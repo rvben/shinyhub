@@ -103,18 +103,19 @@ func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
 // --- Apps ---
 
 type App struct {
-	ID          int64      `json:"id"`
-	Slug        string     `json:"slug"`
-	Name        string     `json:"name"`
-	ProjectSlug string     `json:"project_slug"`
-	OwnerID     int64      `json:"owner_id"`
-	Access      string     `json:"access"`
-	Status      string     `json:"status"`
-	CurrentPort *int       `json:"port,omitempty"`
-	CurrentPID  *int       `json:"pid,omitempty"`
-	DeployCount int        `json:"deploy_count"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID                      int64      `json:"id"`
+	Slug                    string     `json:"slug"`
+	Name                    string     `json:"name"`
+	ProjectSlug             string     `json:"project_slug"`
+	OwnerID                 int64      `json:"owner_id"`
+	Access                  string     `json:"access"`
+	Status                  string     `json:"status"`
+	CurrentPort             *int       `json:"port,omitempty"`
+	CurrentPID              *int       `json:"pid,omitempty"`
+	DeployCount             int        `json:"deploy_count"`
+	HibernateTimeoutMinutes *int       `json:"hibernate_timeout_minutes,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
 }
 
 type CreateAppParams struct {
@@ -138,7 +139,8 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	row := s.db.QueryRow(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       current_port, current_pid, deploy_count, created_at, updated_at
+		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       created_at, updated_at
 		FROM apps WHERE slug = ?`, slug)
 	return scanApp(row)
 }
@@ -146,7 +148,8 @@ func (s *Store) GetAppBySlug(slug string) (*App, error) {
 func (s *Store) ListApps() ([]*App, error) {
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       current_port, current_pid, deploy_count, created_at, updated_at
+		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       created_at, updated_at
 		FROM apps ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -184,6 +187,20 @@ func (s *Store) IncrementDeployCount(slug string) error {
 	_, err := s.db.Exec(`UPDATE apps SET deploy_count = deploy_count + 1 WHERE slug = ?`, slug)
 	if err != nil {
 		return fmt.Errorf("increment deploy count: %w", err)
+	}
+	return nil
+}
+
+// UpdateHibernateTimeout sets the per-app idle timeout in minutes.
+// Pass nil to store SQL NULL (means "use the global config default").
+// Pass 0 to disable hibernation for this app specifically.
+func (s *Store) UpdateHibernateTimeout(slug string, minutes *int) error {
+	_, err := s.db.Exec(
+		`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		minutes, slug,
+	)
+	if err != nil {
+		return fmt.Errorf("update hibernate timeout: %w", err)
 	}
 	return nil
 }
@@ -257,6 +274,7 @@ func scanApp(s scanner) (*App, error) {
 	if err := s.Scan(
 		&a.ID, &a.Slug, &a.Name, &a.ProjectSlug, &a.OwnerID, &a.Access,
 		&a.Status, &a.CurrentPort, &a.CurrentPID, &a.DeployCount,
+		&a.HibernateTimeoutMinutes,
 		&a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

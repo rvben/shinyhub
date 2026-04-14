@@ -80,3 +80,63 @@ func mustOpenDB(t *testing.T) *db.Store {
 	t.Cleanup(func() { store.Close() })
 	return store
 }
+
+func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.GetUserByUsername("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	mins := 45
+	if err := store.UpdateHibernateTimeout("myapp", &mins); err != nil {
+		t.Fatalf("UpdateHibernateTimeout: %v", err)
+	}
+	app, err := store.GetAppBySlug("myapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.HibernateTimeoutMinutes == nil || *app.HibernateTimeoutMinutes != 45 {
+		t.Errorf("expected HibernateTimeoutMinutes=45, got %v", app.HibernateTimeoutMinutes)
+	}
+
+	// Reset to NULL (global default).
+	if err := store.UpdateHibernateTimeout("myapp", nil); err != nil {
+		t.Fatalf("UpdateHibernateTimeout nil: %v", err)
+	}
+	app, err = store.GetAppBySlug("myapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.HibernateTimeoutMinutes != nil {
+		t.Errorf("expected nil after reset, got %v", app.HibernateTimeoutMinutes)
+	}
+}
+
+func TestMigrate_Idempotent(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("first Migrate: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("second Migrate must be idempotent: %v", err)
+	}
+}
