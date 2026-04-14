@@ -3,7 +3,10 @@ package proxy_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -36,8 +39,11 @@ func TestProxyUnknownSlug(t *testing.T) {
 	req := httptest.NewRequest("GET", "/app/unknown/", nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
-	if rec.Code != 404 {
-		t.Errorf("expected 404, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (loading page) for unknown slug, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Starting app") {
+		t.Errorf("expected loading page body for unknown slug")
 	}
 }
 
@@ -84,8 +90,11 @@ func TestProxyDeregister(t *testing.T) {
 	req := httptest.NewRequest("GET", "/app/app/", nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
-	if rec.Code != 404 {
-		t.Errorf("expected 404 after deregister, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (loading page) after deregister, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Starting app") {
+		t.Errorf("expected loading page body after deregister")
 	}
 }
 
@@ -114,5 +123,68 @@ func TestProxyStripsPrefix(t *testing.T) {
 
 	if receivedPath != "/dashboard" {
 		t.Errorf("expected backend to receive /dashboard, got %s", receivedPath)
+	}
+}
+
+func TestProxy_RecordsActivity(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	before := time.Now()
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	last := p.LastSeen("app")
+	if last.Before(before) {
+		t.Errorf("LastSeen not updated after proxy: got %v, before was %v", last, before)
+	}
+}
+
+func TestProxy_ServesLoadingPageOnMiss(t *testing.T) {
+	p := proxy.New()
+	req := httptest.NewRequest("GET", "/app/missing/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (loading page), got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Starting app") {
+		t.Errorf("loading page missing 'Starting app': %s", body)
+	}
+	if !strings.Contains(body, `http-equiv="refresh"`) {
+		t.Errorf("loading page missing meta refresh tag: %s", body)
+	}
+}
+
+func TestProxy_CallsOnMissCallback(t *testing.T) {
+	p := proxy.New()
+	var mu sync.Mutex
+	var called []string
+	p.SetOnMiss(func(slug string) {
+		mu.Lock()
+		called = append(called, slug)
+		mu.Unlock()
+	})
+
+	req := httptest.NewRequest("GET", "/app/myapp/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// onMiss runs in a goroutine; give it time to execute.
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(called) != 1 || called[0] != "myapp" {
+		t.Errorf("expected onMiss('myapp') called once, got %v", called)
 	}
 }
