@@ -65,18 +65,18 @@ type Result struct {
 func Run(p Params) (*Result, error) {
 	port := AllocatePort()
 
+	// Sync dependencies before starting the process.
+	if err := process.Sync(p.BundleDir); err != nil {
+		return nil, fmt.Errorf("sync: %w", err)
+	}
+
 	cmd := p.Command
 	if len(cmd) == 0 {
 		workers := p.Workers
 		if workers <= 0 {
 			workers = 1
 		}
-		cmd = []string{
-			"uv", "run", "shiny", "run", "app.py",
-			"--host", "127.0.0.1",
-			"--port", fmt.Sprintf("%d", port),
-			"--workers", fmt.Sprintf("%d", workers),
-		}
+		cmd = buildCommand(p.BundleDir, port, workers)
 	}
 
 	env := append(p.Env, fmt.Sprintf("PORT=%d", port))
@@ -99,7 +99,7 @@ func Run(p Params) (*Result, error) {
 
 	timeout := p.HealthTimeout
 	if timeout == 0 {
-		timeout = 30 * time.Second
+		timeout = 120 * time.Second
 	}
 	if err := healthCheck(port, timeout); err != nil {
 		stopErr := p.Manager.Stop(p.Slug)
@@ -113,6 +113,25 @@ func Run(p Params) (*Result, error) {
 	}
 
 	return &Result{PID: info.PID, Port: port}, nil
+}
+
+// buildCommand constructs the uv launch command for a bundle directory.
+// If a pyproject.toml is present, uv sync has already prepared the environment
+// and we use plain `uv run`. If only requirements.txt is present, we pass
+// --with-requirements so uv installs deps into an ephemeral environment.
+func buildCommand(bundleDir string, port, workers int) []string {
+	base := []string{"uv", "run", "--no-project"}
+	if _, err := os.Stat(filepath.Join(bundleDir, "pyproject.toml")); err == nil {
+		// Project mode: environment was synced by process.Sync.
+		base = []string{"uv", "run"}
+	} else if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
+		base = append(base, "--with-requirements", "requirements.txt")
+	}
+	return append(base,
+		"shiny", "run", "app.py",
+		"--host", "127.0.0.1",
+		"--port", fmt.Sprintf("%d", port),
+	)
 }
 
 // waitHealthy polls the app's root endpoint until it responds with a non-5xx

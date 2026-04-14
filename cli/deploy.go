@@ -74,7 +74,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	resp, err := httpClient.Do(req)
+	// Deploy can take several minutes on first run (uv downloads packages).
+	// Use http.DefaultClient (no timeout) to match the SSE logs command.
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("deploy request: %w", err)
 	}
@@ -92,7 +94,7 @@ func ensureApp(cfg *cliConfig, slug string) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	checkReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+	checkReq.Header.Set("Authorization", authHeader(cfg.Token))
 	resp, err := httpClient.Do(checkReq)
 	if err != nil {
 		return err
@@ -108,7 +110,7 @@ func ensureApp(cfg *cliConfig, slug string) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	createReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+	createReq.Header.Set("Authorization", authHeader(cfg.Token))
 	createReq.Header.Set("Content-Type", "application/json")
 	cr, err := httpClient.Do(createReq)
 	if err != nil {
