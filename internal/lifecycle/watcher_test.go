@@ -59,15 +59,19 @@ func (f *fakeProxy) Deregister(slug string) {
 
 type fakeStore struct {
 	mu            sync.Mutex
-	app           *db.App
+	apps          map[string]*db.App
 	deployments   []*db.Deployment
 	statusUpdates []db.UpdateAppStatusParams
 }
 
-func (f *fakeStore) GetAppBySlug(_ string) (*db.App, error) {
+func (f *fakeStore) GetAppBySlug(slug string) (*db.App, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.app, nil
+	app, ok := f.apps[slug]
+	if !ok {
+		return nil, fmt.Errorf("fakeStore: no app for slug %q", slug)
+	}
+	return app, nil
 }
 func (f *fakeStore) UpdateAppStatus(p db.UpdateAppStatusParams) error {
 	f.mu.Lock()
@@ -104,7 +108,7 @@ func TestWatchdog_RestartsOnCrash(t *testing.T) {
 		{Slug: "myapp", Status: process.StatusCrashed},
 	}}
 	st := &fakeStore{
-		app:         &db.App{ID: 1, Slug: "myapp", Status: "crashed"},
+		apps:        map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "crashed"}},
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	var deployed []string
@@ -131,7 +135,7 @@ func TestWatchdog_ExponentialBackoff(t *testing.T) {
 		{Slug: "app", Status: process.StatusCrashed},
 	}}
 	st := &fakeStore{
-		app:         &db.App{ID: 1, Slug: "app", Status: "crashed"},
+		apps:        map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "crashed"}},
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	var deployCount int32
@@ -169,21 +173,21 @@ func TestWatchdog_GivesUpAfterMaxAttempts(t *testing.T) {
 		{Slug: "app", Status: process.StatusCrashed},
 	}}
 	st := &fakeStore{
-		app:         &db.App{ID: 1, Slug: "app", Status: "crashed"},
+		apps:        map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "crashed"}},
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 3}, mgr, newFakeProxy(), st,
 		func(slug, bundleDir string) error { return fmt.Errorf("always fails") })
 
-	// Run max attempts, advancing past the backoff each time.
-	for i := 0; i < 3; i++ {
+	// Exhaust all allowed attempts.
+	for i := 0; i < w.cfg.RestartMaxAttempts; i++ {
 		w.mu.Lock()
 		w.nextRetry["app"] = time.Now().Add(-time.Second)
 		w.mu.Unlock()
 		w.runOnce()
 	}
 
-	// One more tick: attempts > max → should mark degraded.
+	// This tick pushes attempts over the limit → must mark degraded.
 	w.mu.Lock()
 	w.nextRetry["app"] = time.Now().Add(-time.Second)
 	w.mu.Unlock()
@@ -200,7 +204,7 @@ func TestWatchdog_ResetsAttemptsOnSuccess(t *testing.T) {
 		{Slug: "app", Status: process.StatusCrashed},
 	}}
 	st := &fakeStore{
-		app:         &db.App{ID: 1, Slug: "app", Status: "crashed"},
+		apps:        map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "crashed"}},
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	var callCount int32
@@ -242,12 +246,12 @@ func TestHibernation_StopsIdleApp(t *testing.T) {
 	prx.seen["app"] = time.Now().Add(-2 * time.Hour) // idle for 2h
 
 	st := &fakeStore{
-		app: &db.App{
+		apps: map[string]*db.App{"app": {
 			ID:        1,
 			Slug:      "app",
 			Status:    "running",
 			UpdatedAt: time.Now().Add(-3 * time.Hour),
-		},
+		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
 		mgr, prx, st, func(slug, dir string) error { return nil })
@@ -274,13 +278,13 @@ func TestHibernation_RespectsPerAppDisable(t *testing.T) {
 
 	zero := 0
 	st := &fakeStore{
-		app: &db.App{
+		apps: map[string]*db.App{"app": {
 			ID:                      1,
 			Slug:                    "app",
 			Status:                  "running",
 			HibernateTimeoutMinutes: &zero, // 0 = disabled for this app
 			UpdatedAt:               time.Now().Add(-3 * time.Hour),
-		},
+		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
 		mgr, prx, st, func(slug, dir string) error { return nil })
@@ -301,13 +305,13 @@ func TestHibernation_RespectsPerAppCustomTimeout(t *testing.T) {
 
 	tenMin := 10
 	st := &fakeStore{
-		app: &db.App{
+		apps: map[string]*db.App{"app": {
 			ID:                      1,
 			Slug:                    "app",
 			Status:                  "running",
 			HibernateTimeoutMinutes: &tenMin,
 			UpdatedAt:               time.Now().Add(-30 * time.Minute),
-		},
+		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
 		mgr, prx, st, func(slug, dir string) error { return nil })
@@ -327,7 +331,7 @@ func TestHibernation_GloballyDisabled(t *testing.T) {
 	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
 
 	st := &fakeStore{
-		app: &db.App{ID: 1, Slug: "app", Status: "running", UpdatedAt: time.Now().Add(-3 * time.Hour)},
+		apps: map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", UpdatedAt: time.Now().Add(-3 * time.Hour)}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 0, RestartMaxAttempts: 5},
 		mgr, prx, st, func(slug, dir string) error { return nil })
@@ -344,7 +348,7 @@ func TestHibernation_GloballyDisabled(t *testing.T) {
 func TestWake_TriggeredOnMiss(t *testing.T) {
 	prx := newFakeProxy()
 	st := &fakeStore{
-		app:         &db.App{ID: 1, Slug: "app", Status: "hibernated"},
+		apps:        map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated"}},
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	var deployed []string
@@ -370,7 +374,7 @@ func TestWake_TriggeredOnMiss(t *testing.T) {
 func TestWake_NoConcurrentWakes(t *testing.T) {
 	prx := newFakeProxy()
 	st := &fakeStore{
-		app:         &db.App{ID: 1, Slug: "app", Status: "hibernated"},
+		apps:        map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated"}},
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	var deployCount int32
@@ -399,12 +403,12 @@ func TestHibernation_ActiveAppNotStopped(t *testing.T) {
 	prx.seen["app"] = time.Now().Add(-5 * time.Minute) // recently active, under timeout
 
 	st := &fakeStore{
-		app: &db.App{
+		apps: map[string]*db.App{"app": {
 			ID:        1,
 			Slug:      "app",
 			Status:    "running",
 			UpdatedAt: time.Now().Add(-10 * time.Minute),
-		},
+		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
 		mgr, prx, st, func(slug, dir string) error { return nil })
@@ -419,7 +423,7 @@ func TestHibernation_ActiveAppNotStopped(t *testing.T) {
 func TestWake_NonHibernatedAppNotRedeployed(t *testing.T) {
 	prx := newFakeProxy()
 	st := &fakeStore{
-		app:         &db.App{ID: 1, Slug: "app", Status: "running"}, // not hibernated
+		apps:        map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running"}}, // not hibernated
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	var deployCount int32
