@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -32,15 +33,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("warn: store close: %v", err)
+		}
+	}()
 	if err := store.Migrate(); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
-	defer store.Close()
 
 	// Bootstrap admin user from env if provided and no users exist
 	if adminUser := os.Getenv("SHINYHOST_ADMIN_USER"); adminUser != "" {
 		adminPass := os.Getenv("SHINYHOST_ADMIN_PASSWORD")
-		if _, err := store.GetUserByUsername(adminUser); err != nil {
+		_, err := store.GetUserByUsername(adminUser)
+		if errors.Is(err, db.ErrNotFound) {
 			hash, err := auth.HashPassword(adminPass)
 			if err != nil {
 				log.Fatalf("hash admin password: %v", err)
@@ -54,6 +60,8 @@ func main() {
 			} else {
 				log.Printf("created admin user: %s", adminUser)
 			}
+		} else if err != nil {
+			log.Fatalf("check admin user: %v", err)
 		}
 	}
 
@@ -68,6 +76,8 @@ func main() {
 	mux.Handle("/app/", prx)
 	// Health check
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
 
