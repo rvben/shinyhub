@@ -8,6 +8,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -18,6 +19,7 @@ type Server struct {
 	store   *db.Store
 	manager *process.Manager
 	proxy   *proxy.Proxy
+	github  *oauth.GitHub // nil when GitHub OAuth is not configured
 	router  http.Handler
 }
 
@@ -25,6 +27,13 @@ type Server struct {
 // when running in test contexts that exercise only auth/data handlers.
 func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *proxy.Proxy) *Server {
 	s := &Server{cfg: cfg, store: store, manager: manager, proxy: prx}
+	if cfg.OAuth.GitHub.ClientID != "" {
+		s.github = oauth.NewGitHub(
+			cfg.OAuth.GitHub.ClientID,
+			cfg.OAuth.GitHub.ClientSecret,
+			cfg.OAuth.GitHub.CallbackURL,
+		)
+	}
 	s.router = s.buildRouter()
 	return s
 }
@@ -48,6 +57,8 @@ func (s *Server) buildRouter() http.Handler {
 
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
+	r.Get("/api/auth/github/login", s.handleGitHubLogin)
+	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
 
 	// All other endpoints require a valid Bearer JWT or Token API key.
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup)
