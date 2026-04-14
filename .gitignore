@@ -2,3 +2,4 @@
 docs/superpowers/
 go.work
 bin/
+.worktrees/
