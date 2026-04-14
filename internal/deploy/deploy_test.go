@@ -3,6 +3,7 @@ package deploy_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,5 +109,48 @@ func TestDeploy_CommandOnly(t *testing.T) {
 	}
 	if info.PID <= 0 {
 		t.Errorf("expected valid PID, got %d", info.PID)
+	}
+}
+
+func TestBuildRCommand_NoRenv(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "app.R"), []byte(""), 0644)
+
+	cmd := deploy.BuildRCommand(dir, 8080)
+	if len(cmd) == 0 {
+		t.Fatal("expected non-empty command")
+	}
+	if cmd[0] != "Rscript" {
+		t.Errorf("expected Rscript as first arg, got %s", cmd[0])
+	}
+	full := strings.Join(cmd, " ")
+	if !strings.Contains(full, "shiny::runApp") {
+		t.Errorf("expected shiny::runApp in command: %s", full)
+	}
+	if !strings.Contains(full, "8080") {
+		t.Errorf("expected port 8080 in command: %s", full)
+	}
+}
+
+func TestDetectAppType_Python(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "app.py"), []byte(""), 0644)
+	if deploy.DetectAppType(dir) != "python" {
+		t.Error("expected python for app.py")
+	}
+}
+
+func TestDetectAppType_R(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "app.R"), []byte(""), 0644)
+	if deploy.DetectAppType(dir) != "r" {
+		t.Error("expected r for app.R")
+	}
+}
+
+func TestDetectAppType_Unknown(t *testing.T) {
+	dir := t.TempDir()
+	if deploy.DetectAppType(dir) != "" {
+		t.Error("expected empty string for unknown app type")
 	}
 }

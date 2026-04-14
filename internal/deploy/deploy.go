@@ -65,18 +65,27 @@ type Result struct {
 func Run(p Params) (*Result, error) {
 	port := AllocatePort()
 
-	// Sync dependencies before starting the process.
-	if err := process.Sync(p.BundleDir); err != nil {
-		return nil, fmt.Errorf("sync: %w", err)
-	}
-
 	cmd := p.Command
 	if len(cmd) == 0 {
-		workers := p.Workers
-		if workers <= 0 {
-			workers = 1
+		appType := DetectAppType(p.BundleDir)
+		switch appType {
+		case "python":
+			if err := process.Sync(p.BundleDir); err != nil {
+				return nil, fmt.Errorf("uv sync: %w", err)
+			}
+			workers := p.Workers
+			if workers <= 0 {
+				workers = 1
+			}
+			cmd = buildCommand(p.BundleDir, port, workers)
+		case "r":
+			if err := process.SyncR(p.BundleDir); err != nil {
+				return nil, fmt.Errorf("renv restore: %w", err)
+			}
+			cmd = BuildRCommand(p.BundleDir, port)
+		default:
+			return nil, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
 		}
-		cmd = buildCommand(p.BundleDir, port, workers)
 	}
 
 	env := append(p.Env, fmt.Sprintf("PORT=%d", port))
@@ -113,6 +122,25 @@ func Run(p Params) (*Result, error) {
 	}
 
 	return &Result{PID: info.PID, Port: port}, nil
+}
+
+// DetectAppType returns "python" if app.py exists, "r" if app.R exists, or ""
+// if neither is found.
+func DetectAppType(bundleDir string) string {
+	if _, err := os.Stat(filepath.Join(bundleDir, "app.py")); err == nil {
+		return "python"
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "app.R")); err == nil {
+		return "r"
+	}
+	return ""
+}
+
+// BuildRCommand returns the command to start an R Shiny app on the given port.
+func BuildRCommand(bundleDir string, port int) []string {
+	expr := fmt.Sprintf(
+		`shiny::runApp('.', host='127.0.0.1', port=%d, launch.browser=FALSE)`, port)
+	return []string{"Rscript", "--vanilla", "-e", expr}
 }
 
 // buildCommand constructs the uv launch command for a bundle directory.
