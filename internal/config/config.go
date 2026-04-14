@@ -8,6 +8,28 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// OAuthConfig holds OAuth2 provider credentials.
+type OAuthConfig struct {
+	GitHub GitHubOAuthConfig
+}
+
+// GitHubOAuthConfig holds GitHub OAuth2 application credentials.
+type GitHubOAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+	CallbackURL  string
+}
+
+type rawOAuthConfig struct {
+	GitHub rawGitHubOAuthConfig `yaml:"github"`
+}
+
+type rawGitHubOAuthConfig struct {
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	CallbackURL  string `yaml:"callback_url"`
+}
+
 // Config holds all parsed, ready-to-use configuration for ShinyHub.
 type Config struct {
 	Database  DatabaseConfig
@@ -15,6 +37,7 @@ type Config struct {
 	Auth      AuthConfig
 	Storage   StorageConfig
 	Lifecycle LifecycleConfig
+	OAuth     OAuthConfig `yaml:"-"`
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -50,6 +73,7 @@ type rawConfig struct {
 	Auth      AuthConfig         `yaml:"auth"`
 	Storage   StorageConfig      `yaml:"storage"`
 	Lifecycle rawLifecycleConfig `yaml:"lifecycle"`
+	OAuth     rawOAuthConfig     `yaml:"oauth"`
 }
 
 type rawLifecycleConfig struct {
@@ -88,6 +112,13 @@ func Load(path string) (*Config, error) {
 		Auth:      raw.Auth,
 		Storage:   raw.Storage,
 		Lifecycle: lc,
+		OAuth: OAuthConfig{
+			GitHub: GitHubOAuthConfig{
+				ClientID:     raw.OAuth.GitHub.ClientID,
+				ClientSecret: raw.OAuth.GitHub.ClientSecret,
+				CallbackURL:  raw.OAuth.GitHub.CallbackURL,
+			},
+		},
 	}
 	applyEnv(cfg)
 	if cfg.Auth.Secret == "" {
@@ -134,5 +165,14 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
+	}
+	if v := os.Getenv("SHINYHUB_GITHUB_CLIENT_ID"); v != "" {
+		cfg.OAuth.GitHub.ClientID = v
+	}
+	if v := os.Getenv("SHINYHUB_GITHUB_CLIENT_SECRET"); v != "" {
+		cfg.OAuth.GitHub.ClientSecret = v
+	}
+	if v := os.Getenv("SHINYHUB_GITHUB_CALLBACK_URL"); v != "" {
+		cfg.OAuth.GitHub.CallbackURL = v
 	}
 }

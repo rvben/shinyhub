@@ -24,6 +24,13 @@
                @keyup.enter="login()">
         <button @click="login()">Login</button>
         <p x-show="error" x-text="error" class="error"></p>
+        <div style="text-align:center; margin-top: 1rem; color: #6c757d; font-size: 0.875rem;">or</div>
+        <a href="/api/auth/github/login"
+           style="display:block; text-align:center; margin-top: 0.75rem; padding: 0.5rem 1rem;
+                  background:#24292e; color:#fff; border-radius:0.375rem; text-decoration:none;
+                  font-size:0.9rem;">
+          Login with GitHub
+        </a>
       </div>
     </div>
 
