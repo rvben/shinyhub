@@ -39,6 +39,11 @@ type appStore interface {
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 }
 
+// Compile-time interface satisfaction checks.
+var _ manager = (*process.Manager)(nil)
+var _ proxyBackend = (*proxy.Proxy)(nil)
+var _ appStore = (*db.Store)(nil)
+
 // Watcher owns crash-restart and idle-hibernation policy. It runs a background
 // loop that inspects process state on each tick and takes corrective action.
 type Watcher struct {
@@ -142,7 +147,7 @@ func (w *Watcher) handleCrashed(slug string) {
 
 	// Successful restart — reset backoff state.
 	w.mu.Lock()
-	w.attempts[slug] = 0
+	delete(w.attempts, slug)
 	delete(w.nextRetry, slug)
 	w.mu.Unlock()
 }
