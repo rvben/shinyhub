@@ -57,6 +57,7 @@ func (s *Server) buildRouter() http.Handler {
 		r.Get("/api/apps", s.handleListApps)
 		r.Post("/api/apps", s.handleCreateApp)
 		r.Get("/api/apps/{slug}", s.handleGetApp)
+		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Post("/api/apps/{slug}/deploy", s.handleDeployApp)
 		r.Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		r.Post("/api/apps/{slug}/restart", s.handleRestartApp)

@@ -67,3 +67,52 @@ func TestCreateApp(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestPatchApp_SetHibernateTimeout(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body, _ := json.Marshal(map[string]any{"hibernate_timeout_minutes": 60})
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["hibernate_timeout_minutes"] != float64(60) {
+		t.Errorf("expected hibernate_timeout_minutes=60 in response, got %v", resp["hibernate_timeout_minutes"])
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	if app.HibernateTimeoutMinutes == nil || *app.HibernateTimeoutMinutes != 60 {
+		t.Errorf("DB not updated: got %v", app.HibernateTimeoutMinutes)
+	}
+}
+
+func TestPatchApp_ResetToGlobalDefault(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body := []byte(`{"hibernate_timeout_minutes": null}`)
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	if app.HibernateTimeoutMinutes != nil {
+		t.Errorf("expected nil (global default), got %v", app.HibernateTimeoutMinutes)
+	}
+}

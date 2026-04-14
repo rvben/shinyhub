@@ -92,6 +92,36 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
+type patchAppRequest struct {
+	HibernateTimeoutMinutes *int `json:"hibernate_timeout_minutes"`
+}
+
+func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+
+	var req patchAppRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.store.UpdateHibernateTimeout(slug, req.HibernateTimeoutMinutes); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	app, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, app)
+}
+
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
