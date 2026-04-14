@@ -103,19 +103,19 @@ func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
 // --- Apps ---
 
 type App struct {
-	ID                      int64      `json:"id"`
-	Slug                    string     `json:"slug"`
-	Name                    string     `json:"name"`
-	ProjectSlug             string     `json:"project_slug"`
-	OwnerID                 int64      `json:"owner_id"`
-	Access                  string     `json:"access"`
-	Status                  string     `json:"status"`
-	CurrentPort             *int       `json:"port,omitempty"`
-	CurrentPID              *int       `json:"pid,omitempty"`
-	DeployCount             int        `json:"deploy_count"`
-	HibernateTimeoutMinutes *int       `json:"hibernate_timeout_minutes,omitempty"`
-	CreatedAt               time.Time  `json:"created_at"`
-	UpdatedAt               time.Time  `json:"updated_at"`
+	ID                      int64     `json:"id"`
+	Slug                    string    `json:"slug"`
+	Name                    string    `json:"name"`
+	ProjectSlug             string    `json:"project_slug"`
+	OwnerID                 int64     `json:"owner_id"`
+	Access                  string    `json:"access"`
+	Status                  string    `json:"status"`
+	CurrentPort             *int      `json:"port,omitempty"`
+	CurrentPID              *int      `json:"pid,omitempty"`
+	DeployCount             int       `json:"deploy_count"`
+	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
 }
 
 type CreateAppParams struct {
