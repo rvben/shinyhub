@@ -77,6 +77,7 @@ func main() {
 	srv := api.New(cfg, store, mgr, prx)
 
 	deployFn := func(slug, bundleDir string) error {
+		// Result discarded; the Watcher only needs success/failure.
 		_, err := deploy.Run(deploy.Params{
 			Slug:      slug,
 			BundleDir: bundleDir,
@@ -122,6 +123,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Printf("shinyhub listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
+		cancel() // signal Watcher to stop before os.Exit via log.Fatal
 		log.Fatal(err)
 	}
 }
