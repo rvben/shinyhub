@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -12,21 +13,25 @@ import (
 type Proxy struct {
 	mu       sync.RWMutex
 	backends map[string]*httputil.ReverseProxy
-	targets  map[string]string
 }
 
 func New() *Proxy {
 	return &Proxy{
 		backends: make(map[string]*httputil.ReverseProxy),
-		targets:  make(map[string]string),
 	}
 }
 
 // Register sets the backend URL for slug, atomically replacing any existing entry.
-func (p *Proxy) Register(slug, targetURL string) {
-	target, _ := url.Parse(targetURL)
+func (p *Proxy) Register(slug, targetURL string) error {
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("register %s: invalid url: %w", slug, err)
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return fmt.Errorf("register %s: url must have scheme and host", slug)
+	}
 	rp := httputil.NewSingleHostReverseProxy(target)
-	// Capture slug and target in a local variable to avoid closure issues.
+	// Capture slug and target in local variables to avoid closure issues.
 	slugCopy := slug
 	rp.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
@@ -37,19 +42,24 @@ func (p *Proxy) Register(slug, targetURL string) {
 		if req.URL.Path == "" {
 			req.URL.Path = "/"
 		}
+		if req.URL.RawPath != "" {
+			req.URL.RawPath = strings.TrimPrefix(req.URL.RawPath, prefix)
+			if req.URL.RawPath == "" {
+				req.URL.RawPath = "/"
+			}
+		}
 		req.Host = target.Host
 	}
 	p.mu.Lock()
 	p.backends[slug] = rp
-	p.targets[slug] = targetURL
 	p.mu.Unlock()
+	return nil
 }
 
 // Deregister removes slug from the routing table.
 func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
 	delete(p.backends, slug)
-	delete(p.targets, slug)
 	p.mu.Unlock()
 }
 
@@ -70,12 +80,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rp.ServeHTTP(w, r)
 }
 
-// extractSlug parses the slug from /app/:slug/...
+// extractSlug parses the slug from /app/:slug/... Requires a trailing slash
+// after the slug, so /app/foo returns "" but /app/foo/ returns "foo".
 func extractSlug(path string) string {
-	path = strings.TrimPrefix(path, "/app/")
-	if path == "" {
+	trimmed := strings.TrimPrefix(path, "/app/")
+	if trimmed == path || trimmed == "" {
 		return ""
 	}
-	parts := strings.SplitN(path, "/", 2)
-	return parts[0]
+	return strings.SplitN(trimmed, "/", 2)[0]
 }

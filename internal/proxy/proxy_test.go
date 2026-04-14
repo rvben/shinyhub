@@ -15,7 +15,9 @@ func TestProxyRoutesKnownSlug(t *testing.T) {
 	defer backend.Close()
 
 	p := proxy.New()
-	p.Register("my-app", backend.URL)
+	if err := p.Register("my-app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest("GET", "/app/my-app/some/path", nil)
 	rec := httptest.NewRecorder()
@@ -50,7 +52,9 @@ func TestProxySwap(t *testing.T) {
 	defer backend2.Close()
 
 	p := proxy.New()
-	p.Register("app", backend1.URL)
+	if err := p.Register("app", backend1.URL); err != nil {
+		t.Fatal(err)
+	}
 	req1 := httptest.NewRequest("GET", "/app/app/", nil)
 	rec1 := httptest.NewRecorder()
 	p.ServeHTTP(rec1, req1)
@@ -58,7 +62,9 @@ func TestProxySwap(t *testing.T) {
 		t.Fatalf("expected v1, got %s", rec1.Body.String())
 	}
 
-	p.Register("app", backend2.URL) // atomic swap
+	if err := p.Register("app", backend2.URL); err != nil { // atomic swap
+		t.Fatal(err)
+	}
 	req2 := httptest.NewRequest("GET", "/app/app/", nil)
 	rec2 := httptest.NewRecorder()
 	p.ServeHTTP(rec2, req2)
@@ -71,12 +77,42 @@ func TestProxyDeregister(t *testing.T) {
 	p := proxy.New()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer backend.Close()
-	p.Register("app", backend.URL)
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
 	p.Deregister("app")
 	req := httptest.NewRequest("GET", "/app/app/", nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != 404 {
 		t.Errorf("expected 404 after deregister, got %d", rec.Code)
+	}
+}
+
+func TestProxyRegisterInvalidURL(t *testing.T) {
+	p := proxy.New()
+	if err := p.Register("app", "not-a-url"); err == nil {
+		t.Error("expected error for URL with no scheme/host")
+	}
+}
+
+func TestProxyStripsPrefix(t *testing.T) {
+	var receivedPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("my-app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/app/my-app/dashboard", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if receivedPath != "/dashboard" {
+		t.Errorf("expected backend to receive /dashboard, got %s", receivedPath)
 	}
 }
