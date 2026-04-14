@@ -9,9 +9,26 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+var slugInvalidRE = regexp.MustCompile(`[^a-z0-9]+`)
+
+// sanitizeSlug lowercases the name, replaces runs of non-alphanumeric characters
+// with a single dash, and trims leading/trailing dashes to produce a slug that
+// matches the server's ^[a-z0-9][a-z0-9-]{0,62}$ constraint.
+func sanitizeSlug(name string) string {
+	s := strings.ToLower(name)
+	s = slugInvalidRE.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > 63 {
+		s = s[:63]
+	}
+	return s
+}
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy [dir]",
@@ -42,7 +59,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	slug := deployFlags.slug
 	if slug == "" {
-		slug = filepath.Base(abs)
+		slug = sanitizeSlug(filepath.Base(abs))
 	}
 
 	cfg, err := loadConfig()
@@ -149,8 +166,8 @@ func zipDir(dir string) (*bytes.Buffer, error) {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
 		_, err = io.Copy(fw, f)
+		f.Close()
 		return err
 	})
 	if err != nil {

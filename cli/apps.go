@@ -41,8 +41,14 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		out, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+	}
 	var apps []map[string]any
-	json.NewDecoder(resp.Body).Decode(&apps)
+	if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
 	if len(apps) == 0 {
 		fmt.Println("No apps.")
 		return nil

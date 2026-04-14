@@ -106,7 +106,7 @@ func generateAPIKey() (rawKey, keyHash string, err error) {
 	if _, err = rand.Read(buf); err != nil {
 		return "", "", err
 	}
-	rawKey = hex.EncodeToString(buf)
+	rawKey = "shk_" + hex.EncodeToString(buf)
 	keyHash = auth.HashAPIKey(rawKey)
 	return rawKey, keyHash, nil
 }
