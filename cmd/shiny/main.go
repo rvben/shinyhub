@@ -1,11 +1,7 @@
 package main
 
-import (
-	"fmt"
-	"os"
-)
+import "github.com/rvben/shinyhost/cli"
 
 func main() {
-	fmt.Fprintln(os.Stderr, "shiny: not yet implemented")
-	os.Exit(1)
+	cli.Execute()
 }
