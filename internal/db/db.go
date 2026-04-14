@@ -18,6 +18,9 @@ var migration002SQL string
 //go:embed migrations/003_app_members.sql
 var migration003SQL string
 
+//go:embed migrations/004_oauth_accounts.sql
+var migration004SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -47,6 +50,9 @@ func (s *Store) Migrate() error {
 	}
 	if _, err := s.db.Exec(migration003SQL); err != nil {
 		return fmt.Errorf("migrate 003: %w", err)
+	}
+	if _, err := s.db.Exec(migration004SQL); err != nil {
+		return fmt.Errorf("migrate 004: %w", err)
 	}
 	return nil
 }

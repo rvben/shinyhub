@@ -211,3 +211,57 @@ func TestMigrate_Idempotent(t *testing.T) {
 		t.Fatalf("second Migrate must be idempotent: %v", err)
 	}
 }
+
+func TestOAuthAccount_CreateAndLookup(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "h", Role: "developer"})
+	alice, _ := store.GetUserByUsername("alice")
+
+	err = store.CreateOAuthAccount(db.CreateOAuthAccountParams{
+		UserID:     alice.ID,
+		Provider:   "github",
+		ProviderID: "gh_123",
+	})
+	if err != nil {
+		t.Fatalf("CreateOAuthAccount: %v", err)
+	}
+
+	u, err := store.GetUserByOAuthAccount("github", "gh_123")
+	if err != nil {
+		t.Fatalf("GetUserByOAuthAccount: %v", err)
+	}
+	if u.Username != "alice" {
+		t.Errorf("expected alice, got %s", u.Username)
+	}
+}
+
+func TestOAuthState_ConsumeOnce(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.Migrate()
+
+	if err := store.CreateOAuthState("nonce-abc123"); err != nil {
+		t.Fatalf("CreateOAuthState: %v", err)
+	}
+
+	// First consume: should succeed.
+	if err := store.ConsumeOAuthState("nonce-abc123"); err != nil {
+		t.Errorf("first ConsumeOAuthState failed: %v", err)
+	}
+
+	// Second consume: state is gone, should fail.
+	if err := store.ConsumeOAuthState("nonce-abc123"); err == nil {
+		t.Error("expected error on second ConsumeOAuthState, got nil")
+	}
+}

@@ -344,6 +344,73 @@ func (s *Store) SetAppAccess(slug, access string) error {
 	return nil
 }
 
+// --- OAuth Accounts ---
+
+type OAuthAccount struct {
+	ID         int64
+	UserID     int64
+	Provider   string
+	ProviderID string
+	CreatedAt  time.Time
+}
+
+type CreateOAuthAccountParams struct {
+	UserID     int64
+	Provider   string
+	ProviderID string
+}
+
+func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?)`,
+		p.UserID, p.Provider, p.ProviderID,
+	)
+	if err != nil {
+		return fmt.Errorf("create oauth account: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error) {
+	row := s.db.QueryRow(`
+		SELECT u.id, u.username, u.password_hash, u.role, u.created_at
+		FROM users u
+		JOIN oauth_accounts o ON o.user_id = u.id
+		WHERE o.provider = ? AND o.provider_id = ?`, provider, providerID)
+	var u User
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+// --- OAuth State (CSRF nonce) ---
+
+func (s *Store) CreateOAuthState(state string) error {
+	_, err := s.db.Exec(`INSERT INTO oauth_states (state) VALUES (?)`, state)
+	if err != nil {
+		return fmt.Errorf("create oauth state: %w", err)
+	}
+	return nil
+}
+
+// ConsumeOAuthState validates the state nonce and deletes it (one-time use).
+// Returns an error if the state does not exist.
+func (s *Store) ConsumeOAuthState(state string) error {
+	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ?`, state)
+	if err != nil {
+		return fmt.Errorf("consume oauth state: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("oauth state not found or already used")
+	}
+	return nil
+}
+
 // scanner interface satisfied by both *sql.Row and *sql.Rows
 type scanner interface {
 	Scan(dest ...any) error
