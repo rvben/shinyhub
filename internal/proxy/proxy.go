@@ -46,7 +46,7 @@ type Proxy struct {
 	backends map[string]*httputil.ReverseProxy
 	onMiss   func(slug string)
 
-	seenMu   sync.Mutex
+	seenMu   sync.RWMutex
 	lastSeen map[string]time.Time
 }
 
@@ -75,8 +75,8 @@ func (p *Proxy) RecordActivity(slug string) {
 // LastSeen returns the last time a request was successfully proxied for slug.
 // Returns zero time if slug has never been proxied.
 func (p *Proxy) LastSeen(slug string) time.Time {
-	p.seenMu.Lock()
-	defer p.seenMu.Unlock()
+	p.seenMu.RLock()
+	defer p.seenMu.RUnlock()
 	return p.lastSeen[slug]
 }
 

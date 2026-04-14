@@ -170,18 +170,23 @@ func TestProxy_CallsOnMissCallback(t *testing.T) {
 	p := proxy.New()
 	var mu sync.Mutex
 	var called []string
+	done := make(chan struct{})
 	p.SetOnMiss(func(slug string) {
 		mu.Lock()
 		called = append(called, slug)
 		mu.Unlock()
+		close(done)
 	})
 
 	req := httptest.NewRequest("GET", "/app/myapp/", nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
-	// onMiss runs in a goroutine; give it time to execute.
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("onMiss not called within timeout")
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(called) != 1 || called[0] != "myapp" {
