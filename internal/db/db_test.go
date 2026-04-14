@@ -127,6 +127,77 @@ func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 	}
 }
 
+func TestAppMembers_GrantRevoke(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "h", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	alice, _ := store.GetUserByUsername("alice")
+
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.GrantAppAccess("myapp", alice.ID); err != nil {
+		t.Fatalf("GrantAppAccess: %v", err)
+	}
+
+	ok, err := store.UserCanAccessApp("myapp", alice.ID)
+	if err != nil {
+		t.Fatalf("UserCanAccessApp: %v", err)
+	}
+	if !ok {
+		t.Error("expected alice to have access after grant")
+	}
+
+	if err := store.RevokeAppAccess("myapp", alice.ID); err != nil {
+		t.Fatalf("RevokeAppAccess: %v", err)
+	}
+	ok, _ = store.UserCanAccessApp("myapp", alice.ID)
+	if ok {
+		t.Error("expected access revoked")
+	}
+}
+
+func TestAppAccess_OwnerAlwaysHasAccess(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := store.UserCanAccessApp("myapp", owner.ID)
+	if err != nil {
+		t.Fatalf("UserCanAccessApp: %v", err)
+	}
+	if !ok {
+		t.Error("expected owner to always have access")
+	}
+}
+
 func TestMigrate_Idempotent(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {

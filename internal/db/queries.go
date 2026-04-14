@@ -271,6 +271,71 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	return ds, rows.Err()
 }
 
+// --- App Members ---
+
+func (s *Store) GrantAppAccess(slug string, userID int64) error {
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO app_members (app_slug, user_id) VALUES (?, ?)`, slug, userID)
+	if err != nil {
+		return fmt.Errorf("grant app access: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RevokeAppAccess(slug string, userID int64) error {
+	_, err := s.db.Exec(
+		`DELETE FROM app_members WHERE app_slug = ? AND user_id = ?`, slug, userID)
+	if err != nil {
+		return fmt.Errorf("revoke app access: %w", err)
+	}
+	return nil
+}
+
+// GetAppMembers returns the IDs of all users explicitly granted access to slug.
+func (s *Store) GetAppMembers(slug string) ([]int64, error) {
+	rows, err := s.db.Query(`SELECT user_id FROM app_members WHERE app_slug = ?`, slug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// UserCanAccessApp returns true if userID is the app's owner or has been
+// explicitly granted access via app_members.
+func (s *Store) UserCanAccessApp(slug string, userID int64) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM apps WHERE slug = ? AND owner_id = ?
+			UNION ALL
+			SELECT 1 FROM app_members WHERE app_slug = ? AND user_id = ?
+		)`, slug, userID, slug, userID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// SetAppAccess updates the access level for an app.
+// Valid values: "public", "private", "shared".
+func (s *Store) SetAppAccess(slug, access string) error {
+	_, err := s.db.Exec(
+		`UPDATE apps SET access = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, access, slug)
+	if err != nil {
+		return fmt.Errorf("set app access: %w", err)
+	}
+	return nil
+}
+
 // scanner interface satisfied by both *sql.Row and *sql.Rows
 type scanner interface {
 	Scan(dest ...any) error
