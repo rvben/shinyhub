@@ -5,15 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ShinyHost</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
-  <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  <script src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <nav>
+  <nav x-data>
     <span class="brand">✦ ShinyHost</span>
-    <span x-data="auth" x-show="username" x-text="username"></span>
-    <button x-data="auth" @click="logout()" x-show="username">Logout</button>
+    <span x-show="$store.auth.username" x-text="$store.auth.username"></span>
+    <button @click="$store.auth.logout()" x-show="$store.auth.username">Logout</button>
   </nav>
 
   <main x-data="appList">

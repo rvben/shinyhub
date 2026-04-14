@@ -1,7 +1,7 @@
 const TOKEN_KEY = 'shinyhost_token';
 
 document.addEventListener('alpine:init', () => {
-  Alpine.data('auth', () => ({
+  Alpine.store('auth', {
     get username() {
       const t = localStorage.getItem(TOKEN_KEY);
       if (!t) return null;
@@ -11,7 +11,7 @@ document.addEventListener('alpine:init', () => {
       localStorage.removeItem(TOKEN_KEY);
       window.location.reload();
     }
-  }));
+  });
 
   Alpine.data('appList', () => ({
     loggedIn: !!localStorage.getItem(TOKEN_KEY),
@@ -37,28 +37,35 @@ document.addEventListener('alpine:init', () => {
     async refresh() {
       const token = localStorage.getItem(TOKEN_KEY);
       if (!token) return;
-      const r = await fetch('/api/apps', {
-        headers: {'Authorization': 'Bearer ' + token}
-      });
-      if (r.status === 401) { this.loggedIn = false; return; }
-      this.apps = (await r.json()) || [];
+      try {
+        const r = await fetch('/api/apps', {
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        if (r.status === 401) { this.loggedIn = false; return; }
+        if (!r.ok) { this.error = 'Failed to load apps'; return; }
+        this.apps = (await r.json()) || [];
+      } catch {
+        this.error = 'Network error';
+      }
     },
 
     async restart(slug) {
       const token = localStorage.getItem(TOKEN_KEY);
-      await fetch('/api/apps/' + slug + '/restart', {
+      const r = await fetch('/api/apps/' + slug + '/restart', {
         method: 'POST',
         headers: {'Authorization': 'Bearer ' + token}
       });
+      if (!r.ok) { this.error = 'Restart failed'; return; }
       setTimeout(() => this.refresh(), 1000);
     },
 
     async rollback(slug) {
       const token = localStorage.getItem(TOKEN_KEY);
-      await fetch('/api/apps/' + slug + '/rollback', {
+      const r = await fetch('/api/apps/' + slug + '/rollback', {
         method: 'PUT',
         headers: {'Authorization': 'Bearer ' + token}
       });
+      if (!r.ok) { this.error = 'Rollback failed'; return; }
       setTimeout(() => this.refresh(), 1000);
     },
 
