@@ -71,7 +71,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := httpClient.Do(req)

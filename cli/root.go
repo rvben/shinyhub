@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -52,6 +53,15 @@ func loadConfig() (*cliConfig, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// authHeader returns the correct Authorization header value for the stored token.
+// API keys (shk_ prefix) use the Token scheme; JWTs use Bearer.
+func authHeader(token string) string {
+	if strings.HasPrefix(token, "shk_") {
+		return "Token " + token
+	}
+	return "Bearer " + token
 }
 
 func saveConfig(cfg *cliConfig) error {

@@ -231,7 +231,7 @@ func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
 func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, version, bundle_dir, status, created_at
-		FROM deployments WHERE app_id = ? ORDER BY created_at DESC`, appID)
+		FROM deployments WHERE app_id = ? ORDER BY id DESC`, appID)
 	if err != nil {
 		return nil, err
 	}

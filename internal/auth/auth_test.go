@@ -32,7 +32,7 @@ func TestIssueAndValidateJWT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if claims.UserID != 42 || claims.Username != "alice" || claims.Role != "admin" {
+	if claims.UserID != 42 || claims.Subject != "alice" || claims.Role != "admin" {
 		t.Errorf("unexpected claims: %+v", claims)
 	}
 }

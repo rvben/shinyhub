@@ -46,6 +46,9 @@ func main() {
 	// Bootstrap admin user from env if provided and no users exist
 	if adminUser := os.Getenv("SHINYHOST_ADMIN_USER"); adminUser != "" {
 		adminPass := os.Getenv("SHINYHOST_ADMIN_PASSWORD")
+		if adminPass == "" {
+			log.Fatal("SHINYHOST_ADMIN_PASSWORD must not be empty when SHINYHOST_ADMIN_USER is set")
+		}
 		_, err := store.GetUserByUsername(adminUser)
 		if errors.Is(err, db.ErrNotFound) {
 			hash, err := auth.HashPassword(adminPass)

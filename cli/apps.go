@@ -35,7 +35,7 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Authorization", authHeader(cfg.Token))
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
@@ -70,7 +70,7 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Accept", "text/event-stream")
 	// Use http.DefaultClient for SSE streaming — no timeout, connection is indefinite.
 	resp, err := http.DefaultClient.Do(req)
@@ -108,7 +108,7 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 		if err != nil {
 			return fmt.Errorf("build request: %w", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+cfg.Token)
+		req.Header.Set("Authorization", authHeader(cfg.Token))
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			return err
@@ -149,7 +149,7 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient.Do(req)
 	if err != nil {

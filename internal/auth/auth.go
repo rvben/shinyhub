@@ -12,9 +12,8 @@ import (
 const jwtExpiry = 24 * time.Hour
 
 type Claims struct {
-	UserID   int64  `json:"uid"`
-	Username string `json:"sub"`
-	Role     string `json:"role"`
+	UserID int64  `json:"uid"`
+	Role   string `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -32,10 +31,10 @@ func VerifyPassword(hash, password string) error {
 
 func IssueJWT(userID int64, username, role, secret string) (string, error) {
 	claims := Claims{
-		UserID:   userID,
-		Username: username,
-		Role:     role,
+		UserID: userID,
+		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   username,
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtExpiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},

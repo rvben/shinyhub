@@ -267,6 +267,15 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := s.store.CreateDeployment(db.CreateDeploymentParams{
+		AppID:     app.ID,
+		Version:   prev.Version,
+		BundleDir: prev.BundleDir,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "record rollback deployment for %s: %v\n", slug, err)
+		// app is running; don't fail the request over a record error
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pid":     result.PID,
 		"port":    result.Port,

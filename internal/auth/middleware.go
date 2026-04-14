@@ -43,7 +43,7 @@ func BearerMiddleware(secret string, keyLookup APIKeyLookup) func(http.Handler) 
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
 					return
 				}
-				user = &ContextUser{ID: claims.UserID, Username: claims.Username, Role: claims.Role}
+				user = &ContextUser{ID: claims.UserID, Username: claims.Subject, Role: claims.Role}
 			case "token":
 				if keyLookup == nil {
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
