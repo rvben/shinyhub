@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
@@ -102,7 +103,8 @@ func main() {
 	// API routes
 	mux.Handle("/api/", srv.Router())
 	// App proxy routes
-	mux.Handle("/app/", prx)
+	appHandler := access.Middleware(store, cfg.Auth.Secret)(prx)
+	mux.Handle("/app/", appHandler)
 	// Health check
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

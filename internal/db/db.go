@@ -15,6 +15,9 @@ var initSQL string
 //go:embed migrations/002_hibernate_timeout.sql
 var migration002SQL string
 
+//go:embed migrations/003_app_members.sql
+var migration003SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -41,6 +44,9 @@ func (s *Store) Migrate() error {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("migrate 002: %w", err)
 		}
+	}
+	if _, err := s.db.Exec(migration003SQL); err != nil {
+		return fmt.Errorf("migrate 003: %w", err)
 	}
 	return nil
 }
