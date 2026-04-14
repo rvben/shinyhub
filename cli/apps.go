@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,7 +56,7 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 
 var appsLogsCmd = &cobra.Command{
 	Use:   "logs <slug>",
-	Short: "Tail live logs for an app",
+	Short: "Connect to the SSE log stream for an app",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runAppsLogs,
 }
@@ -122,9 +123,17 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 	}
 }
 
+var tokenName string
+
 var tokensCreateCmd = &cobra.Command{
-	Use:  "create",
-	RunE: runTokensCreate,
+	Use:   "create",
+	Short: "Create a new API token",
+	RunE:  runTokensCreate,
+}
+
+func init() {
+	tokensCreateCmd.Flags().StringVar(&tokenName, "name", "", "Name for the token (required)")
+	tokensCreateCmd.MarkFlagRequired("name")
 }
 
 func runTokensCreate(cmd *cobra.Command, args []string) error {
@@ -132,7 +141,11 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", cfg.Host+"/api/tokens", nil)
+	body, err := json.Marshal(map[string]string{"name": tokenName})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", cfg.Host+"/api/tokens", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -143,10 +156,15 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server returned %d", resp.StatusCode)
+	}
 	var result map[string]string
-	json.NewDecoder(resp.Body).Decode(&result)
-	if key, ok := result["key"]; ok {
-		fmt.Printf("API key: %s\n", key)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if token, ok := result["token"]; ok {
+		fmt.Printf("API token: %s\n", token)
 		fmt.Println("Store this — it will not be shown again.")
 	}
 	_ = os.Stdout.Sync()

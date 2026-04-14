@@ -80,8 +80,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rp.ServeHTTP(w, r)
 }
 
-// extractSlug parses the slug from /app/:slug/... Requires a trailing slash
-// after the slug, so /app/foo returns "" but /app/foo/ returns "foo".
+// extractSlug parses the slug from /app/:slug/... paths.
+// Returns "" for /app or /app/ (no slug present).
 func extractSlug(path string) string {
 	trimmed := strings.TrimPrefix(path, "/app/")
 	if trimmed == path || trimmed == "" {

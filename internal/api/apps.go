@@ -165,7 +165,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
-		s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); err != nil {
+			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
+		}
 		http.Error(w, "deploy failed", http.StatusInternalServerError)
 		return
 	}
@@ -246,7 +248,9 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
-		s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
+			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
+		}
 		http.Error(w, "rollback failed", http.StatusInternalServerError)
 		return
 	}
@@ -313,7 +317,9 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "restart %s: %v\n", slug, err)
-		s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
+			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
+		}
 		http.Error(w, "restart failed", http.StatusInternalServerError)
 		return
 	}
