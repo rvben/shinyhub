@@ -114,7 +114,6 @@ func TestDeploy_CommandOnly(t *testing.T) {
 
 func TestBuildRCommand_NoRenv(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "app.R"), []byte(""), 0644)
 
 	cmd := deploy.BuildRCommand(dir, 8080)
 	if len(cmd) == 0 {
@@ -134,7 +133,9 @@ func TestBuildRCommand_NoRenv(t *testing.T) {
 
 func TestDetectAppType_Python(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "app.py"), []byte(""), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if deploy.DetectAppType(dir) != "python" {
 		t.Error("expected python for app.py")
 	}
@@ -142,7 +143,9 @@ func TestDetectAppType_Python(t *testing.T) {
 
 func TestDetectAppType_R(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "app.R"), []byte(""), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "app.R"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if deploy.DetectAppType(dir) != "r" {
 		t.Error("expected r for app.R")
 	}
