@@ -35,7 +35,7 @@ type StorageConfig struct {
 
 func Load(path string) (*Config, error) {
 	cfg := &Config{
-		Database: DatabaseConfig{Driver: "sqlite", DSN: "./data/shinyhost.db"},
+		Database: DatabaseConfig{Driver: "sqlite", DSN: "./data/shinyhub.db"},
 		Server:   ServerConfig{Host: "0.0.0.0", Port: 8080},
 		Storage:  StorageConfig{AppsDir: "./data/apps"},
 	}
@@ -53,22 +53,22 @@ func Load(path string) (*Config, error) {
 	}
 	applyEnv(cfg)
 	if cfg.Auth.Secret == "" {
-		return nil, fmt.Errorf("auth.secret must be set (SHINYHOST_AUTH_SECRET)")
+		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}
 	return cfg, nil
 }
 
 func applyEnv(cfg *Config) {
-	if v := os.Getenv("SHINYHOST_AUTH_SECRET"); v != "" {
+	if v := os.Getenv("SHINYHUB_AUTH_SECRET"); v != "" {
 		cfg.Auth.Secret = v
 	}
-	if v := os.Getenv("SHINYHOST_DB_DSN"); v != "" {
+	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
 	}
-	if v := os.Getenv("SHINYHOST_APPS_DIR"); v != "" {
+	if v := os.Getenv("SHINYHUB_APPS_DIR"); v != "" {
 		cfg.Storage.AppsDir = v
 	}
-	if v := os.Getenv("SHINYHOST_BASE_URL"); v != "" {
+	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
 	}
 }

@@ -6,10 +6,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/rvben/shinyhost/internal/api"
-	"github.com/rvben/shinyhost/internal/auth"
-	"github.com/rvben/shinyhost/internal/config"
-	"github.com/rvben/shinyhost/internal/db"
+	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 func newTestServer(t *testing.T) (*api.Server, *db.Store) {

@@ -15,7 +15,7 @@ import (
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy [dir]",
-	Short: "Deploy a Shiny app to ShinyHost",
+	Short: "Deploy a Shiny app to ShinyHub",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runDeploy,
 }

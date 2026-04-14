@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/rvben/shinyhost/internal/proxy"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 func TestProxyRoutesKnownSlug(t *testing.T) {

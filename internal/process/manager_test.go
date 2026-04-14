@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rvben/shinyhost/internal/process"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 func TestManagerStartStop(t *testing.T) {

@@ -5,11 +5,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/rvben/shinyhost/internal/auth"
-	"github.com/rvben/shinyhost/internal/config"
-	"github.com/rvben/shinyhost/internal/db"
-	"github.com/rvben/shinyhost/internal/process"
-	"github.com/rvben/shinyhost/internal/proxy"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 // Server holds the dependencies shared by all API handlers.

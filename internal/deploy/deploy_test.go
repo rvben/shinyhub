@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rvben/shinyhost/internal/deploy"
-	"github.com/rvben/shinyhost/internal/process"
-	"github.com/rvben/shinyhost/internal/proxy"
+	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 func TestExtractBundle(t *testing.T) {

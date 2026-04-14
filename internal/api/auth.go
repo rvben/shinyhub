@@ -7,8 +7,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/rvben/shinyhost/internal/auth"
-	"github.com/rvben/shinyhost/internal/db"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // dummyHash is a pre-computed bcrypt hash used to ensure constant-time

@@ -1,6 +1,6 @@
 database:
   driver: sqlite
-  dsn: ./data/shinyhost.db
+  dsn: ./data/shinyhub.db
 
 server:
   host: 0.0.0.0

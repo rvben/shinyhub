@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/rvben/shinyhost/internal/auth"
+	"github.com/rvben/shinyhub/internal/auth"
 )
 
 func TestHashAndVerifyPassword(t *testing.T) {

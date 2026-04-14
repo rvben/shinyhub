@@ -19,7 +19,7 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 var rootCmd = &cobra.Command{
 	Use:   "shiny",
-	Short: "ShinyHost CLI — deploy and manage Shiny apps",
+	Short: "ShinyHub CLI — deploy and manage Shiny apps",
 }
 
 func Execute() {

@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rvben/shinyhost/internal/process"
-	"github.com/rvben/shinyhost/internal/proxy"
+	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 var portCounter atomic.Int64

@@ -1,4 +1,4 @@
-module github.com/rvben/shinyhost
+module github.com/rvben/shinyhub
 
 go 1.26.1
 

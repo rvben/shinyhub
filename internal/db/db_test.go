@@ -3,7 +3,7 @@ package db_test
 import (
 	"testing"
 
-	"github.com/rvben/shinyhost/internal/db"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 func TestOpenAndMigrate(t *testing.T) {

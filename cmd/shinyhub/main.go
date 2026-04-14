@@ -7,18 +7,18 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/rvben/shinyhost/internal/api"
-	"github.com/rvben/shinyhost/internal/auth"
-	"github.com/rvben/shinyhost/internal/config"
-	"github.com/rvben/shinyhost/internal/db"
-	"github.com/rvben/shinyhost/internal/process"
-	"github.com/rvben/shinyhost/internal/proxy"
-	"github.com/rvben/shinyhost/internal/ui"
+	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/ui"
 )
 
 func main() {
-	cfgPath := "shinyhost.yaml"
-	if v := os.Getenv("SHINYHOST_CONFIG"); v != "" {
+	cfgPath := "shinyhub.yaml"
+	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
 		cfgPath = v
 	}
 	cfg, err := config.Load(cfgPath)
@@ -44,10 +44,10 @@ func main() {
 	}
 
 	// Bootstrap admin user from env if provided and no users exist
-	if adminUser := os.Getenv("SHINYHOST_ADMIN_USER"); adminUser != "" {
-		adminPass := os.Getenv("SHINYHOST_ADMIN_PASSWORD")
+	if adminUser := os.Getenv("SHINYHUB_ADMIN_USER"); adminUser != "" {
+		adminPass := os.Getenv("SHINYHUB_ADMIN_PASSWORD")
 		if adminPass == "" {
-			log.Fatal("SHINYHOST_ADMIN_PASSWORD must not be empty when SHINYHOST_ADMIN_USER is set")
+			log.Fatal("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
 		}
 		_, err := store.GetUserByUsername(adminUser)
 		if errors.Is(err, db.ErrNotFound) {
@@ -96,7 +96,7 @@ func main() {
 	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-	log.Printf("shinyhost listening on %s", addr)
+	log.Printf("shinyhub listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}

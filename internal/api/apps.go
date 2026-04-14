@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/rvben/shinyhost/internal/auth"
-	"github.com/rvben/shinyhost/internal/db"
-	"github.com/rvben/shinyhost/internal/deploy"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 )
 
 // slugRE enforces a safe, DNS-compatible slug format.

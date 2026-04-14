@@ -4,7 +4,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/rvben/shinyhost/internal/process"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 func TestUVAvailable(t *testing.T) {

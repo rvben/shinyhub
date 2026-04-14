@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rvben/shinyhost/internal/api"
-	"github.com/rvben/shinyhost/internal/auth"
-	"github.com/rvben/shinyhost/internal/config"
-	"github.com/rvben/shinyhost/internal/db"
-	"github.com/rvben/shinyhost/internal/process"
-	"github.com/rvben/shinyhost/internal/proxy"
+	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 // createTestBundle writes a zip file at zipPath containing the given files map.

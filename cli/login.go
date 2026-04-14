@@ -11,7 +11,7 @@ import (
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
-	Short: "Authenticate with a ShinyHost server",
+	Short: "Authenticate with a ShinyHub server",
 	RunE:  runLogin,
 }
 
@@ -23,7 +23,7 @@ var loginFlags struct {
 }
 
 func init() {
-	loginCmd.Flags().StringVar(&loginFlags.host, "host", "", "ShinyHost server URL (e.g. https://shiny.example.com)")
+	loginCmd.Flags().StringVar(&loginFlags.host, "host", "", "ShinyHub server URL (e.g. https://shiny.example.com)")
 	loginCmd.Flags().StringVar(&loginFlags.token, "token", "", "API token (skips username/password)")
 	loginCmd.Flags().StringVar(&loginFlags.username, "username", "", "Username")
 	loginCmd.Flags().StringVar(&loginFlags.password, "password", "", "Password")

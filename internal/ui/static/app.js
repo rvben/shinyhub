@@ -1,4 +1,4 @@
-const TOKEN_KEY = 'shinyhost_token';
+const TOKEN_KEY = 'shinyhub_token';
 
 document.addEventListener('alpine:init', () => {
   Alpine.store('auth', {
