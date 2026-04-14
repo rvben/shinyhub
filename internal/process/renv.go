@@ -1,7 +1,9 @@
 package process
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +13,7 @@ import (
 // It is a no-op when renv.lock does not exist (app manages its own packages).
 func SyncR(bundleDir string) error {
 	lockfile := filepath.Join(bundleDir, "renv.lock")
-	if _, err := os.Stat(lockfile); os.IsNotExist(err) {
+	if _, err := os.Stat(lockfile); errors.Is(err, fs.ErrNotExist) {
 		return nil // no renv.lock — nothing to restore
 	}
 

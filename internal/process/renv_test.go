@@ -2,6 +2,7 @@ package process_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestSyncR_WithLockfile_RNotInstalled(t *testing.T) {
 
 	// If R is not installed, SyncR should fail with a clear error.
 	// This test is only meaningful when R is absent; skip otherwise.
-	if _, err := os.Stat("/usr/bin/Rscript"); err == nil {
+	if _, err := exec.LookPath("Rscript"); err == nil {
 		t.Skip("R is installed; skipping absence test")
 	}
 	err := process.SyncR(dir)
