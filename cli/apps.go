@@ -16,7 +16,7 @@ var appsCmd = &cobra.Command{Use: "apps", Short: "Manage apps"}
 var tokensCmd = &cobra.Command{Use: "tokens", Short: "Manage API tokens"}
 
 func init() {
-	appsCmd.AddCommand(appsListCmd, appsLogsCmd, appsRollbackCmd, appsRestartCmd, appsSetCmd)
+	appsCmd.AddCommand(appsListCmd, appsLogsCmd, appsRollbackCmd, appsRestartCmd, appsSetCmd, appsAccessCmd)
 	tokensCmd.AddCommand(tokensCreateCmd)
 }
 
@@ -193,6 +193,51 @@ func runAppsSet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s: hibernate-timeout set to %d minutes\n", slug, *minutes)
 	}
 	return nil
+}
+
+var appsAccessCmd = &cobra.Command{
+	Use:   "access",
+	Short: "Manage app access control",
+}
+
+var appsAccessSetCmd = &cobra.Command{
+	Use:   "set <slug> <public|private|shared>",
+	Short: "Set access level for an app",
+	Args:  cobra.ExactArgs(2),
+	RunE:  runAppsAccessSet,
+}
+
+func runAppsAccessSet(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug, accessLevel := args[0], args[1]
+	body, err := json.Marshal(map[string]string{"access": accessLevel})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("PATCH", cfg.Host+"/api/apps/"+slug+"/access", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("set access failed: %s", out)
+	}
+	fmt.Printf("%s: access set to %s\n", slug, accessLevel)
+	return nil
+}
+
+func init() {
+	appsAccessCmd.AddCommand(appsAccessSetCmd)
 }
 
 var tokenName string
