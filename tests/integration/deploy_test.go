@@ -6,12 +6,12 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -55,6 +55,7 @@ func TestFullDeployCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer store.Close()
 	if err := store.Migrate(); err != nil {
 		t.Fatal(err)
 	}
@@ -79,13 +80,18 @@ func TestFullDeployCycle(t *testing.T) {
 	srv := api.New(cfg, store, mgr, prx)
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()
+	t.Cleanup(func() { _ = mgr.Stop("hello") })
 
 	// 1. Login
-	loginBody, _ := json.Marshal(map[string]string{"username": "admin", "password": "pass"})
+	loginBody, err := json.Marshal(map[string]string{"username": "admin", "password": "pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	lr, err := http.Post(ts.URL+"/api/auth/login", "application/json", bytes.NewReader(loginBody))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer lr.Body.Close()
 	var loginResp map[string]string
 	if err := json.NewDecoder(lr.Body).Decode(&loginResp); err != nil {
 		t.Fatal(err)
@@ -96,21 +102,28 @@ func TestFullDeployCycle(t *testing.T) {
 	}
 
 	// 2. Create app
-	appBody, _ := json.Marshal(map[string]string{"slug": "hello", "name": "Hello"})
-	req, _ := http.NewRequest("POST", ts.URL+"/api/apps", bytes.NewReader(appBody))
+	appBody, err := json.Marshal(map[string]string{"slug": "hello", "name": "Hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest("POST", ts.URL+"/api/apps", bytes.NewReader(appBody))
+	if err != nil {
+		t.Fatal(err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	cr, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cr.Body.Close()
 	if cr.StatusCode != 201 {
 		t.Fatalf("expected 201, got %d", cr.StatusCode)
 	}
 
 	// 3. Build a minimal hello-world shiny bundle
 	bundleDir := t.TempDir()
-	zipPath := bundleDir + "/app.zip"
+	zipPath := filepath.Join(bundleDir, "app.zip")
 	createTestBundle(t, zipPath, map[string]string{
 		"app.py": `from shiny import App, ui, render
 app_ui = ui.page_fluid(ui.h1("Hello"))
@@ -134,7 +147,9 @@ app = App(app_ui, server)
 	if _, err := part.Write(zipBytes); err != nil {
 		t.Fatal(err)
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	dreq, err := http.NewRequest("POST", ts.URL+"/api/apps/hello/deploy", &body)
 	if err != nil {
@@ -149,20 +164,27 @@ app = App(app_ui, server)
 	if err != nil {
 		t.Fatalf("deploy request: %v", err)
 	}
+	defer dr.Body.Close()
 	if dr.StatusCode != 200 {
 		var out bytes.Buffer
-		out.ReadFrom(dr.Body)
+		if _, err := out.ReadFrom(dr.Body); err != nil {
+			t.Logf("reading error body: %v", err)
+		}
 		t.Fatalf("deploy failed (%d): %s", dr.StatusCode, out.String())
 	}
-	fmt.Println("Deploy succeeded")
+	t.Log("deploy succeeded")
 
 	// 5. Check app list
-	listReq, _ := http.NewRequest("GET", ts.URL+"/api/apps", nil)
+	listReq, err := http.NewRequest("GET", ts.URL+"/api/apps", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	listReq.Header.Set("Authorization", "Bearer "+token)
 	listResp, err := http.DefaultClient.Do(listReq)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer listResp.Body.Close()
 	var apps []map[string]any
 	if err := json.NewDecoder(listResp.Body).Decode(&apps); err != nil {
 		t.Fatal(err)
