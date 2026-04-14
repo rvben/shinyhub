@@ -187,11 +187,12 @@ func gitClone(repoURL, branch, subdir string) (string, error) {
 	}
 
 	if subdir != "" {
-		dir = filepath.Join(dir, subdir)
-		if _, err := os.Stat(dir); err != nil {
-			os.RemoveAll(dir)
+		appDir := filepath.Join(dir, subdir)
+		if _, err := os.Stat(appDir); err != nil {
+			os.RemoveAll(dir) // dir still holds the root clone path
 			return "", fmt.Errorf("subdir %q not found in repo", subdir)
 		}
+		dir = appDir
 	}
 
 	return dir, nil
