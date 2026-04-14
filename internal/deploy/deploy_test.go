@@ -13,7 +13,7 @@ import (
 func TestExtractBundle(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "app.zip")
-	if err := deploy.CreateTestBundle(zipPath, map[string]string{
+	if err := createTestBundle(zipPath, map[string]string{
 		"app.py":           "# shiny app",
 		"requirements.txt": "shiny",
 	}); err != nil {
@@ -34,7 +34,7 @@ func TestExtractBundle_ZipSlip(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "malicious.zip")
 	// Attempt path traversal via a ../../../etc/passwd-style entry name.
-	if err := deploy.CreateTestBundle(zipPath, map[string]string{
+	if err := createTestBundle(zipPath, map[string]string{
 		"../escape.txt": "should not appear outside destDir",
 	}); err != nil {
 		t.Fatal(err)

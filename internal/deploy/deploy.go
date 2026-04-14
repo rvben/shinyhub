@@ -193,24 +193,3 @@ func extractFile(f *zip.File, dest string) error {
 	return err
 }
 
-// CreateTestBundle writes a zip archive at path containing the provided files.
-// Intended for use in tests only.
-func CreateTestBundle(path string, files map[string]string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := zip.NewWriter(f)
-	defer w.Close()
-	for name, content := range files {
-		fw, err := w.Create(name)
-		if err != nil {
-			return err
-		}
-		if _, err := fw.Write([]byte(content)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
