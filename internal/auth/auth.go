@@ -60,6 +60,19 @@ func ValidateJWT(tokenStr, secret string) (*Claims, error) {
 	return claims, nil
 }
 
+// ParseJWT validates a token and returns the embedded user as a ContextUser.
+func ParseJWT(tokenStr, secret string) (*ContextUser, error) {
+	claims, err := ValidateJWT(tokenStr, secret)
+	if err != nil {
+		return nil, err
+	}
+	return &ContextUser{
+		ID:       claims.UserID,
+		Username: claims.Subject,
+		Role:     claims.Role,
+	}, nil
+}
+
 func HashAPIKey(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return fmt.Sprintf("%x", sum)
