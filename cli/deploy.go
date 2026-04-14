@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -38,20 +39,38 @@ var deployCmd = &cobra.Command{
 }
 
 var deployFlags struct {
-	slug string
-	wait bool
+	slug   string
+	wait   bool
+	git    string // git repo URL; if set, clone instead of using local dir
+	branch string // branch/tag to check out (default: default branch)
+	subdir string // subdirectory within the repo containing the app
 }
 
 func init() {
 	deployCmd.Flags().StringVar(&deployFlags.slug, "slug", "", "App slug (defaults to directory name)")
 	deployCmd.Flags().BoolVar(&deployFlags.wait, "wait", false, "Wait until deployment is healthy")
+	deployCmd.Flags().StringVar(&deployFlags.git, "git", "", "Git repository URL to clone and deploy")
+	deployCmd.Flags().StringVar(&deployFlags.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
+	deployCmd.Flags().StringVar(&deployFlags.subdir, "subdir", "", "Subdirectory within repo containing the app")
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	dir := "."
-	if len(args) > 0 {
-		dir = args[0]
+	var dir string
+
+	if deployFlags.git != "" {
+		cloned, err := gitClone(deployFlags.git, deployFlags.branch, deployFlags.subdir)
+		if err != nil {
+			return fmt.Errorf("git clone: %w", err)
+		}
+		defer os.RemoveAll(cloned)
+		dir = cloned
+	} else {
+		dir = "."
+		if len(args) > 0 {
+			dir = args[0]
+		}
 	}
+
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -59,7 +78,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	slug := deployFlags.slug
 	if slug == "" {
-		slug = sanitizeSlug(filepath.Base(abs))
+		if deployFlags.git != "" {
+			// Derive slug from the repo name (last path component, strip .git suffix).
+			repoName := filepath.Base(deployFlags.git)
+			repoName = strings.TrimSuffix(repoName, ".git")
+			slug = sanitizeSlug(repoName)
+		} else {
+			slug = sanitizeSlug(filepath.Base(abs))
+		}
 	}
 
 	cfg, err := loadConfig()
@@ -138,6 +164,37 @@ func ensureApp(cfg *cliConfig, slug string) error {
 		return fmt.Errorf("could not create app %s", slug)
 	}
 	return nil
+}
+
+// gitClone shallow-clones repoURL at the given branch into a temp directory
+// and returns the path. The caller is responsible for removing the directory.
+func gitClone(repoURL, branch, subdir string) (string, error) {
+	dir, err := os.MkdirTemp("", "shiny-git-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp dir: %w", err)
+	}
+
+	args := []string{"clone", "--depth=1"}
+	if branch != "" {
+		args = append(args, "--branch", branch)
+	}
+	args = append(args, repoURL, dir)
+
+	cmd := exec.Command("git", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("git clone: %w\n%s", err, out)
+	}
+
+	if subdir != "" {
+		dir = filepath.Join(dir, subdir)
+		if _, err := os.Stat(dir); err != nil {
+			os.RemoveAll(dir)
+			return "", fmt.Errorf("subdir %q not found in repo", subdir)
+		}
+	}
+
+	return dir, nil
 }
 
 func zipDir(dir string) (*bytes.Buffer, error) {
