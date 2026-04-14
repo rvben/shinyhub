@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ShinyHost</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+  <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <nav>
+    <span class="brand">✦ ShinyHost</span>
+    <span x-data="auth" x-show="username" x-text="username"></span>
+    <button x-data="auth" @click="logout()" x-show="username">Logout</button>
+  </nav>
+
+  <main x-data="appList">
+    <div x-show="!loggedIn">
+      <div class="login-box">
+        <h2>Sign in</h2>
+        <input x-model="username" placeholder="Username" type="text">
+        <input x-model="password" placeholder="Password" type="password"
+               @keyup.enter="login()">
+        <button @click="login()">Login</button>
+        <p x-show="error" x-text="error" class="error"></p>
+      </div>
+    </div>
+
+    <div x-show="loggedIn">
+      <div class="toolbar">
+        <h1>Apps</h1>
+        <button @click="refresh()">Refresh</button>
+      </div>
+      <div class="app-grid">
+        <template x-for="app in apps" :key="app.slug">
+          <div class="app-card">
+            <div class="app-header">
+              <strong x-text="app.name"></strong>
+              <span :class="'badge badge-' + app.status" x-text="app.status"></span>
+            </div>
+            <div class="app-meta">
+              <span x-text="'/' + app.slug"></span>
+              <span x-text="app.deploy_count + ' deploys'"></span>
+            </div>
+            <div class="app-actions">
+              <a :href="'/app/' + app.slug + '/'" target="_blank">Open</a>
+              <button @click="restart(app.slug)">Restart</button>
+              <button @click="rollback(app.slug)">Rollback</button>
+            </div>
+          </div>
+        </template>
+        <p x-show="apps.length === 0">No apps deployed yet.</p>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

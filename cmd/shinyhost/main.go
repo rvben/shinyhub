@@ -13,6 +13,7 @@ import (
 	"github.com/rvben/shinyhost/internal/db"
 	"github.com/rvben/shinyhost/internal/process"
 	"github.com/rvben/shinyhost/internal/proxy"
+	"github.com/rvben/shinyhost/internal/ui"
 )
 
 func main() {
@@ -79,6 +80,16 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
+	})
+	// Static UI assets
+	mux.Handle("/static/", ui.Handler())
+	// Serve index.html at root
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFileFS(w, r, ui.Static(), "index.html")
 	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

@@ -1,0 +1,34 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+nav { display: flex; align-items: center; gap: 1.5rem; padding: 0.75rem 1.5rem;
+      background: #1a1d27; border-bottom: 1px solid #2d3148; }
+.brand { font-weight: 700; font-size: 1.1rem; }
+nav button { margin-left: auto; background: transparent; border: 1px solid #4a5568;
+             color: #a0aec0; padding: 0.25rem 0.75rem; border-radius: 4px; cursor: pointer; }
+main { padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; }
+.login-box { max-width: 360px; margin: 4rem auto; background: #1a1d27;
+             border: 1px solid #2d3148; border-radius: 8px; padding: 2rem; }
+.login-box h2 { margin-bottom: 1.25rem; }
+.login-box input { display: block; width: 100%; margin-bottom: 0.75rem;
+                   background: #0f1117; border: 1px solid #4a5568; color: #e2e8f0;
+                   padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.9rem; }
+.login-box button { width: 100%; background: #6366f1; color: white; border: none;
+                    padding: 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.95rem; }
+.error { margin-top: 0.75rem; color: #fc8181; font-size: 0.85rem; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem; }
+.toolbar h1 { font-size: 1.4rem; }
+.toolbar button { background: #6366f1; color: white; border: none;
+                  padding: 0.4rem 1rem; border-radius: 4px; cursor: pointer; }
+.app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.app-card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 8px; padding: 1rem; }
+.app-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+.app-meta { font-size: 0.8rem; color: #718096; margin-bottom: 0.75rem; display: flex; gap: 1rem; }
+.app-actions { display: flex; gap: 0.5rem; }
+.app-actions a, .app-actions button { font-size: 0.8rem; padding: 0.25rem 0.6rem;
+  border-radius: 4px; cursor: pointer; border: 1px solid #4a5568;
+  background: transparent; color: #a0aec0; text-decoration: none; }
+.badge { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 99px; font-weight: 600; }
+.badge-healthy  { background: #1a4731; color: #48bb78; }
+.badge-deploying { background: #3d2e00; color: #ecc94b; }
+.badge-degraded { background: #3d1515; color: #fc8181; }
+.badge-stopped  { background: #2d3148; color: #718096; }
