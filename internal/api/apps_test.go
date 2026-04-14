@@ -95,6 +95,23 @@ func TestPatchApp_SetHibernateTimeout(t *testing.T) {
 	}
 }
 
+func TestPatchApp_NotFound(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]any{"hibernate_timeout_minutes": 30})
+	req := authedRequest(t, "PATCH", "/api/apps/nonexistent", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for nonexistent slug, got %d", rec.Code)
+	}
+}
+
 func TestPatchApp_ResetToGlobalDefault(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

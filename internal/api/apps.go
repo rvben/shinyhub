@@ -92,6 +92,10 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
+// patchAppRequest holds the updatable fields for an app.
+// HibernateTimeoutMinutes uses *int so that both a missing field and an
+// explicit JSON null are treated identically: store SQL NULL, which means
+// "inherit the global hibernate_timeout config".
 type patchAppRequest struct {
 	HibernateTimeoutMinutes *int `json:"hibernate_timeout_minutes"`
 }
@@ -106,6 +110,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.UpdateHibernateTimeout(slug, req.HibernateTimeoutMinutes); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

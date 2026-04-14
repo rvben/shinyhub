@@ -195,12 +195,19 @@ func (s *Store) IncrementDeployCount(slug string) error {
 // Pass nil to store SQL NULL (means "use the global config default").
 // Pass 0 to disable hibernation for this app specifically.
 func (s *Store) UpdateHibernateTimeout(slug string, minutes *int) error {
-	_, err := s.db.Exec(
+	result, err := s.db.Exec(
 		`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
 		minutes, slug,
 	)
 	if err != nil {
 		return fmt.Errorf("update hibernate timeout: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update hibernate timeout rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
