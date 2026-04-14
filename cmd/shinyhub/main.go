@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/ui"
@@ -72,6 +75,27 @@ func main() {
 	mgr := process.NewManager()
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
+
+	deployFn := func(slug, bundleDir string) error {
+		_, err := deploy.Run(deploy.Params{
+			Slug:      slug,
+			BundleDir: bundleDir,
+			Manager:   mgr,
+			Proxy:     prx,
+		})
+		return err
+	}
+
+	lcCfg := lifecycle.Config{
+		WatchInterval:      cfg.Lifecycle.WatchInterval,
+		RestartMaxAttempts: cfg.Lifecycle.RestartMaxAttempts,
+		HibernateTimeout:   cfg.Lifecycle.HibernateTimeout,
+	}
+	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watcher.Start(ctx)
 
 	mux := http.NewServeMux()
 	// API routes
