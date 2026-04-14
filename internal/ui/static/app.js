@@ -10,6 +10,7 @@ document.addEventListener('alpine:init', () => {
     },
     logout() {
       localStorage.removeItem(TOKEN_KEY);
+      document.cookie = 'shiny_session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
       window.location.reload();
     }
   });
@@ -31,6 +32,7 @@ document.addEventListener('alpine:init', () => {
       if (!r.ok) { this.error = 'Invalid credentials'; return; }
       const {token} = await r.json();
       localStorage.setItem(TOKEN_KEY, token);
+      document.cookie = `shiny_session=${token}; path=/; SameSite=Lax`;
       try { Alpine.store('auth').username = JSON.parse(atob(token.split('.')[1])).sub; } catch {}
       this.loggedIn = true;
       this.refresh();
