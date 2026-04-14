@@ -79,7 +79,10 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) error {
 		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?)`,
 		p.UserID, p.KeyHash, p.Name,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("create api key: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
@@ -126,7 +129,10 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 		`INSERT INTO apps (slug, name, project_slug, owner_id) VALUES (?, ?, ?, ?)`,
 		p.Slug, p.Name, p.ProjectSlug, p.OwnerID,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("create app: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
@@ -168,12 +174,18 @@ func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
 	_, err := s.db.Exec(`
 		UPDATE apps SET status = ?, current_port = ?, current_pid = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE slug = ?`, p.Status, p.Port, p.PID, p.Slug)
-	return err
+	if err != nil {
+		return fmt.Errorf("update app status: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) IncrementDeployCount(slug string) error {
 	_, err := s.db.Exec(`UPDATE apps SET deploy_count = deploy_count + 1 WHERE slug = ?`, slug)
-	return err
+	if err != nil {
+		return fmt.Errorf("increment deploy count: %w", err)
+	}
+	return nil
 }
 
 // --- Deployments ---
@@ -201,13 +213,19 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("last insert id: %w", err)
+	}
 	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: "pending"}, nil
 }
 
 func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
 	_, err := s.db.Exec(`UPDATE deployments SET status = ? WHERE id = ?`, status, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("update deployment status: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {

@@ -39,13 +39,24 @@ func TestCreateAndGetUser(t *testing.T) {
 
 func TestCreateAndGetApp(t *testing.T) {
 	store := mustOpenDB(t)
-	err := store.CreateApp(db.CreateAppParams{
+	// Create the owning user first (FK requires it)
+	if err := store.CreateUser(db.CreateUserParams{
+		Username:     "owner",
+		PasswordHash: "hash",
+		Role:         "developer",
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	owner, err := store.GetUserByUsername("owner")
+	if err != nil {
+		t.Fatalf("get owner: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{
 		Slug:        "my-app",
 		Name:        "My App",
 		ProjectSlug: "default",
-		OwnerID:     1,
-	})
-	if err != nil {
+		OwnerID:     owner.ID,
+	}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, err := store.GetAppBySlug("my-app")
