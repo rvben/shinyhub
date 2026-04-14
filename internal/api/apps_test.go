@@ -42,6 +42,16 @@ func TestListApps(t *testing.T) {
 	// empty list is fine
 }
 
+func TestUnauthenticatedRejected(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/apps", nil) // no auth header
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated request, got %d", rec.Code)
+	}
+}
+
 func TestCreateApp(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

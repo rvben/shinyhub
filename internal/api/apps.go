@@ -3,14 +3,21 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
+	"regexp"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhost/internal/auth"
 	"github.com/rvben/shinyhost/internal/db"
 	"github.com/rvben/shinyhost/internal/deploy"
 )
+
+// slugRE enforces a safe, DNS-compatible slug format.
+var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	apps, err := s.store.ListApps()
@@ -21,8 +28,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	if apps == nil {
 		apps = []*db.App{}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(apps)
+	writeJSON(w, http.StatusOK, apps)
 }
 
 type createAppRequest struct {
@@ -39,6 +45,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Slug == "" || req.Name == "" {
 		http.Error(w, "slug and name are required", http.StatusBadRequest)
+		return
+	}
+	if !slugRE.MatchString(req.Slug) {
+		http.Error(w, "slug must match ^[a-z0-9][a-z0-9-]{0,62}$", http.StatusBadRequest)
 		return
 	}
 
@@ -64,9 +74,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(app)
+	writeJSON(w, http.StatusCreated, app)
 }
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
@@ -80,18 +88,16 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(app)
+	writeJSON(w, http.StatusOK, app)
 }
 
+// deployRequest carries the runtime parameters for a deploy. The bundle
+// directory is always derived server-side from the slug and a timestamp; it
+// is never accepted from the caller.
 type deployRequest struct {
-	// BundleDir is a server-side path to a pre-extracted bundle directory.
-	// Callers that upload a zip should first call the upload endpoint; this
-	// handler expects the bundle to already be on disk.
-	BundleDir string   `json:"bundle_dir"`
-	Command   []string `json:"command"`
-	Env       []string `json:"env"`
-	Workers   int      `json:"workers"`
+	Command []string `json:"command"`
+	Env     []string `json:"env"`
+	Workers int      `json:"workers"`
 }
 
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
@@ -118,11 +124,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bundleDir := req.BundleDir
-	if bundleDir == "" {
-		// Default to the app's directory under the configured apps storage path.
-		bundleDir = filepath.Join(s.cfg.Storage.AppsDir, slug)
-	}
+	// Bundle directory is always computed server-side from the slug and a
+	// millisecond-precision timestamp; the client never controls this path.
+	version := fmt.Sprintf("%d", time.Now().UnixMilli())
+	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
 
 	// Stop existing instance before re-deploying; ignore the error since the
 	// app may not have been running yet.
@@ -142,7 +147,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		Proxy:     s.proxy,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
+		s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		http.Error(w, "deploy failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -165,15 +172,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := s.store.CreateDeployment(db.CreateDeploymentParams{
 		AppID:     app.ID,
-		Version:   "latest",
+		Version:   version,
 		BundleDir: bundleDir,
 	}); err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"pid":  result.PID,
 		"port": result.Port,
 	})
@@ -222,7 +228,9 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		Proxy:     s.proxy,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
+		s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		http.Error(w, "rollback failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -238,8 +246,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"pid":     result.PID,
 		"port":    result.Port,
 		"version": prev.Version,
@@ -288,7 +295,9 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		Proxy:     s.proxy,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		fmt.Fprintf(os.Stderr, "restart %s: %v\n", slug, err)
+		s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		http.Error(w, "restart failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -304,8 +313,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"pid":  result.PID,
 		"port": result.Port,
 	})

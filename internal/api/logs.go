@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,8 +26,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	// Sanitize slug to prevent header injection via CRLF into the SSE stream.
+	safeSlug := strings.NewReplacer("\r", "", "\n", "").Replace(slug)
+
 	// Send an initial comment so the client knows the stream is open.
-	fmt.Fprintf(w, ": connected to log stream for %s\n\n", slug)
+	fmt.Fprintf(w, ": connected to log stream for %s\n\n", safeSlug)
 	flusher.Flush()
 
 	ticker := time.NewTicker(15 * time.Second)

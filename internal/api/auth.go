@@ -11,6 +11,10 @@ import (
 	"github.com/rvben/shinyhost/internal/db"
 )
 
+// dummyHash is a pre-computed bcrypt hash used to ensure constant-time
+// response for unknown usernames, preventing timing-based enumeration.
+var dummyHash, _ = auth.HashPassword("dummy-sentinel-do-not-use")
+
 type loginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -30,6 +34,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUserByUsername(req.Username)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
+			auth.VerifyPassword(dummyHash, req.Password) // constant-time guard
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -48,8 +53,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(loginResponse{Token: token})
+	writeJSON(w, http.StatusOK, loginResponse{Token: token})
 }
 
 type createTokenRequest struct {
@@ -92,9 +96,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(createTokenResponse{Token: rawKey})
+	writeJSON(w, http.StatusCreated, createTokenResponse{Token: rawKey})
 }
 
 // generateAPIKey creates a cryptographically random 32-byte token and returns
