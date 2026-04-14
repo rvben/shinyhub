@@ -127,3 +127,27 @@ func TestAccess_PrivateApp_GrantedUser(t *testing.T) {
 		t.Errorf("granted user: expected 200, got %d", rec.Code)
 	}
 }
+
+func TestAccess_PrivateApp_NonMember_Forbidden(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	bob, _ := store.GetUserByUsername("bob")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+	// Bob is authenticated but NOT granted access and is not an admin.
+
+	token, _ := auth.IssueJWT(bob.ID, "bob", "developer", "test-secret")
+
+	mw := access.Middleware(store, "test-secret")
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/priv/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-member: expected 403, got %d", rec.Code)
+	}
+}

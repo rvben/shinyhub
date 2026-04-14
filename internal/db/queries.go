@@ -327,11 +327,19 @@ func (s *Store) UserCanAccessApp(slug string, userID int64) (bool, error) {
 
 // SetAppAccess updates the access level for an app.
 // Valid values: "public", "private", "shared".
+// Returns ErrNotFound if no app with the given slug exists.
 func (s *Store) SetAppAccess(slug, access string) error {
-	_, err := s.db.Exec(
+	result, err := s.db.Exec(
 		`UPDATE apps SET access = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, access, slug)
 	if err != nil {
 		return fmt.Errorf("set app access: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app access rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

@@ -42,6 +42,10 @@ func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Both "private" and "shared" require authentication and an explicit
+			// member or owner grant. The distinction is surfaced to the UI/CLI
+			// to convey intent, but the enforcement logic is identical: present
+			// a valid JWT and pass the UserCanAccessApp check.
 			user := extractUser(r, jwtSecret)
 			if user == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)

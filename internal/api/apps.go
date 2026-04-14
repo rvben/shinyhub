@@ -403,6 +403,10 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.SetAppAccess(slug, req.Access); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
