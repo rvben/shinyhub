@@ -4,6 +4,14 @@ document.addEventListener('alpine:init', () => {
   Alpine.store('auth', {
     username: null,
     init() {
+      // Handle OAuth redirect: server sends /?token=<jwt> after GitHub login.
+      const params = new URLSearchParams(window.location.search);
+      const redirectToken = params.get('token');
+      if (redirectToken) {
+        localStorage.setItem(TOKEN_KEY, redirectToken);
+        document.cookie = `shiny_session=${redirectToken}; path=/; SameSite=Lax`;
+        window.history.replaceState({}, '', '/');
+      }
       const t = localStorage.getItem(TOKEN_KEY);
       if (!t) return;
       try { this.username = JSON.parse(atob(t.split('.')[1])).sub; } catch {}
