@@ -6,9 +6,38 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 )
+
+// newOAuthTestServer creates a test server with a fake GitHub OAuth config so
+// that s.github is non-nil and param/state validation logic is reachable.
+func newOAuthTestServer(t *testing.T) (*api.Server, *db.Store) {
+	t.Helper()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir()},
+		OAuth: config.OAuthConfig{
+			GitHub: config.GitHubOAuthConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+				CallbackURL:  "http://localhost/callback",
+			},
+		},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
 
 func TestGitHubLogin_NotConfigured(t *testing.T) {
 	srv, _ := newTestServer(t) // no OAuth config
@@ -20,8 +49,18 @@ func TestGitHubLogin_NotConfigured(t *testing.T) {
 	}
 }
 
+func TestGitHubCallback_NotConfigured(t *testing.T) {
+	srv, _ := newTestServer(t) // no OAuth config
+	req := httptest.NewRequest("GET", "/api/auth/github/callback?state=x&code=y", nil)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("expected 501 when OAuth not configured, got %d", rec.Code)
+	}
+}
+
 func TestGitHubCallback_InvalidState(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, _ := newOAuthTestServer(t)
 	req := httptest.NewRequest("GET", "/api/auth/github/callback?state=bogus&code=xyz", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
@@ -31,7 +70,7 @@ func TestGitHubCallback_InvalidState(t *testing.T) {
 }
 
 func TestGitHubCallback_MissingParams(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, _ := newOAuthTestServer(t)
 	req := httptest.NewRequest("GET", "/api/auth/github/callback", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)

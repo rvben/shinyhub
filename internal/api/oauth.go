@@ -38,6 +38,11 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 // handleGitHubCallback handles the GitHub OAuth2 callback, creates or finds
 // the local user account, and issues a JWT.
 func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
+	if s.github == nil {
+		http.Error(w, "GitHub OAuth not configured", http.StatusNotImplemented)
+		return
+	}
+
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 	if state == "" || code == "" {
@@ -47,11 +52,6 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.ConsumeOAuthState(state); err != nil {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
-		return
-	}
-
-	if s.github == nil {
-		http.Error(w, "GitHub OAuth not configured", http.StatusNotImplemented)
 		return
 	}
 
