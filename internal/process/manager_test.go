@@ -1,6 +1,7 @@
 package process_test
 
 import (
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,11 @@ func TestManagerStartStop(t *testing.T) {
 	if err := m.Stop("test-app"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
+
+	// verify the process is actually gone
+	if err := syscall.Kill(info.PID, 0); err == nil {
+		t.Error("expected process to be dead after Stop")
+	}
 }
 
 func TestManagerStatus(t *testing.T) {
@@ -49,5 +55,19 @@ func TestManagerStatus(t *testing.T) {
 	}
 	if info.Status != process.StatusRunning {
 		t.Errorf("expected running, got %s", info.Status)
+	}
+}
+
+func TestManagerStatusUnknown(t *testing.T) {
+	m := process.NewManager()
+	info, err := m.Status("no-such-app")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != process.StatusStopped {
+		t.Errorf("expected stopped, got %s", info.Status)
+	}
+	if info.Slug != "no-such-app" {
+		t.Errorf("expected slug preserved, got %s", info.Slug)
 	}
 }

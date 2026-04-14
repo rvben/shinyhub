@@ -1,12 +1,12 @@
 package process
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type Status string
@@ -35,6 +35,7 @@ type StartParams struct {
 type entry struct {
 	info *ProcessInfo
 	cmd  *exec.Cmd
+	done chan struct{} // closed when the process exits
 }
 
 // Manager tracks running app processes by slug.
@@ -51,6 +52,10 @@ func NewManager() *Manager {
 // Start spawns a new process for the given slug. Returns an error if the slug
 // is already running.
 func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
+	if len(p.Command) == 0 {
+		return nil, fmt.Errorf("start: command must not be empty")
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -75,46 +80,59 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		Port:   p.Port,
 		Status: StatusRunning,
 	}
-	e := &entry{info: info, cmd: cmd}
-	m.entries[p.Slug] = e
+	done := make(chan struct{})
+	m.entries[p.Slug] = &entry{info: info, cmd: cmd, done: done}
 
 	// Reap the process in the background and mark it crashed if it exits
 	// unexpectedly (i.e. not via Stop).
 	go func() {
 		cmd.Wait()
 		m.mu.Lock()
-		defer m.mu.Unlock()
-		// Only update if this entry is still the one we started — Stop may have
-		// already removed it.
-		if cur, ok := m.entries[p.Slug]; ok && cur.cmd == cmd {
-			cur.info.Status = StatusCrashed
+		if e, ok := m.entries[p.Slug]; ok && e.cmd == cmd {
+			e.info.Status = StatusCrashed
 		}
+		m.mu.Unlock()
+		close(done)
 	}()
 
 	return info, nil
 }
 
-// Stop sends SIGTERM to the process group of the named slug and removes it
-// from the manager. If the process has already exited, Stop still cleans up
-// the entry without returning an error.
+// Stop sends SIGTERM to the process group of the named slug and waits for the
+// process to exit before removing the entry. If the process does not exit
+// within 5 seconds, SIGKILL is sent. This guarantees the port is free when
+// Stop returns.
 func (m *Manager) Stop(slug string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	e, ok := m.entries[slug]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("app %s not found", slug)
 	}
-	if e.cmd.Process != nil {
-		// Negate PID to target the entire process group.
-		err := syscall.Kill(-e.cmd.Process.Pid, syscall.SIGTERM)
-		if err != nil && !errors.Is(err, syscall.ESRCH) {
-			// ESRCH means the process already exited; treat as success.
-			return fmt.Errorf("sigterm: %w", err)
-		}
+	if e.cmd.Process == nil {
+		m.mu.Unlock()
+		return nil
 	}
-	e.info.Status = StatusStopped
+	done := e.done
+	pid := e.cmd.Process.Pid
+	m.mu.Unlock() // release lock before blocking ops
+
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		return fmt.Errorf("sigterm: %w", err)
+	}
+
+	// Wait for the process to exit (reaper goroutine closes done).
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		// SIGKILL the process group if it didn't exit gracefully.
+		syscall.Kill(-pid, syscall.SIGKILL) //nolint:errcheck
+		<-done
+	}
+
+	m.mu.Lock()
 	delete(m.entries, slug)
+	m.mu.Unlock()
 	return nil
 }
 
