@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhost/internal/deploy"
 	"github.com/rvben/shinyhost/internal/process"
@@ -41,9 +42,10 @@ func TestExtractBundle_ZipSlip(t *testing.T) {
 	}
 
 	destDir := filepath.Join(dir, "extracted")
-	// ExtractBundle must either reject the entry or sanitize the path so that
-	// the file ends up inside destDir, never outside it.
-	_ = deploy.ExtractBundle(zipPath, destDir)
+	err := deploy.ExtractBundle(zipPath, destDir)
+	if err == nil {
+		t.Fatal("expected error for zip-slip entry, got nil")
+	}
 
 	// The file must not have escaped to the parent of destDir.
 	escaped := filepath.Join(dir, "escape.txt")
@@ -61,11 +63,14 @@ func TestAllocatePort(t *testing.T) {
 	if p1 < 20000 || p1 > 60000 {
 		t.Errorf("port out of range: %d", p1)
 	}
+	if p2 < 20000 || p2 > 60000 {
+		t.Errorf("p2 out of range: %d", p2)
+	}
 }
 
 func TestAllocatePort_WrapAround(t *testing.T) {
 	// Drive the counter to 60000, then verify the next call wraps back into range.
-	deploy.SetPortCounter(59999)
+	deploy.SetPortCounterForTest(59999)
 	p1 := deploy.AllocatePort() // 60000 — last valid
 	p2 := deploy.AllocatePort() // should wrap to 20001 (or 20000 sentinel + 1)
 	if p1 != 60000 {
@@ -83,12 +88,14 @@ func TestDeploy_CommandOnly(t *testing.T) {
 	dir := t.TempDir()
 
 	params := deploy.Params{
-		Slug:            "test-deploy",
-		BundleDir:       dir,
-		Command:         []string{"sleep", "30"},
-		Manager:         mgr,
-		Proxy:           prx,
-		SkipHealthCheck: true,
+		Slug:      "test-deploy",
+		BundleDir: dir,
+		Command:   []string{"sleep", "30"},
+		Manager:   mgr,
+		Proxy:     prx,
+		HealthCheck: func(port int, timeout time.Duration) error {
+			return nil // no HTTP server in this test
+		},
 	}
 	info, err := deploy.Run(params)
 	if err != nil {

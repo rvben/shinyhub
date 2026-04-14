@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"archive/zip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,22 +38,20 @@ func AllocatePort() int {
 	}
 }
 
-// SetPortCounter overrides the internal port counter. Used only in tests.
-func SetPortCounter(v int64) {
-	portCounter.Store(v)
-}
-
 // Params controls a single deploy operation.
 type Params struct {
-	Slug            string
-	BundleDir       string
-	Command         []string      // if empty, defaults to uv run shiny run app.py
-	Env             []string
-	Workers         int
-	Manager         *process.Manager
-	Proxy           *proxy.Proxy
-	SkipHealthCheck bool          // skip HTTP health polling; intended for tests
-	HealthTimeout   time.Duration // 0 means the 30 s default
+	Slug          string
+	BundleDir     string
+	Command       []string // if empty, defaults to uv run shiny run app.py
+	Env           []string
+	Workers       int
+	Manager       *process.Manager
+	Proxy         *proxy.Proxy
+	HealthTimeout time.Duration // 0 means the 30 s default
+	// HealthCheck is called after the process starts to verify it is ready.
+	// If nil, the default HTTP health poller is used.
+	// Set to a no-op function in tests that do not serve HTTP.
+	HealthCheck func(port int, timeout time.Duration) error
 }
 
 // Result contains identifiers for the successfully deployed process.
@@ -60,7 +60,7 @@ type Result struct {
 	Port int
 }
 
-// Run orchestrates a deploy: spawns a new process, optionally health-checks it,
+// Run orchestrates a deploy: spawns a new process, health-checks it,
 // then registers it with the reverse proxy.
 func Run(p Params) (*Result, error) {
 	port := AllocatePort()
@@ -92,33 +92,40 @@ func Run(p Params) (*Result, error) {
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	if !p.SkipHealthCheck {
-		timeout := p.HealthTimeout
-		if timeout == 0 {
-			timeout = 30 * time.Second
-		}
-		if err := waitHealthy(port, timeout); err != nil {
-			p.Manager.Stop(p.Slug) //nolint:errcheck
-			return nil, fmt.Errorf("health check failed: %w", err)
-		}
+	healthCheck := p.HealthCheck
+	if healthCheck == nil {
+		healthCheck = waitHealthy
+	}
+
+	timeout := p.HealthTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	if err := healthCheck(port, timeout); err != nil {
+		stopErr := p.Manager.Stop(p.Slug)
+		return nil, errors.Join(fmt.Errorf("health check failed: %w", err), stopErr)
 	}
 
 	targetURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	if err := p.Proxy.Register(p.Slug, targetURL); err != nil {
-		p.Manager.Stop(p.Slug) //nolint:errcheck
-		return nil, fmt.Errorf("proxy register: %w", err)
+		stopErr := p.Manager.Stop(p.Slug)
+		return nil, errors.Join(fmt.Errorf("proxy register: %w", err), stopErr)
 	}
 
 	return &Result{PID: info.PID, Port: port}, nil
 }
 
 // waitHealthy polls the app's root endpoint until it responds with a non-5xx
-// status or the deadline is exceeded.
+// status or the deadline is exceeded. Each HTTP attempt is capped at 5 seconds.
 func waitHealthy(port int, timeout time.Duration) error {
-	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/", port)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:noctx
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		resp, err := client.Do(req)
+		cancel()
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode < 500 {
@@ -157,9 +164,8 @@ func ExtractBundle(src, destDir string) error {
 		// filepath.Rel returns a path starting with ".." when target is outside
 		// absDestDir. The separator-aware check catches both ".." and "../foo".
 		rel, err := filepath.Rel(absDestDir, target)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			// Skip entries that would escape the destination directory.
-			continue
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return fmt.Errorf("zip-slip detected in %q: entry escapes destination", f.Name)
 		}
 
 		if f.FileInfo().IsDir() {
@@ -184,7 +190,7 @@ func extractFile(f *zip.File, dest string) error {
 		return err
 	}
 	defer rc.Close()
-	out, err := os.Create(dest)
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 	if err != nil {
 		return err
 	}
@@ -192,4 +198,3 @@ func extractFile(f *zip.File, dest string) error {
 	_, err = io.Copy(out, rc)
 	return err
 }
-
