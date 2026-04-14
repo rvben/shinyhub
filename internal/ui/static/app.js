@@ -2,10 +2,11 @@ const TOKEN_KEY = 'shinyhost_token';
 
 document.addEventListener('alpine:init', () => {
   Alpine.store('auth', {
-    get username() {
+    username: null,
+    init() {
       const t = localStorage.getItem(TOKEN_KEY);
-      if (!t) return null;
-      try { return JSON.parse(atob(t.split('.')[1])).sub; } catch { return null; }
+      if (!t) return;
+      try { this.username = JSON.parse(atob(t.split('.')[1])).sub; } catch {}
     },
     logout() {
       localStorage.removeItem(TOKEN_KEY);
@@ -30,6 +31,7 @@ document.addEventListener('alpine:init', () => {
       if (!r.ok) { this.error = 'Invalid credentials'; return; }
       const {token} = await r.json();
       localStorage.setItem(TOKEN_KEY, token);
+      try { Alpine.store('auth').username = JSON.parse(atob(token.split('.')[1])).sub; } catch {}
       this.loggedIn = true;
       this.refresh();
     },
@@ -51,22 +53,30 @@ document.addEventListener('alpine:init', () => {
 
     async restart(slug) {
       const token = localStorage.getItem(TOKEN_KEY);
-      const r = await fetch('/api/apps/' + slug + '/restart', {
-        method: 'POST',
-        headers: {'Authorization': 'Bearer ' + token}
-      });
-      if (!r.ok) { this.error = 'Restart failed'; return; }
-      setTimeout(() => this.refresh(), 1000);
+      try {
+        const r = await fetch('/api/apps/' + slug + '/restart', {
+          method: 'POST',
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        if (!r.ok) { this.error = 'Restart failed'; return; }
+        setTimeout(() => this.refresh(), 1000);
+      } catch {
+        this.error = 'Network error';
+      }
     },
 
     async rollback(slug) {
       const token = localStorage.getItem(TOKEN_KEY);
-      const r = await fetch('/api/apps/' + slug + '/rollback', {
-        method: 'PUT',
-        headers: {'Authorization': 'Bearer ' + token}
-      });
-      if (!r.ok) { this.error = 'Rollback failed'; return; }
-      setTimeout(() => this.refresh(), 1000);
+      try {
+        const r = await fetch('/api/apps/' + slug + '/rollback', {
+          method: 'PUT',
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        if (!r.ok) { this.error = 'Rollback failed'; return; }
+        setTimeout(() => this.refresh(), 1000);
+      } catch {
+        this.error = 'Network error';
+      }
     },
 
     init() { if (this.loggedIn) this.refresh(); }
