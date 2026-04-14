@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -79,5 +80,73 @@ func TestBearerMiddleware(t *testing.T) {
 	}
 	if rec.Body.String() != "alice" {
 		t.Errorf("expected alice, got %s", rec.Body.String())
+	}
+}
+
+func TestBearerMiddleware_TokenScheme(t *testing.T) {
+	rawKey := "shk_testkey123"
+	keyHash := auth.HashAPIKey(rawKey)
+
+	keyLookup := func(hash string) (*auth.ContextUser, error) {
+		if hash == keyHash {
+			return &auth.ContextUser{ID: 99, Username: "bot", Role: "developer"}, nil
+		}
+		return nil, fmt.Errorf("not found")
+	}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := auth.UserFromContext(r.Context())
+		if u == nil {
+			http.Error(w, "no user", 500)
+			return
+		}
+		w.Write([]byte(u.Username))
+	})
+	handler := auth.BearerMiddleware("secret", keyLookup)(next)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Token "+rawKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "bot" {
+		t.Errorf("expected bot, got %s", rec.Body.String())
+	}
+}
+
+func TestRequireRole_UnknownUserRole(t *testing.T) {
+	handler := auth.RequireRole("viewer")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	ctx := auth.WithUser(req.Context(), &auth.ContextUser{ID: 1, Username: "x", Role: "superadmin"})
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for unknown role, got %d", rec.Code)
+	}
+}
+
+func TestRequireRole_NoUser(t *testing.T) {
+	handler := auth.RequireRole("viewer")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for missing user, got %d", rec.Code)
+	}
+}
+
+func TestHashAPIKey_Distinct(t *testing.T) {
+	h1 := auth.HashAPIKey("shk_key_one")
+	h2 := auth.HashAPIKey("shk_key_two")
+	if h1 == h2 {
+		t.Error("expected distinct keys to produce distinct hashes")
 	}
 }

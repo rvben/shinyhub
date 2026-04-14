@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -72,16 +73,32 @@ func UserFromContext(ctx context.Context) *ContextUser {
 
 // RequireRole enforces a minimum role level. Roles are ordered:
 // viewer < developer < operator < admin.
+// Panics at startup if an unknown role name is passed.
 func RequireRole(role string) func(http.Handler) http.Handler {
-	order := map[string]int{"viewer": 0, "developer": 1, "operator": 2, "admin": 3}
+	order := map[string]int{"viewer": 1, "developer": 2, "operator": 3, "admin": 4}
+	required, ok := order[role]
+	if !ok {
+		panic(fmt.Sprintf("auth.RequireRole: unknown role %q", role))
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			u := UserFromContext(r.Context())
-			if u == nil || order[u.Role] < order[role] {
+			if u == nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			actual, ok := order[u.Role]
+			if !ok || actual < required {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// WithUser returns a copy of ctx with the given ContextUser attached.
+// Used in tests and handlers that pre-populate context.
+func WithUser(ctx context.Context, u *ContextUser) context.Context {
+	return context.WithValue(ctx, userContextKey, u)
 }
