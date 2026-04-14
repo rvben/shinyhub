@@ -3,11 +3,18 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// httpClient is the shared HTTP client for all CLI commands.
+// A 30-second timeout prevents indefinite hangs. For SSE streaming
+// connections, use http.DefaultClient directly.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 var rootCmd = &cobra.Command{
 	Use:   "shiny",

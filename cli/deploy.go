@@ -67,17 +67,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	io.Copy(part, bundle)
 	writer.Close()
 
-	req, _ := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("deploy request: %w", err)
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode >= 400 {
 		return fmt.Errorf("deploy failed (%s): %s", resp.Status, out)
 	}
 	fmt.Printf("Deployed: %s\n", out)
@@ -85,9 +88,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 }
 
 func ensureApp(cfg *cliConfig, slug string) error {
-	checkReq, _ := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
+	checkReq, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 	checkReq.Header.Set("Authorization", "Bearer "+cfg.Token)
-	resp, err := http.DefaultClient.Do(checkReq)
+	resp, err := httpClient.Do(checkReq)
 	if err != nil {
 		return err
 	}
@@ -97,11 +103,14 @@ func ensureApp(cfg *cliConfig, slug string) error {
 	}
 
 	body := fmt.Sprintf(`{"slug":%q,"name":%q}`, slug, slug)
-	createReq, _ := http.NewRequest("POST", cfg.Host+"/api/apps",
+	createReq, err := http.NewRequest("POST", cfg.Host+"/api/apps",
 		bytes.NewBufferString(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 	createReq.Header.Set("Authorization", "Bearer "+cfg.Token)
 	createReq.Header.Set("Content-Type", "application/json")
-	cr, err := http.DefaultClient.Do(createReq)
+	cr, err := httpClient.Do(createReq)
 	if err != nil {
 		return err
 	}
@@ -120,9 +129,16 @@ func zipDir(dir string) (*bytes.Buffer, error) {
 			return err
 		}
 		if info.IsDir() {
+			switch info.Name() {
+			case ".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user":
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		rel, _ := filepath.Rel(dir, path)
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
 		fw, err := w.Create(rel)
 		if err != nil {
 			return err

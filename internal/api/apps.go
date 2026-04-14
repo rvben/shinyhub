@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -91,15 +92,6 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
-// deployRequest carries the runtime parameters for a deploy. The bundle
-// directory is always derived server-side from the slug and a timestamp; it
-// is never accepted from the caller.
-type deployRequest struct {
-	Command []string `json:"command"`
-	Env     []string `json:"env"`
-	Workers int      `json:"workers"`
-}
-
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
@@ -118,16 +110,44 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req deployRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Accept multipart bundle upload (max 128 MB in memory)
+	if err := r.ParseMultipartForm(128 << 20); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	file, _, err := r.FormFile("bundle")
+	if err != nil {
+		http.Error(w, "bundle file required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
 
-	// Bundle directory is always computed server-side from the slug and a
-	// millisecond-precision timestamp; the client never controls this path.
+	// Save bundle zip to disk
 	version := fmt.Sprintf("%d", time.Now().UnixMilli())
+	bundleZip := filepath.Join(s.cfg.Storage.AppsDir, slug, "bundles", version+".zip")
+	if err := os.MkdirAll(filepath.Dir(bundleZip), 0755); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out, err := os.Create(bundleZip)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		out.Close()
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out.Close()
+
+	// Extract bundle zip into a versioned directory
 	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
+	if err := deploy.ExtractBundle(bundleZip, bundleDir); err != nil {
+		fmt.Fprintf(os.Stderr, "extract bundle %s: %v\n", slug, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	// Stop existing instance before re-deploying; ignore the error since the
 	// app may not have been running yet.
@@ -140,9 +160,6 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	result, err := deploy.Run(deploy.Params{
 		Slug:      slug,
 		BundleDir: bundleDir,
-		Command:   req.Command,
-		Env:       req.Env,
-		Workers:   req.Workers,
 		Manager:   s.manager,
 		Proxy:     s.proxy,
 	})

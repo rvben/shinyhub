@@ -103,18 +103,18 @@ func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
 // --- Apps ---
 
 type App struct {
-	ID          int64
-	Slug        string
-	Name        string
-	ProjectSlug string
-	OwnerID     int64
-	Access      string
-	Status      string
-	CurrentPort *int
-	CurrentPID  *int
-	DeployCount int
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID          int64      `json:"id"`
+	Slug        string     `json:"slug"`
+	Name        string     `json:"name"`
+	ProjectSlug string     `json:"project_slug"`
+	OwnerID     int64      `json:"owner_id"`
+	Access      string     `json:"access"`
+	Status      string     `json:"status"`
+	CurrentPort *int       `json:"port,omitempty"`
+	CurrentPID  *int       `json:"pid,omitempty"`
+	DeployCount int        `json:"deploy_count"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type CreateAppParams struct {

@@ -48,7 +48,12 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	var result struct {
 		Token string `json:"token"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode login response: %w", err)
+	}
+	if result.Token == "" {
+		return fmt.Errorf("server returned empty token")
+	}
 	if err := saveConfig(&cliConfig{Host: f.host, Token: result.Token}); err != nil {
 		return err
 	}

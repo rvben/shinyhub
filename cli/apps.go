@@ -20,8 +20,9 @@ func init() {
 }
 
 var appsListCmd = &cobra.Command{
-	Use:  "list",
-	RunE: runAppsList,
+	Use:   "list",
+	Short: "List all apps",
+	RunE:  runAppsList,
 }
 
 func runAppsList(cmd *cobra.Command, args []string) error {
@@ -29,9 +30,12 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, _ := http.NewRequest("GET", cfg.Host+"/api/apps", nil)
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -44,15 +48,16 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("%-20s %-10s %-12s\n", "SLUG", "STATUS", "DEPLOYS")
 	for _, a := range apps {
-		fmt.Printf("%-20s %-10s %-12v\n", a["Slug"], a["Status"], a["DeployCount"])
+		fmt.Printf("%-20s %-10s %-12v\n", a["slug"], a["status"], a["deploy_count"])
 	}
 	return nil
 }
 
 var appsLogsCmd = &cobra.Command{
-	Use:  "logs <slug>",
-	Args: cobra.ExactArgs(1),
-	RunE: runAppsLogs,
+	Use:   "logs <slug>",
+	Short: "Tail live logs for an app",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAppsLogs,
 }
 
 func runAppsLogs(cmd *cobra.Command, args []string) error {
@@ -60,9 +65,13 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, _ := http.NewRequest("GET", cfg.Host+"/api/apps/"+args[0]+"/logs", nil)
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+args[0]+"/logs", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	req.Header.Set("Accept", "text/event-stream")
+	// Use http.DefaultClient for SSE streaming — no timeout, connection is indefinite.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -94,9 +103,12 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 			return err
 		}
 		slug := args[0]
-		req, _ := http.NewRequest(method, cfg.Host+"/api/apps/"+slug+"/"+action, nil)
+		req, err := http.NewRequest(method, cfg.Host+"/api/apps/"+slug+"/"+action, nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
 		req.Header.Set("Authorization", "Bearer "+cfg.Token)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return err
 		}
@@ -120,10 +132,13 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, _ := http.NewRequest("POST", cfg.Host+"/api/tokens", nil)
+	req, err := http.NewRequest("POST", cfg.Host+"/api/tokens", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
