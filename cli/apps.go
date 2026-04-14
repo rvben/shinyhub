@@ -141,13 +141,12 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 }
 
 func init() {
-	// -2 is the "not provided" sentinel; the flag must be specified explicitly.
-	appsSetCmd.Flags().IntVar(&appsSetFlags.hibernateTimeout, "hibernate-timeout", -2,
-		"Idle timeout minutes before hibernation (-1 = global default, 0 = disable, N = N minutes)")
+	appsSetCmd.Flags().IntVar(&appsSetFlags.hibernateTimeout, "hibernate-timeout", 0,
+		"Idle timeout minutes before hibernation (-1 = reset to global default, 0 = disable, N = N minutes)")
 }
 
 func runAppsSet(cmd *cobra.Command, args []string) error {
-	if appsSetFlags.hibernateTimeout == -2 {
+	if !cmd.Flags().Changed("hibernate-timeout") {
 		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout)")
 	}
 
