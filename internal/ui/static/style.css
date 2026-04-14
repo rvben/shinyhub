@@ -28,7 +28,9 @@ main { padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; }
   border-radius: 4px; cursor: pointer; border: 1px solid #4a5568;
   background: transparent; color: #a0aec0; text-decoration: none; }
 .badge { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 99px; font-weight: 600; }
+.badge-running  { background: #1a4731; color: #48bb78; }
 .badge-healthy  { background: #1a4731; color: #48bb78; }
 .badge-deploying { background: #3d2e00; color: #ecc94b; }
 .badge-degraded { background: #3d1515; color: #fc8181; }
 .badge-stopped  { background: #2d3148; color: #718096; }
+[x-cloak] { display: none !important; }

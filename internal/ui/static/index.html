@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ShinyHub</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="/static/app.js" defer></script>
+  <script src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
 </head>
 <body>
   <nav x-data>
@@ -16,7 +16,7 @@
   </nav>
 
   <main x-data="appList">
-    <div x-show="!loggedIn">
+    <div x-show="!loggedIn" x-cloak>
       <div class="login-box">
         <h2>Sign in</h2>
         <input x-model="username" placeholder="Username" type="text">
@@ -27,7 +27,7 @@
       </div>
     </div>
 
-    <div x-show="loggedIn">
+    <div x-show="loggedIn" x-cloak>
       <div class="toolbar">
         <h1>Apps</h1>
         <button @click="refresh()">Refresh</button>
