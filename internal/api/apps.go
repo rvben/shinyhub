@@ -346,7 +346,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prune old version directories beyond the retention limit.
-	go deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir)
+	go func() {
+		if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
+			fmt.Fprintf(os.Stderr, "prune old versions %s: %v\n", slug, err)
+		}
+	}()
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
