@@ -51,10 +51,16 @@ func (g *GopsutilSampler) Sample(pid int) (Stats, error) {
 
 	cpu, err := p.CPUPercent()
 	if err != nil {
+		g.mu.Lock()
+		delete(g.procs, pid32)
+		g.mu.Unlock()
 		return Stats{}, fmt.Errorf("cpu percent: %w", err)
 	}
 	mem, err := p.MemoryInfo()
 	if err != nil {
+		g.mu.Lock()
+		delete(g.procs, pid32)
+		g.mu.Unlock()
 		return Stats{}, fmt.Errorf("memory info: %w", err)
 	}
 	if mem.RSS > math.MaxInt64 {
