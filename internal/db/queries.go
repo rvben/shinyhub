@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -782,6 +783,73 @@ func (s *Store) ConsumeOAuthState(state string) error {
 		return fmt.Errorf("oauth state not found or already used")
 	}
 	return nil
+}
+
+// --- Audit Events ---
+
+// AuditEventParams holds the fields for a new audit event.
+// UserID is a pointer because some actions (login_failed) have no authenticated user.
+type AuditEventParams struct {
+	UserID       *int64
+	Action       string
+	ResourceType string
+	ResourceID   string
+	Detail       string
+	IPAddress    string
+}
+
+// AuditEvent is a row from the audit_events table.
+type AuditEvent struct {
+	ID           int64      `json:"id"`
+	UserID       *int64     `json:"user_id,omitempty"`
+	Action       string     `json:"action"`
+	ResourceType string     `json:"resource_type"`
+	ResourceID   string     `json:"resource_id"`
+	Detail       string     `json:"detail"`
+	IPAddress    string     `json:"ip_address"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
+// LogAuditEvent inserts an audit event. Errors are logged to stderr but do
+// not fail the caller — audit recording must never break normal operation.
+func (s *Store) LogAuditEvent(p AuditEventParams) {
+	_, err := s.db.Exec(`
+		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit log: %v\n", err)
+	}
+}
+
+// ListAuditEvents returns audit events ordered newest-first with pagination.
+func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT id, user_id, action, resource_type, resource_id, detail, ip_address, created_at
+		FROM audit_events
+		ORDER BY created_at DESC, id DESC
+		LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]AuditEvent, 0)
+	for rows.Next() {
+		var e AuditEvent
+		var createdAt string
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Action, &e.ResourceType, &e.ResourceID, &e.Detail, &e.IPAddress, &createdAt); err != nil {
+			return nil, err
+		}
+		e.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		if e.CreatedAt.IsZero() {
+			e.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
 }
 
 // scanner interface satisfied by both *sql.Row and *sql.Rows

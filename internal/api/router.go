@@ -128,6 +128,8 @@ func (s *Server) buildRouter() http.Handler {
 		r.Get("/api/users/{username}", s.handleGetUser)   // any auth: lookup by username
 		r.Patch("/api/users/{id}", s.handlePatchUser)     // admin: update role
 		r.Delete("/api/users/{id}", s.handleDeleteUser)   // admin: delete user
+
+		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log
 	})
 
 	return r

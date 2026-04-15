@@ -111,6 +111,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.authenticateCredentials(req)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
+			s.store.LogAuditEvent(db.AuditEventParams{
+				Action:       "login_failed",
+				ResourceType: "user",
+				ResourceID:   req.Username,
+				IPAddress:    clientIP(r),
+			})
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -124,6 +130,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       &user.ID,
+		Action:       "login",
+		ResourceType: "user",
+		ResourceID:   user.Username,
+		IPAddress:    clientIP(r),
+	})
 	writeJSON(w, http.StatusOK, loginResponse{
 		Token: token,
 		User:  &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
@@ -144,6 +157,12 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.authenticateCredentials(req)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
+			s.store.LogAuditEvent(db.AuditEventParams{
+				Action:       "login_failed",
+				ResourceType: "user",
+				ResourceID:   req.Username,
+				IPAddress:    clientIP(r),
+			})
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -157,6 +176,13 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       &user.ID,
+		Action:       "login",
+		ResourceType: "user",
+		ResourceID:   user.Username,
+		IPAddress:    clientIP(r),
+	})
 	auth.SetSessionCookie(w, r, token)
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User: &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
@@ -164,6 +190,15 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "logout",
+			ResourceType: "user",
+			ResourceID:   u.Username,
+			IPAddress:    clientIP(r),
+		})
+	}
 	auth.ClearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -239,6 +274,13 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       &u.ID,
+		Action:       "create_token",
+		ResourceType: "token",
+		ResourceID:   req.Name,
+		IPAddress:    clientIP(r),
+	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{Token: rawKey})
 }
 
@@ -286,6 +328,13 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       &u.ID,
+		Action:       "delete_token",
+		ResourceType: "token",
+		ResourceID:   strconv.FormatInt(id, 10),
+		IPAddress:    clientIP(r),
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

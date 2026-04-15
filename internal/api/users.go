@@ -11,6 +11,15 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
+// callerID returns the ID pointer of the authenticated user, or nil if not present.
+// Used to keep audit calls concise.
+func callerID(r *http.Request) *int64 {
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		return &u.ID
+	}
+	return nil
+}
+
 // requireAdmin returns the user from context and writes 403 if they are not an admin.
 func requireAdmin(w http.ResponseWriter, r *http.Request) (*auth.ContextUser, bool) {
 	u := auth.UserFromContext(r.Context())
@@ -109,6 +118,14 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       callerID(r),
+		Action:       "create_user",
+		ResourceType: "user",
+		ResourceID:   req.Username,
+		IPAddress:    clientIP(r),
+	})
 	writeJSON(w, http.StatusCreated, toUserResponse(user))
 }
 
@@ -156,6 +173,14 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       callerID(r),
+		Action:       "update_user",
+		ResourceType: "user",
+		ResourceID:   strconv.FormatInt(id, 10),
+		IPAddress:    clientIP(r),
+	})
 	writeJSON(w, http.StatusOK, toUserResponse(user))
 }
 
@@ -180,5 +205,12 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       callerID(r),
+		Action:       "delete_user",
+		ResourceType: "user",
+		ResourceID:   strconv.FormatInt(id, 10),
+		IPAddress:    clientIP(r),
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

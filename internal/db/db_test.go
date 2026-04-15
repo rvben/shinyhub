@@ -356,6 +356,57 @@ func TestGetDeploymentBySlugAndID(t *testing.T) {
 	}
 }
 
+func TestAuditLog(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store.LogAuditEvent(db.AuditEventParams{
+		UserID:       &u.ID,
+		Action:       "deploy",
+		ResourceType: "app",
+		ResourceID:   "myapp",
+		IPAddress:    "1.2.3.4",
+	})
+	store.LogAuditEvent(db.AuditEventParams{
+		Action:       "login_failed",
+		ResourceType: "user",
+		ResourceID:   "unknown",
+		IPAddress:    "5.6.7.8",
+	})
+
+	events, err := store.ListAuditEvents(10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	// Newest first.
+	if events[0].Action != "login_failed" {
+		t.Errorf("expected newest event first, got action=%s", events[0].Action)
+	}
+	if events[1].Action != "deploy" {
+		t.Errorf("expected deploy second, got %s", events[1].Action)
+	}
+	if events[1].ResourceID != "myapp" {
+		t.Errorf("expected myapp, got %s", events[1].ResourceID)
+	}
+}
+
 func TestListRunningApps(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {

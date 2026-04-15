@@ -106,6 +106,13 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       &u.ID,
+		Action:       "create_app",
+		ResourceType: "app",
+		ResourceID:   req.Slug,
+		IPAddress:    clientIP(r),
+	})
 	writeJSON(w, http.StatusCreated, app)
 }
 
@@ -340,6 +347,16 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "deploy",
+			ResourceType: "app",
+			ResourceID:   slug,
+			IPAddress:    clientIP(r),
+		})
+	}
 	writeJSON(w, http.StatusOK, updatedApp)
 }
 
@@ -440,6 +457,16 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "rollback",
+			ResourceType: "app",
+			ResourceID:   slug,
+			IPAddress:    clientIP(r),
+		})
+	}
 	// Rollbacks are not counted as deploys — deploy_count tracks forward deployments only.
 	writeJSON(w, http.StatusOK, updatedApp)
 }
@@ -506,6 +533,16 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "restart",
+			ResourceType: "app",
+			ResourceID:   slug,
+			IPAddress:    clientIP(r),
+		})
+	}
 	writeJSON(w, http.StatusOK, updatedApp)
 }
 
@@ -532,6 +569,15 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "delete_app",
+			ResourceType: "app",
+			ResourceID:   slug,
+			IPAddress:    clientIP(r),
+		})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -563,6 +609,16 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "stop",
+			ResourceType: "app",
+			ResourceID:   slug,
+			IPAddress:    clientIP(r),
+		})
 	}
 	writeJSON(w, http.StatusOK, app)
 }
@@ -627,6 +683,17 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "grant_access",
+			ResourceType: "app",
+			ResourceID:   slug,
+			Detail:       fmt.Sprintf("user_id=%d", req.UserID),
+			IPAddress:    clientIP(r),
+		})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -669,6 +736,16 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "revoke_access",
+			ResourceType: "app",
+			ResourceID:   slug,
+			IPAddress:    clientIP(r),
+		})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
