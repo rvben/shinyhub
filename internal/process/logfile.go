@@ -66,12 +66,24 @@ func (l *LogFile) Write(p []byte) (int, error) {
 // Must be called with l.mu held.
 func (l *LogFile) rotate() {
 	l.file.Close()
-	os.Rename(l.path, l.backup)
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-	if err == nil {
-		l.file = f
-		l.size = 0
+	if err := os.Rename(l.path, l.backup); err != nil {
+		// Rename failed — reopen the existing file for appending so writes continue.
+		if f, err2 := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err2 == nil {
+			l.file = f
+		}
+		return
 	}
+	// Rename succeeded — open a fresh file at the primary path.
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		// Can't open new file — fall back to the backup so writes don't stop.
+		if f2, err2 := os.OpenFile(l.backup, os.O_APPEND|os.O_WRONLY, 0644); err2 == nil {
+			l.file = f2
+		}
+		return
+	}
+	l.file = f
+	l.size = 0
 }
 
 // Close flushes and closes the underlying file.
@@ -95,6 +107,9 @@ func NewLogReader(path string) *LogReader {
 
 // Tail returns the last n lines from the log file in chronological order.
 func (r *LogReader) Tail(n int) ([]string, error) {
+	if n <= 0 {
+		return nil, nil
+	}
 	f, err := os.Open(r.path)
 	if err != nil {
 		return nil, err
