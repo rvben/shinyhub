@@ -16,6 +16,7 @@ const (
 	StatusRunning Status = "running"
 	StatusStopped Status = "stopped"
 	StatusCrashed Status = "crashed"
+	StatusUnknown Status = "unknown" // app has not been started in this session
 )
 
 type ProcessInfo struct {
@@ -206,6 +207,15 @@ func (m *Manager) Get(slug string) (*ProcessInfo, bool) {
 	}
 	snapshot := *e.info
 	return &snapshot, true
+}
+
+// ForceEntry directly inserts a ProcessInfo into the manager's entry table.
+// Intended for tests that need to verify handler behavior without starting
+// a real process. Not safe to call concurrently with Start or Stop.
+func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[slug] = &entry{info: &info, done: make(chan struct{})}
 }
 
 // LogReader returns a LogReader for the app's log file. Returns false if no

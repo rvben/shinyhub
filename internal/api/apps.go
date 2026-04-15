@@ -493,13 +493,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.manager == nil {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: "unknown"})
+		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusUnknown)})
 		return
 	}
 
 	info, ok := s.manager.Get(slug)
 	if !ok {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: "unknown"})
+		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusUnknown)})
 		return
 	}
 	if info.Status != process.StatusRunning {
