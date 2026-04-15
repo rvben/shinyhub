@@ -166,6 +166,34 @@ func (s *Store) ListApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+func (s *Store) ListAppsVisibleToUser(userID int64) ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT id, slug, name, project_slug, owner_id, access, status,
+		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       created_at, updated_at
+		FROM apps
+		WHERE access = 'public'
+		   OR owner_id = ?
+		   OR EXISTS (
+		       SELECT 1 FROM app_members
+		       WHERE app_slug = apps.slug AND user_id = ?
+		   )
+		ORDER BY created_at DESC`, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 type UpdateAppStatusParams struct {
 	Slug   string
 	Status string
