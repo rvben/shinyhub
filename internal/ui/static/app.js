@@ -120,6 +120,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function showLoggedOut() {
+    closeLogs();
     state.user = null;
     state.apps = [];
     sessionUser.textContent = '';
@@ -225,8 +226,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     es.onmessage = (event) => {
       const atBottom =
-        logPaneBody.scrollHeight - logPaneBody.scrollTop <= logPaneBody.clientHeight + 4;
-      logPaneBody.textContent += event.data + '\n';
+        logPaneBody.scrollHeight - Math.ceil(logPaneBody.scrollTop) <= logPaneBody.clientHeight + 1;
+      logPaneBody.appendChild(document.createTextNode(event.data + '\n'));
       if (atBottom) {
         logPaneBody.scrollTop = logPaneBody.scrollHeight;
       }
