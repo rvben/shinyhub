@@ -1,6 +1,7 @@
 package oauth_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/oauth"
@@ -13,24 +14,21 @@ func TestNewGoogle_AuthURL(t *testing.T) {
 		t.Fatal("AuthURL returned empty string")
 	}
 	// Must contain the state param.
-	if !containsString(url, "test-state-123") {
+	if !strings.Contains(url, "state=test-state-123") {
 		t.Errorf("AuthURL missing state param: %s", url)
 	}
 	// Must point at Google's auth domain.
-	if !containsString(url, "accounts.google.com") {
+	if !strings.Contains(url, "accounts.google.com") {
 		t.Errorf("AuthURL missing Google domain: %s", url)
 	}
 }
 
-func containsString(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStringHelper(s, sub))
-}
-
-func containsStringHelper(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
+func TestNewGoogle_AuthURLContainsScopes(t *testing.T) {
+	g := oauth.NewGoogle("client-id", "client-secret", "http://localhost/callback")
+	url := g.AuthURL("state")
+	for _, scope := range []string{"openid", "email", "profile"} {
+		if !strings.Contains(url, scope) {
+			t.Errorf("AuthURL missing scope %q: %s", scope, url)
 		}
 	}
-	return false
 }
