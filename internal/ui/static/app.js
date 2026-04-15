@@ -502,14 +502,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function loadProviders() {
     try {
-      const resp = await fetch('/api/auth/providers');
+      const resp = await api('/api/auth/providers');
       if (!resp.ok) return;
-      const p = await resp.json();
-      if (p.oidc && p.oidc.enabled) {
+      const data = await resp.json();
+      if (data && data.oidc && data.oidc.enabled) {
         const btn = document.createElement('a');
         btn.className = 'oidc-login';
         btn.href = '/api/auth/oidc/login';
-        btn.textContent = p.oidc.display_name || 'Sign in with SSO';
+        btn.textContent = data.oidc.display_name || 'Sign in with SSO';
         const googleLink = document.querySelector('.google-login');
         if (googleLink) {
           googleLink.insertAdjacentElement('afterend', btn);

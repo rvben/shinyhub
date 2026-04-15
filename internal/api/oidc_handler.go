@@ -39,6 +39,7 @@ func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
 		resp.OIDC.DisplayName = s.oidcProvider.DisplayName
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -104,23 +105,23 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUserByOAuthAccount("oidc", oidcUser.Sub)
 	if errors.Is(err, db.ErrNotFound) {
 		username := deriveOIDCUsername(oidcUser)
-
-		if err := s.store.CreateUser(db.CreateUserParams{
-			Username:     username,
-			PasswordHash: "",
-			Role:         "developer",
-		}); err != nil {
-			// Username collision — append "-oidc" suffix to make it unique.
-			username = username + "-oidc"
+		var createdUser bool
+		for _, candidate := range []string{username, username + "-" + oidcUser.Sub[:min(8, len(oidcUser.Sub))], username + "-oidc"} {
 			if err2 := s.store.CreateUser(db.CreateUserParams{
-				Username:     username,
+				Username:     candidate,
 				PasswordHash: "",
 				Role:         "developer",
 			}); err2 != nil {
-				fmt.Fprintf(os.Stderr, "create oidc user: %v\n", err2)
-				writeError(w, http.StatusInternalServerError, "internal server error")
-				return
+				fmt.Fprintf(os.Stderr, "oidc: create user %q: %v\n", candidate, err2)
+				continue
 			}
+			username = candidate
+			createdUser = true
+			break
+		}
+		if !createdUser {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
 		}
 		user, err = s.store.GetUserByUsername(username)
 		if err != nil {
@@ -150,21 +151,38 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // deriveOIDCUsername returns a stable, URL-safe username derived from the
-// OIDC user's available claims. Priority: email local-part → name with spaces
-// replaced by hyphens → "oidc-" + first 16 chars of sub.
+// OIDC user's available claims. Priority: email local-part → lowercased name
+// with spaces replaced by hyphens → "oidc-" + first 16 chars of sub.
+// Only alphanumeric characters and hyphens are kept; length is capped at 64.
 func deriveOIDCUsername(u *oauth.OIDCUser) string {
+	var base string
 	if u.Email != "" {
 		if at := strings.IndexByte(u.Email, '@'); at > 0 {
-			return u.Email[:at]
+			base = u.Email[:at]
+		} else {
+			base = u.Email
 		}
-		return u.Email
+	} else if u.Name != "" {
+		base = strings.ToLower(strings.ReplaceAll(u.Name, " ", "-"))
+	} else if len(u.Sub) > 16 {
+		return "oidc-" + u.Sub[:16]
+	} else {
+		return "oidc-" + u.Sub
 	}
-	if u.Name != "" {
-		return strings.ReplaceAll(u.Name, " ", "-")
+	// Keep only alphanumeric and hyphens, cap at 64 chars.
+	var b strings.Builder
+	for _, r := range base {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else if r >= 'A' && r <= 'Z' {
+			b.WriteRune(r + 32) // lowercase
+		}
+		if b.Len() >= 64 {
+			break
+		}
 	}
-	sub := u.Sub
-	if len(sub) > 16 {
-		sub = sub[:16]
+	if b.Len() == 0 {
+		return "oidc-user"
 	}
-	return "oidc-" + sub
+	return b.String()
 }
