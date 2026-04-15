@@ -550,6 +550,25 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	return ds, rows.Err()
 }
 
+// GetDeploymentBySlugAndID fetches a single deployment by its ID, verified
+// to belong to the app identified by slug. Returns ErrNotFound if the
+// deployment does not exist or belongs to a different app.
+func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, error) {
+	row := s.db.QueryRow(`
+		SELECT d.id, d.app_id, d.version, d.bundle_dir, d.status, d.created_at
+		FROM deployments d
+		JOIN apps a ON a.id = d.app_id
+		WHERE d.id = ? AND a.slug = ?`, id, slug)
+	var dep Deployment
+	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &dep.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &dep, nil
+}
+
 // --- App Members ---
 
 // AppMember represents a user explicitly granted access to an app.

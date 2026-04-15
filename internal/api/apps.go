@@ -351,22 +351,47 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse optional body to support targeted rollback by deployment ID.
+	var reqBody struct {
+		DeploymentID *int64 `json:"deployment_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+
+	var prev *db.Deployment
+
+	if reqBody.DeploymentID != nil {
+		// Targeted rollback: fetch the specific deployment and verify it belongs to this app.
+		dep, err := s.store.GetDeploymentBySlugAndID(slug, *reqBody.DeploymentID)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "deployment not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		prev = dep
+	} else {
+		// Default rollback: use the previous deployment (index 1, newest-first).
+		deployments, err := s.store.ListDeployments(app.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if len(deployments) < 2 {
+			writeError(w, http.StatusConflict, "no previous deployment to roll back to")
+			return
+		}
+		prev = deployments[1]
+	}
+
 	if s.manager == nil {
 		writeError(w, http.StatusServiceUnavailable, "process manager not available")
 		return
 	}
-
-	deployments, err := s.store.ListDeployments(app.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	// deployments are ordered newest-first; index 1 is the previous deploy.
-	if len(deployments) < 2 {
-		writeError(w, http.StatusConflict, "no previous deployment to roll back to")
-		return
-	}
-	prev := deployments[1]
 
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)

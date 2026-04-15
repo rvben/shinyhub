@@ -91,10 +91,57 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 	return scanner.Err()
 }
 
+var rollbackFlags struct {
+	deploymentID int64
+}
+
 var appsRollbackCmd = &cobra.Command{
-	Use:  "rollback <slug>",
-	Args: cobra.ExactArgs(1),
-	RunE: rollbackOrRestart("rollback", "PUT"),
+	Use:   "rollback <slug>",
+	Short: "Roll back an app to the previous or a specific historical deployment",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAppsRollback,
+}
+
+func init() {
+	appsRollbackCmd.Flags().Int64Var(&rollbackFlags.deploymentID, "to", 0,
+		"Deployment ID to roll back to (default: previous deployment)")
+}
+
+func runAppsRollback(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+
+	var bodyReader io.Reader
+	if cmd.Flags().Changed("to") {
+		body, err := json.Marshal(map[string]any{"deployment_id": rollbackFlags.deploymentID})
+		if err != nil {
+			return err
+		}
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/rollback", bodyReader)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	if bodyReader != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("rollback failed: %s", out)
+	}
+	fmt.Printf("rollback: %s\n", out)
+	return nil
 }
 
 var appsRestartCmd = &cobra.Command{

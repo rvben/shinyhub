@@ -595,6 +595,61 @@ func TestListDeployments(t *testing.T) {
 	}
 }
 
+func TestRollbackApp_ToSpecificDeployment(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("myapp")
+
+	dep1, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v1", BundleDir: "/tmp/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v2", BundleDir: "/tmp/v2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"deployment_id": dep1.ID})
+	req := authedRequest(t, "POST", "/api/apps/myapp/rollback", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	// No real process manager, so expect 503 — proves the deployment was found
+	// and the handler tried to use it. 400/404 would mean it was rejected.
+	if rec.Code == http.StatusBadRequest || rec.Code == http.StatusNotFound {
+		t.Errorf("unexpected error for valid deployment_id: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRollbackApp_ToInvalidDeployment(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"deployment_id": int64(9999)})
+	req := authedRequest(t, "POST", "/api/apps/myapp/rollback", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for invalid deployment_id, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestListDeployments_EmptySlice(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

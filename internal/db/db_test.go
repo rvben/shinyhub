@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -301,6 +302,57 @@ func TestOAuthState_ConsumeOnce(t *testing.T) {
 	// Second consume: state is gone, should fail.
 	if err := store.ConsumeOAuthState("nonce-abc123"); err == nil {
 		t.Error("expected error on second ConsumeOAuthState, got nil")
+	}
+}
+
+func TestGetDeploymentBySlugAndID(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.GetUserByUsername("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("myapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dep, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v1", BundleDir: "/tmp/v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.GetDeploymentBySlugAndID("myapp", dep.ID)
+	if err != nil {
+		t.Fatalf("GetDeploymentBySlugAndID: %v", err)
+	}
+	if got.BundleDir != "/tmp/v1" {
+		t.Errorf("got BundleDir=%s, want /tmp/v1", got.BundleDir)
+	}
+
+	_, err = store.GetDeploymentBySlugAndID("myapp", 9999)
+	if !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for missing ID, got %v", err)
+	}
+
+	_, err = store.GetDeploymentBySlugAndID("wrongslug", dep.ID)
+	if !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for wrong slug, got %v", err)
 	}
 }
 
