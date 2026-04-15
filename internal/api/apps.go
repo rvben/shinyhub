@@ -332,6 +332,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prune old version directories beyond the retention limit.
+	go deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir)
+
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")

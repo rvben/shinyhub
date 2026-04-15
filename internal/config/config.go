@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -78,7 +79,8 @@ type AuthConfig struct {
 }
 
 type StorageConfig struct {
-	AppsDir string `yaml:"apps_dir"`
+	AppsDir          string `yaml:"apps_dir"`
+	VersionRetention int    `yaml:"version_retention"`
 }
 
 // rawConfig mirrors Config for YAML decoding, using string-typed duration fields.
@@ -141,6 +143,9 @@ func Load(path string) (*Config, error) {
 		},
 	}
 	applyEnv(cfg)
+	if cfg.Storage.VersionRetention <= 0 {
+		cfg.Storage.VersionRetention = 5
+	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}
@@ -182,6 +187,11 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_APPS_DIR"); v != "" {
 		cfg.Storage.AppsDir = v
+	}
+	if v := os.Getenv("SHINYHUB_STORAGE_VERSION_RETENTION"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Storage.VersionRetention = n
+		}
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
