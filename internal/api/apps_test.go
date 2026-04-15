@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -529,6 +530,152 @@ func TestRollbackPost(t *testing.T) {
 	// 404 (no such app) proves POST is registered (not 405 Method Not Allowed).
 	if rec.Code == http.StatusMethodNotAllowed {
 		t.Errorf("POST /rollback should be registered, got 405")
+	}
+}
+
+func TestRevokeAppAccess_PathParam(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "viewer"})
+	owner, _ := store.GetUserByUsername("owner")
+	alice, _ := store.GetUserByUsername("alice")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	store.GrantAppAccess("myapp", alice.ID)
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	path := fmt.Sprintf("/api/apps/myapp/members/%d", alice.ID)
+	req := authedRequest(t, "DELETE", path, nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Member should be gone.
+	members, _ := store.GetAppMembers("myapp")
+	if len(members) != 0 {
+		t.Errorf("expected 0 members after revoke, got %d", len(members))
+	}
+}
+
+func TestListDeployments(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("myapp")
+
+	// Insert a deployment row directly.
+	_, err := store.DB().Exec(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+		app.ID, "v1", "/tmp/v1", "pending",
+	)
+	if err != nil {
+		t.Fatalf("insert deployment: %v", err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/deployments", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var deployments []map[string]any
+	json.NewDecoder(rec.Body).Decode(&deployments)
+	if len(deployments) != 1 {
+		t.Fatalf("expected 1 deployment, got %d", len(deployments))
+	}
+	if deployments[0]["version"] != "v1" {
+		t.Errorf("version = %v, want v1", deployments[0]["version"])
+	}
+}
+
+func TestListDeployments_EmptySlice(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/deployments", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Must be [] not null.
+	if rec.Body.String() != "[]\n" {
+		t.Errorf("expected empty JSON array, got %q", rec.Body.String())
+	}
+}
+
+func TestPatchApp_UpdateName(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "Old Name", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"name": "New Name"})
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["name"] != "New Name" {
+		t.Errorf("name = %v, want 'New Name'", resp["name"])
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	if app.Name != "New Name" {
+		t.Errorf("DB name = %q, want %q", app.Name, "New Name")
+	}
+}
+
+func TestPatchApp_UpdateProjectSlug(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	// Set project slug.
+	body, _ := json.Marshal(map[string]string{"project_slug": "analytics"})
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	if app.ProjectSlug != "analytics" {
+		t.Errorf("project_slug = %q, want %q", app.ProjectSlug, "analytics")
+	}
+
+	// Clear project slug with empty string.
+	body, _ = json.Marshal(map[string]string{"project_slug": ""})
+	req = authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on clear, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, _ = store.GetAppBySlug("myapp")
+	if app.ProjectSlug != "" {
+		t.Errorf("project_slug = %q, want empty", app.ProjectSlug)
 	}
 }
 

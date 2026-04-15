@@ -109,6 +109,8 @@ func (s *Server) buildRouter() http.Handler {
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)
 		r.Post("/api/apps/{slug}/members", s.handleGrantAppAccess)
 		r.Delete("/api/apps/{slug}/members", s.handleRevokeAppAccess)
+		r.Delete("/api/apps/{slug}/members/{user_id}", s.handleRevokeAppAccess)
+		r.Get("/api/apps/{slug}/deployments", s.handleListDeployments)
 
 		r.Post("/api/tokens", s.handleCreateToken)
 		r.Get("/api/tokens", s.handleListTokens)

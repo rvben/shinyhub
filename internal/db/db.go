@@ -68,3 +68,9 @@ func (s *Store) Migrate() error {
 func (s *Store) Close() error {
 	return s.db.Close()
 }
+
+// DB returns the underlying *sql.DB. It is exposed for test helpers that need
+// to insert rows directly without going through query methods.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}

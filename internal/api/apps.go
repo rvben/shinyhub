@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,8 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit, offset := parsePagination(r)
+
 	var (
 		apps []*db.App
 		err  error
@@ -36,7 +39,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	if isPrivilegedAppOperator(u) {
 		apps, err = s.store.ListApps()
 	} else {
-		apps, err = s.store.ListAppsVisibleToUser(u.ID)
+		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -146,6 +149,44 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.store.UpdateHibernateTimeout(slug, timeout); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
+	if rawVal, present := raw["name"]; present {
+		var name string
+		if err := json.Unmarshal(rawVal, &name); err != nil {
+			writeError(w, http.StatusBadRequest, "name must be a string")
+			return
+		}
+		name = strings.TrimSpace(name)
+		if len(name) < 1 || len(name) > 128 {
+			writeError(w, http.StatusBadRequest, "name must be between 1 and 128 characters")
+			return
+		}
+		if err := s.store.UpdateAppName(slug, name); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
+	if rawVal, present := raw["project_slug"]; present {
+		var projectSlug string
+		if err := json.Unmarshal(rawVal, &projectSlug); err != nil {
+			writeError(w, http.StatusBadRequest, "project_slug must be a string")
+			return
+		}
+		projectSlug = strings.TrimSpace(projectSlug)
+		if err := s.store.UpdateAppProjectSlug(slug, projectSlug); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not found")
 				return
@@ -544,18 +585,34 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireManageApp(w, r, slug); !ok {
 		return
 	}
-	var req struct {
-		UserID int64 `json:"user_id"`
+
+	var userID int64
+
+	// Prefer the path parameter when present (DELETE /api/apps/{slug}/members/{user_id}).
+	// Fall back to parsing the JSON body for backward compatibility.
+	if pathUserID := chi.URLParam(r, "user_id"); pathUserID != "" {
+		id, err := strconv.ParseInt(pathUserID, 10, 64)
+		if err != nil || id == 0 {
+			writeError(w, http.StatusBadRequest, "invalid user_id")
+			return
+		}
+		userID = id
+	} else {
+		var req struct {
+			UserID int64 `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "bad request")
+			return
+		}
+		if req.UserID == 0 {
+			writeError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		userID = req.UserID
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad request")
-		return
-	}
-	if req.UserID == 0 {
-		writeError(w, http.StatusBadRequest, "user_id is required")
-		return
-	}
-	if err := s.store.RevokeAppAccess(slug, req.UserID); err != nil {
+
+	if err := s.store.RevokeAppAccess(slug, userID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "member not found")
 			return
@@ -577,7 +634,8 @@ func (s *Server) handleGetMembers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireManageApp(w, r, slug); !ok {
 		return
 	}
-	members, err := s.store.GetAppMembers(slug)
+	limit, offset := parsePagination(r)
+	members, err := s.store.ListAppMembers(slug, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -654,4 +712,33 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		CPUPercent: stats.CPUPercent,
 		RSSBytes:   stats.RSSBytes,
 	})
+}
+
+func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, _, ok := s.requireViewApp(w, r, slug); !ok {
+		return
+	}
+	deployments, err := s.store.ListDeploymentsBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, deployments)
+}
+
+// parsePagination extracts optional ?limit= and ?offset= query parameters.
+// Returns 0 for both when absent, which callers interpret as "no pagination".
+func parsePagination(r *http.Request) (limit, offset int) {
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	if s := r.URL.Query().Get("offset"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	return limit, offset
 }

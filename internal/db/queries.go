@@ -294,7 +294,10 @@ func (s *Store) ListApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
-func (s *Store) ListAppsVisibleToUser(userID int64) ([]*App, error) {
+func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = -1 // SQLite treats -1 as no limit
+	}
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
 		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
@@ -307,7 +310,8 @@ func (s *Store) ListAppsVisibleToUser(userID int64) ([]*App, error) {
 		       SELECT 1 FROM app_members
 		       WHERE app_slug = apps.slug AND user_id = ?
 		   )
-		ORDER BY created_at DESC`, userID, userID)
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, userID, userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +366,47 @@ func (s *Store) UpdateHibernateTimeout(slug string, minutes *int) error {
 	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("update hibernate timeout rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateAppName sets the display name for the app identified by slug.
+// Returns ErrNotFound if no app with the given slug exists.
+func (s *Store) UpdateAppName(slug, name string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		name, slug,
+	)
+	if err != nil {
+		return fmt.Errorf("update app name: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update app name rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateAppProjectSlug sets the project_slug field for the app identified by
+// slug. Pass an empty string to clear the association.
+// Returns ErrNotFound if no app with the given slug exists.
+func (s *Store) UpdateAppProjectSlug(slug, projectSlug string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET project_slug = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		projectSlug, slug,
+	)
+	if err != nil {
+		return fmt.Errorf("update app project_slug: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update app project_slug rows: %w", err)
 	}
 	if n == 0 {
 		return ErrNotFound
@@ -427,6 +472,38 @@ func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
 	return nil
 }
 
+// ListDeploymentsBySlug returns deployments for the app identified by slug,
+// ordered newest first. It is a slug-based counterpart to ListDeployments.
+func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT d.id, d.version, d.status, d.created_at
+		FROM deployments d
+		JOIN apps a ON a.id = d.app_id
+		WHERE a.slug = ?
+		ORDER BY d.created_at DESC`, slug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]DeploymentSummary, 0)
+	for rows.Next() {
+		var d DeploymentSummary
+		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, d)
+	}
+	return result, rows.Err()
+}
+
+// DeploymentSummary is a public view of a deployment row, safe for API responses.
+type DeploymentSummary struct {
+	ID        int64     `json:"id"`
+	Version   string    `json:"version"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, version, bundle_dir, status, created_at
@@ -489,6 +566,34 @@ func (s *Store) GetAppMembers(slug string) ([]AppMember, error) {
 		JOIN users u ON u.id = am.user_id
 		WHERE am.app_slug = ?
 		ORDER BY u.username`, slug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := []AppMember{}
+	for rows.Next() {
+		var m AppMember
+		if err := rows.Scan(&m.UserID, &m.Username, &m.Role); err != nil {
+			return nil, err
+		}
+		members = append(members, m)
+	}
+	return members, rows.Err()
+}
+
+// ListAppMembers returns explicitly-granted members of slug with optional
+// pagination. Pass limit=0 to return all members.
+func (s *Store) ListAppMembers(slug string, limit, offset int) ([]AppMember, error) {
+	if limit <= 0 {
+		limit = -1 // SQLite treats -1 as no limit
+	}
+	rows, err := s.db.Query(`
+		SELECT am.user_id, u.username, am.role
+		FROM app_members am
+		JOIN users u ON u.id = am.user_id
+		WHERE am.app_slug = ?
+		ORDER BY u.username
+		LIMIT ? OFFSET ?`, slug, limit, offset)
 	if err != nil {
 		return nil, err
 	}

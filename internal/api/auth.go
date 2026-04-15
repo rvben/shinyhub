@@ -66,7 +66,8 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	Token string `json:"token"`
+	Token string               `json:"token"`
+	User  *sessionUserResponse `json:"user"`
 }
 
 type sessionUserResponse struct {
@@ -123,7 +124,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, loginResponse{Token: token})
+	writeJSON(w, http.StatusOK, loginResponse{
+		Token: token,
+		User:  &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
+	})
 }
 
 func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {

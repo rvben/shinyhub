@@ -67,10 +67,28 @@ func TestLogin(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["token"] == "" {
+	var resp struct {
+		Token string `json:"token"`
+		User  *struct {
+			ID       int64  `json:"id"`
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		} `json:"user"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Token == "" {
 		t.Error("expected token in response")
+	}
+	if resp.User == nil {
+		t.Fatal("expected user object in response")
+	}
+	if resp.User.Username != "alice" {
+		t.Errorf("user.username = %q, want %q", resp.User.Username, "alice")
+	}
+	if resp.User.Role != "admin" {
+		t.Errorf("user.role = %q, want %q", resp.User.Role, "admin")
 	}
 }
 
