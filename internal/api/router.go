@@ -42,7 +42,8 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 // Router returns the fully-configured http.Handler.
 func (s *Server) Router() http.Handler { return s.router }
 
-// SetSampler replaces the metrics sampler. Used in tests.
+// SetSampler replaces the metrics sampler. Must be called before the server
+// begins handling requests; it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetSampler(sampler process.Sampler) { s.sampler = sampler }
 
 // keyLookup satisfies auth.APIKeyLookup by delegating to the DB.
