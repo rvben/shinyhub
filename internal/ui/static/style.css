@@ -41,6 +41,13 @@ main { padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; }
 .badge-degraded { background: #3d1515; color: #fc8181; }
 .badge-stopped  { background: #2d3148; color: #718096; }
 
+.app-metrics {
+  font-size: 0.75rem;
+  color: #6e7681;
+  margin-top: 0.25rem;
+  min-height: 1em;
+}
+
 /* Log pane */
 .log-pane {
   position: fixed;

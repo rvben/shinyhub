@@ -112,10 +112,19 @@ document.addEventListener('DOMContentLoaded', () => {
         actions.appendChild(logsButton);
       }
 
+      const metricsLine = document.createElement('div');
+      metricsLine.className = 'app-metrics';
+      metricsLine.dataset.slug = app.slug;
+
       card.appendChild(header);
       card.appendChild(meta);
+      card.appendChild(metricsLine);
       card.appendChild(actions);
       appGrid.appendChild(card);
+
+      if (app.status === 'running') {
+        fetchMetrics(app.slug);
+      }
     }
   }
 
@@ -295,6 +304,37 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     showLoggedOut();
   });
+
+  async function fetchMetrics(slug) {
+    let resp;
+    try {
+      resp = await api(`/api/apps/${slug}/metrics`);
+    } catch {
+      return;
+    }
+    if (!resp.ok) return;
+    const m = await resp.json();
+    const el = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
+    if (!el) return;
+    if (m.status !== 'running') {
+      el.textContent = '';
+      return;
+    }
+    const cpu = m.cpu_percent.toFixed(1);
+    const ram = m.rss_bytes >= 1 << 20
+      ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
+      : (m.rss_bytes / 1024).toFixed(0) + ' KB';
+    el.textContent = `CPU ${cpu}% · ${ram} RAM`;
+  }
+
+  // Poll metrics every 10 seconds for all running apps.
+  setInterval(() => {
+    for (const app of state.apps) {
+      if (app.status === 'running') {
+        fetchMetrics(app.slug);
+      }
+    }
+  }, 10_000);
 
   async function initialize() {
     setError(loginError, '');
