@@ -339,7 +339,7 @@ func (s *Store) GetAppMembers(slug string) ([]AppMember, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var members []AppMember
+	members := []AppMember{}
 	for rows.Next() {
 		var m AppMember
 		if err := rows.Scan(&m.UserID, &m.Username, &m.Role); err != nil {
