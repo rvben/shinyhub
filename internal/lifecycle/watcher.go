@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -51,7 +52,7 @@ type Watcher struct {
 	mgr    manager
 	prx    proxyBackend
 	store  appStore
-	deploy func(slug, bundleDir string) error
+	deploy func(slug, bundleDir string) (*deploy.Result, error)
 
 	mu        sync.Mutex
 	attempts  map[string]int       // consecutive crash-restart attempts per slug
@@ -60,9 +61,9 @@ type Watcher struct {
 }
 
 // New constructs a Watcher. deployFn encapsulates deploy.Run with the shared
-// Manager and Proxy so the Watcher stays free of deploy-package details.
+// Manager and Proxy so wake/restart paths can persist the resulting PID and port.
 func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
-	deployFn func(slug, bundleDir string) error) *Watcher {
+	deployFn func(slug, bundleDir string) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
 		cfg:       cfg,
 		mgr:       mgr,
@@ -133,7 +134,8 @@ func (w *Watcher) handleCrashed(slug string) {
 		return
 	}
 
-	if err := w.deploy(slug, deployments[0].BundleDir); err != nil {
+	result, err := w.deploy(slug, deployments[0].BundleDir)
+	if err != nil {
 		// Schedule the next retry: 2^(attempt-1) seconds, capped at 5 minutes.
 		delaySec := 1 << uint(attempt-1)
 		if delaySec > 5*60 {
@@ -143,6 +145,17 @@ func (w *Watcher) handleCrashed(slug string) {
 		w.nextRetry[slug] = time.Now().Add(time.Duration(delaySec) * time.Second)
 		w.mu.Unlock()
 		return
+	}
+
+	if result != nil {
+		port := result.Port
+		pid := result.PID
+		_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{
+			Slug:   slug,
+			Status: "running",
+			Port:   &port,
+			PID:    &pid,
+		})
 	}
 
 	// Successful restart — reset backoff state.
@@ -212,6 +225,19 @@ func (w *Watcher) OnMiss(slug string) {
 		if err != nil || len(deployments) == 0 {
 			return
 		}
-		_ = w.deploy(slug, deployments[0].BundleDir)
+		result, err := w.deploy(slug, deployments[0].BundleDir)
+		if err != nil {
+			return
+		}
+		if result != nil {
+			port := result.Port
+			pid := result.PID
+			_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{
+				Slug:   slug,
+				Status: "running",
+				Port:   &port,
+				PID:    &pid,
+			})
+		}
 	}()
 }

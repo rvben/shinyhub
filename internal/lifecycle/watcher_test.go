@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -76,6 +77,11 @@ func (f *fakeStore) GetAppBySlug(slug string) (*db.App, error) {
 func (f *fakeStore) UpdateAppStatus(p db.UpdateAppStatusParams) error {
 	f.mu.Lock()
 	f.statusUpdates = append(f.statusUpdates, p)
+	if app, ok := f.apps[p.Slug]; ok {
+		app.Status = p.Status
+		app.CurrentPort = p.Port
+		app.CurrentPID = p.PID
+	}
 	f.mu.Unlock()
 	return nil
 }
@@ -88,7 +94,7 @@ func (f *fakeStore) ListDeployments(_ int64) ([]*db.Deployment, error) {
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
 // call runOnce() directly without starting the background goroutine.
 func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
-	deployFn func(slug, bundleDir string) error) *Watcher {
+	deployFn func(slug, bundleDir string) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
 		cfg:       cfg,
 		mgr:       mgr,
@@ -114,11 +120,11 @@ func TestWatchdog_RestartsOnCrash(t *testing.T) {
 	var deployed []string
 	var mu sync.Mutex
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string) error {
+		func(slug, bundleDir string) (*deploy.Result, error) {
 			mu.Lock()
 			deployed = append(deployed, slug)
 			mu.Unlock()
-			return nil
+			return &deploy.Result{PID: 11, Port: 20011}, nil
 		})
 
 	w.runOnce()
@@ -140,9 +146,9 @@ func TestWatchdog_ExponentialBackoff(t *testing.T) {
 	}
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string) error {
+		func(slug, bundleDir string) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
-			return fmt.Errorf("still crashed")
+			return nil, fmt.Errorf("still crashed")
 		})
 
 	// First tick: attempt 1, deploys immediately (no nextRetry set yet).
@@ -177,7 +183,7 @@ func TestWatchdog_GivesUpAfterMaxAttempts(t *testing.T) {
 		deployments: []*db.Deployment{{BundleDir: "/bundles/v1"}},
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 3}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string) error { return fmt.Errorf("always fails") })
+		func(slug, bundleDir string) (*deploy.Result, error) { return nil, fmt.Errorf("always fails") })
 
 	// Exhaust all allowed attempts.
 	for i := 0; i < w.cfg.RestartMaxAttempts; i++ {
@@ -209,12 +215,12 @@ func TestWatchdog_ResetsAttemptsOnSuccess(t *testing.T) {
 	}
 	var callCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string) error {
+		func(slug, bundleDir string) (*deploy.Result, error) {
 			n := atomic.AddInt32(&callCount, 1)
 			if n < 2 {
-				return fmt.Errorf("fail once")
+				return nil, fmt.Errorf("fail once")
 			}
-			return nil
+			return &deploy.Result{PID: 22, Port: 20022}, nil
 		})
 
 	// First tick: fail → attempts=1.
@@ -233,6 +239,13 @@ func TestWatchdog_ResetsAttemptsOnSuccess(t *testing.T) {
 	defer w.mu.Unlock()
 	if w.attempts["app"] != 0 {
 		t.Errorf("expected attempts reset to 0 after success, got %d", w.attempts["app"])
+	}
+	if len(st.statusUpdates) == 0 {
+		t.Fatal("expected running status update after successful restart")
+	}
+	last := st.statusUpdates[len(st.statusUpdates)-1]
+	if last.Status != "running" || last.Port == nil || *last.Port != 20022 || last.PID == nil || *last.PID != 22 {
+		t.Fatalf("unexpected running update: %+v", last)
 	}
 }
 
@@ -254,7 +267,7 @@ func TestHibernation_StopsIdleApp(t *testing.T) {
 		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string) error { return nil })
+		mgr, prx, st, func(slug, dir string) (*deploy.Result, error) { return &deploy.Result{}, nil })
 
 	w.runOnce()
 
@@ -287,7 +300,7 @@ func TestHibernation_RespectsPerAppDisable(t *testing.T) {
 		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string) error { return nil })
+		mgr, prx, st, func(slug, dir string) (*deploy.Result, error) { return &deploy.Result{}, nil })
 
 	w.runOnce()
 
@@ -314,7 +327,7 @@ func TestHibernation_RespectsPerAppCustomTimeout(t *testing.T) {
 		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string) error { return nil })
+		mgr, prx, st, func(slug, dir string) (*deploy.Result, error) { return &deploy.Result{}, nil })
 
 	w.runOnce()
 
@@ -334,7 +347,7 @@ func TestHibernation_GloballyDisabled(t *testing.T) {
 		apps: map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", UpdatedAt: time.Now().Add(-3 * time.Hour)}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 0, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string) error { return nil })
+		mgr, prx, st, func(slug, dir string) (*deploy.Result, error) { return &deploy.Result{}, nil })
 
 	w.runOnce()
 
@@ -354,11 +367,11 @@ func TestWake_TriggeredOnMiss(t *testing.T) {
 	var deployed []string
 	var mu sync.Mutex
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string) error {
+		func(slug, bundleDir string) (*deploy.Result, error) {
 			mu.Lock()
 			deployed = append(deployed, slug)
 			mu.Unlock()
-			return nil
+			return &deploy.Result{PID: 33, Port: 20033}, nil
 		})
 
 	w.OnMiss("app")
@@ -368,6 +381,13 @@ func TestWake_TriggeredOnMiss(t *testing.T) {
 	defer mu.Unlock()
 	if len(deployed) != 1 || deployed[0] != "app" {
 		t.Errorf("expected deployFn('app') called once, got %v", deployed)
+	}
+	if len(st.statusUpdates) == 0 {
+		t.Fatal("expected running status update after wake")
+	}
+	last := st.statusUpdates[len(st.statusUpdates)-1]
+	if last.Status != "running" || last.Port == nil || *last.Port != 20033 || last.PID == nil || *last.PID != 33 {
+		t.Fatalf("unexpected wake update: %+v", last)
 	}
 }
 
@@ -379,10 +399,10 @@ func TestWake_NoConcurrentWakes(t *testing.T) {
 	}
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string) error {
+		func(slug, bundleDir string) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			time.Sleep(30 * time.Millisecond) // slow to create race window
-			return nil
+			return &deploy.Result{PID: 44, Port: 20044}, nil
 		})
 
 	// Two concurrent OnMiss calls should result in exactly one deploy.
@@ -411,7 +431,7 @@ func TestHibernation_ActiveAppNotStopped(t *testing.T) {
 		}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string) error { return nil })
+		mgr, prx, st, func(slug, dir string) (*deploy.Result, error) { return &deploy.Result{}, nil })
 
 	w.runOnce()
 
@@ -428,9 +448,9 @@ func TestWake_NonHibernatedAppNotRedeployed(t *testing.T) {
 	}
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string) error {
+		func(slug, bundleDir string) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
-			return nil
+			return &deploy.Result{PID: 55, Port: 20055}, nil
 		})
 
 	w.OnMiss("app")

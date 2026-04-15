@@ -77,15 +77,13 @@ func main() {
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 
-	deployFn := func(slug, bundleDir string) error {
-		// Result discarded; the Watcher only needs success/failure.
-		_, err := deploy.Run(deploy.Params{
+	deployFn := func(slug, bundleDir string) (*deploy.Result, error) {
+		return deploy.Run(deploy.Params{
 			Slug:      slug,
 			BundleDir: bundleDir,
 			Manager:   mgr,
 			Proxy:     prx,
 		})
-		return err
 	}
 
 	lcCfg := lifecycle.Config{
