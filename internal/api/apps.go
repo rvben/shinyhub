@@ -440,6 +440,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// Rollbacks are not counted as deploys — deploy_count tracks forward deployments only.
 	writeJSON(w, http.StatusOK, updatedApp)
 }
 

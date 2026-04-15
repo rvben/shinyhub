@@ -734,6 +734,58 @@ func TestPatchApp_UpdateProjectSlug(t *testing.T) {
 	}
 }
 
+func TestRollbackApp_DeploymentFromOtherApp(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+
+	// Create two apps.
+	store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: owner.ID})
+	store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: owner.ID})
+	appB, _ := store.GetAppBySlug("app-b")
+
+	// Create a deployment for app-b.
+	dep, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: appB.ID, Version: "v1", BundleDir: "/tmp/b-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to roll back app-a using app-b's deployment ID.
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"deployment_id": dep.ID})
+	req := authedRequest(t, "POST", "/api/apps/app-a/rollback", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when using deployment from another app, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRollbackApp_NoPreviousDeployment(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	// Create exactly one deployment so there's no "previous" to roll back to.
+	app, _ := store.GetAppBySlug("myapp")
+	store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v1", BundleDir: "/tmp/v1"})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	// Empty body = use previous deployment.
+	req := authedRequest(t, "POST", "/api/apps/myapp/rollback", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 Conflict when no previous deployment, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateApp_DuplicateSlug(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")
