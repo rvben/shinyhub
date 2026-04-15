@@ -500,7 +500,33 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 10_000);
   }
 
+  async function loadProviders() {
+    try {
+      const resp = await fetch('/api/auth/providers');
+      if (!resp.ok) return;
+      const p = await resp.json();
+      if (p.oidc && p.oidc.enabled) {
+        const btn = document.createElement('a');
+        btn.className = 'oidc-login';
+        btn.href = '/api/auth/oidc/login';
+        btn.textContent = p.oidc.display_name || 'Sign in with SSO';
+        const googleLink = document.querySelector('.google-login');
+        if (googleLink) {
+          googleLink.insertAdjacentElement('afterend', btn);
+        } else {
+          const ghLink = document.querySelector('.github-login');
+          if (ghLink) {
+            ghLink.insertAdjacentElement('afterend', btn);
+          } else {
+            document.querySelector('.login-box').appendChild(btn);
+          }
+        }
+      }
+    } catch (e) { /* non-critical */ }
+  }
+
   async function initialize() {
+    loadProviders();
     setError(loginError, '');
 
     let response;

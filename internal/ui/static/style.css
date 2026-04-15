@@ -179,7 +179,8 @@ main { padding: 2rem 1.75rem; max-width: 1140px; margin: 0 auto; }
 .login-separator::after  { right: 0; }
 
 .github-login,
-.google-login {
+.google-login,
+.oidc-login {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -197,7 +198,8 @@ main { padding: 2rem 1.75rem; max-width: 1140px; margin: 0 auto; }
 }
 
 .github-login:hover,
-.google-login:hover {
+.google-login:hover,
+.oidc-login:hover {
   border-color: var(--border-2);
   background: #231f18;
 }

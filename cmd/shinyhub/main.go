@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
@@ -15,6 +16,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle"
+	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/ui"
@@ -80,6 +82,23 @@ func main() {
 	mgr := process.NewManager(cfg.Storage.AppsDir)
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
+
+	if cfg.OAuth.OIDC.IssuerURL != "" {
+		oidcCtx, oidcCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		p, err := oauth.NewOIDCProvider(oidcCtx,
+			cfg.OAuth.OIDC.IssuerURL,
+			cfg.OAuth.OIDC.ClientID,
+			cfg.OAuth.OIDC.ClientSecret,
+			cfg.OAuth.OIDC.CallbackURL,
+			cfg.OAuth.OIDC.DisplayName,
+		)
+		oidcCancel()
+		if err != nil {
+			log.Fatalf("oidc init: %v", err)
+		}
+		srv.SetOIDCProvider(p)
+		log.Printf("OIDC configured: %s (%s)", cfg.OAuth.OIDC.DisplayName, cfg.OAuth.OIDC.IssuerURL)
+	}
 
 	deployFn := func(slug, bundleDir string) (*deploy.Result, error) {
 		return deploy.Run(deploy.Params{

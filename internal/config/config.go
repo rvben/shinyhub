@@ -13,6 +13,16 @@ import (
 type OAuthConfig struct {
 	GitHub GitHubOAuthConfig
 	Google GoogleOAuthConfig
+	OIDC   OIDCConfig
+}
+
+// OIDCConfig holds generic OpenID Connect provider credentials and metadata.
+type OIDCConfig struct {
+	IssuerURL    string
+	ClientID     string
+	ClientSecret string
+	CallbackURL  string
+	DisplayName  string // e.g. "Sign in with Okta"
 }
 
 // GitHubOAuthConfig holds GitHub OAuth2 application credentials.
@@ -32,6 +42,15 @@ type GoogleOAuthConfig struct {
 type rawOAuthConfig struct {
 	GitHub rawGitHubOAuthConfig `yaml:"github"`
 	Google rawGoogleOAuthConfig `yaml:"google"`
+	OIDC   rawOIDCConfig        `yaml:"oidc"`
+}
+
+type rawOIDCConfig struct {
+	IssuerURL    string `yaml:"issuer_url"`
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	CallbackURL  string `yaml:"callback_url"`
+	DisplayName  string `yaml:"display_name"`
 }
 
 type rawGitHubOAuthConfig struct {
@@ -140,9 +159,19 @@ func Load(path string) (*Config, error) {
 				ClientSecret: raw.OAuth.Google.ClientSecret,
 				CallbackURL:  raw.OAuth.Google.CallbackURL,
 			},
+			OIDC: OIDCConfig{
+				IssuerURL:    raw.OAuth.OIDC.IssuerURL,
+				ClientID:     raw.OAuth.OIDC.ClientID,
+				ClientSecret: raw.OAuth.OIDC.ClientSecret,
+				CallbackURL:  raw.OAuth.OIDC.CallbackURL,
+				DisplayName:  raw.OAuth.OIDC.DisplayName,
+			},
 		},
 	}
 	applyEnv(cfg)
+	if cfg.OAuth.OIDC.DisplayName == "" && cfg.OAuth.OIDC.IssuerURL != "" {
+		cfg.OAuth.OIDC.DisplayName = "Sign in with SSO"
+	}
 	if cfg.Storage.VersionRetention <= 0 {
 		cfg.Storage.VersionRetention = 5
 	}
@@ -213,5 +242,20 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_GOOGLE_CALLBACK_URL"); v != "" {
 		cfg.OAuth.Google.CallbackURL = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_ISSUER_URL"); v != "" {
+		cfg.OAuth.OIDC.IssuerURL = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_CLIENT_ID"); v != "" {
+		cfg.OAuth.OIDC.ClientID = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_CLIENT_SECRET"); v != "" {
+		cfg.OAuth.OIDC.ClientSecret = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_CALLBACK_URL"); v != "" {
+		cfg.OAuth.OIDC.CallbackURL = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_DISPLAY_NAME"); v != "" {
+		cfg.OAuth.OIDC.DisplayName = v
 	}
 }

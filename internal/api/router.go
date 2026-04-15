@@ -20,8 +20,9 @@ type Server struct {
 	store        *db.Store
 	manager      *process.Manager
 	proxy        *proxy.Proxy
-	github       *oauth.GitHub  // nil when GitHub OAuth is not configured
-	googleOAuth  *oauth.Google  // nil when Google OAuth is not configured
+	github       *oauth.GitHub        // nil when GitHub OAuth is not configured
+	googleOAuth  *oauth.Google        // nil when Google OAuth is not configured
+	oidcProvider *oauth.OIDCProvider  // nil when OIDC SSO is not configured
 	sampler      process.Sampler
 	loginLimiter *loginRateLimiter
 	router       http.Handler
@@ -63,6 +64,10 @@ func (s *Server) Router() http.Handler { return s.router }
 // begins handling requests; it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetSampler(sampler process.Sampler) { s.sampler = sampler }
 
+// SetOIDCProvider sets the OIDC provider after the server is constructed.
+// Must be called before the server begins handling requests.
+func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
+
 // keyLookup satisfies auth.APIKeyLookup by delegating to the DB.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	u, err := s.store.GetUserByAPIKeyHash(keyHash)
@@ -85,6 +90,9 @@ func (s *Server) buildRouter() http.Handler {
 	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
 	r.Get("/api/auth/google/login", s.handleGoogleLogin)
 	r.Get("/api/auth/google/callback", s.handleGoogleCallback)
+	r.Get("/api/auth/providers", s.handleGetProviders)
+	r.Get("/api/auth/oidc/login", s.handleOIDCLogin)
+	r.Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 
 	// All other endpoints require either an auth header or a valid session cookie.
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup)
