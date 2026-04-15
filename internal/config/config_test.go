@@ -103,9 +103,9 @@ func TestConfig_GoogleOAuth_EnvVars(t *testing.T) {
 		t.Errorf("ClientID = %q, want %q", cfg.OAuth.Google.ClientID, "g-client-id")
 	}
 	if cfg.OAuth.Google.ClientSecret != "g-client-secret" {
-		t.Errorf("ClientSecret = %q", cfg.OAuth.Google.ClientSecret)
+		t.Errorf("ClientSecret = %q, want %q", cfg.OAuth.Google.ClientSecret, "g-client-secret")
 	}
 	if cfg.OAuth.Google.CallbackURL != "http://localhost/google/callback" {
-		t.Errorf("CallbackURL = %q", cfg.OAuth.Google.CallbackURL)
+		t.Errorf("CallbackURL = %q, want %q", cfg.OAuth.Google.CallbackURL, "http://localhost/google/callback")
 	}
 }
