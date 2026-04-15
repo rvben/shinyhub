@@ -87,9 +87,13 @@ func (s *Server) buildRouter() http.Handler {
 		r.Post("/api/apps", s.handleCreateApp)
 		r.Get("/api/apps/{slug}", s.handleGetApp)
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
+		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
 		r.Post("/api/apps/{slug}/deploy", s.handleDeployApp)
+		r.Post("/api/apps/{slug}/rollback", s.handleRollbackApp)
+		// Keep PUT for backwards compatibility.
 		r.Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		r.Post("/api/apps/{slug}/restart", s.handleRestartApp)
+		r.Post("/api/apps/{slug}/stop", s.handleStopApp)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
 		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
 		r.Get("/api/apps/{slug}/members", s.handleGetMembers)

@@ -466,6 +466,71 @@ func TestViewerMember_CannotManage(t *testing.T) {
 	}
 }
 
+func TestDeleteApp(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "to-delete", Name: "To Delete", OwnerID: u.ID})
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+
+	req := authedRequest(t, "DELETE", "/api/apps/to-delete", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// App should be gone.
+	req = authedRequest(t, "GET", "/api/apps/to-delete", nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 after delete, got %d", rec.Code)
+	}
+}
+
+func TestStopApp(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "running-app", Name: "Running App", OwnerID: u.ID})
+	// Simulate a running status.
+	port := 8181
+	pid := 12345
+	store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "running-app", Status: "running", Port: &port, PID: &pid})
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+
+	req := authedRequest(t, "POST", "/api/apps/running-app/stop", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["status"] != "stopped" {
+		t.Errorf("expected status=stopped, got %v", resp["status"])
+	}
+}
+
+func TestRollbackPost(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	// No deployments → should get 409 Conflict (no previous deployment).
+	// The goal here is just to verify POST is registered, not 405 Method Not Allowed.
+	// We'll create an app but leave it undeployed.
+	// Since there's no DB entry, we'll get 404 first — that's fine, POST is registered.
+	req := authedRequest(t, "POST", "/api/apps/nonexistent/rollback", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	// 404 (no such app) proves POST is registered (not 405 Method Not Allowed).
+	if rec.Code == http.StatusMethodNotAllowed {
+		t.Errorf("POST /rollback should be registered, got 405")
+	}
+}
+
 func TestCreateApp_DuplicateSlug(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

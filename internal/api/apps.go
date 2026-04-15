@@ -270,10 +270,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"pid":  result.PID,
-		"port": result.Port,
-	})
+	updatedApp, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, updatedApp)
 }
 
 func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
@@ -343,11 +345,12 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		// app is running; don't fail the request over a record error
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"pid":     result.PID,
-		"port":    result.Port,
-		"version": prev.Version,
-	})
+	updatedApp, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, updatedApp)
 }
 
 func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
@@ -407,10 +410,70 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"pid":  result.PID,
-		"port": result.Port,
-	})
+	updatedApp, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, updatedApp)
+}
+
+func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+
+	// Stop the process if it is running; ignore the error (may not be running).
+	if s.manager != nil {
+		_ = s.manager.Stop(slug)
+	}
+	if s.proxy != nil {
+		s.proxy.Deregister(slug)
+	}
+
+	if err := s.store.DeleteApp(slug); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+
+	// Stop the process if managed; ignore error if already stopped.
+	if s.manager != nil {
+		_ = s.manager.Stop(slug)
+	}
+	if s.proxy != nil {
+		s.proxy.Deregister(slug)
+	}
+
+	// Update DB status and clear port/PID.
+	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
+		Slug:   slug,
+		Status: "stopped",
+		// Port and PID left nil to clear them in the DB.
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	app, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, app)
 }
 
 func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {

@@ -251,6 +251,24 @@ func (s *Store) UpdateHibernateTimeout(slug string, minutes *int) error {
 	return nil
 }
 
+// DeleteApp permanently removes the app and all its associated data.
+// FK cascades in the schema remove app_members and deployments automatically.
+// Returns ErrNotFound if no app with the given slug exists.
+func (s *Store) DeleteApp(slug string) error {
+	result, err := s.db.Exec(`DELETE FROM apps WHERE slug = ?`, slug)
+	if err != nil {
+		return fmt.Errorf("delete app: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete app rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- Deployments ---
 
 type Deployment struct {
