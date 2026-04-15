@@ -14,6 +14,9 @@ import (
 // would tail the process log file or pipe from the process manager.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {

@@ -57,14 +57,17 @@ func (s *Server) buildRouter() http.Handler {
 
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
+	r.Post("/api/auth/session", s.handleSessionLogin)
+	r.Post("/api/auth/logout", s.handleLogout)
 	r.Get("/api/auth/github/login", s.handleGitHubLogin)
 	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
 
-	// All other endpoints require a valid Bearer JWT or Token API key.
+	// All other endpoints require either an auth header or a valid session cookie.
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup)
 	r.Group(func(r chi.Router) {
 		r.Use(bearer)
 
+		r.Get("/api/auth/me", s.handleMe)
 		r.Get("/api/apps", s.handleListApps)
 		r.Post("/api/apps", s.handleCreateApp)
 		r.Get("/api/apps/{slug}", s.handleGetApp)

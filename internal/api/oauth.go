@@ -114,6 +114,6 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect to UI with the token as a query param so the SPA can store it.
-	http.Redirect(w, r, "/?token="+jwtToken, http.StatusFound)
+	auth.SetSessionCookie(w, r, jwtToken)
+	http.Redirect(w, r, "/", http.StatusFound)
 }
