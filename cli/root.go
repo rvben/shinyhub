@@ -12,14 +12,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is set at build time via -ldflags "-X github.com/rvben/shinyhub/cli.version=vX.Y.Z".
+var version = "dev"
+
 // httpClient is the shared HTTP client for all CLI commands.
 // A 30-second timeout prevents indefinite hangs. For SSE streaming
 // connections, use http.DefaultClient directly.
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 var rootCmd = &cobra.Command{
-	Use:   "shiny",
-	Short: "ShinyHub CLI — deploy and manage Shiny apps",
+	Use:     "shiny",
+	Short:   "ShinyHub CLI — deploy and manage Shiny apps",
+	Version: version,
 }
 
 func Execute() {

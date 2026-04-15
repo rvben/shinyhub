@@ -20,6 +20,10 @@ import (
 	"github.com/rvben/shinyhub/internal/ui"
 )
 
+// version is set at build time via -ldflags "-X main.version=vX.Y.Z".
+// It defaults to "dev" for local builds.
+var version = "dev"
+
 func main() {
 	cfgPath := "shinyhub.yaml"
 	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
@@ -121,7 +125,7 @@ func main() {
 	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-	log.Printf("shinyhub listening on %s", addr)
+	log.Printf("shinyhub %s listening on %s", version, addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		cancel() // signal Watcher to stop before os.Exit via log.Fatal
 		log.Fatal(err)
