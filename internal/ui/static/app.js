@@ -310,11 +310,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const revokeBtn = document.createElement('button');
       revokeBtn.textContent = 'Revoke';
       revokeBtn.addEventListener('click', async () => {
-        const r = await api(`/api/apps/${accessSlug}/members`, {
-          method: 'DELETE',
-          body: JSON.stringify({ user_id: m.user_id }),
-        });
-        if (r.ok) li.remove();
+        const slug = accessSlug;
+        if (!slug) return;
+        try {
+          const r = await api(`/api/apps/${slug}/members`, {
+            method: 'DELETE',
+            body: JSON.stringify({ user_id: m.user_id }),
+          });
+          if (r.ok) li.remove();
+        } catch { /* network error — leave row in place */ }
       });
       li.appendChild(nameSpan);
       li.appendChild(roleSpan);
