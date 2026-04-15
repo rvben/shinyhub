@@ -133,3 +133,153 @@ func TestPatchApp_ResetToGlobalDefault(t *testing.T) {
 		t.Errorf("expected nil (global default), got %v", app.HibernateTimeoutMinutes)
 	}
 }
+
+func TestListApps_FilteredByAccess(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "viewer"})
+
+	owner, _ := store.GetUserByUsername("owner")
+	viewer, _ := store.GetUserByUsername("viewer")
+
+	if err := store.CreateApp(db.CreateAppParams{Slug: "public-app", Name: "Public App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppAccess("public-app", "public"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "private-app", Name: "Private App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "shared-app", Name: "Shared App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppAccess("shared-app", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantAppAccess("shared-app", viewer.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(viewer.ID, "viewer", "viewer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var apps []db.App
+	if err := json.NewDecoder(rec.Body).Decode(&apps); err != nil {
+		t.Fatalf("decode apps: %v", err)
+	}
+	if len(apps) != 2 {
+		t.Fatalf("expected 2 visible apps, got %d", len(apps))
+	}
+	for _, app := range apps {
+		if app.Slug == "private-app" {
+			t.Fatalf("viewer should not see private-app: %+v", apps)
+		}
+	}
+}
+
+func TestCreateApp_ViewerForbidden(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "viewonly", PasswordHash: hash, Role: "viewer"})
+
+	token, _ := auth.IssueJWT(1, "viewonly", "viewer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"slug": "new-app", "name": "New App"})
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetApp_ForbiddenWhenNoAccess(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "viewer"})
+	owner, _ := store.GetUserByUsername("owner")
+	viewer, _ := store.GetUserByUsername("viewer")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Secret", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(viewer.ID, "viewer", "viewer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/secret", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGetApp_GrantedMemberCanView anchors the contract for requireViewApp:
+// a user granted explicit access to a shared app can retrieve it.
+// This test exists to guard the requireViewApp → requireManageApp refactoring
+// that eliminates the redundant auth.UserFromContext call in requireManageApp.
+func TestGetApp_GrantedMemberCanView(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "member", PasswordHash: hash, Role: "viewer"})
+	owner, _ := store.GetUserByUsername("owner")
+	member, _ := store.GetUserByUsername("member")
+
+	if err := store.CreateApp(db.CreateAppParams{Slug: "shared", Name: "Shared", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppAccess("shared", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantAppAccess("shared", member.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(member.ID, "member", "viewer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/shared", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for granted member viewing shared app, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchApp_ForbiddenForNonOwner(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "member", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	member, _ := store.GetUserByUsername("member")
+
+	if err := store.CreateApp(db.CreateAppParams{Slug: "shared", Name: "Shared", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppAccess("shared", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantAppAccess("shared", member.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(member.ID, "member", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"hibernate_timeout_minutes": 10})
+	req := authedRequest(t, "PATCH", "/api/apps/shared", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

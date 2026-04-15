@@ -24,6 +24,33 @@ type loginResponse struct {
 	Token string `json:"token"`
 }
 
+type sessionUserResponse struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+}
+
+type sessionResponse struct {
+	User *sessionUserResponse `json:"user"`
+}
+
+func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
+	user, err := s.store.GetUserByUsername(req.Username)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			auth.VerifyPassword(dummyHash, req.Password) // constant-time guard
+			return nil, db.ErrNotFound
+		}
+		return nil, err
+	}
+
+	if err := auth.VerifyPassword(user.PasswordHash, req.Password); err != nil {
+		return nil, db.ErrNotFound
+	}
+
+	return user, nil
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -31,10 +58,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.store.GetUserByUsername(req.Username)
+	user, err := s.authenticateCredentials(req)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			auth.VerifyPassword(dummyHash, req.Password) // constant-time guard
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -54,6 +80,61 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, loginResponse{Token: token})
+}
+
+func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	user, err := s.authenticateCredentials(req)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	token, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	auth.SetSessionCookie(w, r, token)
+	writeJSON(w, http.StatusOK, sessionResponse{
+		User: &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
+	})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	auth.ClearSessionCookie(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// Slide the session window: only refresh when the request arrived via the
+	// session cookie (Bearer-token callers do not need a cookie response).
+	if _, err := r.Cookie(auth.SessionCookieName); err == nil {
+		freshToken, err := auth.IssueJWT(u.ID, u.Username, u.Role, s.cfg.Auth.Secret)
+		if err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		auth.SetSessionCookie(w, r, freshToken)
+	}
+	writeJSON(w, http.StatusOK, sessionResponse{
+		User: &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role},
+	})
 }
 
 type createTokenRequest struct {

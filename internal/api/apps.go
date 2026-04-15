@@ -21,7 +21,21 @@ import (
 var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
-	apps, err := s.store.ListApps()
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var (
+		apps []*db.App
+		err  error
+	)
+	if isPrivilegedAppOperator(u) {
+		apps, err = s.store.ListApps()
+	} else {
+		apps, err = s.store.ListAppsVisibleToUser(u.ID)
+	}
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -58,6 +72,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if !canCreateApps(u) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 
 	if err := s.store.CreateApp(db.CreateAppParams{
 		Slug:        req.Slug,
@@ -80,13 +98,8 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	app, err := s.store.GetAppBySlug(slug)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	app, _, ok := s.requireViewApp(w, r, slug)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, app)
@@ -102,6 +115,9 @@ type patchAppRequest struct {
 
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
 
 	var req patchAppRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -133,13 +149,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
-	app, err := s.store.GetAppBySlug(slug)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -148,14 +159,16 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Accept multipart bundle upload (max 128 MB in memory)
-	if err := r.ParseMultipartForm(128 << 20); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	file, _, err := r.FormFile("bundle")
+	file, err := readBundleUpload(w, r, maxBundleUploadSize)
 	if err != nil {
-		http.Error(w, "bundle file required", http.StatusBadRequest)
+		switch err {
+		case errBundleTooLarge:
+			http.Error(w, "bundle exceeds 128 MiB limit", http.StatusRequestEntityTooLarge)
+		case errBundleMissing:
+			http.Error(w, "bundle file required", http.StatusBadRequest)
+		default:
+			http.Error(w, "bad request", http.StatusBadRequest)
+		}
 		return
 	}
 	defer file.Close()
@@ -245,13 +258,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
-	app, err := s.store.GetAppBySlug(slug)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -324,13 +332,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
-	app, err := s.store.GetAppBySlug(slug)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -391,6 +394,9 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
 	var req struct {
 		Access string `json:"access"`
 	}
@@ -420,11 +426,26 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
 	var req struct {
 		UserID int64 `json:"user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.UserID == 0 {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.store.GetUserByID(req.UserID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	if err := s.store.GrantAppAccess(slug, req.UserID); err != nil {
@@ -436,11 +457,18 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
 	var req struct {
 		UserID int64 `json:"user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.UserID == 0 {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
 	if err := s.store.RevokeAppAccess(slug, req.UserID); err != nil {
