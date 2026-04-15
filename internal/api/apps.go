@@ -37,7 +37,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		err  error
 	)
 	if isPrivilegedAppOperator(u) {
-		apps, err = s.store.ListApps()
+		apps, err = s.store.ListApps(limit, offset)
 	} else {
 		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
 	}
@@ -138,6 +138,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse and validate all fields first so a bad request never causes a
+	// partial write (e.g. hibernate_timeout persisted while name rejected).
+	var (
+		hibernateTimeout        *int
+		setHibernateTimeout     bool
+		newName                 string
+		setName                 bool
+		newProjectSlug          string
+		setProjectSlug          bool
+	)
+
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
 		var timeout *int
 		if err := json.Unmarshal(rawVal, &timeout); err != nil {
@@ -148,14 +159,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "hibernate_timeout_minutes must be >= 0")
 			return
 		}
-		if err := s.store.UpdateHibernateTimeout(slug, timeout); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
+		hibernateTimeout, setHibernateTimeout = timeout, true
 	}
 
 	if rawVal, present := raw["name"]; present {
@@ -169,14 +173,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "name must be between 1 and 128 characters")
 			return
 		}
-		if err := s.store.UpdateAppName(slug, name); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
+		newName, setName = name, true
 	}
 
 	if rawVal, present := raw["project_slug"]; present {
@@ -185,8 +182,32 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "project_slug must be a string")
 			return
 		}
-		projectSlug = strings.TrimSpace(projectSlug)
-		if err := s.store.UpdateAppProjectSlug(slug, projectSlug); err != nil {
+		newProjectSlug, setProjectSlug = strings.TrimSpace(projectSlug), true
+	}
+
+	// Apply all validated writes.
+	if setHibernateTimeout {
+		if err := s.store.UpdateHibernateTimeout(slug, hibernateTimeout); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	if setName {
+		if err := s.store.UpdateAppName(slug, newName); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	if setProjectSlug {
+		if err := s.store.UpdateAppProjectSlug(slug, newProjectSlug); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not found")
 				return

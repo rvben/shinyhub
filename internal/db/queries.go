@@ -273,12 +273,16 @@ func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	return scanApp(row)
 }
 
-func (s *Store) ListApps() ([]*App, error) {
+func (s *Store) ListApps(limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = -1 // SQLite treats -1 as no limit
+	}
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
 		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
 		       created_at, updated_at
-		FROM apps ORDER BY created_at DESC`)
+		FROM apps ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +484,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE a.slug = ?
-		ORDER BY d.created_at DESC`, slug)
+		ORDER BY d.created_at DESC, d.id DESC`, slug)
 	if err != nil {
 		return nil, err
 	}
