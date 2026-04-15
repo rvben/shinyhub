@@ -19,8 +19,9 @@ type Server struct {
 	store   *db.Store
 	manager *process.Manager
 	proxy   *proxy.Proxy
-	github  *oauth.GitHub // nil when GitHub OAuth is not configured
-	sampler process.Sampler
+	github      *oauth.GitHub  // nil when GitHub OAuth is not configured
+	googleOAuth *oauth.Google  // nil when Google OAuth is not configured
+	sampler     process.Sampler
 	router  http.Handler
 }
 
@@ -33,6 +34,13 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 			cfg.OAuth.GitHub.ClientID,
 			cfg.OAuth.GitHub.ClientSecret,
 			cfg.OAuth.GitHub.CallbackURL,
+		)
+	}
+	if cfg.OAuth.Google.ClientID != "" {
+		s.googleOAuth = oauth.NewGoogle(
+			cfg.OAuth.Google.ClientID,
+			cfg.OAuth.Google.ClientSecret,
+			cfg.OAuth.Google.CallbackURL,
 		)
 	}
 	s.router = s.buildRouter()
@@ -66,6 +74,8 @@ func (s *Server) buildRouter() http.Handler {
 	r.Post("/api/auth/logout", s.handleLogout)
 	r.Get("/api/auth/github/login", s.handleGitHubLogin)
 	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
+	r.Get("/api/auth/google/login", s.handleGoogleLogin)
+	r.Get("/api/auth/google/callback", s.handleGoogleCallback)
 
 	// All other endpoints require either an auth header or a valid session cookie.
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup)
