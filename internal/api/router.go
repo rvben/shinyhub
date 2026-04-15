@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -15,20 +16,28 @@ import (
 
 // Server holds the dependencies shared by all API handlers.
 type Server struct {
-	cfg     *config.Config
-	store   *db.Store
-	manager *process.Manager
-	proxy   *proxy.Proxy
-	github      *oauth.GitHub  // nil when GitHub OAuth is not configured
-	googleOAuth *oauth.Google  // nil when Google OAuth is not configured
-	sampler     process.Sampler
-	router  http.Handler
+	cfg          *config.Config
+	store        *db.Store
+	manager      *process.Manager
+	proxy        *proxy.Proxy
+	github       *oauth.GitHub  // nil when GitHub OAuth is not configured
+	googleOAuth  *oauth.Google  // nil when Google OAuth is not configured
+	sampler      process.Sampler
+	loginLimiter *loginRateLimiter
+	router       http.Handler
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil
 // when running in test contexts that exercise only auth/data handlers.
 func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *proxy.Proxy) *Server {
-	s := &Server{cfg: cfg, store: store, manager: manager, proxy: prx, sampler: &process.GopsutilSampler{}}
+	s := &Server{
+		cfg:          cfg,
+		store:        store,
+		manager:      manager,
+		proxy:        prx,
+		sampler:      &process.GopsutilSampler{},
+		loginLimiter: newLoginRateLimiter(10, time.Minute),
+	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
 			cfg.OAuth.GitHub.ClientID,

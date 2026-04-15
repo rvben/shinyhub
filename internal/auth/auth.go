@@ -9,7 +9,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const jwtExpiry = 24 * time.Hour
+const jwtExpiry = 1 * time.Hour
 
 type Claims struct {
 	UserID int64  `json:"uid"`

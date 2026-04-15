@@ -17,17 +17,17 @@ import (
 )
 
 // buildStaleJWT creates a valid but old JWT for testing session refresh.
-// The token was "issued" 1 hour ago with a 24-hour expiry, so it still
+// The token was "issued" 30 minutes ago with a 1-hour expiry, so it still
 // authenticates but its IssuedAt is clearly in the past.
 func buildStaleJWT(userID int64, username, role, secret string) (token string, issuedAt time.Time) {
-	issuedAt = time.Now().Add(-time.Hour)
+	issuedAt = time.Now().Add(-30 * time.Minute)
 	claims := auth.Claims{
 		UserID: userID,
 		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   username,
 			IssuedAt:  jwt.NewNumericDate(issuedAt),
-			ExpiresAt: jwt.NewNumericDate(issuedAt.Add(24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(issuedAt.Add(1 * time.Hour)),
 		},
 	}
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

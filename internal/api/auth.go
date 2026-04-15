@@ -7,11 +7,54 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 )
+
+// loginRateLimiter is a simple sliding-window in-memory rate limiter per IP.
+type loginRateLimiter struct {
+	mu      sync.Mutex
+	windows map[string][]time.Time
+	limit   int
+	window  time.Duration
+}
+
+func newLoginRateLimiter(limit int, window time.Duration) *loginRateLimiter {
+	return &loginRateLimiter{
+		windows: make(map[string][]time.Time),
+		limit:   limit,
+		window:  window,
+	}
+}
+
+// allow returns true if the request from ip is within the rate limit.
+func (rl *loginRateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+
+	reqs := rl.windows[ip]
+	var recent []time.Time
+	for _, t := range reqs {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+
+	if len(recent) >= rl.limit {
+		rl.windows[ip] = recent
+		return false
+	}
+
+	rl.windows[ip] = append(recent, now)
+	return true
+}
 
 // dummyHash is a pre-computed bcrypt hash used to ensure constant-time
 // response for unknown usernames, preventing timing-based enumeration.
@@ -54,6 +97,10 @@ func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.loginLimiter.allow(r.RemoteAddr) {
+		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
+		return
+	}
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -80,6 +127,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.loginLimiter.allow(r.RemoteAddr) {
+		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
+		return
+	}
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")

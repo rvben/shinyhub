@@ -201,7 +201,7 @@ func TestCreateApp_ViewerForbidden(t *testing.T) {
 	}
 }
 
-func TestGetApp_ForbiddenWhenNoAccess(t *testing.T) {
+func TestGetApp_NotFoundWhenNoAccess(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
@@ -217,8 +217,9 @@ func TestGetApp_ForbiddenWhenNoAccess(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	// 404 prevents confirming that the private slug exists to unauthorized users.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

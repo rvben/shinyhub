@@ -72,7 +72,8 @@ func (s *Server) requireViewApp(w http.ResponseWriter, r *http.Request, slug str
 		return nil, nil, false
 	}
 	if !ok {
-		writeError(w, http.StatusForbidden, "forbidden")
+		// Return 404 to avoid confirming that the slug exists to unauthorized users.
+		writeError(w, http.StatusNotFound, "not found")
 		return nil, nil, false
 	}
 
