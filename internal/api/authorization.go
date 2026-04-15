@@ -54,25 +54,25 @@ func (s *Server) requireViewApp(w http.ResponseWriter, r *http.Request, slug str
 	app, err := s.loadApp(slug)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "not found")
 			return nil, nil, false
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return nil, nil, false
 	}
 
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return nil, nil, false
 	}
 	ok, err := s.canViewApp(u, app)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return nil, nil, false
 	}
 	if !ok {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "forbidden")
 		return nil, nil, false
 	}
 
@@ -85,7 +85,7 @@ func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug s
 		return nil, false
 	}
 	if !canManageApp(u, app) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "forbidden")
 		return nil, false
 	}
 	return app, true

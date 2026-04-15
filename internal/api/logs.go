@@ -19,18 +19,18 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.manager == nil {
-		http.Error(w, "no log available", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "no log available")
 		return
 	}
 	lr, ok := s.manager.LogReader(slug)
 	if !ok {
-		http.Error(w, "no log available", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "no log available")
 		return
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
 

@@ -17,19 +17,19 @@ import (
 // handleGitHubLogin redirects the browser to GitHub's OAuth2 authorization page.
 func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 	if s.github == nil {
-		http.Error(w, "GitHub OAuth not configured", http.StatusNotImplemented)
+		writeError(w, http.StatusNotImplemented, "GitHub OAuth not configured")
 		return
 	}
 
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	state := hex.EncodeToString(stateBytes)
 
 	if err := s.store.CreateOAuthState(state); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -40,33 +40,33 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 // the local user account, and issues a JWT.
 func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	if s.github == nil {
-		http.Error(w, "GitHub OAuth not configured", http.StatusNotImplemented)
+		writeError(w, http.StatusNotImplemented, "GitHub OAuth not configured")
 		return
 	}
 
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 	if state == "" || code == "" {
-		http.Error(w, "missing state or code", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing state or code")
 		return
 	}
 
 	if err := s.store.ConsumeOAuthState(state); err != nil {
-		http.Error(w, "invalid or expired state", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
 
 	tok, err := s.github.Exchange(r.Context(), code)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "github exchange: %v\n", err)
-		http.Error(w, "OAuth exchange failed", http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "OAuth exchange failed")
 		return
 	}
 
 	ghUser, err := s.github.FetchUser(r.Context(), tok)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "github fetch user: %v\n", err)
-		http.Error(w, "failed to fetch GitHub user", http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "failed to fetch GitHub user")
 		return
 	}
 
@@ -88,13 +88,13 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 				Role:         "developer",
 			}); err2 != nil {
 				fmt.Fprintf(os.Stderr, "create oauth user: %v\n", err2)
-				http.Error(w, "internal server error", http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, "internal server error")
 				return
 			}
 		}
 		user, err = s.store.GetUserByUsername(username)
 		if err != nil {
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
 		if err := s.store.CreateOAuthAccount(db.CreateOAuthAccountParams{
@@ -105,13 +105,13 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "create oauth account: %v\n", err)
 		}
 	} else if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -122,19 +122,19 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 // handleGoogleLogin redirects the browser to Google's OAuth2 authorization page.
 func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.googleOAuth == nil {
-		http.Error(w, "Google OAuth not configured", http.StatusNotImplemented)
+		writeError(w, http.StatusNotImplemented, "Google OAuth not configured")
 		return
 	}
 
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	state := hex.EncodeToString(stateBytes)
 
 	if err := s.store.CreateOAuthState(state); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -145,33 +145,33 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 // the local user account, and issues a JWT.
 func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	if s.googleOAuth == nil {
-		http.Error(w, "Google OAuth not configured", http.StatusNotImplemented)
+		writeError(w, http.StatusNotImplemented, "Google OAuth not configured")
 		return
 	}
 
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 	if state == "" || code == "" {
-		http.Error(w, "missing state or code", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing state or code")
 		return
 	}
 
 	if err := s.store.ConsumeOAuthState(state); err != nil {
-		http.Error(w, "invalid or expired state", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
 
 	tok, err := s.googleOAuth.Exchange(r.Context(), code)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "google exchange: %v\n", err)
-		http.Error(w, "OAuth exchange failed", http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "OAuth exchange failed")
 		return
 	}
 
 	gUser, err := s.googleOAuth.FetchUser(r.Context(), tok)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "google fetch user: %v\n", err)
-		http.Error(w, "failed to fetch Google user", http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "failed to fetch Google user")
 		return
 	}
 
@@ -200,13 +200,13 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 				Role:         "developer",
 			}); err2 != nil {
 				fmt.Fprintf(os.Stderr, "create google oauth user: %v\n", err2)
-				http.Error(w, "internal server error", http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, "internal server error")
 				return
 			}
 		}
 		user, err = s.store.GetUserByUsername(username)
 		if err != nil {
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
 		if err := s.store.CreateOAuthAccount(db.CreateOAuthAccountParams{
@@ -217,13 +217,13 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "create google oauth account: %v\n", err)
 		}
 	} else if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 

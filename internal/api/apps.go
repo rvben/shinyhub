@@ -24,7 +24,7 @@ var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -38,7 +38,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		apps, err = s.store.ListAppsVisibleToUser(u.ID)
 	}
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	if apps == nil {
@@ -56,25 +56,25 @@ type createAppRequest struct {
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	var req createAppRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
 	if req.Slug == "" || req.Name == "" {
-		http.Error(w, "slug and name are required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "slug and name are required")
 		return
 	}
 	if !slugRE.MatchString(req.Slug) {
-		http.Error(w, "slug must match ^[a-z0-9][a-z0-9-]{0,62}$", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "slug must match ^[a-z0-9][a-z0-9-]{0,62}$")
 		return
 	}
 
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	if !canCreateApps(u) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 
@@ -84,13 +84,13 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		ProjectSlug: req.ProjectSlug,
 		OwnerID:     u.ID,
 	}); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	app, err := s.store.GetAppBySlug(req.Slug)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -122,26 +122,26 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 
 	var req patchAppRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
 
 	if err := s.store.UpdateHibernateTimeout(slug, req.HibernateTimeoutMinutes); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	writeJSON(w, http.StatusOK, app)
@@ -156,7 +156,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.manager == nil {
-		http.Error(w, "process manager not available", http.StatusServiceUnavailable)
+		writeError(w, http.StatusServiceUnavailable, "process manager not available")
 		return
 	}
 
@@ -164,11 +164,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case errBundleTooLarge:
-			http.Error(w, "bundle exceeds 128 MiB limit", http.StatusRequestEntityTooLarge)
+			writeError(w, http.StatusRequestEntityTooLarge, "bundle exceeds 128 MiB limit")
 		case errBundleMissing:
-			http.Error(w, "bundle file required", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "bundle file required")
 		default:
-			http.Error(w, "bad request", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "bad request")
 		}
 		return
 	}
@@ -178,17 +178,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	version := fmt.Sprintf("%d", time.Now().UnixMilli())
 	bundleZip := filepath.Join(s.cfg.Storage.AppsDir, slug, "bundles", version+".zip")
 	if err := os.MkdirAll(filepath.Dir(bundleZip), 0755); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	out, err := os.Create(bundleZip)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if _, err := io.Copy(out, file); err != nil {
 		out.Close()
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	out.Close()
@@ -197,7 +197,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
 	if err := deploy.ExtractBundle(bundleZip, bundleDir); err != nil {
 		fmt.Fprintf(os.Stderr, "extract bundle %s: %v\n", slug, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -220,7 +220,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); err != nil {
 			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
 		}
-		http.Error(w, "deploy failed", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "deploy failed")
 		return
 	}
 
@@ -232,12 +232,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		Port:   &port,
 		PID:    &pid,
 	}); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	if err := s.store.IncrementDeployCount(slug); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -246,7 +246,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		Version:   version,
 		BundleDir: bundleDir,
 	}); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -265,18 +265,18 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.manager == nil {
-		http.Error(w, "process manager not available", http.StatusServiceUnavailable)
+		writeError(w, http.StatusServiceUnavailable, "process manager not available")
 		return
 	}
 
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	// deployments are ordered newest-first; index 1 is the previous deploy.
 	if len(deployments) < 2 {
-		http.Error(w, "no previous deployment to roll back to", http.StatusConflict)
+		writeError(w, http.StatusConflict, "no previous deployment to roll back to")
 		return
 	}
 	prev := deployments[1]
@@ -298,7 +298,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
 			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
 		}
-		http.Error(w, "rollback failed", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "rollback failed")
 		return
 	}
 
@@ -310,7 +310,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		Port:   &port,
 		PID:    &pid,
 	}); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -339,17 +339,17 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.manager == nil {
-		http.Error(w, "process manager not available", http.StatusServiceUnavailable)
+		writeError(w, http.StatusServiceUnavailable, "process manager not available")
 		return
 	}
 
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	if len(deployments) == 0 {
-		http.Error(w, "app has never been deployed", http.StatusConflict)
+		writeError(w, http.StatusConflict, "app has never been deployed")
 		return
 	}
 	current := deployments[0]
@@ -371,7 +371,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
 			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
 		}
-		http.Error(w, "restart failed", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "restart failed")
 		return
 	}
 
@@ -383,7 +383,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		Port:   &port,
 		PID:    &pid,
 	}); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -402,24 +402,24 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 		Access string `json:"access"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
 	if req.Access != "public" && req.Access != "private" && req.Access != "shared" {
-		http.Error(w, "access must be public, private, or shared", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "access must be public, private, or shared")
 		return
 	}
 	if err := s.store.SetAppAccess(slug, req.Access); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	writeJSON(w, http.StatusOK, app)
@@ -434,23 +434,23 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		UserID int64 `json:"user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
 	if req.UserID == 0 {
-		http.Error(w, "user_id is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "user_id is required")
 		return
 	}
 	if _, err := s.store.GetUserByID(req.UserID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "user not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	if err := s.store.GrantAppAccess(slug, req.UserID); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -465,15 +465,15 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 		UserID int64 `json:"user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
 	if req.UserID == 0 {
-		http.Error(w, "user_id is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "user_id is required")
 		return
 	}
 	if err := s.store.RevokeAppAccess(slug, req.UserID); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -492,7 +492,7 @@ func (s *Server) handleGetMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	members, err := s.store.GetAppMembers(slug)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	resp := make([]appMemberResponse, len(members))
@@ -510,16 +510,16 @@ type userLookupResponse struct {
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("username")
 	if username == "" {
-		http.Error(w, "username query param required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "username query param required")
 		return
 	}
 	user, err := s.store.GetUserByUsername(username)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	writeJSON(w, http.StatusOK, userLookupResponse{ID: user.ID, Username: user.Username})

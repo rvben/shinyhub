@@ -17,3 +17,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		fmt.Fprintf(os.Stderr, "writeJSON encode: %v\n", err)
 	}
 }
+
+// writeError writes a JSON error response: {"error": "msg"}.
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	fmt.Fprintf(w, `{"error":%q}`+"\n", msg)
+}
