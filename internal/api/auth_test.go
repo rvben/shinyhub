@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -224,5 +225,131 @@ func TestMeIssuesFreshJWT(t *testing.T) {
 	if !claims.IssuedAt.Time.After(staleIssuedAt) {
 		t.Errorf("fresh JWT IssuedAt %v is not after original IssuedAt %v",
 			claims.IssuedAt.Time, staleIssuedAt)
+	}
+}
+
+func TestListTokens_Empty(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("alice")
+	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
+
+	req := authedRequest(t, "GET", "/api/tokens", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var keys []any
+	json.NewDecoder(rec.Body).Decode(&keys)
+	if len(keys) != 0 {
+		t.Errorf("expected empty list, got %d items", len(keys))
+	}
+}
+
+func TestListTokens_AfterCreate(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("alice")
+	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
+
+	// Create a token first.
+	body, _ := json.Marshal(map[string]string{"name": "my-ci-token"})
+	req := authedRequest(t, "POST", "/api/tokens", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// List should return it.
+	req = authedRequest(t, "GET", "/api/tokens", nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var keys []map[string]any
+	json.NewDecoder(rec.Body).Decode(&keys)
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 token, got %d", len(keys))
+	}
+	if keys[0]["name"] != "my-ci-token" {
+		t.Errorf("expected name=my-ci-token, got %v", keys[0]["name"])
+	}
+	if keys[0]["id"] == nil {
+		t.Error("expected id in response")
+	}
+}
+
+func TestDeleteToken(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("alice")
+	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
+
+	// Create a token.
+	body, _ := json.Marshal(map[string]string{"name": "to-delete"})
+	req := authedRequest(t, "POST", "/api/tokens", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create token: expected 201, got %d", rec.Code)
+	}
+
+	// List to get the ID.
+	req = authedRequest(t, "GET", "/api/tokens", nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	var keys []map[string]any
+	json.NewDecoder(rec.Body).Decode(&keys)
+	id := int64(keys[0]["id"].(float64))
+
+	// Delete it.
+	path := fmt.Sprintf("/api/tokens/%d", id)
+	req = authedRequest(t, "DELETE", path, nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// List should now be empty.
+	req = authedRequest(t, "GET", "/api/tokens", nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	json.NewDecoder(rec.Body).Decode(&keys)
+	if len(keys) != 0 {
+		t.Errorf("expected empty list after delete, got %d items", len(keys))
+	}
+}
+
+func TestCreateToken_DuplicateName(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("alice")
+	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"name": "my-token"})
+
+	// First create: success.
+	req := authedRequest(t, "POST", "/api/tokens", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rec.Code)
+	}
+
+	// Second create with same name: conflict.
+	req = authedRequest(t, "POST", "/api/tokens", body, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 on duplicate name, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

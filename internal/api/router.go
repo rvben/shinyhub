@@ -102,6 +102,8 @@ func (s *Server) buildRouter() http.Handler {
 		r.Delete("/api/apps/{slug}/members", s.handleRevokeAppAccess)
 
 		r.Post("/api/tokens", s.handleCreateToken)
+		r.Get("/api/tokens", s.handleListTokens)
+		r.Delete("/api/tokens/{id}", s.handleDeleteToken)
 		r.Get("/api/users", s.handleGetUser)
 	})
 

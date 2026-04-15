@@ -100,6 +100,67 @@ func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
 	return &u, nil
 }
 
+// APIKeyInfo is a safe view of an api_keys row — no key_hash exposed.
+type APIKeyInfo struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListAPIKeys returns all tokens owned by userID, newest first.
+func (s *Store) ListAPIKeys(userID int64) ([]APIKeyInfo, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := []APIKeyInfo{}
+	for rows.Next() {
+		var k APIKeyInfo
+		if err := rows.Scan(&k.ID, &k.Name, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// DeleteAPIKey deletes a token by ID.
+// For non-admin callers pass ownerID = the caller's user ID; the DELETE is
+// scoped to that user so they cannot delete other users' tokens.
+// For admin callers pass ownerID = 0 to bypass the ownership check.
+// Returns ErrNotFound if no matching row is deleted.
+func (s *Store) DeleteAPIKey(id int64, ownerID int64) error {
+	var result sql.Result
+	var err error
+	if ownerID == 0 {
+		result, err = s.db.Exec(`DELETE FROM api_keys WHERE id = ?`, id)
+	} else {
+		result, err = s.db.Exec(`DELETE FROM api_keys WHERE id = ? AND user_id = ?`, id, ownerID)
+	}
+	if err != nil {
+		return fmt.Errorf("delete api key: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete api key rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// APIKeyNameExists returns true if the user already has a token with the given name.
+func (s *Store) APIKeyNameExists(userID int64, name string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND name = ?`, userID, name).Scan(&count)
+	return count > 0, err
+}
+
 // --- Apps ---
 
 type App struct {
