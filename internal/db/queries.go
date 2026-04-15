@@ -183,6 +183,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64) ([]*App, error) {
 		       created_at, updated_at
 		FROM apps
 		WHERE access = 'public'
+		   OR access = 'shared'
 		   OR owner_id = ?
 		   OR EXISTS (
 		       SELECT 1 FROM app_members
@@ -381,6 +382,33 @@ func (s *Store) UserCanAccessApp(slug string, userID int64) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GetMemberRole returns the role of userID in app_members for the given slug.
+// Returns ErrNotFound if the user is not an explicit member of the app.
+func (s *Store) GetMemberRole(slug string, userID int64) (string, error) {
+	row := s.db.QueryRow(
+		`SELECT role FROM app_members WHERE app_slug = ? AND user_id = ?`, slug, userID)
+	var role string
+	if err := row.Scan(&role); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return role, nil
+}
+
+// SetMemberRole updates the role of an explicit app member. Intended primarily
+// for testing and admin use.
+func (s *Store) SetMemberRole(slug string, userID int64, role string) error {
+	_, err := s.db.Exec(
+		`UPDATE app_members SET role = ? WHERE app_slug = ? AND user_id = ?`,
+		role, slug, userID)
+	if err != nil {
+		return fmt.Errorf("set member role: %w", err)
+	}
+	return nil
 }
 
 // SetAppAccess updates the access level for an app.

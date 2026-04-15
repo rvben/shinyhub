@@ -23,7 +23,7 @@ func (s *Server) canViewApp(u *auth.ContextUser, app *db.App) (bool, error) {
 	if u == nil || app == nil {
 		return false, nil
 	}
-	if isPrivilegedAppOperator(u) || app.Access == "public" || app.OwnerID == u.ID {
+	if isPrivilegedAppOperator(u) || app.Access == "public" || app.Access == "shared" || app.OwnerID == u.ID {
 		return true, nil
 	}
 	return s.store.UserCanAccessApp(app.Slug, u.ID)
@@ -84,9 +84,14 @@ func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug s
 	if !ok {
 		return nil, false
 	}
-	if !canManageApp(u, app) {
-		writeError(w, http.StatusForbidden, "forbidden")
-		return nil, false
+	if canManageApp(u, app) {
+		return app, true
 	}
-	return app, true
+	// A member with role="manager" may also manage the app.
+	role, err := s.store.GetMemberRole(app.Slug, u.ID)
+	if err == nil && role == "manager" {
+		return app, true
+	}
+	writeError(w, http.StatusForbidden, "forbidden")
+	return nil, false
 }

@@ -152,6 +152,31 @@ func TestAccess_PrivateApp_NonMember_Forbidden(t *testing.T) {
 	}
 }
 
+func TestAccess_SharedApp_AuthenticatedUser(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	stranger, _ := store.GetUserByUsername("stranger")
+	store.CreateApp(db.CreateAppParams{Slug: "shared-app", Name: "Shared", OwnerID: owner.ID})
+	store.SetAppAccess("shared-app", "shared")
+	// stranger is NOT in app_members but is authenticated.
+
+	token, _ := auth.IssueJWT(stranger.ID, "stranger", "developer", "test-secret")
+
+	mw := access.Middleware(store, "test-secret")
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/shared-app/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("shared app: authenticated user expected 200, got %d", rec.Code)
+	}
+}
+
 func TestAccess_PrivateApp_OperatorBypasses(t *testing.T) {
 	store := makeStore(t)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})

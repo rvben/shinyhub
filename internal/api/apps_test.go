@@ -420,6 +420,52 @@ func TestGetUser_Unauthenticated(t *testing.T) {
 	}
 }
 
+func TestManagerMember_CanManage(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	mgr, _ := store.GetUserByUsername("mgr")
+
+	store.CreateApp(db.CreateAppParams{Slug: "theapp", Name: "The App", OwnerID: owner.ID})
+	// Grant mgr access with role=manager via direct DB insert.
+	store.GrantAppAccess("theapp", mgr.ID)
+	store.SetMemberRole("theapp", mgr.ID, "manager")
+
+	token, _ := auth.IssueJWT(mgr.ID, "mgr", "developer", "test-secret")
+	// PATCH /api/apps/{slug} requires manage rights.
+	body, _ := json.Marshal(map[string]any{})
+	req := authedRequest(t, "PATCH", "/api/apps/theapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("manager member: expected 200 on PATCH, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestViewerMember_CannotManage(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	viewer, _ := store.GetUserByUsername("viewer")
+
+	store.CreateApp(db.CreateAppParams{Slug: "theapp2", Name: "The App 2", OwnerID: owner.ID})
+	store.GrantAppAccess("theapp2", viewer.ID)
+	// viewer has the default role="viewer" — no explicit SetMemberRole needed.
+
+	token, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{})
+	req := authedRequest(t, "PATCH", "/api/apps/theapp2", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("viewer member: expected 403 on PATCH, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateApp_DuplicateSlug(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

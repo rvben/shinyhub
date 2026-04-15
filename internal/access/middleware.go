@@ -42,16 +42,18 @@ func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Both "private" and "shared" require authentication. Admins and
-			// operators bypass the membership check; other roles must present a
-			// valid JWT and pass the UserCanAccessApp check.
+			// Both "private" and "shared" require authentication. Admins,
+			// operators, and any authenticated user on shared apps bypass the
+			// membership check; other roles on private apps must pass the
+			// UserCanAccessApp check.
 			user := extractUser(r, jwtSecret)
 			if user == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			if user.Role == "admin" || user.Role == "operator" {
+			// admin, operator, and any authenticated user for shared apps bypass membership check.
+			if user.Role == "admin" || user.Role == "operator" || app.Access == "shared" {
 				next.ServeHTTP(w, r)
 				return
 			}
