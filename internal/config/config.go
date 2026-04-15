@@ -11,6 +11,7 @@ import (
 // OAuthConfig holds OAuth2 provider credentials.
 type OAuthConfig struct {
 	GitHub GitHubOAuthConfig
+	Google GoogleOAuthConfig
 }
 
 // GitHubOAuthConfig holds GitHub OAuth2 application credentials.
@@ -20,11 +21,25 @@ type GitHubOAuthConfig struct {
 	CallbackURL  string
 }
 
+// GoogleOAuthConfig holds Google OAuth2 application credentials.
+type GoogleOAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+	CallbackURL  string
+}
+
 type rawOAuthConfig struct {
 	GitHub rawGitHubOAuthConfig `yaml:"github"`
+	Google rawGoogleOAuthConfig `yaml:"google"`
 }
 
 type rawGitHubOAuthConfig struct {
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	CallbackURL  string `yaml:"callback_url"`
+}
+
+type rawGoogleOAuthConfig struct {
 	ClientID     string `yaml:"client_id"`
 	ClientSecret string `yaml:"client_secret"`
 	CallbackURL  string `yaml:"callback_url"`
@@ -118,6 +133,11 @@ func Load(path string) (*Config, error) {
 				ClientSecret: raw.OAuth.GitHub.ClientSecret,
 				CallbackURL:  raw.OAuth.GitHub.CallbackURL,
 			},
+			Google: GoogleOAuthConfig{
+				ClientID:     raw.OAuth.Google.ClientID,
+				ClientSecret: raw.OAuth.Google.ClientSecret,
+				CallbackURL:  raw.OAuth.Google.CallbackURL,
+			},
 		},
 	}
 	applyEnv(cfg)
@@ -174,5 +194,14 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_GITHUB_CALLBACK_URL"); v != "" {
 		cfg.OAuth.GitHub.CallbackURL = v
+	}
+	if v := os.Getenv("SHINYHUB_GOOGLE_CLIENT_ID"); v != "" {
+		cfg.OAuth.Google.ClientID = v
+	}
+	if v := os.Getenv("SHINYHUB_GOOGLE_CLIENT_SECRET"); v != "" {
+		cfg.OAuth.Google.ClientSecret = v
+	}
+	if v := os.Getenv("SHINYHUB_GOOGLE_CALLBACK_URL"); v != "" {
+		cfg.OAuth.Google.CallbackURL = v
 	}
 }

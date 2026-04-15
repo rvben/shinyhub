@@ -88,3 +88,24 @@ lifecycle:
 		t.Error("expected error for invalid duration, got nil")
 	}
 }
+
+func TestConfig_GoogleOAuth_EnvVars(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_GOOGLE_CLIENT_ID", "g-client-id")
+	t.Setenv("SHINYHUB_GOOGLE_CLIENT_SECRET", "g-client-secret")
+	t.Setenv("SHINYHUB_GOOGLE_CALLBACK_URL", "http://localhost/google/callback")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OAuth.Google.ClientID != "g-client-id" {
+		t.Errorf("ClientID = %q, want %q", cfg.OAuth.Google.ClientID, "g-client-id")
+	}
+	if cfg.OAuth.Google.ClientSecret != "g-client-secret" {
+		t.Errorf("ClientSecret = %q", cfg.OAuth.Google.ClientSecret)
+	}
+	if cfg.OAuth.Google.CallbackURL != "http://localhost/google/callback" {
+		t.Errorf("CallbackURL = %q", cfg.OAuth.Google.CallbackURL)
+	}
+}
