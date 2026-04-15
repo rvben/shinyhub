@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const state = {
     user: null,
     apps: [],
+    metricsInterval: null,
   };
 
   const loginView = document.getElementById('login-view');
@@ -39,8 +40,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let activeEventSource = null;
 
-  localStorage.removeItem('shinyhub_token');
-
   async function api(path, options = {}) {
     const init = {
       credentials: 'same-origin',
@@ -48,6 +47,9 @@ document.addEventListener('DOMContentLoaded', () => {
       ...options,
     };
     init.headers = {...init.headers};
+    if (init.body && !init.headers['Content-Type']) {
+      init.headers['Content-Type'] = 'application/json';
+    }
     return fetch(path, init);
   }
 
@@ -136,6 +138,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function showLoggedOut() {
     closeLogs();
+    clearInterval(state.metricsInterval);
+    state.metricsInterval = null;
     state.user = null;
     state.apps = [];
     sessionUser.textContent = '';
@@ -280,6 +284,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('grant-error').hidden = true;
 
     document.getElementById('access-modal').hidden = false;
+    // Move focus to the close button for keyboard/screen-reader users.
+    document.getElementById('access-modal-close').focus();
 
     await refreshMemberList();
   }
@@ -291,13 +297,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function refreshMemberList() {
     if (!accessSlug) return;
+    const list = document.getElementById('members-list');
+    list.innerHTML = '<li class="loading-placeholder">Loading…</li>';
     let resp;
     try {
       resp = await api(`/api/apps/${accessSlug}/members`);
-    } catch { return; }
-    if (!resp.ok) return;
+    } catch { list.innerHTML = ''; return; }
+    if (!resp.ok) { list.innerHTML = ''; return; }
     const members = await resp.json();
-    const list = document.getElementById('members-list');
     list.innerHTML = '';
     for (const m of members) {
       const li = document.createElement('li');
@@ -329,6 +336,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   logPaneClose.addEventListener('click', closeLogs);
 
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (!document.getElementById('access-modal').hidden) {
+        closeAccessModal();
+      } else if (!document.getElementById('log-pane').hidden) {
+        closeLogs();
+      }
+    }
+  });
+
   // Close modal on × or overlay click.
   document.getElementById('access-modal-close').addEventListener('click', closeAccessModal);
   document.getElementById('access-modal').addEventListener('click', e => {
@@ -358,32 +375,40 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Grant button.
   document.getElementById('grant-btn').addEventListener('click', async () => {
+    const grantBtn = document.getElementById('grant-btn');
     const username = document.getElementById('grant-username').value.trim();
     const errEl = document.getElementById('grant-error');
     errEl.hidden = true;
     if (!username) return;
 
-    // Resolve username → user_id.
-    const lookupResp = await api(`/api/users?username=${encodeURIComponent(username)}`);
-    if (!lookupResp.ok) {
-      errEl.textContent = lookupResp.status === 404 ? 'User not found' : 'Lookup failed';
-      errEl.hidden = false;
-      return;
-    }
-    const user = await lookupResp.json();
+    grantBtn.disabled = true;
+    grantBtn.textContent = 'Granting…';
+    try {
+      // Resolve username → user_id.
+      const lookupResp = await api(`/api/users?username=${encodeURIComponent(username)}`);
+      if (!lookupResp.ok) {
+        errEl.textContent = lookupResp.status === 404 ? 'User not found' : 'Lookup failed';
+        errEl.hidden = false;
+        return;
+      }
+      const user = await lookupResp.json();
 
-    // Grant access.
-    const grantResp = await api(`/api/apps/${accessSlug}/members`, {
-      method: 'POST',
-      body: JSON.stringify({ user_id: user.id }),
-    });
-    if (!grantResp.ok) {
-      errEl.textContent = 'Grant failed';
-      errEl.hidden = false;
-      return;
+      // Grant access.
+      const grantResp = await api(`/api/apps/${accessSlug}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ user_id: user.id }),
+      });
+      if (!grantResp.ok) {
+        errEl.textContent = 'Grant failed';
+        errEl.hidden = false;
+        return;
+      }
+      document.getElementById('grant-username').value = '';
+      await refreshMemberList();
+    } finally {
+      grantBtn.disabled = false;
+      grantBtn.textContent = 'Grant';
     }
-    document.getElementById('grant-username').value = '';
-    await refreshMemberList();
   });
 
   loginForm.addEventListener('submit', async (event) => {
@@ -418,6 +443,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showLoggedIn(payload.user);
     passwordInput.value = '';
     await loadApps();
+    startMetricsPolling();
   });
 
   refreshButton.addEventListener('click', () => {
@@ -456,13 +482,18 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Poll metrics every 10 seconds for all running apps.
-  setInterval(() => {
-    for (const app of state.apps) {
-      if (app.status === 'running') {
-        fetchMetrics(app.slug);
+  function startMetricsPolling() {
+    clearInterval(state.metricsInterval);
+    state.metricsInterval = null;
+    if (!state.apps.some(a => a.status === 'running')) return;
+    state.metricsInterval = setInterval(() => {
+      for (const app of state.apps) {
+        if (app.status === 'running') {
+          fetchMetrics(app.slug);
+        }
       }
-    }
-  }, 10_000);
+    }, 10_000);
+  }
 
   async function initialize() {
     setError(loginError, '');
@@ -489,6 +520,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = await response.json();
     showLoggedIn(payload.user);
     await loadApps();
+    startMetricsPolling();
   }
 
   initialize();
