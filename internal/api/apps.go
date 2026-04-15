@@ -505,7 +505,6 @@ func (s *Server) handleGetMembers(w http.ResponseWriter, r *http.Request) {
 type userLookupResponse struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username"`
-	Role     string `json:"role"`
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
@@ -523,7 +522,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, userLookupResponse{ID: user.ID, Username: user.Username, Role: user.Role})
+	writeJSON(w, http.StatusOK, userLookupResponse{ID: user.ID, Username: user.Username})
 }
 
 type metricsResponse struct {

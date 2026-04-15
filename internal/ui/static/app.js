@@ -339,12 +339,19 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('input[name="access-level"]').forEach(radio => {
     radio.addEventListener('change', async () => {
       if (!accessSlug) return;
-      await api(`/api/apps/${accessSlug}/access`, {
-        method: 'PATCH',
-        body: JSON.stringify({ access: radio.value }),
-      });
+      const slug = accessSlug;
+      let resp;
+      try {
+        resp = await api(`/api/apps/${slug}/access`, {
+          method: 'PATCH',
+          body: JSON.stringify({ access: radio.value }),
+        });
+      } catch {
+        return;
+      }
+      if (!resp.ok) return;
       // Update local state so card reflects the new level.
-      const app = state.apps.find(a => a.slug === accessSlug);
+      const app = state.apps.find(a => a.slug === slug);
       if (app) app.access = radio.value;
     });
   });
