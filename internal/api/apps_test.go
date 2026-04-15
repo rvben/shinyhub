@@ -283,3 +283,136 @@ func TestPatchApp_ForbiddenForNonOwner(t *testing.T) {
 		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestGetMembers_Empty(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/members", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var members []map[string]any
+	json.NewDecoder(rec.Body).Decode(&members)
+	if len(members) != 0 {
+		t.Errorf("expected empty list, got %v", members)
+	}
+}
+
+func TestGetMembers_WithMembers(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "viewer"})
+	owner, _ := store.GetUserByUsername("owner")
+	alice, _ := store.GetUserByUsername("alice")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	store.GrantAppAccess("myapp", alice.ID)
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/members", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var members []map[string]any
+	json.NewDecoder(rec.Body).Decode(&members)
+	if len(members) != 1 {
+		t.Fatalf("expected 1 member, got %d", len(members))
+	}
+	if members[0]["username"] != "alice" {
+		t.Errorf("username = %v, want alice", members[0]["username"])
+	}
+	if members[0]["role"] != "viewer" {
+		t.Errorf("role = %v, want viewer", members[0]["role"])
+	}
+}
+
+func TestGetMembers_Forbidden(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "other", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	other, _ := store.GetUserByUsername("other")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	store.GrantAppAccess("myapp", other.ID)
+
+	token, _ := auth.IssueJWT(other.ID, "other", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/members", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
+	}
+}
+
+func TestGetMembers_NotFound(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/nonexistent/members", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestGetUser_Found(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	alice, _ := store.GetUserByUsername("alice")
+
+	token, _ := auth.IssueJWT(alice.ID, "alice", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/users?username=alice", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["username"] != "alice" {
+		t.Errorf("username = %v, want alice", resp["username"])
+	}
+}
+
+func TestGetUser_NotFound(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	alice, _ := store.GetUserByUsername("alice")
+
+	token, _ := auth.IssueJWT(alice.ID, "alice", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/users?username=nobody", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestGetUser_Unauthenticated(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/users?username=alice", nil)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}

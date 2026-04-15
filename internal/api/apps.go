@@ -479,6 +479,53 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type appMemberResponse struct {
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+}
+
+func (s *Server) handleGetMembers(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+	members, err := s.store.GetAppMembers(slug)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	resp := make([]appMemberResponse, len(members))
+	for i, m := range members {
+		resp[i] = appMemberResponse{UserID: m.UserID, Username: m.Username, Role: m.Role}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type userLookupResponse struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+}
+
+func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
+	username := r.URL.Query().Get("username")
+	if username == "" {
+		http.Error(w, "username query param required", http.StatusBadRequest)
+		return
+	}
+	user, err := s.store.GetUserByUsername(username)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, userLookupResponse{ID: user.ID, Username: user.Username, Role: user.Role})
+}
+
 type metricsResponse struct {
 	Status     string  `json:"status"`
 	PID        int     `json:"pid,omitempty"`

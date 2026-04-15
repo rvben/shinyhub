@@ -92,11 +92,13 @@ func (s *Server) buildRouter() http.Handler {
 		r.Post("/api/apps/{slug}/restart", s.handleRestartApp)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
 		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
+		r.Get("/api/apps/{slug}/members", s.handleGetMembers)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)
 		r.Post("/api/apps/{slug}/members", s.handleGrantAppAccess)
 		r.Delete("/api/apps/{slug}/members", s.handleRevokeAppAccess)
 
 		r.Post("/api/tokens", s.handleCreateToken)
+		r.Get("/api/users", s.handleGetUser)
 	})
 
 	return r
