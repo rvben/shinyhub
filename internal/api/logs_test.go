@@ -82,9 +82,9 @@ func TestHandleLogs_SSEInitialBurst(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	for _, want := range []string{"alpha", "beta", "gamma"} {
+	for _, want := range []string{"data: alpha\n", "data: beta\n", "data: gamma\n"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("expected %q in SSE body, body:\n%s", want, body)
+			t.Errorf("expected SSE line %q in body, got:\n%s", want, body)
 		}
 	}
 }
