@@ -34,9 +34,10 @@ type StartParams struct {
 }
 
 type entry struct {
-	info *ProcessInfo
-	cmd  *exec.Cmd
-	done chan struct{}
+	info    *ProcessInfo
+	cmd     *exec.Cmd
+	done    chan struct{}
+	stopped bool
 }
 
 // Manager tracks running app processes by slug.
@@ -114,7 +115,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		cmd.Wait()
 		m.mu.Lock()
 		if e, ok := m.entries[p.Slug]; ok && e.cmd == cmd {
-			e.info.Status = StatusCrashed
+			if e.stopped {
+				e.info.Status = StatusStopped
+			} else {
+				e.info.Status = StatusCrashed
+			}
 		}
 		if lf, ok := m.logFiles[p.Slug]; ok {
 			lf.Close()
@@ -144,6 +149,7 @@ func (m *Manager) Stop(slug string) error {
 	}
 	done := e.done
 	pid := e.cmd.Process.Pid
+	e.stopped = true
 	m.mu.Unlock()
 
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
