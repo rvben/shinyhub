@@ -11,6 +11,8 @@ type contextKey string
 
 const userContextKey contextKey = "user"
 
+const SessionCookieName = "shiny_session"
+
 type ContextUser struct {
 	ID       int64
 	Username string
@@ -20,42 +22,57 @@ type ContextUser struct {
 // APIKeyLookup looks up a user by API key hash. Injected to avoid import cycles.
 type APIKeyLookup func(keyHash string) (*ContextUser, error)
 
+func authenticateHeader(header, secret string, keyLookup APIKeyLookup) (*ContextUser, error) {
+	if header == "" {
+		return nil, nil
+	}
+
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid authorization header")
+	}
+	scheme, token := parts[0], parts[1]
+
+	switch strings.ToLower(scheme) {
+	case "bearer":
+		claims, err := ValidateJWT(token, secret)
+		if err != nil {
+			return nil, err
+		}
+		return &ContextUser{ID: claims.UserID, Username: claims.Subject, Role: claims.Role}, nil
+	case "token":
+		if keyLookup == nil {
+			return nil, fmt.Errorf("api key lookup unavailable")
+		}
+		return keyLookup(HashAPIKey(token))
+	default:
+		return nil, fmt.Errorf("unsupported authorization scheme")
+	}
+}
+
+func authenticateSessionCookie(r *http.Request, secret string) (*ContextUser, error) {
+	c, err := r.Cookie(SessionCookieName)
+	if err != nil {
+		return nil, err
+	}
+	return ParseJWT(c.Value, secret)
+}
+
+// AuthenticateRequest authenticates a request from either an Authorization
+// header or the browser session cookie. If an Authorization header is present,
+// it takes precedence over the cookie and must be valid.
+func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup) (*ContextUser, error) {
+	if header := r.Header.Get("Authorization"); header != "" {
+		return authenticateHeader(header, secret, keyLookup)
+	}
+	return authenticateSessionCookie(r, secret)
+}
+
 func BearerMiddleware(secret string, keyLookup APIKeyLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			header := r.Header.Get("Authorization")
-			if header == "" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			parts := strings.SplitN(header, " ", 2)
-			if len(parts) != 2 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			scheme, token := parts[0], parts[1]
-
-			var user *ContextUser
-			switch strings.ToLower(scheme) {
-			case "bearer":
-				claims, err := ValidateJWT(token, secret)
-				if err != nil {
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
-				user = &ContextUser{ID: claims.UserID, Username: claims.Subject, Role: claims.Role}
-			case "token":
-				if keyLookup == nil {
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
-				u, err := keyLookup(HashAPIKey(token))
-				if err != nil {
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
-				user = u
-			default:
+			user, err := AuthenticateRequest(r, secret, keyLookup)
+			if err != nil || user == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}

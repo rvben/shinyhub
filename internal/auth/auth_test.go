@@ -117,6 +117,52 @@ func TestBearerMiddleware_TokenScheme(t *testing.T) {
 	}
 }
 
+func TestBearerMiddleware_SessionCookie(t *testing.T) {
+	secret := "test-secret"
+	token, _ := auth.IssueJWT(7, "alice", "developer", secret)
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := auth.UserFromContext(r.Context())
+		if u == nil {
+			http.Error(w, "no user", 500)
+			return
+		}
+		w.Write([]byte(u.Username))
+	})
+	handler := auth.BearerMiddleware(secret, nil)(next)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "alice" {
+		t.Errorf("expected alice, got %s", rec.Body.String())
+	}
+}
+
+func TestBearerMiddleware_InvalidHeaderDoesNotFallBackToCookie(t *testing.T) {
+	secret := "test-secret"
+	token, _ := auth.IssueJWT(7, "alice", "developer", secret)
+
+	handler := auth.BearerMiddleware(secret, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
 func TestRequireRole_UnknownUserRole(t *testing.T) {
 	handler := auth.RequireRole("viewer")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
