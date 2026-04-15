@@ -6,60 +6,38 @@
   <title>ShinyHub</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
-  <script src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
 </head>
 <body>
-  <nav x-data>
-    <span class="brand">✦ ShinyHub</span>
-    <span x-show="$store.auth.username" x-text="$store.auth.username"></span>
-    <button @click="$store.auth.logout()" x-show="$store.auth.username">Logout</button>
+  <nav>
+    <span class="brand">ShinyHub</span>
+    <span id="session-user" class="session-user"></span>
+    <button id="logout-button" type="button" hidden>Logout</button>
   </nav>
 
-  <main x-data="appList">
-    <div x-show="!loggedIn" x-cloak>
+  <main>
+    <section id="login-view">
       <div class="login-box">
         <h2>Sign in</h2>
-        <input x-model="username" placeholder="Username" type="text">
-        <input x-model="password" placeholder="Password" type="password"
-               @keyup.enter="login()">
-        <button @click="login()">Login</button>
-        <p x-show="error" x-text="error" class="error"></p>
-        <div style="text-align:center; margin-top: 1rem; color: #6c757d; font-size: 0.875rem;">or</div>
-        <a href="/api/auth/github/login"
-           style="display:block; text-align:center; margin-top: 0.75rem; padding: 0.5rem 1rem;
-                  background:#24292e; color:#fff; border-radius:0.375rem; text-decoration:none;
-                  font-size:0.9rem;">
-          Login with GitHub
-        </a>
+        <form id="login-form">
+          <input id="login-username" placeholder="Username" type="text" autocomplete="username" required>
+          <input id="login-password" placeholder="Password" type="password" autocomplete="current-password" required>
+          <button type="submit">Login</button>
+        </form>
+        <p id="login-error" class="error" hidden></p>
+        <div class="login-separator">or</div>
+        <a class="github-login" href="/api/auth/github/login">Login with GitHub</a>
       </div>
-    </div>
+    </section>
 
-    <div x-show="loggedIn" x-cloak>
+    <section id="apps-view" hidden>
       <div class="toolbar">
         <h1>Apps</h1>
-        <button @click="refresh()">Refresh</button>
+        <button id="refresh-button" type="button">Refresh</button>
       </div>
-      <div class="app-grid">
-        <template x-for="app in apps" :key="app.slug">
-          <div class="app-card">
-            <div class="app-header">
-              <strong x-text="app.name"></strong>
-              <span :class="'badge badge-' + app.status" x-text="app.status"></span>
-            </div>
-            <div class="app-meta">
-              <span x-text="'/' + app.slug"></span>
-              <span x-text="app.deploy_count + ' deploys'"></span>
-            </div>
-            <div class="app-actions">
-              <a :href="'/app/' + app.slug + '/'" target="_blank">Open</a>
-              <button @click="restart(app.slug)">Restart</button>
-              <button @click="rollback(app.slug)">Rollback</button>
-            </div>
-          </div>
-        </template>
-        <p x-show="apps.length === 0">No apps deployed yet.</p>
-      </div>
-    </div>
+      <p id="app-error" class="error" hidden></p>
+      <div id="app-grid" class="app-grid"></div>
+      <p id="empty-state" class="empty-state" hidden>No apps deployed yet.</p>
+    </section>
   </main>
 </body>
 </html>
