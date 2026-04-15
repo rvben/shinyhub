@@ -3,18 +3,27 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 )
 
-// handleLogs streams log lines for the given app slug as Server-Sent Events.
-// This is a stub that sends a periodic heartbeat comment; a full implementation
-// would tail the process log file or pipe from the process manager.
+// handleLogs streams log lines for the given app as Server-Sent Events.
+// It sends the last 200 lines as an initial burst, then follows new output.
+// Access is restricted to app managers (owners, admins, operators).
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+
+	if s.manager == nil {
+		http.Error(w, "no log available", http.StatusNotFound)
+		return
+	}
+	lr, ok := s.manager.LogReader(slug)
+	if !ok {
+		http.Error(w, "no log available", http.StatusNotFound)
 		return
 	}
 
@@ -29,22 +38,28 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Sanitize slug to prevent header injection via CRLF into the SSE stream.
-	safeSlug := strings.NewReplacer("\r", "", "\n", "").Replace(slug)
-
-	// Send an initial comment so the client knows the stream is open.
-	fmt.Fprintf(w, ": connected to log stream for %s\n\n", safeSlug)
+	// Initial burst: last 200 lines.
+	lines, _ := lr.Tail(200)
+	for _, line := range lines {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+	}
 	flusher.Flush()
 
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	// Follow new output until the client disconnects.
+	ch := make(chan string, 64)
+	go lr.Follow(r.Context(), ch)
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			// SSE heartbeat — keeps the connection alive through proxies.
+		case line := <-ch:
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		case <-heartbeat.C:
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}
