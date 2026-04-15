@@ -104,6 +104,10 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "create oauth account: %v\n", err)
 		}
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID: &user.ID, Action: "create_user", ResourceType: "user",
+			ResourceID: user.Username, IPAddress: clientIP(r),
+		})
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -116,6 +120,10 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auth.SetSessionCookie(w, r, jwtToken)
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID: &user.ID, Action: "login", ResourceType: "user",
+		ResourceID: user.Username, IPAddress: clientIP(r),
+	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -216,6 +224,10 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "create google oauth account: %v\n", err)
 		}
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID: &user.ID, Action: "create_user", ResourceType: "user",
+			ResourceID: user.Username, IPAddress: clientIP(r),
+		})
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -228,5 +240,9 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auth.SetSessionCookie(w, r, jwtToken)
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID: &user.ID, Action: "login", ResourceType: "user",
+		ResourceID: user.Username, IPAddress: clientIP(r),
+	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }

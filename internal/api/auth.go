@@ -98,7 +98,7 @@ func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.loginLimiter.allow(r.RemoteAddr) {
+	if !s.loginLimiter.allow(clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
@@ -144,7 +144,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.loginLimiter.allow(r.RemoteAddr) {
+	if !s.loginLimiter.allow(clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}

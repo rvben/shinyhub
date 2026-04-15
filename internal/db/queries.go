@@ -843,9 +843,16 @@ func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, error) {
 		if err := rows.Scan(&e.ID, &e.UserID, &e.Action, &e.ResourceType, &e.ResourceID, &e.Detail, &e.IPAddress, &createdAt); err != nil {
 			return nil, err
 		}
-		e.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-		if e.CreatedAt.IsZero() {
-			e.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		parsed := false
+		for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339} {
+			if t, err := time.Parse(layout, createdAt); err == nil {
+				e.CreatedAt = t
+				parsed = true
+				break
+			}
+		}
+		if !parsed {
+			fmt.Fprintf(os.Stderr, "audit: unexpected created_at format: %q\n", createdAt)
 		}
 		result = append(result, e)
 	}

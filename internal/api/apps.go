@@ -233,6 +233,12 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID: &u.ID, Action: "update_app", ResourceType: "app",
+			ResourceID: slug, IPAddress: clientIP(r),
+		})
+	}
 	writeJSON(w, http.StatusOK, app)
 }
 
@@ -652,6 +658,12 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID: &u.ID, Action: "set_access", ResourceType: "app",
+			ResourceID: slug, IPAddress: clientIP(r),
+		})
+	}
 	writeJSON(w, http.StatusOK, app)
 }
 
@@ -744,6 +756,7 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 			Action:       "revoke_access",
 			ResourceType: "app",
 			ResourceID:   slug,
+			Detail:       fmt.Sprintf("user_id=%d", userID),
 			IPAddress:    clientIP(r),
 		})
 	}
