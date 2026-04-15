@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ShinyHub</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
@@ -20,7 +21,7 @@
     <section id="login-view">
       <div class="login-box">
         <h2>Sign in</h2>
-        <form id="login-form">
+        <form id="login-form" aria-describedby="login-error">
           <label for="login-username" class="sr-only">Username</label>
           <input id="login-username" placeholder="Username" type="text" autocomplete="username" required>
           <label for="login-password" class="sr-only">Password</label>
@@ -45,12 +46,12 @@
     </section>
 
   <!-- Log pane: hidden overlay that shows SSE log output for one app -->
-  <div id="log-pane" class="log-pane" hidden>
+  <div id="log-pane" class="log-pane" hidden role="log" aria-label="Application logs">
     <div class="log-pane-header">
       <span id="log-pane-title" class="log-pane-title"></span>
       <button id="log-pane-close" type="button" aria-label="Close log pane">Close</button>
     </div>
-    <pre id="log-pane-body" class="log-pane-body"></pre>
+    <pre id="log-pane-body" class="log-pane-body" aria-live="polite"></pre>
   </div>
     <!-- Access control modal -->
     <div id="access-modal" class="modal-overlay" hidden
@@ -74,7 +75,8 @@
           <section class="grant-section">
             <h4>Grant access</h4>
             <div class="grant-row">
-              <input id="grant-username" type="text" placeholder="username" autocomplete="off">
+              <label for="grant-username" class="sr-only">Username to grant access</label>
+              <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
               <button id="grant-btn" type="button">Grant</button>
             </div>
             <p id="grant-error" class="error" hidden></p>

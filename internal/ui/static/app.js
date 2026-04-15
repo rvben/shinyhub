@@ -92,30 +92,35 @@ document.addEventListener('DOMContentLoaded', () => {
       openLink.target = '_blank';
       openLink.rel = 'noopener noreferrer';
       openLink.textContent = 'Open';
+      openLink.setAttribute('aria-label', `Open ${app.name}`);
       actions.appendChild(openLink);
 
       if (canManageApp(state.user, app)) {
         const restartButton = document.createElement('button');
         restartButton.type = 'button';
         restartButton.textContent = 'Restart';
+        restartButton.setAttribute('aria-label', `Restart ${app.name}`);
         restartButton.addEventListener('click', () => restart(app.slug));
         actions.appendChild(restartButton);
 
         const rollbackButton = document.createElement('button');
         rollbackButton.type = 'button';
         rollbackButton.textContent = 'Rollback';
+        rollbackButton.setAttribute('aria-label', `Rollback ${app.name}`);
         rollbackButton.addEventListener('click', () => rollback(app.slug));
         actions.appendChild(rollbackButton);
 
         const logsButton = document.createElement('button');
         logsButton.type = 'button';
         logsButton.textContent = 'Logs';
+        logsButton.setAttribute('aria-label', `View logs for ${app.name}`);
         logsButton.addEventListener('click', () => openLogs(app.slug));
         actions.appendChild(logsButton);
 
         const accessButton = document.createElement('button');
         accessButton.className = 'btn btn-access';
         accessButton.textContent = 'Access';
+        accessButton.setAttribute('aria-label', `Manage access for ${app.name}`);
         accessButton.addEventListener('click', () => openAccessModal(app));
         actions.appendChild(accessButton);
       }

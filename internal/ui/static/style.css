@@ -36,8 +36,8 @@
   --gray-bg:     rgba(120,110,100,0.08);
   --radius:      6px;
   --radius-lg:   10px;
-  --font:        'Syne', system-ui, sans-serif;
-  --mono:        'JetBrains Mono', monospace;
+  --font:        'Syne', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono:        'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
   --ease:        150ms ease;
 }
 
@@ -666,4 +666,20 @@ main { padding: 2rem 1.75rem; max-width: 1140px; margin: 0 auto; }
   background: rgba(245,158,11,0.15) !important;
   border-color: var(--accent) !important;
   color: var(--accent) !important;
+}
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  .toolbar {
+    flex-wrap: wrap;
+    gap: var(--space-xs, 0.5rem);
+  }
+
+  .app-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .app-actions {
+    flex-wrap: wrap;
+  }
 }
