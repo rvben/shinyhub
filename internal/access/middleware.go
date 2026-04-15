@@ -52,7 +52,7 @@ func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
 				return
 			}
 
-			if user.Role == "admin" {
+			if user.Role == "admin" || user.Role == "operator" {
 				next.ServeHTTP(w, r)
 				return
 			}

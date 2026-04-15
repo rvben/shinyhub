@@ -151,3 +151,27 @@ func TestAccess_PrivateApp_NonMember_Forbidden(t *testing.T) {
 		t.Errorf("non-member: expected 403, got %d", rec.Code)
 	}
 }
+
+func TestAccess_PrivateApp_OperatorBypasses(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "ops", PasswordHash: "h", Role: "operator"})
+	owner, _ := store.GetUserByUsername("owner")
+	ops, _ := store.GetUserByUsername("ops")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+	// ops is NOT granted access — bypass must come from role alone
+
+	token, _ := auth.IssueJWT(ops.ID, "ops", "operator", "test-secret")
+
+	mw := access.Middleware(store, "test-secret")
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/priv/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("operator bypass: expected 200, got %d", rec.Code)
+	}
+}
