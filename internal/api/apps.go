@@ -15,6 +15,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 // slugRE enforces a safe, DNS-compatible slug format.
@@ -478,6 +479,45 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type metricsResponse struct {
+	Status     string  `json:"status"`
+	PID        int     `json:"pid,omitempty"`
+	CPUPercent float64 `json:"cpu_percent,omitempty"`
+	RSSBytes   int64   `json:"rss_bytes,omitempty"`
+}
+
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+	slug := chi.URLParam(r, "slug")
+	if _, _, ok := s.requireViewApp(w, r, slug); !ok {
+		return
+	}
+
+	if s.manager == nil {
+		writeJSON(w, http.StatusOK, metricsResponse{Status: "unknown"})
+		return
+	}
+
+	info, ok := s.manager.Get(slug)
+	if !ok {
+		writeJSON(w, http.StatusOK, metricsResponse{Status: "unknown"})
+		return
+	}
+	if info.Status != process.StatusRunning {
+		writeJSON(w, http.StatusOK, metricsResponse{Status: string(info.Status)})
+		return
+	}
+
+	stats, err := s.sampler.Sample(info.PID)
+	if err != nil {
+		// Process may have exited between status check and sample.
+		writeJSON(w, http.StatusOK, metricsResponse{Status: "stopped"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, metricsResponse{
+		Status:     string(info.Status),
+		PID:        info.PID,
+		CPUPercent: stats.CPUPercent,
+		RSSBytes:   stats.RSSBytes,
+	})
 }
