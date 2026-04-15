@@ -196,6 +196,18 @@ func (m *Manager) All() []*ProcessInfo {
 	return out
 }
 
+// Get returns a snapshot of the ProcessInfo for slug, or false if not tracked.
+func (m *Manager) Get(slug string) (*ProcessInfo, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[slug]
+	if !ok {
+		return nil, false
+	}
+	snapshot := *e.info
+	return &snapshot, true
+}
+
 // LogReader returns a LogReader for the app's log file. Returns false if no
 // log file exists yet (app has never been started).
 func (m *Manager) LogReader(slug string) (*LogReader, bool) {

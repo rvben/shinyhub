@@ -20,13 +20,14 @@ type Server struct {
 	manager *process.Manager
 	proxy   *proxy.Proxy
 	github  *oauth.GitHub // nil when GitHub OAuth is not configured
+	sampler process.Sampler
 	router  http.Handler
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil
 // when running in test contexts that exercise only auth/data handlers.
 func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *proxy.Proxy) *Server {
-	s := &Server{cfg: cfg, store: store, manager: manager, proxy: prx}
+	s := &Server{cfg: cfg, store: store, manager: manager, proxy: prx, sampler: &process.GopsutilSampler{}}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
 			cfg.OAuth.GitHub.ClientID,
@@ -40,6 +41,9 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 
 // Router returns the fully-configured http.Handler.
 func (s *Server) Router() http.Handler { return s.router }
+
+// SetSampler replaces the metrics sampler. Used in tests.
+func (s *Server) SetSampler(sampler process.Sampler) { s.sampler = sampler }
 
 // keyLookup satisfies auth.APIKeyLookup by delegating to the DB.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
@@ -76,6 +80,7 @@ func (s *Server) buildRouter() http.Handler {
 		r.Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		r.Post("/api/apps/{slug}/restart", s.handleRestartApp)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
+		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)
 		r.Post("/api/apps/{slug}/members", s.handleGrantAppAccess)
 		r.Delete("/api/apps/{slug}/members", s.handleRevokeAppAccess)
