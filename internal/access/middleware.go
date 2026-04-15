@@ -16,7 +16,7 @@ type store interface {
 
 // Middleware returns an HTTP middleware that enforces per-app access control.
 // Public apps pass through unconditionally. Private and shared apps require
-// a valid JWT from the Authorization header or shiny_session cookie, and the
+// a valid JWT from the Authorization header or session cookie, and the
 // authenticated user must be the owner or an explicit member.
 func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -73,7 +73,7 @@ func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
 }
 
 // extractUser tries to parse a valid JWT from the Authorization header or the
-// shiny_session cookie. Returns nil if no valid token is found.
+// session cookie. Returns nil if no valid token is found.
 func extractUser(r *http.Request, secret string) *auth.ContextUser {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		token := strings.TrimPrefix(h, "Bearer ")
@@ -82,7 +82,7 @@ func extractUser(r *http.Request, secret string) *auth.ContextUser {
 		}
 	}
 
-	if c, err := r.Cookie("shiny_session"); err == nil {
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
 		if u, err := auth.ParseJWT(c.Value, secret); err == nil {
 			return u
 		}
