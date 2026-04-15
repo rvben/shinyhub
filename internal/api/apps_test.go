@@ -419,3 +419,28 @@ func TestGetUser_Unauthenticated(t *testing.T) {
 		t.Errorf("expected 401, got %d", rec.Code)
 	}
 }
+
+func TestCreateApp_DuplicateSlug(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "bob", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"slug": "my-app", "name": "My App"})
+
+	// First create: success
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Second create: conflict
+	req = authedRequest(t, "POST", "/api/apps", body, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

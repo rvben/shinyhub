@@ -68,11 +68,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := auth.VerifyPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-
 	token, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")

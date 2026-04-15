@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -67,6 +68,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "slug must match ^[a-z0-9][a-z0-9-]{0,62}$")
 		return
 	}
+	if len(req.Name) > 128 {
+		writeError(w, http.StatusBadRequest, "name must be 128 characters or fewer")
+		return
+	}
 
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
@@ -84,6 +89,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		ProjectSlug: req.ProjectSlug,
 		OwnerID:     u.ID,
 	}); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			writeError(w, http.StatusConflict, "slug already taken")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -106,33 +115,44 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
-// patchAppRequest holds the updatable fields for an app.
-// HibernateTimeoutMinutes uses *int so that both a missing field and an
-// explicit JSON null are treated identically: store SQL NULL, which means
-// "inherit the global hibernate_timeout config".
-type patchAppRequest struct {
-	HibernateTimeoutMinutes *int `json:"hibernate_timeout_minutes"`
-}
-
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	if _, ok := s.requireManageApp(w, r, slug); !ok {
 		return
 	}
 
-	var req patchAppRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
 
-	if err := s.store.UpdateHibernateTimeout(slug, req.HibernateTimeoutMinutes); err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not found")
+	var raw map[string]json.RawMessage
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &raw); err != nil {
+			writeError(w, http.StatusBadRequest, "bad request")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+	}
+
+	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
+		var timeout *int
+		if err := json.Unmarshal(rawVal, &timeout); err != nil {
+			writeError(w, http.StatusBadRequest, "hibernate_timeout_minutes must be an integer or null")
+			return
+		}
+		if timeout != nil && *timeout < 0 {
+			writeError(w, http.StatusBadRequest, "hibernate_timeout_minutes must be >= 0")
+			return
+		}
+		if err := s.store.UpdateHibernateTimeout(slug, timeout); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
 	}
 
 	app, err := s.store.GetAppBySlug(slug)
@@ -473,6 +493,10 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.RevokeAppAccess(slug, req.UserID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "member not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -534,18 +558,19 @@ type metricsResponse struct {
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, _, ok := s.requireViewApp(w, r, slug); !ok {
+	app, _, ok := s.requireViewApp(w, r, slug)
+	if !ok {
 		return
 	}
 
 	if s.manager == nil {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusUnknown)})
+		writeJSON(w, http.StatusOK, metricsResponse{Status: app.Status})
 		return
 	}
 
 	info, ok := s.manager.Get(slug)
 	if !ok {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusUnknown)})
+		writeJSON(w, http.StatusOK, metricsResponse{Status: app.Status})
 		return
 	}
 	if info.Status != process.StatusRunning {

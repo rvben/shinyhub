@@ -39,14 +39,15 @@ func TestGetMetrics_Running(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
-	// Without a manager entry, we expect {"status":"unknown"} with 200.
+	// Without a manager entry, the DB status is returned ("stopped" for a
+	// newly created, never-deployed app).
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["status"] != "unknown" {
-		t.Errorf("expected status=unknown, got %v", resp["status"])
+	if resp["status"] != "stopped" {
+		t.Errorf("expected status=stopped, got %v", resp["status"])
 	}
 }
 

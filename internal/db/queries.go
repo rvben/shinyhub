@@ -106,7 +106,7 @@ type App struct {
 	ID                      int64     `json:"id"`
 	Slug                    string    `json:"slug"`
 	Name                    string    `json:"name"`
-	ProjectSlug             string    `json:"project_slug"`
+	ProjectSlug             string    `json:"project_slug,omitempty"`
 	OwnerID                 int64     `json:"owner_id"`
 	Access                  string    `json:"access"`
 	Status                  string    `json:"status"`
@@ -126,6 +126,16 @@ type CreateAppParams struct {
 }
 
 func (s *Store) CreateApp(p CreateAppParams) error {
+	if p.ProjectSlug == "" {
+		_, err := s.db.Exec(
+			`INSERT INTO apps (slug, name, owner_id) VALUES (?, ?, ?)`,
+			p.Slug, p.Name, p.OwnerID,
+		)
+		if err != nil {
+			return fmt.Errorf("create app: %w", err)
+		}
+		return nil
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO apps (slug, name, project_slug, owner_id) VALUES (?, ?, ?, ?)`,
 		p.Slug, p.Name, p.ProjectSlug, p.OwnerID,
@@ -318,10 +328,17 @@ func (s *Store) GrantAppAccess(slug string, userID int64) error {
 }
 
 func (s *Store) RevokeAppAccess(slug string, userID int64) error {
-	_, err := s.db.Exec(
+	result, err := s.db.Exec(
 		`DELETE FROM app_members WHERE app_slug = ? AND user_id = ?`, slug, userID)
 	if err != nil {
 		return fmt.Errorf("revoke app access: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revoke app access rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
