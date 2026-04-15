@@ -335,6 +335,9 @@ func TestGetMembers_WithMembers(t *testing.T) {
 	if members[0]["role"] != "viewer" {
 		t.Errorf("role = %v, want viewer", members[0]["role"])
 	}
+	if members[0]["user_id"] != float64(alice.ID) {
+		t.Errorf("user_id = %v, want %v", members[0]["user_id"], alice.ID)
+	}
 }
 
 func TestGetMembers_Forbidden(t *testing.T) {
