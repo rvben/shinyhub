@@ -27,6 +27,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy) {
 		}
 		pid := *app.CurrentPID
 		port := *app.CurrentPort
+		// POSIX-only: Windows is not a supported target.
 		if err := syscall.Kill(pid, 0); err != nil {
 			// Process is gone.
 			markRecoveryStopped(store, app.Slug)
@@ -41,7 +42,9 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy) {
 		})
 		targetURL := fmt.Sprintf("http://localhost:%d", port)
 		if err := prx.Register(app.Slug, targetURL); err != nil {
-			log.Printf("process recovery: register proxy for %s: %v", app.Slug, err)
+			log.Printf("process recovery: register proxy for %s: %v — marking stopped", app.Slug, err)
+			markRecoveryStopped(store, app.Slug)
+			continue
 		}
 		log.Printf("process recovery: re-adopted %s (pid=%d, port=%d)", app.Slug, pid, port)
 	}

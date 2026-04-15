@@ -209,9 +209,11 @@ func (m *Manager) Get(slug string) (*ProcessInfo, bool) {
 	return &snapshot, true
 }
 
-// ForceEntry directly inserts a ProcessInfo into the manager's entry table.
-// Intended for tests that need to verify handler behavior without starting
-// a real process. Not safe to call concurrently with Start or Stop.
+// ForceEntry directly inserts a ProcessInfo into the manager's entry table
+// for processes whose lifecycle the manager did not originate. Used during
+// process recovery on startup to re-adopt surviving processes, and in tests
+// to inject state without starting a real process. Not safe to call
+// concurrently with Start or Stop.
 func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
