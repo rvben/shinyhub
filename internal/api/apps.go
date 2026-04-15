@@ -510,7 +510,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.sampler.Sample(info.PID)
 	if err != nil {
 		// Process may have exited between status check and sample.
-		writeJSON(w, http.StatusOK, metricsResponse{Status: "stopped"})
+		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusStopped)})
 		return
 	}
 
