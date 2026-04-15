@@ -72,6 +72,31 @@ func TestPruneOldVersions_SkipsActiveDir(t *testing.T) {
 	if _, err := os.Stat(active); err != nil {
 		t.Errorf("active dir should not have been deleted")
 	}
+
+	// The active bundle zip should also survive.
+	activeBundlePath := filepath.Join(bundlesDir, "001.zip")
+	if _, err := os.Stat(activeBundlePath); err != nil {
+		t.Errorf("active bundle zip should not have been deleted: %v", err)
+	}
+
+	// With keep=5 and 6 entries, 1 must be deleted. Since "001" is skipped,
+	// "002" is deleted instead. Remaining: "001", "003"–"006" = 5 version dirs.
+	versionEntries, _ := os.ReadDir(versionsDir)
+	if len(versionEntries) != 5 {
+		t.Errorf("expected 5 version dirs after pruning, got %d", len(versionEntries))
+	}
+	if _, err := os.Stat(filepath.Join(versionsDir, "002")); !os.IsNotExist(err) {
+		t.Errorf("expected version 002 to be deleted")
+	}
+
+	// Bundles: same logic — "001.zip" skipped, "002.zip" deleted, 5 remain.
+	bundleEntries, _ := os.ReadDir(bundlesDir)
+	if len(bundleEntries) != 5 {
+		t.Errorf("expected 5 bundle zips after pruning, got %d", len(bundleEntries))
+	}
+	if _, err := os.Stat(filepath.Join(bundlesDir, "002.zip")); !os.IsNotExist(err) {
+		t.Errorf("expected bundle 002.zip to be deleted")
+	}
 }
 
 func TestPruneOldVersions_NothingToDelete(t *testing.T) {

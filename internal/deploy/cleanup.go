@@ -3,7 +3,6 @@ package deploy
 import (
 	"os"
 	"path/filepath"
-	"sort"
 )
 
 // PruneOldVersions removes extracted version directories and bundle ZIPs beyond
@@ -17,10 +16,13 @@ func PruneOldVersions(appsDir, slug string, keep int, activeDir string) error {
 	versionsDir := filepath.Join(appsDir, slug, "versions")
 	bundlesDir := filepath.Join(appsDir, slug, "bundles")
 
+	activeBundleName := filepath.Base(activeDir) + ".zip"
+	activeBundlePath := filepath.Join(bundlesDir, activeBundleName)
+
 	if err := pruneDir(versionsDir, keep, activeDir, false); err != nil {
 		return err
 	}
-	return pruneDir(bundlesDir, keep, "", true)
+	return pruneDir(bundlesDir, keep, activeBundlePath, true)
 }
 
 // pruneDir removes old entries in dir, keeping the newest `keep` entries.
@@ -50,19 +52,24 @@ func pruneDir(dir string, keep int, skipPath string, isFiles bool) error {
 		}
 		all = append(all, candidate{e.Name(), filepath.Join(dir, e.Name())})
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].name < all[j].name })
 
 	toDelete := len(all) - keep
-	for i := 0; i < toDelete && i < len(all); i++ {
+	deleted := 0
+	for i := 0; deleted < toDelete && i < len(all); i++ {
 		c := all[i]
 		if c.path == skipPath {
 			continue
 		}
 		if isFiles {
-			os.Remove(c.path)
+			if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		} else {
-			os.RemoveAll(c.path)
+			if err := os.RemoveAll(c.path); err != nil {
+				return err
+			}
 		}
+		deleted++
 	}
 	return nil
 }
