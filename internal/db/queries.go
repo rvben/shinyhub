@@ -301,6 +301,13 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 
 // --- App Members ---
 
+// AppMember represents a user explicitly granted access to an app.
+type AppMember struct {
+	UserID   int64
+	Username string
+	Role     string
+}
+
 func (s *Store) GrantAppAccess(slug string, userID int64) error {
 	_, err := s.db.Exec(
 		`INSERT OR IGNORE INTO app_members (app_slug, user_id) VALUES (?, ?)`, slug, userID)
@@ -319,22 +326,28 @@ func (s *Store) RevokeAppAccess(slug string, userID int64) error {
 	return nil
 }
 
-// GetAppMembers returns the IDs of all users explicitly granted access to slug.
-func (s *Store) GetAppMembers(slug string) ([]int64, error) {
-	rows, err := s.db.Query(`SELECT user_id FROM app_members WHERE app_slug = ?`, slug)
+// GetAppMembers returns all users explicitly granted access to slug,
+// including their username and role.
+func (s *Store) GetAppMembers(slug string) ([]AppMember, error) {
+	rows, err := s.db.Query(`
+		SELECT am.user_id, u.username, am.role
+		FROM app_members am
+		JOIN users u ON u.id = am.user_id
+		WHERE am.app_slug = ?
+		ORDER BY u.username`, slug)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []int64
+	var members []AppMember
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var m AppMember
+		if err := rows.Scan(&m.UserID, &m.Username, &m.Role); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		members = append(members, m)
 	}
-	return ids, rows.Err()
+	return members, rows.Err()
 }
 
 // UserCanAccessApp returns true if userID is the app's owner or has been

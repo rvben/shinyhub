@@ -21,6 +21,9 @@ var migration003SQL string
 //go:embed migrations/004_oauth_accounts.sql
 var migration004SQL string
 
+//go:embed migrations/005_app_members_role.sql
+var migration005SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -53,6 +56,11 @@ func (s *Store) Migrate() error {
 	}
 	if _, err := s.db.Exec(migration004SQL); err != nil {
 		return fmt.Errorf("migrate 004: %w", err)
+	}
+	if _, err := s.db.Exec(migration005SQL); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migrate 005: %w", err)
+		}
 	}
 	return nil
 }

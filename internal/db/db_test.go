@@ -243,6 +243,44 @@ func TestOAuthAccount_CreateAndLookup(t *testing.T) {
 	}
 }
 
+func TestGetAppMembers_ReturnsUsernameAndRole(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create owner and member users.
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "", Role: "viewer"})
+	owner, _ := store.GetUserByUsername("owner")
+	alice, _ := store.GetUserByUsername("alice")
+
+	// Create app and grant alice access.
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	store.GrantAppAccess("myapp", alice.ID)
+
+	members, err := store.GetAppMembers("myapp")
+	if err != nil {
+		t.Fatalf("GetAppMembers: %v", err)
+	}
+	if len(members) != 1 {
+		t.Fatalf("expected 1 member, got %d", len(members))
+	}
+	if members[0].UserID != alice.ID {
+		t.Errorf("UserID = %d, want %d", members[0].UserID, alice.ID)
+	}
+	if members[0].Username != "alice" {
+		t.Errorf("Username = %q, want %q", members[0].Username, "alice")
+	}
+	if members[0].Role != "viewer" {
+		t.Errorf("Role = %q, want %q", members[0].Role, "viewer")
+	}
+}
+
 func TestOAuthState_ConsumeOnce(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {
