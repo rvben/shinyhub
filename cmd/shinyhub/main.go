@@ -97,6 +97,9 @@ func main() {
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
+	// Re-adopt any processes that survived a server restart.
+	lifecycle.RecoverProcesses(store, mgr, prx)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go watcher.Start(ctx)

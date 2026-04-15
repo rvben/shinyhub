@@ -303,3 +303,37 @@ func TestOAuthState_ConsumeOnce(t *testing.T) {
 		t.Error("expected error on second ConsumeOAuthState, got nil")
 	}
 }
+
+func TestListRunningApps(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"})
+	u, _ := store.GetUserByUsername("u")
+	store.CreateApp(db.CreateAppParams{Slug: "app1", Name: "App 1", OwnerID: u.ID})
+	store.CreateApp(db.CreateAppParams{Slug: "app2", Name: "App 2", OwnerID: u.ID})
+
+	port, pid := 20001, 12345
+	store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "app1", Status: "running", Port: &port, PID: &pid})
+	// app2 remains "stopped"
+
+	apps, err := store.ListRunningApps()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("expected 1 running app, got %d", len(apps))
+	}
+	if apps[0].Slug != "app1" {
+		t.Errorf("expected app1, got %s", apps[0].Slug)
+	}
+	if apps[0].CurrentPID == nil || *apps[0].CurrentPID != 12345 {
+		t.Errorf("expected PID 12345, got %v", apps[0].CurrentPID)
+	}
+}

@@ -298,6 +298,29 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListRunningApps returns all apps whose status is 'running'. Used on startup
+// to re-adopt processes that survived a server restart.
+func (s *Store) ListRunningApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT id, slug, name, project_slug, owner_id, access, status,
+		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       created_at, updated_at
+		FROM apps WHERE status = 'running'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, error) {
 	if limit <= 0 {
 		limit = -1 // SQLite treats -1 as no limit
