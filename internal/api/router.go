@@ -104,7 +104,11 @@ func (s *Server) buildRouter() http.Handler {
 		r.Post("/api/tokens", s.handleCreateToken)
 		r.Get("/api/tokens", s.handleListTokens)
 		r.Delete("/api/tokens/{id}", s.handleDeleteToken)
-		r.Get("/api/users", s.handleGetUser)
+		r.Get("/api/users", s.handleListUsers)           // admin: list all users
+		r.Post("/api/users", s.handleCreateUser)          // admin: create user
+		r.Get("/api/users/{username}", s.handleGetUser)   // any auth: lookup by username
+		r.Patch("/api/users/{id}", s.handlePatchUser)     // admin: update role
+		r.Delete("/api/users/{id}", s.handleDeleteUser)   // admin: delete user
 	})
 
 	return r

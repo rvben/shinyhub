@@ -379,7 +379,7 @@ func TestGetUser_Found(t *testing.T) {
 	alice, _ := store.GetUserByUsername("alice")
 
 	token, _ := auth.IssueJWT(alice.ID, "alice", "developer", "test-secret")
-	req := authedRequest(t, "GET", "/api/users?username=alice", nil, token)
+	req := authedRequest(t, "GET", "/api/users/alice", nil, token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
@@ -400,7 +400,7 @@ func TestGetUser_NotFound(t *testing.T) {
 	alice, _ := store.GetUserByUsername("alice")
 
 	token, _ := auth.IssueJWT(alice.ID, "alice", "developer", "test-secret")
-	req := authedRequest(t, "GET", "/api/users?username=nobody", nil, token)
+	req := authedRequest(t, "GET", "/api/users/nobody", nil, token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
@@ -411,7 +411,7 @@ func TestGetUser_NotFound(t *testing.T) {
 
 func TestGetUser_Unauthenticated(t *testing.T) {
 	srv, _ := newTestServer(t)
-	req := httptest.NewRequest("GET", "/api/users?username=alice", nil)
+	req := httptest.NewRequest("GET", "/api/users/alice", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 

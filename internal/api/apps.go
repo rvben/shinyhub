@@ -595,9 +595,9 @@ type userLookupResponse struct {
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
-	username := r.URL.Query().Get("username")
+	username := chi.URLParam(r, "username")
 	if username == "" {
-		writeError(w, http.StatusBadRequest, "username query param required")
+		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
 	user, err := s.store.GetUserByUsername(username)

@@ -385,7 +385,7 @@ document.addEventListener('DOMContentLoaded', () => {
     grantBtn.textContent = 'Granting…';
     try {
       // Resolve username → user_id.
-      const lookupResp = await api(`/api/users?username=${encodeURIComponent(username)}`);
+      const lookupResp = await api(`/api/users/${encodeURIComponent(username)}`);
       if (!lookupResp.ok) {
         errEl.textContent = lookupResp.status === 404 ? 'User not found' : 'Lookup failed';
         errEl.hidden = false;

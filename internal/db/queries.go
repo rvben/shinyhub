@@ -66,6 +66,63 @@ func (s *Store) GetUserByID(id int64) (*User, error) {
 	return &u, nil
 }
 
+// ListUsers returns all users ordered by username.
+func (s *Store) ListUsers() ([]*User, error) {
+	rows, err := s.db.Query(
+		`SELECT id, username, password_hash, role, created_at FROM users ORDER BY username`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []*User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, &u)
+	}
+	if users == nil {
+		users = []*User{}
+	}
+	return users, rows.Err()
+}
+
+// UpdateUserRole changes the role of a user identified by ID.
+// Returns ErrNotFound if no user with that ID exists.
+func (s *Store) UpdateUserRole(id int64, role string) error {
+	result, err := s.db.Exec(`UPDATE users SET role = ? WHERE id = ?`, role, id)
+	if err != nil {
+		return fmt.Errorf("update user role: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update user role rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteUser permanently removes a user and all their associated data
+// (FK cascades handle oauth_accounts and api_keys).
+// Returns ErrNotFound if no user with that ID exists.
+func (s *Store) DeleteUser(id int64) error {
+	result, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete user rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- API Keys ---
 
 type CreateAPIKeyParams struct {
