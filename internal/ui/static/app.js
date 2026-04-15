@@ -110,6 +110,12 @@ document.addEventListener('DOMContentLoaded', () => {
         logsButton.textContent = 'Logs';
         logsButton.addEventListener('click', () => openLogs(app.slug));
         actions.appendChild(logsButton);
+
+        const accessButton = document.createElement('button');
+        accessButton.className = 'btn btn-access';
+        accessButton.textContent = 'Access';
+        accessButton.addEventListener('click', () => openAccessModal(app));
+        actions.appendChild(accessButton);
       }
 
       const metricsLine = document.createElement('div');
@@ -256,7 +262,118 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(logPane, true);
   }
 
+  // --- Access modal ---
+
+  let accessSlug = null;
+
+  async function openAccessModal(app) {
+    accessSlug = app.slug;
+    document.getElementById('access-app-name').textContent = app.name;
+
+    // Set visibility radio to current access level.
+    const radios = document.querySelectorAll('input[name="access-level"]');
+    radios.forEach(r => { r.checked = r.value === app.access; });
+
+    // Clear previous state.
+    document.getElementById('members-list').innerHTML = '';
+    document.getElementById('grant-username').value = '';
+    document.getElementById('grant-error').hidden = true;
+
+    document.getElementById('access-modal').hidden = false;
+
+    await refreshMemberList();
+  }
+
+  function closeAccessModal() {
+    document.getElementById('access-modal').hidden = true;
+    accessSlug = null;
+  }
+
+  async function refreshMemberList() {
+    if (!accessSlug) return;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${accessSlug}/members`);
+    } catch { return; }
+    if (!resp.ok) return;
+    const members = await resp.json();
+    const list = document.getElementById('members-list');
+    list.innerHTML = '';
+    for (const m of members) {
+      const li = document.createElement('li');
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'member-name';
+      nameSpan.textContent = m.username;
+      const roleSpan = document.createElement('span');
+      roleSpan.className = 'member-role';
+      roleSpan.textContent = m.role;
+      const revokeBtn = document.createElement('button');
+      revokeBtn.textContent = 'Revoke';
+      revokeBtn.addEventListener('click', async () => {
+        const r = await api(`/api/apps/${accessSlug}/members`, {
+          method: 'DELETE',
+          body: JSON.stringify({ user_id: m.user_id }),
+        });
+        if (r.ok) li.remove();
+      });
+      li.appendChild(nameSpan);
+      li.appendChild(roleSpan);
+      li.appendChild(revokeBtn);
+      list.appendChild(li);
+    }
+  }
+
   logPaneClose.addEventListener('click', closeLogs);
+
+  // Close modal on × or overlay click.
+  document.getElementById('access-modal-close').addEventListener('click', closeAccessModal);
+  document.getElementById('access-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeAccessModal();
+  });
+
+  // Visibility radio change → PATCH access level.
+  document.querySelectorAll('input[name="access-level"]').forEach(radio => {
+    radio.addEventListener('change', async () => {
+      if (!accessSlug) return;
+      await api(`/api/apps/${accessSlug}/access`, {
+        method: 'PATCH',
+        body: JSON.stringify({ access: radio.value }),
+      });
+      // Update local state so card reflects the new level.
+      const app = state.apps.find(a => a.slug === accessSlug);
+      if (app) app.access = radio.value;
+    });
+  });
+
+  // Grant button.
+  document.getElementById('grant-btn').addEventListener('click', async () => {
+    const username = document.getElementById('grant-username').value.trim();
+    const errEl = document.getElementById('grant-error');
+    errEl.hidden = true;
+    if (!username) return;
+
+    // Resolve username → user_id.
+    const lookupResp = await api(`/api/users?username=${encodeURIComponent(username)}`);
+    if (!lookupResp.ok) {
+      errEl.textContent = lookupResp.status === 404 ? 'User not found' : 'Lookup failed';
+      errEl.hidden = false;
+      return;
+    }
+    const user = await lookupResp.json();
+
+    // Grant access.
+    const grantResp = await api(`/api/apps/${accessSlug}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ user_id: user.id }),
+    });
+    if (!grantResp.ok) {
+      errEl.textContent = 'Grant failed';
+      errEl.hidden = false;
+      return;
+    }
+    document.getElementById('grant-username').value = '';
+    await refreshMemberList();
+  });
 
   loginForm.addEventListener('submit', async (event) => {
     event.preventDefault();

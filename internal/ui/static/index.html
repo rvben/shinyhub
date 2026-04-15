@@ -48,6 +48,35 @@
     </div>
     <pre id="log-pane-body" class="log-pane-body"></pre>
   </div>
+    <!-- Access control modal -->
+    <div id="access-modal" class="modal-overlay" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <span class="modal-title">Access: <span id="access-app-name"></span></span>
+          <button id="access-modal-close" type="button" aria-label="Close access modal">×</button>
+        </div>
+        <div class="modal-body">
+          <fieldset class="access-level">
+            <legend>Visibility</legend>
+            <label><input type="radio" name="access-level" value="private"> Private</label>
+            <label><input type="radio" name="access-level" value="shared"> Shared</label>
+            <label><input type="radio" name="access-level" value="public"> Public</label>
+          </fieldset>
+          <section class="members-section">
+            <h4>Members</h4>
+            <ul id="members-list"></ul>
+          </section>
+          <section class="grant-section">
+            <h4>Grant access</h4>
+            <div class="grant-row">
+              <input id="grant-username" type="text" placeholder="username" autocomplete="off">
+              <button id="grant-btn" type="button">Grant</button>
+            </div>
+            <p id="grant-error" class="error" hidden></p>
+          </section>
+        </div>
+      </div>
+    </div>
   </main>
 </body>
 </html>
