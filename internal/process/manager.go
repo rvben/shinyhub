@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -35,18 +36,25 @@ type StartParams struct {
 type entry struct {
 	info *ProcessInfo
 	cmd  *exec.Cmd
-	done chan struct{} // closed when the process exits
+	done chan struct{}
 }
 
 // Manager tracks running app processes by slug.
 type Manager struct {
-	mu      sync.Mutex
-	entries map[string]*entry
+	mu       sync.Mutex
+	entries  map[string]*entry
+	logFiles map[string]*LogFile
+	appsDir  string
 }
 
-// NewManager returns an initialized Manager.
-func NewManager() *Manager {
-	return &Manager{entries: make(map[string]*entry)}
+// NewManager returns an initialized Manager. appsDir is the root directory
+// where per-app log files are stored as <appsDir>/<slug>/app.log.
+func NewManager(appsDir string) *Manager {
+	return &Manager{
+		entries:  make(map[string]*entry),
+		logFiles: make(map[string]*LogFile),
+		appsDir:  appsDir,
+	}
 }
 
 // Start spawns a new process for the given slug. Returns an error if the slug
@@ -63,14 +71,31 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		return nil, fmt.Errorf("app %s is already running", p.Slug)
 	}
 
+	// Close any existing write handle before opening a fresh one.
+	if existing, ok := m.logFiles[p.Slug]; ok {
+		existing.Close()
+		delete(m.logFiles, p.Slug)
+	}
+
+	logPath := filepath.Join(m.appsDir, p.Slug, "app.log")
+	lf, err := OpenLogFile(logPath, DefaultLogMaxSize)
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+	m.logFiles[p.Slug] = lf
+
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
 	cmd.Env = append(os.Environ(), p.Env...)
+	cmd.Stdout = lf
+	cmd.Stderr = lf
 	// Place the child in its own process group so SIGTERM can be sent to the
 	// entire group, avoiding orphaned sub-processes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
+		lf.Close()
+		delete(m.logFiles, p.Slug)
 		return nil, fmt.Errorf("start process: %w", err)
 	}
 
@@ -90,6 +115,10 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		m.mu.Lock()
 		if e, ok := m.entries[p.Slug]; ok && e.cmd == cmd {
 			e.info.Status = StatusCrashed
+		}
+		if lf, ok := m.logFiles[p.Slug]; ok {
+			lf.Close()
+			delete(m.logFiles, p.Slug)
 		}
 		m.mu.Unlock()
 		close(done)
@@ -115,17 +144,15 @@ func (m *Manager) Stop(slug string) error {
 	}
 	done := e.done
 	pid := e.cmd.Process.Pid
-	m.mu.Unlock() // release lock before blocking ops
+	m.mu.Unlock()
 
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		return fmt.Errorf("sigterm: %w", err)
 	}
 
-	// Wait for the process to exit (reaper goroutine closes done).
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		// SIGKILL the process group if it didn't exit gracefully.
 		syscall.Kill(-pid, syscall.SIGKILL) //nolint:errcheck
 		<-done
 	}
@@ -161,4 +188,14 @@ func (m *Manager) All() []*ProcessInfo {
 		out = append(out, &snapshot)
 	}
 	return out
+}
+
+// LogReader returns a LogReader for the app's log file. Returns false if no
+// log file exists yet (app has never been started).
+func (m *Manager) LogReader(slug string) (*LogReader, bool) {
+	path := filepath.Join(m.appsDir, slug, "app.log")
+	if _, err := os.Stat(path); err != nil {
+		return nil, false
+	}
+	return NewLogReader(path), true
 }
