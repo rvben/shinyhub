@@ -32,6 +32,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const sessionUser = document.getElementById('session-user');
   const appGrid = document.getElementById('app-grid');
   const emptyState = document.getElementById('empty-state');
+  const logPane = document.getElementById('log-pane');
+  const logPaneTitle = document.getElementById('log-pane-title');
+  const logPaneBody = document.getElementById('log-pane-body');
+  const logPaneClose = document.getElementById('log-pane-close');
+
+  let activeEventSource = null;
 
   localStorage.removeItem('shinyhub_token');
 
@@ -98,6 +104,12 @@ document.addEventListener('DOMContentLoaded', () => {
         rollbackButton.textContent = 'Rollback';
         rollbackButton.addEventListener('click', () => rollback(app.slug));
         actions.appendChild(rollbackButton);
+
+        const logsButton = document.createElement('button');
+        logsButton.type = 'button';
+        logsButton.textContent = 'Logs';
+        logsButton.addEventListener('click', () => openLogs(app.slug));
+        actions.appendChild(logsButton);
       }
 
       card.appendChild(header);
@@ -201,6 +213,40 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.setTimeout(loadApps, 1000);
   }
+
+  function openLogs(slug) {
+    closeLogs();
+    logPaneTitle.textContent = `Logs — ${slug}`;
+    logPaneBody.textContent = '';
+    setHidden(logPane, false);
+
+    const es = new EventSource(`/api/apps/${slug}/logs`, {withCredentials: true});
+    activeEventSource = es;
+
+    es.onmessage = (event) => {
+      const atBottom =
+        logPaneBody.scrollHeight - logPaneBody.scrollTop <= logPaneBody.clientHeight + 4;
+      logPaneBody.textContent += event.data + '\n';
+      if (atBottom) {
+        logPaneBody.scrollTop = logPaneBody.scrollHeight;
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      activeEventSource = null;
+    };
+  }
+
+  function closeLogs() {
+    if (activeEventSource) {
+      activeEventSource.close();
+      activeEventSource = null;
+    }
+    setHidden(logPane, true);
+  }
+
+  logPaneClose.addEventListener('click', closeLogs);
 
   loginForm.addEventListener('submit', async (event) => {
     event.preventDefault();

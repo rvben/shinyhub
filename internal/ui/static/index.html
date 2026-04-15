@@ -38,6 +38,15 @@
       <div id="app-grid" class="app-grid"></div>
       <p id="empty-state" class="empty-state" hidden>No apps deployed yet.</p>
     </section>
+
+  <!-- Log pane: hidden overlay that shows SSE log output for one app -->
+  <div id="log-pane" class="log-pane" hidden>
+    <div class="log-pane-header">
+      <span id="log-pane-title" class="log-pane-title"></span>
+      <button id="log-pane-close" type="button">Close</button>
+    </div>
+    <pre id="log-pane-body" class="log-pane-body"></pre>
+  </div>
   </main>
 </body>
 </html>
