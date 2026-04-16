@@ -82,6 +82,12 @@ func mustOpenDB(t *testing.T) *db.Store {
 	return store
 }
 
+// openTestStore is an alias for mustOpenDB used in resource-limit tests.
+func openTestStore(t *testing.T) *db.Store {
+	t.Helper()
+	return mustOpenDB(t)
+}
+
 func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {
@@ -404,6 +410,61 @@ func TestAuditLog(t *testing.T) {
 	}
 	if events[1].ResourceID != "myapp" {
 		t.Errorf("expected myapp, got %s", events[1].ResourceID)
+	}
+}
+
+func TestUpdateResourceLimits(t *testing.T) {
+	store := openTestStore(t)
+
+	err := store.CreateUser(db.CreateUserParams{
+		Username: "owner", PasswordHash: "x", Role: "developer",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	user, _ := store.GetUserByUsername("owner")
+
+	err = store.CreateApp(db.CreateAppParams{
+		Slug: "test-app", Name: "Test", OwnerID: user.ID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	memMB := 512
+	cpuPct := 75
+	err = store.UpdateResourceLimits(db.UpdateResourceLimitsParams{
+		Slug:            "test-app",
+		MemoryLimitMB:   &memMB,
+		CPUQuotaPercent: &cpuPct,
+	})
+	if err != nil {
+		t.Fatalf("UpdateResourceLimits: %v", err)
+	}
+
+	app, err := store.GetApp("test-app")
+	if err != nil {
+		t.Fatalf("GetApp: %v", err)
+	}
+	if app.MemoryLimitMB == nil || *app.MemoryLimitMB != 512 {
+		t.Errorf("expected MemoryLimitMB=512, got %v", app.MemoryLimitMB)
+	}
+	if app.CPUQuotaPercent == nil || *app.CPUQuotaPercent != 75 {
+		t.Errorf("expected CPUQuotaPercent=75, got %v", app.CPUQuotaPercent)
+	}
+
+	// Setting to nil should clear the limits.
+	err = store.UpdateResourceLimits(db.UpdateResourceLimitsParams{
+		Slug:            "test-app",
+		MemoryLimitMB:   nil,
+		CPUQuotaPercent: nil,
+	})
+	if err != nil {
+		t.Fatalf("UpdateResourceLimits (clear): %v", err)
+	}
+	app, _ = store.GetApp("test-app")
+	if app.MemoryLimitMB != nil {
+		t.Errorf("expected nil MemoryLimitMB after clear, got %v", app.MemoryLimitMB)
 	}
 }
 

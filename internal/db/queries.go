@@ -233,6 +233,8 @@ type App struct {
 	CurrentPID              *int      `json:"pid,omitempty"`
 	DeployCount             int       `json:"deploy_count"`
 	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes,omitempty"`
+	MemoryLimitMB           *int      `json:"memory_limit_mb,omitempty"`
+	CPUQuotaPercent         *int      `json:"cpu_quota_percent,omitempty"`
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`
 }
@@ -269,9 +271,15 @@ func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	row := s.db.QueryRow(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
 		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps WHERE slug = ?`, slug)
 	return scanApp(row)
+}
+
+// GetApp is an alias for GetAppBySlug.
+func (s *Store) GetApp(slug string) (*App, error) {
+	return s.GetAppBySlug(slug)
 }
 
 func (s *Store) ListApps(limit, offset int) ([]*App, error) {
@@ -281,6 +289,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
 		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
@@ -305,6 +314,7 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
 		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps WHERE status = 'running'`)
 	if err != nil {
@@ -329,6 +339,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
 		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps
 		WHERE access = 'public'
@@ -397,6 +408,27 @@ func (s *Store) UpdateHibernateTimeout(slug string, minutes *int) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateResourceLimitsParams holds the resource limit values to set.
+// Nil means "inherit from global config" (stored as NULL in the DB).
+type UpdateResourceLimitsParams struct {
+	Slug            string
+	MemoryLimitMB   *int
+	CPUQuotaPercent *int
+}
+
+// UpdateResourceLimits sets the per-app resource limits. NULL means inherit global default.
+func (s *Store) UpdateResourceLimits(p UpdateResourceLimitsParams) error {
+	_, err := s.db.Exec(
+		`UPDATE apps SET memory_limit_mb = ?, cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE slug = ?`,
+		p.MemoryLimitMB, p.CPUQuotaPercent, p.Slug,
+	)
+	if err != nil {
+		return fmt.Errorf("update resource limits: %w", err)
 	}
 	return nil
 }
@@ -870,6 +902,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ID, &a.Slug, &a.Name, &a.ProjectSlug, &a.OwnerID, &a.Access,
 		&a.Status, &a.CurrentPort, &a.CurrentPID, &a.DeployCount,
 		&a.HibernateTimeoutMinutes,
+		&a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
