@@ -157,3 +157,31 @@ func TestDetectAppType_Unknown(t *testing.T) {
 		t.Error("expected empty string for unknown app type")
 	}
 }
+
+func TestResolveResourceLimits(t *testing.T) {
+	zero := 0
+	pos := 256
+
+	tests := []struct {
+		name       string
+		perApp     *int
+		defaultVal int
+		want       int
+	}{
+		{"nil uses default", nil, 512, 512},
+		{"nil with zero default", nil, 0, 0},
+		{"zero overrides default", &zero, 512, 0},
+		{"positive overrides default", &pos, 512, 256},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deploy.ResolveMemoryLimitMB(tc.perApp, tc.defaultVal); got != tc.want {
+				t.Errorf("ResolveMemoryLimitMB: got %d, want %d", got, tc.want)
+			}
+			if got := deploy.ResolveCPUQuotaPercent(tc.perApp, tc.defaultVal); got != tc.want {
+				t.Errorf("ResolveCPUQuotaPercent: got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

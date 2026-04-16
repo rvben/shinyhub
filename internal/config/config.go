@@ -369,4 +369,10 @@ func applyEnv(cfg *Config) {
 			cfg.Runtime.Docker.DefaultCPUPercent = n
 		}
 	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON"); v != "" {
+		cfg.Runtime.Docker.Images.Python = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_R"); v != "" {
+		cfg.Runtime.Docker.Images.R = v
+	}
 }

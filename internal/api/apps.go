@@ -202,6 +202,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "memory_limit_mb must be an integer or null")
 			return
 		}
+		if v != nil && *v < 0 {
+			http.Error(w, "memory_limit_mb must be non-negative", http.StatusBadRequest)
+			return
+		}
 		memoryLimitMB, setMemoryLimitMB = v, true
 	}
 
@@ -209,6 +213,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		var v *int
 		if err := json.Unmarshal(rawVal, &v); err != nil {
 			writeError(w, http.StatusBadRequest, "cpu_quota_percent must be an integer or null")
+			return
+		}
+		if v != nil && (*v < 0 || *v > 100) {
+			http.Error(w, "cpu_quota_percent must be between 0 and 100", http.StatusBadRequest)
 			return
 		}
 		cpuQuotaPercent, setCPUQuotaPercent = v, true

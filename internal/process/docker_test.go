@@ -66,3 +66,24 @@ func TestDockerRuntimeSignal(t *testing.T) {
 		t.Error("expected kill request")
 	}
 }
+
+func TestDockerRuntimeImageForCommand(t *testing.T) {
+	rt := &DockerRuntime{pythonImage: "uv:latest", rImage: "r-base:latest"}
+
+	tests := []struct {
+		cmd  []string
+		want string
+	}{
+		{[]string{"uv", "run", "app.py"}, "uv:latest"},
+		{[]string{"Rscript", "app.R"}, "r-base:latest"},
+		{[]string{"/usr/bin/Rscript", "app.R"}, "r-base:latest"},
+		{[]string{}, "uv:latest"}, // empty → python default
+	}
+
+	for _, tc := range tests {
+		got := rt.imageForCommand(tc.cmd)
+		if got != tc.want {
+			t.Errorf("imageForCommand(%v) = %q, want %q", tc.cmd, got, tc.want)
+		}
+	}
+}

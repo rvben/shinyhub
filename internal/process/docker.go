@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -64,7 +65,9 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	}
 
 	if err := r.client.startContainer(id); err != nil {
-		r.client.removeContainer(id) //nolint:errcheck
+		if err := r.client.removeContainer(id); err != nil {
+			log.Printf("docker: cleanup container %s after failed start: %v", id, err)
+		}
 		return RunHandle{}, fmt.Errorf("start container for %s: %w", p.Slug, err)
 	}
 

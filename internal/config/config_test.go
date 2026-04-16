@@ -224,3 +224,20 @@ func TestRuntimeConfigDefaults(t *testing.T) {
 		t.Error("expected non-empty default R image")
 	}
 }
+
+func TestRuntimeConfigImageEnvOverrides(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON", "my-registry/uv:custom")
+	t.Setenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_R", "my-registry/r-base:custom")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Docker.Images.Python != "my-registry/uv:custom" {
+		t.Errorf("expected custom python image, got %s", cfg.Runtime.Docker.Images.Python)
+	}
+	if cfg.Runtime.Docker.Images.R != "my-registry/r-base:custom" {
+		t.Errorf("expected custom R image, got %s", cfg.Runtime.Docker.Images.R)
+	}
+}

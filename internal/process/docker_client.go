@@ -107,26 +107,6 @@ func (c *dockerClient) startContainer(id string) error {
 	return c.postEmpty(fmt.Sprintf("/containers/%s/start", id))
 }
 
-// stopContainer sends SIGTERM to the container and waits up to timeoutSecs.
-func (c *dockerClient) stopContainer(id string, timeoutSecs int) error {
-	url := fmt.Sprintf("%s/containers/%s/stop?t=%d", c.base, id, timeoutSecs)
-	req, err := http.NewRequest(http.MethodPost, url, nil)
-	if err != nil {
-		return fmt.Errorf("stop container: %w", err)
-	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return fmt.Errorf("stop container: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("stop container: status %d: %s", resp.StatusCode, body)
-	}
-	io.Copy(io.Discard, resp.Body) //nolint:errcheck
-	return nil
-}
-
 // removeContainer forcibly removes a container.
 func (c *dockerClient) removeContainer(id string) error {
 	url := fmt.Sprintf("%s/containers/%s?force=true", c.base, id)
@@ -168,7 +148,7 @@ func (c *dockerClient) waitContainer(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.hc.Do(req)
+	resp, err := c.stream.Do(req)
 	if err != nil {
 		return fmt.Errorf("wait container: %w", err)
 	}

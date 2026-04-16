@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -73,22 +74,42 @@ func TestDockerClientInspect(t *testing.T) {
 	}
 }
 
-func TestDockerClientStop(t *testing.T) {
-	stopped := false
+
+func TestDockerClientContainerStatsFormula(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/stop") {
-			stopped = true
-			w.WriteHeader(http.StatusNoContent)
+		if strings.Contains(r.URL.Path, "/stats") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"cpu_stats": map[string]any{
+					"cpu_usage":        map[string]any{"total_usage": uint64(200_000_000)},
+					"system_cpu_usage": uint64(1_000_000_000),
+					"online_cpus":      2,
+				},
+				"precpu_stats": map[string]any{
+					"cpu_usage":        map[string]any{"total_usage": uint64(100_000_000)},
+					"system_cpu_usage": uint64(900_000_000),
+				},
+				"memory_stats": map[string]any{
+					"usage": uint64(50 * 1024 * 1024),
+					"cache": uint64(10 * 1024 * 1024),
+				},
+			})
 		}
 	}))
 	defer srv.Close()
 
 	c := newTestDockerClient(srv)
-	if err := c.stopContainer("abc123", 5); err != nil {
-		t.Fatalf("stopContainer: %v", err)
+	cpu, rss, err := c.containerStats(context.Background(), "abc")
+	if err != nil {
+		t.Fatalf("containerStats: %v", err)
 	}
-	if !stopped {
-		t.Error("expected stop request to be sent")
+	// cpuDelta=100M, systemDelta=100M, numCPU=2 → (100M/100M)*2*100 = 200%
+	if cpu != 200.0 {
+		t.Errorf("expected cpu=200.0, got %f", cpu)
+	}
+	// rss = 50MB - 10MB cache = 40MB
+	if rss != 40*1024*1024 {
+		t.Errorf("expected rss=40MB, got %d", rss)
 	}
 }
 
