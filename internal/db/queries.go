@@ -232,9 +232,9 @@ type App struct {
 	CurrentPort             *int      `json:"port,omitempty"`
 	CurrentPID              *int      `json:"pid,omitempty"`
 	DeployCount             int       `json:"deploy_count"`
-	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes,omitempty"`
-	MemoryLimitMB           *int      `json:"memory_limit_mb,omitempty"`
-	CPUQuotaPercent         *int      `json:"cpu_quota_percent,omitempty"`
+	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes"`
+	MemoryLimitMB           *int      `json:"memory_limit_mb"`
+	CPUQuotaPercent         *int      `json:"cpu_quota_percent"`
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`
 }

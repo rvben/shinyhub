@@ -875,8 +875,8 @@ func TestPatchAppResourceLimitsClear(t *testing.T) {
 	srv.Router().ServeHTTP(rr, req)
 	var app map[string]any
 	json.NewDecoder(rr.Body).Decode(&app)
-	if _, exists := app["memory_limit_mb"]; exists && app["memory_limit_mb"] != nil {
-		t.Errorf("expected nil memory_limit_mb, got %v", app["memory_limit_mb"])
+	if app["memory_limit_mb"] != nil {
+		t.Errorf("expected null memory_limit_mb after clear, got %v", app["memory_limit_mb"])
 	}
 }
 
