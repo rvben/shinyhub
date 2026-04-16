@@ -28,11 +28,13 @@ type ProcessInfo struct {
 }
 
 type StartParams struct {
-	Slug    string
-	Dir     string
-	Command []string
-	Port    int
-	Env     []string
+	Slug            string
+	Dir             string
+	Command         []string
+	Port            int
+	Env             []string
+	MemoryLimitMB   int // 0 = no limit
+	CPUQuotaPercent int // 0 = no limit; 100 = 1 full core
 }
 
 type entry struct {
