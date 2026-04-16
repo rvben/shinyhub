@@ -906,7 +906,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	handle, ok := s.manager.Handle(slug)
 	if !ok {
-		http.Error(w, "app not running", http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusStopped)})
 		return
 	}
 	stats, err := s.sampler.Sample(handle)
