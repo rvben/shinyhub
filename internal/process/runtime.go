@@ -25,3 +25,9 @@ type RunHandle struct {
 	PID         int    // set by NativeRuntime
 	ContainerID string // set by DockerRuntime
 }
+
+// ContainerInfo is a summary of a running container used during process recovery.
+type ContainerInfo struct {
+	ID     string
+	Labels map[string]string
+}

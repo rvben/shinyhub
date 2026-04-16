@@ -10,16 +10,31 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 )
 
-// RecoverProcesses is called once on startup. It queries the DB for apps that
-// were running before the server stopped and checks whether their OS processes
-// are still alive. Survivors are re-registered in the manager and proxy;
-// orphaned entries are marked stopped in the DB.
-func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy) {
+// ContainerLister is implemented by DockerRuntime to support recovery.
+// NativeRuntime does not implement it; pass nil for native mode.
+type ContainerLister interface {
+	ListByLabel(labelFilter string) ([]process.ContainerInfo, error)
+	InspectPID(containerID string) (int, error)
+}
+
+// RecoverProcesses re-adopts running app processes after a server restart.
+// For native runtime, pass nil for lister (PID-based recovery is used).
+// For docker runtime, pass the DockerRuntime as lister.
+func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister) {
 	apps, err := store.ListRunningApps()
 	if err != nil {
 		log.Printf("process recovery: list running apps: %v", err)
 		return
 	}
+
+	if lister != nil {
+		recoverDockerProcesses(store, mgr, prx, lister, apps)
+		return
+	}
+	recoverNativeProcesses(store, mgr, prx, apps)
+}
+
+func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, apps []*db.App) {
 	for _, app := range apps {
 		if app.CurrentPID == nil || app.CurrentPort == nil {
 			markRecoveryStopped(store, app.Slug)
@@ -27,13 +42,10 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy) {
 		}
 		pid := *app.CurrentPID
 		port := *app.CurrentPort
-		// POSIX-only: Windows is not a supported target.
 		if err := syscall.Kill(pid, 0); err != nil {
-			// Process is gone.
 			markRecoveryStopped(store, app.Slug)
 			continue
 		}
-		// Process is still alive — re-register it with exit monitoring.
 		mgr.Adopt(app.Slug, process.ProcessInfo{
 			Slug:   app.Slug,
 			PID:    pid,
@@ -47,6 +59,59 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy) {
 			continue
 		}
 		log.Printf("process recovery: re-adopted %s (pid=%d, port=%d)", app.Slug, pid, port)
+	}
+}
+
+func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister, apps []*db.App) {
+	portBySlug := make(map[string]int)
+	for _, app := range apps {
+		if app.CurrentPort != nil {
+			portBySlug[app.Slug] = *app.CurrentPort
+		}
+	}
+
+	containers, err := lister.ListByLabel(`{"label":["shinyhub.slug"]}`)
+	if err != nil {
+		log.Printf("process recovery (docker): list containers: %v", err)
+		for _, app := range apps {
+			markRecoveryStopped(store, app.Slug)
+		}
+		return
+	}
+
+	recovered := make(map[string]bool)
+	for _, c := range containers {
+		slug := c.Labels["shinyhub.slug"]
+		port, ok := portBySlug[slug]
+		if !ok {
+			continue
+		}
+		pid, err := lister.InspectPID(c.ID)
+		if err != nil {
+			log.Printf("process recovery (docker): inspect %s: %v", slug, err)
+			markRecoveryStopped(store, slug)
+			continue
+		}
+		mgr.Adopt(slug, process.ProcessInfo{
+			Slug:   slug,
+			PID:    pid,
+			Port:   port,
+			Status: process.StatusRunning,
+		}, process.RunHandle{ContainerID: c.ID})
+		targetURL := fmt.Sprintf("http://localhost:%d", port)
+		if err := prx.Register(slug, targetURL); err != nil {
+			log.Printf("process recovery (docker): register proxy for %s: %v", slug, err)
+			markRecoveryStopped(store, slug)
+			continue
+		}
+		recovered[slug] = true
+		log.Printf("process recovery (docker): re-adopted %s (container=%s, port=%d)", slug, c.ID, port)
+	}
+
+	for _, app := range apps {
+		if !recovered[app.Slug] {
+			markRecoveryStopped(store, app.Slug)
+		}
 	}
 }
 

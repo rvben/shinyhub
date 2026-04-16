@@ -140,7 +140,11 @@ func main() {
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
 	// Re-adopt any processes that survived a server restart.
-	lifecycle.RecoverProcesses(store, mgr, prx)
+	var lister lifecycle.ContainerLister
+	if dockerRT, ok := rt.(lifecycle.ContainerLister); ok {
+		lister = dockerRT
+	}
+	lifecycle.RecoverProcesses(store, mgr, prx, lister)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

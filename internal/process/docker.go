@@ -89,6 +89,28 @@ func (r *DockerRuntime) Stats(ctx context.Context, handle RunHandle) (float64, u
 	return r.client.containerStats(ctx, handle.ContainerID)
 }
 
+// ListByLabel returns containers with the given label filter (JSON filter string).
+func (r *DockerRuntime) ListByLabel(labelFilter string) ([]ContainerInfo, error) {
+	containers, err := r.client.listContainers(labelFilter)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ContainerInfo, len(containers))
+	for i, c := range containers {
+		out[i] = ContainerInfo{ID: c.ID, Labels: c.Labels}
+	}
+	return out, nil
+}
+
+// InspectPID returns the host PID of the container's init process.
+func (r *DockerRuntime) InspectPID(containerID string) (int, error) {
+	state, err := r.client.inspectContainer(containerID)
+	if err != nil {
+		return 0, err
+	}
+	return state.Pid, nil
+}
+
 // imageForCommand selects the base image based on the command.
 // uv → Python image; Rscript → R image.
 func (r *DockerRuntime) imageForCommand(cmd []string) string {

@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -9,6 +10,23 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
+
+// fakeContainerLister implements lifecycle.ContainerLister for tests.
+type fakeContainerLister struct {
+	containers []process.ContainerInfo
+	pids       map[string]int // containerID → host PID
+}
+
+func (f *fakeContainerLister) ListByLabel(_ string) ([]process.ContainerInfo, error) {
+	return f.containers, nil
+}
+
+func (f *fakeContainerLister) InspectPID(id string) (int, error) {
+	if pid, ok := f.pids[id]; ok {
+		return pid, nil
+	}
+	return 0, fmt.Errorf("container %s not found", id)
+}
 
 func TestRecoverProcesses_DeadPID(t *testing.T) {
 	store, err := db.Open(":memory:")
@@ -39,7 +57,7 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx)
+	lifecycle.RecoverProcesses(store, mgr, prx, nil)
 
 	// App should now be stopped in the DB.
 	app, err := store.GetAppBySlug("myapp")
@@ -77,7 +95,7 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx) // must not panic
+	lifecycle.RecoverProcesses(store, mgr, prx, nil) // must not panic
 
 	app, err := store.GetAppBySlug("myapp")
 	if err != nil {
@@ -116,7 +134,7 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx)
+	lifecycle.RecoverProcesses(store, mgr, prx, nil)
 
 	// App should still be running in the DB.
 	app, err := store.GetAppBySlug("myapp")
@@ -133,5 +151,55 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 		t.Error("expected manager to have myapp after recovery")
 	} else if info.PID != pid {
 		t.Errorf("expected PID %d in manager, got %d", pid, info.PID)
+	}
+}
+
+func TestRecoverDockerProcesses(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	prx := proxy.New()
+
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "u", PasswordHash: "x", Role: "developer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	user, _ := store.GetUserByUsername("u")
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "docker-app", Name: "Docker App", OwnerID: user.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	port := 20500
+	pid := 99001
+	store.UpdateAppStatus(db.UpdateAppStatusParams{
+		Slug: "docker-app", Status: "running", Port: &port, PID: &pid,
+	})
+
+	lister := &fakeContainerLister{
+		containers: []process.ContainerInfo{
+			{ID: "cont-abc", Labels: map[string]string{"shinyhub.slug": "docker-app"}},
+		},
+		pids: map[string]int{"cont-abc": 99001},
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+
+	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+
+	info, ok := mgr.Get("docker-app")
+	if !ok {
+		t.Fatal("expected docker-app to be adopted after recovery")
+	}
+	if info.Port != port {
+		t.Errorf("expected port %d, got %d", port, info.Port)
+	}
+	if info.PID != pid {
+		t.Errorf("expected pid %d, got %d", pid, info.PID)
 	}
 }
