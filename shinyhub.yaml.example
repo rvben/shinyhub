@@ -1,14 +1,56 @@
+# ShinyHub configuration. Copy this file to shinyhub.yaml and edit.
+# Every key here can be overridden by a SHINYHUB_<UPPER_SNAKE> environment variable.
+
 database:
-  driver: sqlite
-  dsn: ./data/shinyhub.db
+  driver: sqlite                      # only driver supported today
+  dsn: ./data/shinyhub.db             # SHINYHUB_DB_DSN
 
 server:
-  host: 0.0.0.0
-  port: 8080
-  base_url: https://shiny.example.com
+  host: 0.0.0.0                       # bind address
+  port: 8080                          # HTTP port
+  base_url: https://shiny.example.com # external URL (used in OAuth callbacks)  # SHINYHUB_BASE_URL
+  trusted_proxies:                    # CIDRs that may set X-Forwarded-For
+    - 127.0.0.0/8                     # default: loopback only
+    - ::1/128
+  # SHINYHUB_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
 
 auth:
-  secret: change-me-to-a-random-string
+  # REQUIRED. 32+ characters. Generate with: openssl rand -hex 32
+  # The server refuses to start with this placeholder. Do not ship it.
+  secret: change-me-to-a-random-string  # SHINYHUB_AUTH_SECRET
 
 storage:
-  apps_dir: ./data/apps
+  apps_dir: ./data/apps               # where deployed bundles live
+  version_retention: 5                # keep N newest version dirs per app
+
+lifecycle:
+  watch_interval: 15s                 # how often the watchdog runs
+  restart_max_attempts: 5             # crash-loop threshold
+  hibernate_timeout: 30m              # stop apps idle longer than this
+
+runtime:
+  mode: native                        # "native" (default) or "docker"
+  docker:
+    socket: /var/run/docker.sock
+    images:
+      python: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+      r: rocker/r-base
+    default_memory_mb: 512            # per-app; 0 = no limit
+    default_cpu_percent: 100          # 100 = one full core; 0 = no limit
+
+# Optional: OAuth / OIDC login providers. Remove any block you don't use.
+oauth:
+  github:
+    client_id:     ""                 # SHINYHUB_GITHUB_CLIENT_ID
+    client_secret: ""                 # SHINYHUB_GITHUB_CLIENT_SECRET
+    callback_url:  ""                 # e.g. https://shiny.example.com/api/auth/github/callback
+  google:
+    client_id:     ""                 # SHINYHUB_GOOGLE_CLIENT_ID
+    client_secret: ""                 # SHINYHUB_GOOGLE_CLIENT_SECRET
+    callback_url:  ""                 # SHINYHUB_GOOGLE_CALLBACK_URL
+  oidc:
+    issuer_url:    ""                 # SHINYHUB_OIDC_ISSUER_URL
+    client_id:     ""                 # SHINYHUB_OIDC_CLIENT_ID
+    client_secret: ""                 # SHINYHUB_OIDC_CLIENT_SECRET
+    callback_url:  ""                 # SHINYHUB_OIDC_CALLBACK_URL
+    display_name:  "Sign in with SSO" # SHINYHUB_OIDC_DISPLAY_NAME
