@@ -17,6 +17,11 @@
     <button id="logout-button" type="button" hidden>Logout</button>
   </nav>
 
+  <div id="tab-bar" hidden>
+    <button id="tab-apps" class="tab" type="button">Apps</button>
+    <button id="tab-audit" class="tab" type="button" hidden>Audit Log</button>
+  </div>
+
   <main>
     <section id="login-view">
       <div class="login-box">
@@ -43,6 +48,30 @@
       <p id="app-error" class="error" hidden></p>
       <div id="app-grid" class="app-grid"></div>
       <p id="empty-state" class="empty-state" hidden>No apps deployed yet.</p>
+    </section>
+
+    <section id="audit-view" hidden>
+      <div class="toolbar">
+        <h1>Audit Log</h1>
+      </div>
+      <p id="audit-error" class="error" hidden></p>
+      <table id="audit-table">
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">User</th>
+            <th scope="col">Action</th>
+            <th scope="col">Resource</th>
+            <th scope="col">IP</th>
+          </tr>
+        </thead>
+        <tbody id="audit-body"></tbody>
+      </table>
+      <div id="audit-pagination" class="pagination">
+        <button id="audit-prev" type="button">← Prev</button>
+        <span id="audit-range"></span>
+        <button id="audit-next" type="button">Next →</button>
+      </div>
     </section>
 
   <!-- Log pane: hidden overlay that shows SSE log output for one app -->
@@ -81,6 +110,19 @@
             </div>
             <p id="grant-error" class="error" hidden></p>
           </section>
+        </div>
+      </div>
+    </div>
+    <!-- Deployment history modal -->
+    <div id="history-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="history-modal-heading">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="history-modal-heading" class="modal-title">History: <span id="history-app-name"></span></h2>
+          <button id="history-modal-close" type="button" aria-label="Close history modal">×</button>
+        </div>
+        <div class="modal-body">
+          <ul id="history-list"></ul>
         </div>
       </div>
     </div>
