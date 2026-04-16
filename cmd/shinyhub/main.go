@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +20,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle"
+	"github.com/rvben/shinyhub/internal/logging"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -31,30 +32,37 @@ import (
 var version = "dev"
 
 func main() {
+	logger := logging.New()
+	slog.SetDefault(logger)
+
 	cfgPath := "shinyhub.yaml"
 	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
 		cfgPath = v
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		slog.Error("load config", "err", err)
+		os.Exit(1)
 	}
 
 	if err := os.MkdirAll(cfg.Storage.AppsDir, 0755); err != nil {
-		log.Fatalf("create apps dir: %v", err)
+		slog.Error("create apps dir", "err", err)
+		os.Exit(1)
 	}
 
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
-		log.Fatalf("db: %v", err)
+		slog.Error("open db", "err", err)
+		os.Exit(1)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
-			log.Printf("warn: store close: %v", err)
+			slog.Warn("store close", "err", err)
 		}
 	}()
 	if err := store.Migrate(); err != nil {
-		log.Fatalf("migrate: %v", err)
+		slog.Error("db migrate", "err", err)
+		os.Exit(1)
 	}
 
 	// readyCh is closed once HTTP listener is live. /readyz returns 503 until then.
@@ -64,25 +72,28 @@ func main() {
 	if adminUser := os.Getenv("SHINYHUB_ADMIN_USER"); adminUser != "" {
 		adminPass := os.Getenv("SHINYHUB_ADMIN_PASSWORD")
 		if adminPass == "" {
-			log.Fatal("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
+			slog.Error("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
+			os.Exit(1)
 		}
 		_, err := store.GetUserByUsername(adminUser)
 		if errors.Is(err, db.ErrNotFound) {
 			hash, err := auth.HashPassword(adminPass)
 			if err != nil {
-				log.Fatalf("hash admin password: %v", err)
+				slog.Error("hash admin password", "err", err)
+				os.Exit(1)
 			}
 			if err := store.CreateUser(db.CreateUserParams{
 				Username:     adminUser,
 				PasswordHash: hash,
 				Role:         "admin",
 			}); err != nil {
-				log.Printf("warn: could not create admin user: %v", err)
+				slog.Warn("could not create admin user", "err", err)
 			} else {
-				log.Printf("created admin user: %s", adminUser)
+				slog.Info("admin user created", "username", adminUser)
 			}
 		} else if err != nil {
-			log.Fatalf("check admin user: %v", err)
+			slog.Error("check admin user", "err", err)
+			os.Exit(1)
 		}
 	}
 
@@ -95,13 +106,14 @@ func main() {
 			cfg.Runtime.Docker.Images.R,
 		)
 		if err != nil {
-			log.Fatalf("docker runtime: %v", err)
+			slog.Error("docker runtime", "err", err)
+			os.Exit(1)
 		}
 		rt = dockerRT
-		log.Printf("runtime: docker (socket=%s)", cfg.Runtime.Docker.Socket)
+		slog.Info("runtime configured", "mode", "docker", "socket", cfg.Runtime.Docker.Socket)
 	default:
 		rt = process.NewNativeRuntime()
-		log.Printf("runtime: native")
+		slog.Info("runtime configured", "mode", "native")
 	}
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	prx := proxy.New()
@@ -122,10 +134,11 @@ func main() {
 		)
 		oidcCancel()
 		if err != nil {
-			log.Fatalf("oidc init: %v", err)
+			slog.Error("oidc init", "err", err)
+			os.Exit(1)
 		}
 		srv.SetOIDCProvider(p)
-		log.Printf("OIDC configured: %s (%s)", cfg.OAuth.OIDC.DisplayName, cfg.OAuth.OIDC.IssuerURL)
+		slog.Info("oidc configured", "display_name", cfg.OAuth.OIDC.DisplayName, "issuer", cfg.OAuth.OIDC.IssuerURL)
 	}
 
 	deployFn := func(slug, bundleDir string) (*deploy.Result, error) {
@@ -217,12 +230,13 @@ func main() {
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("listen %s: %v", addr, err)
+		slog.Error("listen", "addr", addr, "err", err)
+		os.Exit(1)
 	}
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Printf("shinyhub %s listening on %s", version, addr)
+		slog.Info("listening", "version", version, "addr", addr)
 		close(readyCh)
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
@@ -234,20 +248,21 @@ func main() {
 	case err := <-serveErr:
 		if err != nil {
 			cancelWatcher()
-			log.Fatalf("http: %v", err)
+			slog.Error("http server", "err", err)
+			os.Exit(1)
 		}
 	case <-rootCtx.Done():
-		log.Printf("shutdown signal received, draining…")
+		slog.Info("shutdown signal received, draining")
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelShutdown()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("warn: http shutdown: %v", err)
+		slog.Warn("http shutdown", "err", err)
 	}
 	cancelWatcher()
 	<-watcherDone
-	log.Printf("bye")
+	slog.Info("shutdown complete")
 }
 
 // apiTimeoutHandler wraps the API router with a 30s per-request timeout,

@@ -2,7 +2,7 @@ package lifecycle
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"syscall"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -23,7 +23,7 @@ type ContainerLister interface {
 func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister) {
 	apps, err := store.ListRunningApps()
 	if err != nil {
-		log.Printf("process recovery: list running apps: %v", err)
+		slog.Error("process recovery: list running apps", "err", err)
 		return
 	}
 
@@ -54,11 +54,11 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 		}, process.RunHandle{PID: pid})
 		targetURL := fmt.Sprintf("http://localhost:%d", port)
 		if err := prx.Register(app.Slug, targetURL); err != nil {
-			log.Printf("process recovery: register proxy for %s: %v — marking stopped", app.Slug, err)
+			slog.Error("process recovery: register proxy", "slug", app.Slug, "err", err)
 			markRecoveryStopped(store, app.Slug)
 			continue
 		}
-		log.Printf("process recovery: re-adopted %s (pid=%d, port=%d)", app.Slug, pid, port)
+		slog.Info("process recovery: re-adopted process", "slug", app.Slug, "pid", pid, "port", port)
 	}
 }
 
@@ -72,7 +72,7 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 
 	containers, err := lister.ListByLabel(`{"label":["shinyhub.slug"]}`)
 	if err != nil {
-		log.Printf("process recovery (docker): list containers: %v", err)
+		slog.Error("process recovery: list docker containers", "err", err)
 		for _, app := range apps {
 			markRecoveryStopped(store, app.Slug)
 		}
@@ -88,7 +88,7 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 		}
 		pid, err := lister.InspectPID(c.ID)
 		if err != nil {
-			log.Printf("process recovery (docker): inspect %s: %v", slug, err)
+			slog.Error("process recovery: inspect docker container", "slug", slug, "err", err)
 			markRecoveryStopped(store, slug)
 			continue
 		}
@@ -100,12 +100,12 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 		}, process.RunHandle{ContainerID: c.ID})
 		targetURL := fmt.Sprintf("http://localhost:%d", port)
 		if err := prx.Register(slug, targetURL); err != nil {
-			log.Printf("process recovery (docker): register proxy for %s: %v", slug, err)
+			slog.Error("process recovery: register docker proxy", "slug", slug, "err", err)
 			markRecoveryStopped(store, slug)
 			continue
 		}
 		recovered[slug] = true
-		log.Printf("process recovery (docker): re-adopted %s (container=%s, port=%d)", slug, c.ID, port)
+		slog.Info("process recovery: re-adopted docker container", "slug", slug, "container", c.ID, "port", port)
 	}
 
 	for _, app := range apps {
@@ -117,6 +117,6 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 
 func markRecoveryStopped(store *db.Store, slug string) {
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
-		log.Printf("process recovery: mark stopped %s: %v", slug, err)
+		slog.Error("process recovery: mark stopped", "slug", slug, "err", err)
 	}
 }

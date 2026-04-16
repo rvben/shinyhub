@@ -2,7 +2,7 @@ package api
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -42,7 +42,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	// Initial burst: last 200 lines.
 	lines, err := lr.Tail(200)
 	if err != nil {
-		log.Printf("logs: tail %s: %v", slug, err)
+		slog.Warn("logs tail", "slug", slug, "err", err)
 	}
 	for _, line := range lines {
 		fmt.Fprintf(w, "data: %s\n\n", line)

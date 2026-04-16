@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -66,7 +66,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 
 	if err := r.client.startContainer(id); err != nil {
 		if err := r.client.removeContainer(id); err != nil {
-			log.Printf("docker: cleanup container %s after failed start: %v", id, err)
+			slog.Warn("docker cleanup container after failed start", "container", id, "err", err)
 		}
 		return RunHandle{}, fmt.Errorf("start container for %s: %w", p.Slug, err)
 	}
