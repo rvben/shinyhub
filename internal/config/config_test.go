@@ -3,6 +3,8 @@ package config_test
 import (
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +23,7 @@ func writeYAML(t *testing.T, content string) string {
 }
 
 func TestLifecycle_Defaults(t *testing.T) {
-	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -40,7 +42,7 @@ func TestLifecycle_Defaults(t *testing.T) {
 func TestLifecycle_FromYAML(t *testing.T) {
 	path := writeYAML(t, `
 auth:
-  secret: test-secret
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 lifecycle:
   watch_interval: 30s
   restart_max_attempts: 3
@@ -64,7 +66,7 @@ lifecycle:
 func TestLifecycle_HibernateDisabled(t *testing.T) {
 	path := writeYAML(t, `
 auth:
-  secret: test-secret
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 lifecycle:
   hibernate_timeout: 0s
 `)
@@ -80,7 +82,7 @@ lifecycle:
 func TestLifecycle_InvalidDuration(t *testing.T) {
 	path := writeYAML(t, `
 auth:
-  secret: test-secret
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 lifecycle:
   watch_interval: "not-a-duration"
 `)
@@ -91,7 +93,7 @@ lifecycle:
 }
 
 func TestTrustedProxies_Default(t *testing.T) {
-	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -115,7 +117,7 @@ func TestTrustedProxies_Default(t *testing.T) {
 func TestTrustedProxies_FromYAML(t *testing.T) {
 	path := writeYAML(t, `
 auth:
-  secret: test-secret
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 server:
   trusted_proxies:
     - "10.0.0.0/8"
@@ -138,7 +140,7 @@ server:
 func TestTrustedProxies_InvalidCIDR(t *testing.T) {
 	path := writeYAML(t, `
 auth:
-  secret: test-secret
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 server:
   trusted_proxies:
     - "not-a-cidr"
@@ -159,7 +161,7 @@ func parseIP(t *testing.T, s string) net.IP {
 }
 
 func TestConfig_GoogleOAuth_EnvVars(t *testing.T) {
-	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_GOOGLE_CLIENT_ID", "g-client-id")
 	t.Setenv("SHINYHUB_GOOGLE_CLIENT_SECRET", "g-client-secret")
 	t.Setenv("SHINYHUB_GOOGLE_CALLBACK_URL", "http://localhost/google/callback")
@@ -180,7 +182,7 @@ func TestConfig_GoogleOAuth_EnvVars(t *testing.T) {
 }
 
 func TestRuntimeConfig(t *testing.T) {
-	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_RUNTIME_MODE", "docker")
 	t.Setenv("SHINYHUB_RUNTIME_DOCKER_SOCKET", "/run/docker.sock")
 	t.Setenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB", "512")
@@ -205,7 +207,7 @@ func TestRuntimeConfig(t *testing.T) {
 }
 
 func TestRuntimeConfigDefaults(t *testing.T) {
-	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 
 	cfg, err := config.Load("")
 	if err != nil {
@@ -226,7 +228,7 @@ func TestRuntimeConfigDefaults(t *testing.T) {
 }
 
 func TestRuntimeConfigImageEnvOverrides(t *testing.T) {
-	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON", "my-registry/uv:custom")
 	t.Setenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_R", "my-registry/r-base:custom")
 
@@ -239,5 +241,51 @@ func TestRuntimeConfigImageEnvOverrides(t *testing.T) {
 	}
 	if cfg.Runtime.Docker.Images.R != "my-registry/r-base:custom" {
 		t.Errorf("expected custom R image, got %s", cfg.Runtime.Docker.Images.R)
+	}
+}
+
+func TestLoad_RejectsPlaceholderSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte("auth:\n  secret: change-me-to-a-random-string\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("SHINYHUB_AUTH_SECRET")
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for placeholder secret, got nil")
+	}
+	if !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("expected placeholder error, got %v", err)
+	}
+}
+
+func TestLoad_RejectsShortSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte("auth:\n  secret: short\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("SHINYHUB_AUTH_SECRET")
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for short secret, got nil")
+	}
+	if !strings.Contains(err.Error(), "32") {
+		t.Fatalf("expected length error mentioning 32, got %v", err)
+	}
+}
+
+func TestLoad_AcceptsStrongSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	strong := strings.Repeat("a", 32)
+	if err := os.WriteFile(path, []byte("auth:\n  secret: "+strong+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("SHINYHUB_AUTH_SECRET")
+	_, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
 	}
 }

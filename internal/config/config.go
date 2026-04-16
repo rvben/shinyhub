@@ -238,6 +238,12 @@ func Load(path string) (*Config, error) {
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}
+	if cfg.Auth.Secret == "change-me-to-a-random-string" {
+		return nil, fmt.Errorf("auth.secret is the placeholder value from shinyhub.yaml.example; generate a strong value with: openssl rand -hex 32")
+	}
+	if len(cfg.Auth.Secret) < 32 {
+		return nil, fmt.Errorf("auth.secret must be at least 32 characters (got %d); generate one with: openssl rand -hex 32", len(cfg.Auth.Secret))
+	}
 	return cfg, nil
 }
 
