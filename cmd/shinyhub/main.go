@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/access"
@@ -151,25 +153,27 @@ func main() {
 	}
 	lifecycle.RecoverProcesses(store, mgr, prx, lister)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go watcher.Start(ctx)
+	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
+	defer cancelWatcher()
+	watcherDone := make(chan struct{})
+	go func() {
+		watcher.Start(watcherCtx)
+		close(watcherDone)
+	}()
 
 	mux := http.NewServeMux()
-	// API routes
 	mux.Handle("/api/", apiTimeoutHandler(srv.Router()))
-	// App proxy routes
 	appHandler := access.Middleware(store, cfg.Auth.Secret)(prx)
 	mux.Handle("/app/", appHandler)
-	// Health check
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	// Static UI assets
 	mux.Handle("/static/", ui.Handler())
-	// Serve index.html at root
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -184,15 +188,35 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
-		// No global ReadTimeout or WriteTimeout: deploy uploads (up to 128 MB)
-		// and SSE log streams need unbounded time. Per-handler timeouts are
-		// applied by apiTimeoutHandler.
 	}
-	log.Printf("shinyhub %s listening on %s", version, addr)
-	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		cancel()
-		log.Fatal(err)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Printf("shinyhub %s listening on %s", version, addr)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+		}
+		close(serveErr)
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			cancelWatcher()
+			log.Fatalf("http: %v", err)
+		}
+	case <-rootCtx.Done():
+		log.Printf("shutdown signal received, draining…")
 	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelShutdown()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("warn: http shutdown: %v", err)
+	}
+	cancelWatcher()
+	<-watcherDone
+	log.Printf("bye")
 }
 
 // apiTimeoutHandler wraps the API router with a 30s per-request timeout,
