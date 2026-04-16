@@ -14,6 +14,14 @@ function canManageApp(user, app) {
   return user.role === 'admin' || user.role === 'operator' || user.id === app.owner_id;
 }
 
+function relativeTime(date) {
+  const diff = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (diff < 60)    return `${diff}s ago`;
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const state = {
     user: null,
@@ -221,6 +229,84 @@ document.addEventListener('DOMContentLoaded', () => {
     renderApps();
   }
 
+  async function loadAuditEvents(page) {
+    setError(auditError, '');
+    const offset = page * 100;
+    let resp;
+    try {
+      resp = await api(`/api/audit?limit=101&offset=${offset}`);
+    } catch {
+      setError(auditError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) { setError(auditError, 'Failed to load audit log'); return; }
+
+    let events;
+    try {
+      events = (await resp.json()) || [];
+    } catch {
+      setError(auditError, 'Invalid response from server');
+      return;
+    }
+    state.auditHasMore = events.length > 100;
+    state.auditPage = page;
+    renderAuditEvents(events.slice(0, 100));
+  }
+
+  function renderAuditEvents(events) {
+    auditBody.textContent = '';
+
+    const knownActions = ['deploy', 'restart', 'rollback', 'login', 'login_failed'];
+
+    for (const e of events) {
+      const tr = document.createElement('tr');
+
+      // Time
+      const timeCell = document.createElement('td');
+      const ts = new Date(e.created_at);
+      timeCell.textContent = relativeTime(ts);
+      timeCell.title = ts.toISOString();
+      tr.appendChild(timeCell);
+
+      // User
+      const userCell = document.createElement('td');
+      userCell.textContent = e.username || '—';
+      tr.appendChild(userCell);
+
+      // Action badge
+      const actionCell = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + (knownActions.includes(e.action)
+        ? `badge-action-${e.action}`
+        : 'badge-action-default');
+      badge.textContent = e.action;
+      actionCell.appendChild(badge);
+      tr.appendChild(actionCell);
+
+      // Resource
+      const resourceCell = document.createElement('td');
+      const parts = [e.resource_type, e.resource_id].filter(Boolean);
+      resourceCell.textContent = parts.length ? parts.join(' ') : '—';
+      tr.appendChild(resourceCell);
+
+      // IP
+      const ipCell = document.createElement('td');
+      ipCell.textContent = e.ip_address || '—';
+      tr.appendChild(ipCell);
+
+      auditBody.appendChild(tr);
+    }
+
+    const start = state.auditPage * 100 + 1;
+    const end   = state.auditPage * 100 + events.length;
+    auditRange.textContent = events.length === 0
+      ? 'No events'
+      : `Showing ${start}–${end}`;
+    auditPrev.disabled = state.auditPage === 0;
+    auditNext.disabled = !state.auditHasMore;
+  }
+
   async function restart(slug) {
     setError(appError, '');
 
@@ -371,6 +457,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   tabApps.addEventListener('click',  () => showView('apps'));
   tabAudit.addEventListener('click', () => showView('audit'));
+  auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1));
+  auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1));
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
