@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -67,12 +69,13 @@ type rawGoogleOAuthConfig struct {
 
 // Config holds all parsed, ready-to-use configuration for ShinyHub.
 type Config struct {
-	Database  DatabaseConfig
-	Server    ServerConfig
-	Auth      AuthConfig
-	Storage   StorageConfig
-	Lifecycle LifecycleConfig
-	OAuth     OAuthConfig `yaml:"-"`
+	Database          DatabaseConfig
+	Server            ServerConfig
+	Auth              AuthConfig
+	Storage           StorageConfig
+	Lifecycle         LifecycleConfig
+	OAuth             OAuthConfig  `yaml:"-"`
+	TrustedProxyNets  []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -88,9 +91,10 @@ type DatabaseConfig struct {
 }
 
 type ServerConfig struct {
-	Host    string `yaml:"host"`
-	Port    int    `yaml:"port"`
-	BaseURL string `yaml:"base_url"`
+	Host           string   `yaml:"host"`
+	Port           int      `yaml:"port"`
+	BaseURL        string   `yaml:"base_url"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 type AuthConfig struct {
@@ -169,6 +173,20 @@ func Load(path string) (*Config, error) {
 		},
 	}
 	applyEnv(cfg)
+
+	// Parse trusted proxy CIDRs. Default to loopback-only when none are configured,
+	// so XFF is trusted only from local reverse proxies by default.
+	if len(cfg.Server.TrustedProxies) == 0 {
+		cfg.Server.TrustedProxies = []string{"127.0.0.0/8", "::1/128"}
+	}
+	for _, cidr := range cfg.Server.TrustedProxies {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("trusted_proxies: invalid CIDR %q: %w", cidr, err)
+		}
+		cfg.TrustedProxyNets = append(cfg.TrustedProxyNets, ipNet)
+	}
+
 	if cfg.OAuth.OIDC.DisplayName == "" && cfg.OAuth.OIDC.IssuerURL != "" {
 		cfg.OAuth.OIDC.DisplayName = "Sign in with SSO"
 	}
@@ -224,6 +242,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
+	}
+	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
+		cfg.Server.TrustedProxies = strings.Split(v, ",")
 	}
 	if v := os.Getenv("SHINYHUB_GITHUB_CLIENT_ID"); v != "" {
 		cfg.OAuth.GitHub.ClientID = v

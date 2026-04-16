@@ -137,7 +137,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &user.ID, Action: "create_user", ResourceType: "user",
-			ResourceID: user.Username, IPAddress: clientIP(r),
+			ResourceID: user.Username, IPAddress: s.clientIP(r),
 		})
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -153,7 +153,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	auth.SetSessionCookie(w, r, jwtToken)
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
-		ResourceID: user.Username, IPAddress: clientIP(r),
+		ResourceID: user.Username, IPAddress: s.clientIP(r),
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }

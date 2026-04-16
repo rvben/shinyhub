@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -87,6 +88,74 @@ lifecycle:
 	if err == nil {
 		t.Error("expected error for invalid duration, got nil")
 	}
+}
+
+func TestTrustedProxies_Default(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.TrustedProxyNets) == 0 {
+		t.Fatal("expected default trusted proxy nets, got none")
+	}
+	// 127.0.0.1 must be trusted by default.
+	found := false
+	for _, n := range cfg.TrustedProxyNets {
+		if n.Contains(parseIP(t, "127.0.0.1")) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 127.0.0.1 to be in default trusted proxies")
+	}
+}
+
+func TestTrustedProxies_FromYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: test-secret
+server:
+  trusted_proxies:
+    - "10.0.0.0/8"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.TrustedProxyNets) != 1 {
+		t.Fatalf("expected 1 trusted net, got %d", len(cfg.TrustedProxyNets))
+	}
+	if !cfg.TrustedProxyNets[0].Contains(parseIP(t, "10.1.2.3")) {
+		t.Error("expected 10.1.2.3 to be in 10.0.0.0/8")
+	}
+	if cfg.TrustedProxyNets[0].Contains(parseIP(t, "192.168.1.1")) {
+		t.Error("expected 192.168.1.1 NOT to be in 10.0.0.0/8")
+	}
+}
+
+func TestTrustedProxies_InvalidCIDR(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: test-secret
+server:
+  trusted_proxies:
+    - "not-a-cidr"
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Error("expected error for invalid CIDR, got nil")
+	}
+}
+
+func parseIP(t *testing.T, s string) net.IP {
+	t.Helper()
+	ip := net.ParseIP(s)
+	if ip == nil {
+		t.Fatalf("invalid IP %q", s)
+	}
+	return ip
 }
 
 func TestConfig_GoogleOAuth_EnvVars(t *testing.T) {

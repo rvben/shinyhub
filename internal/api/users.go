@@ -124,7 +124,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Action:       "create_user",
 		ResourceType: "user",
 		ResourceID:   req.Username,
-		IPAddress:    clientIP(r),
+		IPAddress:    s.clientIP(r),
 	})
 	writeJSON(w, http.StatusCreated, toUserResponse(user))
 }
@@ -179,7 +179,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		Action:       "update_user",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
-		IPAddress:    clientIP(r),
+		IPAddress:    s.clientIP(r),
 	})
 	writeJSON(w, http.StatusOK, toUserResponse(user))
 }
@@ -210,7 +210,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		Action:       "delete_user",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
-		IPAddress:    clientIP(r),
+		IPAddress:    s.clientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
