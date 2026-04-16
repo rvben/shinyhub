@@ -79,7 +79,24 @@ func main() {
 		}
 	}
 
-	mgr := process.NewManager(cfg.Storage.AppsDir, process.NewNativeRuntime())
+	var rt process.Runtime
+	switch cfg.Runtime.Mode {
+	case "docker":
+		dockerRT, err := process.NewDockerRuntime(
+			cfg.Runtime.Docker.Socket,
+			cfg.Runtime.Docker.Images.Python,
+			cfg.Runtime.Docker.Images.R,
+		)
+		if err != nil {
+			log.Fatalf("docker runtime: %v", err)
+		}
+		rt = dockerRT
+		log.Printf("runtime: docker (socket=%s)", cfg.Runtime.Docker.Socket)
+	default:
+		rt = process.NewNativeRuntime()
+		log.Printf("runtime: native")
+	}
+	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 

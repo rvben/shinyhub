@@ -360,10 +360,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:      slug,
-		BundleDir: bundleDir,
-		Manager:   s.manager,
-		Proxy:     s.proxy,
+		Slug:            slug,
+		BundleDir:       bundleDir,
+		Manager:         s.manager,
+		Proxy:           s.proxy,
+		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
@@ -482,10 +484,12 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:      slug,
-		BundleDir: prev.BundleDir,
-		Manager:   s.manager,
-		Proxy:     s.proxy,
+		Slug:            slug,
+		BundleDir:       prev.BundleDir,
+		Manager:         s.manager,
+		Proxy:           s.proxy,
+		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
@@ -567,10 +571,12 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:      slug,
-		BundleDir: current.BundleDir,
-		Manager:   s.manager,
-		Proxy:     s.proxy,
+		Slug:            slug,
+		BundleDir:       current.BundleDir,
+		Manager:         s.manager,
+		Proxy:           s.proxy,
+		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "restart %s: %v\n", slug, err)

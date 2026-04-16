@@ -48,6 +48,9 @@ type Params struct {
 	Manager       *process.Manager
 	Proxy         *proxy.Proxy
 	HealthTimeout time.Duration // 0 means the 30 s default
+	// Resource limits passed to the runtime. 0 means no limit.
+	MemoryLimitMB   int
+	CPUQuotaPercent int
 	// HealthCheck is called after the process starts to verify it is ready.
 	// If nil, the default HTTP health poller is used.
 	// Set to a no-op function in tests that do not serve HTTP.
@@ -91,11 +94,13 @@ func Run(p Params) (*Result, error) {
 	env := append(p.Env, fmt.Sprintf("PORT=%d", port))
 
 	info, err := p.Manager.Start(process.StartParams{
-		Slug:    p.Slug,
-		Dir:     p.BundleDir,
-		Command: cmd,
-		Port:    port,
-		Env:     env,
+		Slug:            p.Slug,
+		Dir:             p.BundleDir,
+		Command:         cmd,
+		Port:            port,
+		Env:             env,
+		MemoryLimitMB:   p.MemoryLimitMB,
+		CPUQuotaPercent: p.CPUQuotaPercent,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start: %w", err)
@@ -244,4 +249,22 @@ func extractFile(f *zip.File, dest string) error {
 	defer out.Close()
 	_, err = io.Copy(out, rc)
 	return err
+}
+
+// ResolveMemoryLimitMB returns perAppMB if non-nil, otherwise defaultMB.
+// Zero means no limit in both cases.
+func ResolveMemoryLimitMB(perAppMB *int, defaultMB int) int {
+	if perAppMB != nil {
+		return *perAppMB
+	}
+	return defaultMB
+}
+
+// ResolveCPUQuotaPercent returns perAppPct if non-nil, otherwise defaultPct.
+// Zero means no limit in both cases.
+func ResolveCPUQuotaPercent(perAppPct *int, defaultPct int) int {
+	if perAppPct != nil {
+		return *perAppPct
+	}
+	return defaultPct
 }
