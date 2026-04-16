@@ -11,7 +11,7 @@ import (
 
 // newTestDockerClient wires a dockerClient to a httptest.Server using TCP (not Unix socket).
 func newTestDockerClient(srv *httptest.Server) *dockerClient {
-	return &dockerClient{base: srv.URL, hc: srv.Client()}
+	return &dockerClient{base: srv.URL, hc: srv.Client(), stream: srv.Client()}
 }
 
 func TestDockerClientCreateAndStart(t *testing.T) {

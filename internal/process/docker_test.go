@@ -15,7 +15,7 @@ func newDockerRuntimeWithServer(t *testing.T, handler http.Handler) *DockerRunti
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	client := &dockerClient{base: srv.URL, hc: srv.Client()}
+	client := &dockerClient{base: srv.URL, hc: srv.Client(), stream: srv.Client()}
 	return &DockerRuntime{
 		client:      client,
 		pythonImage: "uv-test:latest",

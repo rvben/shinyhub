@@ -15,21 +15,24 @@ import (
 // dockerClient is a minimal Docker Engine API client over a Unix socket.
 // It implements only the operations ShinyHub needs.
 type dockerClient struct {
-	base string      // e.g. "http://localhost" for Unix socket, or test server URL
-	hc   *http.Client
+	base   string       // e.g. "http://localhost" for Unix socket, or test server URL
+	hc     *http.Client // for short-lived API calls (30s timeout)
+	stream *http.Client // for long-lived streaming connections (no timeout)
 }
 
 // newDockerClient dials the Docker Unix socket at socketPath.
 func newDockerClient(socketPath string) *dockerClient {
-	hc := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
-			},
-		},
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
 	}
-	return &dockerClient{base: "http://localhost", hc: hc}
+	hc := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: dial},
+	}
+	stream := &http.Client{
+		Transport: &http.Transport{DialContext: dial},
+	}
+	return &dockerClient{base: "http://localhost", hc: hc, stream: stream}
 }
 
 // containerConfig holds the subset of Docker container config ShinyHub uses.
@@ -270,9 +273,25 @@ func (c *dockerClient) listContainers(filtersJSON string) ([]containerSummary, e
 	return out, nil
 }
 
-// killContainer sends a signal to a container by name.
+// killContainer sends a signal to a container. A 404 response means the
+// container is already gone and is treated as a no-op.
 func (c *dockerClient) killContainer(id string, sig string) error {
-	return c.postEmpty(fmt.Sprintf("/containers/%s/kill?signal=%s", id, sig))
+	path := fmt.Sprintf("/containers/%s/kill?signal=%s", id, sig)
+	req, err := http.NewRequest(http.MethodPost, c.base+path, nil)
+	if err != nil {
+		return fmt.Errorf("kill container: %w", err)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("kill container: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		return nil
+	}
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("kill container: status %d: %s", resp.StatusCode, body)
 }
 
 // --- helpers ---

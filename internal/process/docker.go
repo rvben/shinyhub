@@ -107,7 +107,7 @@ func (r *DockerRuntime) imageForCommand(cmd []string) string {
 func (r *DockerRuntime) streamLogs(id string, w io.Writer) {
 	attachURL := fmt.Sprintf("%s/containers/%s/attach?stream=1&stdout=1&stderr=1&logs=1",
 		r.client.base, url.PathEscape(id))
-	resp, err := r.client.hc.Post(attachURL, "", nil)
+	resp, err := r.client.stream.Post(attachURL, "", nil)
 	if err != nil || resp == nil {
 		return
 	}
