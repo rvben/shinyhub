@@ -421,14 +421,22 @@ type UpdateResourceLimitsParams struct {
 }
 
 // UpdateResourceLimits sets the per-app resource limits. NULL means inherit global default.
+// Returns ErrNotFound if no app with the given slug exists.
 func (s *Store) UpdateResourceLimits(p UpdateResourceLimitsParams) error {
-	_, err := s.db.Exec(
+	result, err := s.db.Exec(
 		`UPDATE apps SET memory_limit_mb = ?, cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE slug = ?`,
 		p.MemoryLimitMB, p.CPUQuotaPercent, p.Slug,
 	)
 	if err != nil {
 		return fmt.Errorf("update resource limits: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update resource limits rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

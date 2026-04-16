@@ -466,6 +466,12 @@ func TestUpdateResourceLimits(t *testing.T) {
 	if app.MemoryLimitMB != nil {
 		t.Errorf("expected nil MemoryLimitMB after clear, got %v", app.MemoryLimitMB)
 	}
+
+	// UpdateResourceLimits on a non-existent slug must return ErrNotFound.
+	err = store.UpdateResourceLimits(db.UpdateResourceLimitsParams{Slug: "no-such-app"})
+	if !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for missing slug, got %v", err)
+	}
 }
 
 func TestListRunningApps(t *testing.T) {
