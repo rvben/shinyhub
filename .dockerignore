@@ -1,0 +1,17 @@
+.git
+.github
+.worktrees
+bin/
+data/
+docs/
+*.md
+!README.md
+.goreleaser.yaml
+.gitignore
+.dockerignore
+Dockerfile
+scripts/
+shinyhub.db
+CLAUDE.md
+CLAUDE.local.md
+go.work
