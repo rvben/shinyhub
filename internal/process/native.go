@@ -49,10 +49,14 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	r.mu.Lock()
 	r.cmds[pid] = cmd
 	r.mu.Unlock()
+	// MemoryLimitMB and CPUQuotaPercent are enforced by DockerRuntime only;
+	// the native runtime inherits OS scheduling with no additional limits.
 	return RunHandle{PID: pid}, nil
 }
 
 func (r *NativeRuntime) Signal(handle RunHandle, sig syscall.Signal) error {
+	// ESRCH means the process group is already gone — treat as a no-op so
+	// Stop remains idempotent when the process exits before SIGTERM arrives.
 	if err := syscall.Kill(-handle.PID, sig); err != nil && err != syscall.ESRCH {
 		return fmt.Errorf("signal %v to pgid %d: %w", sig, handle.PID, err)
 	}
@@ -62,13 +66,16 @@ func (r *NativeRuntime) Signal(handle RunHandle, sig syscall.Signal) error {
 func (r *NativeRuntime) Wait(_ context.Context, handle RunHandle) error {
 	r.mu.Lock()
 	cmd, ok := r.cmds[handle.PID]
-	r.mu.Unlock()
 	if !ok {
+		r.mu.Unlock()
 		return nil
 	}
-	err := cmd.Wait()
-	r.mu.Lock()
 	delete(r.cmds, handle.PID)
+	r.mu.Unlock()
+
+	err := cmd.Wait()
+
+	r.mu.Lock()
 	delete(r.procs, handle.PID)
 	r.mu.Unlock()
 	return err
