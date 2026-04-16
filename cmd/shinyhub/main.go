@@ -79,7 +79,7 @@ func main() {
 		}
 	}
 
-	mgr := process.NewManager(cfg.Storage.AppsDir)
+	mgr := process.NewManager(cfg.Storage.AppsDir, process.NewNativeRuntime())
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 

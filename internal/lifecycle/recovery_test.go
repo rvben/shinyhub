@@ -37,7 +37,7 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := process.NewManager(t.TempDir())
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx)
 
@@ -75,7 +75,7 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 	// Simulate status=running with no PID (corrupted state).
 	store.DB().Exec(`UPDATE apps SET status='running' WHERE slug='myapp'`)
 
-	mgr := process.NewManager(t.TempDir())
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx) // must not panic
 
@@ -114,7 +114,7 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := process.NewManager(t.TempDir())
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx)
 

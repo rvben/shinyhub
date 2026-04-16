@@ -83,7 +83,7 @@ func TestAllocatePort_WrapAround(t *testing.T) {
 }
 
 func TestDeploy_CommandOnly(t *testing.T) {
-	mgr := process.NewManager(t.TempDir())
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 
 	dir := t.TempDir()

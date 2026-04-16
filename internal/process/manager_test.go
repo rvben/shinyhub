@@ -9,7 +9,7 @@ import (
 )
 
 func TestManagerStartStop(t *testing.T) {
-	m := process.NewManager(t.TempDir())
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 
 	info, err := m.Start(process.StartParams{
 		Slug:    "test-app",
@@ -37,7 +37,7 @@ func TestManagerStartStop(t *testing.T) {
 }
 
 func TestManagerStatus(t *testing.T) {
-	m := process.NewManager(t.TempDir())
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	_, err := m.Start(process.StartParams{
 		Slug:    "status-app",
 		Dir:     t.TempDir(),
@@ -59,7 +59,7 @@ func TestManagerStatus(t *testing.T) {
 }
 
 func TestManagerStatusUnknown(t *testing.T) {
-	m := process.NewManager(t.TempDir())
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	info, err := m.Status("no-such-app")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

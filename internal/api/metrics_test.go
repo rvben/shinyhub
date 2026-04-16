@@ -76,7 +76,7 @@ func newMetricsTestServer(t *testing.T) (*api.Server, *db.Store, *process.Manage
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 	}
-	mgr := process.NewManager(appsDir)
+	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	srv := api.New(cfg, store, mgr, nil)
 	t.Cleanup(func() { store.Close() })
 	return srv, store, mgr

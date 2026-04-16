@@ -75,7 +75,7 @@ func TestFullDeployCycle(t *testing.T) {
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir()},
 	}
-	mgr := process.NewManager()
+	mgr := process.NewManager(cfg.Storage.AppsDir, process.NewNativeRuntime())
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 	ts := httptest.NewServer(srv.Router())

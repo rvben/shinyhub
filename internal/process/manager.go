@@ -1,9 +1,9 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,7 +17,7 @@ const (
 	StatusRunning Status = "running"
 	StatusStopped Status = "stopped"
 	StatusCrashed Status = "crashed"
-	StatusUnknown Status = "unknown" // app has not been started in this session
+	StatusUnknown Status = "unknown"
 )
 
 type ProcessInfo struct {
@@ -39,7 +39,7 @@ type StartParams struct {
 
 type entry struct {
 	info    *ProcessInfo
-	cmd     *exec.Cmd
+	handle  RunHandle
 	done    chan struct{}
 	stopped bool
 }
@@ -50,15 +50,16 @@ type Manager struct {
 	entries  map[string]*entry
 	logFiles map[string]*LogFile
 	appsDir  string
+	runtime  Runtime
 }
 
-// NewManager returns an initialized Manager. appsDir is the root directory
-// where per-app log files are stored as <appsDir>/<slug>/app.log.
-func NewManager(appsDir string) *Manager {
+// NewManager returns an initialized Manager using the given Runtime.
+func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
 		entries:  make(map[string]*entry),
 		logFiles: make(map[string]*LogFile),
 		appsDir:  appsDir,
+		runtime:  rt,
 	}
 }
 
@@ -76,7 +77,6 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		return nil, fmt.Errorf("app %s is already running", p.Slug)
 	}
 
-	// Close any existing write handle before opening a fresh one.
 	if existing, ok := m.logFiles[p.Slug]; ok {
 		existing.Close()
 		delete(m.logFiles, p.Slug)
@@ -89,16 +89,8 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	}
 	m.logFiles[p.Slug] = lf
 
-	cmd := exec.Command(p.Command[0], p.Command[1:]...)
-	cmd.Dir = p.Dir
-	cmd.Env = append(filteredEnv(), p.Env...)
-	cmd.Stdout = lf
-	cmd.Stderr = lf
-	// Place the child in its own process group so SIGTERM can be sent to the
-	// entire group, avoiding orphaned sub-processes.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := cmd.Start(); err != nil {
+	handle, err := m.runtime.Start(context.Background(), p, lf)
+	if err != nil {
 		lf.Close()
 		delete(m.logFiles, p.Slug)
 		return nil, fmt.Errorf("start process: %w", err)
@@ -106,19 +98,17 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 
 	info := &ProcessInfo{
 		Slug:   p.Slug,
-		PID:    cmd.Process.Pid,
+		PID:    handle.PID,
 		Port:   p.Port,
 		Status: StatusRunning,
 	}
 	done := make(chan struct{})
-	m.entries[p.Slug] = &entry{info: info, cmd: cmd, done: done}
+	m.entries[p.Slug] = &entry{info: info, handle: handle, done: done}
 
-	// Reap the process in the background and mark it crashed if it exits
-	// unexpectedly (i.e. not via Stop).
 	go func() {
-		cmd.Wait()
+		m.runtime.Wait(context.Background(), handle)
 		m.mu.Lock()
-		if e, ok := m.entries[p.Slug]; ok && e.cmd == cmd {
+		if e, ok := m.entries[p.Slug]; ok && e.handle == handle {
 			if e.stopped {
 				e.info.Status = StatusStopped
 			} else {
@@ -136,10 +126,8 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	return info, nil
 }
 
-// Stop sends SIGTERM to the process group of the named slug and waits for the
-// process to exit before removing the entry. If the process does not exit
-// within 5 seconds, SIGKILL is sent. This guarantees the port is free when
-// Stop returns.
+// Stop signals the process to stop and waits for it to exit.
+// If the process does not exit within 5 seconds, SIGKILL is sent.
 func (m *Manager) Stop(slug string) error {
 	m.mu.Lock()
 	e, ok := m.entries[slug]
@@ -147,23 +135,19 @@ func (m *Manager) Stop(slug string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("app %s not found", slug)
 	}
-	if e.cmd.Process == nil {
-		m.mu.Unlock()
-		return nil
-	}
 	done := e.done
-	pid := e.cmd.Process.Pid
+	handle := e.handle
 	e.stopped = true
 	m.mu.Unlock()
 
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+	if err := m.runtime.Signal(handle, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		return fmt.Errorf("sigterm: %w", err)
 	}
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		syscall.Kill(-pid, syscall.SIGKILL) //nolint:errcheck
+		m.runtime.Signal(handle, syscall.SIGKILL) //nolint:errcheck
 		<-done
 	}
 
@@ -173,12 +157,10 @@ func (m *Manager) Stop(slug string) error {
 	return nil
 }
 
-// Status returns a snapshot of the ProcessInfo for the given slug. If the slug
-// is not known, it returns a stopped ProcessInfo without an error.
+// Status returns a snapshot of the ProcessInfo for the given slug.
 func (m *Manager) Status(slug string) (*ProcessInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	e, ok := m.entries[slug]
 	if !ok {
 		return &ProcessInfo{Slug: slug, Status: StatusStopped}, nil
@@ -191,7 +173,6 @@ func (m *Manager) Status(slug string) (*ProcessInfo, error) {
 func (m *Manager) All() []*ProcessInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	out := make([]*ProcessInfo, 0, len(m.entries))
 	for _, e := range m.entries {
 		snapshot := *e.info
@@ -212,15 +193,44 @@ func (m *Manager) Get(slug string) (*ProcessInfo, bool) {
 	return &snapshot, true
 }
 
-// ForceEntry directly inserts a ProcessInfo into the manager's entry table
-// for processes whose lifecycle the manager did not originate. Used during
-// process recovery on startup to re-adopt surviving processes, and in tests
-// to inject state without starting a real process. Not safe to call
-// concurrently with Start or Stop.
+// Adopt re-registers a process that was not started by this Manager instance
+// (e.g. recovered after a server restart). It starts the exit-monitoring
+// goroutine so crashed processes are detected normally.
+func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	done := make(chan struct{})
+	m.entries[slug] = &entry{info: &info, handle: handle, done: done}
+	go func() {
+		m.runtime.Wait(context.Background(), handle)
+		m.mu.Lock()
+		if e, ok := m.entries[slug]; ok && e.handle == handle {
+			if !e.stopped {
+				e.info.Status = StatusCrashed
+			}
+		}
+		m.mu.Unlock()
+		close(done)
+	}()
+}
+
+// ForceEntry directly inserts a ProcessInfo without starting a goroutine.
+// Used in tests to inject state without starting a real process.
 func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[slug] = &entry{info: &info, done: make(chan struct{})}
+	m.entries[slug] = &entry{info: &info, handle: RunHandle{PID: info.PID}, done: make(chan struct{})}
+}
+
+// Handle returns the RunHandle for a running slug, or false if not tracked.
+func (m *Manager) Handle(slug string) (RunHandle, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[slug]
+	if !ok {
+		return RunHandle{}, false
+	}
+	return e.handle, true
 }
 
 // LogReader returns a LogReader for the app's log file. Returns false if no
