@@ -154,6 +154,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setName                 bool
 		newProjectSlug          string
 		setProjectSlug          bool
+		memoryLimitMB           *int
+		setMemoryLimitMB        bool
+		cpuQuotaPercent         *int
+		setCPUQuotaPercent      bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -192,6 +196,24 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		newProjectSlug, setProjectSlug = strings.TrimSpace(projectSlug), true
 	}
 
+	if rawVal, present := raw["memory_limit_mb"]; present {
+		var v *int
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "memory_limit_mb must be an integer or null")
+			return
+		}
+		memoryLimitMB, setMemoryLimitMB = v, true
+	}
+
+	if rawVal, present := raw["cpu_quota_percent"]; present {
+		var v *int
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "cpu_quota_percent must be an integer or null")
+			return
+		}
+		cpuQuotaPercent, setCPUQuotaPercent = v, true
+	}
+
 	// Apply all validated writes.
 	if setHibernateTimeout {
 		if err := s.store.UpdateHibernateTimeout(slug, hibernateTimeout); err != nil {
@@ -215,6 +237,39 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if setProjectSlug {
 		if err := s.store.UpdateAppProjectSlug(slug, newProjectSlug); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	if setMemoryLimitMB || setCPUQuotaPercent {
+		// Read current state to preserve whichever field is not being updated,
+		// since UpdateResourceLimits writes both columns in a single statement.
+		existing, err := s.store.GetApp(slug)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		newMemory := existing.MemoryLimitMB
+		if setMemoryLimitMB {
+			newMemory = memoryLimitMB
+		}
+		newCPU := existing.CPUQuotaPercent
+		if setCPUQuotaPercent {
+			newCPU = cpuQuotaPercent
+		}
+		if err := s.store.UpdateResourceLimits(db.UpdateResourceLimitsParams{
+			Slug:            slug,
+			MemoryLimitMB:   newMemory,
+			CPUQuotaPercent: newCPU,
+		}); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not found")
 				return

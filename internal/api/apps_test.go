@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 )
@@ -783,6 +784,99 @@ func TestRollbackApp_NoPreviousDeployment(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Errorf("expected 409 Conflict when no previous deployment, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// loginAsAdmin returns a valid JWT token for user ID 1 with the admin role.
+// The caller must have already created the admin user in the store before calling this.
+func loginAsAdmin(t *testing.T, _ *api.Server) string {
+	t.Helper()
+	token, err := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	if err != nil {
+		t.Fatalf("loginAsAdmin: IssueJWT: %v", err)
+	}
+	return token
+}
+
+// createApp creates an app with the given slug via the API and fails the test on error.
+func createApp(t *testing.T, srv *api.Server, token, slug string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"slug": slug, "name": slug})
+	req := httptest.NewRequest(http.MethodPost, "/api/apps", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("createApp(%q): expected 201, got %d: %s", slug, rr.Code, rr.Body.String())
+	}
+}
+
+func TestPatchAppResourceLimits(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token := loginAsAdmin(t, srv)
+	createApp(t, srv, token, "my-app")
+
+	// Set limits.
+	patch := map[string]any{"memory_limit_mb": 256, "cpu_quota_percent": 50}
+	body, _ := json.Marshal(patch)
+	req := httptest.NewRequest(http.MethodPatch, "/api/apps/my-app", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify via GET.
+	req = httptest.NewRequest(http.MethodGet, "/api/apps/my-app", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	var app map[string]any
+	json.NewDecoder(rr.Body).Decode(&app)
+	if app["memory_limit_mb"] != float64(256) {
+		t.Errorf("expected memory_limit_mb=256, got %v", app["memory_limit_mb"])
+	}
+	if app["cpu_quota_percent"] != float64(50) {
+		t.Errorf("expected cpu_quota_percent=50, got %v", app["cpu_quota_percent"])
+	}
+}
+
+func TestPatchAppResourceLimitsClear(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token := loginAsAdmin(t, srv)
+	createApp(t, srv, token, "my-app")
+
+	// Set then clear.
+	for _, patch := range []map[string]any{
+		{"memory_limit_mb": 256},
+		{"memory_limit_mb": nil},
+	} {
+		body, _ := json.Marshal(patch)
+		req := httptest.NewRequest(http.MethodPatch, "/api/apps/my-app", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rr.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/apps/my-app", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	var app map[string]any
+	json.NewDecoder(rr.Body).Decode(&app)
+	if _, exists := app["memory_limit_mb"]; exists && app["memory_limit_mb"] != nil {
+		t.Errorf("expected nil memory_limit_mb, got %v", app["memory_limit_mb"])
 	}
 }
 
