@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -88,7 +89,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
-	cmd.Env = append(os.Environ(), p.Env...)
+	cmd.Env = append(filteredEnv(), p.Env...)
 	cmd.Stdout = lf
 	cmd.Stderr = lf
 	// Place the child in its own process group so SIGTERM can be sent to the
@@ -228,4 +229,17 @@ func (m *Manager) LogReader(slug string) (*LogReader, bool) {
 		return nil, false
 	}
 	return NewLogReader(path), true
+}
+
+// filteredEnv returns the current process environment with all SHINYHUB_*
+// variables removed, preventing server secrets from leaking into app processes.
+func filteredEnv() []string {
+	raw := os.Environ()
+	filtered := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if !strings.HasPrefix(e, "SHINYHUB_") {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
