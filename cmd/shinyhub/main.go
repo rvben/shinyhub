@@ -100,6 +100,10 @@ func main() {
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 
+	if cfg.Runtime.Mode == "docker" {
+		srv.SetSampler(&process.RuntimeSampler{Runtime: rt})
+	}
+
 	if cfg.OAuth.OIDC.IssuerURL != "" {
 		oidcCtx, oidcCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		p, err := oauth.NewOIDCProvider(oidcCtx,

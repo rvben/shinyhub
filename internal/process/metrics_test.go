@@ -13,7 +13,7 @@ type fakeSampler struct {
 	err   error
 }
 
-func (f fakeSampler) Sample(pid int) (process.Stats, error) {
+func (f fakeSampler) Sample(_ process.RunHandle) (process.Stats, error) {
 	return f.stats, f.err
 }
 
@@ -24,7 +24,7 @@ func TestSamplerInterface(t *testing.T) {
 
 func TestSampler_ReturnsStats(t *testing.T) {
 	s := fakeSampler{stats: process.Stats{CPUPercent: 3.14, RSSBytes: 1 << 20}}
-	got, err := s.Sample(1)
+	got, err := s.Sample(process.RunHandle{PID: 1})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestSampler_ReturnsStats(t *testing.T) {
 
 func TestSampler_ReturnsError(t *testing.T) {
 	s := fakeSampler{err: errors.New("process gone")}
-	_, err := s.Sample(99999)
+	_, err := s.Sample(process.RunHandle{PID: 99999})
 	if err == nil {
 		t.Error("expected error, got nil")
 	}

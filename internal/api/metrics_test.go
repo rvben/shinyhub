@@ -20,7 +20,7 @@ type fakeMetricsSampler struct {
 	err   error
 }
 
-func (f fakeMetricsSampler) Sample(_ int) (process.Stats, error) {
+func (f fakeMetricsSampler) Sample(_ process.RunHandle) (process.Stats, error) {
 	return f.stats, f.err
 }
 

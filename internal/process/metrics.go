@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sync"
@@ -14,10 +15,9 @@ type Stats struct {
 	RSSBytes   int64
 }
 
-// Sampler reads CPU and memory stats for a given PID.
-// The interface exists so tests can inject a fake without a live process.
+// Sampler reads CPU and memory stats for a running app process.
 type Sampler interface {
-	Sample(pid int) (Stats, error)
+	Sample(handle RunHandle) (Stats, error)
 }
 
 // GopsutilSampler is the production Sampler that reads from the OS via gopsutil.
@@ -28,22 +28,22 @@ type GopsutilSampler struct {
 	procs map[int32]*gops.Process
 }
 
-// Sample returns CPU% and RSS for the process with the given PID.
+// Sample returns CPU% and RSS for the process identified by handle.PID.
 // The first call for a PID always returns CPUPercent = 0.0 because gopsutil
 // needs two measurements to compute a delta. Subsequent calls return the real value.
-func (g *GopsutilSampler) Sample(pid int) (Stats, error) {
+func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
 	g.mu.Lock()
 	if g.procs == nil {
 		g.procs = make(map[int32]*gops.Process)
 	}
-	pid32 := int32(pid)
+	pid32 := int32(handle.PID)
 	p, ok := g.procs[pid32]
 	if !ok {
 		var err error
 		p, err = gops.NewProcess(pid32)
 		if err != nil {
 			g.mu.Unlock()
-			return Stats{}, fmt.Errorf("process %d not found: %w", pid, err)
+			return Stats{}, fmt.Errorf("process %d not found: %w", handle.PID, err)
 		}
 		g.procs[pid32] = p
 	}
@@ -70,4 +70,21 @@ func (g *GopsutilSampler) Sample(pid int) (Stats, error) {
 		CPUPercent: cpu,
 		RSSBytes:   int64(mem.RSS),
 	}, nil
+}
+
+// RuntimeSampler implements Sampler by delegating to Runtime.Stats.
+// Used when DockerRuntime is active so stats are fetched via the Docker API.
+type RuntimeSampler struct {
+	Runtime Runtime
+}
+
+func (r *RuntimeSampler) Sample(handle RunHandle) (Stats, error) {
+	cpu, rss, err := r.Runtime.Stats(context.Background(), handle)
+	if err != nil {
+		return Stats{}, err
+	}
+	if rss > math.MaxInt64 {
+		return Stats{}, fmt.Errorf("rss %d overflows int64", rss)
+	}
+	return Stats{CPUPercent: cpu, RSSBytes: int64(rss)}, nil
 }
