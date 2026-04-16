@@ -33,13 +33,13 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy) {
 			markRecoveryStopped(store, app.Slug)
 			continue
 		}
-		// Process is still alive — re-register it.
-		mgr.ForceEntry(app.Slug, process.ProcessInfo{
+		// Process is still alive — re-register it with exit monitoring.
+		mgr.Adopt(app.Slug, process.ProcessInfo{
 			Slug:   app.Slug,
 			PID:    pid,
 			Port:   port,
 			Status: process.StatusRunning,
-		})
+		}, process.RunHandle{PID: pid})
 		targetURL := fmt.Sprintf("http://localhost:%d", port)
 		if err := prx.Register(app.Slug, targetURL); err != nil {
 			log.Printf("process recovery: register proxy for %s: %v — marking stopped", app.Slug, err)

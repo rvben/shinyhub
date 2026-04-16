@@ -140,7 +140,7 @@ func (m *Manager) Stop(slug string) error {
 	e.stopped = true
 	m.mu.Unlock()
 
-	if err := m.runtime.Signal(handle, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+	if err := m.runtime.Signal(handle, syscall.SIGTERM); err != nil {
 		return fmt.Errorf("sigterm: %w", err)
 	}
 
@@ -214,8 +214,9 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	}()
 }
 
-// ForceEntry directly inserts a ProcessInfo without starting a goroutine.
-// Used in tests to inject state without starting a real process.
+// ForceEntry directly inserts a ProcessInfo without starting an exit-monitoring
+// goroutine. Used in tests to inject state without starting a real process.
+// For production recovery use Adopt, which starts the monitoring goroutine.
 func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

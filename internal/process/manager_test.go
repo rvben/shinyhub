@@ -1,6 +1,7 @@
 package process_test
 
 import (
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -69,5 +70,66 @@ func TestManagerStatusUnknown(t *testing.T) {
 	}
 	if info.Slug != "no-such-app" {
 		t.Errorf("expected slug preserved, got %s", info.Slug)
+	}
+}
+
+func TestManagerCrashDetection(t *testing.T) {
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "crash-test",
+		Dir:     t.TempDir(),
+		Command: []string{"sh", "-c", "exit 1"},
+		Port:    19200,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait for the exit-monitoring goroutine to update status.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		info, err := m.Status("crash-test")
+		if err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		if info.Status == process.StatusCrashed {
+			return // pass
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("expected StatusCrashed after process exited unexpectedly")
+}
+
+func TestManagerAdopt(t *testing.T) {
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	pid := os.Getpid()
+	handle := process.RunHandle{PID: pid}
+
+	info := process.ProcessInfo{
+		Slug:   "adopted",
+		PID:    pid,
+		Port:   19201,
+		Status: process.StatusRunning,
+	}
+	m.Adopt("adopted", info, handle)
+
+	got, err := m.Status("adopted")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.Status != process.StatusRunning {
+		t.Errorf("expected StatusRunning, got %s", got.Status)
+	}
+	if got.PID != pid {
+		t.Errorf("expected PID %d, got %d", pid, got.PID)
+	}
+
+	gotHandle, ok := m.Handle("adopted")
+	if !ok {
+		t.Fatal("Handle: not found")
+	}
+	if gotHandle != handle {
+		t.Errorf("expected handle %+v, got %+v", handle, gotHandle)
 	}
 }
