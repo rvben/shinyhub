@@ -515,6 +515,46 @@ func TestUpdateResourceLimits(t *testing.T) {
 	}
 }
 
+func TestListAuditEvents_UsernameJoin(t *testing.T) {
+	store := mustOpenDB(t)
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "alice", PasswordHash: "h", Role: "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("alice")
+	store.LogAuditEvent(db.AuditEventParams{
+		UserID: &u.ID, Action: "deploy", ResourceType: "app", ResourceID: "myapp",
+	})
+	events, err := store.ListAuditEvents(10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Username == nil || *events[0].Username != "alice" {
+		t.Errorf("expected username=alice, got %v", events[0].Username)
+	}
+}
+
+func TestListAuditEvents_NilUserHasNilUsername(t *testing.T) {
+	store := mustOpenDB(t)
+	store.LogAuditEvent(db.AuditEventParams{
+		Action: "login_failed", ResourceType: "user", ResourceID: "unknown",
+	})
+	events, err := store.ListAuditEvents(10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Username != nil {
+		t.Errorf("expected nil username for anonymous event, got %v", *events[0].Username)
+	}
+}
+
 func TestListRunningApps(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {

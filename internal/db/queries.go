@@ -843,14 +843,15 @@ type AuditEventParams struct {
 
 // AuditEvent is a row from the audit_events table.
 type AuditEvent struct {
-	ID           int64      `json:"id"`
-	UserID       *int64     `json:"user_id,omitempty"`
-	Action       string     `json:"action"`
-	ResourceType string     `json:"resource_type"`
-	ResourceID   string     `json:"resource_id"`
-	Detail       string     `json:"detail"`
-	IPAddress    string     `json:"ip_address"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID           int64     `json:"id"`
+	UserID       *int64    `json:"user_id,omitempty"`
+	Username     *string   `json:"username,omitempty"`
+	Action       string    `json:"action"`
+	ResourceType string    `json:"resource_type"`
+	ResourceID   string    `json:"resource_id"`
+	Detail       string    `json:"detail"`
+	IPAddress    string    `json:"ip_address"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // LogAuditEvent inserts an audit event. Errors are logged to stderr but do
@@ -866,14 +867,19 @@ func (s *Store) LogAuditEvent(p AuditEventParams) {
 }
 
 // ListAuditEvents returns audit events ordered newest-first with pagination.
+// Each event includes the username of the acting user via a LEFT JOIN on users,
+// so anonymous events (no user_id) are still returned with a nil Username.
 func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.Query(`
-		SELECT id, user_id, action, resource_type, resource_id, detail, ip_address, created_at
-		FROM audit_events
-		ORDER BY created_at DESC, id DESC
+		SELECT ae.id, ae.user_id, u.username,
+		       ae.action, ae.resource_type, ae.resource_id,
+		       ae.detail, ae.ip_address, ae.created_at
+		FROM audit_events ae
+		LEFT JOIN users u ON u.id = ae.user_id
+		ORDER BY ae.created_at DESC, ae.id DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
@@ -882,7 +888,11 @@ func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, error) {
 	result := make([]AuditEvent, 0)
 	for rows.Next() {
 		var e AuditEvent
-		if err := rows.Scan(&e.ID, &e.UserID, &e.Action, &e.ResourceType, &e.ResourceID, &e.Detail, &e.IPAddress, &e.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&e.ID, &e.UserID, &e.Username,
+			&e.Action, &e.ResourceType, &e.ResourceID,
+			&e.Detail, &e.IPAddress, &e.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		result = append(result, e)
