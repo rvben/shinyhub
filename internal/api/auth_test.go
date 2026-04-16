@@ -53,6 +53,13 @@ func newTestServer(t *testing.T) (*api.Server, *db.Store) {
 	return srv, store
 }
 
+// setCSRF attaches a matching csrf_token cookie and X-CSRF-Token header so a
+// request using session-cookie auth can pass the CSRF middleware in tests.
+func setCSRF(req *http.Request) {
+	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "test-csrf-token"})
+	req.Header.Set("X-CSRF-Token", "test-csrf-token")
+}
+
 func TestLogin(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass123")
@@ -221,10 +228,16 @@ func TestMeIssuesFreshJWT(t *testing.T) {
 	}
 
 	cookies := rec.Result().Cookies()
-	if len(cookies) == 0 {
+	var freshToken string
+	for _, c := range cookies {
+		if c.Name == auth.SessionCookieName {
+			freshToken = c.Value
+			break
+		}
+	}
+	if freshToken == "" {
 		t.Fatal("handleMe must set a refreshed session cookie")
 	}
-	freshToken := cookies[0].Value
 
 	// The response token must differ — same string means the old JWT was echoed.
 	if freshToken == staleToken {

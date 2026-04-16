@@ -62,6 +62,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let activeEventSource = null;
 
+  function readCookie(name) {
+    const prefix = name + '=';
+    for (const raw of document.cookie.split(';')) {
+      const c = raw.trim();
+      if (c.startsWith(prefix)) return decodeURIComponent(c.slice(prefix.length));
+    }
+    return '';
+  }
+
   async function api(path, options = {}) {
     const init = {
       credentials: 'same-origin',
@@ -71,6 +80,11 @@ document.addEventListener('DOMContentLoaded', () => {
     init.headers = {...init.headers};
     if (init.body && !init.headers['Content-Type']) {
       init.headers['Content-Type'] = 'application/json';
+    }
+    const method = (init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const token = readCookie('csrf_token');
+      if (token) init.headers['X-CSRF-Token'] = token;
     }
     return fetch(path, init);
   }
