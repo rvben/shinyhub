@@ -246,7 +246,7 @@ func (c *dockerClient) containerStats(ctx context.Context, id string) (float64, 
 }
 
 // listContainers returns containers matching the given filters JSON string.
-// Example filtersJSON: `{"label":["shinyhub.managed=true"]}`
+// Example filtersJSON: `{"label":["shinyhub.slug"]}`
 func (c *dockerClient) listContainers(filtersJSON string) ([]containerSummary, error) {
 	reqURL := fmt.Sprintf("%s/containers/json?filters=%s", c.base, url.QueryEscape(filtersJSON))
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)

@@ -203,3 +203,66 @@ func TestRecoverDockerProcesses(t *testing.T) {
 		t.Errorf("expected pid %d, got %d", pid, info.PID)
 	}
 }
+
+func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	prx := proxy.New()
+
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "u2", PasswordHash: "x", Role: "developer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	user, _ := store.GetUserByUsername("u2")
+
+	// Create two apps both marked as running in the DB.
+	for _, slug := range []string{"alive-app", "orphan-app"} {
+		if err := store.CreateApp(db.CreateAppParams{
+			Slug: slug, Name: slug, OwnerID: user.ID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		port := 20600
+		pid := 99002
+		store.UpdateAppStatus(db.UpdateAppStatusParams{
+			Slug: slug, Status: "running", Port: &port, PID: &pid,
+		})
+	}
+
+	// Only "alive-app" has a running container.
+	lister := &fakeContainerLister{
+		containers: []process.ContainerInfo{
+			{ID: "cont-alive", Labels: map[string]string{"shinyhub.slug": "alive-app"}},
+		},
+		pids: map[string]int{"cont-alive": 99002},
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+
+	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+
+	// "alive-app" should be adopted.
+	if _, ok := mgr.Get("alive-app"); !ok {
+		t.Error("expected alive-app to be adopted")
+	}
+
+	// "orphan-app" should NOT be in the manager.
+	if _, ok := mgr.Get("orphan-app"); ok {
+		t.Error("expected orphan-app to not be adopted (no container found)")
+	}
+
+	// "orphan-app" should be marked stopped in the DB.
+	orphan, err := store.GetApp("orphan-app")
+	if err != nil {
+		t.Fatalf("GetApp: %v", err)
+	}
+	if orphan.Status != "stopped" {
+		t.Errorf("expected orphan-app status=stopped, got %s", orphan.Status)
+	}
+}
