@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/access"
@@ -156,7 +157,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	// API routes
-	mux.Handle("/api/", srv.Router())
+	mux.Handle("/api/", apiTimeoutHandler(srv.Router()))
 	// App proxy routes
 	appHandler := access.Middleware(store, cfg.Auth.Secret)(prx)
 	mux.Handle("/app/", appHandler)
@@ -178,9 +179,33 @@ func main() {
 	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// No global ReadTimeout or WriteTimeout: deploy uploads (up to 128 MB)
+		// and SSE log streams need unbounded time. Per-handler timeouts are
+		// applied by apiTimeoutHandler.
+	}
 	log.Printf("shinyhub %s listening on %s", version, addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		cancel() // signal Watcher to stop before os.Exit via log.Fatal
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		cancel()
 		log.Fatal(err)
 	}
+}
+
+// apiTimeoutHandler wraps the API router with a 30s per-request timeout,
+// exempting the long-lived SSE log-stream route and the large-file deploy
+// upload route so neither is prematurely cut off.
+func apiTimeoutHandler(h http.Handler) http.Handler {
+	timed := http.TimeoutHandler(h, 30*time.Second, `{"error":"request timeout"}`)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if strings.HasSuffix(p, "/logs") || strings.HasSuffix(p, "/deploy") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		timed.ServeHTTP(w, r)
+	})
 }
