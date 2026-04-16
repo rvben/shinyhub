@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -81,6 +82,11 @@ func (s *Store) Migrate() error {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// PingContext verifies DB connectivity.
+func (s *Store) PingContext(ctx context.Context) error {
+	return s.db.PingContext(ctx)
 }
 
 // DB returns the underlying *sql.DB. It is exposed for test helpers that need

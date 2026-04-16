@@ -56,6 +56,9 @@ func main() {
 		log.Fatalf("migrate: %v", err)
 	}
 
+	// readyCh is closed once HTTP listener is live. /readyz returns 503 until then.
+	readyCh := make(chan struct{})
+
 	// Bootstrap admin user from env if provided and no users exist
 	if adminUser := os.Getenv("SHINYHUB_ADMIN_USER"); adminUser != "" {
 		adminPass := os.Getenv("SHINYHUB_ADMIN_PASSWORD")
@@ -173,6 +176,27 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-readyCh:
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"ready":false,"reason":"starting"}`))
+			return
+		}
+		pingCtx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
+		defer cancel()
+		if err := store.PingContext(pingCtx); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"ready":false,"reason":"db"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ready":true}`))
+	})
 	mux.Handle("/static/", ui.Handler())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -193,6 +217,7 @@ func main() {
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("shinyhub %s listening on %s", version, addr)
+		close(readyCh)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
