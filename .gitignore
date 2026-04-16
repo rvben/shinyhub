@@ -3,3 +3,5 @@ docs/superpowers/
 go.work
 bin/
 .worktrees/
+CLAUDE.md
+CLAUDE.local.md
