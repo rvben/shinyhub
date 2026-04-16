@@ -69,13 +69,14 @@ type rawGoogleOAuthConfig struct {
 
 // Config holds all parsed, ready-to-use configuration for ShinyHub.
 type Config struct {
-	Database          DatabaseConfig
-	Server            ServerConfig
-	Auth              AuthConfig
-	Storage           StorageConfig
-	Lifecycle         LifecycleConfig
-	OAuth             OAuthConfig  `yaml:"-"`
-	TrustedProxyNets  []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
+	Database         DatabaseConfig
+	Server           ServerConfig
+	Auth             AuthConfig
+	Storage          StorageConfig
+	Lifecycle        LifecycleConfig
+	Runtime          RuntimeConfig
+	OAuth            OAuthConfig  `yaml:"-"`
+	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -106,6 +107,26 @@ type StorageConfig struct {
 	VersionRetention int    `yaml:"version_retention"`
 }
 
+// RuntimeConfig controls how app processes are started and isolated.
+type RuntimeConfig struct {
+	Mode   string // "native" (default) or "docker"
+	Docker DockerRuntimeConfig
+}
+
+// DockerRuntimeConfig holds Docker-specific runtime settings.
+type DockerRuntimeConfig struct {
+	Socket            string
+	Images            DockerImages
+	DefaultMemoryMB   int // 0 = no limit
+	DefaultCPUPercent int // 0 = no limit; 100 = 1 full core
+}
+
+// DockerImages holds the base image names for each app type.
+type DockerImages struct {
+	Python string
+	R      string
+}
+
 // rawConfig mirrors Config for YAML decoding, using string-typed duration fields.
 type rawConfig struct {
 	Database  DatabaseConfig     `yaml:"database"`
@@ -114,12 +135,30 @@ type rawConfig struct {
 	Storage   StorageConfig      `yaml:"storage"`
 	Lifecycle rawLifecycleConfig `yaml:"lifecycle"`
 	OAuth     rawOAuthConfig     `yaml:"oauth"`
+	Runtime   rawRuntimeConfig   `yaml:"runtime"`
 }
 
 type rawLifecycleConfig struct {
 	WatchInterval      string `yaml:"watch_interval"`
 	RestartMaxAttempts int    `yaml:"restart_max_attempts"`
 	HibernateTimeout   string `yaml:"hibernate_timeout"`
+}
+
+type rawRuntimeConfig struct {
+	Mode   string               `yaml:"mode"`
+	Docker rawDockerRuntimeConfig `yaml:"docker"`
+}
+
+type rawDockerRuntimeConfig struct {
+	Socket            string          `yaml:"socket"`
+	Images            rawDockerImages `yaml:"images"`
+	DefaultMemoryMB   int             `yaml:"default_memory_mb"`
+	DefaultCPUPercent int             `yaml:"default_cpu_percent"`
+}
+
+type rawDockerImages struct {
+	Python string `yaml:"python"`
+	R      string `yaml:"r"`
 }
 
 func Load(path string) (*Config, error) {
@@ -146,12 +185,15 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	rc := parseRuntime(raw.Runtime)
+
 	cfg := &Config{
 		Database:  raw.Database,
 		Server:    raw.Server,
 		Auth:      raw.Auth,
 		Storage:   raw.Storage,
 		Lifecycle: lc,
+		Runtime:   rc,
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
@@ -225,6 +267,38 @@ func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 	return lc, nil
 }
 
+func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
+	rc := RuntimeConfig{
+		Mode: "native",
+		Docker: DockerRuntimeConfig{
+			Socket: "/var/run/docker.sock",
+			Images: DockerImages{
+				Python: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
+				R:      "rocker/r-base",
+			},
+		},
+	}
+	if r.Mode != "" {
+		rc.Mode = r.Mode
+	}
+	if r.Docker.Socket != "" {
+		rc.Docker.Socket = r.Docker.Socket
+	}
+	if r.Docker.Images.Python != "" {
+		rc.Docker.Images.Python = r.Docker.Images.Python
+	}
+	if r.Docker.Images.R != "" {
+		rc.Docker.Images.R = r.Docker.Images.R
+	}
+	if r.Docker.DefaultMemoryMB != 0 {
+		rc.Docker.DefaultMemoryMB = r.Docker.DefaultMemoryMB
+	}
+	if r.Docker.DefaultCPUPercent != 0 {
+		rc.Docker.DefaultCPUPercent = r.Docker.DefaultCPUPercent
+	}
+	return rc
+}
+
 func applyEnv(cfg *Config) {
 	if v := os.Getenv("SHINYHUB_AUTH_SECRET"); v != "" {
 		cfg.Auth.Secret = v
@@ -278,5 +352,21 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_OIDC_DISPLAY_NAME"); v != "" {
 		cfg.OAuth.OIDC.DisplayName = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_MODE"); v != "" {
+		cfg.Runtime.Mode = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SOCKET"); v != "" {
+		cfg.Runtime.Docker.Socket = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Runtime.Docker.DefaultMemoryMB = n
+		}
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Runtime.Docker.DefaultCPUPercent = n
+		}
 	}
 }

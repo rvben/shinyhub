@@ -178,3 +178,49 @@ func TestConfig_GoogleOAuth_EnvVars(t *testing.T) {
 		t.Errorf("CallbackURL = %q, want %q", cfg.OAuth.Google.CallbackURL, "http://localhost/google/callback")
 	}
 }
+
+func TestRuntimeConfig(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+	t.Setenv("SHINYHUB_RUNTIME_MODE", "docker")
+	t.Setenv("SHINYHUB_RUNTIME_DOCKER_SOCKET", "/run/docker.sock")
+	t.Setenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB", "512")
+	t.Setenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT", "100")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Mode != "docker" {
+		t.Errorf("expected mode docker, got %s", cfg.Runtime.Mode)
+	}
+	if cfg.Runtime.Docker.Socket != "/run/docker.sock" {
+		t.Errorf("unexpected socket: %s", cfg.Runtime.Docker.Socket)
+	}
+	if cfg.Runtime.Docker.DefaultMemoryMB != 512 {
+		t.Errorf("expected 512, got %d", cfg.Runtime.Docker.DefaultMemoryMB)
+	}
+	if cfg.Runtime.Docker.DefaultCPUPercent != 100 {
+		t.Errorf("expected 100, got %d", cfg.Runtime.Docker.DefaultCPUPercent)
+	}
+}
+
+func TestRuntimeConfigDefaults(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "test-secret")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Mode != "native" {
+		t.Errorf("expected default mode native, got %s", cfg.Runtime.Mode)
+	}
+	if cfg.Runtime.Docker.Socket != "/var/run/docker.sock" {
+		t.Errorf("expected default socket, got %s", cfg.Runtime.Docker.Socket)
+	}
+	if cfg.Runtime.Docker.Images.Python == "" {
+		t.Error("expected non-empty default python image")
+	}
+	if cfg.Runtime.Docker.Images.R == "" {
+		t.Error("expected non-empty default R image")
+	}
+}
