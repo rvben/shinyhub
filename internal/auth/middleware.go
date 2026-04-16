@@ -88,15 +88,29 @@ func UserFromContext(ctx context.Context) *ContextUser {
 	return u
 }
 
+// Role is a typed role identifier. Exported constants are the only valid values.
+type Role string
+
+const (
+	RoleViewer    Role = "viewer"
+	RoleDeveloper Role = "developer"
+	RoleOperator  Role = "operator"
+	RoleAdmin     Role = "admin"
+)
+
+// roleOrder ranks roles for comparison. Unknown role strings on a user rank 0
+// (below every required level) and are rejected.
+var roleOrder = map[string]int{
+	string(RoleViewer):    1,
+	string(RoleDeveloper): 2,
+	string(RoleOperator):  3,
+	string(RoleAdmin):     4,
+}
+
 // RequireRole enforces a minimum role level. Roles are ordered:
 // viewer < developer < operator < admin.
-// Panics at startup if an unknown role name is passed.
-func RequireRole(role string) func(http.Handler) http.Handler {
-	order := map[string]int{"viewer": 1, "developer": 2, "operator": 3, "admin": 4}
-	required, ok := order[role]
-	if !ok {
-		panic(fmt.Sprintf("auth.RequireRole: unknown role %q", role))
-	}
+func RequireRole(role Role) func(http.Handler) http.Handler {
+	required := roleOrder[string(role)]
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			u := UserFromContext(r.Context())
@@ -104,8 +118,8 @@ func RequireRole(role string) func(http.Handler) http.Handler {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			actual, ok := order[u.Role]
-			if !ok || actual < required {
+			actual := roleOrder[u.Role]
+			if actual == 0 || actual < required {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
