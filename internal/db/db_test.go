@@ -311,6 +311,41 @@ func TestOAuthState_ConsumeOnce(t *testing.T) {
 	}
 }
 
+func TestOAuthState_ExpiredStateIsRejected(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.Migrate()
+
+	// Create two states: one fresh, one that will be backdated.
+	if err := store.CreateOAuthState("nonce-fresh"); err != nil {
+		t.Fatalf("CreateOAuthState fresh: %v", err)
+	}
+	if err := store.CreateOAuthState("nonce-stale"); err != nil {
+		t.Fatalf("CreateOAuthState stale: %v", err)
+	}
+
+	// Backdate nonce-stale to 15 minutes ago.
+	_, err = store.DB().Exec(
+		`UPDATE oauth_states SET created_at = datetime('now', '-15 minutes') WHERE state = 'nonce-stale'`)
+	if err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	// Consuming the fresh state triggers the sweep and must succeed.
+	if err := store.ConsumeOAuthState("nonce-fresh"); err != nil {
+		t.Fatalf("ConsumeOAuthState fresh: %v", err)
+	}
+
+	// The sweep that ran during nonce-fresh consume should have deleted nonce-stale.
+	// Consuming it now must fail.
+	if err := store.ConsumeOAuthState("nonce-stale"); err == nil {
+		t.Error("expected error consuming expired state, got nil")
+	}
+}
+
 func TestGetDeploymentBySlugAndID(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {
@@ -410,6 +445,12 @@ func TestAuditLog(t *testing.T) {
 	}
 	if events[1].ResourceID != "myapp" {
 		t.Errorf("expected myapp, got %s", events[1].ResourceID)
+	}
+	// CreatedAt must be populated — not the zero value.
+	for i, e := range events {
+		if e.CreatedAt.IsZero() {
+			t.Errorf("event[%d] CreatedAt is zero", i)
+		}
 	}
 }
 

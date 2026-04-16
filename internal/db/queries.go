@@ -812,8 +812,11 @@ func (s *Store) CreateOAuthState(state string) error {
 }
 
 // ConsumeOAuthState validates the state nonce and deletes it (one-time use).
-// Returns an error if the state does not exist.
+// Returns an error if the state does not exist or has expired (>10 minutes old).
+// Also sweeps all expired states to prevent unbounded table growth.
 func (s *Store) ConsumeOAuthState(state string) error {
+	// Sweep stale nonces — ignore errors; this is best-effort cleanup.
+	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < datetime('now', '-10 minutes')`) //nolint:errcheck
 	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ?`, state)
 	if err != nil {
 		return fmt.Errorf("consume oauth state: %w", err)
@@ -879,20 +882,8 @@ func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, error) {
 	result := make([]AuditEvent, 0)
 	for rows.Next() {
 		var e AuditEvent
-		var createdAt string
-		if err := rows.Scan(&e.ID, &e.UserID, &e.Action, &e.ResourceType, &e.ResourceID, &e.Detail, &e.IPAddress, &createdAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Action, &e.ResourceType, &e.ResourceID, &e.Detail, &e.IPAddress, &e.CreatedAt); err != nil {
 			return nil, err
-		}
-		parsed := false
-		for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339} {
-			if t, err := time.Parse(layout, createdAt); err == nil {
-				e.CreatedAt = t
-				parsed = true
-				break
-			}
-		}
-		if !parsed {
-			fmt.Fprintf(os.Stderr, "audit: unexpected created_at format: %q\n", createdAt)
 		}
 		result = append(result, e)
 	}
