@@ -51,3 +51,44 @@ changelog:
     exclude:
       - "^chore\\(release\\)"
       - "^style"
+
+dockers:
+  - id: shinyhub-amd64
+    ids: [shinyhub]
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/rvben/shinyhub:{{ .Version }}-amd64"
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/rvben/shinyhub"
+      - "--label=org.opencontainers.image.licenses=MIT"
+
+  - id: shinyhub-arm64
+    ids: [shinyhub]
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/rvben/shinyhub:{{ .Version }}-arm64"
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/rvben/shinyhub"
+      - "--label=org.opencontainers.image.licenses=MIT"
+
+docker_manifests:
+  - name_template: "ghcr.io/rvben/shinyhub:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/rvben/shinyhub:{{ .Version }}-amd64"
+      - "ghcr.io/rvben/shinyhub:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/rvben/shinyhub:latest"
+    image_templates:
+      - "ghcr.io/rvben/shinyhub:{{ .Version }}-amd64"
+      - "ghcr.io/rvben/shinyhub:{{ .Version }}-arm64"

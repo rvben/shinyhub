@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1.7
+# This Dockerfile is consumed by GoReleaser during a release. It expects
+# `shinyhub` to be pre-built alongside it.
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY shinyhub /usr/local/bin/shinyhub
+COPY shinyhub.yaml.example /etc/shinyhub/shinyhub.yaml.example
+
+ENV SHINYHUB_CONFIG=/etc/shinyhub/shinyhub.yaml
+EXPOSE 8080
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/shinyhub"]
