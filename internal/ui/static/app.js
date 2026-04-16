@@ -125,12 +125,12 @@ document.addEventListener('DOMContentLoaded', () => {
         restartButton.addEventListener('click', () => restart(app.slug));
         actions.appendChild(restartButton);
 
-        const rollbackButton = document.createElement('button');
-        rollbackButton.type = 'button';
-        rollbackButton.textContent = 'Rollback';
-        rollbackButton.setAttribute('aria-label', `Rollback ${app.name}`);
-        rollbackButton.addEventListener('click', () => rollback(app.slug));
-        actions.appendChild(rollbackButton);
+        const historyButton = document.createElement('button');
+        historyButton.type = 'button';
+        historyButton.textContent = 'History';
+        historyButton.setAttribute('aria-label', `Deployment history for ${app.name}`);
+        historyButton.addEventListener('click', () => openHistoryModal(app.slug));
+        actions.appendChild(historyButton);
 
         const logsButton = document.createElement('button');
         logsButton.type = 'button';
@@ -330,29 +330,6 @@ document.addEventListener('DOMContentLoaded', () => {
     window.setTimeout(loadApps, 1000);
   }
 
-  async function rollback(slug) {
-    setError(appError, '');
-
-    let response;
-    try {
-      response = await api(`/api/apps/${slug}/rollback`, {method: 'PUT'});
-    } catch {
-      setError(appError, 'Network error');
-      return;
-    }
-
-    if (response.status === 401) {
-      await handleUnauthorized();
-      return;
-    }
-    if (!response.ok) {
-      setError(appError, 'Rollback failed');
-      return;
-    }
-
-    window.setTimeout(loadApps, 1000);
-  }
-
   function openLogs(slug) {
     closeLogs();
     logPaneTitle.textContent = `Logs — ${slug}`;
@@ -388,6 +365,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Access modal ---
 
   let accessSlug = null;
+  let historySlug = null;
 
   async function openAccessModal(app) {
     accessSlug = app.slug;
@@ -412,6 +390,112 @@ document.addEventListener('DOMContentLoaded', () => {
   function closeAccessModal() {
     document.getElementById('access-modal').hidden = true;
     accessSlug = null;
+  }
+
+  async function openHistoryModal(slug) {
+    historySlug = slug;
+    const app = state.apps.find(a => a.slug === slug);
+    historyAppName.textContent = app ? app.name : slug;
+    historyList.textContent = '';
+    historyModal.hidden = false;
+    document.getElementById('history-modal-close').focus();
+    historyList.innerHTML = '<li style="color:var(--text-muted);padding:0.5rem 0">Loading…</li>';
+
+    let resp;
+    try {
+      resp = await api(`/api/apps/${slug}/deployments`);
+    } catch {
+      historyList.innerHTML = '<li style="color:var(--text-muted)">Failed to load deployments</li>';
+      return;
+    }
+    if (!resp.ok) {
+      historyList.innerHTML = '<li style="color:var(--text-muted)">Failed to load deployments</li>';
+      return;
+    }
+
+    let deployments;
+    try {
+      deployments = (await resp.json()) || [];
+    } catch {
+      historyList.innerHTML = '<li style="color:var(--text-muted)">Failed to load deployments</li>';
+      return;
+    }
+    if (historySlug !== slug) return;  // modal was superseded by a later open
+    historyList.textContent = '';
+
+    for (const d of deployments) {
+      const li = document.createElement('li');
+      if (d.status === 'active') li.className = 'deployment-active';
+
+      const meta = document.createElement('div');
+      meta.className = 'deployment-meta';
+
+      const versionRow = document.createElement('div');
+
+      const versionEl = document.createElement('code');
+      versionEl.className = 'deployment-version';
+      const isHash = /^[0-9a-f]{8,}$/i.test(d.version);
+      versionEl.textContent = isHash ? d.version.slice(0, 7) : d.version;
+      versionRow.appendChild(versionEl);
+
+      const statusBadge = document.createElement('span');
+      statusBadge.className = `badge badge-${d.status}`;
+      statusBadge.textContent = d.status;
+      versionRow.appendChild(statusBadge);
+
+      meta.appendChild(versionRow);
+
+      const dateEl = document.createElement('div');
+      dateEl.className = 'deployment-date';
+      const ts = new Date(d.created_at);
+      dateEl.textContent = relativeTime(ts);
+      dateEl.title = ts.toISOString();
+      meta.appendChild(dateEl);
+
+      li.appendChild(meta);
+
+      if (d.status === 'success') {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Rollback';
+        btn.addEventListener('click', () => rollbackTo(slug, d.id));
+        li.appendChild(btn);
+      } else if (d.status === 'active') {
+        const label = document.createElement('span');
+        label.style.cssText = 'color:var(--text-muted);font-size:0.72rem';
+        label.textContent = 'current';
+        li.appendChild(label);
+      }
+
+      historyList.appendChild(li);
+    }
+  }
+
+  function closeHistoryModal() {
+    historyModal.hidden = true;
+    historySlug = null;
+  }
+
+  async function rollbackTo(slug, deploymentId) {
+    let resp;
+    try {
+      resp = await api(`/api/apps/${slug}/rollback`, {
+        method: 'PUT',
+        body: JSON.stringify({ deployment_id: deploymentId }),
+      });
+    } catch {
+      historyList.insertAdjacentHTML('beforeend',
+        '<li style="color:var(--red);padding:0.5rem 0">Network error — rollback not sent</li>');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      historyList.insertAdjacentHTML('beforeend',
+        '<li style="color:var(--red);padding:0.5rem 0">Rollback failed</li>');
+      return;
+    }
+    closeHistoryModal();
+    window.setTimeout(loadApps, 1000);
   }
 
   async function refreshMemberList() {
@@ -476,6 +560,11 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('access-modal-close').addEventListener('click', closeAccessModal);
   document.getElementById('access-modal').addEventListener('click', e => {
     if (e.target === e.currentTarget) closeAccessModal();
+  });
+
+  document.getElementById('history-modal-close').addEventListener('click', closeHistoryModal);
+  historyModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeHistoryModal();
   });
 
   // Visibility radio change → PATCH access level.
