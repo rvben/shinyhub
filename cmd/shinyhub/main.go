@@ -118,11 +118,17 @@ func main() {
 	}
 
 	deployFn := func(slug, bundleDir string) (*deploy.Result, error) {
+		app, err := store.GetApp(slug)
+		if err != nil {
+			return nil, fmt.Errorf("get app for deploy: %w", err)
+		}
 		return deploy.Run(deploy.Params{
-			Slug:      slug,
-			BundleDir: bundleDir,
-			Manager:   mgr,
-			Proxy:     prx,
+			Slug:            slug,
+			BundleDir:       bundleDir,
+			Manager:         mgr,
+			Proxy:           prx,
+			MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
+			CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
 		})
 	}
 
