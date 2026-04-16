@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -106,7 +107,10 @@ func (c *dockerClient) startContainer(id string) error {
 // stopContainer sends SIGTERM to the container and waits up to timeoutSecs.
 func (c *dockerClient) stopContainer(id string, timeoutSecs int) error {
 	url := fmt.Sprintf("%s/containers/%s/stop?t=%d", c.base, id, timeoutSecs)
-	req, _ := http.NewRequest(http.MethodPost, url, nil)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("stop container: %w", err)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("stop container: %w", err)
@@ -116,13 +120,17 @@ func (c *dockerClient) stopContainer(id string, timeoutSecs int) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("stop container: status %d: %s", resp.StatusCode, body)
 	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 	return nil
 }
 
 // removeContainer forcibly removes a container.
 func (c *dockerClient) removeContainer(id string) error {
 	url := fmt.Sprintf("%s/containers/%s?force=true", c.base, id)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("remove container: %w", err)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("remove container: %w", err)
@@ -132,6 +140,7 @@ func (c *dockerClient) removeContainer(id string) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("remove container: status %d: %s", resp.StatusCode, body)
 	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 	return nil
 }
 
@@ -161,10 +170,16 @@ func (c *dockerClient) waitContainer(ctx context.Context, id string) error {
 		return fmt.Errorf("wait container: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("wait container: status %d: %s", resp.StatusCode, body)
+	}
 	var result struct {
 		StatusCode int `json:"StatusCode"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("wait container: decode response: %w", err)
+	}
 	return nil
 }
 
@@ -230,8 +245,11 @@ func (c *dockerClient) containerStats(ctx context.Context, id string) (float64, 
 // listContainers returns containers matching the given filters JSON string.
 // Example filtersJSON: `{"label":["shinyhub.managed=true"]}`
 func (c *dockerClient) listContainers(filtersJSON string) ([]containerSummary, error) {
-	url := fmt.Sprintf("%s/containers/json?filters=%s", c.base, filtersJSON)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	reqURL := fmt.Sprintf("%s/containers/json?filters=%s", c.base, url.QueryEscape(filtersJSON))
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
@@ -264,7 +282,10 @@ func (c *dockerClient) post(path string, body any, out any) error {
 	if err != nil {
 		return err
 	}
-	req, _ := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(b))
+	req, err := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(b))
+	if err != nil {
+		return fmt.Errorf("post %s: %w", path, err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -282,7 +303,10 @@ func (c *dockerClient) post(path string, body any, out any) error {
 }
 
 func (c *dockerClient) postEmpty(path string) error {
-	req, _ := http.NewRequest(http.MethodPost, c.base+path, nil)
+	req, err := http.NewRequest(http.MethodPost, c.base+path, nil)
+	if err != nil {
+		return fmt.Errorf("post %s: %w", path, err)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return err
