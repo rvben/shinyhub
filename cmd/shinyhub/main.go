@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -214,11 +215,16 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen %s: %v", addr, err)
+	}
+
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("shinyhub %s listening on %s", version, addr)
 		close(readyCh)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
 		close(serveErr)
