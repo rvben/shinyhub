@@ -19,6 +19,8 @@ document.addEventListener('DOMContentLoaded', () => {
     user: null,
     apps: [],
     metricsInterval: null,
+    auditPage: 0,
+    auditHasMore: false,
   };
 
   const loginView = document.getElementById('login-view');
@@ -37,6 +39,18 @@ document.addEventListener('DOMContentLoaded', () => {
   const logPaneTitle = document.getElementById('log-pane-title');
   const logPaneBody = document.getElementById('log-pane-body');
   const logPaneClose = document.getElementById('log-pane-close');
+  const auditView   = document.getElementById('audit-view');
+  const auditError  = document.getElementById('audit-error');
+  const auditBody   = document.getElementById('audit-body');
+  const auditPrev   = document.getElementById('audit-prev');
+  const auditNext   = document.getElementById('audit-next');
+  const auditRange  = document.getElementById('audit-range');
+  const tabBar      = document.getElementById('tab-bar');
+  const tabApps     = document.getElementById('tab-apps');
+  const tabAudit    = document.getElementById('tab-audit');
+  const historyModal    = document.getElementById('history-modal');
+  const historyAppName  = document.getElementById('history-app-name');
+  const historyList     = document.getElementById('history-list');
 
   let activeEventSource = null;
 
@@ -141,16 +155,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function showView(name) {
+    appsView.hidden  = name !== 'apps';
+    auditView.hidden = name !== 'audit';
+    tabApps.classList.toggle('tab-active',  name === 'apps');
+    tabAudit.classList.toggle('tab-active', name === 'audit');
+    if (name === 'audit') loadAuditEvents(0);
+  }
+
   function showLoggedOut() {
     closeLogs();
     clearInterval(state.metricsInterval);
     state.metricsInterval = null;
     state.user = null;
     state.apps = [];
+    state.auditPage = 0;
+    state.auditHasMore = false;
     sessionUser.textContent = '';
     setHidden(logoutButton, true);
     setHidden(loginView, false);
     setHidden(appsView, true);
+    setHidden(auditView, true);
+    tabBar.hidden = true;
     setError(loginError, '');
     setError(appError, '');
     renderApps();
@@ -161,7 +187,9 @@ document.addEventListener('DOMContentLoaded', () => {
     sessionUser.textContent = user.username;
     setHidden(logoutButton, false);
     setHidden(loginView, true);
-    setHidden(appsView, false);
+    tabBar.hidden = false;
+    tabAudit.hidden = user.role !== 'admin';
+    showView('apps');
   }
 
   async function handleUnauthorized() {
@@ -341,10 +369,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   logPaneClose.addEventListener('click', closeLogs);
 
+  tabApps.addEventListener('click',  () => showView('apps'));
+  tabAudit.addEventListener('click', () => showView('audit'));
+
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (!document.getElementById('access-modal').hidden) {
         closeAccessModal();
+      } else if (!historyModal.hidden) {
+        closeHistoryModal();
       } else if (!document.getElementById('log-pane').hidden) {
         closeLogs();
       }
