@@ -2,6 +2,7 @@
 docs/superpowers/
 go.work
 bin/
+tmp/
 .worktrees/
 CLAUDE.md
 CLAUDE.local.md

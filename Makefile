@@ -1,4 +1,4 @@
-.PHONY: build test lint run goreleaser-check
+.PHONY: build test lint run dev goreleaser-check
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -11,7 +11,14 @@ lint:
 	go vet ./...
 
 run: build
-	SHINYHUB_AUTH_SECRET=dev-secret ./bin/shinyhub
+	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production ./bin/shinyhub
+
+# dev runs the server with live reload via air. Go changes trigger a rebuild;
+# edits to internal/ui/static/ are served from disk (no rebuild) thanks to
+# SHINYHUB_DEV_STATIC. Install air with: go install github.com/air-verse/air@latest
+dev:
+	@command -v air >/dev/null 2>&1 || { echo "air not found. install: go install github.com/air-verse/air@latest"; exit 1; }
+	air
 
 goreleaser-check:
 	goreleaser check
