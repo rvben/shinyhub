@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,9 +24,12 @@ type Server struct {
 	github       *oauth.GitHub        // nil when GitHub OAuth is not configured
 	googleOAuth  *oauth.Google        // nil when Google OAuth is not configured
 	oidcProvider *oauth.OIDCProvider  // nil when OIDC SSO is not configured
-	sampler      process.Sampler
-	loginLimiter *loginRateLimiter
-	router       http.Handler
+	sampler       process.Sampler
+	loginLimiter  *loginRateLimiter
+	deployLimiter *keyedRateLimiter
+	userLimiter   *keyedRateLimiter
+	tokenLimiter  *keyedRateLimiter
+	router        http.Handler
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil
@@ -37,7 +41,10 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		manager:      manager,
 		proxy:        prx,
 		sampler:      &process.GopsutilSampler{},
-		loginLimiter: newLoginRateLimiter(10, time.Minute),
+		loginLimiter:  newLoginRateLimiter(10, time.Minute),
+		deployLimiter: newKeyedRateLimiter(10, time.Minute),
+		userLimiter:   newKeyedRateLimiter(5, time.Minute),
+		tokenLimiter:  newKeyedRateLimiter(20, time.Minute),
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
@@ -107,7 +114,7 @@ func (s *Server) buildRouter() http.Handler {
 		r.Get("/api/apps/{slug}", s.handleGetApp)
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
-		r.Post("/api/apps/{slug}/deploy", s.handleDeployApp)
+		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/deploy", s.handleDeployApp)
 		r.Post("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		// Keep PUT for backwards compatibility.
 		r.Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
@@ -122,11 +129,11 @@ func (s *Server) buildRouter() http.Handler {
 		r.Delete("/api/apps/{slug}/members/{user_id}", s.handleRevokeAppAccess)
 		r.Get("/api/apps/{slug}/deployments", s.handleListDeployments)
 
-		r.Post("/api/tokens", s.handleCreateToken)
+		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens", s.handleCreateToken)
 		r.Get("/api/tokens", s.handleListTokens)
 		r.Delete("/api/tokens/{id}", s.handleDeleteToken)
 		r.Get("/api/users", s.handleListUsers)           // admin: list all users
-		r.Post("/api/users", s.handleCreateUser)          // admin: create user
+		r.With(rateLimitByUser(s.userLimiter)).Post("/api/users", s.handleCreateUser) // admin: create user
 		r.Get("/api/users/{username}", s.handleGetUser)   // any auth: lookup by username
 		r.Patch("/api/users/{id}", s.handlePatchUser)     // admin: update role
 		r.Delete("/api/users/{id}", s.handleDeleteUser)   // admin: delete user
@@ -135,4 +142,23 @@ func (s *Server) buildRouter() http.Handler {
 	})
 
 	return r
+}
+
+// rateLimitByUser applies the given limiter, keyed by the authenticated user
+// ID. Must be placed after the bearer middleware so UserFromContext resolves.
+func rateLimitByUser(rl *keyedRateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u := auth.UserFromContext(r.Context())
+			if u == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !rl.allow(strconv.FormatInt(u.ID, 10)) {
+				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

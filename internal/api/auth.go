@@ -15,31 +15,32 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
-// loginRateLimiter is a simple sliding-window in-memory rate limiter per IP.
-type loginRateLimiter struct {
+// keyedRateLimiter is a simple sliding-window in-memory rate limiter keyed by
+// an arbitrary identifier (IP, user ID, etc.).
+type keyedRateLimiter struct {
 	mu      sync.Mutex
 	windows map[string][]time.Time
 	limit   int
 	window  time.Duration
 }
 
-func newLoginRateLimiter(limit int, window time.Duration) *loginRateLimiter {
-	return &loginRateLimiter{
+func newKeyedRateLimiter(limit int, window time.Duration) *keyedRateLimiter {
+	return &keyedRateLimiter{
 		windows: make(map[string][]time.Time),
 		limit:   limit,
 		window:  window,
 	}
 }
 
-// allow returns true if the request from ip is within the rate limit.
-func (rl *loginRateLimiter) allow(ip string) bool {
+// allow returns true if the request from key is within the rate limit.
+func (rl *keyedRateLimiter) allow(key string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
 	cutoff := now.Add(-rl.window)
 
-	reqs := rl.windows[ip]
+	reqs := rl.windows[key]
 	var recent []time.Time
 	for _, t := range reqs {
 		if t.After(cutoff) {
@@ -48,12 +49,19 @@ func (rl *loginRateLimiter) allow(ip string) bool {
 	}
 
 	if len(recent) >= rl.limit {
-		rl.windows[ip] = recent
+		rl.windows[key] = recent
 		return false
 	}
 
-	rl.windows[ip] = append(recent, now)
+	rl.windows[key] = append(recent, now)
 	return true
+}
+
+// loginRateLimiter retains its name for readability at existing call sites.
+type loginRateLimiter = keyedRateLimiter
+
+func newLoginRateLimiter(limit int, window time.Duration) *loginRateLimiter {
+	return newKeyedRateLimiter(limit, window)
 }
 
 // dummyHash is a pre-computed bcrypt hash used to ensure constant-time
