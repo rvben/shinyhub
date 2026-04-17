@@ -131,6 +131,45 @@
         </div>
       </div>
     </div>
+    <!-- Deploy modal: accepts folder drop, zip drop, or file pick -->
+    <div id="deploy-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="deploy-modal-heading">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="deploy-modal-heading" class="modal-title">Deploy: <span id="deploy-app-name"></span></h2>
+          <button id="deploy-modal-close" type="button" aria-label="Close deploy modal">×</button>
+        </div>
+        <div class="modal-body">
+          <div id="deploy-dropzone" class="dropzone" tabindex="0" role="button"
+               aria-label="Drop folder or zip, or press Enter to pick a file">
+            <p>Drop a folder or <code>.zip</code> here,</p>
+            <p>or <button id="deploy-pick" type="button" class="linklike">pick a file</button>.</p>
+            <input id="deploy-file" type="file" accept=".zip" hidden>
+          </div>
+
+          <ul id="deploy-summary" class="deploy-summary" hidden>
+            <li>Source: <span id="deploy-source-name">—</span></li>
+            <li>Files: <span id="deploy-file-count">0</span></li>
+            <li>Bundle size: <span id="deploy-bundle-size">0 B</span></li>
+            <li id="deploy-ignored-row" hidden>
+              Ignored: <span id="deploy-ignored-list"></span>
+            </li>
+          </ul>
+
+          <div id="deploy-progress-wrap" class="deploy-progress" hidden>
+            <progress id="deploy-progress-bar" max="100" value="0"></progress>
+            <span id="deploy-progress-text">0%</span>
+          </div>
+
+          <p id="deploy-error" class="error" hidden></p>
+
+          <div class="modal-actions">
+            <button type="button" id="deploy-cancel">Cancel</button>
+            <button type="button" id="deploy-submit" disabled>Deploy</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <!-- Access control modal -->
     <div id="access-modal" class="modal-overlay" hidden
          role="dialog" aria-modal="true" aria-labelledby="access-modal-heading">
