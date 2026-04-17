@@ -927,8 +927,122 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(deployError, 'Drop a single folder or a single .zip. Multiple files are not supported yet.');
   }
 
-  async function zipFolderEntry(_entry) {
-    setError(deployError, 'Folder zipping not yet implemented (next task).');
+  let jsZipPromise = null;
+
+  function loadJSZip() {
+    if (!jsZipPromise) {
+      jsZipPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = '/static/vendor/jszip.min.js';
+        s.onload = () => {
+          if (window.JSZip) resolve(window.JSZip);
+          else reject(new Error('JSZip loaded but global is missing'));
+        };
+        s.onerror = () => reject(new Error('Failed to load JSZip'));
+        document.head.appendChild(s);
+      });
+    }
+    return jsZipPromise;
+  }
+
+  function readEntriesAll(dirReader) {
+    // webkit's readEntries returns results in chunks; loop until empty.
+    return new Promise((resolve, reject) => {
+      const all = [];
+      function readBatch() {
+        dirReader.readEntries((entries) => {
+          if (entries.length === 0) { resolve(all); return; }
+          all.push(...entries);
+          readBatch();
+        }, reject);
+      }
+      readBatch();
+    });
+  }
+
+  function fileFromEntry(entry) {
+    return new Promise((resolve, reject) => entry.file(resolve, reject));
+  }
+
+  // Walks a DirectoryEntry tree, yielding { relativePath, file } for every file
+  // not under an ignored directory.  rootEntry itself contributes no prefix —
+  // mirrors the CLI's `filepath.Rel(dir, path)` behavior so the archive contains
+  // the folder's contents, not the folder itself.
+  async function* walkFolder(rootEntry, ignored) {
+    const queue = [{ entry: rootEntry, path: '' }];
+    while (queue.length > 0) {
+      const { entry, path } = queue.shift();
+      if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const children = await readEntriesAll(reader);
+        for (const child of children) {
+          const childPath = path ? `${path}/${child.name}` : child.name;
+          if (child.isDirectory && DEPLOY_IGNORE_DIRS.has(child.name)) {
+            ignored.add(child.name);
+            continue;
+          }
+          queue.push({ entry: child, path: childPath });
+        }
+      } else if (entry.isFile) {
+        const file = await fileFromEntry(entry);
+        yield { relativePath: path, file };
+      }
+    }
+  }
+
+  async function zipFolderEntry(rootEntry) {
+    setError(deployError, '');
+    deploySubmit.disabled = true;
+    deploySourceName.textContent = rootEntry.name + '/';
+    deployFileCount.textContent = 'Reading…';
+    deployBundleSize.textContent = '—';
+    deploySummary.hidden = false;
+
+    let JSZip;
+    try {
+      JSZip = await loadJSZip();
+    } catch (err) {
+      console.error('loadJSZip failed:', err);
+      setError(deployError, 'Failed to load zip library. Check your network.');
+      return;
+    }
+    const zip = new JSZip();
+    const ignored = new Set();
+    let fileCount = 0;
+
+    try {
+      for await (const { relativePath, file } of walkFolder(rootEntry, ignored)) {
+        zip.file(relativePath, file);
+        fileCount++;
+      }
+    } catch (err) {
+      console.error('walkFolder failed:', err);
+      setError(deployError, 'Failed to read folder contents.');
+      return;
+    }
+
+    if (fileCount === 0) {
+      setError(deployError, 'Folder is empty after filtering ignored directories.');
+      return;
+    }
+
+    const hasAppPy = Object.keys(zip.files).some(p => p === 'app.py' || p.endsWith('/app.py'));
+    const hasAppR  = Object.keys(zip.files).some(p => p === 'app.R'  || p.endsWith('/app.R'));
+    if (!hasAppPy && !hasAppR) {
+      setError(deployError, 'Bundle contains no app.py or app.R at any level. Did you drop the wrong folder?');
+      return;
+    }
+
+    const blob = await zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
+
+    deployState.blob = blob;
+    deployState.fileCount = fileCount;
+    deployState.ignored = ignored;
+    renderDeploySummary(rootEntry.name + '/', blob.size, fileCount, ignored);
   }
 
   deployModalClose.addEventListener('click', closeDeployModal);
