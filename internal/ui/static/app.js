@@ -96,8 +96,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const deploySubmit       = document.getElementById('deploy-submit');
 
   const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+  const DEPLOY_MAX_BYTES = 128 * 1024 * 1024;
+  const DEPLOY_IGNORE_DIRS = new Set(['.git', '.venv', '__pycache__', 'node_modules', '.renv', '.Rproj.user']);
 
   let activeEventSource = null;
+  let deployState = null; // { slug, appName, blob, fileCount, ignored: Set<string>, xhr }
 
   function readCookie(name) {
     const prefix = name + '=';
@@ -169,6 +172,13 @@ document.addEventListener('DOMContentLoaded', () => {
       actions.appendChild(openLink);
 
       if (canManageApp(state.user, app)) {
+        const deployButton = document.createElement('button');
+        deployButton.type = 'button';
+        deployButton.textContent = 'Deploy';
+        deployButton.setAttribute('aria-label', `Deploy new bundle to ${app.name}`);
+        deployButton.addEventListener('click', () => openDeployModal(app));
+        actions.appendChild(deployButton);
+
         const restartButton = document.createElement('button');
         restartButton.type = 'button';
         restartButton.textContent = 'Restart';
@@ -601,7 +611,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      if (!newAppModal.hidden) {
+      if (!deployModal.hidden) {
+        closeDeployModal();
+      } else if (!newAppModal.hidden) {
         closeNewAppModal();
       } else if (!document.getElementById('access-modal').hidden) {
         closeAccessModal();
@@ -778,6 +790,153 @@ document.addEventListener('DOMContentLoaded', () => {
     showNewAppHandoff(slug);
     await loadApps();
   }
+
+  function formatBytes(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
+  }
+
+  function resetDeployModal() {
+    deploySummary.hidden = true;
+    deployIgnoredRow.hidden = true;
+    deployProgressWrap.hidden = true;
+    deployProgressBar.value = 0;
+    deployProgressText.textContent = '0%';
+    setError(deployError, '');
+    deploySubmit.disabled = true;
+    deploySubmit.textContent = 'Deploy';
+    deployFileInput.value = '';
+    deployDropzone.classList.remove('dragover');
+    if (deployState && deployState.xhr) {
+      deployState.xhr.abort();
+    }
+    deployState = null;
+  }
+
+  function openDeployModal(app) {
+    resetDeployModal();
+    deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, ignored: new Set(), xhr: null };
+    deployAppName.textContent = app.name;
+    deployModal.hidden = false;
+    deployDropzone.focus();
+  }
+
+  function closeDeployModal() {
+    resetDeployModal();
+    deployModal.hidden = true;
+  }
+
+  function renderDeploySummary(sourceName, blobSize, fileCount, ignored) {
+    deploySourceName.textContent = sourceName;
+    deployFileCount.textContent = fileCount == null ? '—' : String(fileCount);
+    deployBundleSize.textContent = formatBytes(blobSize);
+    if (ignored && ignored.size > 0) {
+      deployIgnoredRow.hidden = false;
+      deployIgnoredList.textContent = [...ignored].sort().join(', ');
+    } else {
+      deployIgnoredRow.hidden = true;
+    }
+    deploySummary.hidden = false;
+
+    if (blobSize > DEPLOY_MAX_BYTES) {
+      setError(deployError, `Bundle is ${formatBytes(blobSize)} — exceeds the 128 MiB upload limit. Use the CLI for larger bundles.`);
+      deploySubmit.disabled = true;
+      return;
+    }
+    setError(deployError, '');
+    deploySubmit.disabled = false;
+  }
+
+  async function acceptZipFile(file) {
+    // Pre-built .zip — counting files would require parsing the central
+    // directory, so leave the file count unknown and render it as "—".
+    deployState.blob = file;
+    deployState.fileCount = null;
+    deployState.ignored = new Set();
+    renderDeploySummary(file.name, file.size, null, null);
+  }
+
+  function bindDropzoneEvents() {
+    deployDropzone.addEventListener('click', (e) => {
+      if (e.target.tagName === 'BUTTON') return; // pick button handles itself
+      deployFileInput.click();
+    });
+    deployDropzone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        deployFileInput.click();
+      }
+    });
+    deployPick.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deployFileInput.click();
+    });
+    deployFileInput.addEventListener('change', async () => {
+      const file = deployFileInput.files && deployFileInput.files[0];
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith('.zip')) {
+        setError(deployError, 'File picker only accepts .zip. Drop a folder to zip it in the browser.');
+        return;
+      }
+      await acceptZipFile(file);
+    });
+
+    deployDropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      deployDropzone.classList.add('dragover');
+    });
+    deployDropzone.addEventListener('dragleave', () => {
+      deployDropzone.classList.remove('dragover');
+    });
+    deployDropzone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      deployDropzone.classList.remove('dragover');
+      await handleDrop(e);
+    });
+  }
+
+  async function handleDrop(e) {
+    const items = [...(e.dataTransfer?.items || [])];
+    if (items.length === 0) {
+      setError(deployError, 'Nothing to upload.');
+      return;
+    }
+    // Single .zip file → treat as pre-built.
+    if (items.length === 1 && items[0].kind === 'file') {
+      const entry = items[0].webkitGetAsEntry ? items[0].webkitGetAsEntry() : null;
+      const file = items[0].getAsFile();
+      if (file && !entry?.isDirectory && file.name.toLowerCase().endsWith('.zip')) {
+        await acceptZipFile(file);
+        return;
+      }
+      if (entry && entry.isDirectory) {
+        await zipFolderEntry(entry);
+        return;
+      }
+    }
+    // Folder drop may come in as multiple file entries OR a single directory
+    // entry depending on the browser.  If any item is a directory entry, zip it.
+    const directories = items
+      .map(i => i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)
+      .filter(en => en && en.isDirectory);
+    if (directories.length === 1) {
+      await zipFolderEntry(directories[0]);
+      return;
+    }
+    setError(deployError, 'Drop a single folder or a single .zip. Multiple files are not supported yet.');
+  }
+
+  async function zipFolderEntry(_entry) {
+    setError(deployError, 'Folder zipping not yet implemented (next task).');
+  }
+
+  deployModalClose.addEventListener('click', closeDeployModal);
+  deployCancel.addEventListener('click', closeDeployModal);
+  deployModal.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeDeployModal();
+  });
+  bindDropzoneEvents();
 
   newAppButton.addEventListener('click', openNewAppModal);
   newAppClose.addEventListener('click', closeNewAppModal);
