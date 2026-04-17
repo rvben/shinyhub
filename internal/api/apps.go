@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -361,6 +362,26 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+
+	// Enforce per-app disk quota: the new extracted version has already been
+	// written, so DirSize now reflects the post-deploy footprint. Roll back
+	// both the version dir and the bundle zip on violation so a rejected
+	// deploy leaves no stale files behind.
+	if s.cfg.Storage.AppQuotaMB > 0 {
+		used, qErr := deploy.CheckAppQuota(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.AppQuotaMB)
+		if qErr != nil {
+			_ = os.RemoveAll(bundleDir)
+			_ = os.Remove(bundleZip)
+			if errors.Is(qErr, deploy.ErrQuotaExceeded) {
+				s.logQuotaRejected(r, slug, used)
+				writeQuotaExceeded(w, used, s.cfg.Storage.AppQuotaMB)
+				return
+			}
+			slog.Warn("quota check failed", "slug", slug, "err", qErr)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 	}
 
 	// Stop existing instance before re-deploying; ignore the error since the
@@ -947,6 +968,33 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, deployments)
+}
+
+// writeQuotaExceeded returns a 413 with structured detail so callers can
+// surface the measured footprint alongside the configured quota.
+func writeQuotaExceeded(w http.ResponseWriter, usedBytes int64, quotaMB int) {
+	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+		"error":    "app disk quota exceeded",
+		"used_mb":  usedBytes / deploy.MiB,
+		"quota_mb": quotaMB,
+	})
+}
+
+// logQuotaRejected emits an audit record so operators can see when a deploy
+// was rejected for quota reasons (and by whom).
+func (s *Server) logQuotaRejected(r *http.Request, slug string, usedBytes int64) {
+	var userID *int64
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		userID = &u.ID
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       userID,
+		Action:       "deploy_rejected_quota",
+		ResourceType: "app",
+		ResourceID:   slug,
+		Detail:       fmt.Sprintf("used=%d bytes, quota=%d MiB", usedBytes, s.cfg.Storage.AppQuotaMB),
+		IPAddress:    s.clientIP(r),
+	})
 }
 
 // parsePagination extracts optional ?limit= and ?offset= query parameters.

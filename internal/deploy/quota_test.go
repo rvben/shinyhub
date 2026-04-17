@@ -1,6 +1,7 @@
 package deploy_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +60,59 @@ func TestDirSize_IgnoresSymlinks(t *testing.T) {
 	}
 	if size != 0 {
 		t.Errorf("expected 0 bytes (symlink target should not be counted), got %d", size)
+	}
+}
+
+func TestCheckAppQuota_Disabled(t *testing.T) {
+	appsDir := t.TempDir()
+	writeFile(t, filepath.Join(appsDir, "slug", "bundles", "a.zip"), int(2*deploy.MiB))
+
+	used, err := deploy.CheckAppQuota(appsDir, "slug", 0)
+	if err != nil {
+		t.Fatalf("quotaMB=0 should disable the check, got error: %v", err)
+	}
+	if used != 2*deploy.MiB {
+		t.Errorf("expected usage %d, got %d", 2*deploy.MiB, used)
+	}
+}
+
+func TestCheckAppQuota_WithinLimit(t *testing.T) {
+	appsDir := t.TempDir()
+	writeFile(t, filepath.Join(appsDir, "slug", "bundles", "a.zip"), int(deploy.MiB))
+
+	used, err := deploy.CheckAppQuota(appsDir, "slug", 2)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if used != deploy.MiB {
+		t.Errorf("expected usage %d, got %d", deploy.MiB, used)
+	}
+}
+
+func TestCheckAppQuota_Exceeded(t *testing.T) {
+	appsDir := t.TempDir()
+	writeFile(t, filepath.Join(appsDir, "slug", "bundles", "a.zip"), int(3*deploy.MiB))
+
+	used, err := deploy.CheckAppQuota(appsDir, "slug", 2)
+	if err == nil {
+		t.Fatal("expected ErrQuotaExceeded, got nil")
+	}
+	if !errors.Is(err, deploy.ErrQuotaExceeded) {
+		t.Errorf("expected error to wrap ErrQuotaExceeded, got %v", err)
+	}
+	if used != 3*deploy.MiB {
+		t.Errorf("expected reported usage %d, got %d", 3*deploy.MiB, used)
+	}
+}
+
+func TestCheckAppQuota_MissingSlugDirIsZero(t *testing.T) {
+	appsDir := t.TempDir()
+	used, err := deploy.CheckAppQuota(appsDir, "fresh-app", 2)
+	if err != nil {
+		t.Fatalf("missing app dir should return 0 bytes, got %v", err)
+	}
+	if used != 0 {
+		t.Errorf("expected 0 bytes for fresh slug, got %d", used)
 	}
 }
 
