@@ -85,7 +85,8 @@ type sessionUserResponse struct {
 }
 
 type sessionResponse struct {
-	User *sessionUserResponse `json:"user"`
+	User          *sessionUserResponse `json:"user"`
+	CanCreateApps bool                 `json:"can_create_apps"`
 }
 
 func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
@@ -192,8 +193,10 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.clientIP(r),
 	})
 	auth.SetSessionCookie(w, r, token)
+	ctxUser := &auth.ContextUser{ID: user.ID, Username: user.Username, Role: user.Role}
 	writeJSON(w, http.StatusOK, sessionResponse{
-		User: &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
+		User:          &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
+		CanCreateApps: canCreateApps(ctxUser),
 	})
 }
 
@@ -228,7 +231,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		auth.SetSessionCookie(w, r, freshToken)
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
-		User: &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role},
+		User:          &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role},
+		CanCreateApps: canCreateApps(u),
 	})
 }
 

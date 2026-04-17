@@ -384,3 +384,89 @@ func TestCreateToken_DuplicateName(t *testing.T) {
 		t.Errorf("expected 409 on duplicate name, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestMeIncludesCanCreateApps_Admin(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token, _ := auth.IssueJWT(1, "alice", "admin", "test-secret")
+
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		User *struct {
+			ID       int64  `json:"id"`
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		} `json:"user"`
+		CanCreateApps bool `json:"can_create_apps"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !payload.CanCreateApps {
+		t.Errorf("admin should see can_create_apps=true, got false")
+	}
+}
+
+func TestMeIncludesCanCreateApps_Viewer(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token, _ := auth.IssueJWT(1, "bob", "viewer", "test-secret")
+
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		User *struct {
+			ID       int64  `json:"id"`
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		} `json:"user"`
+		CanCreateApps bool `json:"can_create_apps"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.CanCreateApps {
+		t.Errorf("viewer should see can_create_apps=false, got true")
+	}
+}
+
+func TestSessionLoginIncludesCanCreateApps_Developer(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass123")
+	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
+
+	body, _ := json.Marshal(map[string]string{"username": "dev", "password": "pass123"})
+	req := httptest.NewRequest("POST", "/api/auth/session", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		User *struct {
+			ID       int64  `json:"id"`
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		} `json:"user"`
+		CanCreateApps bool `json:"can_create_apps"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !payload.CanCreateApps {
+		t.Errorf("developer should see can_create_apps=true, got false")
+	}
+}
