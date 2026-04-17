@@ -1098,3 +1098,165 @@ main {
   nav { padding: 0.75rem 1rem; }
   #tab-bar { padding: 0 1rem; top: 56px; }
 }
+
+/* === New-app modal === */
+
+.toolbar-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+#new-app-modal form label {
+  display: block;
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+#new-app-modal form input {
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+.hint {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin-top: 0.25rem;
+}
+
+.hint-inline {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.handoff pre {
+  background: var(--bg-deep);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem;
+  margin-top: 0.5rem;
+  color: var(--cyan-bright);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+#new-app-snippet-copy {
+  margin-top: 0.5rem;
+  font-size: 0.74rem;
+  padding: 0.35rem 0.7rem;
+}
+
+/* === Deploy modal === */
+
+.dropzone {
+  border: 1.5px dashed var(--line);
+  border-radius: 10px;
+  padding: 2rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+  color: var(--text-muted);
+}
+
+.dropzone.dragover {
+  border-color: var(--cyan-bright);
+  background: color-mix(in srgb, var(--cyan-bright) 8%, transparent);
+  color: var(--text);
+}
+
+.dropzone p {
+  margin: 0.25rem 0;
+  font-size: 0.88rem;
+}
+
+.dropzone code {
+  font-family: var(--mono);
+  background: var(--surface);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.linklike {
+  background: transparent;
+  border: none;
+  color: var(--cyan-bright);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.deploy-summary {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.deploy-summary li {
+  display: contents;
+}
+
+.deploy-summary li span {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+.deploy-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.deploy-progress progress {
+  flex: 1;
+  height: 8px;
+  appearance: none;
+}
+
+.deploy-progress progress::-webkit-progress-bar {
+  background: var(--surface);
+  border-radius: 4px;
+}
+
+.deploy-progress progress::-webkit-progress-value {
+  background: var(--cyan-bright);
+  border-radius: 4px;
+}
+
+.deploy-progress progress::-moz-progress-bar {
+  background: var(--cyan-bright);
+  border-radius: 4px;
+}
+
+#deploy-progress-text {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  min-width: 3em;
+  text-align: right;
+}
