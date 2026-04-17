@@ -1045,6 +1045,80 @@ document.addEventListener('DOMContentLoaded', () => {
     renderDeploySummary(rootEntry.name + '/', blob.size, fileCount, ignored);
   }
 
+  function uploadBundle(slug, blob) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const form = new FormData();
+      form.append('bundle', blob, 'bundle.zip');
+
+      xhr.open('POST', `/api/apps/${encodeURIComponent(slug)}/deploy`, true);
+      xhr.withCredentials = true;
+      const csrf = readCookie('csrf_token');
+      if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.floor((e.loaded / e.total) * 100);
+        deployProgressBar.value = pct;
+        deployProgressText.textContent = `${pct}%`;
+      });
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(xhr.responseText);
+        } else {
+          let msg = 'Deploy failed';
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (body && body.error) msg = body.error;
+          } catch { /* non-JSON; keep default */ }
+          const err = new Error(msg);
+          err.status = xhr.status;
+          reject(err);
+        }
+      });
+      xhr.addEventListener('error',  () => reject(new Error('Network error during upload')));
+      xhr.addEventListener('abort',  () => {
+        const err = new Error('Upload cancelled');
+        err.code = 'UPLOAD_CANCELLED';
+        reject(err);
+      });
+      xhr.addEventListener('timeout',() => reject(new Error('Upload timed out')));
+
+      deployState.xhr = xhr;
+      xhr.send(form);
+    });
+  }
+
+  deploySubmit.addEventListener('click', async () => {
+    if (!deployState || !deployState.blob) return;
+    setError(deployError, '');
+    deploySubmit.disabled = true;
+    deployCancel.textContent = 'Close';
+    deployProgressWrap.hidden = false;
+    deployProgressBar.value = 0;
+    deployProgressText.textContent = '0%';
+
+    const { slug, blob } = deployState;
+
+    try {
+      await uploadBundle(slug, blob);
+    } catch (err) {
+      if (err.code === 'UPLOAD_CANCELLED') {
+        return; // closeDeployModal resets state
+      }
+      if (err.status === 401) { await handleUnauthorized(); return; }
+      setError(deployError, err.message || 'Deploy failed');
+      deploySubmit.disabled = false;
+      deployCancel.textContent = 'Cancel';
+      return;
+    }
+
+    deployProgressText.textContent = 'Deployed';
+    closeDeployModal();
+    await loadApps();
+    openLogs(slug);
+  });
+
   deployModalClose.addEventListener('click', closeDeployModal);
   deployCancel.addEventListener('click', closeDeployModal);
   deployModal.addEventListener('click', (e) => {
