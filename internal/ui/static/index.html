@@ -6,13 +6,18 @@
   <title>ShinyHub</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
+  <div class="bg-stars" aria-hidden="true"></div>
+
   <nav>
-    <span class="brand">ShinyHub</span>
+    <span class="brand">
+      <span class="sparkle sparkle-brand" aria-hidden="true"></span>
+      Shiny<span class="brand-hub">Hub</span>
+    </span>
     <span id="session-user" class="session-user"></span>
     <button id="logout-button" type="button" hidden>Logout</button>
   </nav>
