@@ -161,8 +161,14 @@ func TestProxy_ServesLoadingPageOnMiss(t *testing.T) {
 	if !strings.Contains(body, "Starting app") {
 		t.Errorf("loading page missing 'Starting app': %s", body)
 	}
-	if !strings.Contains(body, `http-equiv="refresh"`) {
-		t.Errorf("loading page missing meta refresh tag: %s", body)
+	if !strings.Contains(body, "window.location.reload") {
+		t.Errorf("loading page missing client-side reload script: %s", body)
+	}
+	if !strings.Contains(body, "shinyhub-retry") {
+		t.Errorf("loading page missing retry button: %s", body)
+	}
+	if !strings.Contains(body, `<noscript><meta http-equiv="refresh"`) {
+		t.Errorf("loading page missing noscript meta refresh fallback: %s", body)
 	}
 }
 
