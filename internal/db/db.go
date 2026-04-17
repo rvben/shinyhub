@@ -31,6 +31,9 @@ var migration006SQL string
 //go:embed migrations/007_resource_limits.sql
 var migration007SQL string
 
+//go:embed migrations/008_revoked_tokens.sql
+var migration008SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -76,6 +79,9 @@ func (s *Store) Migrate() error {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("migrate 007: %w", err)
 		}
+	}
+	if _, err := s.db.Exec(migration008SQL); err != nil {
+		return fmt.Errorf("migrate 008: %w", err)
 	}
 	return nil
 }

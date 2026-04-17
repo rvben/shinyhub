@@ -183,7 +183,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiTimeoutHandler(srv.Router()))
-	appHandler := access.Middleware(store, cfg.Auth.Secret)(prx)
+	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked)(prx)
 	mux.Handle("/app/", appHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

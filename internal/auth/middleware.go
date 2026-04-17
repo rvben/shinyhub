@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type contextKey string
 
-const userContextKey contextKey = "user"
+const (
+	userContextKey  contextKey = "user"
+	tokenContextKey contextKey = "token"
+)
 
 const SessionCookieName = "shiny_session"
 
@@ -19,10 +23,38 @@ type ContextUser struct {
 	Role     string
 }
 
+// TokenInfo describes the JWT the current request was authenticated with.
+// It is only set when auth succeeded via a JWT (Bearer or session cookie);
+// API-key authenticated requests leave it unset. Handlers use this to revoke
+// the caller's own token on logout.
+type TokenInfo struct {
+	JTI       string
+	ExpiresAt time.Time
+}
+
 // APIKeyLookup looks up a user by API key hash. Injected to avoid import cycles.
 type APIKeyLookup func(keyHash string) (*ContextUser, error)
 
-func authenticateHeader(header, secret string, keyLookup APIKeyLookup) (*ContextUser, error) {
+// authResult carries the authenticated identity plus (for JWT paths) the token
+// metadata needed by the logout handler to revoke the current session.
+type authResult struct {
+	User  *ContextUser
+	Token *TokenInfo
+}
+
+func userFromClaims(c *Claims) *ContextUser {
+	return &ContextUser{ID: c.UserID, Username: c.Subject, Role: c.Role}
+}
+
+func tokenFromClaims(c *Claims) *TokenInfo {
+	info := &TokenInfo{JTI: c.ID}
+	if c.ExpiresAt != nil {
+		info.ExpiresAt = c.ExpiresAt.Time
+	}
+	return info
+}
+
+func authenticateHeader(header, secret string, keyLookup APIKeyLookup, revoked RevocationChecker) (*authResult, error) {
 	if header == "" {
 		return nil, nil
 	}
@@ -35,52 +67,91 @@ func authenticateHeader(header, secret string, keyLookup APIKeyLookup) (*Context
 
 	switch strings.ToLower(scheme) {
 	case "bearer":
-		claims, err := ValidateJWT(token, secret)
+		claims, err := ValidateJWT(token, secret, revoked)
 		if err != nil {
 			return nil, err
 		}
-		return &ContextUser{ID: claims.UserID, Username: claims.Subject, Role: claims.Role}, nil
+		return &authResult{User: userFromClaims(claims), Token: tokenFromClaims(claims)}, nil
 	case "token":
 		if keyLookup == nil {
 			return nil, fmt.Errorf("api key lookup unavailable")
 		}
-		return keyLookup(HashAPIKey(token))
+		user, err := keyLookup(HashAPIKey(token))
+		if err != nil {
+			return nil, err
+		}
+		return &authResult{User: user}, nil
 	default:
 		return nil, fmt.Errorf("unsupported authorization scheme")
 	}
 }
 
-func authenticateSessionCookie(r *http.Request, secret string) (*ContextUser, error) {
+func authenticateSessionCookie(r *http.Request, secret string, revoked RevocationChecker) (*authResult, error) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil {
 		return nil, err
 	}
-	return ParseJWT(c.Value, secret)
+	claims, err := ValidateJWT(c.Value, secret, revoked)
+	if err != nil {
+		return nil, err
+	}
+	return &authResult{User: userFromClaims(claims), Token: tokenFromClaims(claims)}, nil
 }
 
 // AuthenticateRequest authenticates a request from either an Authorization
 // header or the browser session cookie. If an Authorization header is present,
 // it takes precedence over the cookie and must be valid.
-func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup) (*ContextUser, error) {
+func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup, revoked RevocationChecker) (*ContextUser, *TokenInfo, error) {
+	var (
+		res *authResult
+		err error
+	)
 	if header := r.Header.Get("Authorization"); header != "" {
-		return authenticateHeader(header, secret, keyLookup)
+		res, err = authenticateHeader(header, secret, keyLookup, revoked)
+	} else {
+		res, err = authenticateSessionCookie(r, secret, revoked)
 	}
-	return authenticateSessionCookie(r, secret)
+	if err != nil || res == nil {
+		return nil, nil, err
+	}
+	return res.User, res.Token, nil
 }
 
-func BearerMiddleware(secret string, keyLookup APIKeyLookup) func(http.Handler) http.Handler {
+// BearerMiddleware authenticates the request from an Authorization header or
+// the session cookie. The optional RevocationChecker is consulted for JWT
+// paths so revoked tokens are rejected. When a JWT is used, the token's jti
+// and expiry are attached to the context via WithTokenInfo so handlers can
+// reference them (e.g. to revoke on logout).
+func BearerMiddleware(secret string, keyLookup APIKeyLookup, revoked RevocationChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user, err := AuthenticateRequest(r, secret, keyLookup)
+			user, token, err := AuthenticateRequest(r, secret, keyLookup, revoked)
 			if err != nil || user == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 
 			ctx := context.WithValue(r.Context(), userContextKey, user)
+			if token != nil {
+				ctx = context.WithValue(ctx, tokenContextKey, token)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// TokenInfoFromContext returns the JWT metadata attached by BearerMiddleware,
+// or nil if the request was authenticated by an API key or from an unauthed
+// route.
+func TokenInfoFromContext(ctx context.Context) *TokenInfo {
+	t, _ := ctx.Value(tokenContextKey).(*TokenInfo)
+	return t
+}
+
+// WithTokenInfo returns a context annotated with token metadata. Exposed for
+// tests that pre-populate the token context without running the middleware.
+func WithTokenInfo(ctx context.Context, t *TokenInfo) context.Context {
+	return context.WithValue(ctx, tokenContextKey, t)
 }
 
 func UserFromContext(ctx context.Context) *ContextUser {

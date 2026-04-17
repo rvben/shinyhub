@@ -32,7 +32,7 @@ func TestAccess_PublicApp_NoAuth(t *testing.T) {
 	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: owner.ID})
 	store.SetAppAccess("pub", "public")
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/pub/", nil)
@@ -50,7 +50,7 @@ func TestAccess_PrivateApp_NoAuth_Rejected(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -70,7 +70,7 @@ func TestAccess_PrivateApp_OwnerAccess(t *testing.T) {
 
 	token, _ := auth.IssueJWT(owner.ID, "owner", "admin", "test-secret")
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -91,7 +91,7 @@ func TestAccess_PrivateApp_CookieAuth(t *testing.T) {
 
 	token, _ := auth.IssueJWT(owner.ID, "owner", "admin", "test-secret")
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -115,7 +115,7 @@ func TestAccess_PrivateApp_GrantedUser(t *testing.T) {
 
 	token, _ := auth.IssueJWT(alice.ID, "alice", "developer", "test-secret")
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -139,7 +139,7 @@ func TestAccess_PrivateApp_NonMember_Forbidden(t *testing.T) {
 
 	token, _ := auth.IssueJWT(bob.ID, "bob", "developer", "test-secret")
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -164,7 +164,7 @@ func TestAccess_SharedApp_AuthenticatedUser(t *testing.T) {
 
 	token, _ := auth.IssueJWT(stranger.ID, "stranger", "developer", "test-secret")
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/shared-app/", nil)
@@ -188,7 +188,7 @@ func TestAccess_PrivateApp_OperatorBypasses(t *testing.T) {
 
 	token, _ := auth.IssueJWT(ops.ID, "ops", "operator", "test-secret")
 
-	mw := access.Middleware(store, "test-secret")
+	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)

@@ -84,6 +84,17 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
 }
 
+// revocationChecker returns an auth.RevocationChecker bound to the server's
+// store. Returning nil for the checker (when store is unset) disables the
+// revocation path, which matches the behavior expected by tests that construct
+// a Server without a database.
+func (s *Server) revocationChecker() auth.RevocationChecker {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.IsTokenRevoked
+}
+
 func (s *Server) buildRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -92,7 +103,6 @@ func (s *Server) buildRouter() http.Handler {
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
 	r.Post("/api/auth/session", s.handleSessionLogin)
-	r.Post("/api/auth/logout", s.handleLogout)
 	r.Get("/api/auth/github/login", s.handleGitHubLogin)
 	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
 	r.Get("/api/auth/google/login", s.handleGoogleLogin)
@@ -102,12 +112,16 @@ func (s *Server) buildRouter() http.Handler {
 	r.Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 
 	// All other endpoints require either an auth header or a valid session cookie.
-	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup)
+	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.revocationChecker())
 	csrf := auth.CSRFMiddleware()
 	r.Group(func(r chi.Router) {
 		r.Use(bearer)
 		r.Use(csrf)
 
+		// Logout is authenticated so we can revoke the caller's JWT by jti.
+		// An unauthenticated logout has nothing to revoke — the client can
+		// just discard its own session cookie.
+		r.Post("/api/auth/logout", s.handleLogout)
 		r.Get("/api/auth/me", s.handleMe)
 		r.Get("/api/apps", s.handleListApps)
 		r.Post("/api/apps", s.handleCreateApp)

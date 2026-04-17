@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -28,19 +29,55 @@ func TestIssueAndValidateJWT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := auth.ValidateJWT(token, secret)
+	claims, err := auth.ValidateJWT(token, secret, nil)
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	if claims.UserID != 42 || claims.Subject != "alice" || claims.Role != "admin" {
 		t.Errorf("unexpected claims: %+v", claims)
 	}
+	if claims.ID == "" {
+		t.Error("expected jti claim to be set on issued token")
+	}
 }
 
 func TestValidateJWT_WrongSecret(t *testing.T) {
 	token, _ := auth.IssueJWT(1, "alice", "admin", "secret-a")
-	if _, err := auth.ValidateJWT(token, "secret-b"); err == nil {
+	if _, err := auth.ValidateJWT(token, "secret-b", nil); err == nil {
 		t.Error("expected validation to fail with wrong secret")
+	}
+}
+
+func TestValidateJWT_RejectsRevokedToken(t *testing.T) {
+	secret := "test-secret"
+	token, err := auth.IssueJWT(1, "alice", "admin", secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Extract the jti by parsing once with no checker.
+	claims, err := auth.ValidateJWT(token, secret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revoker := func(jti string) (bool, error) { return jti == claims.ID, nil }
+	_, err = auth.ValidateJWT(token, secret, revoker)
+	if err == nil {
+		t.Fatal("expected revoked token to fail validation")
+	}
+	if !errors.Is(err, auth.ErrTokenRevoked) {
+		t.Errorf("expected ErrTokenRevoked, got %v", err)
+	}
+}
+
+func TestValidateJWT_FailsClosedOnCheckerError(t *testing.T) {
+	secret := "test-secret"
+	token, _ := auth.IssueJWT(1, "alice", "admin", secret)
+	boom := fmt.Errorf("db down")
+	revoker := func(string) (bool, error) { return false, boom }
+	if _, err := auth.ValidateJWT(token, secret, revoker); err == nil {
+		t.Error("expected checker error to fail validation")
 	}
 }
 
@@ -68,7 +105,7 @@ func TestBearerMiddleware(t *testing.T) {
 		}
 		w.Write([]byte(u.Username))
 	})
-	handler := auth.BearerMiddleware(secret, nil)(next)
+	handler := auth.BearerMiddleware(secret, nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -102,7 +139,7 @@ func TestBearerMiddleware_TokenScheme(t *testing.T) {
 		}
 		w.Write([]byte(u.Username))
 	})
-	handler := auth.BearerMiddleware("secret", keyLookup)(next)
+	handler := auth.BearerMiddleware("secret", keyLookup, nil)(next)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Token "+rawKey)
@@ -129,7 +166,7 @@ func TestBearerMiddleware_SessionCookie(t *testing.T) {
 		}
 		w.Write([]byte(u.Username))
 	})
-	handler := auth.BearerMiddleware(secret, nil)(next)
+	handler := auth.BearerMiddleware(secret, nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
@@ -148,7 +185,7 @@ func TestBearerMiddleware_InvalidHeaderDoesNotFallBackToCookie(t *testing.T) {
 	secret := "test-secret"
 	token, _ := auth.IssueJWT(7, "alice", "developer", secret)
 
-	handler := auth.BearerMiddleware(secret, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := auth.BearerMiddleware(secret, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 

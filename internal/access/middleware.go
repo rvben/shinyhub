@@ -17,8 +17,10 @@ type store interface {
 // Middleware returns an HTTP middleware that enforces per-app access control.
 // Public apps pass through unconditionally. Private and shared apps require
 // a valid JWT from the Authorization header or session cookie, and the
-// authenticated user must be the owner or an explicit member.
-func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
+// authenticated user must be the owner or an explicit member. The optional
+// RevocationChecker is consulted so tokens revoked on logout can no longer
+// reach private apps either.
+func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			slug := extractSlug(r.URL.Path)
@@ -46,7 +48,7 @@ func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
 			// operators, and any authenticated user on shared apps bypass the
 			// membership check; other roles on private apps must pass the
 			// UserCanAccessApp check.
-			user := extractUser(r, jwtSecret)
+			user := extractUser(r, jwtSecret, revoked)
 			if user == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
@@ -75,16 +77,16 @@ func Middleware(st store, jwtSecret string) func(http.Handler) http.Handler {
 
 // extractUser tries to parse a valid JWT from the Authorization header or the
 // session cookie. Returns nil if no valid token is found.
-func extractUser(r *http.Request, secret string) *auth.ContextUser {
+func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker) *auth.ContextUser {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		token := strings.TrimPrefix(h, "Bearer ")
-		if u, err := auth.ParseJWT(token, secret); err == nil {
+		if u, err := auth.ParseJWT(token, secret, revoked); err == nil {
 			return u
 		}
 	}
 
 	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
-		if u, err := auth.ParseJWT(c.Value, secret); err == nil {
+		if u, err := auth.ParseJWT(c.Value, secret, revoked); err == nil {
 			return u
 		}
 	}

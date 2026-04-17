@@ -187,8 +187,10 @@ func TestMeUsesSessionCookie(t *testing.T) {
 
 func TestLogoutClearsSessionCookie(t *testing.T) {
 	srv, _ := newTestServer(t)
+	token, _ := auth.IssueJWT(1, "alice", "admin", "test-secret")
 
 	req := httptest.NewRequest("POST", "/api/auth/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
@@ -204,6 +206,66 @@ func TestLogoutClearsSessionCookie(t *testing.T) {
 	}
 	if cookies[0].Name != auth.SessionCookieName || cookies[0].MaxAge >= 0 {
 		t.Fatalf("expected expired session cookie, got %+v", cookies[0])
+	}
+}
+
+func TestLogoutUnauthenticatedReturns401(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/auth/logout", nil)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated logout = %d, want 401", rec.Code)
+	}
+}
+
+func TestLogoutRevokesJWT(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass123")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"})
+
+	token, _ := auth.IssueJWT(1, "alice", "admin", "test-secret")
+	claims, err := auth.ValidateJWT(token, "test-secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: before logout the token unlocks /api/auth/me.
+	meReq := httptest.NewRequest("GET", "/api/auth/me", nil)
+	meReq.Header.Set("Authorization", "Bearer "+token)
+	meRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(meRec, meReq)
+	if meRec.Code != http.StatusOK {
+		t.Fatalf("pre-logout /api/auth/me = %d, want 200", meRec.Code)
+	}
+
+	// Logout.
+	logoutReq := httptest.NewRequest("POST", "/api/auth/logout", nil)
+	logoutReq.Header.Set("Authorization", "Bearer "+token)
+	logoutRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusNoContent {
+		t.Fatalf("logout = %d, want 204", logoutRec.Code)
+	}
+
+	// The jti must now be on the revocation list.
+	revoked, err := store.IsTokenRevoked(claims.ID)
+	if err != nil {
+		t.Fatalf("is revoked: %v", err)
+	}
+	if !revoked {
+		t.Fatal("expected jti to be revoked after logout")
+	}
+
+	// Replaying the same token must be rejected.
+	replayReq := httptest.NewRequest("GET", "/api/auth/me", nil)
+	replayReq.Header.Set("Authorization", "Bearer "+token)
+	replayRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(replayRec, replayReq)
+	if replayRec.Code != http.StatusUnauthorized {
+		t.Fatalf("post-logout replay = %d, want 401", replayRec.Code)
 	}
 }
 
@@ -245,7 +307,7 @@ func TestMeIssuesFreshJWT(t *testing.T) {
 	}
 
 	// The replacement token must be structurally valid.
-	claims, err := auth.ValidateJWT(freshToken, "test-secret")
+	claims, err := auth.ValidateJWT(freshToken, "test-secret", nil)
 	if err != nil {
 		t.Fatalf("fresh JWT must be valid: %v", err)
 	}

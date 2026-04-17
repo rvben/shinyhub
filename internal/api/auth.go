@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -201,7 +202,16 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if u := auth.UserFromContext(r.Context()); u != nil {
+	u := auth.UserFromContext(r.Context())
+	if u != nil {
+		// Revoke the caller's own JWT so it cannot be reused for the remainder
+		// of its signed lifetime. Only JWT-authenticated requests populate
+		// TokenInfo; API-key callers have no jti to revoke.
+		if t := auth.TokenInfoFromContext(r.Context()); t != nil && t.JTI != "" {
+			if err := s.store.RevokeToken(t.JTI, u.ID, t.ExpiresAt); err != nil {
+				slog.Warn("revoke token on logout", "user", u.Username, "err", err)
+			}
+		}
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "logout",
