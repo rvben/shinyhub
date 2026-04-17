@@ -95,6 +95,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const deployCancel       = document.getElementById('deploy-cancel');
   const deploySubmit       = document.getElementById('deploy-submit');
 
+  const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
   let activeEventSource = null;
 
   function readCookie(name) {
@@ -599,7 +601,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      if (!document.getElementById('access-modal').hidden) {
+      if (!newAppModal.hidden) {
+        closeNewAppModal();
+      } else if (!document.getElementById('access-modal').hidden) {
         closeAccessModal();
       } else if (!historyModal.hidden) {
         closeHistoryModal();
@@ -677,6 +681,118 @@ document.addEventListener('DOMContentLoaded', () => {
       grantBtn.disabled = false;
       grantBtn.textContent = 'Grant';
     }
+  });
+
+  function resetNewAppModal() {
+    newAppForm.hidden = false;
+    newAppHandoff.hidden = true;
+    newAppSlug.value = '';
+    newAppName.value = '';
+    newAppProject.value = '';
+    setError(newAppError, '');
+    newAppSubmit.disabled = false;
+    newAppSubmit.textContent = 'Create';
+  }
+
+  function openNewAppModal() {
+    resetNewAppModal();
+    newAppModal.hidden = false;
+    newAppSlug.focus();
+  }
+
+  function closeNewAppModal() {
+    newAppModal.hidden = true;
+    resetNewAppModal();
+  }
+
+  function showNewAppHandoff(slug) {
+    newAppForm.hidden = true;
+    newAppHandoff.hidden = false;
+    const origin = window.location.origin;
+    newAppSnippet.textContent =
+      `shiny login --host ${origin} --username <your-name>\n` +
+      `shiny deploy --slug ${slug} <path-to-your-app>`;
+    newAppDone.focus();
+  }
+
+  async function submitNewApp(event) {
+    event.preventDefault();
+    setError(newAppError, '');
+
+    const slug = newAppSlug.value.trim();
+    const name = newAppName.value.trim();
+    const projectSlug = newAppProject.value.trim();
+
+    if (!SLUG_RE.test(slug)) {
+      setError(newAppError, 'Slug must be 1–63 lowercase letters, digits, or dashes (cannot start with a dash).');
+      newAppSlug.focus();
+      return;
+    }
+    if (name.length < 1 || name.length > 128) {
+      setError(newAppError, 'Display name must be 1–128 characters.');
+      newAppName.focus();
+      return;
+    }
+
+    newAppSubmit.disabled = true;
+    newAppSubmit.textContent = 'Creating…';
+
+    let resp;
+    try {
+      resp = await api('/api/apps', {
+        method: 'POST',
+        body: JSON.stringify({ slug, name, project_slug: projectSlug }),
+      });
+    } catch {
+      setError(newAppError, 'Network error');
+      newAppSubmit.disabled = false;
+      newAppSubmit.textContent = 'Create';
+      return;
+    }
+
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (resp.status === 409) {
+      setError(newAppError, 'Slug already taken. Pick another.');
+      newAppSubmit.disabled = false;
+      newAppSubmit.textContent = 'Create';
+      return;
+    }
+    if (resp.status === 403) {
+      setError(newAppError, 'You do not have permission to create apps.');
+      newAppSubmit.disabled = false;
+      newAppSubmit.textContent = 'Create';
+      return;
+    }
+    if (!resp.ok) {
+      let message = 'Failed to create app.';
+      try {
+        const body = await resp.json();
+        if (body && body.error) message = body.error;
+      } catch { /* non-JSON response */ }
+      setError(newAppError, message);
+      newAppSubmit.disabled = false;
+      newAppSubmit.textContent = 'Create';
+      return;
+    }
+
+    showNewAppHandoff(slug);
+    await loadApps();
+  }
+
+  newAppButton.addEventListener('click', openNewAppModal);
+  newAppClose.addEventListener('click', closeNewAppModal);
+  newAppCancel.addEventListener('click', closeNewAppModal);
+  newAppDone.addEventListener('click', closeNewAppModal);
+  newAppModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeNewAppModal();
+  });
+  newAppForm.addEventListener('submit', submitNewApp);
+  newAppSnippetCopy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(newAppSnippet.textContent);
+      newAppSnippetCopy.textContent = 'Copied';
+      setTimeout(() => { newAppSnippetCopy.textContent = 'Copy'; }, 1500);
+    } catch { /* clipboard blocked; user can select text manually */ }
   });
 
   loginForm.addEventListener('submit', async (event) => {
