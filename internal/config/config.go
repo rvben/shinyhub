@@ -105,6 +105,9 @@ type AuthConfig struct {
 type StorageConfig struct {
 	AppsDir          string `yaml:"apps_dir"`
 	VersionRetention int    `yaml:"version_retention"`
+	// AppQuotaMB caps the total on-disk footprint (bundles + extracted
+	// versions) of a single app, in mebibytes. 0 disables the limit.
+	AppQuotaMB int `yaml:"app_quota_mb"`
 }
 
 // RuntimeConfig controls how app processes are started and isolated.
@@ -235,6 +238,9 @@ func Load(path string) (*Config, error) {
 	if cfg.Storage.VersionRetention <= 0 {
 		cfg.Storage.VersionRetention = 5
 	}
+	if cfg.Storage.AppQuotaMB < 0 {
+		cfg.Storage.AppQuotaMB = 0
+	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}
@@ -318,6 +324,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SHINYHUB_STORAGE_VERSION_RETENTION"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Storage.VersionRetention = n
+		}
+	}
+	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Storage.AppQuotaMB = n
 		}
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {

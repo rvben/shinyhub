@@ -276,6 +276,61 @@ func TestLoad_RejectsShortSecret(t *testing.T) {
 	}
 }
 
+func TestStorage_AppQuotaMB_DefaultsToDisabled(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.AppQuotaMB != 0 {
+		t.Errorf("AppQuotaMB default: got %d, want 0 (disabled)", cfg.Storage.AppQuotaMB)
+	}
+}
+
+func TestStorage_AppQuotaMB_FromYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+storage:
+  app_quota_mb: 512
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.AppQuotaMB != 512 {
+		t.Errorf("AppQuotaMB: got %d, want 512", cfg.Storage.AppQuotaMB)
+	}
+}
+
+func TestStorage_AppQuotaMB_NegativeNormalizesToZero(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+storage:
+  app_quota_mb: -1
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.AppQuotaMB != 0 {
+		t.Errorf("expected negative to normalize to 0 (disabled), got %d", cfg.Storage.AppQuotaMB)
+	}
+}
+
+func TestStorage_AppQuotaMB_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_APP_QUOTA_MB", "1024")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.AppQuotaMB != 1024 {
+		t.Errorf("AppQuotaMB from env: got %d, want 1024", cfg.Storage.AppQuotaMB)
+	}
+}
+
 func TestLoad_AcceptsStrongSecret(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
