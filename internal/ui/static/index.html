@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/zip-writer.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -100,15 +101,16 @@
         </div>
         <div class="modal-body">
           <form id="new-app-form">
+            <label for="new-app-name">Display name</label>
+            <input id="new-app-name" type="text" required maxlength="128"
+                   placeholder="My Sales Dashboard">
+
             <label for="new-app-slug">Slug</label>
             <input id="new-app-slug" type="text" required
                    pattern="[a-z0-9][a-z0-9-]{0,62}"
                    placeholder="lowercase-letters-digits-dashes"
                    autocomplete="off" spellcheck="false">
             <p class="hint">1–63 chars. Letters, digits and dashes. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
-
-            <label for="new-app-name">Display name</label>
-            <input id="new-app-name" type="text" required maxlength="128">
 
             <label for="new-app-project">Project slug <span class="hint-inline">(optional)</span></label>
             <input id="new-app-project" type="text" autocomplete="off" spellcheck="false">
