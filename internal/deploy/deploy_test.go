@@ -1,6 +1,7 @@
 package deploy_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,67 @@ func TestExtractBundle_ZipSlip(t *testing.T) {
 	escaped := filepath.Join(dir, "escape.txt")
 	if _, err := os.Stat(escaped); err == nil {
 		t.Error("zip-slip: file escaped destDir — path traversal not prevented")
+	}
+}
+
+func TestExtractBundle_RejectsPerEntryOverflow(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "bomb.zip")
+	// Single 2 MiB zero-filled entry; limit set to 1 MiB.
+	if err := createBombBundle(zipPath, "bomb.bin", 2<<20); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(dir, "extracted")
+	err := deploy.ExtractBundleWithLimits(zipPath, destDir, 1<<20, 10<<20)
+	if err == nil {
+		t.Fatal("expected error for per-entry overflow, got nil")
+	}
+	if !errors.Is(err, deploy.ErrBundleTooLarge) {
+		t.Errorf("expected ErrBundleTooLarge, got %v", err)
+	}
+}
+
+func TestExtractBundle_RejectsAggregateOverflow(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "aggregate.zip")
+	// Three 400 KiB entries = 1.2 MiB total; each under the per-entry cap of
+	// 1 MiB but combined exceeds the 1 MiB aggregate cap.
+	files := map[string]string{
+		"a.bin": strings.Repeat("x", 400<<10),
+		"b.bin": strings.Repeat("x", 400<<10),
+		"c.bin": strings.Repeat("x", 400<<10),
+	}
+	if err := createTestBundle(zipPath, files); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(dir, "extracted")
+	err := deploy.ExtractBundleWithLimits(zipPath, destDir, 1<<20, 1<<20)
+	if err == nil {
+		t.Fatal("expected error for aggregate overflow, got nil")
+	}
+	if !errors.Is(err, deploy.ErrBundleTooLarge) {
+		t.Errorf("expected ErrBundleTooLarge, got %v", err)
+	}
+}
+
+func TestExtractBundle_WithinLimitsSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "ok.zip")
+	if err := createTestBundle(zipPath, map[string]string{
+		"app.py":           "print('hi')",
+		"requirements.txt": "shiny",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(dir, "extracted")
+	if err := deploy.ExtractBundleWithLimits(zipPath, destDir, 1<<20, 10<<20); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "app.py")); err != nil {
+		t.Error("expected app.py to be extracted")
 	}
 }
 

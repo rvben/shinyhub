@@ -189,9 +189,31 @@ func waitHealthy(port int, timeout time.Duration) error {
 	return fmt.Errorf("app on port %d did not become healthy within %s", port, timeout)
 }
 
-// ExtractBundle unzips src into destDir, rejecting any entry whose resolved
-// path would escape destDir (zip-slip protection).
+// ErrBundleTooLarge is returned by ExtractBundle when a single entry, or the
+// combined size of all entries, exceeds the configured limits. Zip-bomb
+// protection: uncompressed sizes in the zip header are attacker-controlled, so
+// we also enforce the caps while streaming bytes to disk.
+var ErrBundleTooLarge = errors.New("bundle exceeds extracted size limit")
+
+const (
+	// DefaultMaxEntrySize caps the extracted size of a single file inside the
+	// bundle. Matches the upload size cap — a single file can never be larger
+	// than the full archive.
+	DefaultMaxEntrySize int64 = 128 << 20
+	// DefaultMaxBundleSize caps the combined extracted size of all entries.
+	DefaultMaxBundleSize int64 = 512 << 20
+)
+
+// ExtractBundle unzips src into destDir with the default size limits.
 func ExtractBundle(src, destDir string) error {
+	return ExtractBundleWithLimits(src, destDir, DefaultMaxEntrySize, DefaultMaxBundleSize)
+}
+
+// ExtractBundleWithLimits unzips src into destDir, rejecting any entry whose
+// resolved path would escape destDir (zip-slip protection) and enforcing both
+// a per-entry and aggregate size cap (zip-bomb protection). A zero or negative
+// limit means unlimited.
+func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int64) error {
 	r, err := zip.OpenReader(src)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
@@ -208,6 +230,7 @@ func ExtractBundle(src, destDir string) error {
 		return err
 	}
 
+	var total int64
 	for _, f := range r.File {
 		// filepath.Join cleans the path, which resolves any ".." components.
 		target := filepath.Join(absDestDir, filepath.Clean(f.Name))
@@ -226,29 +249,64 @@ func ExtractBundle(src, destDir string) error {
 			}
 			continue
 		}
-		if err := extractFile(f, target); err != nil {
+
+		// Trust-but-verify: reject up front when the declared size is already
+		// over budget so we avoid any extraction work for obviously malicious
+		// archives.
+		if maxEntrySize > 0 && int64(f.UncompressedSize64) > maxEntrySize {
+			return fmt.Errorf("%w: %q declared %d bytes", ErrBundleTooLarge, f.Name, f.UncompressedSize64)
+		}
+
+		written, err := extractFile(f, target, maxEntrySize)
+		if err != nil {
 			return err
+		}
+		total += written
+		if maxTotalSize > 0 && total > maxTotalSize {
+			return fmt.Errorf("%w: extracted %d bytes exceeds %d", ErrBundleTooLarge, total, maxTotalSize)
 		}
 	}
 	return nil
 }
 
-func extractFile(f *zip.File, dest string) error {
+// extractFile streams f into dest, capped at maxEntrySize bytes. Returns the
+// number of bytes written. If the entry produces more bytes than the cap, the
+// copy is aborted and ErrBundleTooLarge is returned; the partially-written
+// file is removed so caller cleanup logic isn't needed.
+func extractFile(f *zip.File, dest string, maxEntrySize int64) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return err
+		return 0, err
 	}
 	rc, err := f.Open()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rc.Close()
 	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, rc)
-	return err
+
+	var src io.Reader = rc
+	if maxEntrySize > 0 {
+		// Read one extra byte so we can detect an overflow.
+		src = io.LimitReader(rc, maxEntrySize+1)
+	}
+	n, copyErr := io.Copy(out, src)
+	closeErr := out.Close()
+	if copyErr != nil {
+		os.Remove(dest)
+		return 0, copyErr
+	}
+	if closeErr != nil {
+		os.Remove(dest)
+		return 0, closeErr
+	}
+	if maxEntrySize > 0 && n > maxEntrySize {
+		os.Remove(dest)
+		return 0, fmt.Errorf("%w: %q expanded past %d bytes", ErrBundleTooLarge, f.Name, maxEntrySize)
+	}
+	return n, nil
 }
 
 // ResolveMemoryLimitMB returns perAppMB if non-nil, otherwise defaultMB.
