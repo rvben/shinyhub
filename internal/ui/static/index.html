@@ -48,7 +48,10 @@
     <section id="apps-view" hidden>
       <div class="toolbar">
         <h1>Apps</h1>
-        <button id="refresh-button" type="button">Refresh</button>
+        <div class="toolbar-actions">
+          <button id="new-app-button" type="button" hidden>+ New app</button>
+          <button id="refresh-button" type="button">Refresh</button>
+        </div>
       </div>
       <p id="app-error" class="error" hidden></p>
       <div id="app-grid" class="app-grid"></div>
@@ -87,6 +90,47 @@
     </div>
     <pre id="log-pane-body" class="log-pane-body" aria-live="polite"></pre>
   </div>
+    <!-- New-app modal: create-only; hand-off to CLI for the first deploy -->
+    <div id="new-app-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="new-app-heading">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="new-app-heading" class="modal-title">New app</h2>
+          <button id="new-app-close" type="button" aria-label="Close new app modal">×</button>
+        </div>
+        <div class="modal-body">
+          <form id="new-app-form">
+            <label for="new-app-slug">Slug</label>
+            <input id="new-app-slug" type="text" required
+                   pattern="[a-z0-9][a-z0-9-]{0,62}"
+                   placeholder="lowercase-letters-digits-dashes"
+                   autocomplete="off" spellcheck="false">
+            <p class="hint">1–63 chars. Letters, digits and dashes. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
+
+            <label for="new-app-name">Display name</label>
+            <input id="new-app-name" type="text" required maxlength="128">
+
+            <label for="new-app-project">Project slug <span class="hint-inline">(optional)</span></label>
+            <input id="new-app-project" type="text" autocomplete="off" spellcheck="false">
+
+            <p id="new-app-error" class="error" hidden></p>
+            <div class="modal-actions">
+              <button type="button" id="new-app-cancel">Cancel</button>
+              <button type="submit" id="new-app-submit">Create</button>
+            </div>
+          </form>
+          <section id="new-app-handoff" class="handoff" hidden>
+            <p>App created. First deploy from your machine:</p>
+            <pre><code id="new-app-snippet"></code></pre>
+            <button type="button" id="new-app-snippet-copy">Copy</button>
+            <p class="hint">Or use the <strong>Deploy</strong> button on the card to push a bundle from this browser.</p>
+            <div class="modal-actions">
+              <button type="button" id="new-app-done">Done</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
     <!-- Access control modal -->
     <div id="access-modal" class="modal-overlay" hidden
          role="dialog" aria-modal="true" aria-labelledby="access-modal-heading">
