@@ -4,7 +4,7 @@ tmp_dir = "tmp"
 [build]
   cmd = "go build -o ./tmp/shinyhub ./cmd/shinyhub"
   bin = "./tmp/shinyhub"
-  full_bin = "SHINYHUB_DEV_STATIC=./internal/ui/static SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production SHINYHUB_LOG_FORMAT=text ./tmp/shinyhub"
+  full_bin = "SHINYHUB_DEV_STATIC=./internal/ui/static SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production SHINYHUB_LOG_FORMAT=text SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=admin ./tmp/shinyhub"
   include_ext = ["go"]
   exclude_dir = [
     "bin",
