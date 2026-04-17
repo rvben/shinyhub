@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     metricsInterval: null,
     auditPage: 0,
     auditHasMore: false,
+    canCreateApps: false,
   };
 
   const loginView = document.getElementById('login-view');
@@ -59,6 +60,40 @@ document.addEventListener('DOMContentLoaded', () => {
   const historyModal    = document.getElementById('history-modal');
   const historyAppName  = document.getElementById('history-app-name');
   const historyList     = document.getElementById('history-list');
+
+  const newAppButton       = document.getElementById('new-app-button');
+  const newAppModal        = document.getElementById('new-app-modal');
+  const newAppClose        = document.getElementById('new-app-close');
+  const newAppCancel       = document.getElementById('new-app-cancel');
+  const newAppForm         = document.getElementById('new-app-form');
+  const newAppSlug         = document.getElementById('new-app-slug');
+  const newAppName         = document.getElementById('new-app-name');
+  const newAppProject      = document.getElementById('new-app-project');
+  const newAppError        = document.getElementById('new-app-error');
+  const newAppHandoff      = document.getElementById('new-app-handoff');
+  const newAppSnippet      = document.getElementById('new-app-snippet');
+  const newAppSnippetCopy  = document.getElementById('new-app-snippet-copy');
+  const newAppDone         = document.getElementById('new-app-done');
+  const newAppSubmit       = document.getElementById('new-app-submit');
+
+  const deployModal        = document.getElementById('deploy-modal');
+  const deployModalClose   = document.getElementById('deploy-modal-close');
+  const deployAppName      = document.getElementById('deploy-app-name');
+  const deployDropzone     = document.getElementById('deploy-dropzone');
+  const deployPick         = document.getElementById('deploy-pick');
+  const deployFileInput    = document.getElementById('deploy-file');
+  const deploySummary      = document.getElementById('deploy-summary');
+  const deploySourceName   = document.getElementById('deploy-source-name');
+  const deployFileCount    = document.getElementById('deploy-file-count');
+  const deployBundleSize   = document.getElementById('deploy-bundle-size');
+  const deployIgnoredRow   = document.getElementById('deploy-ignored-row');
+  const deployIgnoredList  = document.getElementById('deploy-ignored-list');
+  const deployProgressWrap = document.getElementById('deploy-progress-wrap');
+  const deployProgressBar  = document.getElementById('deploy-progress-bar');
+  const deployProgressText = document.getElementById('deploy-progress-text');
+  const deployError        = document.getElementById('deploy-error');
+  const deployCancel       = document.getElementById('deploy-cancel');
+  const deploySubmit       = document.getElementById('deploy-submit');
 
   let activeEventSource = null;
 
@@ -193,6 +228,8 @@ document.addEventListener('DOMContentLoaded', () => {
     state.apps = [];
     state.auditPage = 0;
     state.auditHasMore = false;
+    state.canCreateApps = false;
+    newAppButton.hidden = true;
     sessionUser.textContent = '';
     setHidden(logoutButton, true);
     setHidden(loginView, false);
@@ -204,13 +241,15 @@ document.addEventListener('DOMContentLoaded', () => {
     renderApps();
   }
 
-  function showLoggedIn(user) {
-    state.user = user;
-    sessionUser.textContent = user.username;
+  function showLoggedIn(payload) {
+    state.user = payload.user;
+    state.canCreateApps = !!payload.can_create_apps;
+    sessionUser.textContent = payload.user.username;
     setHidden(logoutButton, false);
     setHidden(loginView, true);
     tabBar.hidden = false;
-    tabAudit.hidden = user.role !== 'admin';
+    tabAudit.hidden = payload.user.role !== 'admin';
+    newAppButton.hidden = !state.canCreateApps;
     showView('apps');
   }
 
@@ -669,7 +708,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const payload = await response.json();
-    showLoggedIn(payload.user);
+    showLoggedIn(payload);
     passwordInput.value = '';
     await loadApps();
     startMetricsPolling();
@@ -773,7 +812,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const payload = await response.json();
-    showLoggedIn(payload.user);
+    showLoggedIn(payload);
     await loadApps();
     startMetricsPolling();
   }
