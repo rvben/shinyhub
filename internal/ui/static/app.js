@@ -990,6 +990,135 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Precomputed CRC-32 table (IEEE 802.3 polynomial, reflected).
+  const CRC32_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[i] = c;
+    }
+    return t;
+  })();
+
+  function crc32(bytes) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = CRC32_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  let compressionStreamSupport = null;
+  function supportsCompressionStream() {
+    if (compressionStreamSupport !== null) return compressionStreamSupport;
+    if (typeof CompressionStream === 'undefined') { compressionStreamSupport = false; return false; }
+    try { new CompressionStream('deflate-raw'); compressionStreamSupport = true; }
+    catch { compressionStreamSupport = false; }
+    return compressionStreamSupport;
+  }
+
+  async function deflateRaw(bytes) {
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  function dosDateTime(d) {
+    const time = ((d.getHours() & 0x1F) << 11) | ((d.getMinutes() & 0x3F) << 5) | ((d.getSeconds() >> 1) & 0x1F);
+    const date = (((d.getFullYear() - 1980) & 0x7F) << 9) | (((d.getMonth() + 1) & 0x0F) << 5) | (d.getDate() & 0x1F);
+    return { time, date };
+  }
+
+  // Build a ZIP archive using the browser's native DEFLATE (CompressionStream).
+  // Writes local file headers, central directory, and EOCD — the same wire
+  // format Go's archive/zip produces. Sets the UTF-8 name flag so non-ASCII
+  // paths round-trip safely.
+  async function buildZipNative(fileList) {
+    const { time, date } = dosDateTime(new Date());
+    const encoder = new TextEncoder();
+    const parts = [];
+    const records = [];
+    let offset = 0;
+
+    for (const { relativePath, file } of fileList) {
+      const uncompressed = new Uint8Array(await file.arrayBuffer());
+      const uncompressedSize = uncompressed.length;
+      const checksum = crc32(uncompressed);
+      const compressed = await deflateRaw(uncompressed);
+      const compressedSize = compressed.length;
+      const nameBytes = encoder.encode(relativePath);
+
+      const lfh = new Uint8Array(30 + nameBytes.length);
+      const lv = new DataView(lfh.buffer);
+      lv.setUint32(0, 0x04034b50, true);
+      lv.setUint16(4, 20, true);
+      lv.setUint16(6, 0x0800, true);
+      lv.setUint16(8, 8, true);
+      lv.setUint16(10, time, true);
+      lv.setUint16(12, date, true);
+      lv.setUint32(14, checksum, true);
+      lv.setUint32(18, compressedSize, true);
+      lv.setUint32(22, uncompressedSize, true);
+      lv.setUint16(26, nameBytes.length, true);
+      lv.setUint16(28, 0, true);
+      lfh.set(nameBytes, 30);
+
+      parts.push(lfh, compressed);
+      records.push({ nameBytes, checksum, compressedSize, uncompressedSize, localHeaderOffset: offset });
+      offset += lfh.length + compressedSize;
+    }
+
+    const cdStart = offset;
+    for (const r of records) {
+      const cdr = new Uint8Array(46 + r.nameBytes.length);
+      const cv = new DataView(cdr.buffer);
+      cv.setUint32(0, 0x02014b50, true);
+      cv.setUint16(4, 20, true);
+      cv.setUint16(6, 20, true);
+      cv.setUint16(8, 0x0800, true);
+      cv.setUint16(10, 8, true);
+      cv.setUint16(12, time, true);
+      cv.setUint16(14, date, true);
+      cv.setUint32(16, r.checksum, true);
+      cv.setUint32(20, r.compressedSize, true);
+      cv.setUint32(24, r.uncompressedSize, true);
+      cv.setUint16(28, r.nameBytes.length, true);
+      cv.setUint16(30, 0, true);
+      cv.setUint16(32, 0, true);
+      cv.setUint16(34, 0, true);
+      cv.setUint16(36, 0, true);
+      cv.setUint32(38, 0, true);
+      cv.setUint32(42, r.localHeaderOffset, true);
+      cdr.set(r.nameBytes, 46);
+      parts.push(cdr);
+      offset += cdr.length;
+    }
+    const cdSize = offset - cdStart;
+
+    const eocd = new Uint8Array(22);
+    const ev = new DataView(eocd.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(4, 0, true);
+    ev.setUint16(6, 0, true);
+    ev.setUint16(8, records.length, true);
+    ev.setUint16(10, records.length, true);
+    ev.setUint32(12, cdSize, true);
+    ev.setUint32(16, cdStart, true);
+    ev.setUint16(20, 0, true);
+    parts.push(eocd);
+
+    return new Blob(parts, { type: 'application/zip' });
+  }
+
+  async function buildZipJSZip(fileList) {
+    const JSZip = await loadJSZip();
+    const zip = new JSZip();
+    for (const { relativePath, file } of fileList) zip.file(relativePath, file);
+    return zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
+  }
+
   async function zipFolderEntry(rootEntry) {
     setError(deployError, '');
     deploySubmit.disabled = true;
@@ -998,51 +1127,43 @@ document.addEventListener('DOMContentLoaded', () => {
     deployBundleSize.textContent = '—';
     deploySummary.hidden = false;
 
-    let JSZip;
-    try {
-      JSZip = await loadJSZip();
-    } catch (err) {
-      console.error('loadJSZip failed:', err);
-      setError(deployError, 'Failed to load zip library. Check your network.');
-      return;
-    }
-    const zip = new JSZip();
     const ignored = new Set();
-    let fileCount = 0;
-
+    const fileList = [];
     try {
-      for await (const { relativePath, file } of walkFolder(rootEntry, ignored)) {
-        zip.file(relativePath, file);
-        fileCount++;
-      }
+      for await (const item of walkFolder(rootEntry, ignored)) fileList.push(item);
     } catch (err) {
       console.error('walkFolder failed:', err);
       setError(deployError, 'Failed to read folder contents.');
       return;
     }
 
-    if (fileCount === 0) {
+    if (fileList.length === 0) {
       setError(deployError, 'Folder is empty after filtering ignored directories.');
       return;
     }
 
-    const hasAppPy = Object.keys(zip.files).some(p => p === 'app.py' || p.endsWith('/app.py'));
-    const hasAppR  = Object.keys(zip.files).some(p => p === 'app.R'  || p.endsWith('/app.R'));
+    const hasAppPy = fileList.some(f => f.relativePath === 'app.py' || f.relativePath.endsWith('/app.py'));
+    const hasAppR  = fileList.some(f => f.relativePath === 'app.R'  || f.relativePath.endsWith('/app.R'));
     if (!hasAppPy && !hasAppR) {
       setError(deployError, 'Bundle contains no app.py or app.R at any level. Did you drop the wrong folder?');
       return;
     }
 
-    const blob = await zip.generateAsync({
-      type: 'blob',
-      compression: 'DEFLATE',
-      compressionOptions: { level: 6 },
-    });
+    let blob;
+    try {
+      blob = supportsCompressionStream()
+        ? await buildZipNative(fileList)
+        : await buildZipJSZip(fileList);
+    } catch (err) {
+      console.error('zip build failed:', err);
+      setError(deployError, 'Failed to build zip archive.');
+      return;
+    }
 
     deployState.blob = blob;
-    deployState.fileCount = fileCount;
+    deployState.fileCount = fileList.length;
     deployState.ignored = ignored;
-    renderDeploySummary(rootEntry.name + '/', blob.size, fileCount, ignored);
+    renderDeploySummary(rootEntry.name + '/', blob.size, fileList.length, ignored);
   }
 
   function uploadBundle(slug, blob) {
