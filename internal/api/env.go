@@ -154,45 +154,17 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.clientIP(r),
 	})
 
-	restarted := false
-	if r.URL.Query().Get("restart") == "true" && s.manager != nil {
-		// Restart by stopping the current process and re-launching with the
-		// current deployment, mirroring handleRestartApp. A restart failure is
-		// best-effort: the env var is already stored.
-		if deployments, err := s.store.ListDeployments(app.ID); err == nil && len(deployments) > 0 {
-			current := deployments[0]
-			_ = s.manager.Stop(slug)
-			if s.proxy != nil {
-				s.proxy.Deregister(slug)
-			}
-			result, runErr := deploy.Run(deploy.Params{
-				Slug:            slug,
-				BundleDir:       current.BundleDir,
-				Manager:         s.manager,
-				Proxy:           s.proxy,
-				MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-				CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
-			})
-			if runErr == nil {
-				port := result.Port
-				pid := result.PID
-				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
-					Slug:   slug,
-					Status: "running",
-					Port:   &port,
-					PID:    &pid,
-				})
-				restarted = true
-			}
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
+	restarted, restartErr := s.maybeRestartForEnvChange(r, app, slug)
+	resp := map[string]any{
 		"key":       key,
 		"secret":    body.Secret,
 		"set":       true,
 		"restarted": restarted,
-	})
+	}
+	if restartErr != nil {
+		resp["restart_error"] = restartErr.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleDeleteAppEnv removes a single per-app environment variable.
@@ -231,36 +203,65 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.clientIP(r),
 	})
 
-	if r.URL.Query().Get("restart") == "true" && s.manager != nil {
-		// Restart by stopping the current process and re-launching with the
-		// current deployment, mirroring handleUpsertAppEnv. A restart failure is
-		// best-effort: the env var is already deleted.
-		if deployments, err := s.store.ListDeployments(app.ID); err == nil && len(deployments) > 0 {
-			current := deployments[0]
-			_ = s.manager.Stop(slug)
-			if s.proxy != nil {
-				s.proxy.Deregister(slug)
-			}
-			result, runErr := deploy.Run(deploy.Params{
-				Slug:            slug,
-				BundleDir:       current.BundleDir,
-				Manager:         s.manager,
-				Proxy:           s.proxy,
-				MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-				CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
-			})
-			if runErr == nil {
-				port := result.Port
-				pid := result.PID
-				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
-					Slug:   slug,
-					Status: "running",
-					Port:   &port,
-					PID:    &pid,
-				})
-			}
-		}
-	}
+	s.maybeRestartForEnvChange(r, app, slug)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maybeRestartForEnvChange optionally restarts an app to apply env-var changes.
+// It only acts when ?restart=true is set, a manager is configured, and the app
+// is currently running — stopped or hibernated apps are intentionally left
+// alone so an env-var change doesn't unexpectedly wake them.
+//
+// Returns (true, nil) on a successful restart, (false, nil) when the restart
+// was skipped, and (false, err) when the old process was stopped but the
+// re-launch failed. In the failure case the app's DB status is reset to
+// "stopped" so it reflects reality.
+func (s *Server) maybeRestartForEnvChange(r *http.Request, app *db.App, slug string) (bool, error) {
+	if r.URL.Query().Get("restart") != "true" {
+		return false, nil
+	}
+	if s.manager == nil {
+		return false, nil
+	}
+	if app.Status != "running" {
+		return false, nil
+	}
+	deployments, err := s.store.ListDeployments(app.ID)
+	if err != nil || len(deployments) == 0 {
+		return false, nil
+	}
+	current := deployments[0]
+	_ = s.manager.Stop(slug)
+	if s.proxy != nil {
+		s.proxy.Deregister(slug)
+	}
+	result, runErr := deploy.Run(deploy.Params{
+		Slug:            slug,
+		BundleDir:       current.BundleDir,
+		Manager:         s.manager,
+		Proxy:           s.proxy,
+		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+	})
+	if runErr != nil {
+		// The old process is gone; reflect that in the DB so callers don't
+		// see a stale "running" status with a dead PID.
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
+			Slug:   slug,
+			Status: "stopped",
+			Port:   nil,
+			PID:    nil,
+		})
+		return false, runErr
+	}
+	port := result.Port
+	pid := result.PID
+	_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
+		Slug:   slug,
+		Status: "running",
+		Port:   &port,
+		PID:    &pid,
+	})
+	return true, nil
 }
