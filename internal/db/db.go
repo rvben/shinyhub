@@ -34,6 +34,9 @@ var migration007SQL string
 //go:embed migrations/008_revoked_tokens.sql
 var migration008SQL string
 
+//go:embed migrations/009_app_env_vars.sql
+var migration009SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -82,6 +85,9 @@ func (s *Store) Migrate() error {
 	}
 	if _, err := s.db.Exec(migration008SQL); err != nil {
 		return fmt.Errorf("migrate 008: %w", err)
+	}
+	if _, err := s.db.Exec(migration009SQL); err != nil {
+		return fmt.Errorf("migrate 009: %w", err)
 	}
 	return nil
 }
