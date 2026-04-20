@@ -1364,14 +1364,18 @@ main {
 }
 
 .snippet {
-  position: relative;
-}
-
-.snippet pre {
+  display: flex;
+  flex-direction: column-reverse;
   background: var(--bg-deep);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 0.75rem 3rem 0.75rem 0.85rem;
+  overflow: hidden;
+}
+
+.snippet pre {
+  background: transparent;
+  border: 0;
+  padding: 0.75rem 0.85rem;
   margin: 0;
   color: var(--cyan-bright);
   font-family: var(--mono);
@@ -1391,10 +1395,10 @@ main {
 
 .snippet pre code { color: inherit; font-family: inherit; }
 
+/* Toolbar row above the code; column-reverse on .snippet puts this on top. */
 .copy-btn {
-  position: absolute;
-  top: 0.45rem;
-  right: 0.45rem;
+  align-self: flex-end;
+  margin: 0.4rem 0.4rem 0;
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
