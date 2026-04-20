@@ -36,7 +36,7 @@ func TestGitClone_InvalidURL(t *testing.T) {
 func TestGitClone_LocalRepo(t *testing.T) {
 	// Create a minimal local git repo to clone from.
 	src := t.TempDir()
-	mustRun(t, src, "git", "init")
+	mustRun(t, src, "git", "init", "-b", "main")
 	mustRun(t, src, "git", "config", "user.email", "test@test.com")
 	mustRun(t, src, "git", "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(src, "app.py"), []byte("# shiny app\n"), 0644); err != nil {
