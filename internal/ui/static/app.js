@@ -494,11 +494,26 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('grant-username').value = '';
     document.getElementById('grant-error').hidden = true;
 
+    // Danger zone: visible only to managers (owner/admin/operator), wired per-app.
+    resetDangerZone();
+    const dangerZone = document.getElementById('danger-zone');
+    dangerZone.hidden = !canManageApp(state.user, app);
+    document.getElementById('delete-confirm-slug').textContent = app.slug;
+
     document.getElementById('access-modal').hidden = false;
     // Move focus to the close button for keyboard/screen-reader users.
     document.getElementById('access-modal-close').focus();
 
     await refreshMemberList();
+  }
+
+  function resetDangerZone() {
+    const input = document.getElementById('delete-confirm');
+    const btn = document.getElementById('delete-app-btn');
+    input.value = '';
+    btn.disabled = true;
+    btn.textContent = 'Delete app';
+    setError(document.getElementById('delete-error'), '');
   }
 
   function closeAccessModal() {
@@ -742,6 +757,48 @@ document.addEventListener('DOMContentLoaded', () => {
       grantBtn.disabled = false;
       grantBtn.textContent = 'Grant';
     }
+  });
+
+  // Danger zone: typed-confirmation unlocks the Delete button.
+  document.getElementById('delete-confirm').addEventListener('input', (e) => {
+    const btn = document.getElementById('delete-app-btn');
+    btn.disabled = e.target.value !== accessSlug;
+  });
+
+  document.getElementById('delete-app-btn').addEventListener('click', async () => {
+    if (!accessSlug) return;
+    const slug = accessSlug;
+    const btn = document.getElementById('delete-app-btn');
+    const errEl = document.getElementById('delete-error');
+    setError(errEl, '');
+    btn.disabled = true;
+    btn.textContent = 'Deleting…';
+
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+    } catch {
+      setError(errEl, 'Network error');
+      btn.disabled = false;
+      btn.textContent = 'Delete app';
+      return;
+    }
+
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok && resp.status !== 204) {
+      let message = 'Delete failed.';
+      try {
+        const body = await resp.json();
+        if (body && body.error) message = body.error;
+      } catch { /* non-JSON */ }
+      setError(errEl, message);
+      btn.disabled = false;
+      btn.textContent = 'Delete app';
+      return;
+    }
+
+    closeAccessModal();
+    await loadApps();
   });
 
   function renderNewAppSnippet(slug) {

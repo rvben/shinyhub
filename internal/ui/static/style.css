@@ -1103,6 +1103,107 @@ main {
   border-color: var(--line);
 }
 
+/* ── Danger zone (Access modal) ── */
+.danger-zone {
+  margin-top: 1.25rem;
+  padding: 0.95rem 1rem 1rem;
+  border: 1px solid rgba(248,113,113,0.35);
+  border-radius: var(--radius-lg);
+  background: rgba(248,113,113,0.04);
+}
+
+.danger-zone h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--red);
+  font-family: var(--mono);
+}
+
+.danger-zone-lead {
+  margin: 0 0 0.8rem;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  line-height: 1.45;
+}
+
+.danger-zone-label {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  margin-bottom: 0.4rem;
+}
+
+.danger-zone-label code {
+  color: var(--text);
+  background: rgba(6,9,20,0.65);
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.danger-zone-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.danger-zone-controls input {
+  flex: 1;
+  padding: 0.55rem 0.85rem;
+  background: rgba(6,9,20,0.65);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  transition: border-color var(--ease);
+}
+
+.danger-zone-controls input:focus {
+  outline: none;
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px rgba(248,113,113,0.18);
+}
+
+.btn-danger {
+  padding: 0.58rem 1.1rem;
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 0.83rem;
+  font-weight: 700;
+  cursor: pointer;
+  background: var(--red);
+  color: var(--bg-deep);
+  border: 1px solid var(--red);
+  transition: all var(--ease);
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+}
+
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(248,113,113,0.35);
+}
+
+.btn-danger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(248,113,113,0.28);
+}
+
+.btn-danger:disabled {
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border-color: var(--line);
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+  filter: none;
+}
+
 /* ── History modal ── */
 #history-list {
   list-style: none;

@@ -235,6 +235,20 @@
             </div>
             <p id="grant-error" class="error" hidden></p>
           </section>
+          <section id="danger-zone" class="danger-zone" hidden>
+            <h4>Danger zone</h4>
+            <p class="danger-zone-lead">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
+            <div class="danger-zone-row">
+              <label for="delete-confirm" class="danger-zone-label">
+                Type <code id="delete-confirm-slug"></code> to confirm:
+              </label>
+              <div class="danger-zone-controls">
+                <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" aria-describedby="delete-error">
+                <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
+              </div>
+            </div>
+            <p id="delete-error" class="error" hidden></p>
+          </section>
         </div>
       </div>
     </div>
