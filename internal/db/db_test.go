@@ -83,12 +83,6 @@ func mustOpenDB(t *testing.T) *db.Store {
 	return store
 }
 
-// newTestStore is the canonical test helper for this package.
-func newTestStore(t *testing.T) *db.Store {
-	t.Helper()
-	return mustOpenDB(t)
-}
-
 // openTestStore is an alias for mustOpenDB used in resource-limit tests.
 func openTestStore(t *testing.T) *db.Store {
 	t.Helper()
@@ -739,7 +733,7 @@ func TestListRunningApps(t *testing.T) {
 }
 
 func TestApp_HasReplicasColumn(t *testing.T) {
-	store := newTestStore(t)
+	store := mustOpenDB(t)
 	u := mustCreateUser(t, store, "o", "developer")
 	app := mustCreateApp(t, store, "demo", u.ID)
 	if app.Replicas != 1 {
@@ -748,7 +742,7 @@ func TestApp_HasReplicasColumn(t *testing.T) {
 }
 
 func TestReplicas_UpsertListDelete(t *testing.T) {
-	store := newTestStore(t)
+	store := mustOpenDB(t)
 	user := mustCreateUser(t, store, "owner", "developer")
 	app := mustCreateApp(t, store, "demo", user.ID)
 
@@ -801,5 +795,46 @@ func TestReplicas_UpsertListDelete(t *testing.T) {
 	reps, _ = store.ListReplicas(app.ID)
 	if len(reps) != 0 {
 		t.Fatalf("cascade delete: want 0, got %d", len(reps))
+	}
+}
+
+func TestReplicas_DeleteReplicasAbove(t *testing.T) {
+	store := mustOpenDB(t)
+	user := mustCreateUser(t, store, "owner", "developer")
+	app := mustCreateApp(t, store, "demo", user.ID)
+
+	for _, idx := range []int{0, 1, 2} {
+		if err := store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: idx, Status: "stopped",
+		}); err != nil {
+			t.Fatalf("upsert replica %d: %v", idx, err)
+		}
+	}
+
+	// DeleteReplicasAbove(2) removes idx >= 2, leaving [0, 1].
+	if err := store.DeleteReplicasAbove(app.ID, 2); err != nil {
+		t.Fatalf("DeleteReplicasAbove(2): %v", err)
+	}
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reps) != 2 {
+		t.Fatalf("want 2 replicas after DeleteReplicasAbove(2), got %d", len(reps))
+	}
+	if reps[0].Index != 0 || reps[1].Index != 1 {
+		t.Fatalf("want indices [0,1], got [%d,%d]", reps[0].Index, reps[1].Index)
+	}
+
+	// DeleteReplicasAbove(0) removes all remaining.
+	if err := store.DeleteReplicasAbove(app.ID, 0); err != nil {
+		t.Fatalf("DeleteReplicasAbove(0): %v", err)
+	}
+	reps, err = store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reps) != 0 {
+		t.Fatalf("want 0 replicas after DeleteReplicasAbove(0), got %d", len(reps))
 	}
 }

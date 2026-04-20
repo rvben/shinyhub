@@ -1026,7 +1026,7 @@ type Replica struct {
 	PID       *int   `json:"pid,omitempty"`
 	Port      *int   `json:"port,omitempty"`
 	Status    string `json:"status"`
-	UpdatedAt int64  `json:"updated_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
@@ -1070,9 +1070,11 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	out := []*Replica{}
 	for rows.Next() {
 		var r Replica
-		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status, &r.UpdatedAt); err != nil {
+		var updatedAt int64
+		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status, &updatedAt); err != nil {
 			return nil, err
 		}
+		r.UpdatedAt = time.Unix(updatedAt, 0)
 		out = append(out, &r)
 	}
 	return out, rows.Err()
