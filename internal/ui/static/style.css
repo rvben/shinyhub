@@ -771,7 +771,7 @@ main {
   border: 1px solid var(--line-2);
   border-radius: var(--radius-lg);
   width: 100%;
-  max-width: 460px;
+  max-width: 560px;
   max-height: 85vh;
   overflow-y: auto;
   box-shadow: 0 32px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(56,189,248,0.08);
@@ -1398,7 +1398,7 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  background: rgba(14,20,38,0.85);
+  background: var(--surface);
   border: 1px solid var(--line-2);
   color: var(--text-soft);
   padding: 0.3rem 0.55rem;
