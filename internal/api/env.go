@@ -1,9 +1,16 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/secrets"
 )
 
 type envListItem struct {
@@ -40,4 +47,148 @@ func (s *Server) handleListAppEnv(w http.ResponseWriter, r *http.Request) {
 		out = append(out, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"env": out})
+}
+
+// envKeyRegex enforces POSIX-style env var naming: uppercase letters, digits,
+// and underscores only, with a non-digit first character.
+var envKeyRegex = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+const (
+	// maxEnvValueBytes is the maximum size of a single env var value (64 KiB).
+	maxEnvValueBytes = 64 * 1024
+	// maxEnvKeysPerApp caps the number of distinct env vars per app.
+	maxEnvKeysPerApp = 100
+)
+
+type upsertEnvRequest struct {
+	Value  string `json:"value"`
+	Secret bool   `json:"secret"`
+}
+
+// handleUpsertAppEnv creates or updates a single per-app environment variable.
+// Keys must match [A-Z_][A-Z0-9_]* and may not start with "SHINYHUB_".
+// Secret values are encrypted at rest using the server's secrets key.
+// Pass ?restart=true to restart the app after the update (no-op when the app
+// is stopped or no manager is present).
+func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	key := chi.URLParam(r, "key")
+
+	// Key validation before the DB lookup so invalid requests fail fast.
+	if !envKeyRegex.MatchString(key) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid key: must match [A-Z_][A-Z0-9_]*")
+		return
+	}
+	if strings.HasPrefix(key, "SHINYHUB_") {
+		writeError(w, http.StatusUnprocessableEntity, "keys with prefix SHINYHUB_ are reserved")
+		return
+	}
+
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+
+	var body upsertEnvRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if len(body.Value) > maxEnvValueBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "value exceeds 64 KB")
+		return
+	}
+
+	// Count cap: only checked for new keys, not updates.
+	existing, _ := s.store.GetAppEnvVar(app.ID, key)
+	if existing == nil {
+		n, err := s.store.CountAppEnvVars(app.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "count env vars")
+			return
+		}
+		if n >= maxEnvKeysPerApp {
+			writeError(w, http.StatusUnprocessableEntity, "per-app env var limit reached (100)")
+			return
+		}
+	}
+
+	storedValue := []byte(body.Value)
+	if body.Secret {
+		ct, err := secrets.Encrypt(s.secretsKey, []byte(body.Value))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "encrypt")
+			return
+		}
+		storedValue = ct
+	}
+
+	if err := s.store.UpsertAppEnvVar(app.ID, key, storedValue, body.Secret); err != nil {
+		writeError(w, http.StatusInternalServerError, "store")
+		return
+	}
+
+	action := "created"
+	if existing != nil {
+		action = "updated"
+	}
+	detail, _ := json.Marshal(map[string]any{
+		"key":    key,
+		"secret": body.Secret,
+		"action": action,
+	})
+
+	u := auth.UserFromContext(r.Context())
+	var userID *int64
+	if u != nil {
+		userID = &u.ID
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       userID,
+		Action:       "env.set",
+		ResourceType: "app",
+		ResourceID:   slug,
+		Detail:       string(detail),
+		IPAddress:    s.clientIP(r),
+	})
+
+	restarted := false
+	if r.URL.Query().Get("restart") == "true" && s.manager != nil {
+		// Restart by stopping the current process and re-launching with the
+		// current deployment, mirroring handleRestartApp. A restart failure is
+		// best-effort: the env var is already stored.
+		if deployments, err := s.store.ListDeployments(app.ID); err == nil && len(deployments) > 0 {
+			current := deployments[0]
+			_ = s.manager.Stop(slug)
+			if s.proxy != nil {
+				s.proxy.Deregister(slug)
+			}
+			result, runErr := deploy.Run(deploy.Params{
+				Slug:            slug,
+				BundleDir:       current.BundleDir,
+				Manager:         s.manager,
+				Proxy:           s.proxy,
+				MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+				CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+			})
+			if runErr == nil {
+				port := result.Port
+				pid := result.PID
+				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
+					Slug:   slug,
+					Status: "running",
+					Port:   &port,
+					PID:    &pid,
+				})
+				restarted = true
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"key":       key,
+		"secret":    body.Secret,
+		"set":       true,
+		"restarted": restarted,
+	})
 }
