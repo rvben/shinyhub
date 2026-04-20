@@ -100,32 +100,59 @@
           <button id="new-app-close" type="button" aria-label="Close new app modal">×</button>
         </div>
         <div class="modal-body">
-          <form id="new-app-form">
-            <label for="new-app-name">Display name</label>
-            <input id="new-app-name" type="text" required maxlength="128"
-                   placeholder="My Sales Dashboard">
+          <div class="handoff-card">
+            <form id="new-app-form">
+              <label for="new-app-name">Display name</label>
+              <input id="new-app-name" type="text" required maxlength="128"
+                     placeholder="My Sales Dashboard">
 
-            <label for="new-app-slug">Slug</label>
-            <input id="new-app-slug" type="text" required
-                   pattern="[a-z0-9][a-z0-9-]{0,62}"
-                   placeholder="lowercase-letters-digits-dashes"
-                   autocomplete="off" spellcheck="false">
-            <p class="hint">1–63 chars. Letters, digits and dashes. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
+              <label for="new-app-slug">Slug</label>
+              <input id="new-app-slug" type="text" required
+                     pattern="[a-z0-9][a-z0-9-]{0,62}"
+                     placeholder="lowercase-letters-digits-dashes"
+                     autocomplete="off" spellcheck="false">
+              <p class="hint">1–63 chars. Letters, digits and dashes. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
 
-            <label for="new-app-project">Project slug <span class="hint-inline">(optional)</span></label>
-            <input id="new-app-project" type="text" autocomplete="off" spellcheck="false">
+              <label for="new-app-project">Project slug <span class="hint-inline">(optional)</span></label>
+              <input id="new-app-project" type="text" autocomplete="off" spellcheck="false">
 
-            <p id="new-app-error" class="error" hidden></p>
-            <div class="modal-actions">
-              <button type="button" id="new-app-cancel">Cancel</button>
-              <button type="submit" id="new-app-submit">Create</button>
+              <p id="new-app-error" class="error" hidden></p>
+
+              <div class="modal-actions">
+                <button type="button" id="new-app-cancel">Cancel</button>
+                <button type="submit" id="new-app-submit">Create</button>
+              </div>
+            </form>
+
+            <hr class="handoff-card-divider" aria-hidden="true">
+
+            <div>
+              <p class="handoff-section-label" id="new-app-snippet-label">Deploy from your machine after creating</p>
+              <div class="snippet">
+                <pre><code id="new-app-snippet"></code></pre>
+                <button type="button" id="new-app-snippet-copy" class="copy-btn"
+                        aria-label="Copy CLI commands to clipboard">
+                  <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
+                       stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                       stroke-linejoin="round" aria-hidden="true">
+                    <rect x="4" y="3" width="8" height="10" rx="1.2"/>
+                    <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
+                  </svg>
+                  <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
+                       stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                       stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
+                  </svg>
+                  <span class="copy-label" aria-hidden="true">Copy</span>
+                  <span class="sr-only" id="new-app-snippet-status" aria-live="polite"></span>
+                </button>
+              </div>
             </div>
-          </form>
-          <section id="new-app-handoff" class="handoff" hidden>
-            <p>App created. First deploy from your machine:</p>
-            <pre><code id="new-app-snippet"></code></pre>
-            <button type="button" id="new-app-snippet-copy">Copy</button>
-            <p class="hint">Or use the <strong>Deploy</strong> button on the card to push a bundle from this browser.</p>
+          </div>
+
+          <section id="new-app-handoff" hidden>
+            <p>App created.</p>
+            <p class="hint">Run the commands above, or use the <strong>Deploy</strong> button on the card to push a bundle from this browser.</p>
             <div class="modal-actions">
               <button type="button" id="new-app-done">Done</button>
             </div>

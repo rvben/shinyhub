@@ -72,6 +72,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const newAppError        = document.getElementById('new-app-error');
   const newAppHandoff      = document.getElementById('new-app-handoff');
   const newAppSnippet      = document.getElementById('new-app-snippet');
+  const newAppSnippetLabel = document.getElementById('new-app-snippet-label');
   const newAppSnippetCopy  = document.getElementById('new-app-snippet-copy');
   const newAppDone         = document.getElementById('new-app-done');
   const newAppSubmit       = document.getElementById('new-app-submit');
@@ -157,9 +158,16 @@ document.addEventListener('DOMContentLoaded', () => {
       name.textContent = app.name;
       header.appendChild(name);
 
+      const neverDeployed = (app.deploy_count || 0) === 0;
+
       const badge = document.createElement('span');
-      badge.className = `badge badge-${app.status}`;
-      badge.textContent = app.status;
+      if (neverDeployed) {
+        badge.className = 'badge badge-new';
+        badge.textContent = 'Awaiting deploy';
+      } else {
+        badge.className = `badge badge-${app.status}`;
+        badge.textContent = app.status;
+      }
       header.appendChild(badge);
 
       const meta = document.createElement('div');
@@ -176,42 +184,47 @@ document.addEventListener('DOMContentLoaded', () => {
       const actions = document.createElement('div');
       actions.className = 'app-actions';
 
-      const openLink = document.createElement('a');
-      openLink.href = `/app/${app.slug}/`;
-      openLink.target = '_blank';
-      openLink.rel = 'noopener noreferrer';
-      openLink.textContent = 'Open';
-      openLink.setAttribute('aria-label', `Open ${app.name}`);
-      actions.appendChild(openLink);
+      if (!neverDeployed) {
+        const openLink = document.createElement('a');
+        openLink.href = `/app/${app.slug}/`;
+        openLink.target = '_blank';
+        openLink.rel = 'noopener noreferrer';
+        openLink.textContent = 'Open';
+        openLink.setAttribute('aria-label', `Open ${app.name}`);
+        actions.appendChild(openLink);
+      }
 
       if (canManageApp(state.user, app)) {
         const deployButton = document.createElement('button');
         deployButton.type = 'button';
-        deployButton.textContent = 'Deploy';
+        deployButton.textContent = neverDeployed ? 'Deploy first bundle' : 'Deploy';
+        if (neverDeployed) deployButton.className = 'btn-primary';
         deployButton.setAttribute('aria-label', `Deploy new bundle to ${app.name}`);
         deployButton.addEventListener('click', () => openDeployModal(app));
         actions.appendChild(deployButton);
 
-        const restartButton = document.createElement('button');
-        restartButton.type = 'button';
-        restartButton.textContent = 'Restart';
-        restartButton.setAttribute('aria-label', `Restart ${app.name}`);
-        restartButton.addEventListener('click', () => restart(app.slug));
-        actions.appendChild(restartButton);
+        if (!neverDeployed) {
+          const restartButton = document.createElement('button');
+          restartButton.type = 'button';
+          restartButton.textContent = 'Restart';
+          restartButton.setAttribute('aria-label', `Restart ${app.name}`);
+          restartButton.addEventListener('click', () => restart(app.slug));
+          actions.appendChild(restartButton);
 
-        const historyButton = document.createElement('button');
-        historyButton.type = 'button';
-        historyButton.textContent = 'History';
-        historyButton.setAttribute('aria-label', `Deployment history for ${app.name}`);
-        historyButton.addEventListener('click', () => openHistoryModal(app.slug));
-        actions.appendChild(historyButton);
+          const historyButton = document.createElement('button');
+          historyButton.type = 'button';
+          historyButton.textContent = 'History';
+          historyButton.setAttribute('aria-label', `Deployment history for ${app.name}`);
+          historyButton.addEventListener('click', () => openHistoryModal(app.slug));
+          actions.appendChild(historyButton);
 
-        const logsButton = document.createElement('button');
-        logsButton.type = 'button';
-        logsButton.textContent = 'Logs';
-        logsButton.setAttribute('aria-label', `View logs for ${app.name}`);
-        logsButton.addEventListener('click', () => openLogs(app.slug));
-        actions.appendChild(logsButton);
+          const logsButton = document.createElement('button');
+          logsButton.type = 'button';
+          logsButton.textContent = 'Logs';
+          logsButton.setAttribute('aria-label', `View logs for ${app.name}`);
+          logsButton.addEventListener('click', () => openLogs(app.slug));
+          actions.appendChild(logsButton);
+        }
 
         const accessButton = document.createElement('button');
         accessButton.className = 'btn btn-access';
@@ -708,9 +721,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  function renderNewAppSnippet(slug) {
+    const origin = window.location.origin;
+    const username = (state.user && state.user.username) || '<your-name>';
+    const effectiveSlug = slug && slug.length > 0 ? slug : '<slug>';
+    newAppSnippet.textContent =
+      `shiny login --host ${origin} --username ${username}\n` +
+      `shiny deploy --slug ${effectiveSlug} <path-to-your-app>`;
+  }
+
+  const newAppDivider = document.querySelector('#new-app-modal .handoff-card-divider');
+
   function resetNewAppModal() {
     newAppForm.hidden = false;
+    if (newAppDivider) newAppDivider.hidden = false;
     newAppHandoff.hidden = true;
+    newAppSnippetLabel.textContent = 'Deploy from your machine after creating';
     newAppSlug.value = '';
     newAppName.value = '';
     newAppProject.value = '';
@@ -718,6 +744,7 @@ document.addEventListener('DOMContentLoaded', () => {
     newAppSubmit.disabled = false;
     newAppSubmit.textContent = 'Create';
     slugEdited = false;
+    renderNewAppSnippet('');
   }
 
   function openNewAppModal() {
@@ -733,11 +760,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function showNewAppHandoff(slug) {
     newAppForm.hidden = true;
+    if (newAppDivider) newAppDivider.hidden = true;
     newAppHandoff.hidden = false;
-    const origin = window.location.origin;
-    newAppSnippet.textContent =
-      `shiny login --host ${origin} --username <your-name>\n` +
-      `shiny deploy --slug ${slug} <path-to-your-app>`;
+    newAppSnippetLabel.textContent = 'Deploy from your machine';
+    renderNewAppSnippet(slug);
     newAppDone.focus();
   }
 
@@ -1157,15 +1183,26 @@ document.addEventListener('DOMContentLoaded', () => {
   newAppName.addEventListener('input', () => {
     if (slugEdited) return;
     newAppSlug.value = slugify(newAppName.value);
+    renderNewAppSnippet(newAppSlug.value);
   });
   newAppSlug.addEventListener('input', () => {
     slugEdited = newAppSlug.value.length > 0;
+    renderNewAppSnippet(newAppSlug.value);
   });
+  const newAppSnippetCopyLabel  = newAppSnippetCopy.querySelector('.copy-label');
+  const newAppSnippetCopyStatus = document.getElementById('new-app-snippet-status');
+
   newAppSnippetCopy.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(newAppSnippet.textContent);
-      newAppSnippetCopy.textContent = 'Copied';
-      setTimeout(() => { newAppSnippetCopy.textContent = 'Copy'; }, 1500);
+      newAppSnippetCopy.classList.add('is-copied');
+      if (newAppSnippetCopyLabel)  newAppSnippetCopyLabel.textContent  = 'Copied';
+      if (newAppSnippetCopyStatus) newAppSnippetCopyStatus.textContent = 'Copied to clipboard';
+      setTimeout(() => {
+        newAppSnippetCopy.classList.remove('is-copied');
+        if (newAppSnippetCopyLabel)  newAppSnippetCopyLabel.textContent  = 'Copy';
+        if (newAppSnippetCopyStatus) newAppSnippetCopyStatus.textContent = '';
+      }, 1800);
     } catch { /* clipboard blocked; user can select text manually */ }
   });
 
@@ -1305,6 +1342,26 @@ document.addEventListener('DOMContentLoaded', () => {
     showLoggedIn(payload);
     await loadApps();
     startMetricsPolling();
+    handleDeployHash();
+  }
+
+  // Honour /#deploy=<slug> from the server-rendered empty-state page:
+  // after the apps list has loaded, scroll to the matching card and open the
+  // deploy modal. Clears the hash afterwards so refreshing doesn't re-trigger.
+  function handleDeployHash() {
+    const match = /^#deploy=([a-z0-9][a-z0-9-]{0,62})$/i.exec(window.location.hash);
+    if (!match) return;
+    const slug = match[1];
+    const app = state.apps.find(a => a.slug === slug);
+    // Clear hash without adding a history entry.
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    if (!app) return;
+    if (!canManageApp(state.user, app)) return;
+    const card = [...appGrid.querySelectorAll('.app-card')].find(
+      c => c.querySelector('.app-meta span')?.textContent === `/${slug}`
+    );
+    if (card) card.scrollIntoView({behavior: 'smooth', block: 'center'});
+    openDeployModal(app);
   }
 
   initialize();
