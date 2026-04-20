@@ -917,6 +917,111 @@ func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, error) {
 	return result, rows.Err()
 }
 
+// --- App Environment Variables ---
+
+// AppEnvVar represents a per-app environment variable row.
+// Secret values are stored encrypted; callers are responsible for
+// encrypting before Upsert and decrypting after Get/List.
+type AppEnvVar struct {
+	ID        int64
+	AppID     int64
+	Key       string
+	Value     []byte
+	IsSecret  bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// UpsertAppEnvVar inserts or updates an env var for the given app.
+// On key conflict, value, is_secret, and updated_at are replaced.
+func (s *Store) UpsertAppEnvVar(appID int64, key string, value []byte, isSecret bool) error {
+	_, err := s.db.Exec(`
+		INSERT INTO app_env_vars (app_id, key, value, is_secret, updated_at)
+		VALUES (?, ?, ?, ?, strftime('%s','now'))
+		ON CONFLICT(app_id, key) DO UPDATE SET
+			value      = excluded.value,
+			is_secret  = excluded.is_secret,
+			updated_at = strftime('%s','now')`,
+		appID, key, value, boolToInt(isSecret))
+	return err
+}
+
+// GetAppEnvVar fetches a single env var by app ID and key.
+// Returns sql.ErrNoRows if no matching row exists.
+func (s *Store) GetAppEnvVar(appID int64, key string) (*AppEnvVar, error) {
+	var v AppEnvVar
+	var isSecretInt int
+	var createdAt, updatedAt int64
+	err := s.db.QueryRow(`
+		SELECT id, app_id, key, value, is_secret, created_at, updated_at
+		FROM app_env_vars
+		WHERE app_id = ? AND key = ?`, appID, key).Scan(
+		&v.ID, &v.AppID, &v.Key, &v.Value, &isSecretInt, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	v.IsSecret = isSecretInt != 0
+	v.CreatedAt = time.Unix(createdAt, 0)
+	v.UpdatedAt = time.Unix(updatedAt, 0)
+	return &v, nil
+}
+
+// ListAppEnvVars returns all env vars for the given app, ordered by key.
+func (s *Store) ListAppEnvVars(appID int64) ([]AppEnvVar, error) {
+	rows, err := s.db.Query(`
+		SELECT id, app_id, key, value, is_secret, created_at, updated_at
+		FROM app_env_vars
+		WHERE app_id = ?
+		ORDER BY key`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AppEnvVar, 0)
+	for rows.Next() {
+		var v AppEnvVar
+		var isSecretInt int
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&v.ID, &v.AppID, &v.Key, &v.Value, &isSecretInt, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		v.IsSecret = isSecretInt != 0
+		v.CreatedAt = time.Unix(createdAt, 0)
+		v.UpdatedAt = time.Unix(updatedAt, 0)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAppEnvVar removes an env var by app ID and key.
+// Returns sql.ErrNoRows if no matching row exists.
+func (s *Store) DeleteAppEnvVar(appID int64, key string) error {
+	res, err := s.db.Exec(`DELETE FROM app_env_vars WHERE app_id = ? AND key = ?`, appID, key)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// CountAppEnvVars returns the number of env vars set for the given app.
+func (s *Store) CountAppEnvVars(appID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM app_env_vars WHERE app_id = ?`, appID).Scan(&n)
+	return n, err
+}
+
+// boolToInt converts a bool to the integer representation used in SQLite.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // scanner interface satisfied by both *sql.Row and *sql.Rows
 type scanner interface {
 	Scan(dest ...any) error

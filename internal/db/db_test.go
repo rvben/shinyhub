@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 
@@ -552,6 +553,118 @@ func TestListAuditEvents_NilUserHasNilUsername(t *testing.T) {
 	}
 	if events[0].Username != nil {
 		t.Errorf("expected nil username for anonymous event, got %v", *events[0].Username)
+	}
+}
+
+func TestAppEnvVars_UpsertListDelete(t *testing.T) {
+	store := mustOpenDB(t)
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("demo")
+
+	// Insert non-secret var.
+	if err := store.UpsertAppEnvVar(app.ID, "AWS_REGION", []byte("eu-west-1"), false); err != nil {
+		t.Fatalf("insert non-secret: %v", err)
+	}
+	// Insert secret var.
+	if err := store.UpsertAppEnvVar(app.ID, "AWS_SECRET", []byte("ciphertext-blob"), true); err != nil {
+		t.Fatalf("insert secret: %v", err)
+	}
+
+	// List — expect both vars.
+	vars, err := store.ListAppEnvVars(app.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vars) != 2 {
+		t.Fatalf("want 2 vars, got %d", len(vars))
+	}
+	// Ordered by key: AWS_REGION < AWS_SECRET.
+	if vars[0].Key != "AWS_REGION" {
+		t.Errorf("want first key AWS_REGION, got %s", vars[0].Key)
+	}
+	if vars[1].Key != "AWS_SECRET" {
+		t.Errorf("want second key AWS_SECRET, got %s", vars[1].Key)
+	}
+	if vars[1].IsSecret != true {
+		t.Errorf("want IsSecret=true for AWS_SECRET")
+	}
+	if vars[0].IsSecret != false {
+		t.Errorf("want IsSecret=false for AWS_REGION")
+	}
+	if vars[0].CreatedAt.IsZero() {
+		t.Error("CreatedAt must not be zero")
+	}
+
+	// Update via upsert.
+	if err := store.UpsertAppEnvVar(app.ID, "AWS_REGION", []byte("us-east-1"), false); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	v, err := store.GetAppEnvVar(app.ID, "AWS_REGION")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(v.Value) != "us-east-1" {
+		t.Errorf("want us-east-1, got %s", v.Value)
+	}
+
+	// CountAppEnvVars.
+	n, err := store.CountAppEnvVars(app.ID)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("want count=2, got %d", n)
+	}
+
+	// Delete one var.
+	if err := store.DeleteAppEnvVar(app.ID, "AWS_REGION"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	vars, _ = store.ListAppEnvVars(app.ID)
+	if len(vars) != 1 {
+		t.Errorf("want 1 after delete, got %d", len(vars))
+	}
+
+	// Delete non-existent key must return sql.ErrNoRows.
+	err = store.DeleteAppEnvVar(app.ID, "NO_SUCH_KEY")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("want sql.ErrNoRows for missing key, got %v", err)
+	}
+}
+
+func TestAppEnvVars_CascadeOnAppDelete(t *testing.T) {
+	store := mustOpenDB(t)
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("demo")
+
+	if err := store.UpsertAppEnvVar(app.ID, "FOO", []byte("bar"), false); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if err := store.DeleteApp(app.Slug); err != nil {
+		t.Fatalf("delete app: %v", err)
+	}
+
+	vars, err := store.ListAppEnvVars(app.ID)
+	if err != nil {
+		t.Fatalf("list after cascade: %v", err)
+	}
+	if len(vars) != 0 {
+		t.Errorf("expected cascade delete, got %d vars", len(vars))
 	}
 }
 
