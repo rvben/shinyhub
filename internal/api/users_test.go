@@ -70,6 +70,84 @@ func TestCreateUser_Admin(t *testing.T) {
 	}
 }
 
+func TestCreateUser_Viewer(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{
+		"username": "guest",
+		"password": "secret123",
+		"role":     "viewer",
+	})
+	req := authedRequest(t, "POST", "/api/users", body, adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["role"] != "viewer" {
+		t.Errorf("expected role=viewer, got %v", resp["role"])
+	}
+
+	// Round-trip through the store so we know the role persists.
+	got, err := store.GetUserByUsername("guest")
+	if err != nil {
+		t.Fatalf("reload viewer: %v", err)
+	}
+	if got.Role != "viewer" {
+		t.Errorf("stored role = %q, want viewer", got.Role)
+	}
+}
+
+func TestCreateUser_RejectsInvalidRole(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{
+		"username": "bad",
+		"password": "secret123",
+		"role":     "wizard",
+	})
+	req := authedRequest(t, "POST", "/api/users", body, adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid role, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchUser_DowngradeToViewer(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
+	admin, _ := store.GetUserByUsername("admin")
+	target, _ := store.GetUserByUsername("target")
+	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"role": "viewer"})
+	path := fmt.Sprintf("/api/users/%d", target.ID)
+	req := authedRequest(t, "PATCH", path, body, adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["role"] != "viewer" {
+		t.Errorf("expected role=viewer, got %v", resp["role"])
+	}
+}
+
 func TestPatchUser_UpdateRole(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

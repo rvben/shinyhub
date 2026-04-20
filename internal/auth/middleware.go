@@ -178,6 +178,15 @@ var roleOrder = map[string]int{
 	string(RoleAdmin):     4,
 }
 
+// IsValidGlobalRole reports whether s names one of the four global roles that
+// can be assigned to a user account (viewer, developer, operator, admin).
+// Keep the single source of truth in this package so handlers and migrations
+// cannot drift from the hierarchy used by RequireRole.
+func IsValidGlobalRole(s string) bool {
+	_, ok := roleOrder[s]
+	return ok
+}
+
 // RequireRole enforces a minimum role level. Roles are ordered:
 // viewer < developer < operator < admin.
 func RequireRole(role Role) func(http.Handler) http.Handler {

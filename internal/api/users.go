@@ -93,8 +93,8 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = "developer"
 	}
-	if role != "admin" && role != "developer" && role != "operator" {
-		writeError(w, http.StatusBadRequest, "role must be admin, developer, or operator")
+	if !auth.IsValidGlobalRole(role) {
+		writeError(w, http.StatusBadRequest, "role must be viewer, developer, operator, or admin")
 		return
 	}
 
@@ -154,8 +154,8 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "role is required")
 		return
 	}
-	if req.Role != "admin" && req.Role != "developer" && req.Role != "operator" {
-		writeError(w, http.StatusBadRequest, "role must be admin, developer, or operator")
+	if !auth.IsValidGlobalRole(req.Role) {
+		writeError(w, http.StatusBadRequest, "role must be viewer, developer, operator, or admin")
 		return
 	}
 
