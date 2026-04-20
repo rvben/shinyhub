@@ -150,6 +150,7 @@ func (s *Server) buildRouter() http.Handler {
 		r.With(rateLimitByUser(s.userLimiter)).Post("/api/users", s.handleCreateUser) // admin: create user
 		r.Get("/api/users/{username}", s.handleGetUser)   // any auth: lookup by username
 		r.Patch("/api/users/{id}", s.handlePatchUser)     // admin: update role
+		r.Patch("/api/users/{id}/password", s.handlePatchUserPassword) // admin: reset password
 		r.Delete("/api/users/{id}", s.handleDeleteUser)   // admin: delete user
 
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log

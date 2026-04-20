@@ -106,6 +106,23 @@ func (s *Store) UpdateUserRole(id int64, role string) error {
 	return nil
 }
 
+// UpdateUserPassword sets a new password hash for the user identified by ID.
+// Returns ErrNotFound if no user with that ID exists.
+func (s *Store) UpdateUserPassword(id int64, hash string) error {
+	result, err := s.db.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, hash, id)
+	if err != nil {
+		return fmt.Errorf("update user password: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update user password rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // DeleteUser permanently removes a user and all their associated data
 // (FK cascades handle oauth_accounts and api_keys).
 // Returns ErrNotFound if no user with that ID exists.

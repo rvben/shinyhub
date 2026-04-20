@@ -30,6 +30,8 @@ document.addEventListener('DOMContentLoaded', () => {
     auditPage: 0,
     auditHasMore: false,
     canCreateApps: false,
+    resetPwTargetId: null,
+    resetPwTargetUsername: '',
   };
 
   const loginView = document.getElementById('login-view');
@@ -62,6 +64,27 @@ document.addEventListener('DOMContentLoaded', () => {
   const tabBar      = document.getElementById('tab-bar');
   const tabApps     = document.getElementById('tab-apps');
   const tabAudit    = document.getElementById('tab-audit');
+  const tabUsers    = document.getElementById('tab-users');
+  const usersView   = document.getElementById('users-view');
+  const usersError  = document.getElementById('users-error');
+  const usersBody   = document.getElementById('users-body');
+  const usersRefresh   = document.getElementById('users-refresh');
+  const newUserButton  = document.getElementById('new-user-button');
+  const newUserModal   = document.getElementById('new-user-modal');
+  const newUserClose   = document.getElementById('new-user-close');
+  const newUserCancel  = document.getElementById('new-user-cancel');
+  const newUserForm    = document.getElementById('new-user-form');
+  const newUserUsername = document.getElementById('new-user-username');
+  const newUserPassword = document.getElementById('new-user-password');
+  const newUserRole     = document.getElementById('new-user-role');
+  const newUserError    = document.getElementById('new-user-error');
+  const resetPwModal    = document.getElementById('reset-password-modal');
+  const resetPwClose    = document.getElementById('reset-password-close');
+  const resetPwCancel   = document.getElementById('reset-password-cancel');
+  const resetPwForm     = document.getElementById('reset-password-form');
+  const resetPwInput    = document.getElementById('reset-password-input');
+  const resetPwUsername = document.getElementById('reset-password-username');
+  const resetPwError    = document.getElementById('reset-password-error');
   const historyModal    = document.getElementById('history-modal');
   const historyAppName  = document.getElementById('history-app-name');
   const historyList     = document.getElementById('history-list');
@@ -275,10 +298,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function showView(name) {
     appsView.hidden  = name !== 'apps';
+    usersView.hidden = name !== 'users';
     auditView.hidden = name !== 'audit';
     tabApps.classList.toggle('tab-active',  name === 'apps');
+    tabUsers.classList.toggle('tab-active', name === 'users');
     tabAudit.classList.toggle('tab-active', name === 'audit');
     if (name === 'audit') loadAuditEvents(0);
+    if (name === 'users') loadUsers();
   }
 
   function showLoggedOut() {
@@ -295,6 +321,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(logoutButton, true);
     setHidden(loginView, false);
     setHidden(appsView, true);
+    setHidden(usersView, true);
     setHidden(auditView, true);
     tabBar.hidden = true;
     setError(loginError, '');
@@ -310,6 +337,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(loginView, true);
     tabBar.hidden = false;
     tabAudit.hidden = payload.user.role !== 'admin';
+    tabUsers.hidden = payload.user.role !== 'admin';
     newAppButton.hidden = !state.canCreateApps;
     showView('apps');
   }
@@ -419,6 +447,233 @@ document.addEventListener('DOMContentLoaded', () => {
       : `Showing ${start}–${end}`;
     auditPrev.disabled = state.auditPage === 0;
     auditNext.disabled = !state.auditHasMore;
+  }
+
+  async function loadUsers() {
+    setError(usersError, '');
+    let resp;
+    try {
+      resp = await api('/api/users');
+    } catch {
+      setError(usersError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (resp.status === 403) { setError(usersError, 'Admin only'); return; }
+    if (!resp.ok) { setError(usersError, 'Failed to load users'); return; }
+    let users = [];
+    try { users = (await resp.json()) || []; }
+    catch { setError(usersError, 'Invalid response'); return; }
+    renderUsers(users);
+  }
+
+  function renderUsers(users) {
+    usersBody.textContent = '';
+    const selfId = state.user ? state.user.id : null;
+
+    for (const u of users) {
+      const tr = document.createElement('tr');
+
+      // Username
+      const nameCell = document.createElement('td');
+      nameCell.className = 'users-username';
+      nameCell.textContent = u.username;
+      if (u.id === selfId) {
+        const tag = document.createElement('span');
+        tag.className = 'users-self-tag';
+        tag.textContent = 'you';
+        nameCell.appendChild(tag);
+      }
+      tr.appendChild(nameCell);
+
+      // Role (editable select; disabled for self)
+      const roleCell = document.createElement('td');
+      const select = document.createElement('select');
+      select.className = 'users-row-role';
+      for (const r of ['developer', 'operator', 'admin']) {
+        const opt = document.createElement('option');
+        opt.value = r;
+        opt.textContent = r.charAt(0).toUpperCase() + r.slice(1);
+        if (u.role === r) opt.selected = true;
+        select.appendChild(opt);
+      }
+      if (u.id === selfId) {
+        select.disabled = true;
+        select.title = 'You cannot change your own role';
+      } else {
+        select.addEventListener('change', () => updateUserRole(u.id, u.username, select));
+      }
+      roleCell.appendChild(select);
+      tr.appendChild(roleCell);
+
+      // Created
+      const createdCell = document.createElement('td');
+      createdCell.className = 'users-created';
+      const ts = new Date(u.created_at);
+      createdCell.textContent = relativeTime(ts);
+      createdCell.title = ts.toISOString();
+      tr.appendChild(createdCell);
+
+      // Actions
+      const actionsCell = document.createElement('td');
+      const actions = document.createElement('div');
+      actions.className = 'users-row-actions';
+
+      const resetBtn = document.createElement('button');
+      resetBtn.type = 'button';
+      resetBtn.className = 'btn-row';
+      resetBtn.textContent = 'Reset password';
+      resetBtn.addEventListener('click', () => openResetPasswordModal(u));
+      actions.appendChild(resetBtn);
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn-row btn-row-danger';
+      delBtn.textContent = 'Delete';
+      if (u.id === selfId) {
+        delBtn.disabled = true;
+        delBtn.title = 'You cannot delete yourself';
+      } else {
+        delBtn.addEventListener('click', () => deleteUser(u.id, u.username));
+      }
+      actions.appendChild(delBtn);
+
+      actionsCell.appendChild(actions);
+      tr.appendChild(actionsCell);
+
+      usersBody.appendChild(tr);
+    }
+  }
+
+  async function updateUserRole(id, username, selectEl) {
+    const newRole = selectEl.value;
+    const previous = selectEl.dataset.previous || '';
+    selectEl.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/users/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({role: newRole}),
+      });
+    } catch {
+      setError(usersError, 'Network error');
+      selectEl.disabled = false;
+      return;
+    }
+    selectEl.disabled = false;
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      setError(usersError, `Failed to update role for ${username}`);
+      if (previous) selectEl.value = previous;
+      return;
+    }
+    setError(usersError, '');
+    loadUsers();
+  }
+
+  async function deleteUser(id, username) {
+    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    let resp;
+    try {
+      resp = await api(`/api/users/${id}`, {method: 'DELETE'});
+    } catch {
+      setError(usersError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) { setError(usersError, `Failed to delete ${username}`); return; }
+    setError(usersError, '');
+    loadUsers();
+  }
+
+  function openResetPasswordModal(user) {
+    state.resetPwTargetId = user.id;
+    state.resetPwTargetUsername = user.username;
+    resetPwUsername.textContent = user.username;
+    resetPwInput.value = '';
+    setError(resetPwError, '');
+    resetPwModal.hidden = false;
+    resetPwInput.focus();
+  }
+
+  function closeResetPasswordModal() {
+    resetPwModal.hidden = true;
+    state.resetPwTargetId = null;
+    state.resetPwTargetUsername = '';
+    resetPwInput.value = '';
+    setError(resetPwError, '');
+  }
+
+  async function submitResetPassword(event) {
+    event.preventDefault();
+    const id = state.resetPwTargetId;
+    if (!id) return;
+    const password = resetPwInput.value;
+    if (password.length < 8) {
+      setError(resetPwError, 'Password must be at least 8 characters');
+      return;
+    }
+    let resp;
+    try {
+      resp = await api(`/api/users/${id}/password`, {
+        method: 'PATCH',
+        body: JSON.stringify({password}),
+      });
+    } catch {
+      setError(resetPwError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Failed to reset password';
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+      setError(resetPwError, msg);
+      return;
+    }
+    closeResetPasswordModal();
+  }
+
+  function openNewUserModal() {
+    newUserForm.reset();
+    setError(newUserError, '');
+    newUserModal.hidden = false;
+    newUserUsername.focus();
+  }
+
+  function closeNewUserModal() {
+    newUserModal.hidden = true;
+    newUserForm.reset();
+    setError(newUserError, '');
+  }
+
+  async function submitNewUser(event) {
+    event.preventDefault();
+    const username = newUserUsername.value.trim();
+    const password = newUserPassword.value;
+    const role     = newUserRole.value;
+    if (!username || password.length < 8) {
+      setError(newUserError, 'Username and 8+ char password are required');
+      return;
+    }
+    let resp;
+    try {
+      resp = await api('/api/users', {
+        method: 'POST',
+        body: JSON.stringify({username, password, role}),
+      });
+    } catch {
+      setError(newUserError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Failed to create user';
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+      setError(newUserError, msg);
+      return;
+    }
+    closeNewUserModal();
+    loadUsers();
   }
 
   async function restart(slug) {
@@ -669,7 +924,16 @@ document.addEventListener('DOMContentLoaded', () => {
   logPaneClose.addEventListener('click', closeLogs);
 
   tabApps.addEventListener('click',  () => showView('apps'));
+  tabUsers.addEventListener('click', () => showView('users'));
   tabAudit.addEventListener('click', () => showView('audit'));
+  usersRefresh.addEventListener('click', () => loadUsers());
+  newUserButton.addEventListener('click', openNewUserModal);
+  newUserClose.addEventListener('click', closeNewUserModal);
+  newUserCancel.addEventListener('click', closeNewUserModal);
+  newUserForm.addEventListener('submit', submitNewUser);
+  resetPwClose.addEventListener('click', closeResetPasswordModal);
+  resetPwCancel.addEventListener('click', closeResetPasswordModal);
+  resetPwForm.addEventListener('submit', submitResetPassword);
   auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1));
   auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1));
 
@@ -683,10 +947,21 @@ document.addEventListener('DOMContentLoaded', () => {
         closeSettingsModal();
       } else if (!historyModal.hidden) {
         closeHistoryModal();
+      } else if (!newUserModal.hidden) {
+        closeNewUserModal();
+      } else if (!resetPwModal.hidden) {
+        closeResetPasswordModal();
       } else if (!document.getElementById('log-pane').hidden) {
         closeLogs();
       }
     }
+  });
+
+  newUserModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeNewUserModal();
+  });
+  resetPwModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeResetPasswordModal();
   });
 
   // Close modal on × or overlay click.

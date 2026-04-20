@@ -172,6 +172,71 @@ func TestPatchUser_UpdateRole(t *testing.T) {
 	}
 }
 
+func TestPatchUserPassword_Admin(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
+	admin, _ := store.GetUserByUsername("admin")
+	target, _ := store.GetUserByUsername("target")
+	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"password": "newsecret123"})
+	path := fmt.Sprintf("/api/users/%d/password", target.ID)
+	req := authedRequest(t, "PATCH", path, body, adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	updated, err := store.GetUserByUsername("target")
+	if err != nil {
+		t.Fatalf("reload target: %v", err)
+	}
+	if err := auth.VerifyPassword(updated.PasswordHash, "newsecret123"); err != nil {
+		t.Errorf("new password does not verify: %v", err)
+	}
+}
+
+func TestPatchUserPassword_TooShort(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
+	admin, _ := store.GetUserByUsername("admin")
+	target, _ := store.GetUserByUsername("target")
+	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"password": "short"})
+	path := fmt.Sprintf("/api/users/%d/password", target.ID)
+	req := authedRequest(t, "PATCH", path, body, adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchUserPassword_NonAdminForbidden(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
+	dev, _ := store.GetUserByUsername("dev")
+	target, _ := store.GetUserByUsername("target")
+	devToken, _ := auth.IssueJWT(dev.ID, "dev", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"password": "newsecret123"})
+	path := fmt.Sprintf("/api/users/%d/password", target.ID)
+	req := authedRequest(t, "PATCH", path, body, devToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDeleteUser_Admin(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

@@ -652,6 +652,123 @@ main {
 #audit-table tbody tr { transition: background var(--ease); }
 #audit-table tbody tr:hover { background: rgba(56,189,248,0.04); }
 
+/* ── Users table ── */
+#users-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  background: linear-gradient(180deg, rgba(20,27,50,0.55) 0%, rgba(14,20,38,0.35) 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+#users-table th {
+  text-align: left;
+  padding: 0.9rem 1rem 0.85rem;
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-family: var(--mono);
+  background: rgba(6,9,20,0.4);
+  border-bottom: 1px solid var(--line);
+}
+
+#users-table td {
+  padding: 0.7rem 1rem;
+  border-top: 1px solid var(--line);
+  vertical-align: middle;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+}
+
+#users-table td.users-username {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+}
+
+#users-table td.users-created {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+#users-table tbody tr { transition: background var(--ease); }
+#users-table tbody tr:hover { background: rgba(56,189,248,0.04); }
+
+.users-actions-col { width: 1%; white-space: nowrap; }
+#users-table td:last-child { white-space: nowrap; }
+
+.users-row-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+.users-row-actions .btn-row {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--text-soft);
+  padding: 0.38rem 0.9rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-family: var(--font);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition: all var(--ease);
+}
+
+.users-row-actions .btn-row:hover:not(:disabled) {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+  background: rgba(56,189,248,0.06);
+}
+
+.users-row-actions .btn-row.btn-row-danger:hover:not(:disabled) {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--red-bg);
+}
+
+.users-row-actions .btn-row:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.users-row-role {
+  background: var(--bg-deep);
+  border: 1px solid var(--line-2);
+  color: var(--text-soft);
+  padding: 0.3rem 0.6rem;
+  border-radius: var(--radius);
+  font-size: 0.75rem;
+  font-family: var(--font);
+  cursor: pointer;
+}
+
+.users-row-role:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.users-self-tag {
+  margin-left: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-family: var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 /* ── Pagination ── */
 .pagination {
   display: flex;
@@ -1298,14 +1415,18 @@ main {
   align-items: center;
 }
 
-#new-app-modal form label {
+.modal-card form label {
   display: block;
   margin-top: 0.75rem;
   font-size: 0.82rem;
   color: var(--text);
 }
 
-#new-app-modal form input {
+.modal-card form input[type="text"],
+.modal-card form input[type="password"],
+.modal-card form input[type="email"],
+.modal-card form input:not([type]),
+.modal-card form select {
   width: 100%;
   margin-top: 0.25rem;
   padding: 0.55rem 0.75rem;
@@ -1315,6 +1436,31 @@ main {
   color: var(--text);
   font-family: var(--mono);
   font-size: 0.82rem;
+  box-sizing: border-box;
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+
+.modal-card form input[type="text"]:focus,
+.modal-card form input[type="password"]:focus,
+.modal-card form input[type="email"]:focus,
+.modal-card form input:not([type]):focus,
+.modal-card form select:focus {
+  outline: none;
+  border-color: var(--cyan-bright);
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+}
+
+.modal-card form select {
+  font-family: var(--font);
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+                    linear-gradient(-45deg, transparent 50%, var(--text-muted) 50%);
+  background-position: calc(100% - 18px) 55%, calc(100% - 12px) 55%;
+  background-size: 6px 6px;
+  background-repeat: no-repeat;
+  padding-right: 2rem;
+  cursor: pointer;
 }
 
 .hint {
