@@ -14,6 +14,7 @@ OAuth or OIDC, and hibernate idle apps automatically.
 - **Auth:** username/password, GitHub OAuth, Google OAuth, or generic OIDC
   (Okta, Azure AD, Keycloak, Auth0).
 - **Access control:** public, private, or shared apps; member roles.
+- **Per-app env vars & secrets:** encrypted at rest with AES-256-GCM.
 - **Audit log:** 27 action types recorded for admin review.
 - **Container isolation (optional):** run each app inside a Docker container
   with CPU and memory limits.
@@ -73,6 +74,53 @@ Minimum required:
 - `auth.secret` — random 32+ character string. Generate with
   `openssl rand -hex 32`. The server refuses to start with the placeholder
   value.
+
+## Environment variables & secrets
+
+Every app has its own key-value environment store. Non-secret values are
+stored plaintext; values marked `--secret` are encrypted at rest with
+AES-256-GCM (key derived from `SHINYHUB_AUTH_SECRET` via HKDF-SHA256) and
+can never be read back through the API or UI.
+
+### CLI
+
+```
+shiny env set demo AWS_REGION=eu-west-1
+shiny env set demo AWS_SECRET_ACCESS_KEY --secret --stdin    # value from stdin
+shiny env set demo LOG_LEVEL=debug --restart                 # restart the app after setting
+shiny env ls  demo
+shiny env rm  demo OLD_VAR
+```
+
+Keys must match `[A-Z_][A-Z0-9_]*`. Values are capped at 64 KiB each, with
+at most 100 keys per app.
+
+### UI
+
+Open an app's **Settings** modal and switch to the **Environment** tab to
+list, add, edit, and delete variables. Secret values are masked in the
+list and write-only once created.
+
+### Reserved prefix
+
+Keys starting with `SHINYHUB_` are reserved for platform variables
+(`SHINYHUB_APP_DATA`, future additions) and will be rejected with 422.
+
+### Caveat: rotating `SHINYHUB_AUTH_SECRET`
+
+The encryption key is derived from `SHINYHUB_AUTH_SECRET`. Rotating that
+secret invalidates every stored secret; the affected apps will fail to
+read their secret values until the variables are re-set via the CLI or
+UI.
+
+### When to use env vars vs persistent data
+
+| You want to...                                         | Use                                  |
+|--------------------------------------------------------|--------------------------------------|
+| Configure a cloud bucket URL / DB URL / API endpoint   | Env var (non-secret)                 |
+| Pass a password / API key / private key string        | Env var (secret)                     |
+| Ship a Parquet / DuckDB / SQLite file the app reads   | *(coming soon — persistent data dir)* |
+| Let the app write uploads / cache / session data      | *(coming soon — persistent data dir)* |
 
 ## Architecture
 
