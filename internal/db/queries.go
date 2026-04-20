@@ -246,8 +246,7 @@ type App struct {
 	OwnerID                 int64     `json:"owner_id"`
 	Access                  string    `json:"access"`
 	Status                  string    `json:"status"`
-	CurrentPort             *int      `json:"port,omitempty"`
-	CurrentPID              *int      `json:"pid,omitempty"`
+	Replicas                int       `json:"replicas"`
 	DeployCount             int       `json:"deploy_count"`
 	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes"`
 	MemoryLimitMB           *int      `json:"memory_limit_mb"`
@@ -287,7 +286,7 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	row := s.db.QueryRow(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       replicas, deploy_count, hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps WHERE slug = ?`, slug)
@@ -305,7 +304,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	}
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       replicas, deploy_count, hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps ORDER BY created_at DESC
@@ -330,7 +329,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 func (s *Store) ListRunningApps() ([]*App, error) {
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       replicas, deploy_count, hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps WHERE status = 'running'`)
@@ -355,7 +354,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	}
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       current_port, current_pid, deploy_count, hibernate_timeout_minutes,
+		       replicas, deploy_count, hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps
@@ -386,16 +385,19 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 type UpdateAppStatusParams struct {
 	Slug   string
 	Status string
-	Port   *int
-	PID    *int
 }
 
 func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
-	_, err := s.db.Exec(`
-		UPDATE apps SET status = ?, current_port = ?, current_pid = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE slug = ?`, p.Status, p.Port, p.PID, p.Slug)
+	res, err := s.db.Exec(
+		`UPDATE apps SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		p.Status, p.Slug,
+	)
 	if err != nil {
 		return fmt.Errorf("update app status: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -1029,17 +1031,21 @@ type scanner interface {
 
 func scanApp(s scanner) (*App, error) {
 	var a App
-	if err := s.Scan(
-		&a.ID, &a.Slug, &a.Name, &a.ProjectSlug, &a.OwnerID, &a.Access,
-		&a.Status, &a.CurrentPort, &a.CurrentPID, &a.DeployCount,
-		&a.HibernateTimeoutMinutes,
-		&a.MemoryLimitMB, &a.CPUQuotaPercent,
+	var projectSlug sql.NullString
+	err := s.Scan(
+		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
+		&a.Status, &a.Replicas, &a.DeployCount,
+		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
-	); err != nil {
+	)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	if projectSlug.Valid {
+		a.ProjectSlug = projectSlug.String
 	}
 	return &a, nil
 }

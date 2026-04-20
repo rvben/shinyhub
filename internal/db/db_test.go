@@ -683,8 +683,7 @@ func TestListRunningApps(t *testing.T) {
 	store.CreateApp(db.CreateAppParams{Slug: "app1", Name: "App 1", OwnerID: u.ID})
 	store.CreateApp(db.CreateAppParams{Slug: "app2", Name: "App 2", OwnerID: u.ID})
 
-	port, pid := 20001, 12345
-	store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "app1", Status: "running", Port: &port, PID: &pid})
+	store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "app1", Status: "running"})
 	// app2 remains "stopped"
 
 	apps, err := store.ListRunningApps()
@@ -697,7 +696,25 @@ func TestListRunningApps(t *testing.T) {
 	if apps[0].Slug != "app1" {
 		t.Errorf("expected app1, got %s", apps[0].Slug)
 	}
-	if apps[0].CurrentPID == nil || *apps[0].CurrentPID != 12345 {
-		t.Errorf("expected PID 12345, got %v", apps[0].CurrentPID)
+}
+
+func TestApp_HasReplicasColumn(t *testing.T) {
+	store := mustOpenDB(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "o", PasswordHash: "h", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.GetUserByUsername("o")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Replicas != 1 {
+		t.Fatalf("expected default Replicas=1, got %d", app.Replicas)
 	}
 }
