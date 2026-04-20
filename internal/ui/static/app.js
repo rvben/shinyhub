@@ -807,7 +807,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const effectiveSlug = slug && slug.length > 0 ? slug : '<slug>';
     newAppSnippet.textContent =
       `shiny login --host ${origin} --username ${username}\n` +
-      `shiny deploy --slug ${effectiveSlug} <path-to-your-app>`;
+      `shiny deploy --slug ${effectiveSlug} .`;
   }
 
   const newAppDivider = document.querySelector('#new-app-modal .handoff-card-divider');

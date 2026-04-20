@@ -110,7 +110,7 @@ func renderNeverDeployedPage(app *db.App, user *auth.ContextUser, manager bool, 
 			username = html.EscapeString(user.Username)
 		}
 		snippet := fmt.Sprintf(
-			"shiny login --host %s --username %s\nshiny deploy --slug %s <path-to-your-app>",
+			"shiny login --host %s --username %s\nshiny deploy --slug %s .",
 			html.EscapeString(origin), username, slug,
 		)
 
