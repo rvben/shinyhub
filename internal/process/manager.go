@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// EnvResolver returns a slice of "KEY=VALUE" strings for the given app slug.
+// It is called during Start to inject per-app environment variables into the
+// process before launch.
+type EnvResolver func(slug string) ([]string, error)
+
 type Status string
 
 const (
@@ -46,12 +51,18 @@ type entry struct {
 
 // Manager tracks running app processes by slug.
 type Manager struct {
-	mu       sync.Mutex
-	entries  map[string]*entry
-	logFiles map[string]*LogFile
-	appsDir  string
-	runtime  Runtime
+	mu          sync.Mutex
+	entries     map[string]*entry
+	logFiles    map[string]*LogFile
+	appsDir     string
+	runtime     Runtime
+	envResolver EnvResolver
 }
+
+// SetEnvResolver sets the function used to inject per-app environment variables
+// during Start. Must be called before the manager begins starting processes; it
+// is not safe to call concurrently with Start.
+func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
 
 // NewManager returns an initialized Manager using the given Runtime.
 func NewManager(appsDir string, rt Runtime) *Manager {
@@ -80,6 +91,14 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	if existing, ok := m.logFiles[p.Slug]; ok {
 		existing.Close()
 		delete(m.logFiles, p.Slug)
+	}
+
+	if m.envResolver != nil {
+		userEnv, err := m.envResolver(p.Slug)
+		if err != nil {
+			return nil, fmt.Errorf("resolve env: %w", err)
+		}
+		p.Env = append(p.Env, userEnv...)
 	}
 
 	logPath := filepath.Join(m.appsDir, p.Slug, "app.log")

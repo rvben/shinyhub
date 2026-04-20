@@ -24,6 +24,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/secrets"
 	"github.com/rvben/shinyhub/internal/ui"
 )
 
@@ -64,6 +65,8 @@ func main() {
 		slog.Error("db migrate", "err", err)
 		os.Exit(1)
 	}
+
+	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
 
 	// readyCh is closed once HTTP listener is live. /readyz returns 503 until then.
 	readyCh := make(chan struct{})
@@ -116,8 +119,32 @@ func main() {
 		slog.Info("runtime configured", "mode", "native")
 	}
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
+	mgr.SetEnvResolver(func(slug string) ([]string, error) {
+		app, err := store.GetApp(slug)
+		if err != nil {
+			return nil, err
+		}
+		vars, err := store.ListAppEnvVars(app.ID)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(vars))
+		for _, v := range vars {
+			val := string(v.Value)
+			if v.IsSecret {
+				pt, err := secrets.Decrypt(secretsKey, v.Value)
+				if err != nil {
+					return nil, fmt.Errorf("decrypt env %s for app %s: %w", v.Key, slug, err)
+				}
+				val = string(pt)
+			}
+			out = append(out, fmt.Sprintf("%s=%s", v.Key, val))
+		}
+		return out, nil
+	})
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
+	srv.SetSecretsKey(secretsKey)
 
 	if cfg.Runtime.Mode == "docker" {
 		srv.SetSampler(&process.RuntimeSampler{Runtime: rt})

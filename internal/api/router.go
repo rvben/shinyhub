@@ -29,6 +29,7 @@ type Server struct {
 	deployLimiter *keyedRateLimiter
 	userLimiter   *keyedRateLimiter
 	tokenLimiter  *keyedRateLimiter
+	secretsKey    []byte
 	router        http.Handler
 }
 
@@ -74,6 +75,10 @@ func (s *Server) SetSampler(sampler process.Sampler) { s.sampler = sampler }
 // SetOIDCProvider sets the OIDC provider after the server is constructed.
 // Must be called before the server begins handling requests.
 func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
+
+// SetSecretsKey sets the AES-256 key used to decrypt per-app secret env vars.
+// Must be called before the server begins handling requests.
+func (s *Server) SetSecretsKey(k []byte) { s.secretsKey = k }
 
 // keyLookup satisfies auth.APIKeyLookup by delegating to the DB.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
