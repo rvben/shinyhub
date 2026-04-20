@@ -890,10 +890,6 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(errEl, 'Key must match [A-Z_][A-Z0-9_]*');
       return;
     }
-    if (!value) {
-      setError(errEl, 'Value is required.');
-      return;
-    }
 
     const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
     let resp;
