@@ -1016,6 +1016,87 @@ func (s *Store) CountAppEnvVars(appID int64) (int, error) {
 	return n, err
 }
 
+// --- Replicas ---
+
+// Replica represents a single backend process instance for an app.
+// Multiple replicas allow an app to run N parallel processes behind the proxy.
+type Replica struct {
+	AppID     int64  `json:"app_id"`
+	Index     int    `json:"index"`
+	PID       *int   `json:"pid,omitempty"`
+	Port      *int   `json:"port,omitempty"`
+	Status    string `json:"status"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+// UpsertReplicaParams holds the fields for inserting or updating a replica row.
+type UpsertReplicaParams struct {
+	AppID  int64
+	Index  int
+	PID    *int
+	Port   *int
+	Status string
+}
+
+// UpsertReplica inserts a new replica or updates an existing one identified by
+// (app_id, idx). All fields are replaced on conflict.
+func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
+	_, err := s.db.Exec(`
+		INSERT INTO replicas (app_id, idx, pid, port, status, updated_at)
+		VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+		ON CONFLICT(app_id, idx) DO UPDATE SET
+			pid        = excluded.pid,
+			port       = excluded.port,
+			status     = excluded.status,
+			updated_at = excluded.updated_at`,
+		p.AppID, p.Index, p.PID, p.Port, p.Status,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert replica: %w", err)
+	}
+	return nil
+}
+
+// ListReplicas returns all replicas for the given app, ordered by index.
+// Returns an empty (non-nil) slice when no replicas exist.
+func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
+	rows, err := s.db.Query(`
+		SELECT app_id, idx, pid, port, status, updated_at
+		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Replica{}
+	for rows.Next() {
+		var r Replica
+		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteReplica removes the replica at the given index for an app.
+func (s *Store) DeleteReplica(appID int64, index int) error {
+	_, err := s.db.Exec(`DELETE FROM replicas WHERE app_id = ? AND idx = ?`, appID, index)
+	if err != nil {
+		return fmt.Errorf("delete replica: %w", err)
+	}
+	return nil
+}
+
+// DeleteReplicasAbove removes all replicas with idx >= keepBelow for an app.
+// Used when the operator shrinks the pool.
+func (s *Store) DeleteReplicasAbove(appID int64, keepBelow int) error {
+	_, err := s.db.Exec(`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`, appID, keepBelow)
+	if err != nil {
+		return fmt.Errorf("delete replicas above: %w", err)
+	}
+	return nil
+}
+
 // boolToInt converts a bool to the integer representation used in SQLite.
 func boolToInt(b bool) int {
 	if b {

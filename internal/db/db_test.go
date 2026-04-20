@@ -83,10 +83,47 @@ func mustOpenDB(t *testing.T) *db.Store {
 	return store
 }
 
+// newTestStore is the canonical test helper for this package.
+func newTestStore(t *testing.T) *db.Store {
+	t.Helper()
+	return mustOpenDB(t)
+}
+
 // openTestStore is an alias for mustOpenDB used in resource-limit tests.
 func openTestStore(t *testing.T) *db.Store {
 	t.Helper()
 	return mustOpenDB(t)
+}
+
+func mustCreateUser(t *testing.T, s *db.Store, name, role string) *db.User {
+	t.Helper()
+	if err := s.CreateUser(db.CreateUserParams{Username: name, PasswordHash: "h", Role: role}); err != nil {
+		t.Fatalf("create user %q: %v", name, err)
+	}
+	u, err := s.GetUserByUsername(name)
+	if err != nil {
+		t.Fatalf("get user %q: %v", name, err)
+	}
+	return u
+}
+
+func mustCreateApp(t *testing.T, s *db.Store, slug string, ownerID int64) *db.App {
+	t.Helper()
+	if err := s.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID}); err != nil {
+		t.Fatalf("create app %q: %v", slug, err)
+	}
+	app, err := s.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatalf("get app %q: %v", slug, err)
+	}
+	return app
+}
+
+func mustDeleteApp(t *testing.T, s *db.Store, slug string) {
+	t.Helper()
+	if err := s.DeleteApp(slug); err != nil {
+		t.Fatalf("delete app %q: %v", slug, err)
+	}
 }
 
 func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
@@ -696,25 +733,73 @@ func TestListRunningApps(t *testing.T) {
 	if apps[0].Slug != "app1" {
 		t.Errorf("expected app1, got %s", apps[0].Slug)
 	}
+	if apps[0].Replicas != 1 {
+		t.Errorf("expected default Replicas=1, got %d", apps[0].Replicas)
+	}
 }
 
 func TestApp_HasReplicasColumn(t *testing.T) {
-	store := mustOpenDB(t)
-	if err := store.CreateUser(db.CreateUserParams{Username: "o", PasswordHash: "h", Role: "developer"}); err != nil {
-		t.Fatal(err)
-	}
-	u, err := store.GetUserByUsername("o")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID}); err != nil {
-		t.Fatal(err)
-	}
-	app, err := store.GetAppBySlug("demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestStore(t)
+	u := mustCreateUser(t, store, "o", "developer")
+	app := mustCreateApp(t, store, "demo", u.ID)
 	if app.Replicas != 1 {
 		t.Fatalf("expected default Replicas=1, got %d", app.Replicas)
+	}
+}
+
+func TestReplicas_UpsertListDelete(t *testing.T) {
+	store := newTestStore(t)
+	user := mustCreateUser(t, store, "owner", "developer")
+	app := mustCreateApp(t, store, "demo", user.ID)
+
+	pid, port := 111, 20001
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	pid2, port2 := 222, 20002
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 1, PID: &pid2, Port: &port2, Status: "running",
+	}); err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reps) != 2 {
+		t.Fatalf("want 2 replicas, got %d", len(reps))
+	}
+	if reps[0].Index != 0 || reps[1].Index != 1 {
+		t.Fatalf("want ordered [0,1], got [%d,%d]", reps[0].Index, reps[1].Index)
+	}
+
+	// Idempotent upsert.
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "stopped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reps, _ = store.ListReplicas(app.ID)
+	if reps[0].Status != "stopped" {
+		t.Fatalf("want stopped, got %s", reps[0].Status)
+	}
+
+	// Delete one.
+	if err := store.DeleteReplica(app.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	reps, _ = store.ListReplicas(app.ID)
+	if len(reps) != 1 {
+		t.Fatalf("want 1 after delete, got %d", len(reps))
+	}
+
+	// Cascade delete with app.
+	mustDeleteApp(t, store, app.Slug)
+	reps, _ = store.ListReplicas(app.ID)
+	if len(reps) != 0 {
+		t.Fatalf("cascade delete: want 0, got %d", len(reps))
 	}
 }
