@@ -238,39 +238,78 @@
           <h2 id="settings-modal-heading" class="modal-title">Settings: <span id="settings-app-name"></span></h2>
           <button id="settings-modal-close" type="button" aria-label="Close settings modal">×</button>
         </div>
+        <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
+          <button type="button" class="settings-tab active" role="tab" aria-selected="true" aria-controls="settings-access-panel" data-tab="access">Access</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-env-panel" data-tab="env">Environment</button>
+        </div>
         <div class="modal-body">
-          <fieldset class="access-level">
-            <legend>Visibility</legend>
-            <label><input type="radio" name="access-level" value="private"> Private</label>
-            <label><input type="radio" name="access-level" value="shared"> Shared</label>
-            <label><input type="radio" name="access-level" value="public"> Public</label>
-          </fieldset>
-          <section class="members-section">
-            <h4>Members</h4>
-            <ul id="members-list"></ul>
-          </section>
-          <section class="grant-section">
-            <h4>Grant access</h4>
-            <div class="grant-row">
-              <label for="grant-username" class="sr-only">Username to grant access</label>
-              <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
-              <button id="grant-btn" type="button">Grant</button>
-            </div>
-            <p id="grant-error" class="error" hidden></p>
-          </section>
-          <section id="danger-zone" class="danger-zone" hidden>
-            <h4>Danger zone</h4>
-            <p class="danger-zone-lead">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
-            <div class="danger-zone-row">
-              <label for="delete-confirm" class="danger-zone-label">
-                Type <code id="delete-confirm-slug"></code> to confirm:
-              </label>
-              <div class="danger-zone-controls">
-                <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" aria-describedby="delete-error">
-                <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
+          <section id="settings-access-panel" class="settings-tab-panel" role="tabpanel">
+            <fieldset class="access-level">
+              <legend>Visibility</legend>
+              <label><input type="radio" name="access-level" value="private"> Private</label>
+              <label><input type="radio" name="access-level" value="shared"> Shared</label>
+              <label><input type="radio" name="access-level" value="public"> Public</label>
+            </fieldset>
+            <section class="members-section">
+              <h4>Members</h4>
+              <ul id="members-list"></ul>
+            </section>
+            <section class="grant-section">
+              <h4>Grant access</h4>
+              <div class="grant-row">
+                <label for="grant-username" class="sr-only">Username to grant access</label>
+                <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
+                <button id="grant-btn" type="button">Grant</button>
               </div>
+              <p id="grant-error" class="error" hidden></p>
+            </section>
+            <section id="danger-zone" class="danger-zone" hidden>
+              <h4>Danger zone</h4>
+              <p class="danger-zone-lead">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
+              <div class="danger-zone-row">
+                <label for="delete-confirm" class="danger-zone-label">
+                  Type <code id="delete-confirm-slug"></code> to confirm:
+                </label>
+                <div class="danger-zone-controls">
+                  <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" aria-describedby="delete-error">
+                  <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
+                </div>
+              </div>
+              <p id="delete-error" class="error" hidden></p>
+            </section>
+          </section>
+
+          <section id="settings-env-panel" class="settings-tab-panel" role="tabpanel" hidden>
+            <div class="env-header">
+              <h4>Environment variables</h4>
+              <button id="env-add-btn" type="button" class="env-add-btn">+ Add variable</button>
             </div>
-            <p id="delete-error" class="error" hidden></p>
+            <p class="env-empty" id="env-empty" hidden>No environment variables set for this app.</p>
+            <table id="env-list" class="env-list" hidden>
+              <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+
+            <form id="env-form" class="env-form" hidden>
+              <h5 id="env-form-heading">Add variable</h5>
+              <div class="env-form-row">
+                <label for="env-form-key">Key</label>
+                <input id="env-form-key" type="text" pattern="[A-Z_][A-Z0-9_]*" required autocomplete="off" spellcheck="false">
+              </div>
+              <div class="env-form-row">
+                <label for="env-form-value">Value</label>
+                <input id="env-form-value" type="text" required autocomplete="off" spellcheck="false">
+              </div>
+              <div class="env-form-row env-form-checks">
+                <label><input type="checkbox" id="env-form-secret"> Secret (encrypted at rest, write-only)</label>
+                <label><input type="checkbox" id="env-form-restart" checked> Restart app after saving</label>
+              </div>
+              <p class="error" id="env-form-error" hidden></p>
+              <div class="env-form-actions">
+                <button type="submit" class="env-btn-primary">Save</button>
+                <button type="button" id="env-form-cancel" class="env-btn-secondary">Cancel</button>
+              </div>
+            </form>
           </section>
         </div>
       </div>

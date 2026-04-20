@@ -1854,3 +1854,268 @@ main {
   min-width: 3em;
   text-align: right;
 }
+
+/* ── Settings modal tabs ── */
+.settings-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0 1.4rem;
+}
+
+.settings-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.6rem 1rem;
+  margin-bottom: -1px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 0.83rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  transition: color var(--ease), border-color var(--ease);
+}
+
+.settings-tab:hover {
+  color: var(--text-soft);
+}
+
+.settings-tab.active {
+  color: var(--cyan-bright);
+  border-bottom-color: var(--cyan-bright);
+}
+
+.settings-tab-panel {
+  display: contents;
+}
+
+/* ── Environment tab ── */
+.env-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.env-header h4 {
+  font-weight: 700;
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+
+.env-add-btn {
+  padding: 0.4rem 0.8rem;
+  background: var(--accent-dim);
+  color: var(--cyan-bright);
+  border: 1px solid rgba(56,189,248,0.25);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: var(--font);
+  transition: all var(--ease);
+}
+
+.env-add-btn:hover {
+  background: rgba(56,189,248,0.18);
+  border-color: var(--cyan-bright);
+}
+
+.env-list {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+}
+
+.env-list th {
+  text-align: left;
+  font-weight: 700;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.env-list td {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.82rem;
+  color: var(--text-soft);
+  word-break: break-all;
+}
+
+.env-list td:first-child {
+  font-family: var(--mono);
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.env-list .env-secret {
+  font-family: var(--mono);
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+
+.env-list .env-actions {
+  display: flex;
+  gap: 0.25rem;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.env-list .env-actions button {
+  padding: 0.25rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: var(--font);
+  color: var(--text-soft);
+  transition: all var(--ease);
+}
+
+.env-list .env-actions button:hover {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+  background: rgba(56,189,248,0.08);
+}
+
+.env-list .env-actions .env-btn-danger {
+  color: var(--red);
+  border-color: rgba(248,113,113,0.35);
+}
+
+.env-list .env-actions .env-btn-danger:hover {
+  background: rgba(248,113,113,0.1);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.env-empty {
+  color: var(--text-muted);
+  font-size: 0.83rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.env-form {
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.env-form h5 {
+  font-weight: 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  font-family: var(--mono);
+  margin-bottom: 0.85rem;
+}
+
+.env-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.75rem;
+}
+
+.env-form-row label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.env-form-row input[type="text"] {
+  padding: 0.55rem 0.85rem;
+  background: rgba(6,9,20,0.65);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  transition: border-color var(--ease);
+}
+
+.env-form-row input[type="text"]:focus {
+  outline: none;
+  border-color: var(--cyan-bright);
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.14);
+}
+
+.env-form-row input[type="text"]:read-only {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.env-form-checks {
+  gap: 0.4rem;
+  flex-direction: column;
+}
+
+.env-form-checks label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 400;
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+}
+
+.env-form-checks label input[type="checkbox"]:disabled + * {
+  opacity: 0.5;
+}
+
+.env-form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.env-btn-primary {
+  padding: 0.5rem 1.1rem;
+  background: linear-gradient(135deg, var(--cyan-bright), var(--electric));
+  color: var(--bg-deep);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 700;
+  font-family: var(--font);
+  transition: all var(--ease);
+  box-shadow: 0 4px 14px rgba(56,189,248,0.25);
+}
+
+.env-btn-primary:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.env-btn-secondary {
+  padding: 0.5rem 1.1rem;
+  background: rgba(14,20,38,0.55);
+  color: var(--text-soft);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 600;
+  font-family: var(--font);
+  transition: all var(--ease);
+}
+
+.env-btn-secondary:hover {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+  background: rgba(56,189,248,0.08);
+}

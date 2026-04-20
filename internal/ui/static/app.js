@@ -774,6 +774,165 @@ document.addEventListener('DOMContentLoaded', () => {
   function closeSettingsModal() {
     document.getElementById('settings-modal').hidden = true;
     settingsSlug = null;
+    closeEnvForm();
+    switchSettingsTab('access');
+  }
+
+  // --- Environment tab ---
+
+  let envEditingKey = null;
+
+  function switchSettingsTab(tabName) {
+    document.querySelectorAll('.settings-tab').forEach(t => {
+      const active = t.dataset.tab === tabName;
+      t.classList.toggle('active', active);
+      t.setAttribute('aria-selected', String(active));
+    });
+    document.getElementById('settings-access-panel').hidden = tabName !== 'access';
+    document.getElementById('settings-env-panel').hidden = tabName !== 'env';
+    if (tabName === 'env' && settingsSlug) {
+      refreshEnvList(settingsSlug);
+    }
+  }
+
+  async function refreshEnvList(slug) {
+    const tbody = document.querySelector('#env-list tbody');
+    tbody.innerHTML = '';
+    const errEl = document.getElementById('env-form-error');
+
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/env`);
+    } catch {
+      setError(errEl, 'Failed to load environment variables.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to load environment variables.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+
+    let data;
+    try { data = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
+
+    const vars = (data && data.env) || [];
+    const empty = document.getElementById('env-empty');
+    const table = document.getElementById('env-list');
+    empty.hidden = vars.length > 0;
+    table.hidden = vars.length === 0;
+
+    const app = state.apps.find(a => a.slug === slug);
+    const canWrite = canManageApp(state.user, app);
+    document.getElementById('env-add-btn').hidden = !canWrite;
+
+    for (const v of vars) {
+      const tr = document.createElement('tr');
+      const keyTd = document.createElement('td');
+      keyTd.textContent = v.key;
+      const valTd = document.createElement('td');
+      valTd.className = v.secret ? 'env-secret' : '';
+      valTd.textContent = v.secret ? '••••••' : v.value;
+      const actTd = document.createElement('td');
+      actTd.className = 'env-actions';
+      if (canWrite) {
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.textContent = 'Edit';
+        editBtn.addEventListener('click', () => openEnvForm(v));
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'env-btn-danger';
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', () => deleteEnvVar(slug, v.key));
+        actTd.append(editBtn, delBtn);
+      }
+      tr.append(keyTd, valTd, actTd);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function openEnvForm(existing) {
+    envEditingKey = existing ? existing.key : null;
+    document.getElementById('env-form-heading').textContent = existing ? `Edit ${existing.key}` : 'Add variable';
+    const keyInput = document.getElementById('env-form-key');
+    const valueInput = document.getElementById('env-form-value');
+    const secretInput = document.getElementById('env-form-secret');
+    keyInput.value = existing ? existing.key : '';
+    keyInput.readOnly = !!existing;
+    valueInput.value = '';
+    valueInput.placeholder = (existing && existing.secret) ? 'Enter new value (current value is write-only)' : '';
+    secretInput.checked = existing ? existing.secret : false;
+    secretInput.disabled = !!existing;
+    document.getElementById('env-form-error').hidden = true;
+    document.getElementById('env-form').hidden = false;
+    keyInput.focus();
+  }
+
+  function closeEnvForm() {
+    const form = document.getElementById('env-form');
+    if (form) form.hidden = true;
+    envEditingKey = null;
+  }
+
+  async function submitEnvForm(e) {
+    e.preventDefault();
+    const key = document.getElementById('env-form-key').value.trim();
+    const value = document.getElementById('env-form-value').value;
+    const secret = document.getElementById('env-form-secret').checked;
+    const restart = document.getElementById('env-form-restart').checked;
+    const errEl = document.getElementById('env-form-error');
+    errEl.hidden = true;
+
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) {
+      setError(errEl, 'Key must match [A-Z_][A-Z0-9_]*');
+      return;
+    }
+    if (!value) {
+      setError(errEl, 'Value is required.');
+      return;
+    }
+
+    const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
+    let resp;
+    try {
+      resp = await api(url, { method: 'PUT', body: JSON.stringify({ value, secret }) });
+    } catch {
+      setError(errEl, 'Network error.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Save failed.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+
+    closeEnvForm();
+    await refreshEnvList(settingsSlug);
+  }
+
+  async function deleteEnvVar(slug, key) {
+    if (!window.confirm(`Delete environment variable ${key}?`)) return;
+    const errEl = document.getElementById('env-form-error');
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}?restart=true`, { method: 'DELETE' });
+    } catch {
+      setError(errEl, 'Network error.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok && resp.status !== 204) {
+      let message = 'Delete failed.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+    await refreshEnvList(slug);
   }
 
   async function openHistoryModal(slug) {
@@ -969,6 +1128,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('settings-modal').addEventListener('click', e => {
     if (e.target === e.currentTarget) closeSettingsModal();
   });
+
+  // Settings tab switching.
+  document.querySelectorAll('.settings-tab').forEach(btn => {
+    btn.addEventListener('click', () => switchSettingsTab(btn.dataset.tab));
+  });
+
+  // Environment tab: add button, form submit/cancel.
+  document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));
+  document.getElementById('env-form').addEventListener('submit', submitEnvForm);
+  document.getElementById('env-form-cancel').addEventListener('click', closeEnvForm);
 
   document.getElementById('history-modal-close').addEventListener('click', closeHistoryModal);
   historyModal.addEventListener('click', e => {
