@@ -44,6 +44,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const sessionUser = document.getElementById('session-user');
   const appGrid = document.getElementById('app-grid');
   const emptyState = document.getElementById('empty-state');
+  const emptyStateHeading = document.getElementById('empty-state-heading');
+  const emptyStateEyebrow = document.getElementById('empty-state-eyebrow');
+  const emptyStateLead    = document.getElementById('empty-state-lead');
+  const emptyStateActions = document.getElementById('empty-state-actions');
+  const emptyStateCTA     = document.getElementById('empty-state-cta');
   const logPane = document.getElementById('log-pane');
   const logPaneTitle = document.getElementById('log-pane-title');
   const logPaneBody = document.getElementById('log-pane-body');
@@ -143,9 +148,27 @@ document.addEventListener('DOMContentLoaded', () => {
     return fetch(path, init);
   }
 
+  function renderEmptyStateCopy() {
+    if (state.canCreateApps) {
+      emptyStateEyebrow.textContent = 'Ready when you are';
+      emptyStateHeading.innerHTML = 'Deploy your <strong>first Shiny app</strong>.';
+      emptyStateLead.textContent =
+        'Apps you create will appear here as cards. Start by naming your app — you can hand off to the CLI or drop a bundle straight into the browser.';
+      emptyStateActions.hidden = false;
+    } else {
+      emptyStateEyebrow.textContent = 'Nothing here yet';
+      emptyStateHeading.innerHTML = 'No apps are visible to you.';
+      emptyStateLead.textContent =
+        'Apps shared with you will appear here once the owner deploys them. Check back soon.';
+      emptyStateActions.hidden = true;
+    }
+  }
+
   function renderApps() {
     appGrid.textContent = '';
-    emptyState.hidden = state.apps.length !== 0;
+    const empty = state.apps.length === 0;
+    emptyState.hidden = !empty;
+    if (empty) renderEmptyStateCopy();
 
     for (const app of state.apps) {
       const card = document.createElement('div');
@@ -1173,6 +1196,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bindDropzoneEvents();
 
   newAppButton.addEventListener('click', openNewAppModal);
+  emptyStateCTA.addEventListener('click', openNewAppModal);
   newAppClose.addEventListener('click', closeNewAppModal);
   newAppCancel.addEventListener('click', closeNewAppModal);
   newAppDone.addEventListener('click', closeNewAppModal);

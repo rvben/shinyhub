@@ -56,7 +56,15 @@
       </div>
       <p id="app-error" class="error" hidden></p>
       <div id="app-grid" class="app-grid"></div>
-      <p id="empty-state" class="empty-state" hidden>No apps deployed yet.</p>
+      <div id="empty-state" class="emptystate-card dashboard-emptystate" hidden role="region"
+           aria-labelledby="empty-state-heading">
+        <p class="emptystate-eyebrow"><span class="sparkle" aria-hidden="true"></span><span id="empty-state-eyebrow">Nothing here yet</span></p>
+        <h2 id="empty-state-heading"></h2>
+        <p class="lead" id="empty-state-lead"></p>
+        <div class="emptystate-actions" id="empty-state-actions" hidden>
+          <button type="button" id="empty-state-cta" class="emptystate-btn emptystate-btn-primary">Create your first app</button>
+        </div>
+      </div>
     </section>
 
     <section id="audit-view" hidden>
