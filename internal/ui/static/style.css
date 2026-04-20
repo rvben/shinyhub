@@ -1376,8 +1376,17 @@ main {
   color: var(--cyan-bright);
   font-family: var(--mono);
   font-size: 0.78rem;
-  white-space: pre-wrap;
-  word-break: break-all;
+  white-space: pre;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+
+.snippet pre::-webkit-scrollbar { height: 6px; }
+.snippet pre::-webkit-scrollbar-track { background: transparent; }
+.snippet pre::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+  border-radius: 3px;
 }
 
 .snippet pre code { color: inherit; font-family: inherit; }
