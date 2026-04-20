@@ -37,6 +37,9 @@ var migration008SQL string
 //go:embed migrations/009_app_env_vars.sql
 var migration009SQL string
 
+//go:embed migrations/010_replicas.sql
+var migration010SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -88,6 +91,12 @@ func (s *Store) Migrate() error {
 	}
 	if _, err := s.db.Exec(migration009SQL); err != nil {
 		return fmt.Errorf("migrate 009: %w", err)
+	}
+	if _, err := s.db.Exec(migration010SQL); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") &&
+			!strings.Contains(err.Error(), "no such column") {
+			return fmt.Errorf("migrate 010: %w", err)
+		}
 	}
 	return nil
 }
