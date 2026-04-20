@@ -1014,14 +1014,14 @@ main {
   cursor: not-allowed;
 }
 
-/* Access button on cards — keep JS-added .btn-access with accent look */
-.btn-access {
+/* Settings button on cards — keep JS-added .btn-settings with accent look */
+.btn-settings {
   background: var(--accent-dim) !important;
   color: var(--cyan-bright) !important;
   border-color: rgba(56,189,248,0.25) !important;
 }
 
-.btn-access:hover {
+.btn-settings:hover {
   background: rgba(56,189,248,0.18) !important;
   border-color: var(--cyan-bright) !important;
   color: var(--cyan-bright) !important;

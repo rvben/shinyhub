@@ -249,12 +249,12 @@ document.addEventListener('DOMContentLoaded', () => {
           actions.appendChild(logsButton);
         }
 
-        const accessButton = document.createElement('button');
-        accessButton.className = 'btn btn-access';
-        accessButton.textContent = 'Access';
-        accessButton.setAttribute('aria-label', `Manage access for ${app.name}`);
-        accessButton.addEventListener('click', () => openAccessModal(app));
-        actions.appendChild(accessButton);
+        const settingsButton = document.createElement('button');
+        settingsButton.className = 'btn btn-settings';
+        settingsButton.textContent = 'Settings';
+        settingsButton.setAttribute('aria-label', `Open settings for ${app.name}`);
+        settingsButton.addEventListener('click', () => openSettingsModal(app));
+        actions.appendChild(settingsButton);
       }
 
       const metricsLine = document.createElement('div');
@@ -478,12 +478,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Access modal ---
 
-  let accessSlug = null;
+  let settingsSlug = null;
   let historySlug = null;
 
-  async function openAccessModal(app) {
-    accessSlug = app.slug;
-    document.getElementById('access-app-name').textContent = app.name;
+  async function openSettingsModal(app) {
+    settingsSlug = app.slug;
+    document.getElementById('settings-app-name').textContent = app.name;
 
     // Set visibility radio to current access level.
     const radios = document.querySelectorAll('input[name="access-level"]');
@@ -500,9 +500,9 @@ document.addEventListener('DOMContentLoaded', () => {
     dangerZone.hidden = !canManageApp(state.user, app);
     document.getElementById('delete-confirm-slug').textContent = app.slug;
 
-    document.getElementById('access-modal').hidden = false;
+    document.getElementById('settings-modal').hidden = false;
     // Move focus to the close button for keyboard/screen-reader users.
-    document.getElementById('access-modal-close').focus();
+    document.getElementById('settings-modal-close').focus();
 
     await refreshMemberList();
   }
@@ -516,9 +516,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(document.getElementById('delete-error'), '');
   }
 
-  function closeAccessModal() {
-    document.getElementById('access-modal').hidden = true;
-    accessSlug = null;
+  function closeSettingsModal() {
+    document.getElementById('settings-modal').hidden = true;
+    settingsSlug = null;
   }
 
   async function openHistoryModal(slug) {
@@ -628,12 +628,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function refreshMemberList() {
-    if (!accessSlug) return;
+    if (!settingsSlug) return;
     const list = document.getElementById('members-list');
     list.innerHTML = '<li class="loading-placeholder">Loading…</li>';
     let resp;
     try {
-      resp = await api(`/api/apps/${accessSlug}/members`);
+      resp = await api(`/api/apps/${settingsSlug}/members`);
     } catch { list.innerHTML = ''; return; }
     if (!resp.ok) { list.innerHTML = ''; return; }
     const members = await resp.json();
@@ -649,7 +649,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const revokeBtn = document.createElement('button');
       revokeBtn.textContent = 'Revoke';
       revokeBtn.addEventListener('click', async () => {
-        const slug = accessSlug;
+        const slug = settingsSlug;
         if (!slug) return;
         try {
           const r = await api(`/api/apps/${slug}/members`, {
@@ -679,8 +679,8 @@ document.addEventListener('DOMContentLoaded', () => {
         closeDeployModal();
       } else if (!newAppModal.hidden) {
         closeNewAppModal();
-      } else if (!document.getElementById('access-modal').hidden) {
-        closeAccessModal();
+      } else if (!document.getElementById('settings-modal').hidden) {
+        closeSettingsModal();
       } else if (!historyModal.hidden) {
         closeHistoryModal();
       } else if (!document.getElementById('log-pane').hidden) {
@@ -690,9 +690,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Close modal on × or overlay click.
-  document.getElementById('access-modal-close').addEventListener('click', closeAccessModal);
-  document.getElementById('access-modal').addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeAccessModal();
+  document.getElementById('settings-modal-close').addEventListener('click', closeSettingsModal);
+  document.getElementById('settings-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeSettingsModal();
   });
 
   document.getElementById('history-modal-close').addEventListener('click', closeHistoryModal);
@@ -703,8 +703,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Visibility radio change → PATCH access level.
   document.querySelectorAll('input[name="access-level"]').forEach(radio => {
     radio.addEventListener('change', async () => {
-      if (!accessSlug) return;
-      const slug = accessSlug;
+      if (!settingsSlug) return;
+      const slug = settingsSlug;
       let resp;
       try {
         resp = await api(`/api/apps/${slug}/access`, {
@@ -742,7 +742,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const user = await lookupResp.json();
 
       // Grant access.
-      const grantResp = await api(`/api/apps/${accessSlug}/members`, {
+      const grantResp = await api(`/api/apps/${settingsSlug}/members`, {
         method: 'POST',
         body: JSON.stringify({ user_id: user.id }),
       });
@@ -762,12 +762,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Danger zone: typed-confirmation unlocks the Delete button.
   document.getElementById('delete-confirm').addEventListener('input', (e) => {
     const btn = document.getElementById('delete-app-btn');
-    btn.disabled = e.target.value !== accessSlug;
+    btn.disabled = e.target.value !== settingsSlug;
   });
 
   document.getElementById('delete-app-btn').addEventListener('click', async () => {
-    if (!accessSlug) return;
-    const slug = accessSlug;
+    if (!settingsSlug) return;
+    const slug = settingsSlug;
     const btn = document.getElementById('delete-app-btn');
     const errEl = document.getElementById('delete-error');
     setError(errEl, '');
@@ -797,7 +797,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    closeAccessModal();
+    closeSettingsModal();
     await loadApps();
   });
 
