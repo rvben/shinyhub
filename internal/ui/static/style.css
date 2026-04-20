@@ -1027,17 +1027,80 @@ main {
   color: var(--cyan-bright) !important;
 }
 
-/* Primary CTA — used on "Deploy first bundle" for never-deployed apps */
-.btn-primary {
-  background: var(--cyan-bright) !important;
-  color: var(--bg-deep) !important;
-  border-color: var(--cyan-bright) !important;
-  font-weight: 600;
+/* Primary CTA on app cards — used on "Deploy first bundle" */
+.app-actions .btn-primary {
+  background: var(--cyan-bright);
+  color: var(--bg-deep);
+  border-color: var(--cyan-bright);
+  font-weight: 700;
 }
 
-.btn-primary:hover {
-  background: var(--cyan) !important;
-  border-color: var(--cyan) !important;
+.app-actions .btn-primary:hover {
+  background: var(--cyan);
+  color: var(--bg-deep);
+  border-color: var(--cyan);
+}
+
+/* ── Buttons inside any modal-actions row ── */
+.modal-actions button {
+  padding: 0.58rem 1.1rem;
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 0.83rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--line-2);
+  background: rgba(14,20,38,0.55);
+  color: var(--text-soft);
+  transition: all var(--ease);
+  letter-spacing: -0.005em;
+}
+
+.modal-actions button:hover:not(:disabled) {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+  background: rgba(56,189,248,0.08);
+}
+
+.modal-actions button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.25);
+  border-color: var(--cyan-bright);
+}
+
+.modal-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Primary action — submit or explicitly .btn-primary inside a modal */
+.modal-actions button[type="submit"],
+.modal-actions .btn-primary {
+  background: linear-gradient(135deg, var(--cyan-bright), var(--electric));
+  border-color: transparent;
+  color: var(--bg-deep);
+  font-weight: 700;
+  box-shadow: 0 4px 18px rgba(56,189,248,0.28), inset 0 1px 0 rgba(255,255,255,0.2);
+}
+
+.modal-actions button[type="submit"]:hover:not(:disabled),
+.modal-actions .btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  background: linear-gradient(135deg, var(--cyan-bright), var(--electric));
+  border-color: transparent;
+  color: var(--bg-deep);
+  box-shadow: 0 8px 28px rgba(56,189,248,0.42), inset 0 1px 0 rgba(255,255,255,0.3);
+}
+
+.modal-actions button[type="submit"]:disabled,
+.modal-actions .btn-primary:disabled {
+  background: var(--surface-2);
+  color: var(--text-dim);
+  box-shadow: none;
+  transform: none;
+  filter: none;
+  border-color: var(--line);
 }
 
 /* ── History modal ── */
