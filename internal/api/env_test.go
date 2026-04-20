@@ -436,3 +436,133 @@ func TestUpsertAppEnv_RestartTrue_RestartsRunningApp(t *testing.T) {
 	t.Skip("manager.Restart not yet implemented; restart via ?restart=true returns restarted:false when no manager is present")
 }
 
+// --- DELETE /api/apps/{slug}/env/{key} tests ---
+
+func TestDeleteAppEnv_Success(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.store.UpsertAppEnvVar(f.app.ID, "AWS_REGION", []byte("eu-west-1"), false); err != nil {
+		t.Fatalf("seed var: %v", err)
+	}
+
+	req := authedRequest(t, "DELETE", "/api/apps/demo/env/AWS_REGION", nil, f.ownerToken)
+	rec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Confirm the key is gone via GET
+	getReq := authedRequest(t, "GET", "/api/apps/demo/env", nil, f.ownerToken)
+	getRec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET want 200, got %d", getRec.Code)
+	}
+	var listResp struct {
+		Env []struct {
+			Key string `json:"key"`
+		} `json:"env"`
+	}
+	json.NewDecoder(getRec.Body).Decode(&listResp)
+	for _, v := range listResp.Env {
+		if v.Key == "AWS_REGION" {
+			t.Error("AWS_REGION still present after DELETE")
+		}
+	}
+}
+
+func TestDeleteAppEnv_NotFound(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := authedRequest(t, "DELETE", "/api/apps/demo/env/NO_SUCH_KEY", nil, f.ownerToken)
+	rec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("want 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteAppEnv_RequiresManager(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hash, _ := auth.HashPassword("pass")
+	f.store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
+	viewer, _ := f.store.GetUserByUsername("viewer")
+	viewerToken, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")
+
+	// Set the app to shared so the viewer can at least see it, but has no manage rights
+	f.store.SetAppAccess("demo", "shared")
+
+	// Seed a var so the attempt is meaningful
+	f.store.UpsertAppEnvVar(f.app.ID, "FOO", []byte("bar"), false)
+
+	req := authedRequest(t, "DELETE", "/api/apps/demo/env/FOO", nil, viewerToken)
+	rec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("want 403 for viewer, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteAppEnv_AuditLogged(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.store.UpsertAppEnvVar(f.app.ID, "AWS_REGION", []byte("eu-west-1"), false); err != nil {
+		t.Fatalf("seed var: %v", err)
+	}
+
+	req := authedRequest(t, "DELETE", "/api/apps/demo/env/AWS_REGION", nil, f.ownerToken)
+	rec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	events, err := f.store.ListAuditEvents(10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+
+	var found bool
+	for _, e := range events {
+		if e.Action == "env.delete" && e.ResourceType == "app" && e.ResourceID == "demo" {
+			found = true
+			if !strings.Contains(e.Detail, `"key":"AWS_REGION"`) {
+				t.Errorf("audit detail missing key: %s", e.Detail)
+			}
+			// Detail must NOT contain the value
+			if strings.Contains(e.Detail, "eu-west-1") {
+				t.Errorf("audit detail must not contain the value, got: %s", e.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no env.delete audit event found; events: %+v", events)
+	}
+}
+
+// TestDeleteAppEnv_RestartTrue_RestartsRunningApp is skipped because the
+// process.Manager does not expose a Restart method and the test server is
+// constructed without a manager. Restarting requires Stop + deploy.Run with
+// the current deployment's bundle dir, which cannot be exercised without a
+// real runtime. This is tracked for a future task.
+func TestDeleteAppEnv_RestartTrue_RestartsRunningApp(t *testing.T) {
+	t.Skip("manager.Restart not yet implemented; restart via ?restart=true returns restarted:false when no manager is present")
+}

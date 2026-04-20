@@ -1,7 +1,9 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -191,4 +193,74 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		"set":       true,
 		"restarted": restarted,
 	})
+}
+
+// handleDeleteAppEnv removes a single per-app environment variable.
+// Pass ?restart=true to restart the app after the deletion (no-op when the app
+// is stopped or no manager is present).
+func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	key := chi.URLParam(r, "key")
+
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+
+	if err := s.store.DeleteAppEnvVar(app.ID, key); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "env var not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "delete env var")
+		return
+	}
+
+	detail, _ := json.Marshal(map[string]any{"key": key})
+	u := auth.UserFromContext(r.Context())
+	var userID *int64
+	if u != nil {
+		userID = &u.ID
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       userID,
+		Action:       "env.delete",
+		ResourceType: "app",
+		ResourceID:   slug,
+		Detail:       string(detail),
+		IPAddress:    s.clientIP(r),
+	})
+
+	if r.URL.Query().Get("restart") == "true" && s.manager != nil {
+		// Restart by stopping the current process and re-launching with the
+		// current deployment, mirroring handleUpsertAppEnv. A restart failure is
+		// best-effort: the env var is already deleted.
+		if deployments, err := s.store.ListDeployments(app.ID); err == nil && len(deployments) > 0 {
+			current := deployments[0]
+			_ = s.manager.Stop(slug)
+			if s.proxy != nil {
+				s.proxy.Deregister(slug)
+			}
+			result, runErr := deploy.Run(deploy.Params{
+				Slug:            slug,
+				BundleDir:       current.BundleDir,
+				Manager:         s.manager,
+				Proxy:           s.proxy,
+				MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+				CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+			})
+			if runErr == nil {
+				port := result.Port
+				pid := result.PID
+				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
+					Slug:   slug,
+					Status: "running",
+					Port:   &port,
+					PID:    &pid,
+				})
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
