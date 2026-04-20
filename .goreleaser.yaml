@@ -61,6 +61,8 @@ dockers:
       - "ghcr.io/rvben/shinyhub:{{ .Version }}-amd64"
     dockerfile: Dockerfile.goreleaser
     use: buildx
+    extra_files:
+      - shinyhub.yaml.example
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.version={{ .Version }}"
@@ -76,6 +78,8 @@ dockers:
       - "ghcr.io/rvben/shinyhub:{{ .Version }}-arm64"
     dockerfile: Dockerfile.goreleaser
     use: buildx
+    extra_files:
+      - shinyhub.yaml.example
     build_flag_templates:
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.version={{ .Version }}"
