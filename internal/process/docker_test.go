@@ -6,10 +6,21 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+// dockerAvailable skips t if the Docker daemon is unreachable.
+func dockerAvailable(t *testing.T) {
+	t.Helper()
+	_, err := NewDockerRuntime("/var/run/docker.sock", "alpine:3", "alpine:3")
+	if err != nil {
+		t.Skipf("Docker not available: %v", err)
+	}
+}
 
 func newDockerRuntimeWithServer(t *testing.T, handler http.Handler) *DockerRuntime {
 	t.Helper()
@@ -193,5 +204,50 @@ func TestDockerRuntimeImageForCommand(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("imageForCommand(%v) = %q, want %q", tc.cmd, got, tc.want)
 		}
+	}
+}
+
+func TestDockerRuntime_RunOnce_ExitsCleanly(t *testing.T) {
+	dockerAvailable(t)
+	rt, err := NewDockerRuntime("/var/run/docker.sock", "alpine:3", "alpine:3")
+	if err != nil {
+		t.Fatalf("docker runtime: %v", err)
+	}
+	var buf bytes.Buffer
+	p := StartParams{
+		Slug: "x", Dir: t.TempDir(),
+		Command: []string{"sh", "-c", "echo hello; exit 5"},
+	}
+	info, err := rt.RunOnce(context.Background(), p, &buf)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if info.Code != 5 {
+		t.Fatalf("expected exit 5, got %d", info.Code)
+	}
+}
+
+func TestDockerRuntime_RunOnce_SharedMountIsReadOnly(t *testing.T) {
+	dockerAvailable(t)
+	rt, err := NewDockerRuntime("/var/run/docker.sock", "alpine:3", "alpine:3")
+	if err != nil {
+		t.Fatalf("docker runtime: %v", err)
+	}
+	sourceData := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceData, "marker"), []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	var buf bytes.Buffer
+	p := StartParams{
+		Slug: "consumer", Dir: t.TempDir(),
+		Command:      []string{"sh", "-c", "echo hi > /app/data/shared/fetch/should-fail"},
+		SharedMounts: []SharedMount{{SourceSlug: "fetch", HostPath: sourceData}},
+	}
+	info, err := rt.RunOnce(context.Background(), p, &buf)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if info.Code == 0 {
+		t.Fatalf("expected nonzero exit (write to RO mount), got 0; output=%q", buf.String())
 	}
 }

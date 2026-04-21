@@ -41,9 +41,10 @@ type StartParams struct {
 	Command         []string
 	Port            int
 	Env             []string
-	AppDataPath     string // host path to per-app data dir; empty disables data-dir wiring in runtime
-	MemoryLimitMB   int    // 0 = no limit
-	CPUQuotaPercent int    // 0 = no limit; 100 = 1 full core
+	AppDataPath     string        // host path to per-app data dir; empty disables data-dir wiring in runtime
+	MemoryLimitMB   int           // 0 = no limit
+	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
+	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
 }
 
 type entry struct {

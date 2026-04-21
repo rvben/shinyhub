@@ -37,6 +37,10 @@ func (r *captureRuntime) Stats(_ context.Context, _ RunHandle) (float64, uint64,
 	return 0, 0, nil
 }
 
+func (r *captureRuntime) RunOnce(_ context.Context, _ StartParams, _ io.Writer) (ExitInfo, error) {
+	return ExitInfo{}, nil
+}
+
 func TestFilteredEnvStripsShinyHubVars(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "super-secret")
 	t.Setenv("SHINYHUB_GITHUB_CLIENT_SECRET", "github-secret")

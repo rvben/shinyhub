@@ -17,6 +17,23 @@ type Runtime interface {
 	Wait(ctx context.Context, handle RunHandle) error
 	// Stats returns CPU usage (percent, 0–100+) and RSS bytes for the handle.
 	Stats(ctx context.Context, handle RunHandle) (cpuPercent float64, rssBytes uint64, err error)
+	// RunOnce spawns a short-lived process from the same bundle/runtime context
+	// as Start, blocks until it exits or ctx is cancelled, and returns the
+	// exit info. Implementations MUST signal SIGTERM on ctx cancel and
+	// SIGKILL after a 10-second grace.
+	RunOnce(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error)
+}
+
+// ExitInfo summarizes how a one-shot process ended.
+type ExitInfo struct {
+	Code     int  // exit code; -1 if Signaled
+	Signaled bool // true if killed by signal (e.g. SIGKILL after timeout)
+}
+
+// SharedMount is a read-only mount of another app's data dir into the consumer.
+type SharedMount struct {
+	SourceSlug string // for path naming under data/shared/<source-slug>
+	HostPath   string // absolute path on the host (the source app's app-data dir)
 }
 
 // RunHandle identifies a running app instance.

@@ -6,10 +6,12 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // DockerRuntime implements Runtime using the Docker Engine API.
@@ -31,6 +33,23 @@ func NewDockerRuntime(socketPath, pythonImage, rImage string) (*DockerRuntime, e
 		return nil, fmt.Errorf("docker socket %s: %w", socketPath, err)
 	}
 	return &DockerRuntime{client: client, pythonImage: pythonImage, rImage: rImage}, nil
+}
+
+// addSharedMounts appends a read-only mount per SharedMount to cfg.Mounts,
+// targeted at /app/data/shared/<source-slug>. Source paths are MkdirAll'd
+// host-side so the consumer always has a directory to mount.
+func addSharedMounts(cfg *containerConfig, mounts []SharedMount) error {
+	for _, m := range mounts {
+		if err := os.MkdirAll(m.HostPath, 0o750); err != nil {
+			return fmt.Errorf("mkdir source data %s: %w", m.HostPath, err)
+		}
+		cfg.Mounts = append(cfg.Mounts, containerMount{
+			Source: filepath.Clean(m.HostPath),
+			Target: filepath.ToSlash(filepath.Join(cfg.WorkDir, "data", "shared", m.SourceSlug)),
+			Mode:   "ro",
+		})
+	}
+	return nil
 }
 
 func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (RunHandle, error) {
@@ -62,6 +81,9 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		// from the Manager) with the in-container path. Docker env honors
 		// last-occurrence-wins so appending here is sufficient.
 		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
+	}
+	if err := addSharedMounts(&cfg, p.SharedMounts); err != nil {
+		return RunHandle{}, err
 	}
 	if p.MemoryLimitMB > 0 {
 		cfg.MemoryBytes = int64(p.MemoryLimitMB) * 1024 * 1024
@@ -189,5 +211,79 @@ func sigName(sig syscall.Signal) string {
 		return "SIGHUP"
 	default:
 		return fmt.Sprintf("%d", sig)
+	}
+}
+
+// RunOnce creates a one-shot container with AutoRemove=true, starts it, and
+// blocks on /containers/{id}/wait. Ctx cancel sends SIGTERM via the kill API,
+// then SIGKILL after a 10-second grace.
+func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error) {
+	image := r.imageForCommand(p.Command)
+	cfg := containerConfig{
+		Image:   image,
+		Cmd:     p.Command,
+		Env:     append(filteredEnv(), p.Env...),
+		WorkDir: "/app",
+		Mounts: []containerMount{
+			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"},
+		},
+		Labels: map[string]string{
+			"shinyhub.managed": "true",
+			"shinyhub.slug":    p.Slug,
+			"shinyhub.kind":    "schedule-run",
+		},
+		NetworkMode: "host",
+		AutoRemove:  true,
+	}
+	if p.AppDataPath != "" {
+		cfg.Mounts = append(cfg.Mounts,
+			containerMount{Source: filepath.Clean(p.AppDataPath), Target: "/app-data", Mode: "rw"},
+			containerMount{Source: filepath.Clean(p.AppDataPath), Target: filepath.ToSlash(filepath.Join(cfg.WorkDir, "data")), Mode: "rw"},
+		)
+		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
+	}
+	if err := addSharedMounts(&cfg, p.SharedMounts); err != nil {
+		return ExitInfo{}, err
+	}
+	if p.MemoryLimitMB > 0 {
+		cfg.MemoryBytes = int64(p.MemoryLimitMB) * 1024 * 1024
+	}
+	if p.CPUQuotaPercent > 0 {
+		cfg.NanoCPUs = int64(p.CPUQuotaPercent) * 1e7
+	}
+
+	id, err := r.client.createContainer(cfg)
+	if err != nil {
+		return ExitInfo{}, fmt.Errorf("create one-shot container for %s: %w", p.Slug, err)
+	}
+	if err := r.client.startContainer(id); err != nil {
+		_ = r.client.removeContainer(id)
+		return ExitInfo{}, fmt.Errorf("start one-shot container for %s: %w", p.Slug, err)
+	}
+
+	go r.streamLogs(id, logWriter)
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- r.client.waitContainer(context.Background(), id) }()
+
+	select {
+	case <-ctx.Done():
+		_ = r.client.killContainer(id, "SIGTERM")
+		select {
+		case <-waitDone:
+		case <-time.After(10 * time.Second):
+			_ = r.client.killContainer(id, "SIGKILL")
+			<-waitDone
+		}
+		return ExitInfo{Code: -1, Signaled: true}, nil
+	case err := <-waitDone:
+		if err != nil {
+			return ExitInfo{}, fmt.Errorf("wait one-shot %s: %w", id, err)
+		}
+		state, ierr := r.client.inspectContainer(id)
+		if ierr != nil {
+			return ExitInfo{Code: 0}, nil
+		}
+		return ExitInfo{Code: state.ExitCode}, nil
 	}
 }

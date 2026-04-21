@@ -46,6 +46,7 @@ type containerConfig struct {
 	MemoryBytes int64  // 0 = unlimited
 	NanoCPUs    int64  // 0 = unlimited; 1e9 = 1 CPU
 	NetworkMode string
+	AutoRemove  bool // remove container automatically when it exits
 }
 
 type containerMount struct {
@@ -55,8 +56,9 @@ type containerMount struct {
 }
 
 type containerState struct {
-	Running bool
-	Pid     int
+	Running  bool
+	Pid      int
+	ExitCode int
 }
 
 type containerSummary struct {
@@ -91,6 +93,7 @@ func (c *dockerClient) createContainer(cfg containerConfig) (string, error) {
 			"NetworkMode": networkMode,
 			"Memory":      cfg.MemoryBytes,
 			"NanoCPUs":    cfg.NanoCPUs,
+			"AutoRemove":  cfg.AutoRemove,
 		},
 	}
 	var resp struct {
@@ -131,14 +134,15 @@ func (c *dockerClient) removeContainer(id string) error {
 func (c *dockerClient) inspectContainer(id string) (containerState, error) {
 	var resp struct {
 		State struct {
-			Running bool `json:"Running"`
-			Pid     int  `json:"Pid"`
+			Running  bool `json:"Running"`
+			Pid      int  `json:"Pid"`
+			ExitCode int  `json:"ExitCode"`
 		} `json:"State"`
 	}
 	if err := c.get(fmt.Sprintf("/containers/%s/json", id), &resp); err != nil {
 		return containerState{}, fmt.Errorf("inspect container: %w", err)
 	}
-	return containerState{Running: resp.State.Running, Pid: resp.State.Pid}, nil
+	return containerState{Running: resp.State.Running, Pid: resp.State.Pid, ExitCode: resp.State.ExitCode}, nil
 }
 
 // waitContainer blocks until the container exits. ctx cancellation aborts the wait.

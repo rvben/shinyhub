@@ -70,6 +70,10 @@ func (f *fakeRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, ui
 	return 0, 0, nil
 }
 
+func (f *fakeRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+
 func TestManagerStartStop(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 
