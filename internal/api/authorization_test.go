@@ -80,6 +80,29 @@ func TestRequireExplicitAppAccess_StrangerOnPublicAppRejected(t *testing.T) {
 	}
 }
 
+func TestRequireExplicitAppAccess_StrangerOnSharedAppRejected(t *testing.T) {
+	srv, store := newAuthTestServer(t)
+	hash, _ := auth.HashPassword("pw")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+	if err := store.SetAppAccess("demo", "shared"); err != nil {
+		t.Fatalf("SetAppAccess: %v", err)
+	}
+
+	store.CreateUser(db.CreateUserParams{Username: "rando", PasswordHash: hash, Role: "developer"})
+	rando, _ := store.GetUserByUsername("rando")
+
+	rr := httptest.NewRecorder()
+	_, _, ok := srv.requireExplicitAppAccess(rr, reqWithUser(&auth.ContextUser{ID: rando.ID, Username: "rando", Role: "developer"}), "demo")
+	if ok {
+		t.Fatal("stranger on shared app must be rejected (shared visibility alone is not explicit access)")
+	}
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
 func TestRequireExplicitAppAccess_ExplicitMemberPasses(t *testing.T) {
 	srv, store := newAuthTestServer(t)
 	hash, _ := auth.HashPassword("pw")
