@@ -278,9 +278,7 @@ func TestManager_Start_AppliesResolvedSharedMounts(t *testing.T) {
 	// to the runtime. captureRuntime records the SharedMounts received by Start.
 	captured := make(chan []process.SharedMount, 1)
 
-	rt := &captureRuntime{
-		onStart: func(p process.StartParams) { captured <- p.SharedMounts },
-	}
+	rt := newCaptureRuntime(func(p process.StartParams) { captured <- p.SharedMounts })
 	m := process.NewManager(t.TempDir(), rt)
 	m.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
 		return []process.SharedMount{{SourceSlug: "fetch", HostPath: t.TempDir()}}, nil
@@ -320,16 +318,10 @@ func newCaptureRuntime(onStart func(process.StartParams)) *captureRuntime {
 
 func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.stops == nil {
-		c.stops = make(map[int]chan struct{})
-	}
-	if c.nextPID == 0 {
-		c.nextPID = 20000
-	}
 	pid := c.nextPID
 	c.nextPID++
 	c.stops[pid] = make(chan struct{})
+	c.mu.Unlock()
 	if c.onStart != nil {
 		c.onStart(p)
 	}
