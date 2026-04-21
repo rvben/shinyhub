@@ -16,6 +16,66 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 )
 
+// dataListMaxEntries is the upper bound on files returned by handleDataList.
+// List returns ErrTooManyFiles when the count would exceed this cap.
+const dataListMaxEntries = 10000
+
+// appUsedBytes returns the combined on-disk usage (apps dir + data dir) for the slug.
+func (s *Server) appUsedBytes(slug string) (int64, error) {
+	appsUsed, err := deploy.DirSize(filepath.Join(s.cfg.Storage.AppsDir, slug))
+	if err != nil {
+		return 0, err
+	}
+	dataUsed, err := data.DirSize(data.AppDataDir(s.cfg.Storage.AppDataDir, slug))
+	if err != nil {
+		return 0, err
+	}
+	return appsUsed + dataUsed, nil
+}
+
+// handleDataList handles GET /api/apps/{slug}/data — lists files in the
+// per-app data directory and returns a quota envelope.
+//
+// Access is gated by requireExplicitAppAccess: public/shared visibility alone
+// is not sufficient; only the owner, admins/operators, or explicit app_members
+// rows pass.
+func (s *Server) handleDataList(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+
+	_, _, ok := s.requireExplicitAppAccess(w, r, slug)
+	if !ok {
+		return
+	}
+
+	appDataDir := data.AppDataDir(s.cfg.Storage.AppDataDir, slug)
+
+	files, err := data.List(appDataDir, dataListMaxEntries)
+	if err != nil {
+		if errors.Is(err, data.ErrTooManyFiles) {
+			writeError(w, http.StatusUnprocessableEntity,
+				"too many files: directory exceeds the cap of 10000 entries")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "list files")
+		return
+	}
+	if files == nil {
+		files = []data.FileInfo{}
+	}
+
+	used, err := s.appUsedBytes(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "measure disk usage")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"files":      files,
+		"quota_mb":   s.cfg.Storage.AppQuotaMB,
+		"used_bytes": used,
+	})
+}
+
 // handleDataDelete handles DELETE /api/apps/{slug}/data/* — removes a single
 // file from the per-app data directory. Directories and reserved-prefix paths
 // are refused. Responds 204 No Content on success.
@@ -118,17 +178,11 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 	// account for any existing file at the destination (overwrite-aware).
 	quotaBytes := int64(s.cfg.Storage.AppQuotaMB) << 20
 	if quotaBytes > 0 {
-		appsUsed, err := deploy.DirSize(filepath.Join(s.cfg.Storage.AppsDir, slug))
+		used, err := s.appUsedBytes(slug)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "measure app size")
 			return
 		}
-		dataUsed, err := data.DirSize(appDataDir)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "measure data size")
-			return
-		}
-		used := appsUsed + dataUsed
 
 		// Determine the size of the existing destination file (0 for new files).
 		var existingDestSize int64

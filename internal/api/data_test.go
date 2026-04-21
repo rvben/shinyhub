@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -325,6 +326,193 @@ func TestDataPut_ZeroContentLength(t *testing.T) {
 
 	if rr.Code != http.StatusLengthRequired {
 		t.Fatalf("expected 411, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// dataListReq builds a GET /api/apps/{slug}/data request.
+func dataListReq(t *testing.T, slug, token string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/apps/"+slug+"/data", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
+}
+
+// seedVisitor creates an unprivileged user with no app memberships and returns
+// a valid JWT for that user.
+func seedVisitor(t *testing.T, store *db.Store, username string) (*db.User, string) {
+	t.Helper()
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: username, PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	u, err := store.GetUserByUsername(username)
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	token, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	if err != nil {
+		t.Fatalf("IssueJWT: %v", err)
+	}
+	return u, token
+}
+
+// TestDataList_OwnerSeesEnvelope verifies that the app owner gets a 200 with a
+// populated files list, correct quota_mb, and used_bytes >= the seeded content.
+func TestDataList_OwnerSeesEnvelope(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 5) // 5 MiB quota
+
+	owner, token := seedOwnerAndApp(t, store, "owner", "demo")
+	_ = owner
+
+	// Pre-seed two files in the app data dir.
+	appDataDir := filepath.Join(dataDir, "demo")
+	if err := os.MkdirAll(appDataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "a.txt"), []byte("hello"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "b.txt"), []byte("world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	req := dataListReq(t, "demo", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Files     []any  `json:"files"`
+		QuotaMB   int    `json:"quota_mb"`
+		UsedBytes int64  `json:"used_bytes"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Files) != 2 {
+		t.Errorf("expected 2 files, got %d", len(resp.Files))
+	}
+	if resp.QuotaMB != 5 {
+		t.Errorf("quota_mb = %d, want 5", resp.QuotaMB)
+	}
+	if resp.UsedBytes < 5 {
+		t.Errorf("used_bytes = %d, want >= 5", resp.UsedBytes)
+	}
+}
+
+// TestDataList_PublicVisitorRejected verifies that a user with no membership is
+// rejected with 404 even when the app is public, because requireExplicitAppAccess
+// is stricter than requireViewApp.
+func TestDataList_PublicVisitorRejected(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	seedOwnerAndApp(t, store, "owner", "demo")
+	// Make the app public.
+	if err := store.SetAppAccess("demo", "public"); err != nil {
+		t.Fatalf("SetAppAccess: %v", err)
+	}
+
+	_, visitorToken := seedVisitor(t, store, "visitor")
+
+	req := dataListReq(t, "demo", visitorToken)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataList_ExplicitViewerAllowed verifies that a user with an explicit
+// app_members row (viewer role) receives 200 from the list endpoint.
+func TestDataList_ExplicitViewerAllowed(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	seedOwnerAndApp(t, store, "owner", "demo")
+
+	viewer, viewerToken := seedVisitor(t, store, "viewer")
+
+	// Grant the viewer explicit access.
+	if err := store.GrantAppAccess("demo", viewer.ID); err != nil {
+		t.Fatalf("GrantAppAccess: %v", err)
+	}
+
+	req := dataListReq(t, "demo", viewerToken)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataList_MissingDataDir verifies that when the per-app data dir does not
+// yet exist the handler responds 200 with an empty (non-null) files array.
+func TestDataList_MissingDataDir(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	// Deliberately do NOT create <dataDir>/demo — directory is absent.
+
+	req := dataListReq(t, "demo", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Files json.RawMessage `json:"files"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// files must be [] not null
+	if string(resp.Files) == "null" {
+		t.Error("files must be an empty array [], got null")
+	}
+}
+
+// TestDataList_TooManyFiles verifies that a data dir with more than
+// dataListMaxEntries files results in a 422 Unprocessable Entity response.
+func TestDataList_TooManyFiles(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	// Seed dataListMaxEntries+1 files.
+	appDataDir := filepath.Join(dataDir, "demo")
+	if err := os.MkdirAll(appDataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= 10000; i++ { // 10001 files > dataListMaxEntries (10000)
+		name := filepath.Join(appDataDir, fmt.Sprintf("f%05d.txt", i))
+		if err := os.WriteFile(name, []byte("x"), 0o640); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+
+	req := dataListReq(t, "demo", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

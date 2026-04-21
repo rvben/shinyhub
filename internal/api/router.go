@@ -154,6 +154,7 @@ func (s *Server) buildRouter() http.Handler {
 		r.Get("/api/apps/{slug}/env", s.handleListAppEnv)
 		r.Put("/api/apps/{slug}/env/{key}", s.handleUpsertAppEnv)
 		r.Delete("/api/apps/{slug}/env/{key}", s.handleDeleteAppEnv)
+		r.Get("/api/apps/{slug}/data", s.handleDataList)
 		r.Put("/api/apps/{slug}/data/*", s.handleDataPut)
 		r.Delete("/api/apps/{slug}/data/*", s.handleDataDelete)
 
