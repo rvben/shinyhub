@@ -269,3 +269,85 @@ func TestStart_NoAppDataRootSkipsSymlinkAndEnv(t *testing.T) {
 		t.Errorf("symlink should not be created when appDataRoot is empty, lstat err = %v", err)
 	}
 }
+
+func TestStart_IdempotentWhenSymlinkAlreadyPointsToCorrectTarget(t *testing.T) {
+	appData := t.TempDir()
+	bundle := t.TempDir()
+	// Use the native runtime so Stop can actually terminate the process and
+	// release the entry — fakeRuntime.Wait blocks forever.
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	m.SetAppDataRoot(appData)
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "10"},
+		Port:    9999,
+	}
+	// First start creates the symlink.
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	// Stop so the entry is released.
+	if err := m.Stop("demo"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	// Second start with the same bundle dir must succeed (restart/wake path).
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("second Start (idempotent symlink): %v", err)
+	}
+	defer m.Stop("demo") //nolint:errcheck
+	// Symlink still points to the correct target.
+	target, err := os.Readlink(filepath.Join(bundle, "data"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if want := filepath.Join(appData, "demo"); target != want {
+		t.Errorf("symlink target = %q, want %q", target, want)
+	}
+}
+
+func TestStart_RefusesIfSymlinkPointsToWrongTarget(t *testing.T) {
+	appData := t.TempDir()
+	bundle := t.TempDir()
+	rt := &fakeRuntime{}
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(appData)
+
+	// Plant a symlink pointing to a different location.
+	wrongTarget := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(wrongTarget, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(wrongTarget, filepath.Join(bundle, "data")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-conflict error for foreign symlink, got %v", err)
+	}
+}
+
+func TestStart_RefusesIfBundleHasDataDir(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bundle, "data"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeRuntime{}
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(t.TempDir())
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-conflict error for pre-existing dir, got %v", err)
+	}
+}

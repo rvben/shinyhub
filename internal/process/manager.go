@@ -112,12 +112,22 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		linkPath := filepath.Join(p.Dir, "data")
 		switch info, err := os.Lstat(linkPath); {
 		case err == nil:
+			// Something is already at <bundle>/data. Accept only if it's a symlink
+			// pointing to the correct target — that's the idempotent restart case.
+			if info.Mode()&os.ModeSymlink != 0 {
+				existing, readErr := os.Readlink(linkPath)
+				if readErr == nil && existing == appDataPath {
+					break // already correct, nothing to do
+				}
+			}
 			return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
 		case !os.IsNotExist(err):
 			return nil, fmt.Errorf("stat %s: %w", linkPath, err)
-		}
-		if err := os.Symlink(appDataPath, linkPath); err != nil {
-			return nil, fmt.Errorf("symlink data: %w", err)
+		default:
+			// Path does not exist — create the symlink.
+			if err := os.Symlink(appDataPath, linkPath); err != nil {
+				return nil, fmt.Errorf("symlink data: %w", err)
+			}
 		}
 	}
 
