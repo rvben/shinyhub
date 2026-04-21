@@ -7,6 +7,7 @@ import "github.com/rvben/shinyhub/internal/db"
 type Store interface {
 	GetSchedule(id int64) (*db.Schedule, error)
 	GetAppByID(id int64) (*db.App, error)
+	ListDeployments(appID int64) ([]*db.Deployment, error)
 	ListAppEnvVars(appID int64) ([]db.AppEnvVar, error)
 	ListSharedDataSources(consumerAppID int64) ([]*db.SharedDataMount, error)
 	InsertScheduleRun(p db.InsertScheduleRunParams) (int64, error)

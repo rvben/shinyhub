@@ -18,8 +18,9 @@ import (
 type fakeRuntime struct {
 	process.Runtime
 
-	mu    sync.Mutex
-	calls int
+	mu        sync.Mutex
+	calls     int
+	lastParams process.StartParams
 
 	// block, when non-nil, is received by RunOnce before returning.
 	// Set to a non-nil channel to simulate a long-running process.
@@ -29,19 +30,21 @@ type fakeRuntime struct {
 	err      error
 }
 
-func (f *fakeRuntime) RunOnce(ctx context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+func (f *fakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	if f.block != nil {
 		select {
 		case <-f.block:
 		case <-ctx.Done():
 			f.mu.Lock()
 			f.calls++
+			f.lastParams = p
 			f.mu.Unlock()
 			return process.ExitInfo{Code: -1, Signaled: true}, nil
 		}
 	}
 	f.mu.Lock()
 	f.calls++
+	f.lastParams = p
 	f.mu.Unlock()
 	return f.exitInfo, f.err
 }
@@ -69,10 +72,11 @@ func waitForCalls(t *testing.T, rt *fakeRuntime, want int, timeout time.Duration
 type fakeStore struct {
 	mu sync.Mutex
 
-	schedule *db.Schedule
-	app      *db.App
-	envVars  []db.AppEnvVar
-	mounts   []*db.SharedDataMount
+	schedule    *db.Schedule
+	app         *db.App
+	envVars     []db.AppEnvVar
+	mounts      []*db.SharedDataMount
+	deployments []*db.Deployment
 
 	runs        map[int64]*db.ScheduleRun
 	nextRunID   int64
@@ -85,10 +89,13 @@ type fakeStore struct {
 
 func newFakeStore(sched *db.Schedule, app *db.App) *fakeStore {
 	return &fakeStore{
-		schedule:  sched,
-		app:       app,
-		runs:      make(map[int64]*db.ScheduleRun),
-		nextRunID: 1,
+		schedule: sched,
+		app:      app,
+		// One deployment by default so tests don't have to wire one up unless
+		// they care about the bundle dir specifically.
+		deployments: []*db.Deployment{{ID: 1, AppID: app.ID, Version: "v1", BundleDir: "/tmp/fake-bundle"}},
+		runs:        make(map[int64]*db.ScheduleRun),
+		nextRunID:   1,
 	}
 }
 
@@ -104,6 +111,10 @@ func (f *fakeStore) GetAppByID(id int64) (*db.App, error) {
 		return f.app, nil
 	}
 	return nil, db.ErrNotFound
+}
+
+func (f *fakeStore) ListDeployments(appID int64) ([]*db.Deployment, error) {
+	return f.deployments, nil
 }
 
 func (f *fakeStore) ListAppEnvVars(appID int64) ([]db.AppEnvVar, error) {
@@ -369,5 +380,67 @@ func TestManager_Run_TimeoutMarksTimedOut(t *testing.T) {
 	fc := st.finishCalls[0]
 	if fc.Status != "timed_out" {
 		t.Errorf("expected status 'timed_out', got %q", fc.Status)
+	}
+}
+
+// TestManager_Run_UsesLatestDeploymentBundleDir guards against regressing to a
+// hardcoded "<appsDir>/<slug>/current" path; bundles are addressed via the
+// deployment row's BundleDir, not a symlink that doesn't exist.
+func TestManager_Run_UsesLatestDeploymentBundleDir(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	st.deployments = []*db.Deployment{
+		// Newest first — Manager should pick deployments[0].
+		{ID: 2, AppID: 10, Version: "v2", BundleDir: "/tmp/bundles/v2"},
+		{ID: 1, AppID: 10, Version: "v1", BundleDir: "/tmp/bundles/v1"},
+	}
+	m := newTestManager(t, rt, st)
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.lastParams.Dir != "/tmp/bundles/v2" {
+		t.Fatalf("expected StartParams.Dir from latest deployment, got %q", rt.lastParams.Dir)
+	}
+}
+
+// TestManager_Run_FailsWhenNoDeployments verifies Manager records a failed run
+// (rather than panicking or running with an empty Dir) when the app has no
+// deployment rows.
+func TestManager_Run_FailsWhenNoDeployments(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	st.deployments = nil
+	m := newTestManager(t, rt, st)
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Wait for the run goroutine to call FinishScheduleRun.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		st.mu.Lock()
+		n := len(st.finishCalls)
+		st.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.finishCalls) == 0 {
+		t.Fatal("expected FinishScheduleRun call")
+	}
+	if got := st.finishCalls[0].Status; got != "failed" {
+		t.Errorf("expected status 'failed', got %q", got)
+	}
+	if rt.calls != 0 {
+		t.Errorf("expected RunOnce not to be called when no deployments, got %d calls", rt.calls)
 	}
 }

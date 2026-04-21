@@ -309,9 +309,25 @@ func (m *Manager) execute(sched *db.Schedule, app *db.App, runID int64, trigger 
 		return
 	}
 
+	// Resolve the active bundle dir from the latest deployment. There is no
+	// "current" symlink on disk — bundles live at versions/<version>/ and the
+	// authoritative pointer is the most-recent deployment row.
+	deployments, err := m.store.ListDeployments(app.ID)
+	if err != nil {
+		fmt.Fprintf(logFile, "shinyhub: list deployments: %v\n", err)
+		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		return
+	}
+	if len(deployments) == 0 {
+		fmt.Fprintf(logFile, "shinyhub: app %q has no deployments; cannot run schedule\n", app.Slug)
+		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		return
+	}
+	bundleDir := deployments[0].BundleDir
+
 	params := process.StartParams{
 		Slug:         app.Slug,
-		Dir:          filepath.Join(m.appsDir, app.Slug, "current"),
+		Dir:          bundleDir,
 		Command:      cmd,
 		Env:          env,
 		AppDataPath:  appDataPath,
