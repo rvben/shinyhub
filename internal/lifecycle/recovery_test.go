@@ -28,159 +28,134 @@ func (f *fakeContainerLister) InspectPID(id string) (int, error) {
 	return 0, fmt.Errorf("container %s not found", id)
 }
 
-func TestRecoverProcesses_DeadPID(t *testing.T) {
+// mustCreateApp creates a test app and returns it.
+func mustCreateApp(t *testing.T, store *db.Store, slug string) *db.App {
+	t.Helper()
+	if err := store.CreateUser(db.CreateUserParams{Username: "u-" + slug, PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.GetUserByUsername("u-" + slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+// mustOpenStore creates an in-memory store with migrations applied.
+func mustOpenStore(t *testing.T) *db.Store {
+	t.Helper()
 	store, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	t.Cleanup(func() { store.Close() })
 	if err := store.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	return store
+}
 
-	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
-		t.Fatal(err)
-	}
-	u, err := store.GetUserByUsername("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
-		t.Fatal(err)
-	}
+func TestRecoverProcesses_DeadPID(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "myapp")
 
-	// Set a PID that definitely doesn't exist.
+	// Set up a replica with a dead PID.
 	port, pid := 20001, 99999999
-	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "myapp", Status: "running", Port: &port, PID: &pid}); err != nil {
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
+	}); err != nil {
 		t.Fatal(err)
 	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='myapp'`)
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx, nil)
 
 	// App should now be stopped in the DB.
-	app, err := store.GetAppBySlug("myapp")
+	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if app.Status != "stopped" {
-		t.Errorf("expected status=stopped after recovery of dead PID, got %s", app.Status)
+	if a.Status != "stopped" {
+		t.Errorf("expected status=stopped after recovery of dead PID, got %s", a.Status)
 	}
 }
 
 func TestRecoverProcesses_NoPID(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := mustOpenStore(t)
+	mustCreateApp(t, store, "myapp")
 
-	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
-		t.Fatal(err)
-	}
-	u, err := store.GetUserByUsername("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate status=running with no PID (corrupted state).
-	store.DB().Exec(`UPDATE apps SET status='running' WHERE slug='myapp'`)
+	// Simulate status=running with no replicas (corrupted state).
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='myapp'`)
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx, nil) // must not panic
 
-	app, err := store.GetAppBySlug("myapp")
+	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if app.Status != "stopped" {
-		t.Errorf("expected stopped, got %s", app.Status)
+	if a.Status != "stopped" {
+		t.Errorf("expected stopped, got %s", a.Status)
 	}
 }
 
 func TestRecoverProcesses_AlivePID(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
-		t.Fatal(err)
-	}
-	u, err := store.GetUserByUsername("u")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
-		t.Fatal(err)
-	}
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "myapp")
 
 	port, pid := 20002, os.Getpid() // current test process is guaranteed alive
-	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "myapp", Status: "running", Port: &port, PID: &pid}); err != nil {
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
+	}); err != nil {
 		t.Fatal(err)
 	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='myapp'`)
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx, nil)
 
 	// App should still be running in the DB.
-	app, err := store.GetAppBySlug("myapp")
+	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if app.Status != "running" {
-		t.Errorf("expected status=running for alive PID, got %s", app.Status)
+	if a.Status != "running" {
+		t.Errorf("expected status=running for alive PID, got %s", a.Status)
 	}
 
-	// Manager should have the entry.
-	info, ok := mgr.Get("myapp")
+	// Manager should have the replica entry.
+	info, ok := mgr.GetReplica("myapp", 0)
 	if !ok {
-		t.Error("expected manager to have myapp after recovery")
+		t.Error("expected manager to have myapp replica 0 after recovery")
 	} else if info.PID != pid {
 		t.Errorf("expected PID %d in manager, got %d", pid, info.PID)
 	}
 }
 
 func TestRecoverDockerProcesses(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := mustOpenStore(t)
 	prx := proxy.New()
 
-	if err := store.CreateUser(db.CreateUserParams{
-		Username: "u", PasswordHash: "x", Role: "developer",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	user, _ := store.GetUserByUsername("u")
-	if err := store.CreateApp(db.CreateAppParams{
-		Slug: "docker-app", Name: "Docker App", OwnerID: user.ID,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	app := mustCreateApp(t, store, "docker-app")
 	port := 20500
 	pid := 99001
-	store.UpdateAppStatus(db.UpdateAppStatusParams{
-		Slug: "docker-app", Status: "running", Port: &port, PID: &pid,
-	})
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='docker-app'`)
 
 	lister := &fakeContainerLister{
 		containers: []process.ContainerInfo{
@@ -192,7 +167,7 @@ func TestRecoverDockerProcesses(t *testing.T) {
 
 	lifecycle.RecoverProcesses(store, mgr, prx, lister)
 
-	info, ok := mgr.Get("docker-app")
+	info, ok := mgr.GetReplica("docker-app", 0)
 	if !ok {
 		t.Fatal("expected docker-app to be adopted after recovery")
 	}
@@ -205,14 +180,7 @@ func TestRecoverDockerProcesses(t *testing.T) {
 }
 
 func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := mustOpenStore(t)
 	prx := proxy.New()
 
 	if err := store.CreateUser(db.CreateUserParams{
@@ -229,11 +197,15 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
+		a, _ := store.GetAppBySlug(slug)
 		port := 20600
 		pid := 99002
-		store.UpdateAppStatus(db.UpdateAppStatusParams{
-			Slug: slug, Status: "running", Port: &port, PID: &pid,
-		})
+		if err := store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: a.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug=?`, slug)
 	}
 
 	// Only "alive-app" has a running container.
@@ -248,12 +220,12 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	lifecycle.RecoverProcesses(store, mgr, prx, lister)
 
 	// "alive-app" should be adopted.
-	if _, ok := mgr.Get("alive-app"); !ok {
+	if _, ok := mgr.GetReplica("alive-app", 0); !ok {
 		t.Error("expected alive-app to be adopted")
 	}
 
 	// "orphan-app" should NOT be in the manager.
-	if _, ok := mgr.Get("orphan-app"); ok {
+	if _, ok := mgr.GetReplica("orphan-app", 0); ok {
 		t.Error("expected orphan-app to not be adopted (no container found)")
 	}
 

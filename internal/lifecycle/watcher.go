@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -19,6 +20,12 @@ type Config struct {
 	HibernateTimeout   time.Duration // global idle timeout; 0 = disabled globally
 }
 
+// replicaKey uniquely identifies a single replica within a slug.
+type replicaKey struct {
+	slug  string
+	index int
+}
+
 // manager is the subset of *process.Manager used by the Watcher.
 // The interface enables testing with fakes without starting real processes.
 type manager interface {
@@ -31,6 +38,7 @@ type proxyBackend interface {
 	SetOnMiss(fn func(string))
 	LastSeen(slug string) time.Time
 	Deregister(slug string)
+	SetPoolSize(slug string, size int)
 }
 
 // appStore is the subset of *db.Store used by the Watcher.
@@ -38,6 +46,7 @@ type appStore interface {
 	GetAppBySlug(slug string) (*db.App, error)
 	UpdateAppStatus(p db.UpdateAppStatusParams) error
 	ListDeployments(appID int64) ([]*db.Deployment, error)
+	UpsertReplica(p db.UpsertReplicaParams) error
 }
 
 // Compile-time interface satisfaction checks.
@@ -52,26 +61,27 @@ type Watcher struct {
 	mgr    manager
 	prx    proxyBackend
 	store  appStore
-	deploy func(slug, bundleDir string) (*deploy.Result, error)
+	deploy func(slug, bundleDir string, index int) (*deploy.Result, error)
 
 	mu        sync.Mutex
-	attempts  map[string]int       // consecutive crash-restart attempts per slug
-	nextRetry map[string]time.Time // earliest time to retry a crashed app
-	waking    map[string]bool      // true while a wake goroutine is in flight for slug
+	attempts  map[replicaKey]int       // consecutive crash-restart attempts per replica
+	nextRetry map[replicaKey]time.Time // earliest time to retry a crashed replica
+	waking    map[string]bool          // true while a wake goroutine is in flight for slug
 }
 
-// New constructs a Watcher. deployFn encapsulates deploy.Run with the shared
-// Manager and Proxy so wake/restart paths can persist the resulting PID and port.
+// New constructs a Watcher. deployFn encapsulates deploy.RunReplica with the
+// shared Manager and Proxy so wake/restart paths can persist the resulting PID
+// and port on a per-replica basis.
 func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
-	deployFn func(slug, bundleDir string) (*deploy.Result, error)) *Watcher {
+	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
 		cfg:       cfg,
 		mgr:       mgr,
 		prx:       prx,
 		store:     st,
 		deploy:    deployFn,
-		attempts:  make(map[string]int),
-		nextRetry: make(map[string]time.Time),
+		attempts:  make(map[replicaKey]int),
+		nextRetry: make(map[replicaKey]time.Time),
 		waking:    make(map[string]bool),
 	}
 }
@@ -92,36 +102,55 @@ func (w *Watcher) Start(ctx context.Context) {
 	}
 }
 
+// RunOnce exposes a single watchdog/hibernation tick for testing.
+func (w *Watcher) RunOnce() { w.runOnce() }
+
 // runOnce processes all current manager entries for one watchdog/hibernation tick.
+// handleIdle is called at most once per slug — since idleness is per-app (not
+// per-replica), iterating the whole pool would redundantly hibernate the same app.
 func (w *Watcher) runOnce() {
+	idleChecked := make(map[string]bool)
 	for _, info := range w.mgr.All() {
 		switch info.Status {
 		case process.StatusCrashed:
-			w.handleCrashed(info.Slug)
+			w.handleCrashed(info.Slug, info.Index)
 		case process.StatusRunning:
-			w.handleIdle(info.Slug)
+			if !idleChecked[info.Slug] {
+				idleChecked[info.Slug] = true
+				w.handleIdle(info.Slug)
+			}
 		}
 	}
 }
 
-// handleCrashed attempts to restart a crashed app with exponential backoff.
-// After RestartMaxAttempts consecutive failures the app is marked degraded.
-func (w *Watcher) handleCrashed(slug string) {
+// handleCrashed attempts to restart a crashed replica with exponential backoff.
+// After RestartMaxAttempts consecutive failures the app is marked degraded only
+// if every replica in the pool has also exhausted its retry budget.
+func (w *Watcher) handleCrashed(slug string, index int) {
+	k := replicaKey{slug, index}
+
 	w.mu.Lock()
-	if retry, ok := w.nextRetry[slug]; ok && time.Now().Before(retry) {
+	if retry, ok := w.nextRetry[k]; ok && time.Now().Before(retry) {
 		w.mu.Unlock()
 		return // still within backoff window
 	}
-	w.attempts[slug]++
-	attempt := w.attempts[slug]
+	// If this replica has already exhausted its budget, skip the increment
+	// and re-check degraded status (handles the case where another replica
+	// later exhausts its budget too).
+	if w.attempts[k] > w.cfg.RestartMaxAttempts {
+		w.mu.Unlock()
+		w.maybeMarkDegraded(slug)
+		return
+	}
+	w.attempts[k]++
+	attempt := w.attempts[k]
 	w.mu.Unlock()
 
 	if attempt > w.cfg.RestartMaxAttempts {
-		_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
-		w.mu.Lock()
-		delete(w.attempts, slug)
-		delete(w.nextRetry, slug)
-		w.mu.Unlock()
+		// Do not delete the attempt key here — maybeMarkDegraded reads it
+		// to determine whether every replica has exhausted its budget.
+		// The keys are cleaned up on a successful restart.
+		w.maybeMarkDegraded(slug)
 		return
 	}
 
@@ -134,7 +163,7 @@ func (w *Watcher) handleCrashed(slug string) {
 		return
 	}
 
-	result, err := w.deploy(slug, deployments[0].BundleDir)
+	res, err := w.deploy(slug, deployments[0].BundleDir, index)
 	if err != nil {
 		// Schedule the next retry: 2^(attempt-1) seconds, capped at 5 minutes.
 		delaySec := 1 << uint(attempt-1)
@@ -142,31 +171,54 @@ func (w *Watcher) handleCrashed(slug string) {
 			delaySec = 5 * 60
 		}
 		w.mu.Lock()
-		w.nextRetry[slug] = time.Now().Add(time.Duration(delaySec) * time.Second)
+		w.nextRetry[k] = time.Now().Add(time.Duration(delaySec) * time.Second)
 		w.mu.Unlock()
 		return
 	}
 
-	if result != nil {
-		port := result.Port
-		pid := result.PID
-		_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{
-			Slug:   slug,
-			Status: "running",
-			Port:   &port,
-			PID:    &pid,
-		})
-	}
+	pid, port := res.PID, res.Port
+	_ = w.store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:  app.ID,
+		Index:  index,
+		PID:    &pid,
+		Port:   &port,
+		Status: "running",
+	})
+	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
 
-	// Successful restart — reset backoff state.
+	// Successful restart — reset backoff state for this replica.
 	w.mu.Lock()
-	delete(w.attempts, slug)
-	delete(w.nextRetry, slug)
+	delete(w.attempts, k)
+	delete(w.nextRetry, k)
 	w.mu.Unlock()
 }
 
+// maybeMarkDegraded sets app status to degraded only if every replica in the
+// pool has exhausted its retry budget. Running replicas keep the app green.
+func (w *Watcher) maybeMarkDegraded(slug string) {
+	app, err := w.store.GetAppBySlug(slug)
+	if err != nil {
+		return
+	}
+	// If any replica is still running, the app is not fully degraded.
+	for _, info := range w.mgr.All() {
+		if info.Slug == slug && info.Status == process.StatusRunning {
+			return
+		}
+	}
+	// No running replicas — check every index has exhausted attempts.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for idx := 0; idx < app.Replicas; idx++ {
+		if w.attempts[replicaKey{slug, idx}] <= w.cfg.RestartMaxAttempts {
+			return
+		}
+	}
+	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+}
+
 // handleIdle checks whether a running app has been idle past its configured
-// timeout and hibernates it if so.
+// timeout and hibernates it if so. It stops all replicas and zeroes replica rows.
 func (w *Watcher) handleIdle(slug string) {
 	app, err := w.store.GetAppBySlug(slug)
 	if err != nil {
@@ -194,13 +246,17 @@ func (w *Watcher) handleIdle(slug string) {
 		return
 	}
 
-	_ = w.mgr.Stop(slug)
+	_ = w.mgr.Stop(slug) // stops all replicas in the pool
 	w.prx.Deregister(slug)
+	for i := 0; i < app.Replicas; i++ {
+		_ = w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped"})
+	}
 	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"})
 }
 
 // OnMiss is registered with the Proxy as the onMiss callback. When a request
-// arrives for a hibernated app, this wakes it by re-running the deploy.
+// arrives for a hibernated app, this wakes it by re-running the deploy for all
+// replicas in parallel.
 func (w *Watcher) OnMiss(slug string) {
 	w.mu.Lock()
 	if w.waking[slug] {
@@ -225,19 +281,30 @@ func (w *Watcher) OnMiss(slug string) {
 		if err != nil || len(deployments) == 0 {
 			return
 		}
-		result, err := w.deploy(slug, deployments[0].BundleDir)
-		if err != nil {
-			return
+
+		w.prx.SetPoolSize(slug, app.Replicas)
+
+		var wg sync.WaitGroup
+		for i := 0; i < app.Replicas; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				res, err := w.deploy(slug, deployments[0].BundleDir, idx)
+				if err != nil {
+					slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
+					return
+				}
+				pid, port := res.PID, res.Port
+				_ = w.store.UpsertReplica(db.UpsertReplicaParams{
+					AppID:  app.ID,
+					Index:  idx,
+					PID:    &pid,
+					Port:   &port,
+					Status: "running",
+				})
+			}(i)
 		}
-		if result != nil {
-			port := result.Port
-			pid := result.PID
-			_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{
-				Slug:   slug,
-				Status: "running",
-				Port:   &port,
-				PID:    &pid,
-			})
-		}
+		wg.Wait()
+		_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
 	}()
 }

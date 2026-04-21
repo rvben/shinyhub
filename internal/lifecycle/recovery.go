@@ -35,38 +35,57 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, l
 }
 
 func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, apps []*db.App) {
+	// TODO(Task 12): rewrite to iterate store.ListReplicas per app using the
+	// replica table instead of the deprecated per-app PID/port fields.
 	for _, app := range apps {
-		if app.CurrentPID == nil || app.CurrentPort == nil {
+		reps, err := store.ListReplicas(app.ID)
+		if err != nil || len(reps) == 0 {
 			markRecoveryStopped(store, app.Slug)
 			continue
 		}
-		pid := *app.CurrentPID
-		port := *app.CurrentPort
-		if err := syscall.Kill(pid, 0); err != nil {
-			markRecoveryStopped(store, app.Slug)
-			continue
+		prx.SetPoolSize(app.Slug, app.Replicas)
+		anyAlive := false
+		for _, r := range reps {
+			if r.PID == nil || r.Port == nil {
+				continue
+			}
+			if err := syscall.Kill(*r.PID, 0); err != nil {
+				continue
+			}
+			mgr.Adopt(app.Slug, process.ProcessInfo{
+				Slug:   app.Slug,
+				Index:  r.Index,
+				PID:    *r.PID,
+				Port:   *r.Port,
+				Status: process.StatusRunning,
+			}, process.RunHandle{PID: *r.PID})
+			targetURL := fmt.Sprintf("http://localhost:%d", *r.Port)
+			if err := prx.RegisterReplica(app.Slug, r.Index, targetURL); err != nil {
+				slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
+				continue
+			}
+			anyAlive = true
+			slog.Info("process recovery: re-adopted process", "slug", app.Slug, "idx", r.Index, "pid", *r.PID)
 		}
-		mgr.Adopt(app.Slug, process.ProcessInfo{
-			Slug:   app.Slug,
-			PID:    pid,
-			Port:   port,
-			Status: process.StatusRunning,
-		}, process.RunHandle{PID: pid})
-		targetURL := fmt.Sprintf("http://localhost:%d", port)
-		if err := prx.Register(app.Slug, targetURL); err != nil {
-			slog.Error("process recovery: register proxy", "slug", app.Slug, "err", err)
+		if !anyAlive {
 			markRecoveryStopped(store, app.Slug)
-			continue
 		}
-		slog.Info("process recovery: re-adopted process", "slug", app.Slug, "pid", pid, "port", port)
 	}
 }
 
 func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister, apps []*db.App) {
+	// TODO(Task 13): rewrite to use replica table for port lookup.
 	portBySlug := make(map[string]int)
 	for _, app := range apps {
-		if app.CurrentPort != nil {
-			portBySlug[app.Slug] = *app.CurrentPort
+		reps, err := store.ListReplicas(app.ID)
+		if err != nil {
+			continue
+		}
+		for _, r := range reps {
+			if r.Port != nil {
+				portBySlug[app.Slug] = *r.Port
+				break
+			}
 		}
 	}
 
