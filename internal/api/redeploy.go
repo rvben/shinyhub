@@ -13,11 +13,11 @@ import (
 func (s *Server) tryAcquireRedeploy(slug string) bool {
 	s.redeployMu.Lock()
 	defer s.redeployMu.Unlock()
-	if s.redeployInFlight[slug] {
-		return false
-	}
 	if s.redeployInFlight == nil {
 		s.redeployInFlight = make(map[string]bool)
+	}
+	if s.redeployInFlight[slug] {
+		return false
 	}
 	s.redeployInFlight[slug] = true
 	return true
