@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -79,11 +80,26 @@ const loadingPage = `<!DOCTYPE html>
 </body>
 </html>`
 
-// Proxy routes /app/:slug/* to the registered backend URL for that slug.
+// replicaBackend wraps a single reverse proxy with connection tracking.
+type replicaBackend struct {
+	index       int
+	rp          *httputil.ReverseProxy
+	activeConns atomic.Int64
+}
+
+// backendPool holds a fixed-size slice of replicas for one slug.
+// rrCounter is used for round-robin tie-breaking in least-connections selection.
+type backendPool struct {
+	size      int
+	replicas  []*replicaBackend
+	rrCounter atomic.Int64
+}
+
+// Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
-	mu       sync.RWMutex
-	backends map[string]*httputil.ReverseProxy
-	onMiss   func(slug string)
+	mu     sync.RWMutex
+	pools  map[string]*backendPool
+	onMiss func(slug string)
 
 	seenMu   sync.RWMutex
 	lastSeen map[string]time.Time
@@ -91,7 +107,7 @@ type Proxy struct {
 
 func New() *Proxy {
 	return &Proxy{
-		backends: make(map[string]*httputil.ReverseProxy),
+		pools:    make(map[string]*backendPool),
 		lastSeen: make(map[string]time.Time),
 	}
 }
@@ -119,15 +135,47 @@ func (p *Proxy) LastSeen(slug string) time.Time {
 	return p.lastSeen[slug]
 }
 
-// Register sets the backend URL for slug, atomically replacing any existing entry.
-func (p *Proxy) Register(slug, targetURL string) error {
+// SetPoolSize initialises or resizes the replica pool for slug.
+// It is idempotent: growing preserves existing replicas; shrinking drops
+// trailing slots. Callers must invoke this before RegisterReplica.
+func (p *Proxy) SetPoolSize(slug string, size int) {
+	if size < 1 {
+		size = 1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok {
+		p.pools[slug] = &backendPool{size: size, replicas: make([]*replicaBackend, size)}
+		return
+	}
+	if size < len(pool.replicas) {
+		pool.replicas = pool.replicas[:size]
+	}
+	for len(pool.replicas) < size {
+		pool.replicas = append(pool.replicas, nil)
+	}
+	pool.size = size
+}
+
+// RegisterReplica registers a backend URL at the given index within slug's pool.
+// Returns an error if the pool size has not been set or the index is out of range.
+func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
-		return fmt.Errorf("register %s: invalid url: %w", slug, err)
+		return fmt.Errorf("register %s#%d: invalid url: %w", slug, index, err)
 	}
 	if target.Scheme == "" || target.Host == "" {
-		return fmt.Errorf("register %s: url must have scheme and host", slug)
+		return fmt.Errorf("register %s#%d: url needs scheme and host", slug, index)
 	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= pool.size {
+		return fmt.Errorf("register %s#%d: pool size not set or index out of range", slug, index)
+	}
+
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
 	rp.Director = func(req *http.Request) {
@@ -146,33 +194,69 @@ func (p *Proxy) Register(slug, targetURL string) error {
 		}
 		req.Host = target.Host
 	}
-	p.mu.Lock()
-	p.backends[slug] = rp
-	p.mu.Unlock()
+	pool.replicas[index] = &replicaBackend{index: index, rp: rp}
 	return nil
 }
 
-// Deregister removes slug from the routing table.
+// DeregisterReplica removes the replica at index from slug's pool.
+// The slot becomes nil; other replicas are unaffected.
+func (p *Proxy) DeregisterReplica(slug string, index int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return
+	}
+	pool.replicas[index] = nil
+}
+
+// Deregister removes the entire pool for slug from the routing table.
 func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
-	delete(p.backends, slug)
+	delete(p.pools, slug)
 	p.mu.Unlock()
 }
 
-// ServeHTTP handles /app/:slug/* requests. When the slug has no registered
-// backend, the loading page is served and onMiss is invoked in a goroutine.
+// HasLiveReplica reports whether slug has at least one non-nil replica.
+func (p *Proxy) HasLiveReplica(slug string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return false
+	}
+	for _, r := range pool.replicas {
+		if r != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// Register is kept for single-replica callers. It is equivalent to
+// SetPoolSize(slug, 1) + RegisterReplica(slug, 0, targetURL).
+func (p *Proxy) Register(slug, targetURL string) error {
+	p.SetPoolSize(slug, 1)
+	return p.RegisterReplica(slug, 0, targetURL)
+}
+
+// ServeHTTP handles /app/:slug/* requests. When the slug has no live replica,
+// the loading page is served and onMiss is invoked in a goroutine.
+// For multi-replica pools, the first live replica is used; Task 7 will add
+// sticky cookie + least-connections routing.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	slug := extractSlug(r.URL.Path)
 	if slug == "" {
 		http.NotFound(w, r)
 		return
 	}
+
 	p.mu.RLock()
-	rp, ok := p.backends[slug]
+	pool := p.pools[slug]
 	onMiss := p.onMiss
 	p.mu.RUnlock()
 
-	if !ok {
+	if pool == nil || !poolHasAny(pool) {
 		if onMiss != nil {
 			go onMiss(slug)
 		}
@@ -181,8 +265,31 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(loadingPage)) //nolint:errcheck
 		return
 	}
+
+	// Pick the first live replica. Task 7 replaces this with sticky cookie +
+	// least-connections selection.
+	var picked *replicaBackend
+	p.mu.RLock()
+	for _, rep := range pool.replicas {
+		if rep != nil {
+			picked = rep
+			break
+		}
+	}
+	p.mu.RUnlock()
+
 	p.RecordActivity(slug)
-	rp.ServeHTTP(w, r)
+	picked.rp.ServeHTTP(w, r)
+}
+
+// poolHasAny reports whether the pool contains at least one non-nil replica.
+func poolHasAny(pool *backendPool) bool {
+	for _, r := range pool.replicas {
+		if r != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // extractSlug parses the slug from /app/:slug/... paths.

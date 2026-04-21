@@ -199,3 +199,35 @@ func TestProxy_CallsOnMissCallback(t *testing.T) {
 		t.Errorf("expected onMiss('myapp') called once, got %v", called)
 	}
 }
+
+func TestProxy_PoolRegister(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 3)
+
+	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:20001"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RegisterReplica("demo", 1, "http://127.0.0.1:20002"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RegisterReplica("demo", 3, "http://x"); err == nil {
+		t.Fatal("expected error for out-of-range index")
+	}
+}
+
+func TestProxy_DeregisterReplica(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001")
+	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002")
+
+	p.DeregisterReplica("demo", 0)
+	if !p.HasLiveReplica("demo") {
+		t.Fatal("expected at least one live replica")
+	}
+
+	p.Deregister("demo")
+	if p.HasLiveReplica("demo") {
+		t.Fatal("expected empty pool")
+	}
+}
