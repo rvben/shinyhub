@@ -37,7 +37,7 @@ runtime:
     images:
       python: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
       r: rocker/r-base
-    default_memory_mb: 512            # per-app; 0 = no limit
+    default_memory_mb: 512            # per-replica; pool total = replicas × memory_limit_mb; 0 = no limit
     default_cpu_percent: 100          # 100 = one full core; 0 = no limit
 
 # Optional: OAuth / OIDC login providers. Remove any block you don't use.

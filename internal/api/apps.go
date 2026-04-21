@@ -101,6 +101,18 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply the operator-configured default replica count when it exceeds the
+	// SQL DEFAULT of 1. Zero and one are left alone (zero is invalid; one
+	// matches the default).
+	if s.cfg.Runtime.DefaultReplicas > 1 {
+		created, err := s.store.GetAppBySlug(req.Slug)
+		if err == nil {
+			if err := s.store.UpdateAppReplicas(created.ID, s.cfg.Runtime.DefaultReplicas); err != nil {
+				slog.Error("set default replicas on create", "slug", req.Slug, "err", err)
+			}
+		}
+	}
+
 	app, err := s.store.GetAppBySlug(req.Slug)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -794,7 +806,8 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -804,6 +817,22 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
+	}
+
+	// Mark all replica rows as stopped so GET /api/apps/:slug reflects
+	// consistent state immediately after the manual stop.
+	if replicas, err := s.store.ListReplicas(app.ID); err != nil {
+		slog.Error("list replicas on stop", "slug", slug, "err", err)
+	} else {
+		for _, rep := range replicas {
+			if err := s.store.UpsertReplica(db.UpsertReplicaParams{
+				AppID:  app.ID,
+				Index:  rep.Index,
+				Status: "stopped",
+			}); err != nil {
+				slog.Error("upsert replica on stop", "slug", slug, "index", rep.Index, "err", err)
+			}
+		}
 	}
 
 	// Update DB status and clear port/PID.

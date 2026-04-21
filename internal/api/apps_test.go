@@ -1003,6 +1003,27 @@ func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Se
 	return srv, store
 }
 
+// newTestServerWithDefaultReplicas creates a test server with a specific DefaultReplicas value.
+func newTestServerWithDefaultReplicas(t *testing.T, defaultReplicas int) (*api.Server, *db.Store) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir},
+		Runtime: config.RuntimeConfig{DefaultReplicas: defaultReplicas, MaxReplicas: 32},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
+
 // TestAppsAPI_PatchReplicasUpdatesCount verifies that PATCH with {"replicas": N}
 // updates the DB and does not trigger a redeploy when the app is stopped.
 func TestAppsAPI_PatchReplicasUpdatesCount(t *testing.T) {
@@ -1068,6 +1089,33 @@ func TestAppsAPI_PatchReplicasBelowMinRejected(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for replicas=0, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAppsAPI_CreateAppRespectsDefaultReplicas verifies that a newly created app
+// gets the replica count from cfg.Runtime.DefaultReplicas when it is greater than 1.
+func TestAppsAPI_CreateAppRespectsDefaultReplicas(t *testing.T) {
+	srv, store := newTestServerWithDefaultReplicas(t, 4)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"slug": "demo", "name": "Demo"})
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if got.Replicas != 4 {
+		t.Errorf("want replicas=4 (from DefaultReplicas config), got %d", got.Replicas)
 	}
 }
 
