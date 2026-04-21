@@ -125,11 +125,35 @@ document.addEventListener('DOMContentLoaded', () => {
   const deploySubmit       = document.getElementById('deploy-submit');
 
   const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
-  const DEPLOY_MAX_BYTES = 128 * 1024 * 1024;
-  const DEPLOY_IGNORE_DIRS = new Set(['.git', '.venv', '__pycache__', 'node_modules', '.renv', '.Rproj.user']);
+
+  let BUNDLE_RULES = null;
+  async function loadBundleRules() {
+    if (BUNDLE_RULES) return BUNDLE_RULES;
+    const resp = await fetch('/static/bundle-rules.json');
+    if (!resp.ok) throw new Error('failed to load bundle rules');
+    BUNDLE_RULES = await resp.json();
+    return BUNDLE_RULES;
+  }
+
+  // Classify a single entry (file or directory) relative to the bundle root.
+  // Returns one of: 'accept', 'skipCacheDir', 'rejectDataDir',
+  // 'rejectDatasetDir', 'rejectExtension', 'rejectFileSize'.
+  // Directory decisions should pass size=0.
+  function inspectBundleEntry(rules, relPath, size) {
+    const first = relPath.split('/')[0];
+    if (first === 'data') return 'rejectDataDir';
+    if (first === 'datasets' || first === '.shinyhub-data') return 'rejectDatasetDir';
+    if (rules.cacheDirs.includes(first)) return 'skipCacheDir';
+    const lower = relPath.toLowerCase();
+    for (const ext of rules.dataExtensions) {
+      if (lower.endsWith(ext.toLowerCase())) return 'rejectExtension';
+    }
+    if (rules.maxFileBytes > 0 && size > rules.maxFileBytes) return 'rejectFileSize';
+    return 'accept';
+  }
 
   let activeEventSource = null;
-  let deployState = null; // { slug, appName, blob, fileCount, ignored: Set<string>, xhr }
+  let deployState = null; // { slug, appName, blob, fileCount, rejections: Map<string, string[]>, xhr }
   let slugEdited = false;
 
   // Derive a slug from a display name: strip diacritics, lowercase, replace
@@ -1376,7 +1400,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function openDeployModal(app) {
     resetDeployModal();
-    deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, ignored: new Set(), xhr: null };
+    deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, rejections: new Map(), xhr: null };
     deployAppName.textContent = app.name;
     deployModal.hidden = false;
     deployDropzone.focus();
@@ -1387,20 +1411,34 @@ document.addEventListener('DOMContentLoaded', () => {
     deployModal.hidden = true;
   }
 
-  function renderDeploySummary(sourceName, blobSize, fileCount, ignored) {
+  function renderDeploySummary(sourceName, blobSize, fileCount, rejections, rules) {
     deploySourceName.textContent = sourceName;
     deployFileCount.textContent = fileCount == null ? '—' : String(fileCount);
     deployBundleSize.textContent = formatBytes(blobSize);
-    if (ignored && ignored.size > 0) {
+    if (rejections && rejections.size > 0) {
       deployIgnoredRow.hidden = false;
-      deployIgnoredList.textContent = [...ignored].sort().join(', ');
+      const labels = {
+        rejectDataDir:     'data dir',
+        rejectDatasetDir:  'dataset dir',
+        rejectExtension:   'data extension',
+        rejectFileSize:    'oversize file',
+      };
+      const parts = [];
+      for (const [decision, paths] of rejections) {
+        const label = labels[decision] || decision;
+        parts.push(`${label}: ${paths.sort().join(', ')}`);
+      }
+      parts.sort();
+      deployIgnoredList.textContent = parts.join('; ');
     } else {
       deployIgnoredRow.hidden = true;
     }
     deploySummary.hidden = false;
 
-    if (blobSize > DEPLOY_MAX_BYTES) {
-      setError(deployError, `Bundle is ${formatBytes(blobSize)} — exceeds the 128 MiB upload limit. Use the CLI for larger bundles.`);
+    const cap = rules && rules.maxBundleBytes > 0 ? rules.maxBundleBytes : 0;
+    if (cap > 0 && blobSize > cap) {
+      const mib = Math.round(cap / (1024 * 1024));
+      setError(deployError, `Bundle is ${formatBytes(blobSize)} — exceeds the ${mib} MiB upload limit. Use the CLI for larger bundles.`);
       deploySubmit.disabled = true;
       return;
     }
@@ -1411,10 +1449,18 @@ document.addEventListener('DOMContentLoaded', () => {
   async function acceptZipFile(file) {
     // Pre-built .zip — counting files would require parsing the central
     // directory, so leave the file count unknown and render it as "—".
+    let rules;
+    try {
+      rules = await loadBundleRules();
+    } catch (err) {
+      console.error('loadBundleRules failed:', err);
+      setError(deployError, 'Failed to load bundle rules from server.');
+      return;
+    }
     deployState.blob = file;
     deployState.fileCount = null;
-    deployState.ignored = new Set();
-    renderDeploySummary(file.name, file.size, null, null);
+    deployState.rejections = new Map();
+    renderDeploySummary(file.name, file.size, null, null, rules);
   }
 
   function bindDropzoneEvents() {
@@ -1524,11 +1570,15 @@ document.addEventListener('DOMContentLoaded', () => {
     return new Promise((resolve, reject) => entry.file(resolve, reject));
   }
 
-  // Walks a DirectoryEntry tree, yielding { relativePath, file } for every file
-  // not under an ignored directory.  rootEntry itself contributes no prefix —
-  // mirrors the CLI's `filepath.Rel(dir, path)` behavior so the archive contains
-  // the folder's contents, not the folder itself.
-  async function* walkFolder(rootEntry, ignored) {
+  // Walks a DirectoryEntry tree, yielding { relativePath, file } for every
+  // accepted file. rootEntry itself contributes no prefix — mirrors the CLI's
+  // filepath.Rel(dir, path) behavior so the archive contains the folder's
+  // contents, not the folder itself.
+  //
+  // Cache dirs (e.g. .venv, __pycache__) are silently skipped.
+  // Data dirs, dataset dirs, oversize files, and data-extension files are
+  // recorded in the rejections Map under the corresponding decision key.
+  async function* walkFolder(rootEntry, rules, rejections) {
     const queue = [{ entry: rootEntry, path: '' }];
     while (queue.length > 0) {
       const { entry, path } = queue.shift();
@@ -1537,14 +1587,33 @@ document.addEventListener('DOMContentLoaded', () => {
         const children = await readEntriesAll(reader);
         for (const child of children) {
           const childPath = path ? `${path}/${child.name}` : child.name;
-          if (child.isDirectory && DEPLOY_IGNORE_DIRS.has(child.name)) {
-            ignored.add(child.name);
-            continue;
+          if (child.isDirectory) {
+            // Inspect with size=0 — directory decisions don't depend on size.
+            const decision = inspectBundleEntry(rules, childPath, 0);
+            if (decision === 'skipCacheDir') {
+              continue; // silent skip
+            }
+            if (decision !== 'accept') {
+              const arr = rejections.get(decision) || [];
+              arr.push(childPath);
+              rejections.set(decision, arr);
+              continue;
+            }
           }
           queue.push({ entry: child, path: childPath });
         }
       } else if (entry.isFile) {
         const file = await fileFromEntry(entry);
+        const decision = inspectBundleEntry(rules, path, file.size);
+        if (decision === 'skipCacheDir') {
+          continue;
+        }
+        if (decision !== 'accept') {
+          const arr = rejections.get(decision) || [];
+          arr.push(path);
+          rejections.set(decision, arr);
+          continue;
+        }
         yield { relativePath: path, file };
       }
     }
@@ -1572,10 +1641,19 @@ document.addEventListener('DOMContentLoaded', () => {
     deployBundleSize.textContent = '—';
     deploySummary.hidden = false;
 
-    const ignored = new Set();
+    let rules;
+    try {
+      rules = await loadBundleRules();
+    } catch (err) {
+      console.error('loadBundleRules failed:', err);
+      setError(deployError, 'Failed to load bundle rules from server.');
+      return;
+    }
+
+    const rejections = new Map();
     const fileList = [];
     try {
-      for await (const item of walkFolder(rootEntry, ignored)) fileList.push(item);
+      for await (const item of walkFolder(rootEntry, rules, rejections)) fileList.push(item);
     } catch (err) {
       console.error('walkFolder failed:', err);
       setError(deployError, 'Failed to read folder contents.');
@@ -1583,7 +1661,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (fileList.length === 0) {
-      setError(deployError, 'Folder is empty after filtering ignored directories.');
+      setError(deployError, 'Folder is empty after filtering excluded paths.');
       return;
     }
 
@@ -1607,8 +1685,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     deployState.blob = blob;
     deployState.fileCount = fileList.length;
-    deployState.ignored = ignored;
-    renderDeploySummary(rootEntry.name + '/', blob.size, fileList.length, ignored);
+    deployState.rejections = rejections;
+    renderDeploySummary(rootEntry.name + '/', blob.size, fileList.length, rejections, rules);
   }
 
   function uploadBundle(slug, blob) {
