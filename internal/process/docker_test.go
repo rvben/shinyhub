@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,12 +15,60 @@ import (
 	"testing"
 )
 
-// dockerAvailable skips t if the Docker daemon is unreachable.
-func dockerAvailable(t *testing.T) {
+const dockerSocketPath = "/var/run/docker.sock"
+
+// dockerRuntimeWithImage returns a real DockerRuntime with imageRef ready to
+// run. It transparently pulls imageRef when missing so CI runners do not need
+// to pre-seed an image cache. The test is skipped (not failed) if either the
+// daemon or the registry cannot satisfy the precondition; image-cache state
+// and network reachability are environmental, not behaviour the code under
+// test is responsible for.
+func dockerRuntimeWithImage(t *testing.T, imageRef string) *DockerRuntime {
 	t.Helper()
-	_, err := NewDockerRuntime("/var/run/docker.sock", "alpine:3", "alpine:3")
+	rt, err := NewDockerRuntime(dockerSocketPath, imageRef, imageRef)
 	if err != nil {
-		t.Skipf("Docker not available: %v", err)
+		t.Skipf("Docker daemon unavailable: %v", err)
+	}
+	ensureDockerImage(t, rt.client, imageRef)
+	return rt
+}
+
+// ensureDockerImage makes imageRef present in the daemon's local cache, pulling
+// it on demand. Callers should already hold a working *dockerClient. The test
+// is skipped on any environmental failure (no network, registry rate-limit,
+// daemon refusal) — failing would mask cache state as a code defect.
+func ensureDockerImage(t *testing.T, c *dockerClient, imageRef string) {
+	t.Helper()
+	inspectPath := "/images/" + url.PathEscape(imageRef) + "/json"
+	if err := c.get(inspectPath, nil); err == nil {
+		return
+	}
+
+	repo, tag, ok := strings.Cut(imageRef, ":")
+	if !ok {
+		tag = "latest"
+	}
+	pullURL := c.base + "/images/create?fromImage=" + url.QueryEscape(repo) + "&tag=" + url.QueryEscape(tag)
+	req, err := http.NewRequest(http.MethodPost, pullURL, nil)
+	if err != nil {
+		t.Skipf("ensure %s: build pull request: %v", imageRef, err)
+	}
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		t.Skipf("ensure %s: pull dispatch: %v", imageRef, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Skipf("ensure %s: daemon returned %d: %s", imageRef, resp.StatusCode, body)
+	}
+	// The Docker pull API streams JSON progress lines; the actual download
+	// only completes once the response body is fully drained.
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Skipf("ensure %s: pull stream interrupted: %v", imageRef, err)
+	}
+	if err := c.get(inspectPath, nil); err != nil {
+		t.Skipf("ensure %s: image still missing after pull: %v", imageRef, err)
 	}
 }
 
@@ -208,11 +258,7 @@ func TestDockerRuntimeImageForCommand(t *testing.T) {
 }
 
 func TestDockerRuntime_RunOnce_ExitsCleanly(t *testing.T) {
-	dockerAvailable(t)
-	rt, err := NewDockerRuntime("/var/run/docker.sock", "alpine:3", "alpine:3")
-	if err != nil {
-		t.Fatalf("docker runtime: %v", err)
-	}
+	rt := dockerRuntimeWithImage(t, "alpine:3")
 	var buf bytes.Buffer
 	p := StartParams{
 		Slug: "x", Dir: t.TempDir(),
@@ -228,11 +274,7 @@ func TestDockerRuntime_RunOnce_ExitsCleanly(t *testing.T) {
 }
 
 func TestDockerRuntime_RunOnce_SharedMountIsReadOnly(t *testing.T) {
-	dockerAvailable(t)
-	rt, err := NewDockerRuntime("/var/run/docker.sock", "alpine:3", "alpine:3")
-	if err != nil {
-		t.Fatalf("docker runtime: %v", err)
-	}
+	rt := dockerRuntimeWithImage(t, "alpine:3")
 	sourceData := t.TempDir()
 	if err := os.WriteFile(filepath.Join(sourceData, "marker"), []byte("ok"), 0o644); err != nil {
 		t.Fatalf("write marker: %v", err)
