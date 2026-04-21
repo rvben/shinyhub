@@ -392,8 +392,8 @@ func TestGetMembers_Forbidden(t *testing.T) {
 }
 
 func TestGetMembers_NotFound(t *testing.T) {
-	srv, _ := newTestServer(t)
-	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "admin", "admin")
 	req := authedRequest(t, "GET", "/api/apps/nonexistent/members", nil, token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)

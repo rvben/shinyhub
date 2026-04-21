@@ -35,6 +35,14 @@ type TokenInfo struct {
 // APIKeyLookup looks up a user by API key hash. Injected to avoid import cycles.
 type APIKeyLookup func(keyHash string) (*ContextUser, error)
 
+// UserLookup looks up a user by ID so JWT-authenticated requests can be
+// revalidated against the live database on every request. Returning a
+// non-nil error (e.g. db.ErrNotFound for a deleted user) rejects the
+// request as unauthorized. Production wiring MUST supply this — without it
+// a stale JWT keeps its original role until it expires, which means a role
+// downgrade or user deletion does not take effect immediately.
+type UserLookup func(userID int64) (*ContextUser, error)
+
 // authResult carries the authenticated identity plus (for JWT paths) the token
 // metadata needed by the logout handler to revoke the current session.
 type authResult struct {
@@ -54,7 +62,19 @@ func tokenFromClaims(c *Claims) *TokenInfo {
 	return info
 }
 
-func authenticateHeader(header, secret string, keyLookup APIKeyLookup, revoked RevocationChecker) (*authResult, error) {
+// resolveJWTUser turns validated claims into a ContextUser. When userLookup
+// is supplied, the live DB record wins over what the token was issued with;
+// this is what makes role demotions and user deletions take effect without
+// waiting for the JWT to expire. With no lookup we fall back to the claim
+// values (used by tests that want to skip DB plumbing).
+func resolveJWTUser(claims *Claims, userLookup UserLookup) (*ContextUser, error) {
+	if userLookup == nil {
+		return userFromClaims(claims), nil
+	}
+	return userLookup(claims.UserID)
+}
+
+func authenticateHeader(header, secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
 	if header == "" {
 		return nil, nil
 	}
@@ -71,7 +91,11 @@ func authenticateHeader(header, secret string, keyLookup APIKeyLookup, revoked R
 		if err != nil {
 			return nil, err
 		}
-		return &authResult{User: userFromClaims(claims), Token: tokenFromClaims(claims)}, nil
+		user, err := resolveJWTUser(claims, userLookup)
+		if err != nil {
+			return nil, err
+		}
+		return &authResult{User: user, Token: tokenFromClaims(claims)}, nil
 	case "token":
 		if keyLookup == nil {
 			return nil, fmt.Errorf("api key lookup unavailable")
@@ -86,7 +110,7 @@ func authenticateHeader(header, secret string, keyLookup APIKeyLookup, revoked R
 	}
 }
 
-func authenticateSessionCookie(r *http.Request, secret string, revoked RevocationChecker) (*authResult, error) {
+func authenticateSessionCookie(r *http.Request, secret string, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil {
 		return nil, err
@@ -95,21 +119,27 @@ func authenticateSessionCookie(r *http.Request, secret string, revoked Revocatio
 	if err != nil {
 		return nil, err
 	}
-	return &authResult{User: userFromClaims(claims), Token: tokenFromClaims(claims)}, nil
+	user, err := resolveJWTUser(claims, userLookup)
+	if err != nil {
+		return nil, err
+	}
+	return &authResult{User: user, Token: tokenFromClaims(claims)}, nil
 }
 
 // AuthenticateRequest authenticates a request from either an Authorization
 // header or the browser session cookie. If an Authorization header is present,
-// it takes precedence over the cookie and must be valid.
-func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup, revoked RevocationChecker) (*ContextUser, *TokenInfo, error) {
+// it takes precedence over the cookie and must be valid. JWT paths
+// revalidate the user against userLookup when supplied so role changes and
+// account deletions take effect without waiting for the token to expire.
+func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) (*ContextUser, *TokenInfo, error) {
 	var (
 		res *authResult
 		err error
 	)
 	if header := r.Header.Get("Authorization"); header != "" {
-		res, err = authenticateHeader(header, secret, keyLookup, revoked)
+		res, err = authenticateHeader(header, secret, keyLookup, userLookup, revoked)
 	} else {
-		res, err = authenticateSessionCookie(r, secret, revoked)
+		res, err = authenticateSessionCookie(r, secret, userLookup, revoked)
 	}
 	if err != nil || res == nil {
 		return nil, nil, err
@@ -119,13 +149,16 @@ func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup,
 
 // BearerMiddleware authenticates the request from an Authorization header or
 // the session cookie. The optional RevocationChecker is consulted for JWT
-// paths so revoked tokens are rejected. When a JWT is used, the token's jti
-// and expiry are attached to the context via WithTokenInfo so handlers can
-// reference them (e.g. to revoke on logout).
-func BearerMiddleware(secret string, keyLookup APIKeyLookup, revoked RevocationChecker) func(http.Handler) http.Handler {
+// paths so revoked tokens are rejected. When a JWT is used, userLookup (if
+// non-nil) re-resolves the user against the database on every request — this
+// is the path that makes role downgrades and account deletions effective
+// without waiting for the token to expire. The token's jti and expiry are
+// attached to the context via WithTokenInfo so handlers can reference them
+// (e.g. to revoke on logout).
+func BearerMiddleware(secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user, token, err := AuthenticateRequest(r, secret, keyLookup, revoked)
+			user, token, err := AuthenticateRequest(r, secret, keyLookup, userLookup, revoked)
 			if err != nil || user == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return

@@ -93,8 +93,8 @@ func TestAuditListAnonymousEventHasNoUsername(t *testing.T) {
 }
 
 func TestListAuditEvents_AdminOnly(t *testing.T) {
-	srv, _ := newTestServer(t)
-	token, _ := auth.IssueJWT(1, "dev", "developer", "test-secret")
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "dev", "developer")
 	req := authedRequest(t, "GET", "/api/audit", nil, token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)

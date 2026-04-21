@@ -123,6 +123,18 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
 }
 
+// userLookup satisfies auth.UserLookup by re-resolving the user against the
+// live DB on every JWT-authenticated request. This is what makes role
+// downgrades and account deletions take effect immediately, instead of
+// remaining in force until the JWT expires.
+func (s *Server) userLookup(userID int64) (*auth.ContextUser, error) {
+	u, err := s.store.GetUserByID(userID)
+	if err != nil {
+		return nil, err
+	}
+	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+}
+
 // revocationChecker returns an auth.RevocationChecker bound to the server's
 // store. Returning nil for the checker (when store is unset) disables the
 // revocation path, which matches the behavior expected by tests that construct
@@ -151,7 +163,7 @@ func (s *Server) buildRouter() http.Handler {
 	r.Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 
 	// All other endpoints require either an auth header or a valid session cookie.
-	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.revocationChecker())
+	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.userLookup, s.revocationChecker())
 	csrf := auth.CSRFMiddleware()
 	r.Group(func(r chi.Router) {
 		r.Use(bearer)

@@ -53,6 +53,31 @@ func newTestServer(t *testing.T) (*api.Server, *db.Store) {
 	return srv, store
 }
 
+// seedUserAndJWT creates a user in the test store and returns a JWT bound to
+// the user's actual database ID. BearerMiddleware re-resolves users against
+// the live DB on every request, so handing out JWTs for IDs that don't exist
+// in the store now returns 401. Tests that need an authenticated request
+// should mint their token via this helper.
+func seedUserAndJWT(t *testing.T, store *db.Store, username, role string) (token string, userID int64) {
+	t.Helper()
+	hash, err := auth.HashPassword("seed-password")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{Username: username, PasswordHash: hash, Role: role}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	u, err := store.GetUserByUsername(username)
+	if err != nil {
+		t.Fatalf("lookup user: %v", err)
+	}
+	token, err = auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	if err != nil {
+		t.Fatalf("issue jwt: %v", err)
+	}
+	return token, u.ID
+}
+
 // setCSRF attaches a matching csrf_token cookie and X-CSRF-Token header so a
 // request using session-cookie auth can pass the CSRF middleware in tests.
 func setCSRF(req *http.Request) {
@@ -159,8 +184,8 @@ func TestSessionLoginSetsHttpOnlyCookie(t *testing.T) {
 }
 
 func TestMeUsesSessionCookie(t *testing.T) {
-	srv, _ := newTestServer(t)
-	token, _ := auth.IssueJWT(42, "alice", "admin", "test-secret")
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "admin")
 
 	req := httptest.NewRequest("GET", "/api/auth/me", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
@@ -186,8 +211,8 @@ func TestMeUsesSessionCookie(t *testing.T) {
 }
 
 func TestLogoutClearsSessionCookie(t *testing.T) {
-	srv, _ := newTestServer(t)
-	token, _ := auth.IssueJWT(1, "alice", "admin", "test-secret")
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "admin")
 
 	req := httptest.NewRequest("POST", "/api/auth/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -275,10 +300,18 @@ func TestLogoutRevokesJWT(t *testing.T) {
 // would expire exactly 24 h after first login regardless of how often the user
 // is active — the sliding-window behaviour would be broken.
 func TestMeIssuesFreshJWT(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, store := newTestServer(t)
+
+	// Seed the user before minting the stale JWT — BearerMiddleware
+	// re-resolves the user against the live DB on every request.
+	hash, _ := auth.HashPassword("seed")
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	alice, _ := store.GetUserByUsername("alice")
 
 	// Build a stale but still-valid JWT (issued 1 hour ago).
-	staleToken, staleIssuedAt := buildStaleJWT(42, "alice", "admin", "test-secret")
+	staleToken, staleIssuedAt := buildStaleJWT(alice.ID, "alice", "admin", "test-secret")
 
 	req := httptest.NewRequest("GET", "/api/auth/me", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: staleToken})
@@ -311,8 +344,8 @@ func TestMeIssuesFreshJWT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh JWT must be valid: %v", err)
 	}
-	if claims.UserID != 42 {
-		t.Errorf("fresh JWT UserID = %d, want 42", claims.UserID)
+	if claims.UserID != alice.ID {
+		t.Errorf("fresh JWT UserID = %d, want %d", claims.UserID, alice.ID)
 	}
 	// The new token must have been issued after the stale one.
 	if !claims.IssuedAt.Time.After(staleIssuedAt) {
@@ -448,8 +481,8 @@ func TestCreateToken_DuplicateName(t *testing.T) {
 }
 
 func TestMeIncludesCanCreateApps_Admin(t *testing.T) {
-	srv, _ := newTestServer(t)
-	token, _ := auth.IssueJWT(1, "alice", "admin", "test-secret")
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "admin")
 
 	req := httptest.NewRequest("GET", "/api/auth/me", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
@@ -476,8 +509,8 @@ func TestMeIncludesCanCreateApps_Admin(t *testing.T) {
 }
 
 func TestMeIncludesCanCreateApps_Viewer(t *testing.T) {
-	srv, _ := newTestServer(t)
-	token, _ := auth.IssueJWT(1, "bob", "viewer", "test-secret")
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "bob", "viewer")
 
 	req := httptest.NewRequest("GET", "/api/auth/me", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})

@@ -105,7 +105,7 @@ func TestBearerMiddleware(t *testing.T) {
 		}
 		w.Write([]byte(u.Username))
 	})
-	handler := auth.BearerMiddleware(secret, nil, nil)(next)
+	handler := auth.BearerMiddleware(secret, nil, nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -139,7 +139,7 @@ func TestBearerMiddleware_TokenScheme(t *testing.T) {
 		}
 		w.Write([]byte(u.Username))
 	})
-	handler := auth.BearerMiddleware("secret", keyLookup, nil)(next)
+	handler := auth.BearerMiddleware("secret", keyLookup, nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Token "+rawKey)
@@ -166,7 +166,7 @@ func TestBearerMiddleware_SessionCookie(t *testing.T) {
 		}
 		w.Write([]byte(u.Username))
 	})
-	handler := auth.BearerMiddleware(secret, nil, nil)(next)
+	handler := auth.BearerMiddleware(secret, nil, nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
@@ -185,7 +185,7 @@ func TestBearerMiddleware_InvalidHeaderDoesNotFallBackToCookie(t *testing.T) {
 	secret := "test-secret"
 	token, _ := auth.IssueJWT(7, "alice", "developer", secret)
 
-	handler := auth.BearerMiddleware(secret, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := auth.BearerMiddleware(secret, nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -197,6 +197,104 @@ func TestBearerMiddleware_InvalidHeaderDoesNotFallBackToCookie(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+// TestBearerMiddleware_RevalidatesUserViaLookup proves that the DB-backed
+// userLookup wins over claims baked into the JWT. A user demoted from admin
+// to viewer must lose admin privileges on the next request, even if the
+// previously-issued admin token has not yet expired.
+func TestBearerMiddleware_RevalidatesUserViaLookup(t *testing.T) {
+	secret := "test-secret"
+	token, _ := auth.IssueJWT(7, "alice", "admin", secret)
+
+	userLookup := func(id int64) (*auth.ContextUser, error) {
+		if id != 7 {
+			t.Fatalf("expected userLookup for ID 7, got %d", id)
+		}
+		return &auth.ContextUser{ID: 7, Username: "alice", Role: "viewer"}, nil
+	}
+
+	var seen *auth.ContextUser
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = auth.UserFromContext(r.Context())
+	})
+	handler := auth.BearerMiddleware(secret, nil, userLookup, nil)(next)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if seen == nil {
+		t.Fatal("expected user in context")
+	}
+	if seen.Role != "viewer" {
+		t.Fatalf("DB role must win over JWT claim: got role=%q, want viewer", seen.Role)
+	}
+}
+
+// TestBearerMiddleware_LookupErrorRejects proves that a userLookup error
+// (e.g. user was deleted) rejects the request without invoking the handler.
+// This is the path that makes account deletions take effect without waiting
+// for the JWT to expire.
+func TestBearerMiddleware_LookupErrorRejects(t *testing.T) {
+	secret := "test-secret"
+	token, _ := auth.IssueJWT(7, "alice", "admin", secret)
+
+	userLookup := func(int64) (*auth.ContextUser, error) {
+		return nil, errors.New("user not found")
+	}
+
+	called := false
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		called = true
+	})
+	handler := auth.BearerMiddleware(secret, nil, userLookup, nil)(next)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if called {
+		t.Fatal("handler must not be called when lookup rejects")
+	}
+}
+
+// TestBearerMiddleware_SessionCookieRevalidates mirrors the bearer-header path
+// for session cookie auth: a stale session cookie issued before a role
+// demotion must yield the demoted role on subsequent requests.
+func TestBearerMiddleware_SessionCookieRevalidates(t *testing.T) {
+	secret := "test-secret"
+	token, _ := auth.IssueJWT(7, "alice", "admin", secret)
+
+	userLookup := func(id int64) (*auth.ContextUser, error) {
+		return &auth.ContextUser{ID: id, Username: "alice", Role: "viewer"}, nil
+	}
+
+	var seen *auth.ContextUser
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = auth.UserFromContext(r.Context())
+	})
+	handler := auth.BearerMiddleware(secret, nil, userLookup, nil)(next)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if seen == nil || seen.Role != "viewer" {
+		t.Fatalf("session cookie path must also re-resolve via lookup: got %+v", seen)
 	}
 }
 

@@ -52,8 +52,8 @@ func TestGetMetrics_Running(t *testing.T) {
 }
 
 func TestGetMetrics_NotFound(t *testing.T) {
-	srv, _ := newTestServer(t)
-	token, _ := auth.IssueJWT(1, "alice", "admin", "test-secret")
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "admin")
 	req := authedRequest(t, "GET", "/api/apps/nonexistent/metrics", nil, token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
