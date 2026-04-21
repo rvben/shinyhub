@@ -153,6 +153,24 @@ func main() {
 		}
 		return out, nil
 	})
+	mgr.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
+		app, err := store.GetApp(slug)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := store.ListSharedDataSources(app.ID)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]process.SharedMount, 0, len(rows))
+		for _, m := range rows {
+			out = append(out, process.SharedMount{
+				SourceSlug: m.SourceSlug,
+				HostPath:   filepath.Join(cfg.Storage.AppDataDir, m.SourceSlug),
+			})
+		}
+		return out, nil
+	})
 	mgr.SetAppDataRoot(cfg.Storage.AppDataDir)
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)

@@ -17,6 +17,10 @@ import (
 // process before launch.
 type EnvResolver func(slug string) ([]string, error)
 
+// SharedMountResolver returns the shared mounts for a slug. Empty slice means
+// no mounts. Called once per Start; failures abort the start.
+type SharedMountResolver func(slug string) ([]SharedMount, error)
+
 type Status string
 
 const (
@@ -63,19 +67,25 @@ type replicaKey struct {
 // Manager tracks running app processes as a pool of replicas per slug.
 // entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
-	mu          sync.Mutex
-	entries     map[string][]*entry
-	logFiles    map[replicaKey]*LogFile
-	appsDir     string
-	runtime     Runtime
-	envResolver EnvResolver
-	appDataRoot string
+	mu              sync.Mutex
+	entries         map[string][]*entry
+	logFiles        map[replicaKey]*LogFile
+	appsDir         string
+	runtime         Runtime
+	envResolver     EnvResolver
+	mountResolver   SharedMountResolver
+	appDataRoot     string
 }
 
 // SetEnvResolver sets the function used to inject per-app environment variables
 // during Start. Must be called before the manager begins starting processes; it
 // is not safe to call concurrently with Start.
 func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
+
+// SetSharedMountResolver sets the function used to resolve shared mounts during
+// Start. Must be called before the manager begins starting processes; not safe
+// to call concurrently with Start.
+func (m *Manager) SetSharedMountResolver(r SharedMountResolver) { m.mountResolver = r }
 
 // SetAppDataRoot sets the root directory under which per-app persistent data
 // directories live. Each Start resolves <root>/<slug>, ensures it exists,
@@ -156,6 +166,14 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		// Build user env first, then append platform env so platform values win
 		// on duplicate keys (os/exec uses last-occurrence-wins).
 		p.Env = append(userEnv, p.Env...)
+	}
+
+	if m.mountResolver != nil {
+		mounts, err := m.mountResolver(p.Slug)
+		if err != nil {
+			return nil, fmt.Errorf("resolve shared mounts: %w", err)
+		}
+		p.SharedMounts = mounts
 	}
 
 	logPath := filepath.Join(m.appsDir, p.Slug, fmt.Sprintf("app-%d.log", p.Index))

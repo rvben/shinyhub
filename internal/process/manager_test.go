@@ -273,6 +273,101 @@ func TestStart_PlatformEnvWinsOverUserEnv(t *testing.T) {
 	}
 }
 
+func TestManager_Start_AppliesResolvedSharedMounts(t *testing.T) {
+	// The manager's Start path must call the resolver and pass mounts through
+	// to the runtime. captureRuntime records the SharedMounts received by Start.
+	captured := make(chan []process.SharedMount, 1)
+
+	rt := &captureRuntime{
+		onStart: func(p process.StartParams) { captured <- p.SharedMounts },
+	}
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
+		return []process.SharedMount{{SourceSlug: "fetch", HostPath: t.TempDir()}}, nil
+	})
+
+	_, err := m.Start(process.StartParams{Slug: "consumer", Dir: t.TempDir(), Command: []string{"true"}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	select {
+	case mounts := <-captured:
+		if len(mounts) != 1 || mounts[0].SourceSlug != "fetch" {
+			t.Fatalf("expected one mount of 'fetch', got %+v", mounts)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime never received Start")
+	}
+}
+
+// captureRuntime is a minimal Runtime implementation that invokes an onStart
+// callback so tests can inspect the StartParams passed by the manager.
+type captureRuntime struct {
+	mu      sync.Mutex
+	nextPID int
+	stops   map[int]chan struct{}
+	onStart func(process.StartParams)
+}
+
+func newCaptureRuntime(onStart func(process.StartParams)) *captureRuntime {
+	return &captureRuntime{
+		nextPID: 20000,
+		stops:   make(map[int]chan struct{}),
+		onStart: onStart,
+	}
+}
+
+func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stops == nil {
+		c.stops = make(map[int]chan struct{})
+	}
+	if c.nextPID == 0 {
+		c.nextPID = 20000
+	}
+	pid := c.nextPID
+	c.nextPID++
+	c.stops[pid] = make(chan struct{})
+	if c.onStart != nil {
+		c.onStart(p)
+	}
+	return process.RunHandle{PID: pid}, nil
+}
+
+func (c *captureRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
+	c.mu.Lock()
+	ch, ok := c.stops[h.PID]
+	c.mu.Unlock()
+	if ok && (sig == syscall.SIGTERM || sig == syscall.SIGKILL) {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+	return nil
+}
+
+func (c *captureRuntime) Wait(_ context.Context, h process.RunHandle) error {
+	c.mu.Lock()
+	ch, ok := c.stops[h.PID]
+	c.mu.Unlock()
+	if ok {
+		<-ch
+	}
+	return nil
+}
+
+func (c *captureRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+
+func (c *captureRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+
 func lastValue(env []string, key string) string {
 	out := ""
 	prefix := key + "="
