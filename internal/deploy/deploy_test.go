@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -148,6 +150,58 @@ func TestAllocatePort_WrapAround(t *testing.T) {
 	}
 	if p2 < 20000 || p2 > 60000 {
 		t.Errorf("wrapped port out of range: %d", p2)
+	}
+}
+
+// TestAllocatePort_SkipsInUsePorts pins down the contract that motivated the
+// rewrite: a port already held by another listener (e.g. a survivor container
+// from a prior shinyhub process) must NOT be handed back. Without the bind
+// probe, a counter reset on restart would happily re-issue an in-use port and
+// the spawned app would bind-fail.
+func TestAllocatePort_SkipsInUsePorts(t *testing.T) {
+	// Reserve the next port the counter will issue.
+	deploy.SetPortCounterForTest(40000)
+	occupied := 40001
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", occupied))
+	if err != nil {
+		t.Skipf("could not bind probe port %d: %v", occupied, err)
+	}
+	defer l.Close()
+
+	got := deploy.AllocatePort()
+	if got == occupied {
+		t.Errorf("AllocatePort returned in-use port %d; expected the probe to skip it", got)
+	}
+	if got < 20000 || got > 60000 {
+		t.Errorf("port out of range: %d", got)
+	}
+}
+
+// TestAllocatePort_ConcurrentIsRaceFree verifies that concurrent allocations
+// never produce duplicates within a single burst — the property a long-lived
+// deploys-and-restarts workload depends on.
+func TestAllocatePort_ConcurrentIsRaceFree(t *testing.T) {
+	const N = 64
+	deploy.SetPortCounterForTest(45000)
+
+	results := make(chan int, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- deploy.AllocatePort()
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	seen := make(map[int]struct{}, N)
+	for p := range results {
+		if _, dup := seen[p]; dup {
+			t.Errorf("duplicate port %d returned by concurrent AllocatePort", p)
+		}
+		seen[p] = struct{}{}
 	}
 }
 

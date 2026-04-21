@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,19 +36,68 @@ var (
 	rSyncFn      = process.SyncR
 )
 
-// AllocatePort returns a unique port in the 20000–60000 range.
-// The counter wraps back to 20001 after reaching 60000.
+// AllocatePort returns an unused TCP port in the 20000–60000 range.
+//
+// Each candidate is verified with a short-lived bind on 127.0.0.1 so we never
+// hand back a port already held by a survivor process from a prior shinyhub
+// run (the counter resets to 20000 on every startup; without the probe a
+// restart could happily re-issue an in-use port and the spawned app would
+// bind-fail). On range exhaustion the counter wraps; if no probed port in
+// the range is bindable within maxAllocateProbes attempts, the OS is asked
+// for any free port via :0.
 func AllocatePort() int {
-	for {
+	for attempt := 0; attempt < maxAllocateProbes; attempt++ {
 		p := portCounter.Add(1)
-		if p <= 60000 {
+		if p > 60000 {
+			// Another goroutine may have already reset; use CompareAndSwap to
+			// let exactly one resetter win and avoid a thundering-herd reset.
+			portCounter.CompareAndSwap(p, 20000)
+			continue
+		}
+		if portIsBindable(int(p)) {
 			return int(p)
 		}
-		// Another goroutine may have already reset; use CompareAndSwap to let
-		// exactly one resetter win and avoid a thundering-herd reset loop.
-		portCounter.CompareAndSwap(p, 20000)
-		// Re-try; the next Add will land at 20001.
 	}
+	// Range fully saturated or every probe lost a race: defer to the kernel.
+	if p := osAssignedPort(); p > 0 {
+		return p
+	}
+	// Last resort: surface whatever the counter is on so the spawned process
+	// fails loudly instead of this loop spinning forever.
+	return int(portCounter.Load())
+}
+
+// maxAllocateProbes caps AllocatePort's bind-probe loop. The 20000–60000
+// range holds 40 000 candidate ports, so 1 000 attempts is generous for any
+// realistic deploy load and bounds the worst-case latency.
+const maxAllocateProbes = 1000
+
+// portIsBindable returns true if a TCP listener can be opened on
+// 127.0.0.1:port right now. The probe listener is closed immediately; the
+// caller is responsible for reserving the port via the actual app process
+// before another concurrent allocation re-probes the same value.
+func portIsBindable(port int) bool {
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+// osAssignedPort asks the kernel for any free TCP port on 127.0.0.1.
+// Returns 0 if even that fails (host is out of ephemeral ports).
+func osAssignedPort() int {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0
+	}
+	defer l.Close()
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0
+	}
+	return addr.Port
 }
 
 // Params controls a deploy operation.
