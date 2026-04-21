@@ -39,7 +39,10 @@ func Put(dataDir, rel string, body io.Reader, size int64) (FileInfo, error) {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return FileInfo{}, fmt.Errorf("mkdir data dir: %w", err)
 	}
-	dest := filepath.Join(dataDir, clean)
+	dest, err := SafeJoin(dataDir, clean)
+	if err != nil {
+		return FileInfo{}, err
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return FileInfo{}, fmt.Errorf("mkdir parent: %w", err)
 	}
@@ -156,7 +159,10 @@ func Delete(dataDir, rel string) error {
 	if err != nil {
 		return err
 	}
-	target := filepath.Join(dataDir, clean)
+	target, err := SafeJoin(dataDir, clean)
+	if err != nil {
+		return err
+	}
 	fi, err := os.Lstat(target)
 	if err != nil {
 		if os.IsNotExist(err) {
