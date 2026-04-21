@@ -272,6 +272,12 @@ func Load(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("auth.oauth_default_role: %q is not allowed; must be one of viewer, developer, operator", cfg.Auth.OAuthDefaultRole)
 	}
+	switch cfg.Runtime.Mode {
+	case "native", "docker":
+		// allowed
+	default:
+		return nil, fmt.Errorf("runtime.mode: %q is not supported; must be one of native, docker", cfg.Runtime.Mode)
+	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}

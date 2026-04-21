@@ -507,6 +507,69 @@ auth:
 	}
 }
 
+func TestRuntime_Mode_RejectsUnknownValue(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  mode: dockre
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown runtime.mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "runtime.mode") {
+		t.Fatalf("expected error mentioning runtime.mode, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "dockre") {
+		t.Fatalf("expected error to surface the offending value, got %v", err)
+	}
+}
+
+func TestRuntime_Mode_RejectsUnknownEnvValue(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_RUNTIME_MODE", "kubernetes")
+	_, err := config.Load("")
+	if err == nil {
+		t.Fatal("expected error for unknown SHINYHUB_RUNTIME_MODE, got nil")
+	}
+	if !strings.Contains(err.Error(), "runtime.mode") {
+		t.Fatalf("expected error mentioning runtime.mode, got %v", err)
+	}
+}
+
+func TestRuntime_Mode_AcceptsNative(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  mode: native
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Mode != "native" {
+		t.Errorf("Runtime.Mode = %q, want native", cfg.Runtime.Mode)
+	}
+}
+
+func TestRuntime_Mode_AcceptsDocker(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  mode: docker
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Mode != "docker" {
+		t.Errorf("Runtime.Mode = %q, want docker", cfg.Runtime.Mode)
+	}
+}
+
 func TestLoad_MaxBundleMBNegativeNormalized(t *testing.T) {
 	path := writeYAML(t, `
 auth:

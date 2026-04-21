@@ -125,9 +125,13 @@ func main() {
 		}
 		rt = dockerRT
 		slog.Info("runtime configured", "mode", "docker", "socket", cfg.Runtime.Docker.Socket)
-	default:
+	case "native":
 		rt = process.NewNativeRuntime()
 		slog.Info("runtime configured", "mode", "native")
+	default:
+		// Unreachable: config.Load validates Runtime.Mode before we get here.
+		slog.Error("unsupported runtime mode", "mode", cfg.Runtime.Mode)
+		os.Exit(1)
 	}
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	mgr.SetEnvResolver(func(slug string) ([]string, error) {
