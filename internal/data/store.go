@@ -139,11 +139,9 @@ func List(dataDir string, maxEntries int) ([]FileInfo, error) {
 	if errors.Is(err, ErrTooManyFiles) {
 		return nil, ErrTooManyFiles
 	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		// If the root itself doesn't exist, treat as empty.
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
+	// Treat a missing root as an empty result; surface every other walk error.
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
