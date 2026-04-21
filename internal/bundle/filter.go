@@ -4,6 +4,8 @@
 // server-side enforcement cannot drift.
 package bundle
 
+//go:generate go run gen.go
+
 import (
 	"path"
 	"strings"

@@ -1,6 +1,9 @@
 package bundle
 
 import (
+	"encoding/json"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -75,5 +78,19 @@ func TestDefaultRules_Stable(t *testing.T) {
 	want := []string{".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user"}
 	if strings.Join(r.CacheDirs, ",") != strings.Join(want, ",") {
 		t.Errorf("CacheDirs = %v, want %v", r.CacheDirs, want)
+	}
+}
+
+func TestRulesJSON_MatchesDefault(t *testing.T) {
+	raw, err := os.ReadFile("../ui/static/bundle-rules.json")
+	if err != nil {
+		t.Fatalf("read embedded JSON: %v", err)
+	}
+	var fromFile Rules
+	if err := json.Unmarshal(raw, &fromFile); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	if !reflect.DeepEqual(fromFile, DefaultRules()) {
+		t.Errorf("bundle-rules.json drifted from DefaultRules()\nfile = %#v\ngo   = %#v", fromFile, DefaultRules())
 	}
 }
