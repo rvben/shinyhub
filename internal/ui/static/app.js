@@ -802,6 +802,15 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('settings-modal').hidden = true;
     settingsSlug = null;
     closeEnvForm();
+    // Reset data tab state.
+    const dataForm = document.getElementById('data-upload-form');
+    if (dataForm) dataForm.reset();
+    const dataProgress = document.getElementById('data-progress');
+    if (dataProgress) dataProgress.hidden = true;
+    const dataError = document.getElementById('data-error');
+    if (dataError) setError(dataError, '');
+    const dataTbody = document.getElementById('data-list');
+    if (dataTbody) dataTbody.innerHTML = '';
     switchSettingsTab('access');
   }
 
@@ -817,8 +826,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('settings-access-panel').hidden = tabName !== 'access';
     document.getElementById('settings-env-panel').hidden = tabName !== 'env';
+    document.getElementById('settings-data-panel').hidden = tabName !== 'data';
     if (tabName === 'env' && settingsSlug) {
       refreshEnvList(settingsSlug);
+    }
+    if (tabName === 'data' && settingsSlug) {
+      refreshDataTab(settingsSlug);
     }
   }
 
@@ -956,6 +969,169 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     await refreshEnvList(slug);
+  }
+
+  // --- Data tab ---
+
+  function encodeDataPath(p) {
+    return p.split('/').map(encodeURIComponent).join('/');
+  }
+
+  async function refreshDataTab(slug) {
+    const tbody = document.getElementById('data-list');
+    tbody.innerHTML = '';
+    const errEl = document.getElementById('data-error');
+    setError(errEl, '');
+
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data`);
+    } catch {
+      setError(errEl, 'Failed to load data files.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to load data files.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+
+    let env;
+    try { env = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
+
+    const files = (env && env.files) || [];
+    const empty = document.getElementById('data-empty');
+    const table = document.getElementById('data-list-table');
+    empty.hidden = files.length > 0;
+    table.hidden = files.length === 0;
+
+    const app = state.apps.find(a => a.slug === slug);
+    const canWrite = canManageApp(state.user, app);
+    document.getElementById('data-upload-form').hidden = !canWrite;
+
+    const quotaEl = document.getElementById('data-quota');
+    if (env) {
+      const used = formatBytes(env.used_bytes || 0);
+      quotaEl.textContent = env.quota_mb
+        ? `Using ${used} of ${env.quota_mb} MiB`
+        : `Using ${used} (no quota set)`;
+    } else {
+      quotaEl.textContent = '';
+    }
+
+    for (const f of files) {
+      const tr = document.createElement('tr');
+
+      const pathTd = document.createElement('td');
+      pathTd.textContent = f.path;
+
+      const sizeTd = document.createElement('td');
+      sizeTd.textContent = formatBytes(f.size);
+
+      const modTd = document.createElement('td');
+      modTd.textContent = new Date(f.modified_at * 1000).toLocaleString();
+
+      const actTd = document.createElement('td');
+      actTd.className = 'env-actions';
+      if (canWrite) {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'env-btn-danger';
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', () => deleteDataFile(slug, f.path));
+        actTd.appendChild(delBtn);
+      }
+
+      tr.append(pathTd, sizeTd, modTd, actTd);
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function deleteDataFile(slug, path) {
+    if (!window.confirm(`Delete ${path}?`)) return;
+    const errEl = document.getElementById('data-error');
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
+    } catch {
+      setError(errEl, 'Network error.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok && resp.status !== 204) {
+      let message = 'Delete failed.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+    await refreshDataTab(slug);
+  }
+
+  function uploadDataFile(event) {
+    event.preventDefault();
+    const slug = settingsSlug;
+    if (!slug) return;
+
+    const fileInput = document.getElementById('data-file-input');
+    const destInput = document.getElementById('data-dest-input');
+    const restartInput = document.getElementById('data-restart-input');
+    const uploadBtn = document.getElementById('data-upload-btn');
+    const progressEl = document.getElementById('data-progress');
+    const errEl = document.getElementById('data-error');
+
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    const dest = destInput.value.trim() || file.name;
+    const restart = restartInput.checked;
+    const url = `/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(dest)}${restart ? '?restart=true' : ''}`;
+
+    setError(errEl, '');
+    uploadBtn.disabled = true;
+    progressEl.value = 0;
+    progressEl.hidden = false;
+
+    const xhr = new XMLHttpRequest();
+    xhr.withCredentials = true;
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-CSRF-Token', readCookie('csrf_token'));
+
+    xhr.upload.addEventListener('progress', e => {
+      if (e.lengthComputable) {
+        progressEl.value = Math.round((e.loaded / e.total) * 100);
+      }
+    });
+
+    xhr.onload = () => {
+      progressEl.hidden = true;
+      if (xhr.status >= 400) {
+        let message = `Upload failed (${xhr.status} ${xhr.statusText})`;
+        try {
+          const b = JSON.parse(xhr.responseText);
+          if (b && b.error) {
+            message = b.error;
+            if (b.used_bytes !== undefined && b.quota_bytes !== undefined) {
+              message += ` — quota: ${formatBytes(b.used_bytes + b.requested_bytes)} requested, ${formatBytes(b.quota_bytes)} limit`;
+            }
+          }
+        } catch { /* non-JSON */ }
+        setError(errEl, message);
+      } else {
+        document.getElementById('data-upload-form').reset();
+        setError(errEl, '');
+        refreshDataTab(slug);
+      }
+    };
+
+    xhr.onloadend = () => {
+      uploadBtn.disabled = false;
+      progressEl.hidden = true;
+    };
+
+    xhr.send(file);
   }
 
   async function openHistoryModal(slug) {
@@ -1161,6 +1337,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));
   document.getElementById('env-form').addEventListener('submit', submitEnvForm);
   document.getElementById('env-form-cancel').addEventListener('click', closeEnvForm);
+
+  // Data tab: upload form submit.
+  document.getElementById('data-upload-form').addEventListener('submit', uploadDataFile);
 
   document.getElementById('history-modal-close').addEventListener('click', closeHistoryModal);
   historyModal.addEventListener('click', e => {
