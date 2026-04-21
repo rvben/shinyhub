@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -256,6 +257,11 @@ func (m *Manager) execute(sched *db.Schedule, app *db.App, runID int64, trigger 
 		return
 	}
 	defer logFile.Close()
+
+	if err := m.store.SetScheduleRunLogPath(runID, logPath); err != nil {
+		slog.Warn("set schedule run log path", "run", runID, "err", err)
+		// Non-fatal — proceed with the run. The streaming endpoint will fall back gracefully.
+	}
 
 	// Build env vars, decrypting secrets.
 	envVars, err := m.store.ListAppEnvVars(app.ID)

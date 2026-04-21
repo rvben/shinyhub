@@ -6,11 +6,11 @@ import "github.com/rvben/shinyhub/internal/db"
 // can fake it without touching SQLite.
 type Store interface {
 	GetSchedule(id int64) (*db.Schedule, error)
-	GetApp(slug string) (*db.App, error)
 	GetAppByID(id int64) (*db.App, error)
 	ListAppEnvVars(appID int64) ([]db.AppEnvVar, error)
 	ListSharedDataSources(consumerAppID int64) ([]*db.SharedDataMount, error)
 	InsertScheduleRun(p db.InsertScheduleRunParams) (int64, error)
+	SetScheduleRunLogPath(runID int64, logPath string) error
 	FinishScheduleRun(p db.FinishScheduleRunParams) error
 	LogAuditEvent(p db.AuditEventParams)
 }

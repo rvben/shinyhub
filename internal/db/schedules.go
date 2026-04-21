@@ -227,6 +227,20 @@ func (s *Store) FinishScheduleRun(p FinishScheduleRunParams) error {
 	return nil
 }
 
+// SetScheduleRunLogPath updates the log_path column on a schedule_runs row.
+// Returns ErrNotFound if no row matches.
+func (s *Store) SetScheduleRunLogPath(runID int64, logPath string) error {
+	res, err := s.db.Exec(`UPDATE schedule_runs SET log_path = ? WHERE id = ?`, logPath, runID)
+	if err != nil {
+		return fmt.Errorf("set schedule run log path: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*ScheduleRun, error) {
 	rows, err := s.db.Query(`
 		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,

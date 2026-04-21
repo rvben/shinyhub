@@ -222,5 +222,34 @@ func TestScheduleRuns_FinishMissing_ReturnsErrNotFound(t *testing.T) {
 	}
 }
 
+func TestScheduleRuns_SetLogPath(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "fetch")
+	schedID, _ := store.CreateSchedule(CreateScheduleParams{
+		AppID: appID, Name: "x", CronExpr: "* * * * *",
+		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 10,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	runID, err := store.InsertScheduleRun(InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "schedule",
+		StartedAt: time.Now().UTC(), LogPath: "",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	if err := store.SetScheduleRunLogPath(runID, "/var/log/x/run-1.log"); err != nil {
+		t.Fatalf("set log path: %v", err)
+	}
+	got, _ := store.GetScheduleRun(runID)
+	if got.LogPath != "/var/log/x/run-1.log" {
+		t.Fatalf("expected /var/log/x/run-1.log, got %q", got.LogPath)
+	}
+
+	if err := store.SetScheduleRunLogPath(999, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing row, got %v", err)
+	}
+}
+
 func ptrString(s string) *string { return &s }
 func ptrBool(b bool) *bool       { return &b }

@@ -3,6 +3,7 @@ package jobs_test
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,9 +74,13 @@ type fakeStore struct {
 	envVars  []db.AppEnvVar
 	mounts   []*db.SharedDataMount
 
-	runs       map[int64]*db.ScheduleRun
-	nextRunID  int64
+	runs        map[int64]*db.ScheduleRun
+	nextRunID   int64
 	finishCalls []db.FinishScheduleRunParams
+	logPaths    []struct {
+		RunID int64
+		Path  string
+	}
 }
 
 func newFakeStore(sched *db.Schedule, app *db.App) *fakeStore {
@@ -90,13 +95,6 @@ func newFakeStore(sched *db.Schedule, app *db.App) *fakeStore {
 func (f *fakeStore) GetSchedule(id int64) (*db.Schedule, error) {
 	if f.schedule != nil && f.schedule.ID == id {
 		return f.schedule, nil
-	}
-	return nil, db.ErrNotFound
-}
-
-func (f *fakeStore) GetApp(slug string) (*db.App, error) {
-	if f.app != nil && f.app.Slug == slug {
-		return f.app, nil
 	}
 	return nil, db.ErrNotFound
 }
@@ -132,6 +130,16 @@ func (f *fakeStore) InsertScheduleRun(p db.InsertScheduleRunParams) (int64, erro
 	}
 	f.runs[id] = run
 	return id, nil
+}
+
+func (f *fakeStore) SetScheduleRunLogPath(runID int64, logPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logPaths = append(f.logPaths, struct {
+		RunID int64
+		Path  string
+	}{RunID: runID, Path: logPath})
+	return nil
 }
 
 func (f *fakeStore) FinishScheduleRun(p db.FinishScheduleRunParams) error {
@@ -300,6 +308,31 @@ func TestManager_Run_OverlapSkip_DropsConcurrent(t *testing.T) {
 	// Unblock the first run.
 	close(block)
 	waitForCalls(t, rt, 1, 2*time.Second)
+}
+
+// TestManager_Run_PersistsLogPath verifies that Manager calls SetScheduleRunLogPath
+// with a non-empty path after opening the log file for a run.
+func TestManager_Run_PersistsLogPath(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	if _, err := m.Run(1, "schedule", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	if len(st.logPaths) != 1 {
+		t.Fatalf("expected 1 SetScheduleRunLogPath call, got %d", len(st.logPaths))
+	}
+	got := st.logPaths[0].Path
+	if !strings.Contains(got, "run-") || !strings.HasSuffix(got, ".log") {
+		t.Fatalf("expected log path containing run- and ending .log, got %q", got)
+	}
 }
 
 // TestManager_Run_TimeoutMarksTimedOut verifies that when a run exceeds its
