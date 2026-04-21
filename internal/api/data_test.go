@@ -1,0 +1,330 @@
+package api_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
+)
+
+// newDataTestServer wires a Server with a custom appsDir, appDataDir, and
+// quota so data-push tests can control all three config knobs independently.
+func newDataTestServer(t *testing.T, appsDir, appDataDir string, quotaMB int) (*api.Server, *db.Store) {
+	t.Helper()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth: config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{
+			AppsDir:    appsDir,
+			AppDataDir: appDataDir,
+			AppQuotaMB: quotaMB,
+		},
+	}
+	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
+	prx := proxy.New()
+	srv := api.New(cfg, store, mgr, prx)
+	t.Cleanup(func() { _ = store.Close() })
+	return srv, store
+}
+
+// seedOwnerAndApp creates a user and an app owned by that user. It returns the
+// user and a JWT token that can be used in requests.
+func seedOwnerAndApp(t *testing.T, store *db.Store, username, slug string) (*db.User, string) {
+	t.Helper()
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: username, PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	u, err := store.GetUserByUsername(username)
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID}); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	token, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	if err != nil {
+		t.Fatalf("IssueJWT: %v", err)
+	}
+	return u, token
+}
+
+// dataPutReq builds a PUT /api/apps/{slug}/data/{rel} request with the given body.
+func dataPutReq(t *testing.T, slug, rel string, body []byte, token string) *http.Request {
+	t.Helper()
+	path := "/api/apps/" + slug + "/data/" + rel
+	req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.ContentLength = int64(len(body))
+	return req
+}
+
+// TestDataPut_HappyPath verifies that an owner can push a file, the response
+// JSON is correct, and the file lands on disk with the expected content.
+func TestDataPut_HappyPath(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	content := []byte("hello world")
+	req := dataPutReq(t, "demo", "seed.txt", content, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Path      string `json:"path"`
+		Size      int64  `json:"size"`
+		SHA256    string `json:"sha256"`
+		Restarted bool   `json:"restarted"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Path != "seed.txt" {
+		t.Errorf("path = %q, want %q", resp.Path, "seed.txt")
+	}
+	if resp.Size != int64(len(content)) {
+		t.Errorf("size = %d, want %d", resp.Size, len(content))
+	}
+	if resp.SHA256 == "" {
+		t.Error("sha256 should not be empty")
+	}
+	if resp.Restarted {
+		t.Error("restarted should be false (app is stopped)")
+	}
+
+	// Verify file is on disk.
+	dest := filepath.Join(dataDir, "demo", "seed.txt")
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read file on disk: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("disk content = %q, want %q", got, content)
+	}
+}
+
+// TestDataPut_MissingContentLength verifies that chunked requests (no known
+// Content-Length) are rejected with 411 Length Required.
+func TestDataPut_MissingContentLength(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	req := httptest.NewRequest(http.MethodPut, "/api/apps/demo/data/file.txt",
+		strings.NewReader("some content"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusLengthRequired {
+		t.Fatalf("expected 411, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataPut_PathTraversal verifies that a path containing ".." is rejected
+// with 400 Bad Request.
+func TestDataPut_PathTraversal(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	// Use URL-encoded traversal attempt.
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/apps/demo/data/..%2Fetc%2Fpasswd",
+		strings.NewReader("bad"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.ContentLength = 3
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataPut_ReservedPrefix verifies that paths starting with ".shinyhub-"
+// are rejected with 400 Bad Request.
+func TestDataPut_ReservedPrefix(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/apps/demo/data/.shinyhub-evil",
+		strings.NewReader("bad"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.ContentLength = 3
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataPut_QuotaOverwriteAware exercises the overwrite-aware quota logic:
+//   - a.bin (900 KiB) → 200 OK
+//   - b.bin (200 KiB) → 413 (would exceed 1 MiB cap)
+//   - overwrite a.bin with 50 KiB → 200 OK (replaces existing, stays under cap)
+func TestDataPut_QuotaOverwriteAware(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 1) // 1 MiB cap
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	send := func(t *testing.T, rel string, sizeBytes int) int {
+		t.Helper()
+		body := bytes.Repeat([]byte("x"), sizeBytes)
+		req := dataPutReq(t, "demo", rel, body, token)
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	const KiB = 1024
+
+	// First write: 900 KiB → should succeed.
+	if code := send(t, "a.bin", 900*KiB); code != http.StatusOK {
+		t.Fatalf("a.bin (900 KiB): expected 200, got %d", code)
+	}
+
+	// Second write: 200 KiB → 900+200=1100 KiB > 1024 KiB quota → should fail.
+	if code := send(t, "b.bin", 200*KiB); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("b.bin (200 KiB): expected 413, got %d", code)
+	}
+
+	// Overwrite a.bin with 50 KiB → (900-900)+50=50 KiB → should succeed.
+	if code := send(t, "a.bin", 50*KiB); code != http.StatusOK {
+		t.Fatalf("overwrite a.bin (50 KiB): expected 200, got %d", code)
+	}
+}
+
+// TestDataPut_StrangerRejected verifies that a non-owner non-member receives
+// 404 (requireManageApp calls requireViewApp which returns 404 for strangers,
+// to avoid leaking slug existence).
+func TestDataPut_StrangerRejected(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	// Create the app owned by "owner".
+	seedOwnerAndApp(t, store, "owner", "demo")
+
+	// Create a separate user "stranger" with no access.
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: hash, Role: "developer"})
+	stranger, _ := store.GetUserByUsername("stranger")
+	strangerToken, _ := auth.IssueJWT(stranger.ID, stranger.Username, stranger.Role, "test-secret")
+
+	req := dataPutReq(t, "demo", "file.txt", []byte("data"), strangerToken)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	// requireManageApp → requireViewApp returns 404 for strangers on
+	// non-public/non-shared apps, to avoid leaking slug existence.
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataPut_AuditRecorded verifies that a successful push produces exactly
+// one "data.push" audit event whose Detail JSON contains the expected path.
+func TestDataPut_AuditRecorded(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	content := []byte("hello world")
+	req := dataPutReq(t, "demo", "seed.txt", content, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	events, err := store.ListAuditEvents(10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+
+	var found []db.AuditEvent
+	for _, e := range events {
+		if e.Action == db.AuditDataPush {
+			found = append(found, e)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected 1 data.push audit event, got %d", len(found))
+	}
+
+	var detail struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(found[0].Detail), &detail); err != nil {
+		t.Fatalf("parse audit detail JSON: %v", err)
+	}
+	if detail.Path != "seed.txt" {
+		t.Errorf("audit detail path = %q, want %q", detail.Path, "seed.txt")
+	}
+}
+
+// TestDataPut_ZeroContentLength verifies that Content-Length: 0 is rejected
+// with 411 Length Required.
+func TestDataPut_ZeroContentLength(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	req := httptest.NewRequest(http.MethodPut, "/api/apps/demo/data/file.txt", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.ContentLength = 0
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusLengthRequired {
+		t.Fatalf("expected 411, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
