@@ -329,11 +329,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, err := readBundleUpload(w, r, maxBundleUploadSize)
+	maxSize := maxBundleUploadSize
+	if cap := int64(s.cfg.Storage.MaxBundleMB); cap > 0 {
+		maxSize = cap * 1024 * 1024
+	}
+	file, err := readBundleUpload(w, r, maxSize)
 	if err != nil {
 		switch err {
 		case errBundleTooLarge:
-			writeError(w, http.StatusRequestEntityTooLarge, "bundle exceeds 128 MiB limit")
+			capMB := s.cfg.Storage.MaxBundleMB
+			if capMB == 0 {
+				capMB = 128
+			}
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("bundle exceeds %d MiB cap", capMB))
 		case errBundleMissing:
 			writeError(w, http.StatusBadRequest, "bundle file required")
 		default:
