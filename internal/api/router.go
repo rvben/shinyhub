@@ -12,6 +12,8 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/jobs"
+	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -31,6 +33,8 @@ type Server struct {
 	deployLimiter *keyedRateLimiter
 	userLimiter   *keyedRateLimiter
 	tokenLimiter  *keyedRateLimiter
+	jobs       *jobs.Manager
+	scheduler  *scheduler.Scheduler
 	secretsKey    []byte
 	router        http.Handler
 	deployRun     func(deploy.Params) (*deploy.PoolResult, error)
@@ -92,6 +96,13 @@ func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
 // SetSecretsKey sets the AES-256 key used to decrypt per-app secret env vars.
 // Must be called before the server begins handling requests.
 func (s *Server) SetSecretsKey(k []byte) { s.secretsKey = k }
+
+// SetJobs wires the schedule-runner and the cron scheduler into the API server.
+// Must be called before the server begins handling requests.
+func (s *Server) SetJobs(j *jobs.Manager, sc *scheduler.Scheduler) {
+	s.jobs = j
+	s.scheduler = sc
+}
 
 // SetDeployRunForTest replaces the deploy.Run hook used by maybeRestartForChange.
 // Must be called before the server begins handling requests; intended for tests.

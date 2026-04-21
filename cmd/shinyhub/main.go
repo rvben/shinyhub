@@ -21,7 +21,9 @@ import (
 	"github.com/rvben/shinyhub/internal/data"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle"
+	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/logging"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
@@ -218,6 +220,19 @@ func main() {
 		close(watcherDone)
 	}()
 
+	jobsMgr := jobs.NewManager(rt, store, secretsKey, cfg.Storage.AppsDir, cfg.Storage.AppDataDir)
+	sched := scheduler.New(jobsMgr, store)
+
+	schedCtx, cancelSched := context.WithCancel(context.Background())
+	defer cancelSched()
+	if err := sched.Start(schedCtx); err != nil {
+		slog.Error("start scheduler", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("scheduler started")
+
+	srv.SetJobs(jobsMgr, sched)
+
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiTimeoutHandler(srv.Router()))
 	emptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked)(prx)
@@ -298,6 +313,7 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http shutdown", "err", err)
 	}
+	cancelSched()
 	cancelWatcher()
 	<-watcherDone
 	slog.Info("shutdown complete")
