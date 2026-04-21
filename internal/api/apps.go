@@ -425,7 +425,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if cap := int64(s.cfg.Storage.MaxBundleMB); cap > 0 {
 		maxSize = cap * 1024 * 1024
 	}
-	file, err := readBundleUpload(w, r, maxSize)
+	file, cleanup, err := readBundleUpload(w, r, maxSize)
+	defer cleanup()
 	if err != nil {
 		switch err {
 		case errBundleTooLarge:
@@ -441,7 +442,6 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	defer file.Close()
 
 	// Compute paths up front so a single defer can clean up the on-disk
 	// artefacts on any failure path before the deploy is committed.
