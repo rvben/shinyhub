@@ -242,6 +242,8 @@
           <button type="button" class="settings-tab active" role="tab" aria-selected="true" aria-controls="settings-access-panel" data-tab="access">Access</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-env-panel" data-tab="env">Environment</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-data-panel" data-tab="data">Data</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-schedules-panel" data-tab="schedules">Schedules</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-shared-data-panel" data-tab="shared-data">Shared data</button>
         </div>
         <div class="modal-body">
           <section id="settings-access-panel" class="settings-tab-panel" role="tabpanel">
@@ -344,6 +346,18 @@
               </div>
             </form>
           </section>
+
+          <section id="settings-schedules-panel" class="settings-tab-panel" role="tabpanel" hidden>
+            <p class="settings-help">Cron-style jobs that run as short-lived processes against this app's bundle. Runs do not wake a hibernated app.</p>
+            <div id="schedules-list" class="schedules-table"></div>
+            <button type="button" class="btn-primary" id="schedules-add-btn">+ Add schedule</button>
+          </section>
+
+          <section id="settings-shared-data-panel" class="settings-tab-panel" role="tabpanel" hidden>
+            <p class="settings-help">Mount another app's persistent data dir read-only at <code>data/shared/&lt;slug&gt;/</code>.</p>
+            <div id="shared-data-list" class="shared-data-table"></div>
+            <button type="button" class="btn-primary" id="shared-data-add-btn">+ Mount data from another app</button>
+          </section>
         </div>
       </div>
     </div>
@@ -416,6 +430,46 @@
         </div>
         <div class="modal-body">
           <ul id="history-list"></ul>
+        </div>
+      </div>
+    </div>
+    <!-- Schedule add/edit modal -->
+    <div class="modal-overlay" id="schedule-form-modal" hidden
+         role="dialog" aria-modal="true" aria-labelledby="schedule-form-title">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="schedule-form-title" class="modal-title">Add schedule</h2>
+          <button id="schedule-form-close" type="button" aria-label="Close schedule form">×</button>
+        </div>
+        <div class="modal-body">
+          <form id="schedule-form">
+            <label for="sched-name">Name</label>
+            <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
+            <label for="sched-cron">Cron expression</label>
+            <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off">
+            <div id="cron-preview" class="hint"></div>
+            <label for="sched-command">Command (one token per line)</label>
+            <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py"></textarea>
+            <label for="sched-timeout">Timeout (seconds)</label>
+            <input id="sched-timeout" name="timeout_seconds" type="number" min="1" max="86400" value="3600">
+            <label for="sched-overlap">Overlap policy</label>
+            <select id="sched-overlap" name="overlap_policy">
+              <option value="skip">skip (default)</option>
+              <option value="queue">queue (1-deep)</option>
+              <option value="concurrent">concurrent</option>
+            </select>
+            <label for="sched-missed">Missed-run policy</label>
+            <select id="sched-missed" name="missed_policy">
+              <option value="skip">skip</option>
+              <option value="run_once">run once on startup</option>
+            </select>
+            <label><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
+            <p id="schedule-form-error" class="error" hidden></p>
+            <div class="modal-actions">
+              <button type="button" class="env-btn-secondary" id="schedule-form-cancel">Cancel</button>
+              <button type="submit" class="btn-primary">Save</button>
+            </div>
+          </form>
         </div>
       </div>
     </div>

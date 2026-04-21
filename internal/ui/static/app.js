@@ -827,11 +827,19 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('settings-access-panel').hidden = tabName !== 'access';
     document.getElementById('settings-env-panel').hidden = tabName !== 'env';
     document.getElementById('settings-data-panel').hidden = tabName !== 'data';
+    document.getElementById('settings-schedules-panel').hidden = tabName !== 'schedules';
+    document.getElementById('settings-shared-data-panel').hidden = tabName !== 'shared-data';
     if (tabName === 'env' && settingsSlug) {
       refreshEnvList(settingsSlug);
     }
     if (tabName === 'data' && settingsSlug) {
       refreshDataTab(settingsSlug);
+    }
+    if (tabName === 'schedules' && settingsSlug) {
+      loadSchedules(settingsSlug);
+    }
+    if (tabName === 'shared-data' && settingsSlug) {
+      loadSharedData(settingsSlug);
     }
   }
 
@@ -2144,6 +2152,355 @@ document.addEventListener('DOMContentLoaded', () => {
     if (card) card.scrollIntoView({behavior: 'smooth', block: 'center'});
     openDeployModal(app);
   }
+
+  // --- Schedules + Shared Data ---
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  }
+
+  function flashToast(msg) {
+    const t = document.createElement('div');
+    t.className = 'toast';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('show'));
+    setTimeout(() => {
+      t.classList.remove('show');
+      setTimeout(() => t.remove(), 200);
+    }, 2000);
+  }
+
+  // Cron preview helpers.
+  function parseCronField(s, max) {
+    const [base, stepStr] = s.split('/');
+    const step = stepStr ? parseInt(stepStr, 10) : 1;
+    if (base === '*') {
+      const out = [];
+      for (let i = 0; i <= max; i += step) out.push(i);
+      return out;
+    }
+    if (base.includes(',')) return base.split(',').flatMap(part => parseCronField(part, max));
+    if (base.includes('-')) {
+      const [a, b] = base.split('-').map(Number);
+      const out = [];
+      for (let i = a; i <= b; i += step) out.push(i);
+      return out;
+    }
+    return [parseInt(base, 10)];
+  }
+
+  function nextCronFires(expr, count) {
+    const fields = expr.trim().split(/\s+/);
+    if (fields.length !== 5) throw new Error('expected 5 fields');
+    const min = parseCronField(fields[0], 59);
+    const hr  = parseCronField(fields[1], 23);
+    const dom = parseCronField(fields[2], 31);
+    const mon = parseCronField(fields[3], 12);
+    const dow = parseCronField(fields[4], 6);
+    const out = [];
+    const t = new Date();
+    t.setSeconds(0); t.setMilliseconds(0);
+    t.setMinutes(t.getMinutes() + 1);
+    for (let i = 0; i < 60 * 24 * 366 && out.length < count; i++) {
+      if (min.includes(t.getMinutes()) && hr.includes(t.getHours())
+          && dom.includes(t.getDate()) && mon.includes(t.getMonth() + 1)
+          && dow.includes(t.getDay())) {
+        out.push(new Date(t));
+      }
+      t.setMinutes(t.getMinutes() + 1);
+    }
+    return out;
+  }
+
+  function updateCronPreview(expr) {
+    const el = document.getElementById('cron-preview');
+    if (!el) return;
+    if (!expr.trim()) { el.textContent = ''; return; }
+    try {
+      const fires = nextCronFires(expr, 3);
+      if (fires.length === 0) {
+        el.textContent = 'No fires found in next year';
+      } else {
+        el.textContent = 'Next: ' + fires.map(d => d.toLocaleString()).join(' · ');
+      }
+    } catch {
+      el.textContent = 'Invalid cron expression';
+    }
+  }
+
+  // Load and render the schedules list for a given app slug.
+  async function loadSchedules(slug) {
+    const container = document.getElementById('schedules-list');
+    if (!container) return;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/schedules`);
+    } catch {
+      container.innerHTML = '<p class="error">Failed to load schedules.</p>';
+      return;
+    }
+    if (!resp.ok) {
+      container.innerHTML = '<p class="error">Failed to load schedules.</p>';
+      return;
+    }
+    const schedules = await resp.json();
+    if (schedules.length === 0) {
+      container.innerHTML = '<p class="env-empty">No schedules configured for this app.</p>';
+      return;
+    }
+    const rows = schedules.map(s => `
+      <tr>
+        <td>${escapeHtml(s.name)}</td>
+        <td><code>${escapeHtml(s.cron_expr)}</code></td>
+        <td>${escapeHtml((s.command || []).join(' '))}</td>
+        <td><span class="status-pill ${s.enabled ? 'status-on' : 'status-off'}">${s.enabled ? 'on' : 'off'}</span></td>
+        <td>${s.next_fire ? new Date(s.next_fire).toLocaleString() : '—'}</td>
+        <td class="table-actions">
+          <button type="button" class="env-btn-secondary" data-action="history" data-id="${s.id}">History</button>
+          <button type="button" class="env-btn-secondary" data-action="run" data-id="${s.id}">Run now</button>
+          <button type="button" class="env-btn-secondary" data-action="edit" data-schedule='${escapeHtml(JSON.stringify(s))}'>Edit</button>
+          <button type="button" class="btn-danger-sm" data-action="delete" data-id="${s.id}" data-name="${escapeHtml(s.name)}">Delete</button>
+        </td>
+      </tr>`).join('');
+    container.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Name</th><th>Cron</th><th>Command</th><th>Status</th><th>Next fire</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+
+    container.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        const id = parseInt(btn.dataset.id, 10);
+        if (action === 'run') runScheduleNow(slug, id);
+        else if (action === 'delete') deleteSchedule(slug, id, btn.dataset.name);
+        else if (action === 'history') openScheduleHistory(slug, id);
+        else if (action === 'edit') {
+          const s = JSON.parse(btn.dataset.schedule);
+          openScheduleForm(slug, s);
+        }
+      });
+    });
+  }
+
+  // Load and render the shared-data mounts list.
+  async function loadSharedData(slug) {
+    const container = document.getElementById('shared-data-list');
+    if (!container) return;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data`);
+    } catch {
+      container.innerHTML = '<p class="error">Failed to load shared data mounts.</p>';
+      return;
+    }
+    if (!resp.ok) {
+      container.innerHTML = '<p class="error">Failed to load shared data mounts.</p>';
+      return;
+    }
+    const mounts = await resp.json();
+    if (mounts.length === 0) {
+      container.innerHTML = '<p class="env-empty">No shared data mounts configured.</p>';
+      return;
+    }
+    const items = mounts.map(m => `
+      <li>
+        <span>data/shared/<strong>${escapeHtml(m.source_slug)}</strong>/</span>
+        <button type="button" class="btn-danger-sm" data-action="revoke" data-slug="${escapeHtml(m.source_slug)}">Unmount</button>
+      </li>`).join('');
+    container.innerHTML = `<ul class="shared-data-list">${items}</ul>`;
+
+    container.querySelectorAll('[data-action="revoke"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const sourceSlug = btn.dataset.slug;
+        if (!confirm(`Unmount data from "${sourceSlug}"?`)) return;
+        const r = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data/${encodeURIComponent(sourceSlug)}`, {
+          method: 'DELETE',
+        });
+        if (!r.ok) { flashToast('Unmount failed: ' + await r.text()); return; }
+        await loadSharedData(slug);
+      });
+    });
+  }
+
+  // Open the schedule add/edit form modal.
+  function openScheduleForm(slug, existing) {
+    const modal = document.getElementById('schedule-form-modal');
+    const title = document.getElementById('schedule-form-title');
+    const form = document.getElementById('schedule-form');
+    const errEl = document.getElementById('schedule-form-error');
+    if (!modal || !form) return;
+
+    title.textContent = existing ? 'Edit schedule' : 'Add schedule';
+    form.reset();
+    setError(errEl, '');
+
+    if (existing) {
+      document.getElementById('sched-name').value = existing.name || '';
+      document.getElementById('sched-cron').value = existing.cron_expr || '';
+      document.getElementById('sched-command').value = (existing.command || []).join('\n');
+      document.getElementById('sched-timeout').value = existing.timeout_seconds || 3600;
+      document.getElementById('sched-overlap').value = existing.overlap_policy || 'skip';
+      document.getElementById('sched-missed').value = existing.missed_policy || 'skip';
+      document.getElementById('sched-enabled').checked = existing.enabled !== false;
+    }
+    updateCronPreview(document.getElementById('sched-cron').value);
+    modal.hidden = false;
+
+    // Replace the submit handler to capture the current slug/existing binding.
+    const newForm = form.cloneNode(true);
+    form.parentNode.replaceChild(newForm, form);
+
+    // Re-attach cron preview input listener and cancel button.
+    newForm.querySelector('#sched-cron').addEventListener('input', e => updateCronPreview(e.target.value));
+    newForm.querySelector('#schedule-form-cancel')?.addEventListener('click', closeScheduleForm);
+
+    newForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const name = newForm.querySelector('#sched-name').value.trim();
+      const cronExpr = newForm.querySelector('#sched-cron').value.trim();
+      const command = newForm.querySelector('#sched-command').value.split('\n').map(l => l.trim()).filter(Boolean);
+      const timeoutSeconds = parseInt(newForm.querySelector('#sched-timeout').value, 10);
+      const overlapPolicy = newForm.querySelector('#sched-overlap').value;
+      const missedPolicy = newForm.querySelector('#sched-missed').value;
+      const enabled = newForm.querySelector('#sched-enabled').checked;
+
+      const newErrEl = document.getElementById('schedule-form-error');
+      setError(newErrEl, '');
+
+      const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled});
+      let r;
+      if (existing) {
+        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${existing.id}`, {
+          method: 'PATCH',
+          headers: {'Content-Type': 'application/json'},
+          body,
+        });
+      } else {
+        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body,
+        });
+      }
+      if (!r.ok) {
+        const msg = await r.text().catch(() => 'Request failed');
+        setError(newErrEl, msg);
+        return;
+      }
+      closeScheduleForm();
+      await loadSchedules(slug);
+    });
+  }
+
+  function closeScheduleForm() {
+    const modal = document.getElementById('schedule-form-modal');
+    if (modal) modal.hidden = true;
+  }
+
+  async function runScheduleNow(slug, id) {
+    const r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}/run`, {method: 'POST'});
+    if (!r.ok) {
+      flashToast('Run failed: ' + await r.text().catch(() => 'error'));
+      return;
+    }
+    flashToast('Schedule started.');
+    await loadSchedules(slug);
+  }
+
+  async function deleteSchedule(slug, id, name) {
+    if (!confirm(`Delete schedule "${name}"?`)) return;
+    const r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}`, {method: 'DELETE'});
+    if (!r.ok) {
+      flashToast('Delete failed: ' + await r.text().catch(() => 'error'));
+      return;
+    }
+    await loadSchedules(slug);
+  }
+
+  // Open the log pane showing the run history for a schedule.
+  async function openScheduleHistory(slug, schedID) {
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${schedID}/runs`);
+    } catch {
+      return;
+    }
+    if (!resp.ok) return;
+    const runs = await resp.json();
+
+    // Reuse existing log pane infrastructure.
+    if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+    logPaneTitle.textContent = 'Run history';
+    logPaneBody.innerHTML = '';
+    setHidden(logPane, false);
+
+    if (!runs || runs.length === 0) {
+      logPaneBody.textContent = 'No runs yet.';
+      return;
+    }
+
+    const ul = document.createElement('ul');
+    ul.className = 'run-history-list';
+    runs.forEach(run => {
+      const li = document.createElement('li');
+      const started = run.StartedAt ? new Date(run.StartedAt).toLocaleString() : '—';
+      const status = run.Status || '—';
+      const exit = run.ExitCode != null ? ` · exit ${run.ExitCode}` : '';
+      li.innerHTML = `<button type="button" class="run-history-btn">${escapeHtml(started)} · <strong>${escapeHtml(status)}</strong>${escapeHtml(exit)}</button>`;
+      li.querySelector('button').addEventListener('click', () => {
+        openScheduleRunLogs(slug, schedID, run.ID);
+      });
+      ul.appendChild(li);
+    });
+    logPaneBody.appendChild(ul);
+  }
+
+  // Stream logs for a specific schedule run into the log pane.
+  function openScheduleRunLogs(slug, schedID, runID) {
+    if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+    logPaneTitle.textContent = `Run #${runID} logs`;
+    logPaneBody.textContent = '';
+    setHidden(logPane, false);
+
+    const url = `/api/apps/${encodeURIComponent(slug)}/schedules/${schedID}/runs/${runID}/logs`;
+    const es = new EventSource(url);
+    activeEventSource = es;
+    es.onmessage = e => {
+      const line = document.createElement('div');
+      line.textContent = e.data;
+      logPaneBody.appendChild(line);
+      logPaneBody.scrollTop = logPaneBody.scrollHeight;
+    };
+    es.onerror = () => { es.close(); activeEventSource = null; };
+  }
+
+  // Wire the Schedules and Shared Data buttons.
+  document.getElementById('schedules-add-btn')?.addEventListener('click', () => {
+    if (settingsSlug) openScheduleForm(settingsSlug, null);
+  });
+
+  document.getElementById('shared-data-add-btn')?.addEventListener('click', async () => {
+    if (!settingsSlug) return;
+    const sourceSlug = (prompt('Source app slug to mount read-only:') || '').trim();
+    if (!sourceSlug) return;
+    const r = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/shared-data`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source_slug: sourceSlug}),
+    });
+    if (!r.ok) { alert('Mount failed: ' + await r.text()); return; }
+    await loadSharedData(settingsSlug);
+  });
+
+  // Wire the schedule form close button and overlay-click dismiss.
+  document.getElementById('schedule-form-close')?.addEventListener('click', closeScheduleForm);
+  document.getElementById('schedule-form-modal')?.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeScheduleForm();
+  });
 
   initialize();
 });
