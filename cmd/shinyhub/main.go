@@ -333,6 +333,7 @@ func main() {
 		slog.Warn("http shutdown", "err", err)
 	}
 	cancelSched()
+	sched.Stop()
 	cancelWatcher()
 	<-watcherDone
 	slog.Info("shutdown complete")
