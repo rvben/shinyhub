@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -163,22 +164,16 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	return info, nil
 }
 
-// Stop signals the process to stop and waits for it to exit.
+// StopReplica signals a single replica to stop and waits for it to exit.
 // If the process does not exit within 5 seconds, SIGKILL is sent.
-func (m *Manager) Stop(slug string) error {
+func (m *Manager) StopReplica(slug string, index int) error {
 	m.mu.Lock()
 	pool := m.entries[slug]
-	var e *entry
-	for _, candidate := range pool {
-		if candidate != nil {
-			e = candidate
-			break
-		}
-	}
-	if e == nil {
+	if index >= len(pool) || pool[index] == nil {
 		m.mu.Unlock()
-		return fmt.Errorf("app %s not found", slug)
+		return fmt.Errorf("app %s replica %d not found", slug, index)
 	}
+	e := pool[index]
 	done := e.done
 	handle := e.handle
 	e.stopped = true
@@ -187,7 +182,6 @@ func (m *Manager) Stop(slug string) error {
 	if err := m.runtime.Signal(handle, syscall.SIGTERM); err != nil {
 		return fmt.Errorf("sigterm: %w", err)
 	}
-
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -196,38 +190,128 @@ func (m *Manager) Stop(slug string) error {
 	}
 
 	m.mu.Lock()
-	delete(m.entries, slug)
+	pool = m.entries[slug]
+	if index < len(pool) {
+		pool[index] = nil
+	}
+	for len(pool) > 0 && pool[len(pool)-1] == nil {
+		pool = pool[:len(pool)-1]
+	}
+	if len(pool) == 0 {
+		delete(m.entries, slug)
+	} else {
+		m.entries[slug] = pool
+	}
 	m.mu.Unlock()
 	return nil
 }
 
-// Status returns a snapshot of the ProcessInfo for the given slug.
+// Stop signals all replicas for a slug to stop in parallel and waits for all to exit.
+func (m *Manager) Stop(slug string) error {
+	m.mu.Lock()
+	pool := m.entries[slug]
+	indices := make([]int, 0, len(pool))
+	for i, e := range pool {
+		if e != nil {
+			indices = append(indices, i)
+		}
+	}
+	m.mu.Unlock()
+
+	if len(indices) == 0 {
+		return fmt.Errorf("app %s not running", slug)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(indices))
+	for _, i := range indices {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := m.StopReplica(slug, i); err != nil {
+				errs <- fmt.Errorf("replica %d: %w", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	var combined []error
+	for e := range errs {
+		combined = append(combined, e)
+	}
+	if len(combined) > 0 {
+		return errors.Join(combined...)
+	}
+	return nil
+}
+
+// Status returns the first running replica, or a synthetic stopped record.
+// Callers that need per-replica info should use AllForSlug.
 func (m *Manager) Status(slug string) (*ProcessInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, e := range m.entries[slug] {
-		if e != nil {
-			snapshot := *e.info
-			return &snapshot, nil
+		if e != nil && e.info.Status == StatusRunning {
+			snap := *e.info
+			return &snap, nil
 		}
 	}
 	return &ProcessInfo{Slug: slug, Status: StatusStopped}, nil
 }
 
-// All returns a snapshot of all tracked ProcessInfo entries.
+// All returns a snapshot of all tracked ProcessInfo entries across all slugs.
 func (m *Manager) All() []*ProcessInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*ProcessInfo, 0)
+	out := []*ProcessInfo{}
 	for _, pool := range m.entries {
 		for _, e := range pool {
 			if e != nil {
-				snapshot := *e.info
-				out = append(out, &snapshot)
+				snap := *e.info
+				out = append(out, &snap)
 			}
 		}
 	}
 	return out
+}
+
+// AllForSlug returns per-replica info for one slug, preserving index order.
+// Slots for down replicas are nil.
+func (m *Manager) AllForSlug(slug string) []*ProcessInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pool := m.entries[slug]
+	out := make([]*ProcessInfo, len(pool))
+	for i, e := range pool {
+		if e != nil {
+			snap := *e.info
+			out[i] = &snap
+		}
+	}
+	return out
+}
+
+// GetReplica returns a snapshot of the ProcessInfo for a specific replica.
+func (m *Manager) GetReplica(slug string, index int) (*ProcessInfo, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pool := m.entries[slug]
+	if index >= len(pool) || pool[index] == nil {
+		return nil, false
+	}
+	snap := *pool[index].info
+	return &snap, true
+}
+
+// HandleReplica returns the RunHandle for a specific replica, or false if not tracked.
+func (m *Manager) HandleReplica(slug string, index int) (RunHandle, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pool := m.entries[slug]
+	if index >= len(pool) || pool[index] == nil {
+		return RunHandle{}, false
+	}
+	return pool[index].handle, true
 }
 
 // Adopt re-registers a process that was not started by this Manager instance
