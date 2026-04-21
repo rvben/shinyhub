@@ -168,19 +168,19 @@ func main() {
 		slog.Info("oidc configured", "display_name", cfg.OAuth.OIDC.DisplayName, "issuer", cfg.OAuth.OIDC.IssuerURL)
 	}
 
-	deployFn := func(slug, bundleDir string) (*deploy.Result, error) {
+	deployFn := func(slug, bundleDir string, index int) (*deploy.Result, error) {
 		app, err := store.GetApp(slug)
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
-		return deploy.Run(deploy.Params{
+		return deploy.RunReplica(deploy.Params{
 			Slug:            slug,
 			BundleDir:       bundleDir,
 			Manager:         mgr,
 			Proxy:           prx,
 			MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
 			CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
-		})
+		}, index)
 	}
 
 	lcCfg := lifecycle.Config{

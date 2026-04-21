@@ -62,8 +62,8 @@ func TestHandleLogs_SSEInitialBurst(t *testing.T) {
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
 
-	// Pre-populate log file
-	logPath := filepath.Join(appsDir, "myapp", "app.log")
+	// Pre-populate log file for replica 0 (the default).
+	logPath := filepath.Join(appsDir, "myapp", "app-0.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
 		t.Fatal(err)
 	}

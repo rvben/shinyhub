@@ -10,8 +10,31 @@ import (
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/process"
 )
+
+// newManagerTestServer creates a test server with a real in-memory process manager.
+func newManagerTestServer(t *testing.T) (*api.Server, *db.Store, *process.Manager) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir},
+	}
+	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
+	srv := api.New(cfg, store, mgr, nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store, mgr
+}
 
 func authedRequest(t *testing.T, method, path string, body []byte, token string) *http.Request {
 	t.Helper()
@@ -500,9 +523,7 @@ func TestStopApp(t *testing.T) {
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "running-app", Name: "Running App", OwnerID: u.ID})
 	// Simulate a running status.
-	port := 8181
-	pid := 12345
-	store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "running-app", Status: "running", Port: &port, PID: &pid})
+	store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "running-app", Status: "running"})
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 
 	req := authedRequest(t, "POST", "/api/apps/running-app/stop", nil, token)
@@ -836,8 +857,9 @@ func TestPatchAppResourceLimits(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr = httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr, req)
-	var app map[string]any
-	json.NewDecoder(rr.Body).Decode(&app)
+	var getResp map[string]any
+	json.NewDecoder(rr.Body).Decode(&getResp)
+	app := getResp["app"].(map[string]any)
 	if app["memory_limit_mb"] != float64(256) {
 		t.Errorf("expected memory_limit_mb=256, got %v", app["memory_limit_mb"])
 	}
@@ -873,8 +895,9 @@ func TestPatchAppResourceLimitsClear(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr, req)
-	var app map[string]any
-	json.NewDecoder(rr.Body).Decode(&app)
+	var getResp map[string]any
+	json.NewDecoder(rr.Body).Decode(&getResp)
+	app := getResp["app"].(map[string]any)
 	if app["memory_limit_mb"] != nil {
 		t.Errorf("expected null memory_limit_mb after clear, got %v", app["memory_limit_mb"])
 	}
@@ -902,5 +925,59 @@ func TestCreateApp_DuplicateSlug(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAppsAPI_GetIncludesReplicasStatus verifies that GET /api/apps/:slug returns
+// a wrapped response with both "app" and "replicas_status" fields.
+// Live manager state is merged into the DB rows when the manager is populated.
+func TestAppsAPI_GetIncludesReplicasStatus(t *testing.T) {
+	srv, store, mgr := newManagerTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("demo")
+
+	// Upsert two replica DB rows.
+	pid0, port0 := 111, 20001
+	pid1, port1 := 222, 20002
+	store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, PID: &pid0, Port: &port0, Status: "running"})
+	store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 1, PID: &pid1, Port: &port1, Status: "running"})
+
+	// Inject live state into the manager for one replica so the merge is exercised.
+	mgr.ForceEntry("demo", process.ProcessInfo{Slug: "demo", Index: 0, PID: 111, Port: 20001, Status: process.StatusRunning})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/demo", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		App            *db.App       `json:"app"`
+		ReplicasStatus []*db.Replica `json:"replicas_status"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.App == nil {
+		t.Fatal("expected app in response, got nil")
+	}
+	if body.App.Slug != "demo" {
+		t.Errorf("app.slug = %q, want %q", body.App.Slug, "demo")
+	}
+	if len(body.ReplicasStatus) != 2 {
+		t.Fatalf("want 2 replicas_status entries, got %d", len(body.ReplicasStatus))
+	}
+	// Replica 0: live state should be merged in.
+	if body.ReplicasStatus[0].Status != "running" {
+		t.Errorf("replica 0 status = %q, want running", body.ReplicasStatus[0].Status)
+	}
+	if body.ReplicasStatus[0].PID == nil || *body.ReplicasStatus[0].PID != 111 {
+		t.Errorf("replica 0 PID = %v, want 111", body.ReplicasStatus[0].PID)
 	}
 }

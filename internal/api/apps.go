@@ -123,7 +123,31 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, app)
+
+	replicas, _ := s.store.ListReplicas(app.ID)
+	if replicas == nil {
+		replicas = []*db.Replica{}
+	}
+
+	// Merge live process state into DB rows when the manager is available.
+	if s.manager != nil {
+		live := s.manager.AllForSlug(slug)
+		for i, rep := range replicas {
+			if rep.Index < len(live) && live[rep.Index] != nil {
+				replicas[i].Status = string(live[rep.Index].Status)
+				if live[rep.Index].PID != 0 {
+					pid := live[rep.Index].PID
+					replicas[i].PID = &pid
+				}
+				if live[rep.Index].Port != 0 {
+					port := live[rep.Index].Port
+					replicas[i].Port = &port
+				}
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"app": app, "replicas_status": replicas})
 }
 
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
@@ -395,6 +419,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	result, err := deploy.Run(deploy.Params{
 		Slug:            slug,
 		BundleDir:       bundleDir,
+		Replicas:        app.Replicas,
 		Manager:         s.manager,
 		Proxy:           s.proxy,
 		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
@@ -409,13 +434,21 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	port := result.Port
-	pid := result.PID
+	for _, r := range result.Replicas {
+		pid, port := r.PID, r.Port
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:  app.ID,
+			Index:  r.Index,
+			PID:    &pid,
+			Port:   &port,
+			Status: "running",
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
+		}
+	}
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
-		Port:   &port,
-		PID:    &pid,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -519,6 +552,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	result, err := deploy.Run(deploy.Params{
 		Slug:            slug,
 		BundleDir:       prev.BundleDir,
+		Replicas:        app.Replicas,
 		Manager:         s.manager,
 		Proxy:           s.proxy,
 		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
@@ -533,13 +567,21 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	port := result.Port
-	pid := result.PID
+	for _, r := range result.Replicas {
+		pid, port := r.PID, r.Port
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:  app.ID,
+			Index:  r.Index,
+			PID:    &pid,
+			Port:   &port,
+			Status: "running",
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
+		}
+	}
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
-		Port:   &port,
-		PID:    &pid,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -606,6 +648,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	result, err := deploy.Run(deploy.Params{
 		Slug:            slug,
 		BundleDir:       current.BundleDir,
+		Replicas:        app.Replicas,
 		Manager:         s.manager,
 		Proxy:           s.proxy,
 		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
@@ -620,13 +663,21 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	port := result.Port
-	pid := result.PID
+	for _, r := range result.Replicas {
+		pid, port := r.PID, r.Port
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:  app.ID,
+			Index:  r.Index,
+			PID:    &pid,
+			Port:   &port,
+			Status: "running",
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
+		}
+	}
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
-		Port:   &port,
-		PID:    &pid,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -927,7 +978,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, ok := s.manager.Get(slug)
+	info, ok := s.manager.GetReplica(slug, 0)
 	if !ok {
 		writeJSON(w, http.StatusOK, metricsResponse{Status: app.Status})
 		return
@@ -937,7 +988,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handle, ok := s.manager.Handle(slug)
+	handle, ok := s.manager.HandleReplica(slug, 0)
 	if !ok {
 		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusStopped)})
 		return

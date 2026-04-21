@@ -239,6 +239,7 @@ func (s *Server) maybeRestartForEnvChange(r *http.Request, app *db.App, slug str
 	result, runErr := deploy.Run(deploy.Params{
 		Slug:            slug,
 		BundleDir:       current.BundleDir,
+		Replicas:        app.Replicas,
 		Manager:         s.manager,
 		Proxy:           s.proxy,
 		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
@@ -250,18 +251,22 @@ func (s *Server) maybeRestartForEnvChange(r *http.Request, app *db.App, slug str
 		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 			Slug:   slug,
 			Status: "stopped",
-			Port:   nil,
-			PID:    nil,
 		})
 		return false, runErr
 	}
-	port := result.Port
-	pid := result.PID
+	for _, r := range result.Replicas {
+		pid, port := r.PID, r.Port
+		_ = s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:  app.ID,
+			Index:  r.Index,
+			PID:    &pid,
+			Port:   &port,
+			Status: "running",
+		})
+	}
 	_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
-		Port:   &port,
-		PID:    &pid,
 	})
 	return true, nil
 }
