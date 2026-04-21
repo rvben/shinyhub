@@ -21,20 +21,20 @@ import (
 
 // Server holds the dependencies shared by all API handlers.
 type Server struct {
-	cfg          *config.Config
-	store        *db.Store
-	manager      *process.Manager
-	proxy        *proxy.Proxy
-	github       *oauth.GitHub        // nil when GitHub OAuth is not configured
-	googleOAuth  *oauth.Google        // nil when Google OAuth is not configured
-	oidcProvider *oauth.OIDCProvider  // nil when OIDC SSO is not configured
+	cfg           *config.Config
+	store         *db.Store
+	manager       *process.Manager
+	proxy         *proxy.Proxy
+	github        *oauth.GitHub       // nil when GitHub OAuth is not configured
+	googleOAuth   *oauth.Google       // nil when Google OAuth is not configured
+	oidcProvider  *oauth.OIDCProvider // nil when OIDC SSO is not configured
 	sampler       process.Sampler
 	loginLimiter  *loginRateLimiter
 	deployLimiter *keyedRateLimiter
 	userLimiter   *keyedRateLimiter
 	tokenLimiter  *keyedRateLimiter
-	jobs       *jobs.Manager
-	scheduler  *scheduler.Scheduler
+	jobs          *jobs.Manager
+	scheduler     *scheduler.Scheduler
 	secretsKey    []byte
 	router        http.Handler
 	deployRun     func(deploy.Params) (*deploy.PoolResult, error)
@@ -49,16 +49,16 @@ type Server struct {
 // when running in test contexts that exercise only auth/data handlers.
 func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *proxy.Proxy) *Server {
 	s := &Server{
-		cfg:          cfg,
-		store:        store,
-		manager:      manager,
-		proxy:        prx,
-		sampler:      &process.GopsutilSampler{},
+		cfg:           cfg,
+		store:         store,
+		manager:       manager,
+		proxy:         prx,
+		sampler:       &process.GopsutilSampler{},
 		loginLimiter:  newLoginRateLimiter(10, time.Minute),
 		deployLimiter: newKeyedRateLimiter(10, time.Minute),
 		userLimiter:   newKeyedRateLimiter(5, time.Minute),
 		tokenLimiter:  newKeyedRateLimiter(20, time.Minute),
-		deployRun:    deploy.Run,
+		deployRun:     deploy.Run,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
@@ -187,12 +187,12 @@ func (s *Server) buildRouter() http.Handler {
 		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens", s.handleCreateToken)
 		r.Get("/api/tokens", s.handleListTokens)
 		r.Delete("/api/tokens/{id}", s.handleDeleteToken)
-		r.Get("/api/users", s.handleListUsers)           // admin: list all users
+		r.Get("/api/users", s.handleListUsers)                                        // admin: list all users
 		r.With(rateLimitByUser(s.userLimiter)).Post("/api/users", s.handleCreateUser) // admin: create user
-		r.Get("/api/users/{username}", s.handleGetUser)   // any auth: lookup by username
-		r.Patch("/api/users/{id}", s.handlePatchUser)     // admin: update role
-		r.Patch("/api/users/{id}/password", s.handlePatchUserPassword) // admin: reset password
-		r.Delete("/api/users/{id}", s.handleDeleteUser)   // admin: delete user
+		r.Get("/api/users/{username}", s.handleGetUser)                               // any auth: lookup by username
+		r.Patch("/api/users/{id}", s.handlePatchUser)                                 // admin: update role
+		r.Patch("/api/users/{id}/password", s.handlePatchUserPassword)                // admin: reset password
+		r.Delete("/api/users/{id}", s.handleDeleteUser)                               // admin: delete user
 
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log
 	})

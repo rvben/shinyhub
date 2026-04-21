@@ -300,6 +300,7 @@ func main() {
 	select {
 	case err := <-serveErr:
 		if err != nil {
+			cancelSched()
 			cancelWatcher()
 			slog.Error("http server", "err", err)
 			os.Exit(1)
