@@ -21,7 +21,14 @@ auth:
 
 storage:
   apps_dir: ./data/apps               # where deployed bundles live
+  app_data_dir: ./data/app-data       # persistent per-app data; survives deploys
   version_retention: 5                # keep N newest version dirs per app
+  app_quota_mb: 1024                  # per-app cap (bundles + data dir); 0 disables
+  max_bundle_mb: 128                  # multipart upload cap (must match the UI)
+
+# Reserved env vars (set by ShinyHub at process start; user-supplied values
+# with these names are rejected at validation time and shadowed at merge time):
+#   SHINYHUB_APP_DATA   absolute path to the app's persistent data dir
 
 lifecycle:
   watch_interval: 15s                 # how often the watchdog runs
