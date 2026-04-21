@@ -23,8 +23,8 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	idx := 0
 	if raw := r.URL.Query().Get("replica"); raw != "" {
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 0 {
-			writeError(w, http.StatusBadRequest, "invalid replica index")
+		if err != nil || n < 0 || n > 255 {
+			writeError(w, http.StatusBadRequest, "replica index out of range")
 			return
 		}
 		idx = n

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -285,6 +286,7 @@ func (w *Watcher) OnMiss(slug string) {
 		w.prx.SetPoolSize(slug, app.Replicas)
 
 		var wg sync.WaitGroup
+		var started atomic.Int32
 		for i := 0; i < app.Replicas; i++ {
 			wg.Add(1)
 			go func(idx int) {
@@ -302,9 +304,12 @@ func (w *Watcher) OnMiss(slug string) {
 					Port:   &port,
 					Status: "running",
 				})
+				started.Add(1)
 			}(i)
 		}
 		wg.Wait()
-		_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
+		if started.Load() > 0 {
+			_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
+		}
 	}()
 }

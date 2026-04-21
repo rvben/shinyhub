@@ -415,6 +415,24 @@ func TestHibernation_GloballyDisabled(t *testing.T) {
 	}
 }
 
+// waitNotWaking blocks until the OnMiss goroutine for slug has finished
+// (indicated by waking[slug] being cleared by its defer), or fails the
+// test after 2s.
+func waitNotWaking(t *testing.T, w *Watcher, slug string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		done := !w.waking[slug]
+		w.mu.Unlock()
+		if done {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for OnMiss goroutine (slug=%q)", slug)
+}
+
 // --- wake-on-request tests ---
 
 func TestWake_TriggeredOnMiss(t *testing.T) {
@@ -434,7 +452,7 @@ func TestWake_TriggeredOnMiss(t *testing.T) {
 		})
 
 	w.OnMiss("app")
-	time.Sleep(50 * time.Millisecond)
+	waitNotWaking(t, w, "app")
 
 	mu.Lock()
 	gotDeployed := make([]string, len(deployed))
@@ -481,7 +499,7 @@ func TestWake_NoConcurrentWakes(t *testing.T) {
 	// Two concurrent OnMiss calls should result in exactly one deploy.
 	w.OnMiss("app")
 	w.OnMiss("app")
-	time.Sleep(150 * time.Millisecond)
+	waitNotWaking(t, w, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 1 {
 		t.Errorf("expected exactly 1 deploy for concurrent OnMiss, got %d", n)
@@ -529,7 +547,7 @@ func TestWake_NonHibernatedAppNotRedeployed(t *testing.T) {
 		})
 
 	w.OnMiss("app")
-	time.Sleep(50 * time.Millisecond)
+	waitNotWaking(t, w, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 0 {
 		t.Errorf("expected 0 deploys for non-hibernated app, got %d", n)
@@ -655,8 +673,7 @@ func TestWatcher_OnMissWakesAllReplicas(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 100 + idx, Port: 20000 + idx}, nil
 		})
 	w.OnMiss("demo")
-	// Wait for the wake goroutine to finish.
-	time.Sleep(100 * time.Millisecond)
+	waitNotWaking(t, w, "demo")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -668,5 +685,26 @@ func TestWatcher_OnMissWakesAllReplicas(t *testing.T) {
 	defer prx.mu.Unlock()
 	if prx.poolSizes["demo"] != 3 {
 		t.Errorf("expected SetPoolSize('demo', 3), got %v", prx.poolSizes)
+	}
+}
+
+func TestWake_AllReplicasFailKeepsHibernated(t *testing.T) {
+	prx := newFakeProxy()
+	st := &fakeStore{
+		apps:        map[string]*db.App{"demo": {ID: 1, Slug: "demo", Status: "hibernated", Replicas: 2}},
+		deployments: []*db.Deployment{{BundleDir: "/tmp/demo"}},
+	}
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
+		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("boom") })
+
+	w.OnMiss("demo")
+	waitNotWaking(t, w, "demo")
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, upd := range st.statusUpdates {
+		if upd.Status == "running" {
+			t.Fatal("app marked running despite all replicas failing")
+		}
 	}
 }
