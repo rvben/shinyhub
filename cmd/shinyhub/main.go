@@ -51,6 +51,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := os.MkdirAll(cfg.Storage.AppDataDir, 0o755); err != nil {
+		slog.Error("create app-data dir", "err", err)
+		os.Exit(1)
+	}
+
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
 		slog.Error("open db", "err", err)
