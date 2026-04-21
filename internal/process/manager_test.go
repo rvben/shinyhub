@@ -1,13 +1,71 @@
 package process_test
 
 import (
+	"context"
+	"io"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
 )
+
+// fakeRuntime is a minimal in-process Runtime for tests.
+// Start returns a synthetic RunHandle with an incrementing PID.
+// Wait blocks until Signal is called with SIGTERM or SIGKILL.
+type fakeRuntime struct {
+	mu      sync.Mutex
+	nextPID int
+	stops   map[int]chan struct{}
+}
+
+func newFakeRuntime() *fakeRuntime {
+	return &fakeRuntime{
+		nextPID: 10000,
+		stops:   make(map[int]chan struct{}),
+	}
+}
+
+func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+	f.mu.Lock()
+	pid := f.nextPID
+	f.nextPID++
+	ch := make(chan struct{})
+	f.stops[pid] = ch
+	f.mu.Unlock()
+	return process.RunHandle{PID: pid}, nil
+}
+
+func (f *fakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
+	f.mu.Lock()
+	ch, ok := f.stops[h.PID]
+	f.mu.Unlock()
+	if ok && (sig == syscall.SIGTERM || sig == syscall.SIGKILL) {
+		// close only once
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+	return nil
+}
+
+func (f *fakeRuntime) Wait(_ context.Context, h process.RunHandle) error {
+	f.mu.Lock()
+	ch, ok := f.stops[h.PID]
+	f.mu.Unlock()
+	if ok {
+		<-ch
+	}
+	return nil
+}
+
+func (f *fakeRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
 
 func TestManagerStartStop(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -87,13 +145,11 @@ func TestManagerCrashDetection(t *testing.T) {
 	}
 
 	// Wait for the exit-monitoring goroutine to update status.
+	// Status() only returns running replicas; use GetReplica to observe crashed state.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		info, err := m.Status("crash-test")
-		if err != nil {
-			t.Fatalf("Status: %v", err)
-		}
-		if info.Status == process.StatusCrashed {
+		info, ok := m.GetReplica("crash-test", 0)
+		if ok && info.Status == process.StatusCrashed {
 			return // pass
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -125,11 +181,63 @@ func TestManagerAdopt(t *testing.T) {
 		t.Errorf("expected PID %d, got %d", pid, got.PID)
 	}
 
-	gotHandle, ok := m.Handle("adopted")
+	gotHandle, ok := m.HandleReplica("adopted", 0)
 	if !ok {
-		t.Fatal("Handle: not found")
+		t.Fatal("HandleReplica: not found")
 	}
 	if gotHandle != handle {
 		t.Errorf("expected handle %+v, got %+v", handle, gotHandle)
+	}
+}
+
+func TestManager_PoolStartStop(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+
+	p0, err := m.Start(process.StartParams{
+		Slug: "demo", Index: 0, Port: 20001, Command: []string{"/bin/true"},
+	})
+	if err != nil {
+		t.Fatalf("start 0: %v", err)
+	}
+	p1, err := m.Start(process.StartParams{
+		Slug: "demo", Index: 1, Port: 20002, Command: []string{"/bin/true"},
+	})
+	if err != nil {
+		t.Fatalf("start 1: %v", err)
+	}
+
+	if p0.Index != 0 || p1.Index != 1 {
+		t.Fatalf("indices: %d,%d", p0.Index, p1.Index)
+	}
+
+	all := m.All()
+	if len(all) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(all))
+	}
+
+	if err := m.StopReplica("demo", 0); err != nil {
+		t.Fatalf("stop 0: %v", err)
+	}
+	all = m.All()
+	if len(all) != 1 || all[0].Index != 1 {
+		t.Fatalf("after stop: %+v", all)
+	}
+
+	if err := m.Stop("demo"); err != nil {
+		t.Fatalf("stop pool: %v", err)
+	}
+	if len(m.All()) != 0 {
+		t.Fatalf("pool not empty after Stop")
+	}
+}
+
+func TestManager_DuplicateIndex(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	_, _ = m.Start(process.StartParams{Slug: "demo", Index: 0, Port: 20001, Command: []string{"/bin/true"}})
+	_, err := m.Start(process.StartParams{Slug: "demo", Index: 0, Port: 20002, Command: []string{"/bin/true"}})
+	if err == nil {
+		t.Fatalf("expected error for duplicate index")
 	}
 }

@@ -27,6 +27,7 @@ const (
 
 type ProcessInfo struct {
 	Slug   string
+	Index  int
 	PID    int
 	Port   int
 	Status Status
@@ -34,6 +35,7 @@ type ProcessInfo struct {
 
 type StartParams struct {
 	Slug            string
+	Index           int
 	Dir             string
 	Command         []string
 	Port            int
@@ -49,11 +51,18 @@ type entry struct {
 	stopped bool
 }
 
-// Manager tracks running app processes by slug.
+// replicaKey identifies a specific replica by slug and index.
+type replicaKey struct {
+	Slug  string
+	Index int
+}
+
+// Manager tracks running app processes as a pool of replicas per slug.
+// entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
 	mu          sync.Mutex
-	entries     map[string]*entry
-	logFiles    map[string]*LogFile
+	entries     map[string][]*entry
+	logFiles    map[replicaKey]*LogFile
 	appsDir     string
 	runtime     Runtime
 	envResolver EnvResolver
@@ -67,30 +76,34 @@ func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
 // NewManager returns an initialized Manager using the given Runtime.
 func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
-		entries:  make(map[string]*entry),
-		logFiles: make(map[string]*LogFile),
+		entries:  make(map[string][]*entry),
+		logFiles: make(map[replicaKey]*LogFile),
 		appsDir:  appsDir,
 		runtime:  rt,
 	}
 }
 
-// Start spawns a new process for the given slug. Returns an error if the slug
-// is already running.
+// Start spawns a new process for the given slug and replica index.
+// Returns an error if that replica is already running.
 func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	if len(p.Command) == 0 {
 		return nil, fmt.Errorf("start: command must not be empty")
 	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if e, ok := m.entries[p.Slug]; ok && e.info.Status == StatusRunning {
-		return nil, fmt.Errorf("app %s is already running", p.Slug)
+	pool := m.entries[p.Slug]
+	for len(pool) <= p.Index {
+		pool = append(pool, nil)
+	}
+	if existing := pool[p.Index]; existing != nil && existing.info.Status == StatusRunning {
+		return nil, fmt.Errorf("app %s replica %d already running", p.Slug, p.Index)
 	}
 
-	if existing, ok := m.logFiles[p.Slug]; ok {
-		existing.Close()
-		delete(m.logFiles, p.Slug)
+	key := replicaKey{p.Slug, p.Index}
+	if prev, ok := m.logFiles[key]; ok {
+		prev.Close()
+		delete(m.logFiles, key)
 	}
 
 	if m.envResolver != nil {
@@ -101,42 +114,47 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		p.Env = append(p.Env, userEnv...)
 	}
 
-	logPath := filepath.Join(m.appsDir, p.Slug, "app.log")
+	logPath := filepath.Join(m.appsDir, p.Slug, fmt.Sprintf("app-%d.log", p.Index))
 	lf, err := OpenLogFile(logPath, DefaultLogMaxSize)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
-	m.logFiles[p.Slug] = lf
+	m.logFiles[key] = lf
 
 	handle, err := m.runtime.Start(context.Background(), p, lf)
 	if err != nil {
 		lf.Close()
-		delete(m.logFiles, p.Slug)
+		delete(m.logFiles, key)
 		return nil, fmt.Errorf("start process: %w", err)
 	}
 
 	info := &ProcessInfo{
 		Slug:   p.Slug,
+		Index:  p.Index,
 		PID:    handle.PID,
 		Port:   p.Port,
 		Status: StatusRunning,
 	}
 	done := make(chan struct{})
-	m.entries[p.Slug] = &entry{info: info, handle: handle, done: done}
+	pool[p.Index] = &entry{info: info, handle: handle, done: done}
+	m.entries[p.Slug] = pool
 
 	go func() {
 		m.runtime.Wait(context.Background(), handle)
 		m.mu.Lock()
-		if e, ok := m.entries[p.Slug]; ok && e.handle == handle {
-			if e.stopped {
-				e.info.Status = StatusStopped
-			} else {
-				e.info.Status = StatusCrashed
+		if pool := m.entries[p.Slug]; p.Index < len(pool) {
+			if e := pool[p.Index]; e != nil && e.handle == handle {
+				if e.stopped {
+					e.info.Status = StatusStopped
+				} else {
+					e.info.Status = StatusCrashed
+				}
 			}
 		}
-		if lf, ok := m.logFiles[p.Slug]; ok {
+		key := replicaKey{p.Slug, p.Index}
+		if lf := m.logFiles[key]; lf != nil {
 			lf.Close()
-			delete(m.logFiles, p.Slug)
+			delete(m.logFiles, key)
 		}
 		m.mu.Unlock()
 		close(done)
@@ -149,8 +167,15 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 // If the process does not exit within 5 seconds, SIGKILL is sent.
 func (m *Manager) Stop(slug string) error {
 	m.mu.Lock()
-	e, ok := m.entries[slug]
-	if !ok {
+	pool := m.entries[slug]
+	var e *entry
+	for _, candidate := range pool {
+		if candidate != nil {
+			e = candidate
+			break
+		}
+	}
+	if e == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("app %s not found", slug)
 	}
@@ -180,36 +205,29 @@ func (m *Manager) Stop(slug string) error {
 func (m *Manager) Status(slug string) (*ProcessInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e, ok := m.entries[slug]
-	if !ok {
-		return &ProcessInfo{Slug: slug, Status: StatusStopped}, nil
+	for _, e := range m.entries[slug] {
+		if e != nil {
+			snapshot := *e.info
+			return &snapshot, nil
+		}
 	}
-	snapshot := *e.info
-	return &snapshot, nil
+	return &ProcessInfo{Slug: slug, Status: StatusStopped}, nil
 }
 
 // All returns a snapshot of all tracked ProcessInfo entries.
 func (m *Manager) All() []*ProcessInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*ProcessInfo, 0, len(m.entries))
-	for _, e := range m.entries {
-		snapshot := *e.info
-		out = append(out, &snapshot)
+	out := make([]*ProcessInfo, 0)
+	for _, pool := range m.entries {
+		for _, e := range pool {
+			if e != nil {
+				snapshot := *e.info
+				out = append(out, &snapshot)
+			}
+		}
 	}
 	return out
-}
-
-// Get returns a snapshot of the ProcessInfo for slug, or false if not tracked.
-func (m *Manager) Get(slug string) (*ProcessInfo, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	e, ok := m.entries[slug]
-	if !ok {
-		return nil, false
-	}
-	snapshot := *e.info
-	return &snapshot, true
 }
 
 // Adopt re-registers a process that was not started by this Manager instance
@@ -218,13 +236,18 @@ func (m *Manager) Get(slug string) (*ProcessInfo, bool) {
 func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	pool := m.entries[slug]
+	for len(pool) <= info.Index {
+		pool = append(pool, nil)
+	}
 	done := make(chan struct{})
-	m.entries[slug] = &entry{info: &info, handle: handle, done: done}
+	pool[info.Index] = &entry{info: &info, handle: handle, done: done}
+	m.entries[slug] = pool
 	go func() {
 		m.runtime.Wait(context.Background(), handle)
 		m.mu.Lock()
-		if e, ok := m.entries[slug]; ok && e.handle == handle {
-			if !e.stopped {
+		if p := m.entries[slug]; info.Index < len(p) {
+			if e := p[info.Index]; e != nil && e.handle == handle && !e.stopped {
 				e.info.Status = StatusCrashed
 			}
 		}
@@ -239,24 +262,18 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[slug] = &entry{info: &info, handle: RunHandle{PID: info.PID}, done: make(chan struct{})}
-}
-
-// Handle returns the RunHandle for a running slug, or false if not tracked.
-func (m *Manager) Handle(slug string) (RunHandle, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	e, ok := m.entries[slug]
-	if !ok {
-		return RunHandle{}, false
+	pool := m.entries[slug]
+	for len(pool) <= info.Index {
+		pool = append(pool, nil)
 	}
-	return e.handle, true
+	pool[info.Index] = &entry{info: &info, handle: RunHandle{PID: info.PID}, done: make(chan struct{})}
+	m.entries[slug] = pool
 }
 
-// LogReader returns a LogReader for the app's log file. Returns false if no
-// log file exists yet (app has never been started).
-func (m *Manager) LogReader(slug string) (*LogReader, bool) {
-	path := filepath.Join(m.appsDir, slug, "app.log")
+// LogReader returns a LogReader for a specific replica's log file.
+// Returns false if no log file exists yet (replica has never been started).
+func (m *Manager) LogReader(slug string, index int) (*LogReader, bool) {
+	path := filepath.Join(m.appsDir, slug, fmt.Sprintf("app-%d.log", index))
 	if _, err := os.Stat(path); err != nil {
 		return nil, false
 	}
