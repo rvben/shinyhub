@@ -236,7 +236,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
-	result, runErr := deploy.Run(deploy.Params{
+	result, runErr := s.deployRun(deploy.Params{
 		Slug:            slug,
 		BundleDir:       current.BundleDir,
 		Manager:         s.manager,

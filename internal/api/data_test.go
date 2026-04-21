@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -666,6 +668,147 @@ func TestDataDelete_AuditRecorded(t *testing.T) {
 	}
 	if detail.Path != "tracked.txt" {
 		t.Errorf("audit detail path = %q, want %q", detail.Path, "tracked.txt")
+	}
+}
+
+// seedRunningApp marks an existing app as running and inserts a deployment row
+// so maybeRestartForChange can find a bundle directory to re-launch.
+// It returns the fake PID used for the running status.
+func seedRunningApp(t *testing.T, store *db.Store, slug, bundleDir string) int {
+	t.Helper()
+	app, err := store.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatalf("GetAppBySlug(%q): %v", slug, err)
+	}
+	_, err = store.CreateDeployment(db.CreateDeploymentParams{
+		AppID:     app.ID,
+		Version:   "v1",
+		BundleDir: bundleDir,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	fakePID := 42
+	fakePort := 20001
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{
+		Slug:   slug,
+		Status: "running",
+		PID:    &fakePID,
+		Port:   &fakePort,
+	}); err != nil {
+		t.Fatalf("UpdateAppStatus: %v", err)
+	}
+	return fakePID
+}
+
+// TestDataPut_RestartTrue_RestartsRunningApp verifies that PUT with ?restart=true
+// calls the deploy hook and the response reports restarted=true with the new
+// PID/port reflected in the database.
+func TestDataPut_RestartTrue_RestartsRunningApp(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+	bundleDir := t.TempDir()
+	seedRunningApp(t, store, "demo", bundleDir)
+
+	called := make(chan struct{}, 1)
+	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.Result, error) {
+		called <- struct{}{}
+		return &deploy.Result{PID: 1234, Port: 9999}, nil
+	})
+
+	req := dataPutReq(t, "demo", "seed.txt", []byte("hi"), token)
+	req.URL.RawQuery = "restart=true"
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Restarted    bool   `json:"restarted"`
+		RestartError string `json:"restart_error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Restarted {
+		t.Errorf("expected restarted=true, got false (restart_error=%q)", resp.RestartError)
+	}
+
+	// The deploy stub must have been called.
+	select {
+	case <-called:
+		// good
+	default:
+		t.Error("deploy hook was not called")
+	}
+
+	// DB must reflect the new PID and port.
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("GetAppBySlug: %v", err)
+	}
+	if app.Status != "running" {
+		t.Errorf("app.Status = %q, want %q", app.Status, "running")
+	}
+	if app.CurrentPID == nil || *app.CurrentPID != 1234 {
+		t.Errorf("app.CurrentPID = %v, want 1234", app.CurrentPID)
+	}
+	if app.CurrentPort == nil || *app.CurrentPort != 9999 {
+		t.Errorf("app.CurrentPort = %v, want 9999", app.CurrentPort)
+	}
+}
+
+// TestDataPut_RestartFailure_SurfacedInResponse verifies that when the deploy
+// hook fails the response still returns 200 with restarted=false and a
+// non-empty restart_error, and the app's DB status is reset to "stopped".
+func TestDataPut_RestartFailure_SurfacedInResponse(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+	bundleDir := t.TempDir()
+	seedRunningApp(t, store, "demo", bundleDir)
+
+	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.Result, error) {
+		return nil, errors.New("boom")
+	})
+
+	req := dataPutReq(t, "demo", "seed.txt", []byte("hi"), token)
+	req.URL.RawQuery = "restart=true"
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Restarted    bool   `json:"restarted"`
+		RestartError string `json:"restart_error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Restarted {
+		t.Error("expected restarted=false, got true")
+	}
+	if resp.RestartError != "boom" {
+		t.Errorf("restart_error = %q, want %q", resp.RestartError, "boom")
+	}
+
+	// DB status must be "stopped" after the failed re-launch.
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("GetAppBySlug: %v", err)
+	}
+	if app.Status != "stopped" {
+		t.Errorf("app.Status = %q, want %q", app.Status, "stopped")
 	}
 }
 

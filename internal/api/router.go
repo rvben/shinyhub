@@ -10,6 +10,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -31,6 +32,7 @@ type Server struct {
 	tokenLimiter  *keyedRateLimiter
 	secretsKey    []byte
 	router        http.Handler
+	deployRun     func(deploy.Params) (*deploy.Result, error)
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil
@@ -46,6 +48,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		deployLimiter: newKeyedRateLimiter(10, time.Minute),
 		userLimiter:   newKeyedRateLimiter(5, time.Minute),
 		tokenLimiter:  newKeyedRateLimiter(20, time.Minute),
+		deployRun:    deploy.Run,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
@@ -83,6 +86,12 @@ func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
 // SetSecretsKey sets the AES-256 key used to decrypt per-app secret env vars.
 // Must be called before the server begins handling requests.
 func (s *Server) SetSecretsKey(k []byte) { s.secretsKey = k }
+
+// SetDeployRunForTest replaces the deploy.Run hook used by maybeRestartForChange.
+// Must be called before the server begins handling requests; intended for tests.
+func (s *Server) SetDeployRunForTest(fn func(deploy.Params) (*deploy.Result, error)) {
+	s.deployRun = fn
+}
 
 // keyLookup satisfies auth.APIKeyLookup by delegating to the DB.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
