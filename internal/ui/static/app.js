@@ -2218,7 +2218,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!el) return;
     if (!expr.trim()) { el.textContent = ''; return; }
     try {
-      const fires = nextCronFires(expr, 3);
+      const fires = nextCronFires(expr, 5);
       if (fires.length === 0) {
         el.textContent = 'No fires found in next year';
       } else {
