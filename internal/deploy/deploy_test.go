@@ -220,6 +220,58 @@ func TestDetectAppType_Unknown(t *testing.T) {
 	}
 }
 
+func TestExtractBundle_RejectsDataEntry(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "bundle.zip")
+	if err := createTestBundle(zipPath, map[string]string{
+		"app.R":      "ui <- fluidPage()\n",
+		"data/x.csv": "a,b\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := deploy.ExtractBundle(zipPath, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-rejection error, got %v", err)
+	}
+}
+
+func TestExtractBundle_RejectsParquetAtRoot(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "bundle.zip")
+	if err := createTestBundle(zipPath, map[string]string{
+		"app.R":        "x",
+		"seed.parquet": "PAR1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := deploy.ExtractBundle(zipPath, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "seed.parquet") {
+		t.Fatalf("expected extension-rejection error, got %v", err)
+	}
+}
+
+func TestExtractBundle_SoftSkipsCacheDirs(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "bundle.zip")
+	if err := createTestBundle(zipPath, map[string]string{
+		"app.R":               "x",
+		".git/HEAD":           "ref",
+		"__pycache__/x.pyc":  "p",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := deploy.ExtractBundle(zipPath, out); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, ".git", "HEAD")); !os.IsNotExist(err) {
+		t.Errorf(".git/HEAD should have been skipped: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "app.R")); err != nil {
+		t.Errorf("app.R should have been extracted: %v", err)
+	}
+}
+
 func TestResolveResourceLimits(t *testing.T) {
 	zero := 0
 	pos := 256

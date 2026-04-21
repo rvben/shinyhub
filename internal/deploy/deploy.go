@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -230,6 +231,8 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 		return err
 	}
 
+	rules := bundle.DefaultRules()
+
 	var total int64
 	for _, f := range r.File {
 		// filepath.Join cleans the path, which resolves any ".." components.
@@ -248,6 +251,21 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 				return err
 			}
 			continue
+		}
+
+		// Apply bundle filter rules. Cache dirs are silently skipped; data dirs
+		// and disallowed extensions are hard errors.
+		decision := rules.Inspect(f.Name, int64(f.UncompressedSize64))
+		switch decision {
+		case bundle.FilterAccept:
+			// proceed with extraction
+		case bundle.FilterSkipCacheDir:
+			continue
+		case bundle.FilterRejectDataDir,
+			bundle.FilterRejectDatasetDir,
+			bundle.FilterRejectExtension,
+			bundle.FilterRejectFileSize:
+			return fmt.Errorf("bundle entry %q rejected: %s", f.Name, decision)
 		}
 
 		// Trust-but-verify: reject up front when the declared size is already
