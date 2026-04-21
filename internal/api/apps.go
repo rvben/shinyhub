@@ -642,6 +642,15 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	release := s.acquireDeployLock(slug)
 	defer release()
 
+	// Validate that the target bundle still exists on disk BEFORE we tear
+	// down the running app. If the directory was pruned out from under us
+	// (manual cleanup, disk failure, etc.) deploy.Run would fail and we'd
+	// be left with the live app stopped and no path back to running.
+	if info, err := os.Stat(prev.BundleDir); err != nil || !info.IsDir() {
+		writeError(w, http.StatusConflict, "target deployment bundle is missing or invalid")
+		return
+	}
+
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {

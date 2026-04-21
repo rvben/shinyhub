@@ -813,6 +813,85 @@ func TestRollbackApp_NoPreviousDeployment(t *testing.T) {
 	}
 }
 
+// TestRollbackApp_MissingBundleRefusesBeforeStop guards against a regression
+// where the rollback handler called manager.Stop and proxy.Deregister before
+// validating that the target deployment's bundle directory still existed on
+// disk. If the bundle had been pruned out from under us the deploy would then
+// fail and the live app would already be down with no path back to running.
+func TestRollbackApp_MissingBundleRefusesBeforeStop(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("myapp")
+
+	// Older deployment points at a directory that no longer exists.
+	missingDir := filepath.Join(t.TempDir(), "deleted-bundle")
+	missingDep, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v1", BundleDir: missingDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Newer deployment has a real (empty) directory so it's "current".
+	currentDir := t.TempDir()
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v2", BundleDir: currentDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"deployment_id": missingDep.ID})
+	req := authedRequest(t, "POST", "/api/apps/myapp/rollback", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when target bundle is missing, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRollbackApp_BundlePathIsFileRefuses also rejects a deployment whose
+// recorded BundleDir resolves to a file rather than a directory — same
+// safety reason as above.
+func TestRollbackApp_BundlePathIsFileRefuses(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("myapp")
+
+	// "Bundle" is actually a regular file (corrupted state).
+	bogus := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(bogus, []byte("oops"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dep, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v1", BundleDir: bogus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v2", BundleDir: t.TempDir(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"deployment_id": dep.ID})
+	req := authedRequest(t, "POST", "/api/apps/myapp/rollback", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when bundle path is a file, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // loginAsAdmin returns a valid JWT token for user ID 1 with the admin role.
 // The caller must have already created the admin user in the store before calling this.
 func loginAsAdmin(t *testing.T, _ *api.Server) string {
