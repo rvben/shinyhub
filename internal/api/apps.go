@@ -443,9 +443,23 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Save bundle zip to disk
+	// Compute paths up front so a single defer can clean up the on-disk
+	// artefacts on any failure path before the deploy is committed.
 	version := fmt.Sprintf("%d", time.Now().UnixMilli())
 	bundleZip := filepath.Join(s.cfg.Storage.AppsDir, slug, "bundles", version+".zip")
+	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
+
+	// keepFiles is flipped to true only once deploy.Run succeeds and the new
+	// pool is actually serving the bundle. Any earlier failure — write,
+	// extract, quota, deploy — leaves the apps tree as we found it.
+	keepFiles := false
+	defer func() {
+		if !keepFiles {
+			_ = os.RemoveAll(bundleDir)
+			_ = os.Remove(bundleZip)
+		}
+	}()
+
 	if err := os.MkdirAll(filepath.Dir(bundleZip), 0755); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -462,8 +476,6 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	out.Close()
 
-	// Extract bundle zip into a versioned directory
-	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
 	if err := deploy.ExtractBundle(bundleZip, bundleDir); err != nil {
 		fmt.Fprintf(os.Stderr, "extract bundle %s: %v\n", slug, err)
 		if errors.Is(err, deploy.ErrBundleRejected) {
@@ -479,14 +491,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce per-app disk quota: the new extracted version has already been
-	// written, so DirSize now reflects the post-deploy footprint. Roll back
-	// both the version dir and the bundle zip on violation so a rejected
-	// deploy leaves no stale files behind.
+	// written, so DirSize now reflects the post-deploy footprint. The defer
+	// above rolls the new files back if we reject here.
 	if s.cfg.Storage.AppQuotaMB > 0 {
 		used, qErr := deploy.CheckAppQuota(s.cfg.Storage.AppsDir, s.cfg.Storage.AppDataDir, slug, s.cfg.Storage.AppQuotaMB)
 		if qErr != nil {
-			_ = os.RemoveAll(bundleDir)
-			_ = os.Remove(bundleZip)
 			if errors.Is(qErr, deploy.ErrQuotaExceeded) {
 				s.logQuotaRejected(r, slug, used)
 				writeQuotaExceeded(w, used, s.cfg.Storage.AppQuotaMB)
@@ -528,6 +537,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "deploy failed")
 		return
 	}
+	// The pool is now serving the new bundle; from here onwards the on-disk
+	// artefacts must survive any subsequent error so a follow-up rollback or
+	// recovery still has the directory to point at.
+	keepFiles = true
 
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port

@@ -1304,6 +1304,69 @@ func TestDeployApp_RejectsDataEntry(t *testing.T) {
 	}
 }
 
+// TestDeployApp_OrphanCleanupOnExtractFailure ensures that when ExtractBundle
+// rejects an upload, the saved bundle zip and any partially-extracted version
+// directory are removed from disk. Otherwise repeated bad uploads would
+// silently fill the apps tree.
+func TestDeployApp_OrphanCleanupOnExtractFailure(t *testing.T) {
+	appsDir := t.TempDir()
+	srv, store := newQuotaTestServer(t, appsDir, 0)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	createApp(t, srv, token, "demo")
+
+	// Bundle with a data/ entry — bundle.Inspect inside ExtractBundle returns
+	// ErrBundleRejected and the handler responds 422.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	for _, name := range []string{"app.R", "data/x.csv"} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("bundle", "bundle.zip")
+	part.Write(zipBuf.Bytes())
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/demo/deploy", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", rr.Code, rr.Body.String())
+	}
+
+	versionsDir := filepath.Join(appsDir, "demo", "versions")
+	if entries, err := os.ReadDir(versionsDir); err == nil && len(entries) > 0 {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected versions/ to be empty after rejected extract, found: %v", names)
+	}
+
+	bundlesDir := filepath.Join(appsDir, "demo", "bundles")
+	if entries, err := os.ReadDir(bundlesDir); err == nil && len(entries) > 0 {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected bundles/ to be empty after rejected extract, found: %v", names)
+	}
+}
+
 // TestDeleteApp_RemovesBothDirs verifies that deleting an app removes both the
 // apps dir (code) and the app-data dir (persistent data) from disk.
 func TestDeleteApp_RemovesBothDirs(t *testing.T) {
