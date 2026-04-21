@@ -344,3 +344,33 @@ func TestLoad_AcceptsStrongSecret(t *testing.T) {
 		t.Fatalf("expected success, got %v", err)
 	}
 }
+
+func TestLoad_AppDataDirDefaults(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Storage.AppDataDir, "./data/app-data"; got != want {
+		t.Errorf("AppDataDir default = %q, want %q", got, want)
+	}
+	if got, want := cfg.Storage.MaxBundleMB, 128; got != want {
+		t.Errorf("MaxBundleMB default = %d, want %d", got, want)
+	}
+}
+
+func TestLoad_AppDataDirEnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_APP_DATA_DIR", "/srv/shiny/data")
+	t.Setenv("SHINYHUB_MAX_BUNDLE_MB", "256")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Storage.AppDataDir, "/srv/shiny/data"; got != want {
+		t.Errorf("AppDataDir = %q, want %q", got, want)
+	}
+	if got, want := cfg.Storage.MaxBundleMB, 256; got != want {
+		t.Errorf("MaxBundleMB = %d, want %d", got, want)
+	}
+}

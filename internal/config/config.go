@@ -104,10 +104,16 @@ type AuthConfig struct {
 
 type StorageConfig struct {
 	AppsDir          string `yaml:"apps_dir"`
+	AppDataDir       string `yaml:"app_data_dir"`
 	VersionRetention int    `yaml:"version_retention"`
 	// AppQuotaMB caps the total on-disk footprint (bundles + extracted
-	// versions) of a single app, in mebibytes. 0 disables the limit.
+	// versions + persistent data dir, excluding .shinyhub-upload-tmp/) of a
+	// single app, in mebibytes. 0 disables the limit.
 	AppQuotaMB int `yaml:"app_quota_mb"`
+	// MaxBundleMB caps a single deploy bundle's multipart upload size, in
+	// mebibytes. Must stay aligned with the UI's DEPLOY_MAX_BYTES (asserted
+	// by a test). 0 means "no cap"; default 128 matches the existing UI.
+	MaxBundleMB int `yaml:"max_bundle_mb"`
 }
 
 // RuntimeConfig controls how app processes are started and isolated.
@@ -168,7 +174,7 @@ func Load(path string) (*Config, error) {
 	raw := &rawConfig{
 		Database: DatabaseConfig{Driver: "sqlite", DSN: "./data/shinyhub.db"},
 		Server:   ServerConfig{Host: "0.0.0.0", Port: 8080},
-		Storage:  StorageConfig{AppsDir: "./data/apps"},
+		Storage:  StorageConfig{AppsDir: "./data/apps", AppDataDir: "./data/app-data", MaxBundleMB: 128},
 	}
 	if path != "" {
 		f, err := os.Open(path)
@@ -240,6 +246,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Storage.AppQuotaMB < 0 {
 		cfg.Storage.AppQuotaMB = 0
+	}
+	if cfg.Storage.AppDataDir == "" {
+		cfg.Storage.AppDataDir = "./data/app-data"
+	}
+	if cfg.Storage.MaxBundleMB <= 0 {
+		cfg.Storage.MaxBundleMB = 128
 	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
@@ -329,6 +341,14 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Storage.AppQuotaMB = n
+		}
+	}
+	if v := os.Getenv("SHINYHUB_APP_DATA_DIR"); v != "" {
+		cfg.Storage.AppDataDir = v
+	}
+	if v := os.Getenv("SHINYHUB_MAX_BUNDLE_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Storage.MaxBundleMB = n
 		}
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
