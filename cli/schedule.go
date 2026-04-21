@@ -381,7 +381,10 @@ func newScheduleRunCmd() *cobra.Command {
 		var runs []struct {
 			ID int64 `json:"id"`
 		}
-		if err := json.NewDecoder(runsResp.Body).Decode(&runs); err != nil || len(runs) == 0 {
+		if err := json.NewDecoder(runsResp.Body).Decode(&runs); err != nil {
+			return fmt.Errorf("decode runs: %w", err)
+		}
+		if len(runs) == 0 {
 			return fmt.Errorf("no runs found")
 		}
 
@@ -433,7 +436,10 @@ func newScheduleLogsCmd() *cobra.Command {
 			var runs []struct {
 				ID int64 `json:"id"`
 			}
-			if err := json.NewDecoder(runsResp.Body).Decode(&runs); err != nil || len(runs) == 0 {
+			if err := json.NewDecoder(runsResp.Body).Decode(&runs); err != nil {
+				return fmt.Errorf("decode runs: %w", err)
+			}
+			if len(runs) == 0 {
 				return fmt.Errorf("no runs found for schedule %q", name)
 			}
 			runID = runs[0].ID
