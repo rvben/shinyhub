@@ -199,6 +199,44 @@ func TestSchedules_Patch_RejectsCrossAppSchedule(t *testing.T) {
 	}
 }
 
+// TestSchedules_RunDetail_ReturnsRow verifies that a viewer can fetch a run
+// detail by ID and receives the persisted row.
+func TestSchedules_RunDetail_ReturnsRow(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	user, _ := store.GetUserByUsername("alice")
+	_ = store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: user.ID})
+	app, _ := store.GetAppBySlug("fetch")
+
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	runID, _ := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "succeeded", Trigger: "schedule",
+		StartedAt: time.Now().UTC(), LogPath: "/tmp/x.log",
+	})
+
+	token, _ := auth.IssueJWT(user.ID, user.Username, user.Role, "test-secret")
+	req := authedRequest(t, "GET", fmt.Sprintf("/api/apps/fetch/schedules/%d/runs/%d", schedID, runID), nil, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["Status"] != "succeeded" {
+		t.Errorf("expected Status=succeeded, got %v", got["Status"])
+	}
+}
+
 // TestSchedules_Cancel_RejectsCrossAppRun verifies that a manager of app B
 // cannot cancel a run that belongs to a schedule in app A.
 func TestSchedules_Cancel_RejectsCrossAppRun(t *testing.T) {

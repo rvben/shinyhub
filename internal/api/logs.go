@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 // handleLogs streams log lines for the given app as Server-Sent Events.
@@ -40,6 +41,19 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	streamLogReader(w, r, lr, true)
+}
+
+// streamLogFile is a path-based wrapper used by per-run schedule log streaming.
+func streamLogFile(w http.ResponseWriter, r *http.Request, path string, follow bool) {
+	streamLogReader(w, r, process.NewLogReader(path), follow)
+}
+
+// streamLogReader writes the SSE response: initial Tail(200), then optionally
+// Follow until the client disconnects, with periodic heartbeats.
+// When follow is false, the tail is flushed and the connection is closed
+// immediately — suitable for completed schedule runs whose log files are static.
+func streamLogReader(w http.ResponseWriter, r *http.Request, lr *process.LogReader, follow bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
@@ -54,12 +68,16 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	// Initial burst: last 200 lines.
 	lines, err := lr.Tail(200)
 	if err != nil {
-		slog.Warn("logs tail", "slug", slug, "err", err)
+		slog.Warn("logs tail", "err", err)
 	}
 	for _, line := range lines {
 		fmt.Fprintf(w, "data: %s\n\n", line)
 	}
 	flusher.Flush()
+
+	if !follow {
+		return
+	}
 
 	// Follow new output until the client disconnects.
 	ch := make(chan string, 64)

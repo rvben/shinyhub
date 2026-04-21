@@ -190,6 +190,8 @@ func (s *Server) buildRouter() http.Handler {
 		r.Delete("/api/apps/{slug}/schedules/{id}", s.handleDeleteSchedule)
 		r.Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs", s.handleListScheduleRuns)
+		r.Get("/api/apps/{slug}/schedules/{id}/runs/{run_id}", s.handleGetScheduleRun)
+		r.Get("/api/apps/{slug}/schedules/{id}/runs/{run_id}/logs", s.handleScheduleRunLogs)
 		r.Post("/api/apps/{slug}/schedules/{id}/runs/{run_id}/cancel", s.handleCancelScheduleRun)
 
 		r.Get("/api/apps/{slug}/shared-data", s.handleListSharedData)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -328,6 +329,76 @@ func (s *Server) handleCancelScheduleRun(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/apps/{slug}/schedules/{id}/runs/{run_id}
+func (s *Server) handleGetScheduleRun(w http.ResponseWriter, r *http.Request) {
+	app, _, ok := s.requireViewApp(w, r, chi.URLParam(r, "slug"))
+	if !ok {
+		return
+	}
+	scheduleID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad schedule id")
+		return
+	}
+	runID, err := strconv.ParseInt(chi.URLParam(r, "run_id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad run id")
+		return
+	}
+	run, err := s.store.GetScheduleRun(runID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if run.ScheduleID != scheduleID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	sched, err := s.store.GetSchedule(run.ScheduleID)
+	if err != nil || sched.AppID != app.ID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+// GET /api/apps/{slug}/schedules/{id}/runs/{run_id}/logs
+func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
+	app, _, ok := s.requireViewApp(w, r, chi.URLParam(r, "slug"))
+	if !ok {
+		return
+	}
+	scheduleID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad schedule id")
+		return
+	}
+	runID, err := strconv.ParseInt(chi.URLParam(r, "run_id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad run id")
+		return
+	}
+	run, err := s.store.GetScheduleRun(runID)
+	if err != nil || run.LogPath == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if run.ScheduleID != scheduleID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	sched, err := s.store.GetSchedule(run.ScheduleID)
+	if err != nil || sched.AppID != app.ID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if _, err := os.Stat(run.LogPath); err != nil {
+		writeError(w, http.StatusNotFound, "log file not found")
+		return
+	}
+	streamLogFile(w, r, run.LogPath, run.Status == "running")
 }
 
 // validateSchedule applies all field-level validation.
