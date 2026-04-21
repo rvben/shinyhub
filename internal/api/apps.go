@@ -183,6 +183,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setMemoryLimitMB        bool
 		cpuQuotaPercent         *int
 		setCPUQuotaPercent      bool
+		newReplicas             int
+		setReplicas             bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -247,6 +249,24 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		cpuQuotaPercent, setCPUQuotaPercent = v, true
 	}
 
+	if rawVal, present := raw["replicas"]; present {
+		var n int
+		if err := json.Unmarshal(rawVal, &n); err != nil {
+			writeError(w, http.StatusBadRequest, "replicas must be an integer")
+			return
+		}
+		if n < 1 {
+			writeError(w, http.StatusBadRequest, "replicas must be >= 1")
+			return
+		}
+		if s.cfg.Runtime.MaxReplicas > 0 && n > s.cfg.Runtime.MaxReplicas {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas))
+			return
+		}
+		newReplicas, setReplicas = n, true
+	}
+
 	// Apply all validated writes.
 	if setHibernateTimeout {
 		if err := s.store.UpdateHibernateTimeout(slug, hibernateTimeout); err != nil {
@@ -309,6 +329,38 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			}
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
+		}
+	}
+
+	if setReplicas {
+		// Load current app state to check for shrink and running status.
+		existing, err := s.store.GetApp(slug)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		// On shrink, prune obsolete replica rows before updating the count so
+		// ListReplicas stays consistent during the transition.
+		if newReplicas < existing.Replicas {
+			if err := s.store.DeleteReplicasAbove(existing.ID, newReplicas); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal server error")
+				return
+			}
+		}
+		if err := s.store.UpdateAppReplicas(existing.ID, newReplicas); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if existing.Status == "running" {
+			go s.redeployApp(slug)
 		}
 	}
 

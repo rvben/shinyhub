@@ -1099,6 +1099,22 @@ func (s *Store) DeleteReplicasAbove(appID int64, keepBelow int) error {
 	return nil
 }
 
+// UpdateAppReplicas sets the target replica count for an app.
+func (s *Store) UpdateAppReplicas(appID int64, n int) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		n, appID,
+	)
+	if err != nil {
+		return fmt.Errorf("update replicas: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // boolToInt converts a bool to the integer representation used in SQLite.
 func boolToInt(b bool) int {
 	if b {

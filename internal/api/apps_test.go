@@ -981,3 +981,92 @@ func TestAppsAPI_GetIncludesReplicasStatus(t *testing.T) {
 		t.Errorf("replica 0 PID = %v, want 111", body.ReplicasStatus[0].PID)
 	}
 }
+
+// newManagerTestServerWithMaxReplicas creates a test server with a specific MaxReplicas cap.
+func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Server, *db.Store) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir},
+		Runtime: config.RuntimeConfig{MaxReplicas: maxReplicas},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
+
+// TestAppsAPI_PatchReplicasUpdatesCount verifies that PATCH with {"replicas": N}
+// updates the DB and does not trigger a redeploy when the app is stopped.
+func TestAppsAPI_PatchReplicasUpdatesCount(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+	// Keep status as "stopped" (default) to avoid triggering async redeployApp.
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"replicas": 3})
+	req := authedRequest(t, "PATCH", "/api/apps/demo", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if got.Replicas != 3 {
+		t.Errorf("want replicas=3, got %d", got.Replicas)
+	}
+}
+
+// TestAppsAPI_PatchReplicasAboveMaxRejected verifies that PATCH with a replica
+// count exceeding MaxReplicas returns 400.
+func TestAppsAPI_PatchReplicasAboveMaxRejected(t *testing.T) {
+	srv, store := newManagerTestServerWithMaxReplicas(t, 8)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"replicas": 100})
+	req := authedRequest(t, "PATCH", "/api/apps/demo", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for over-cap, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAppsAPI_PatchReplicasBelowMinRejected verifies that PATCH with replicas=0 returns 400.
+func TestAppsAPI_PatchReplicasBelowMinRejected(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"replicas": 0})
+	req := authedRequest(t, "PATCH", "/api/apps/demo", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for replicas=0, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
