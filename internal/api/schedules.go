@@ -365,8 +365,14 @@ func (s *Server) handleGetScheduleRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/apps/{slug}/schedules/{id}/runs/{run_id}/logs
+//
+// Run logs are stderr+stdout of the scheduled command. They can include
+// values that the command happened to print which originate from the
+// app's secret env vars (e.g. an HTTP client logging an Authorization
+// header), so the endpoint requires manage rights — matching the policy
+// applied to the live app log stream at GET /api/apps/{slug}/logs.
 func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
-	app, _, ok := s.requireViewApp(w, r, chi.URLParam(r, "slug"))
+	app, ok := s.requireManageApp(w, r, chi.URLParam(r, "slug"))
 	if !ok {
 		return
 	}

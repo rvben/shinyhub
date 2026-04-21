@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -377,5 +379,60 @@ func TestSchedules_RunLogs_RejectsCrossAppRun(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for cross-app run logs, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSchedules_RunLogs_RejectsPublicViewer asserts that an unrelated
+// authenticated user cannot read a public app's schedule run logs.
+// Run logs may contain stderr that includes secret values surfaced by the
+// scheduled command, so the endpoint must require manage rights even when
+// the app's HTTP surface is public.
+func TestSchedules_RunLogs_RejectsPublicViewer(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hashOwner, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hashOwner, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: 1}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if err := store.SetAppAccess("pub", "public"); err != nil {
+		t.Fatalf("set public access: %v", err)
+	}
+
+	hashOther, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: hashOther, Role: "developer"})
+	tokenStranger, _ := auth.IssueJWT(2, "stranger", "developer", "test-secret")
+
+	// Real log file so the test fails for the right reason — auth, not file IO.
+	logPath := filepath.Join(t.TempDir(), "run.log")
+	if err := os.WriteFile(logPath, []byte("AWS_SECRET_ACCESS_KEY=hunter2\n"), 0600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	app, _ := store.GetAppBySlug("pub")
+	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("create schedule: %v", err)
+	}
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "succeeded", Trigger: "schedule",
+		StartedAt: time.Now().UTC(), LogPath: logPath,
+	})
+	if err != nil {
+		t.Fatalf("insert schedule run: %v", err)
+	}
+
+	req := authedRequest(t, "GET", fmt.Sprintf("/api/apps/pub/schedules/%d/runs/%d/logs", schedID, runID), nil, tokenStranger)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for public-only viewer reading run logs, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("hunter2")) {
+		t.Fatalf("response body leaked log content: %q", rec.Body.String())
 	}
 }
