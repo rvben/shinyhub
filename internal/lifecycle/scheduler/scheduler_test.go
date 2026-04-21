@@ -144,6 +144,28 @@ func TestScheduler_Reload_RegistersNewEntry(t *testing.T) {
 	s.Stop()
 }
 
+// TestScheduler_Register_AcceptsFiveFieldCron guards against accidentally
+// re-introducing cron.WithSeconds(), which would reject the 5-field
+// expressions the API/UI accepts.
+func TestScheduler_Register_AcceptsFiveFieldCron(t *testing.T) {
+	store := &fakeStore{
+		enabled: []*db.Schedule{
+			{ID: 1, CronExpr: "*/2 * * * *", Enabled: true, MissedPolicy: "skip"},
+		},
+	}
+	jobs := &fakeJobs{}
+	s := New(jobs, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := s.entryCount(); got != 1 {
+		t.Fatalf("expected 1 cron entry for 5-field expr, got %d", got)
+	}
+	s.Stop()
+}
+
 func waitForCallCount(t *testing.T, j *fakeJobs, want int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

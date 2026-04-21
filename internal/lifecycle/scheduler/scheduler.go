@@ -55,7 +55,9 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return errors.New("scheduler already started")
 	}
-	s.cron = cron.New(cron.WithSeconds())
+	// Standard 5-field cron expressions ("min hour dom mon dow"). Matches the
+	// API/UI validation surface; the seconds field is intentionally not exposed.
+	s.cron = cron.New()
 	s.started = true
 	s.mu.Unlock()
 
