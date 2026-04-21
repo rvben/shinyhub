@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/api"
@@ -902,5 +905,50 @@ func TestCreateApp_DuplicateSlug(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateApp_RejectsLingeringDataDir(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+
+	cfg := srv.Config()
+	leftover := filepath.Join(cfg.Storage.AppDataDir, "demo")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"slug":"demo","name":"Demo"}`)
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s, want 409", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "demo") {
+		t.Errorf("body should mention slug: %s", rr.Body.String())
+	}
+}
+
+func TestCreateApp_RejectsLingeringAppsDir(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+
+	cfg := srv.Config()
+	leftover := filepath.Join(cfg.Storage.AppsDir, "demo")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"slug":"demo","name":"Demo"}`)
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
 	}
 }

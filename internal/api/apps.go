@@ -19,6 +19,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/storage"
 )
 
 // slugRE enforces a safe, DNS-compatible slug format.
@@ -84,6 +85,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if !canCreateApps(u) {
 		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	if err := storage.RequireFreeSlug(s.cfg, req.Slug); err != nil {
+		if errors.Is(err, storage.ErrSlugInUse) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
