@@ -155,6 +155,7 @@ func (s *Server) buildRouter() http.Handler {
 		r.Put("/api/apps/{slug}/env/{key}", s.handleUpsertAppEnv)
 		r.Delete("/api/apps/{slug}/env/{key}", s.handleDeleteAppEnv)
 		r.Put("/api/apps/{slug}/data/*", s.handleDataPut)
+		r.Delete("/api/apps/{slug}/data/*", s.handleDataDelete)
 
 		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens", s.handleCreateToken)
 		r.Get("/api/tokens", s.handleListTokens)

@@ -328,3 +328,156 @@ func TestDataPut_ZeroContentLength(t *testing.T) {
 	}
 }
 
+// dataDeleteReq builds a DELETE /api/apps/{slug}/data/{rel} request.
+func dataDeleteReq(t *testing.T, slug, rel string, token string) *http.Request {
+	t.Helper()
+	path := "/api/apps/" + slug + "/data/" + rel
+	req := httptest.NewRequest(http.MethodDelete, path, http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
+}
+
+// TestDataDelete_HappyPath verifies that a pre-seeded file is removed and the
+// handler responds 204 No Content.
+func TestDataDelete_HappyPath(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	// Pre-seed the file on disk.
+	appDataDir := filepath.Join(dataDir, "demo")
+	if err := os.MkdirAll(appDataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(appDataDir, "x.txt")
+	if err := os.WriteFile(dest, []byte("content"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	req := dataDeleteReq(t, "demo", "x.txt", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Error("expected file to be gone after DELETE, but it still exists")
+	}
+}
+
+// TestDataDelete_NotFound verifies that deleting a non-existent file returns 404.
+func TestDataDelete_NotFound(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	req := dataDeleteReq(t, "demo", "does-not-exist.txt", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataDelete_RefusesDirectory verifies that attempting to delete a directory
+// returns 400 Bad Request.
+func TestDataDelete_RefusesDirectory(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	// Pre-create a subdirectory.
+	subDir := filepath.Join(dataDir, "demo", "sub")
+	if err := os.MkdirAll(subDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	req := dataDeleteReq(t, "demo", "sub", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataDelete_RefusesReservedPrefix verifies that paths beginning with the
+// reserved ".shinyhub-" prefix are rejected with 400 Bad Request.
+func TestDataDelete_RefusesReservedPrefix(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	req := dataDeleteReq(t, "demo", ".shinyhub-upload-tmp/x", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDataDelete_AuditRecorded verifies that a successful DELETE produces
+// exactly one "data.delete" audit event whose Detail JSON contains the
+// expected path.
+func TestDataDelete_AuditRecorded(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 0)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	// Pre-seed the file.
+	appDataDir := filepath.Join(dataDir, "demo")
+	if err := os.MkdirAll(appDataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "tracked.txt"), []byte("data"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	req := dataDeleteReq(t, "demo", "tracked.txt", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	events, err := store.ListAuditEvents(10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+
+	var found []db.AuditEvent
+	for _, e := range events {
+		if e.Action == db.AuditDataDelete {
+			found = append(found, e)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected 1 data.delete audit event, got %d", len(found))
+	}
+
+	var detail struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(found[0].Detail), &detail); err != nil {
+		t.Fatalf("parse audit detail JSON: %v", err)
+	}
+	if detail.Path != "tracked.txt" {
+		t.Errorf("audit detail path = %q, want %q", detail.Path, "tracked.txt")
+	}
+}
+

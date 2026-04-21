@@ -16,6 +16,66 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 )
 
+// handleDataDelete handles DELETE /api/apps/{slug}/data/* — removes a single
+// file from the per-app data directory. Directories and reserved-prefix paths
+// are refused. Responds 204 No Content on success.
+func (s *Server) handleDataDelete(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+
+	_, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+
+	rawRel := chi.URLParam(r, "*")
+	rel, err := url.PathUnescape(rawRel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	cleanRel, err := data.SanitizeRelPath(rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+
+	appDataDir := data.AppDataDir(s.cfg.Storage.AppDataDir, slug)
+
+	if delErr := data.Delete(appDataDir, cleanRel); delErr != nil {
+		switch {
+		case errors.Is(delErr, data.ErrFileNotFound):
+			writeError(w, http.StatusNotFound, "file not found")
+		case errors.Is(delErr, data.ErrNotAFile):
+			writeError(w, http.StatusBadRequest, "directory deletion not supported")
+		case errors.Is(delErr, data.ErrInvalidPath):
+			writeError(w, http.StatusBadRequest, "invalid path")
+		default:
+			writeError(w, http.StatusInternalServerError, "delete failed")
+		}
+		return
+	}
+
+	detail, _ := json.Marshal(map[string]any{
+		"slug": slug,
+		"path": cleanRel,
+	})
+	u := auth.UserFromContext(r.Context())
+	var userID *int64
+	if u != nil {
+		userID = &u.ID
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       userID,
+		Action:       db.AuditDataDelete,
+		ResourceType: "app",
+		ResourceID:   slug,
+		Detail:       string(detail),
+		IPAddress:    s.clientIP(r),
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleDataPut handles PUT /api/apps/{slug}/data/* — streams a file body into
 // the per-app data directory with quota enforcement and an audit event.
 //
