@@ -210,6 +210,44 @@ func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(in
 	return Result{Index: idx, PID: info.PID, Port: port}, nil
 }
 
+// RunReplica boots a single replica at the given index. The proxy pool size
+// must already be set to at least index+1 before calling this function.
+// Used by the watchdog's per-replica crash-restart path.
+func RunReplica(p Params, index int) (*Result, error) {
+	var baseCmd []string
+	var appType string
+	if len(p.Command) > 0 {
+		baseCmd = p.Command
+	} else {
+		appType = DetectAppType(p.BundleDir)
+		switch appType {
+		case "python":
+			if err := process.Sync(p.BundleDir); err != nil {
+				return nil, fmt.Errorf("uv sync: %w", err)
+			}
+		case "r":
+			if err := process.SyncR(p.BundleDir); err != nil {
+				return nil, fmt.Errorf("renv restore: %w", err)
+			}
+		default:
+			return nil, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
+		}
+	}
+	hc := p.HealthCheck
+	if hc == nil {
+		hc = waitHealthy
+	}
+	timeout := p.HealthTimeout
+	if timeout == 0 {
+		timeout = 120 * time.Second
+	}
+	r, err := bootReplica(p, index, baseCmd, appType, hc, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 // DetectAppType returns "python" if app.py exists, "r" if app.R exists, or ""
 // if neither is found.
 func DetectAppType(bundleDir string) string {

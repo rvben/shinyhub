@@ -247,6 +247,27 @@ func TestRun_AllFailHealthErrors(t *testing.T) {
 	}
 }
 
+func TestRunReplica_SingleBoot(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("one-rep")
+	prx := proxy.New()
+	prx.SetPoolSize("one-rep", 3)
+
+	r, err := deploy.RunReplica(deploy.Params{
+		Slug: "one-rep", BundleDir: bundle, Replicas: 3,
+		Manager: mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(int, time.Duration) error { return nil },
+	}, 2)
+	if err != nil {
+		t.Fatalf("run replica: %v", err)
+	}
+	if r.Index != 2 {
+		t.Fatalf("want index 2, got %d", r.Index)
+	}
+}
+
 func TestBuildRCommand_NoRenv(t *testing.T) {
 	dir := t.TempDir()
 
