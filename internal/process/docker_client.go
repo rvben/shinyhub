@@ -145,29 +145,30 @@ func (c *dockerClient) inspectContainer(id string) (containerState, error) {
 	return containerState{Running: resp.State.Running, Pid: resp.State.Pid, ExitCode: resp.State.ExitCode}, nil
 }
 
-// waitContainer blocks until the container exits. ctx cancellation aborts the wait.
-func (c *dockerClient) waitContainer(ctx context.Context, id string) error {
+// waitContainer blocks until the container exits and returns its exit code.
+// ctx cancellation aborts the wait.
+func (c *dockerClient) waitContainer(ctx context.Context, id string) (int, error) {
 	url := fmt.Sprintf("%s/containers/%s/wait?condition=not-running", c.base, id)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	resp, err := c.stream.Do(req)
 	if err != nil {
-		return fmt.Errorf("wait container: %w", err)
+		return 0, fmt.Errorf("wait container: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("wait container: status %d: %s", resp.StatusCode, body)
+		return 0, fmt.Errorf("wait container: status %d: %s", resp.StatusCode, body)
 	}
 	var result struct {
 		StatusCode int `json:"StatusCode"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("wait container: decode response: %w", err)
+		return 0, fmt.Errorf("wait container: decode response: %w", err)
 	}
-	return nil
+	return result.StatusCode, nil
 }
 
 // containerStats returns CPU percent and RSS bytes for a running container.

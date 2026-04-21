@@ -119,7 +119,8 @@ func (r *DockerRuntime) Signal(handle RunHandle, sig syscall.Signal) error {
 }
 
 func (r *DockerRuntime) Wait(ctx context.Context, handle RunHandle) error {
-	return r.client.waitContainer(ctx, handle.ContainerID)
+	_, err := r.client.waitContainer(ctx, handle.ContainerID)
+	return err
 }
 
 func (r *DockerRuntime) Stats(ctx context.Context, handle RunHandle) (float64, uint64, error) {
@@ -263,8 +264,11 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 
 	go r.streamLogs(id, logWriter)
 
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- r.client.waitContainer(context.Background(), id) }()
+	waitDone := make(chan waitResult, 1)
+	go func() {
+		code, err := r.client.waitContainer(context.Background(), id)
+		waitDone <- waitResult{code: code, err: err}
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -276,14 +280,16 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 			<-waitDone
 		}
 		return ExitInfo{Code: -1, Signaled: true}, nil
-	case err := <-waitDone:
-		if err != nil {
-			return ExitInfo{}, fmt.Errorf("wait one-shot %s: %w", id, err)
+	case res := <-waitDone:
+		if res.err != nil {
+			return ExitInfo{}, fmt.Errorf("wait one-shot %s: %w", id, res.err)
 		}
-		state, ierr := r.client.inspectContainer(id)
-		if ierr != nil {
-			return ExitInfo{Code: 0}, nil
-		}
-		return ExitInfo{Code: state.ExitCode}, nil
+		return ExitInfo{Code: res.code}, nil
 	}
+}
+
+// waitResult carries the outcome of a waitContainer call.
+type waitResult struct {
+	code int
+	err  error
 }
