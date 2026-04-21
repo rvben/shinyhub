@@ -30,6 +30,8 @@ lifecycle:
 
 runtime:
   mode: native                        # "native" (default) or "docker"
+  default_replicas: 1                 # applied when an app does not set its own replicas  # SHINYHUB_RUNTIME_DEFAULT_REPLICAS
+  max_replicas: 32                    # hard cap enforced by the API  # SHINYHUB_RUNTIME_MAX_REPLICAS
   docker:
     socket: /var/run/docker.sock
     images:

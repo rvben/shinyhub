@@ -331,6 +331,59 @@ func TestStorage_AppQuotaMB_EnvOverride(t *testing.T) {
 	}
 }
 
+func TestConfig_RuntimeReplicaDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+runtime:
+  default_replicas: 2
+  max_replicas: 16
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.DefaultReplicas != 2 {
+		t.Fatalf("DefaultReplicas: got %d, want 2", cfg.Runtime.DefaultReplicas)
+	}
+	if cfg.Runtime.MaxReplicas != 16 {
+		t.Fatalf("MaxReplicas: got %d, want 16", cfg.Runtime.MaxReplicas)
+	}
+}
+
+func TestConfig_RuntimeReplicaDefaultsFallback(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("") // empty path → all defaults
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.DefaultReplicas != 1 {
+		t.Fatalf("default DefaultReplicas: got %d, want 1", cfg.Runtime.DefaultReplicas)
+	}
+	if cfg.Runtime.MaxReplicas != 32 {
+		t.Fatalf("default MaxReplicas: got %d, want 32", cfg.Runtime.MaxReplicas)
+	}
+}
+
+func TestConfig_RuntimeReplicaEnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS", "4")
+	t.Setenv("SHINYHUB_RUNTIME_MAX_REPLICAS", "24")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.DefaultReplicas != 4 {
+		t.Fatalf("env DefaultReplicas: got %d, want 4", cfg.Runtime.DefaultReplicas)
+	}
+	if cfg.Runtime.MaxReplicas != 24 {
+		t.Fatalf("env MaxReplicas: got %d, want 24", cfg.Runtime.MaxReplicas)
+	}
+}
+
 func TestLoad_AcceptsStrongSecret(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

@@ -112,8 +112,10 @@ type StorageConfig struct {
 
 // RuntimeConfig controls how app processes are started and isolated.
 type RuntimeConfig struct {
-	Mode   string // "native" (default) or "docker"
-	Docker DockerRuntimeConfig
+	Mode            string // "native" (default) or "docker"
+	Docker          DockerRuntimeConfig
+	DefaultReplicas int
+	MaxReplicas     int
 }
 
 // DockerRuntimeConfig holds Docker-specific runtime settings.
@@ -148,8 +150,10 @@ type rawLifecycleConfig struct {
 }
 
 type rawRuntimeConfig struct {
-	Mode   string               `yaml:"mode"`
-	Docker rawDockerRuntimeConfig `yaml:"docker"`
+	Mode            string                 `yaml:"mode"`
+	Docker          rawDockerRuntimeConfig `yaml:"docker"`
+	DefaultReplicas int                    `yaml:"default_replicas"`
+	MaxReplicas     int                    `yaml:"max_replicas"`
 }
 
 type rawDockerRuntimeConfig struct {
@@ -308,6 +312,18 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	if r.Docker.DefaultCPUPercent != 0 {
 		rc.Docker.DefaultCPUPercent = r.Docker.DefaultCPUPercent
 	}
+	if r.DefaultReplicas > 0 {
+		rc.DefaultReplicas = r.DefaultReplicas
+	}
+	if r.MaxReplicas > 0 {
+		rc.MaxReplicas = r.MaxReplicas
+	}
+	if rc.DefaultReplicas <= 0 {
+		rc.DefaultReplicas = 1
+	}
+	if rc.MaxReplicas <= 0 {
+		rc.MaxReplicas = 32
+	}
 	return rc
 }
 
@@ -391,5 +407,15 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_R"); v != "" {
 		cfg.Runtime.Docker.Images.R = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Runtime.DefaultReplicas = n
+		}
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_MAX_REPLICAS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Runtime.MaxReplicas = n
+		}
 	}
 }
