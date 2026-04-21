@@ -1,6 +1,8 @@
 package deploy_test
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -311,6 +313,96 @@ func TestDetectAppType_Unknown(t *testing.T) {
 	dir := t.TempDir()
 	if deploy.DetectAppType(dir) != "" {
 		t.Error("expected empty string for unknown app type")
+	}
+}
+
+func TestExtractBundle_RejectsDataEntry(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "bundle.zip")
+	if err := createTestBundle(zipPath, map[string]string{
+		"app.R":      "ui <- fluidPage()\n",
+		"data/x.csv": "a,b\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := deploy.ExtractBundle(zipPath, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-rejection error, got %v", err)
+	}
+}
+
+func TestExtractBundle_RejectsParquetAtRoot(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "bundle.zip")
+	if err := createTestBundle(zipPath, map[string]string{
+		"app.R":        "x",
+		"seed.parquet": "PAR1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := deploy.ExtractBundle(zipPath, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "seed.parquet") {
+		t.Fatalf("expected extension-rejection error, got %v", err)
+	}
+}
+
+func TestExtractBundle_SoftSkipsCacheDirs(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "bundle.zip")
+	if err := createTestBundle(zipPath, map[string]string{
+		"app.R":               "x",
+		".git/HEAD":           "ref",
+		"__pycache__/x.pyc":  "p",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := deploy.ExtractBundle(zipPath, out); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, ".git", "HEAD")); !os.IsNotExist(err) {
+		t.Errorf(".git/HEAD should have been skipped: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "app.R")); err != nil {
+		t.Errorf("app.R should have been extracted: %v", err)
+	}
+}
+
+func TestExtractBundle_RejectsDataDirEntryWithoutCreating(t *testing.T) {
+	// Build a ZIP that contains an explicit "data/" directory entry (and no
+	// file inside it). The extractor must reject and not create the dir.
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	if _, err := zw.Create("data/"); err != nil {
+		t.Fatal(err)
+	}
+	w, err := zw.Create("app.R")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write the in-memory ZIP to a temp file because ExtractBundleWithLimits takes a file path.
+	zipPath := filepath.Join(t.TempDir(), "data-dir.zip")
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := t.TempDir()
+	err = deploy.ExtractBundleWithLimits(zipPath, out, deploy.DefaultMaxEntrySize, deploy.DefaultMaxBundleSize)
+	if err == nil {
+		t.Fatal("expected rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "data") {
+		t.Errorf("error should mention 'data': %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(out, "data")); !os.IsNotExist(statErr) {
+		t.Errorf("data/ directory should NOT have been created: %v", statErr)
 	}
 }
 

@@ -53,6 +53,16 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		Labels:      labels,
 		NetworkMode: "host",
 	}
+	if p.AppDataPath != "" {
+		cfg.Mounts = append(cfg.Mounts,
+			containerMount{Source: filepath.Clean(p.AppDataPath), Target: "/app-data", Mode: "rw"},
+			containerMount{Source: filepath.Clean(p.AppDataPath), Target: filepath.ToSlash(filepath.Join(cfg.WorkDir, "data")), Mode: "rw"},
+		)
+		// Override any inherited SHINYHUB_APP_DATA (which would be the host path
+		// from the Manager) with the in-container path. Docker env honors
+		// last-occurrence-wins so appending here is sufficient.
+		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
+	}
 	if p.MemoryLimitMB > 0 {
 		cfg.MemoryBytes = int64(p.MemoryLimitMB) * 1024 * 1024
 	}

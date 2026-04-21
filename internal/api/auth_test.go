@@ -46,7 +46,7 @@ func newTestServer(t *testing.T) (*api.Server, *db.Store) {
 	}
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
-		Storage: config.StorageConfig{AppsDir: t.TempDir()},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
 	}
 	srv := api.New(cfg, store, nil, nil) // no manager/proxy for auth tests
 	t.Cleanup(func() { store.Close() })

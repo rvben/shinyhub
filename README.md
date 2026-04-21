@@ -15,6 +15,8 @@ OAuth or OIDC, and hibernate idle apps automatically.
   (Okta, Azure AD, Keycloak, Auth0).
 - **Access control:** public, private, or shared apps; member roles.
 - **Per-app env vars & secrets:** encrypted at rest with AES-256-GCM.
+- **Persistent data dir:** each app gets a `data/` directory that survives
+  deploys, with `shiny data push|ls|rm` and a UI Data tab.
 - **Audit log:** 27 action types recorded for admin review.
 - **Container isolation (optional):** run each app inside a Docker container
   with CPU and memory limits.
@@ -121,9 +123,61 @@ UI.
 | You want to...                                         | Use                                  |
 |--------------------------------------------------------|--------------------------------------|
 | Configure a cloud bucket URL / DB URL / API endpoint   | Env var (non-secret)                 |
-| Pass a password / API key / private key string        | Env var (secret)                     |
-| Ship a Parquet / DuckDB / SQLite file the app reads   | *(coming soon — persistent data dir)* |
-| Let the app write uploads / cache / session data      | *(coming soon — persistent data dir)* |
+| Pass a password / API key / private key string         | Env var (secret)                     |
+| Ship a Parquet / DuckDB / SQLite file the app reads    | Persistent data dir (see below)      |
+| Let the app write uploads / cache / session data       | Persistent data dir (see below)      |
+
+## Persistent data dir
+
+Every deployed app gets its own directory at
+`<storage.app_data_dir>/<slug>/`. The path is exposed to the app process two
+ways:
+
+- `SHINYHUB_APP_DATA` env var (absolute path).
+- `./data/` symlink inside the app's working directory (or a Docker bind mount
+  to `/app-data` plus a symlink at `<workdir>/data` when running under
+  `runtime.mode: docker`).
+
+The data dir survives deploys, restarts, and rollbacks. It is removed only
+when the app itself is deleted. Recreating an app with the same slug starts
+with a fresh, empty data dir.
+
+Deploy bundles must not contain a `data/` entry — the server rejects bundles
+where the first segment is a file, directory, or symlink named `data` (a 422
+with the offending path). Push data in separately:
+
+```
+shiny data push <slug> ./seed.parquet
+shiny data push <slug> ./big.csv --dest datasets/2026.csv --restart
+shiny data ls   <slug>
+shiny data rm   <slug> stale.csv
+```
+
+The same operations are available from the UI under **Settings → Data**.
+
+### Auth
+
+`PUT` and `DELETE` on `/api/apps/:slug/data/*path` require app `manager`
+rights or platform `admin` / `operator`.
+
+`GET /api/apps/:slug/data` requires the app's owner, an explicit member
+(any role), or a platform admin / operator. **Public or shared visibility
+alone is not enough** — file listings can leak business intent
+(`q4-revenue.parquet`) and are kept off the public surface even when the
+app itself is public.
+
+### Quota
+
+`storage.app_quota_mb` caps the combined on-disk footprint of the app's
+deploy bundles plus the data dir. The check runs on every `PUT` and is
+overwrite-aware: replacing a 100 MB file with a 50 MB one always succeeds.
+Set to `0` to disable.
+
+### Concurrent writes
+
+The persistent dir is safe for any number of concurrent **readers**. For
+concurrent **writers**, use a real database (Postgres/MySQL); local SQLite
+or DuckDB in read-write mode does not survive multi-process writes.
 
 ## Architecture
 

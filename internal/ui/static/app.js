@@ -125,11 +125,38 @@ document.addEventListener('DOMContentLoaded', () => {
   const deploySubmit       = document.getElementById('deploy-submit');
 
   const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
-  const DEPLOY_MAX_BYTES = 128 * 1024 * 1024;
-  const DEPLOY_IGNORE_DIRS = new Set(['.git', '.venv', '__pycache__', 'node_modules', '.renv', '.Rproj.user']);
+
+  let BUNDLE_RULES = null;
+  async function loadBundleRules() {
+    if (BUNDLE_RULES) return BUNDLE_RULES;
+    const resp = await fetch('/static/bundle-rules.json');
+    if (!resp.ok) throw new Error('failed to load bundle rules');
+    BUNDLE_RULES = await resp.json();
+    return BUNDLE_RULES;
+  }
+
+  // Classify a single entry (file or directory) relative to the bundle root.
+  // Returns one of: 'accept', 'skipCacheDir', 'rejectDataDir',
+  // 'rejectDatasetDir', 'rejectExtension', 'rejectFileSize'.
+  // Directory decisions should pass size=0. The leading-slash strip keeps
+  // first-segment classification in lockstep with server-side bundle.Inspect,
+  // which operates on paths cleaned via path.Clean.
+  function inspectBundleEntry(rules, relPath, size) {
+    const clean = relPath.replace(/^\/+/, '');
+    const first = clean.split('/')[0];
+    if (first === 'data') return 'rejectDataDir';
+    if (first === 'datasets' || first === '.shinyhub-data') return 'rejectDatasetDir';
+    if (rules.cacheDirs.includes(first)) return 'skipCacheDir';
+    const lower = clean.toLowerCase();
+    for (const ext of rules.dataExtensions) {
+      if (lower.endsWith(ext.toLowerCase())) return 'rejectExtension';
+    }
+    if (rules.maxFileBytes > 0 && size > rules.maxFileBytes) return 'rejectFileSize';
+    return 'accept';
+  }
 
   let activeEventSource = null;
-  let deployState = null; // { slug, appName, blob, fileCount, ignored: Set<string>, xhr }
+  let deployState = null; // { slug, appName, blob, fileCount, rejections: Map<string, string[]>, xhr }
   let slugEdited = false;
 
   // Derive a slug from a display name: strip diacritics, lowercase, replace
@@ -775,6 +802,15 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('settings-modal').hidden = true;
     settingsSlug = null;
     closeEnvForm();
+    // Reset data tab state.
+    const dataForm = document.getElementById('data-upload-form');
+    if (dataForm) dataForm.reset();
+    const dataProgress = document.getElementById('data-progress');
+    if (dataProgress) dataProgress.hidden = true;
+    const dataError = document.getElementById('data-error');
+    if (dataError) setError(dataError, '');
+    const dataTbody = document.getElementById('data-list');
+    if (dataTbody) dataTbody.innerHTML = '';
     switchSettingsTab('access');
   }
 
@@ -790,8 +826,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('settings-access-panel').hidden = tabName !== 'access';
     document.getElementById('settings-env-panel').hidden = tabName !== 'env';
+    document.getElementById('settings-data-panel').hidden = tabName !== 'data';
     if (tabName === 'env' && settingsSlug) {
       refreshEnvList(settingsSlug);
+    }
+    if (tabName === 'data' && settingsSlug) {
+      refreshDataTab(settingsSlug);
     }
   }
 
@@ -929,6 +969,169 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     await refreshEnvList(slug);
+  }
+
+  // --- Data tab ---
+
+  function encodeDataPath(p) {
+    return p.split('/').map(encodeURIComponent).join('/');
+  }
+
+  async function refreshDataTab(slug) {
+    const tbody = document.getElementById('data-list');
+    tbody.innerHTML = '';
+    const errEl = document.getElementById('data-error');
+    setError(errEl, '');
+
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data`);
+    } catch {
+      setError(errEl, 'Failed to load data files.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to load data files.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+
+    let env;
+    try { env = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
+
+    const files = (env && env.files) || [];
+    const empty = document.getElementById('data-empty');
+    const table = document.getElementById('data-list-table');
+    empty.hidden = files.length > 0;
+    table.hidden = files.length === 0;
+
+    const app = state.apps.find(a => a.slug === slug);
+    const canWrite = canManageApp(state.user, app);
+    document.getElementById('data-upload-form').hidden = !canWrite;
+
+    const quotaEl = document.getElementById('data-quota');
+    if (env) {
+      const used = formatBytes(env.used_bytes || 0);
+      quotaEl.textContent = env.quota_mb
+        ? `Using ${used} of ${env.quota_mb} MiB`
+        : `Using ${used} (no quota set)`;
+    } else {
+      quotaEl.textContent = '';
+    }
+
+    for (const f of files) {
+      const tr = document.createElement('tr');
+
+      const pathTd = document.createElement('td');
+      pathTd.textContent = f.path;
+
+      const sizeTd = document.createElement('td');
+      sizeTd.textContent = formatBytes(f.size);
+
+      const modTd = document.createElement('td');
+      modTd.textContent = new Date(f.modified_at * 1000).toLocaleString();
+
+      const actTd = document.createElement('td');
+      actTd.className = 'env-actions';
+      if (canWrite) {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'env-btn-danger';
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', () => deleteDataFile(slug, f.path));
+        actTd.appendChild(delBtn);
+      }
+
+      tr.append(pathTd, sizeTd, modTd, actTd);
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function deleteDataFile(slug, path) {
+    if (!window.confirm(`Delete ${path}?`)) return;
+    const errEl = document.getElementById('data-error');
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
+    } catch {
+      setError(errEl, 'Network error.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok && resp.status !== 204) {
+      let message = 'Delete failed.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+    await refreshDataTab(slug);
+  }
+
+  function uploadDataFile(event) {
+    event.preventDefault();
+    const slug = settingsSlug;
+    if (!slug) return;
+
+    const fileInput = document.getElementById('data-file-input');
+    const destInput = document.getElementById('data-dest-input');
+    const restartInput = document.getElementById('data-restart-input');
+    const uploadBtn = document.getElementById('data-upload-btn');
+    const progressEl = document.getElementById('data-progress');
+    const errEl = document.getElementById('data-error');
+
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    const dest = destInput.value.trim() || file.name;
+    const restart = restartInput.checked;
+    const url = `/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(dest)}${restart ? '?restart=true' : ''}`;
+
+    setError(errEl, '');
+    uploadBtn.disabled = true;
+    progressEl.value = 0;
+    progressEl.hidden = false;
+
+    const xhr = new XMLHttpRequest();
+    xhr.withCredentials = true;
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-CSRF-Token', readCookie('csrf_token'));
+
+    xhr.upload.addEventListener('progress', e => {
+      if (e.lengthComputable) {
+        progressEl.value = Math.round((e.loaded / e.total) * 100);
+      }
+    });
+
+    xhr.onload = () => {
+      progressEl.hidden = true;
+      if (xhr.status >= 400) {
+        let message = `Upload failed (${xhr.status} ${xhr.statusText})`;
+        try {
+          const b = JSON.parse(xhr.responseText);
+          if (b && b.error) {
+            message = b.error;
+            if (b.used_bytes !== undefined && b.quota_bytes !== undefined) {
+              message += ` — quota: ${formatBytes(b.used_bytes + b.requested_bytes)} requested, ${formatBytes(b.quota_bytes)} limit`;
+            }
+          }
+        } catch { /* non-JSON */ }
+        setError(errEl, message);
+      } else {
+        document.getElementById('data-upload-form').reset();
+        setError(errEl, '');
+        refreshDataTab(slug);
+      }
+    };
+
+    xhr.onloadend = () => {
+      uploadBtn.disabled = false;
+      progressEl.hidden = true;
+    };
+
+    xhr.send(file);
   }
 
   async function openHistoryModal(slug) {
@@ -1134,6 +1337,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));
   document.getElementById('env-form').addEventListener('submit', submitEnvForm);
   document.getElementById('env-form-cancel').addEventListener('click', closeEnvForm);
+
+  // Data tab: upload form submit.
+  document.getElementById('data-upload-form').addEventListener('submit', uploadDataFile);
 
   document.getElementById('history-modal-close').addEventListener('click', closeHistoryModal);
   historyModal.addEventListener('click', e => {
@@ -1376,7 +1582,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function openDeployModal(app) {
     resetDeployModal();
-    deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, ignored: new Set(), xhr: null };
+    deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, rejections: new Map(), xhr: null };
     deployAppName.textContent = app.name;
     deployModal.hidden = false;
     deployDropzone.focus();
@@ -1387,20 +1593,34 @@ document.addEventListener('DOMContentLoaded', () => {
     deployModal.hidden = true;
   }
 
-  function renderDeploySummary(sourceName, blobSize, fileCount, ignored) {
+  function renderDeploySummary(sourceName, blobSize, fileCount, rejections, rules) {
     deploySourceName.textContent = sourceName;
     deployFileCount.textContent = fileCount == null ? '—' : String(fileCount);
     deployBundleSize.textContent = formatBytes(blobSize);
-    if (ignored && ignored.size > 0) {
+    if (rejections && rejections.size > 0) {
       deployIgnoredRow.hidden = false;
-      deployIgnoredList.textContent = [...ignored].sort().join(', ');
+      const labels = {
+        rejectDataDir:     'data dir',
+        rejectDatasetDir:  'dataset dir',
+        rejectExtension:   'data extension',
+        rejectFileSize:    'oversize file',
+      };
+      const parts = [];
+      for (const [decision, paths] of rejections) {
+        const label = labels[decision] || decision;
+        parts.push(`${label}: ${paths.sort().join(', ')}`);
+      }
+      parts.sort();
+      deployIgnoredList.textContent = parts.join('; ');
     } else {
       deployIgnoredRow.hidden = true;
     }
     deploySummary.hidden = false;
 
-    if (blobSize > DEPLOY_MAX_BYTES) {
-      setError(deployError, `Bundle is ${formatBytes(blobSize)} — exceeds the 128 MiB upload limit. Use the CLI for larger bundles.`);
+    const cap = rules && rules.maxBundleBytes > 0 ? rules.maxBundleBytes : 0;
+    if (cap > 0 && blobSize > cap) {
+      const mib = Math.round(cap / (1024 * 1024));
+      setError(deployError, `Bundle is ${formatBytes(blobSize)} — exceeds the ${mib} MiB upload limit. Use the CLI for larger bundles.`);
       deploySubmit.disabled = true;
       return;
     }
@@ -1411,10 +1631,18 @@ document.addEventListener('DOMContentLoaded', () => {
   async function acceptZipFile(file) {
     // Pre-built .zip — counting files would require parsing the central
     // directory, so leave the file count unknown and render it as "—".
+    let rules;
+    try {
+      rules = await loadBundleRules();
+    } catch (err) {
+      console.error('loadBundleRules failed:', err);
+      setError(deployError, 'Failed to load bundle rules from server.');
+      return;
+    }
     deployState.blob = file;
     deployState.fileCount = null;
-    deployState.ignored = new Set();
-    renderDeploySummary(file.name, file.size, null, null);
+    deployState.rejections = new Map();
+    renderDeploySummary(file.name, file.size, null, null, rules);
   }
 
   function bindDropzoneEvents() {
@@ -1524,11 +1752,15 @@ document.addEventListener('DOMContentLoaded', () => {
     return new Promise((resolve, reject) => entry.file(resolve, reject));
   }
 
-  // Walks a DirectoryEntry tree, yielding { relativePath, file } for every file
-  // not under an ignored directory.  rootEntry itself contributes no prefix —
-  // mirrors the CLI's `filepath.Rel(dir, path)` behavior so the archive contains
-  // the folder's contents, not the folder itself.
-  async function* walkFolder(rootEntry, ignored) {
+  // Walks a DirectoryEntry tree, yielding { relativePath, file } for every
+  // accepted file. rootEntry itself contributes no prefix — mirrors the CLI's
+  // filepath.Rel(dir, path) behavior so the archive contains the folder's
+  // contents, not the folder itself.
+  //
+  // Cache dirs (e.g. .venv, __pycache__) are silently skipped.
+  // Data dirs, dataset dirs, oversize files, and data-extension files are
+  // recorded in the rejections Map under the corresponding decision key.
+  async function* walkFolder(rootEntry, rules, rejections) {
     const queue = [{ entry: rootEntry, path: '' }];
     while (queue.length > 0) {
       const { entry, path } = queue.shift();
@@ -1537,14 +1769,33 @@ document.addEventListener('DOMContentLoaded', () => {
         const children = await readEntriesAll(reader);
         for (const child of children) {
           const childPath = path ? `${path}/${child.name}` : child.name;
-          if (child.isDirectory && DEPLOY_IGNORE_DIRS.has(child.name)) {
-            ignored.add(child.name);
-            continue;
+          if (child.isDirectory) {
+            // Inspect with size=0 — directory decisions don't depend on size.
+            const decision = inspectBundleEntry(rules, childPath, 0);
+            if (decision === 'skipCacheDir') {
+              continue; // silent skip
+            }
+            if (decision !== 'accept') {
+              const arr = rejections.get(decision) || [];
+              arr.push(childPath);
+              rejections.set(decision, arr);
+              continue;
+            }
           }
           queue.push({ entry: child, path: childPath });
         }
       } else if (entry.isFile) {
         const file = await fileFromEntry(entry);
+        const decision = inspectBundleEntry(rules, path, file.size);
+        if (decision === 'skipCacheDir') {
+          continue;
+        }
+        if (decision !== 'accept') {
+          const arr = rejections.get(decision) || [];
+          arr.push(path);
+          rejections.set(decision, arr);
+          continue;
+        }
         yield { relativePath: path, file };
       }
     }
@@ -1572,10 +1823,19 @@ document.addEventListener('DOMContentLoaded', () => {
     deployBundleSize.textContent = '—';
     deploySummary.hidden = false;
 
-    const ignored = new Set();
+    let rules;
+    try {
+      rules = await loadBundleRules();
+    } catch (err) {
+      console.error('loadBundleRules failed:', err);
+      setError(deployError, 'Failed to load bundle rules from server.');
+      return;
+    }
+
+    const rejections = new Map();
     const fileList = [];
     try {
-      for await (const item of walkFolder(rootEntry, ignored)) fileList.push(item);
+      for await (const item of walkFolder(rootEntry, rules, rejections)) fileList.push(item);
     } catch (err) {
       console.error('walkFolder failed:', err);
       setError(deployError, 'Failed to read folder contents.');
@@ -1583,7 +1843,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (fileList.length === 0) {
-      setError(deployError, 'Folder is empty after filtering ignored directories.');
+      setError(deployError, 'Folder is empty after filtering excluded paths.');
       return;
     }
 
@@ -1607,8 +1867,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     deployState.blob = blob;
     deployState.fileCount = fileList.length;
-    deployState.ignored = ignored;
-    renderDeploySummary(rootEntry.name + '/', blob.size, fileList.length, ignored);
+    deployState.rejections = rejections;
+    renderDeploySummary(rootEntry.name + '/', blob.size, fileList.length, rejections, rules);
   }
 
   function uploadBundle(slug, blob) {

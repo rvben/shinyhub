@@ -19,6 +19,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/storage"
 )
 
 // slugRE enforces a safe, DNS-compatible slug format.
@@ -84,6 +85,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if !canCreateApps(u) {
 		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	if err := storage.RequireFreeSlug(s.cfg, req.Slug); err != nil {
+		if errors.Is(err, storage.ErrSlugInUse) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -411,11 +421,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, err := readBundleUpload(w, r, maxBundleUploadSize)
+	maxSize := maxBundleUploadSize
+	if cap := int64(s.cfg.Storage.MaxBundleMB); cap > 0 {
+		maxSize = cap * 1024 * 1024
+	}
+	file, err := readBundleUpload(w, r, maxSize)
 	if err != nil {
 		switch err {
 		case errBundleTooLarge:
-			writeError(w, http.StatusRequestEntityTooLarge, "bundle exceeds 128 MiB limit")
+			capMB := s.cfg.Storage.MaxBundleMB
+			if capMB == 0 {
+				capMB = 128
+			}
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("bundle exceeds %d MiB cap", capMB))
 		case errBundleMissing:
 			writeError(w, http.StatusBadRequest, "bundle file required")
 		default:
@@ -448,6 +466,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
 	if err := deploy.ExtractBundle(bundleZip, bundleDir); err != nil {
 		fmt.Fprintf(os.Stderr, "extract bundle %s: %v\n", slug, err)
+		if errors.Is(err, deploy.ErrBundleRejected) {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		if errors.Is(err, deploy.ErrBundleTooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "bundle extracted size exceeds limit")
 			return
@@ -461,7 +483,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// both the version dir and the bundle zip on violation so a rejected
 	// deploy leaves no stale files behind.
 	if s.cfg.Storage.AppQuotaMB > 0 {
-		used, qErr := deploy.CheckAppQuota(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.AppQuotaMB)
+		used, qErr := deploy.CheckAppQuota(s.cfg.Storage.AppsDir, s.cfg.Storage.AppDataDir, slug, s.cfg.Storage.AppQuotaMB)
 		if qErr != nil {
 			_ = os.RemoveAll(bundleDir)
 			_ = os.Remove(bundleZip)
@@ -792,16 +814,26 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clean up on-disk state after the DB row is gone. Errors are non-fatal
+	// (the record is already deleted) but are captured in the audit detail so
+	// operators can investigate orphaned bytes.
+	detail := ""
+	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
+		detail = cleanupErr.Error()
+		slog.Error("app delete cleanup failed", "slug", slug, "err", cleanupErr)
+	}
+
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "delete_app",
 			ResourceType: "app",
 			ResourceID:   slug,
+			Detail:       detail,
 			IPAddress:    s.clientIP(r),
 		})
 	}
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {

@@ -41,8 +41,9 @@ type StartParams struct {
 	Command         []string
 	Port            int
 	Env             []string
-	MemoryLimitMB   int // 0 = no limit
-	CPUQuotaPercent int // 0 = no limit; 100 = 1 full core
+	AppDataPath     string // host path to per-app data dir; empty disables data-dir wiring in runtime
+	MemoryLimitMB   int    // 0 = no limit
+	CPUQuotaPercent int    // 0 = no limit; 100 = 1 full core
 }
 
 type entry struct {
@@ -67,12 +68,20 @@ type Manager struct {
 	appsDir     string
 	runtime     Runtime
 	envResolver EnvResolver
+	appDataRoot string
 }
 
 // SetEnvResolver sets the function used to inject per-app environment variables
 // during Start. Must be called before the manager begins starting processes; it
 // is not safe to call concurrently with Start.
 func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
+
+// SetAppDataRoot sets the root directory under which per-app persistent data
+// directories live. Each Start resolves <root>/<slug>, ensures it exists,
+// injects SHINYHUB_APP_DATA, and symlinks <bundle_dir>/data to it. An empty
+// root disables the feature. Must be called before the manager begins
+// starting processes; not safe to call concurrently with Start.
+func (m *Manager) SetAppDataRoot(root string) { m.appDataRoot = root }
 
 // NewManager returns an initialized Manager using the given Runtime.
 func NewManager(appsDir string, rt Runtime) *Manager {
@@ -107,12 +116,45 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		delete(m.logFiles, key)
 	}
 
+	var appDataPath string
+	if m.appDataRoot != "" {
+		appDataPath = filepath.Join(m.appDataRoot, p.Slug)
+		if err := os.MkdirAll(appDataPath, 0o750); err != nil {
+			return nil, fmt.Errorf("ensure app data dir: %w", err)
+		}
+		p.AppDataPath = appDataPath
+		p.Env = append(p.Env, "SHINYHUB_APP_DATA="+appDataPath)
+
+		linkPath := filepath.Join(p.Dir, "data")
+		switch info, err := os.Lstat(linkPath); {
+		case err == nil:
+			// Something is already at <bundle>/data. Accept only if it's a symlink
+			// pointing to the correct target — that's the idempotent restart case.
+			if info.Mode()&os.ModeSymlink != 0 {
+				existing, readErr := os.Readlink(linkPath)
+				if readErr == nil && existing == appDataPath {
+					break // already correct, nothing to do
+				}
+			}
+			return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
+		case !os.IsNotExist(err):
+			return nil, fmt.Errorf("stat %s: %w", linkPath, err)
+		default:
+			// Path does not exist — create the symlink.
+			if err := os.Symlink(appDataPath, linkPath); err != nil {
+				return nil, fmt.Errorf("symlink data: %w", err)
+			}
+		}
+	}
+
 	if m.envResolver != nil {
 		userEnv, err := m.envResolver(p.Slug)
 		if err != nil {
 			return nil, fmt.Errorf("resolve env: %w", err)
 		}
-		p.Env = append(p.Env, userEnv...)
+		// Build user env first, then append platform env so platform values win
+		// on duplicate keys (os/exec uses last-occurrence-wins).
+		p.Env = append(userEnv, p.Env...)
 	}
 
 	logPath := filepath.Join(m.appsDir, p.Slug, fmt.Sprintf("app-%d.log", p.Index))

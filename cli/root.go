@@ -33,7 +33,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.AddCommand(loginCmd, deployCmd, appsCmd, tokensCmd, envCmd)
+	rootCmd.AddCommand(loginCmd, deployCmd, appsCmd, tokensCmd, envCmd, dataCmd)
 }
 
 type cliConfig struct {

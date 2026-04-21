@@ -2119,3 +2119,31 @@ main {
   color: var(--cyan-bright);
   background: rgba(56,189,248,0.08);
 }
+
+/* ── Data tab ── */
+#data-progress {
+  width: 100%;
+  height: 8px;
+  appearance: none;
+  margin-bottom: 0.5rem;
+}
+
+#data-progress::-webkit-progress-bar {
+  background: var(--surface);
+  border-radius: 4px;
+}
+
+#data-progress::-webkit-progress-value {
+  background: var(--cyan-bright);
+  border-radius: 4px;
+}
+
+#data-progress::-moz-progress-bar {
+  background: var(--cyan-bright);
+  border-radius: 4px;
+}
+
+.env-form-row input[type="file"] {
+  color: var(--text-soft);
+  font-size: 0.8rem;
+}

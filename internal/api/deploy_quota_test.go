@@ -45,6 +45,67 @@ func newQuotaTestServer(t *testing.T, appsDir string, quotaMB int) (*api.Server,
 	return srv, store
 }
 
+// newMaxBundleTestServer wires a Server with a real manager and an explicit
+// MaxBundleMB cap so the deploy handler can enforce the multipart size limit.
+func newMaxBundleTestServer(t *testing.T, appsDir string, maxBundleMB int) (*api.Server, *db.Store) {
+	t.Helper()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth: config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{
+			AppsDir:      appsDir,
+			AppDataDir:   t.TempDir(),
+			MaxBundleMB:  maxBundleMB,
+		},
+	}
+	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
+	prx := proxy.New()
+	srv := api.New(cfg, store, mgr, prx)
+	t.Cleanup(func() { _ = store.Close() })
+	return srv, store
+}
+
+// buildOversizedBundleUpload produces a multipart request body with a zip that
+// contains a large file exceeding the given threshold (in bytes uncompressed).
+func buildOversizedBundleUpload(t *testing.T, sizeBytes int) (*bytes.Buffer, string) {
+	t.Helper()
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, err := zw.CreateHeader(&zip.FileHeader{
+		Name:   "blob.bin",
+		Method: zip.Store, // no compression so zip size ≈ content size
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(bytes.Repeat([]byte("x"), sizeBytes)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("bundle", "bundle.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(zipBuf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &body, mw.FormDataContentType()
+}
+
 // buildBundleUpload produces a multipart request body wrapping a tiny zip that
 // contains a single file entry. The returned body plus content-type header are
 // ready to attach to an *http.Request.
@@ -156,5 +217,66 @@ func TestDeployApp_QuotaDisabled_DoesNotReject(t *testing.T) {
 	// still fail later (no uv / health check times out), but not with 413.
 	if rec.Code == http.StatusRequestEntityTooLarge {
 		t.Fatalf("quota disabled should not return 413: %s", rec.Body.String())
+	}
+}
+
+// TestDeployApp_RejectsOversizedBundle verifies that a deploy upload exceeding
+// MaxBundleMB is rejected at the multipart boundary with 413 before the body
+// is fully read or written to disk.
+func TestDeployApp_RejectsOversizedBundle(t *testing.T) {
+	appsDir := t.TempDir()
+	srv, store := newMaxBundleTestServer(t, appsDir, 1) // 1 MiB cap
+
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("admin")
+	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+
+	// Build a zip whose raw (stored) payload exceeds 1 MiB so the multipart
+	// body size surpasses the cap even before extraction.
+	body, ctype := buildOversizedBundleUpload(t, 2*1024*1024)
+
+	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	req := httptest.NewRequest("POST", "/api/apps/demo/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body = %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("MiB")) {
+		t.Errorf("expected error body to mention cap size, got: %s", rec.Body.String())
+	}
+}
+
+// TestDeployApp_MaxBundleDisabled_DoesNotRejectBySize verifies that when
+// MaxBundleMB is 0 (no cap), a large upload is not rejected at the boundary.
+func TestDeployApp_MaxBundleDisabled_DoesNotRejectBySize(t *testing.T) {
+	appsDir := t.TempDir()
+	srv, store := newMaxBundleTestServer(t, appsDir, 0) // no cap
+
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("admin")
+	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+
+	// A 2 MiB upload that would be rejected with a 1 MiB cap.
+	body, ctype := buildOversizedBundleUpload(t, 2*1024*1024)
+
+	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	req := httptest.NewRequest("POST", "/api/apps/demo/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	// With no cap, the upload must not be rejected with 413. It may still fail
+	// for other reasons (no runtime, health-check timeout), but not size.
+	if rec.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("cap disabled should not return 413: %s", rec.Body.String())
 	}
 }

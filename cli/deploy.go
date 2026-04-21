@@ -11,8 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/spf13/cobra"
 )
 
@@ -94,9 +96,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Bundling %s...\n", abs)
-	bundle, err := zipDir(abs)
+	bundleBuf, summary, err := zipDir(abs)
 	if err != nil {
 		return fmt.Errorf("bundle: %w", err)
+	}
+	if summary != "" {
+		fmt.Fprintln(os.Stderr, summary)
 	}
 
 	if err := ensureApp(cfg, slug); err != nil {
@@ -107,7 +112,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, _ := writer.CreateFormFile("bundle", "bundle.zip")
-	io.Copy(part, bundle)
+	io.Copy(part, bundleBuf)
 	writer.Close()
 
 	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
@@ -198,38 +203,89 @@ func gitClone(repoURL, branch, subdir string) (string, error) {
 	return dir, nil
 }
 
-func zipDir(dir string) (*bytes.Buffer, error) {
+func zipDir(dir string) (*bytes.Buffer, string, error) {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
+	rules := bundle.DefaultRules()
+	rejected := map[bundle.FilterDecision][]string{}
+
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
-		}
-		if info.IsDir() {
-			switch info.Name() {
-			case ".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user":
-				return filepath.SkipDir
-			}
-			return nil
 		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
-		fw, err := w.Create(rel)
-		if err != nil {
-			return err
+		if rel == "." {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+
+		size := int64(0)
+		if !info.IsDir() {
+			size = info.Size()
+		}
+		decision := rules.Inspect(relSlash, size)
+		switch decision {
+		case bundle.FilterAccept:
+			// fall through to include
+		case bundle.FilterSkipCacheDir:
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		default:
+			rejected[decision] = append(rejected[decision], relSlash)
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if info.IsDir() {
+			return nil
 		}
 		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(fw, f)
-		f.Close()
-		return err
+		defer f.Close()
+		h, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		h.Name = relSlash
+		h.Method = zip.Deflate
+		zw, err := w.CreateHeader(h)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(zw, f); err != nil {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &buf, w.Close()
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
+	return &buf, summarizeRejections(rejected), nil
+}
+
+func summarizeRejections(r map[bundle.FilterDecision][]string) string {
+	if len(r) == 0 {
+		return ""
+	}
+	var parts []string
+	for d, paths := range r {
+		if len(paths) == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s: %s", d, strings.Join(paths, ", ")))
+	}
+	sort.Strings(parts)
+	return "Skipped from bundle (push with `shiny data push`): " + strings.Join(parts, "; ")
 }

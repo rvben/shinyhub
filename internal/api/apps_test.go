@@ -1,11 +1,16 @@
 package api_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/api"
@@ -503,8 +508,8 @@ func TestDeleteApp(t *testing.T) {
 	req := authedRequest(t, "DELETE", "/api/apps/to-delete", nil, token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Errorf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// App should be gone.
@@ -1119,3 +1124,138 @@ func TestAppsAPI_CreateAppRespectsDefaultReplicas(t *testing.T) {
 	}
 }
 
+func TestCreateApp_RejectsLingeringDataDir(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+
+	cfg := srv.Config()
+	leftover := filepath.Join(cfg.Storage.AppDataDir, "demo")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"slug":"demo","name":"Demo"}`)
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s, want 409", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "demo") {
+		t.Errorf("body should mention slug: %s", rr.Body.String())
+	}
+}
+
+func TestCreateApp_RejectsLingeringAppsDir(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+
+	cfg := srv.Config()
+	leftover := filepath.Join(cfg.Storage.AppsDir, "demo")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"slug":"demo","name":"Demo"}`)
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+}
+
+// TestDeployApp_RejectsDataEntry verifies that a bundle containing a data/
+// directory is rejected with 422 Unprocessable Entity, not 500.
+func TestDeployApp_RejectsDataEntry(t *testing.T) {
+	appsDir := t.TempDir()
+	srv, store := newQuotaTestServer(t, appsDir, 0)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	createApp(t, srv, token, "demo")
+
+	// Build a zip containing a data/ entry, which bundle.Inspect rejects.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	for name, body := range map[string]string{
+		"app.R":      "x",
+		"data/x.csv": "a,b",
+	} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("bundle", "bundle.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(zipBuf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/demo/deploy", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "data") {
+		t.Errorf("body = %s, want mention of 'data'", rr.Body.String())
+	}
+}
+
+// TestDeleteApp_RemovesBothDirs verifies that deleting an app removes both the
+// apps dir (code) and the app-data dir (persistent data) from disk.
+func TestDeleteApp_RemovesBothDirs(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	createApp(t, srv, token, "demo")
+
+	cfg := srv.Config()
+	appsPath := filepath.Join(cfg.Storage.AppsDir, "demo")
+	dataPath := filepath.Join(cfg.Storage.AppDataDir, "demo")
+	if err := os.MkdirAll(appsPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataPath, "x.txt"), []byte("hi"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, authedRequest(t, "DELETE", "/api/apps/demo", nil, token))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(appsPath); !os.IsNotExist(err) {
+		t.Errorf("apps dir still present: %v", err)
+	}
+	if _, err := os.Stat(dataPath); !os.IsNotExist(err) {
+		t.Errorf("data dir still present: %v", err)
+	}
+}

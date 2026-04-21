@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -32,6 +33,7 @@ type Server struct {
 	tokenLimiter  *keyedRateLimiter
 	secretsKey    []byte
 	router        http.Handler
+	deployRun     func(deploy.Params) (*deploy.PoolResult, error)
 
 	// redeployMu guards redeployInFlight so that at most one redeployApp goroutine
 	// runs per slug at a time.
@@ -52,6 +54,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		deployLimiter: newKeyedRateLimiter(10, time.Minute),
 		userLimiter:   newKeyedRateLimiter(5, time.Minute),
 		tokenLimiter:  newKeyedRateLimiter(20, time.Minute),
+		deployRun:    deploy.Run,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
@@ -74,6 +77,10 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 // Router returns the fully-configured http.Handler.
 func (s *Server) Router() http.Handler { return s.router }
 
+// Config returns the server's configuration. Exposed for tests that need to
+// locate temp directories (e.g. AppsDir, AppDataDir) created by the test helper.
+func (s *Server) Config() *config.Config { return s.cfg }
+
 // SetSampler replaces the metrics sampler. Must be called before the server
 // begins handling requests; it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetSampler(sampler process.Sampler) { s.sampler = sampler }
@@ -85,6 +92,12 @@ func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
 // SetSecretsKey sets the AES-256 key used to decrypt per-app secret env vars.
 // Must be called before the server begins handling requests.
 func (s *Server) SetSecretsKey(k []byte) { s.secretsKey = k }
+
+// SetDeployRunForTest replaces the deploy.Run hook used by maybeRestartForChange.
+// Must be called before the server begins handling requests; intended for tests.
+func (s *Server) SetDeployRunForTest(fn func(deploy.Params) (*deploy.PoolResult, error)) {
+	s.deployRun = fn
+}
 
 // keyLookup satisfies auth.APIKeyLookup by delegating to the DB.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
@@ -156,6 +169,9 @@ func (s *Server) buildRouter() http.Handler {
 		r.Get("/api/apps/{slug}/env", s.handleListAppEnv)
 		r.Put("/api/apps/{slug}/env/{key}", s.handleUpsertAppEnv)
 		r.Delete("/api/apps/{slug}/env/{key}", s.handleDeleteAppEnv)
+		r.Get("/api/apps/{slug}/data", s.handleDataList)
+		r.Put("/api/apps/{slug}/data/*", s.handleDataPut)
+		r.Delete("/api/apps/{slug}/data/*", s.handleDataDelete)
 
 		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens", s.handleCreateToken)
 		r.Get("/api/tokens", s.handleListTokens)

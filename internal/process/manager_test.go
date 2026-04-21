@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -12,13 +14,15 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 )
 
-// fakeRuntime is a minimal in-process Runtime for tests.
-// Start returns a synthetic RunHandle with an incrementing PID.
-// Wait blocks until Signal is called with SIGTERM or SIGKILL.
+// fakeRuntime is an in-process Runtime for tests. It captures the env passed
+// to Start and assigns incrementing synthetic PIDs. Wait blocks on a
+// per-PID channel that Signal closes when it receives SIGTERM or SIGKILL,
+// so Stop()-based test flows terminate cleanly.
 type fakeRuntime struct {
 	mu      sync.Mutex
 	nextPID int
 	stops   map[int]chan struct{}
+	lastEnv []string
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -30,11 +34,11 @@ func newFakeRuntime() *fakeRuntime {
 
 func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastEnv = p.Env
 	pid := f.nextPID
 	f.nextPID++
-	ch := make(chan struct{})
-	f.stops[pid] = ch
-	f.mu.Unlock()
+	f.stops[pid] = make(chan struct{})
 	return process.RunHandle{PID: pid}, nil
 }
 
@@ -43,7 +47,6 @@ func (f *fakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
 	ch, ok := f.stops[h.PID]
 	f.mu.Unlock()
 	if ok && (sig == syscall.SIGTERM || sig == syscall.SIGKILL) {
-		// close only once
 		select {
 		case <-ch:
 		default:
@@ -239,5 +242,199 @@ func TestManager_DuplicateIndex(t *testing.T) {
 	_, err := m.Start(process.StartParams{Slug: "demo", Index: 0, Port: 20002, Command: []string{"/bin/true"}})
 	if err == nil {
 		t.Fatalf("expected error for duplicate index")
+	}
+}
+
+func TestStart_PlatformEnvWinsOverUserEnv(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetEnvResolver(func(slug string) ([]string, error) {
+		// Simulate a user env row that shadows a platform key.
+		return []string{"SHINYHUB_APP_DATA=/evil"}, nil
+	})
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     t.TempDir(),
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+		Env:     []string{"SHINYHUB_APP_DATA=/legit"},
+	}
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := lastValue(rt.lastEnv, "SHINYHUB_APP_DATA")
+	if last != "/legit" {
+		t.Fatalf("SHINYHUB_APP_DATA last value = %q, want /legit (platform wins)", last)
+	}
+}
+
+func lastValue(env []string, key string) string {
+	out := ""
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			out = strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return out
+}
+
+func TestStart_NativeInjectsAppDataAndSymlink(t *testing.T) {
+	appData := t.TempDir()
+	bundle := t.TempDir()
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(appData)
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+	}
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wantPath := filepath.Join(appData, "demo")
+
+	last := lastValue(rt.lastEnv, "SHINYHUB_APP_DATA")
+	if last != wantPath {
+		t.Errorf("SHINYHUB_APP_DATA = %q, want %q", last, wantPath)
+	}
+
+	target, err := os.Readlink(filepath.Join(bundle, "data"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != wantPath {
+		t.Errorf("symlink target = %q, want %q", target, wantPath)
+	}
+
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Errorf("data dir missing: %v", err)
+	}
+}
+
+func TestStart_RefusesIfBundleHasDataEntry(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "data"), []byte("squat"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(t.TempDir())
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-conflict error, got %v", err)
+	}
+}
+
+func TestStart_NoAppDataRootSkipsSymlinkAndEnv(t *testing.T) {
+	bundle := t.TempDir()
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	// No SetAppDataRoot call — feature opt-out.
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	}
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if v := lastValue(rt.lastEnv, "SHINYHUB_APP_DATA"); v != "" {
+		t.Errorf("SHINYHUB_APP_DATA should not be set when appDataRoot is empty, got %q", v)
+	}
+	if _, err := os.Lstat(filepath.Join(bundle, "data")); !os.IsNotExist(err) {
+		t.Errorf("symlink should not be created when appDataRoot is empty, lstat err = %v", err)
+	}
+}
+
+func TestStart_IdempotentWhenSymlinkAlreadyPointsToCorrectTarget(t *testing.T) {
+	appData := t.TempDir()
+	bundle := t.TempDir()
+	// Use the native runtime so Stop can actually terminate the process and
+	// release the entry — fakeRuntime.Wait blocks forever.
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	m.SetAppDataRoot(appData)
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "10"},
+		Port:    9999,
+	}
+	// First start creates the symlink.
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	// Stop so the entry is released.
+	if err := m.Stop("demo"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	// Second start with the same bundle dir must succeed (restart/wake path).
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("second Start (idempotent symlink): %v", err)
+	}
+	defer m.Stop("demo") //nolint:errcheck
+	// Symlink still points to the correct target.
+	target, err := os.Readlink(filepath.Join(bundle, "data"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if want := filepath.Join(appData, "demo"); target != want {
+		t.Errorf("symlink target = %q, want %q", target, want)
+	}
+}
+
+func TestStart_RefusesIfSymlinkPointsToWrongTarget(t *testing.T) {
+	appData := t.TempDir()
+	bundle := t.TempDir()
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(appData)
+
+	// Plant a symlink pointing to a different location.
+	wrongTarget := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(wrongTarget, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(wrongTarget, filepath.Join(bundle, "data")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-conflict error for foreign symlink, got %v", err)
+	}
+}
+
+func TestStart_RefusesIfBundleHasDataDir(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bundle, "data"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(t.TempDir())
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-conflict error for pre-existing dir, got %v", err)
 	}
 }

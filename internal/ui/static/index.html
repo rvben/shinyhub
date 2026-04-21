@@ -241,6 +241,7 @@
         <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
           <button type="button" class="settings-tab active" role="tab" aria-selected="true" aria-controls="settings-access-panel" data-tab="access">Access</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-env-panel" data-tab="env">Environment</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-data-panel" data-tab="data">Data</button>
         </div>
         <div class="modal-body">
           <section id="settings-access-panel" class="settings-tab-panel" role="tabpanel">
@@ -308,6 +309,38 @@
               <div class="env-form-actions">
                 <button type="submit" class="env-btn-primary">Save</button>
                 <button type="button" id="env-form-cancel" class="env-btn-secondary">Cancel</button>
+              </div>
+            </form>
+          </section>
+
+          <section id="settings-data-panel" class="settings-tab-panel" role="tabpanel" hidden>
+            <div class="env-header">
+              <h4>Data files</h4>
+            </div>
+            <p class="env-empty" id="data-empty" hidden>No files in this app's data dir.</p>
+            <table id="data-list-table" class="env-list" hidden>
+              <thead><tr><th>Path</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+              <tbody id="data-list"></tbody>
+            </table>
+            <div id="data-quota" class="env-empty"></div>
+
+            <form id="data-upload-form" class="env-form" hidden>
+              <h5>Upload file</h5>
+              <div class="env-form-row">
+                <label for="data-file-input">File</label>
+                <input id="data-file-input" type="file" required>
+              </div>
+              <div class="env-form-row">
+                <label for="data-dest-input">Destination path</label>
+                <input id="data-dest-input" type="text" autocomplete="off" spellcheck="false" placeholder="optional subpath (defaults to filename)">
+              </div>
+              <div class="env-form-row env-form-checks">
+                <label><input type="checkbox" id="data-restart-input"> Restart app after upload</label>
+              </div>
+              <progress id="data-progress" max="100" value="0" hidden></progress>
+              <p id="data-error" class="error" hidden></p>
+              <div class="env-form-actions">
+                <button id="data-upload-btn" type="submit" class="env-btn-primary">Upload</button>
               </div>
             </form>
           </section>

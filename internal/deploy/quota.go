@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/rvben/shinyhub/internal/data"
 )
 
 // ErrQuotaExceeded is returned when an app's on-disk footprint exceeds its
@@ -15,14 +17,23 @@ var ErrQuotaExceeded = errors.New("app disk quota exceeded")
 // MiB is 1 mebibyte expressed in bytes.
 const MiB = int64(1) << 20
 
-// CheckAppQuota returns the measured on-disk usage (in bytes) of appsDir/slug.
-// If quotaMB > 0 and usage exceeds that limit, the returned error wraps
-// ErrQuotaExceeded with the measured and allowed byte counts. quotaMB <= 0
-// disables the check and CheckAppQuota always returns a nil error.
-func CheckAppQuota(appsDir, slug string, quotaMB int) (int64, error) {
+// CheckAppQuota returns the measured on-disk usage (in bytes) of
+// appsDir/slug + appDataDir/slug (excluding the data dir's UploadTempDir
+// subtree). If quotaMB > 0 and usage exceeds that limit, the returned error
+// wraps ErrQuotaExceeded with the measured and allowed byte counts.
+// quotaMB <= 0 disables the check and CheckAppQuota always returns a nil
+// error. An empty appDataDir skips the data-dir contribution.
+func CheckAppQuota(appsDir, appDataDir, slug string, quotaMB int) (int64, error) {
 	used, err := DirSize(filepath.Join(appsDir, slug))
 	if err != nil {
 		return 0, fmt.Errorf("measure app size: %w", err)
+	}
+	if appDataDir != "" {
+		dataUsed, err := data.DirSize(filepath.Join(appDataDir, slug))
+		if err != nil {
+			return 0, fmt.Errorf("measure app data size: %w", err)
+		}
+		used += dataUsed
 	}
 	if quotaMB <= 0 {
 		return used, nil

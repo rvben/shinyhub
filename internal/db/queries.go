@@ -849,6 +849,14 @@ func (s *Store) ConsumeOAuthState(state string) error {
 
 // --- Audit Events ---
 
+// Audit action constants. Most actions in the codebase are still raw string
+// literals; new audit producers should prefer constants so handlers and tests
+// can reference the same identifier.
+const (
+	AuditDataPush   = "data.push"
+	AuditDataDelete = "data.delete"
+)
+
 // AuditEventParams holds the fields for a new audit event.
 // UserID is a pointer because some actions (login_failed) have no authenticated user.
 type AuditEventParams struct {
