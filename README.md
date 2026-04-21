@@ -18,6 +18,9 @@ OAuth or OIDC, and hibernate idle apps automatically.
 - **Audit log:** 27 action types recorded for admin review.
 - **Container isolation (optional):** run each app inside a Docker container
   with CPU and memory limits.
+- **Per-app replicas:** set `replicas: N` and ShinyHub boots N backends for
+  the app on the same host, sticky-session load-balanced and recovered
+  independently on crash.
 - **Single binary, SQLite, no external deps.**
 
 ## Quick start
