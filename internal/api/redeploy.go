@@ -2,43 +2,64 @@ package api
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 )
 
-// tryAcquireRedeploy reports whether the caller has acquired the exclusive
-// redeploy lock for slug. Returns false if a redeploy is already in flight
-// for that slug, in which case the caller should skip its work.
-func (s *Server) tryAcquireRedeploy(slug string) bool {
-	s.redeployMu.Lock()
-	defer s.redeployMu.Unlock()
-	if s.redeployInFlight == nil {
-		s.redeployInFlight = make(map[string]bool)
+// deployLockFor returns the per-slug mutex used to serialize all
+// deploy/restart/rollback/stop/delete operations against the same app. The
+// map grows by one *sync.Mutex per distinct slug observed; that's bounded by
+// the app catalog and small enough to leave in place even after an app is
+// deleted (re-creating the same slug gets the same mutex, which is fine).
+func (s *Server) deployLockFor(slug string) *sync.Mutex {
+	s.deployLocksMu.Lock()
+	defer s.deployLocksMu.Unlock()
+	if s.deployLocks == nil {
+		s.deployLocks = make(map[string]*sync.Mutex)
 	}
-	if s.redeployInFlight[slug] {
-		return false
+	m, ok := s.deployLocks[slug]
+	if !ok {
+		m = &sync.Mutex{}
+		s.deployLocks[slug] = m
 	}
-	s.redeployInFlight[slug] = true
-	return true
+	return m
 }
 
-// releaseRedeploy releases the exclusive redeploy lock for slug.
-func (s *Server) releaseRedeploy(slug string) {
-	s.redeployMu.Lock()
-	defer s.redeployMu.Unlock()
-	delete(s.redeployInFlight, slug)
+// acquireDeployLock blocks until the per-slug deploy lock is held. The
+// returned func releases it; pair with `defer release()` at the call site.
+// Use this from HTTP handlers, which should provide backpressure (the second
+// concurrent deploy waits for the first) rather than silently dropping work.
+func (s *Server) acquireDeployLock(slug string) (release func()) {
+	m := s.deployLockFor(slug)
+	m.Lock()
+	return m.Unlock
+}
+
+// tryAcquireDeployLock is the non-blocking variant. It returns nil if the
+// lock is currently held by another goroutine, or the release func when
+// acquired. Use this from coalescing code paths (e.g. the async redeploy
+// goroutine) where "another deploy is already running, skip this one" is the
+// correct behavior.
+func (s *Server) tryAcquireDeployLock(slug string) (release func()) {
+	m := s.deployLockFor(slug)
+	if !m.TryLock() {
+		return nil
+	}
+	return m.Unlock
 }
 
 // redeployApp stops the current pool and restarts it at the replica count stored in the DB.
 // It is called asynchronously (go s.redeployApp(slug)) when the replica count changes while
 // the app is running. On failure the app status is set to "degraded".
 func (s *Server) redeployApp(slug string) {
-	if !s.tryAcquireRedeploy(slug) {
+	release := s.tryAcquireDeployLock(slug)
+	if release == nil {
 		slog.Info("redeploy already in flight, skipping", "slug", slug)
 		return
 	}
-	defer s.releaseRedeploy(slug)
+	defer release()
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {

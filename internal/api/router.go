@@ -39,10 +39,14 @@ type Server struct {
 	router        http.Handler
 	deployRun     func(deploy.Params) (*deploy.PoolResult, error)
 
-	// redeployMu guards redeployInFlight so that at most one redeployApp goroutine
-	// runs per slug at a time.
-	redeployMu       sync.Mutex
-	redeployInFlight map[string]bool
+	// deployLocksMu guards the deployLocks map. Each slug gets its own
+	// sync.Mutex which serializes deploy/restart/rollback/stop/delete
+	// operations for that app: a deploy in flight blocks a concurrent
+	// restart on the same slug. Different slugs are independent. The
+	// async redeployApp goroutine uses TryLock so it coalesces (skips)
+	// when an HTTP-driven deploy is already running.
+	deployLocksMu sync.Mutex
+	deployLocks   map[string]*sync.Mutex
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil

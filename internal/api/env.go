@@ -232,6 +232,11 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		return false, nil
 	}
 	current := deployments[0]
+
+	// Serialize with any deploy/restart on the same slug.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)

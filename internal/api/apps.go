@@ -498,6 +498,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Serialize the mutation phase so a concurrent restart/rollback/stop on
+	// the same slug can't tear down the pool we are about to bring up.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
 	// Stop existing instance before re-deploying; ignore the error since the
 	// app may not have been running yet.
 	_ = s.manager.Stop(slug)
@@ -633,6 +638,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize against concurrent deploy/restart/stop on the same slug.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
@@ -729,6 +738,10 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 	current := deployments[0]
 
+	// Serialize against concurrent deploy/rollback/stop on the same slug.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
@@ -797,6 +810,11 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize against any in-flight deploy/restart on this slug so we don't
+	// race the process manager into an inconsistent state mid-teardown.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
 	// Stop the process if it is running; ignore the error (may not be running).
 	if s.manager != nil {
 		_ = s.manager.Stop(slug)
@@ -842,6 +860,10 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	// Serialize with any in-flight deploy/restart on this slug.
+	release := s.acquireDeployLock(slug)
+	defer release()
 
 	// Stop the process if managed; ignore error if already stopped.
 	if s.manager != nil {
