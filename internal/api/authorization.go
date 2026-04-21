@@ -80,6 +80,43 @@ func (s *Server) requireViewApp(w http.ResponseWriter, r *http.Request, slug str
 	return app, u, true
 }
 
+// requireExplicitAppAccess loads the named app and verifies the caller has
+// explicit access. Unlike requireViewApp, public/shared visibility is NOT
+// sufficient — only one of the following passes:
+//   - admin or operator (platform-wide privilege)
+//   - the app's owner (apps.owner_id == caller.id)
+//   - an explicit row in app_members for this app (any role)
+//
+// This is the guard for endpoints that must not leak via the public surface
+// (e.g. the per-app data API). On 401/404 the response is already written.
+func (s *Server) requireExplicitAppAccess(w http.ResponseWriter, r *http.Request, slug string) (*db.App, *auth.ContextUser, bool) {
+	app, err := s.loadApp(slug)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return nil, nil, false
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return nil, nil, false
+	}
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return nil, nil, false
+	}
+	if isPrivilegedAppOperator(u) || app.OwnerID == u.ID {
+		return app, u, true
+	}
+	role, err := s.store.GetMemberRole(app.Slug, u.ID)
+	if err == nil && role != "" {
+		return app, u, true
+	}
+	// 404 to avoid confirming slug existence to unauthorized users
+	// (matches requireViewApp's convention).
+	writeError(w, http.StatusNotFound, "not found")
+	return nil, nil, false
+}
+
 func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug string) (*db.App, bool) {
 	app, u, ok := s.requireViewApp(w, r, slug)
 	if !ok {
