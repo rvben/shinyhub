@@ -74,6 +74,42 @@ type PoolResult struct {
 	Replicas []Result
 }
 
+// resolveBootParams resolves Command defaults, HealthCheck defaults, and
+// HealthTimeout defaults for a pool/replica boot. Returns the resolved
+// base command, detected app type, the effective health-check func, and
+// the effective timeout.
+func resolveBootParams(p Params) (baseCmd []string, appType string, hc func(int, time.Duration) error, timeout time.Duration, err error) {
+	if len(p.Command) > 0 {
+		baseCmd = p.Command
+	} else {
+		appType = DetectAppType(p.BundleDir)
+		switch appType {
+		case "python":
+			if err = process.Sync(p.BundleDir); err != nil {
+				return nil, "", nil, 0, fmt.Errorf("uv sync: %w", err)
+			}
+		case "r":
+			if err = process.SyncR(p.BundleDir); err != nil {
+				return nil, "", nil, 0, fmt.Errorf("renv restore: %w", err)
+			}
+		default:
+			return nil, "", nil, 0, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
+		}
+		// baseCmd remains nil — bootReplica constructs the per-replica command
+		// using the real port once it is allocated.
+	}
+
+	hc = p.HealthCheck
+	if hc == nil {
+		hc = waitHealthy
+	}
+	timeout = p.HealthTimeout
+	if timeout == 0 {
+		timeout = 120 * time.Second
+	}
+	return baseCmd, appType, hc, timeout, nil
+}
+
 // Run orchestrates a parallel pool deploy: spawns N replicas concurrently,
 // health-checks each, and registers surviving replicas with the reverse proxy.
 // Partial failure (some replicas healthy, some not) is accepted and logged.
@@ -85,37 +121,9 @@ func Run(p Params) (*PoolResult, error) {
 
 	p.Proxy.SetPoolSize(p.Slug, p.Replicas)
 
-	// Sync dependencies once before spawning replicas. When the caller provides
-	// an explicit Command, no sync is needed — we skip app-type detection.
-	var baseCmd []string
-	var appType string
-	if len(p.Command) > 0 {
-		baseCmd = p.Command
-	} else {
-		appType = DetectAppType(p.BundleDir)
-		switch appType {
-		case "python":
-			if err := process.Sync(p.BundleDir); err != nil {
-				return nil, fmt.Errorf("uv sync: %w", err)
-			}
-		case "r":
-			if err := process.SyncR(p.BundleDir); err != nil {
-				return nil, fmt.Errorf("renv restore: %w", err)
-			}
-		default:
-			return nil, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
-		}
-		// baseCmd remains nil — bootReplica constructs the per-replica command
-		// using the real port once it is allocated.
-	}
-
-	timeout := p.HealthTimeout
-	if timeout == 0 {
-		timeout = 120 * time.Second
-	}
-	hc := p.HealthCheck
-	if hc == nil {
-		hc = waitHealthy
+	baseCmd, appType, hc, timeout, err := resolveBootParams(p)
+	if err != nil {
+		return nil, err
 	}
 
 	type bootResult struct {
@@ -214,32 +222,9 @@ func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(in
 // must already be set to at least index+1 before calling this function.
 // Used by the watchdog's per-replica crash-restart path.
 func RunReplica(p Params, index int) (*Result, error) {
-	var baseCmd []string
-	var appType string
-	if len(p.Command) > 0 {
-		baseCmd = p.Command
-	} else {
-		appType = DetectAppType(p.BundleDir)
-		switch appType {
-		case "python":
-			if err := process.Sync(p.BundleDir); err != nil {
-				return nil, fmt.Errorf("uv sync: %w", err)
-			}
-		case "r":
-			if err := process.SyncR(p.BundleDir); err != nil {
-				return nil, fmt.Errorf("renv restore: %w", err)
-			}
-		default:
-			return nil, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
-		}
-	}
-	hc := p.HealthCheck
-	if hc == nil {
-		hc = waitHealthy
-	}
-	timeout := p.HealthTimeout
-	if timeout == 0 {
-		timeout = 120 * time.Second
+	baseCmd, appType, hc, timeout, err := resolveBootParams(p)
+	if err != nil {
+		return nil, err
 	}
 	r, err := bootReplica(p, index, baseCmd, appType, hc, timeout)
 	if err != nil {

@@ -208,13 +208,13 @@ func TestRun_PartialHealthStillSucceeds(t *testing.T) {
 	defer mgr.Stop("pool-partial")
 	prx := proxy.New()
 
-	var hcCalls atomic.Int64
+	var failOnce atomic.Bool
 	result, err := deploy.Run(deploy.Params{
 		Slug: "pool-partial", BundleDir: bundle, Replicas: 2,
 		Manager: mgr, Proxy: prx,
 		Command: []string{"sleep", "30"},
 		HealthCheck: func(port int, _ time.Duration) error {
-			if hcCalls.Add(1) == 2 {
+			if failOnce.CompareAndSwap(false, true) {
 				return fmt.Errorf("simulated")
 			}
 			return nil
