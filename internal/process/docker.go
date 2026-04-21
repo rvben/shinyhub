@@ -35,6 +35,11 @@ func NewDockerRuntime(socketPath, pythonImage, rImage string) (*DockerRuntime, e
 	return &DockerRuntime{client: client, pythonImage: pythonImage, rImage: rImage}, nil
 }
 
+// HostPreparesDeps reports false: dependency installation happens inside the
+// container (via uv/Rscript present in the base image), so callers must not
+// run uv sync / renv::restore on the host.
+func (r *DockerRuntime) HostPreparesDeps() bool { return false }
+
 // addSharedMounts appends a read-only mount per SharedMount to cfg.Mounts,
 // targeted at /app/data/shared/<source-slug>. Source paths are MkdirAll'd
 // host-side so the consumer always has a directory to mount.

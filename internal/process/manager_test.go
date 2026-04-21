@@ -74,6 +74,8 @@ func (f *fakeRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Wri
 	return process.ExitInfo{}, nil
 }
 
+func (f *fakeRuntime) HostPreparesDeps() bool { return true }
+
 func TestManagerStartStop(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 
@@ -359,6 +361,8 @@ func (c *captureRuntime) Stats(_ context.Context, _ process.RunHandle) (float64,
 func (c *captureRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
 }
+
+func (c *captureRuntime) HostPreparesDeps() bool { return true }
 
 func lastValue(env []string, key string) string {
 	out := ""

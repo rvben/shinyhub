@@ -3,12 +3,15 @@ package deploy_test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -270,6 +273,90 @@ func TestRunReplica_SingleBoot(t *testing.T) {
 	}
 }
 
+// TestRun_DockerSkipsHostDepInstall proves the fix for a long-standing footgun:
+// when the runtime is Docker, deploy.Run must not attempt to install bundle
+// dependencies on the host (no `uv sync`, no `Rscript renv::restore`). Those
+// commands belong inside the container; running them on the host pollutes the
+// host environment and fails on hosts where uv/Rscript aren't even installed.
+//
+// We assert the contract by counting how often the package's host-prep hooks
+// fire. With a Docker-mode manager they must be called zero times even when
+// the bundle has a pyproject.toml / renv.lock that would normally trigger the
+// install path.
+func TestRun_DockerSkipsHostDepInstall(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var pyCalls, rCalls atomic.Int32
+	restore := deploy.SetSyncHooksForTest(
+		func(string) error { pyCalls.Add(1); return nil },
+		func(string) error { rCalls.Add(1); return nil },
+	)
+	defer restore()
+
+	mgr := process.NewManager(t.TempDir(), &fakeContainerRuntime{})
+
+	_, err := deploy.Run(deploy.Params{
+		Slug: "docker-app", BundleDir: bundle, Replicas: 1,
+		Manager: mgr, Proxy: proxy.New(),
+		HealthCheck: func(int, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	defer mgr.Stop("docker-app")
+
+	if got := pyCalls.Load(); got != 0 {
+		t.Errorf("python sync hook fired %d times under docker runtime; want 0", got)
+	}
+	if got := rCalls.Load(); got != 0 {
+		t.Errorf("R sync hook fired %d times under docker runtime; want 0", got)
+	}
+}
+
+// TestRun_NativeStillRunsHostDepInstall is the symmetric guarantee: native
+// runtimes still need on-host preparation (no container to cache deps inside),
+// so the hook MUST be invoked exactly once per Run.
+func TestRun_NativeStillRunsHostDepInstall(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var pyCalls atomic.Int32
+	restore := deploy.SetSyncHooksForTest(
+		func(string) error { pyCalls.Add(1); return nil },
+		func(string) error { return nil },
+	)
+	defer restore()
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+
+	_, err := deploy.Run(deploy.Params{
+		Slug: "native-app", BundleDir: bundle, Replicas: 1,
+		Manager: mgr, Proxy: proxy.New(),
+		HealthCheck: func(int, time.Duration) error { return nil },
+		// Inject a benign command so we don't depend on uv being installed.
+		Command: nil, // force the appType branch
+	})
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	defer mgr.Stop("native-app")
+
+	if got := pyCalls.Load(); got != 1 {
+		t.Errorf("python sync hook fired %d times under native runtime; want 1", got)
+	}
+}
+
 func TestBuildRCommand_NoRenv(t *testing.T) {
 	dir := t.TempDir()
 
@@ -404,6 +491,25 @@ func TestExtractBundle_RejectsDataDirEntryWithoutCreating(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(out, "data")); !os.IsNotExist(statErr) {
 		t.Errorf("data/ directory should NOT have been created: %v", statErr)
 	}
+}
+
+// fakeContainerRuntime is a minimal Runtime that reports itself as
+// containerized (HostPreparesDeps == false). It implements just enough of the
+// Runtime contract to let deploy.Run go through Manager.Start without ever
+// touching real OS processes.
+type fakeContainerRuntime struct{}
+
+func (f *fakeContainerRuntime) HostPreparesDeps() bool { return false }
+func (f *fakeContainerRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+	return process.RunHandle{ContainerID: fmt.Sprintf("fake-%s-%d", p.Slug, p.Index)}, nil
+}
+func (f *fakeContainerRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
+func (f *fakeContainerRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
+func (f *fakeContainerRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (f *fakeContainerRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
 }
 
 func TestResolveResourceLimits(t *testing.T) {

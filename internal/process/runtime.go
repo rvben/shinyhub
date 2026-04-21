@@ -22,6 +22,11 @@ type Runtime interface {
 	// exit info. Implementations MUST signal SIGTERM on ctx cancel and
 	// SIGKILL after a 10-second grace.
 	RunOnce(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error)
+	// HostPreparesDeps reports whether bundle dependencies (uv sync,
+	// renv::restore) should be installed on the host before Start. Native
+	// runtimes use the host's PATH and need this; container runtimes prepare
+	// deps inside the image/container, so callers must NOT touch the host.
+	HostPreparesDeps() bool
 }
 
 // ExitInfo summarizes how a one-shot process ended.

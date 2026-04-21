@@ -94,6 +94,11 @@ func (m *Manager) SetSharedMountResolver(r SharedMountResolver) { m.mountResolve
 // starting processes; not safe to call concurrently with Start.
 func (m *Manager) SetAppDataRoot(root string) { m.appDataRoot = root }
 
+// HostPreparesDeps proxies to the underlying Runtime so deploy code can ask
+// whether host-side dependency installation (uv sync, renv::restore) is
+// expected before Start. See Runtime.HostPreparesDeps for the contract.
+func (m *Manager) HostPreparesDeps() bool { return m.runtime.HostPreparesDeps() }
+
 // NewManager returns an initialized Manager using the given Runtime.
 func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{

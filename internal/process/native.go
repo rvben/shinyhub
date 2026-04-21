@@ -67,6 +67,11 @@ func NewNativeRuntime() *NativeRuntime {
 	}
 }
 
+// HostPreparesDeps reports true: native runtime executes app processes on the
+// host using its PATH, so bundle dependencies must be installed locally before
+// Start.
+func (r *NativeRuntime) HostPreparesDeps() bool { return true }
+
 func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (RunHandle, error) {
 	if len(p.Command) == 0 {
 		return RunHandle{}, fmt.Errorf("command must not be empty")

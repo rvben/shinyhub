@@ -27,6 +27,14 @@ func init() {
 	portCounter.Store(20000)
 }
 
+// pythonSyncFn / rSyncFn are package-level indirections so tests can observe
+// (or replace) host-side dependency installation. Production code always
+// goes through process.Sync / process.SyncR.
+var (
+	pythonSyncFn = process.Sync
+	rSyncFn      = process.SyncR
+)
+
 // AllocatePort returns a unique port in the 20000–60000 range.
 // The counter wraps back to 20001 after reaching 60000.
 func AllocatePort() int {
@@ -84,14 +92,23 @@ func resolveBootParams(p Params) (baseCmd []string, appType string, hc func(int,
 		baseCmd = p.Command
 	} else {
 		appType = DetectAppType(p.BundleDir)
+		// Container runtimes prepare dependencies inside the image/container, so
+		// running uv sync / renv::restore on the host would leak host state into
+		// what is supposed to be an isolated boot path (and fail outright on
+		// hosts where uv/Rscript aren't installed).
+		hostDeps := p.Manager == nil || p.Manager.HostPreparesDeps()
 		switch appType {
 		case "python":
-			if err = process.Sync(p.BundleDir); err != nil {
-				return nil, "", nil, 0, fmt.Errorf("uv sync: %w", err)
+			if hostDeps {
+				if err = pythonSyncFn(p.BundleDir); err != nil {
+					return nil, "", nil, 0, fmt.Errorf("uv sync: %w", err)
+				}
 			}
 		case "r":
-			if err = process.SyncR(p.BundleDir); err != nil {
-				return nil, "", nil, 0, fmt.Errorf("renv restore: %w", err)
+			if hostDeps {
+				if err = rSyncFn(p.BundleDir); err != nil {
+					return nil, "", nil, 0, fmt.Errorf("renv restore: %w", err)
+				}
 			}
 		default:
 			return nil, "", nil, 0, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
