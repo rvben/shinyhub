@@ -51,9 +51,8 @@ func TestDeployLock_DifferentSlugsIndependent(t *testing.T) {
 
 	const slugs = 4
 	start := make(chan struct{})
-	var ready, holding sync.WaitGroup
+	var ready sync.WaitGroup
 	ready.Add(slugs)
-	holding.Add(slugs)
 	for i := range slugs {
 		go func() {
 			release := s.acquireDeployLock("slug-" + string(rune('a'+i)))
@@ -61,14 +60,10 @@ func TestDeployLock_DifferentSlugsIndependent(t *testing.T) {
 			ready.Done()
 			<-start
 		}()
-		// Yield so each goroutine has a chance to acquire its lock.
 	}
 	ready.Wait()
 	// All 4 different-slug locks were acquired without serialization. Release.
 	close(start)
-	// Goroutines now exit and release.
-	holding.Add(-slugs) // satisfy WaitGroup; we used start/ready instead
-	_ = holding
 }
 
 func TestDeployLock_TryAcquireFailsWhenHeld(t *testing.T) {
