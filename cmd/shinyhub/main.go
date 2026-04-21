@@ -147,6 +147,7 @@ func main() {
 		}
 		return out, nil
 	})
+	mgr.SetAppDataRoot(cfg.Storage.AppDataDir)
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetSecretsKey(secretsKey)

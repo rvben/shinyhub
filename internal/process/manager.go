@@ -57,12 +57,20 @@ type Manager struct {
 	appsDir     string
 	runtime     Runtime
 	envResolver EnvResolver
+	appDataRoot string
 }
 
 // SetEnvResolver sets the function used to inject per-app environment variables
 // during Start. Must be called before the manager begins starting processes; it
 // is not safe to call concurrently with Start.
 func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
+
+// SetAppDataRoot sets the root directory under which per-app persistent data
+// directories live. Each Start resolves <root>/<slug>, ensures it exists,
+// injects SHINYHUB_APP_DATA, and symlinks <bundle_dir>/data to it. An empty
+// root disables the feature. Must be called before the manager begins
+// starting processes; not safe to call concurrently with Start.
+func (m *Manager) SetAppDataRoot(root string) { m.appDataRoot = root }
 
 // NewManager returns an initialized Manager using the given Runtime.
 func NewManager(appsDir string, rt Runtime) *Manager {
@@ -91,6 +99,26 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	if existing, ok := m.logFiles[p.Slug]; ok {
 		existing.Close()
 		delete(m.logFiles, p.Slug)
+	}
+
+	var appDataPath string
+	if m.appDataRoot != "" {
+		appDataPath = filepath.Join(m.appDataRoot, p.Slug)
+		if err := os.MkdirAll(appDataPath, 0o750); err != nil {
+			return nil, fmt.Errorf("ensure app data dir: %w", err)
+		}
+		p.Env = append(p.Env, "SHINYHUB_APP_DATA="+appDataPath)
+
+		linkPath := filepath.Join(p.Dir, "data")
+		switch info, err := os.Lstat(linkPath); {
+		case err == nil:
+			return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
+		case !os.IsNotExist(err):
+			return nil, fmt.Errorf("stat %s: %w", linkPath, err)
+		}
+		if err := os.Symlink(appDataPath, linkPath); err != nil {
+			return nil, fmt.Errorf("symlink data: %w", err)
+		}
 	}
 
 	if m.envResolver != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -190,4 +191,81 @@ func lastValue(env []string, key string) string {
 		}
 	}
 	return out
+}
+
+func TestStart_NativeInjectsAppDataAndSymlink(t *testing.T) {
+	appData := t.TempDir()
+	bundle := t.TempDir()
+	rt := &fakeRuntime{}
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(appData)
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+	}
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wantPath := filepath.Join(appData, "demo")
+
+	last := lastValue(rt.lastEnv, "SHINYHUB_APP_DATA")
+	if last != wantPath {
+		t.Errorf("SHINYHUB_APP_DATA = %q, want %q", last, wantPath)
+	}
+
+	target, err := os.Readlink(filepath.Join(bundle, "data"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != wantPath {
+		t.Errorf("symlink target = %q, want %q", target, wantPath)
+	}
+
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Errorf("data dir missing: %v", err)
+	}
+}
+
+func TestStart_RefusesIfBundleHasDataEntry(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "data"), []byte("squat"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeRuntime{}
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetAppDataRoot(t.TempDir())
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "data") {
+		t.Fatalf("expected data-conflict error, got %v", err)
+	}
+}
+
+func TestStart_NoAppDataRootSkipsSymlinkAndEnv(t *testing.T) {
+	bundle := t.TempDir()
+	rt := &fakeRuntime{}
+	m := process.NewManager(t.TempDir(), rt)
+	// No SetAppDataRoot call — feature opt-out.
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+	}
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if v := lastValue(rt.lastEnv, "SHINYHUB_APP_DATA"); v != "" {
+		t.Errorf("SHINYHUB_APP_DATA should not be set when appDataRoot is empty, got %q", v)
+	}
+	if _, err := os.Lstat(filepath.Join(bundle, "data")); !os.IsNotExist(err) {
+		t.Errorf("symlink should not be created when appDataRoot is empty, lstat err = %v", err)
+	}
 }
