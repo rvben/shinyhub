@@ -246,15 +246,8 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 			return fmt.Errorf("zip-slip detected in %q: entry escapes destination", f.Name)
 		}
 
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Apply bundle filter rules. Cache dirs are silently skipped; data dirs
-		// and disallowed extensions are hard errors.
+		// Apply bundle filter rules before any disk side effects. Cache dirs are
+		// silently skipped; data dirs and disallowed extensions are hard errors.
 		decision := rules.Inspect(f.Name, int64(f.UncompressedSize64))
 		switch decision {
 		case bundle.FilterAccept:
@@ -266,6 +259,15 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 			bundle.FilterRejectExtension,
 			bundle.FilterRejectFileSize:
 			return fmt.Errorf("bundle entry %q rejected: %s", f.Name, decision)
+		default:
+			return fmt.Errorf("bundle entry %q: unhandled filter decision %v", f.Name, decision)
+		}
+
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
+			continue
 		}
 
 		// Trust-but-verify: reject up front when the declared size is already
