@@ -1,13 +1,36 @@
 package process_test
 
 import (
+	"context"
+	"io"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
 )
+
+// fakeRuntime is a minimal Runtime stub that captures the env passed to Start.
+type fakeRuntime struct {
+	lastEnv []string
+}
+
+func (r *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+	r.lastEnv = p.Env
+	return process.RunHandle{PID: 1}, nil
+}
+
+func (r *fakeRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
+
+func (r *fakeRuntime) Wait(_ context.Context, _ process.RunHandle) error {
+	select {}
+}
+
+func (r *fakeRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
 
 func TestManagerStartStop(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -132,4 +155,39 @@ func TestManagerAdopt(t *testing.T) {
 	if gotHandle != handle {
 		t.Errorf("expected handle %+v, got %+v", handle, gotHandle)
 	}
+}
+
+func TestStart_PlatformEnvWinsOverUserEnv(t *testing.T) {
+	rt := &fakeRuntime{}
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetEnvResolver(func(slug string) ([]string, error) {
+		// Simulate a user env row that shadows a platform key.
+		return []string{"SHINYHUB_APP_DATA=/evil"}, nil
+	})
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     t.TempDir(),
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+		Env:     []string{"SHINYHUB_APP_DATA=/legit"},
+	}
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := lastValue(rt.lastEnv, "SHINYHUB_APP_DATA")
+	if last != "/legit" {
+		t.Fatalf("SHINYHUB_APP_DATA last value = %q, want /legit (platform wins)", last)
+	}
+}
+
+func lastValue(env []string, key string) string {
+	out := ""
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			out = strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return out
 }

@@ -98,7 +98,9 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve env: %w", err)
 		}
-		p.Env = append(p.Env, userEnv...)
+		// Build user env first, then append platform env so platform values win
+		// on duplicate keys (os/exec uses last-occurrence-wins).
+		p.Env = append(userEnv, p.Env...)
 	}
 
 	logPath := filepath.Join(m.appsDir, p.Slug, "app.log")
