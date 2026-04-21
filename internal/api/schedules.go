@@ -209,7 +209,11 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad schedule id")
+		return
+	}
 	sc, err := s.store.GetSchedule(id)
 	if err != nil || sc.AppID != app.ID {
 		writeError(w, http.StatusNotFound, "not found")
@@ -232,7 +236,11 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad schedule id")
+		return
+	}
 	sc, err := s.store.GetSchedule(id)
 	if err != nil || sc.AppID != app.ID {
 		writeError(w, http.StatusNotFound, "not found")
@@ -262,7 +270,11 @@ func (s *Server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad schedule id")
+		return
+	}
 	sc, err := s.store.GetSchedule(id)
 	if err != nil || sc.AppID != app.ID {
 		writeError(w, http.StatusNotFound, "not found")
@@ -279,12 +291,34 @@ func (s *Server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 
 // POST /api/apps/{slug}/schedules/{id}/runs/{run_id}/cancel
 func (s *Server) handleCancelScheduleRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireManageApp(w, r, chi.URLParam(r, "slug")); !ok {
+	app, ok := s.requireManageApp(w, r, chi.URLParam(r, "slug"))
+	if !ok {
+		return
+	}
+	scheduleID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad schedule id")
 		return
 	}
 	runID, err := strconv.ParseInt(chi.URLParam(r, "run_id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad run id")
+		return
+	}
+	// Verify the run belongs to a schedule owned by the caller's app.
+	run, err := s.store.GetScheduleRun(runID)
+	if errors.Is(err, db.ErrNotFound) || err != nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if run.ScheduleID != scheduleID {
+		// The {id} in the URL and the run's schedule must agree.
+		writeError(w, http.StatusBadRequest, "run does not belong to the given schedule")
+		return
+	}
+	sched, err := s.store.GetSchedule(run.ScheduleID)
+	if errors.Is(err, db.ErrNotFound) || err != nil || sched.AppID != app.ID {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	if s.jobs != nil {
