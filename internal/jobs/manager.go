@@ -82,17 +82,17 @@ func (m *Manager) unregisterActive(runID int64) {
 	m.mu.Unlock()
 }
 
-// Cancel stops an in-flight run by cancelling its context. Returns false if the
-// run ID is not currently active.
-func (m *Manager) Cancel(runID int64) bool {
+// Cancel signals an in-flight run to terminate. Returns nil even when the run
+// has already finished — cancellation is best-effort.
+func (m *Manager) Cancel(runID int64) error {
 	m.mu.Lock()
 	cancel, ok := m.active[runID]
 	m.mu.Unlock()
 	if !ok {
-		return false
+		return nil
 	}
 	cancel()
-	return true
+	return nil
 }
 
 // Run executes a scheduled run for the given schedule ID. It enforces the
