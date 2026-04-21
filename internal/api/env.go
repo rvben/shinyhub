@@ -154,7 +154,7 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.clientIP(r),
 	})
 
-	restarted, restartErr := s.maybeRestartForEnvChange(r, app, slug)
+	restarted, restartErr := s.maybeRestartForChange(r, app, slug)
 	resp := map[string]any{
 		"key":       key,
 		"secret":    body.Secret,
@@ -203,12 +203,12 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.clientIP(r),
 	})
 
-	s.maybeRestartForEnvChange(r, app, slug)
+	s.maybeRestartForChange(r, app, slug)
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// maybeRestartForEnvChange optionally restarts an app to apply env-var changes.
+// maybeRestartForChange optionally restarts an app to apply env-var changes.
 // It only acts when ?restart=true is set, a manager is configured, and the app
 // is currently running — stopped or hibernated apps are intentionally left
 // alone so an env-var change doesn't unexpectedly wake them.
@@ -217,7 +217,7 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 // was skipped, and (false, err) when the old process was stopped but the
 // re-launch failed. In the failure case the app's DB status is reset to
 // "stopped" so it reflects reality.
-func (s *Server) maybeRestartForEnvChange(r *http.Request, app *db.App, slug string) (bool, error) {
+func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string) (bool, error) {
 	if r.URL.Query().Get("restart") != "true" {
 		return false, nil
 	}
