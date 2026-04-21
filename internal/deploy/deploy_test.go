@@ -2,9 +2,11 @@ package deploy_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -166,11 +168,82 @@ func TestDeploy_CommandOnly(t *testing.T) {
 	}
 	defer mgr.Stop("test-deploy")
 
-	if info.Port <= 0 {
-		t.Errorf("expected valid port, got %d", info.Port)
+	if len(info.Replicas) != 1 {
+		t.Fatalf("want 1 replica, got %d", len(info.Replicas))
 	}
-	if info.PID <= 0 {
-		t.Errorf("expected valid PID, got %d", info.PID)
+	if info.Replicas[0].Port <= 0 {
+		t.Errorf("expected valid port, got %d", info.Replicas[0].Port)
+	}
+	if info.Replicas[0].PID <= 0 {
+		t.Errorf("expected valid PID, got %d", info.Replicas[0].PID)
+	}
+}
+
+func TestRun_PoolBootsAllReplicas(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("pool-all")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug: "pool-all", BundleDir: bundle, Replicas: 3,
+		Manager: mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(int, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(result.Replicas) != 3 {
+		t.Fatalf("want 3 replicas, got %d", len(result.Replicas))
+	}
+	if !prx.HasLiveReplica("pool-all") {
+		t.Fatal("proxy has no live replica")
+	}
+}
+
+func TestRun_PartialHealthStillSucceeds(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("pool-partial")
+	prx := proxy.New()
+
+	var hcCalls atomic.Int64
+	result, err := deploy.Run(deploy.Params{
+		Slug: "pool-partial", BundleDir: bundle, Replicas: 2,
+		Manager: mgr, Proxy: prx,
+		Command: []string{"sleep", "30"},
+		HealthCheck: func(port int, _ time.Duration) error {
+			if hcCalls.Add(1) == 2 {
+				return fmt.Errorf("simulated")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(result.Replicas) != 1 {
+		t.Fatalf("want 1 healthy replica, got %d", len(result.Replicas))
+	}
+}
+
+func TestRun_AllFailHealthErrors(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+
+	_, err := deploy.Run(deploy.Params{
+		Slug: "pool-allfail", BundleDir: bundle, Replicas: 2,
+		Manager: mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(int, time.Duration) error { return fmt.Errorf("boom") },
+	})
+	if err == nil {
+		t.Fatal("expected error when all replicas fail health")
+	}
+	if prx.HasLiveReplica("pool-allfail") {
+		t.Fatal("proxy should not have any replica registered")
 	}
 }
 

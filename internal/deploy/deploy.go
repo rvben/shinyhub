@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,63 +41,151 @@ func AllocatePort() int {
 	}
 }
 
-// Params controls a single deploy operation.
+// Params controls a deploy operation.
 type Params struct {
-	Slug          string
-	BundleDir     string
-	Command       []string // if empty, defaults to uv run shiny run app.py
-	Env           []string
-	Workers       int
-	Manager       *process.Manager
-	Proxy         *proxy.Proxy
-	HealthTimeout time.Duration // 0 means the 30 s default
-	// Resource limits passed to the runtime. 0 means no limit.
-	MemoryLimitMB   int
-	CPUQuotaPercent int
-	// HealthCheck is called after the process starts to verify it is ready.
+	Slug      string
+	BundleDir string
+	// Command overrides auto-detection. If empty, the app type is detected from
+	// the bundle and the appropriate runtime command is built per replica.
+	Command         []string
+	Env             []string
+	Workers         int
+	Replicas        int // 0 → 1 (single-replica fallback)
+	Manager         *process.Manager
+	Proxy           *proxy.Proxy
+	HealthTimeout   time.Duration // 0 means the 120 s default
+	MemoryLimitMB   int          // 0 = no limit
+	CPUQuotaPercent int          // 0 = no limit; 100 = 1 full core
+	// HealthCheck is called after each replica starts to verify it is ready.
 	// If nil, the default HTTP health poller is used.
 	// Set to a no-op function in tests that do not serve HTTP.
 	HealthCheck func(port int, timeout time.Duration) error
 }
 
-// Result contains identifiers for the successfully deployed process.
+// Result contains identifiers for a single successfully deployed replica.
 type Result struct {
-	PID  int
-	Port int
+	Index int
+	PID   int
+	Port  int
 }
 
-// Run orchestrates a deploy: spawns a new process, health-checks it,
-// then registers it with the reverse proxy.
-func Run(p Params) (*Result, error) {
-	port := AllocatePort()
+// PoolResult contains the full set of replicas that were successfully booted.
+type PoolResult struct {
+	Replicas []Result
+}
 
-	cmd := p.Command
-	if len(cmd) == 0 {
-		appType := DetectAppType(p.BundleDir)
+// Run orchestrates a parallel pool deploy: spawns N replicas concurrently,
+// health-checks each, and registers surviving replicas with the reverse proxy.
+// Partial failure (some replicas healthy, some not) is accepted and logged.
+// All-fail returns an error.
+func Run(p Params) (*PoolResult, error) {
+	if p.Replicas <= 0 {
+		p.Replicas = 1
+	}
+
+	p.Proxy.SetPoolSize(p.Slug, p.Replicas)
+
+	// Sync dependencies once before spawning replicas. When the caller provides
+	// an explicit Command, no sync is needed — we skip app-type detection.
+	var baseCmd []string
+	var appType string
+	if len(p.Command) > 0 {
+		baseCmd = p.Command
+	} else {
+		appType = DetectAppType(p.BundleDir)
 		switch appType {
 		case "python":
 			if err := process.Sync(p.BundleDir); err != nil {
 				return nil, fmt.Errorf("uv sync: %w", err)
 			}
+		case "r":
+			if err := process.SyncR(p.BundleDir); err != nil {
+				return nil, fmt.Errorf("renv restore: %w", err)
+			}
+		default:
+			return nil, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
+		}
+		// baseCmd remains nil — bootReplica constructs the per-replica command
+		// using the real port once it is allocated.
+	}
+
+	timeout := p.HealthTimeout
+	if timeout == 0 {
+		timeout = 120 * time.Second
+	}
+	hc := p.HealthCheck
+	if hc == nil {
+		hc = waitHealthy
+	}
+
+	type bootResult struct {
+		idx int
+		res Result
+		err error
+	}
+	results := make(chan bootResult, p.Replicas)
+	var wg sync.WaitGroup
+
+	for i := 0; i < p.Replicas; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			r, err := bootReplica(p, idx, baseCmd, appType, hc, timeout)
+			results <- bootResult{idx: idx, res: r, err: err}
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	ok := make([]Result, 0, p.Replicas)
+	var bootErrs []error
+	for br := range results {
+		if br.err != nil {
+			bootErrs = append(bootErrs, fmt.Errorf("replica %d: %w", br.idx, br.err))
+			continue
+		}
+		ok = append(ok, br.res)
+	}
+	sort.Slice(ok, func(a, b int) bool { return ok[a].Index < ok[b].Index })
+
+	if len(ok) == 0 {
+		return nil, fmt.Errorf("all replicas failed health check: %w", errors.Join(bootErrs...))
+	}
+	for _, e := range bootErrs {
+		slog.Warn("replica boot failed", "slug", p.Slug, "err", e)
+	}
+	return &PoolResult{Replicas: ok}, nil
+}
+
+// bootReplica starts a single replica: allocates a port, starts the process,
+// health-checks it, and registers it with the proxy. baseCmd == nil signals
+// that the command should be built from appType using the allocated port.
+func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(int, time.Duration) error, timeout time.Duration) (Result, error) {
+	port := AllocatePort()
+
+	var cmd []string
+	if baseCmd != nil {
+		cmd = baseCmd
+	} else {
+		switch appType {
+		case "python":
 			workers := p.Workers
 			if workers <= 0 {
 				workers = 1
 			}
 			cmd = buildCommand(p.BundleDir, port, workers)
 		case "r":
-			if err := process.SyncR(p.BundleDir); err != nil {
-				return nil, fmt.Errorf("renv restore: %w", err)
-			}
 			cmd = BuildRCommand(p.BundleDir, port)
 		default:
-			return nil, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
+			return Result{}, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
 		}
 	}
 
-	env := append(p.Env, fmt.Sprintf("PORT=%d", port))
+	env := append(append([]string{}, p.Env...), fmt.Sprintf("PORT=%d", port))
 
 	info, err := p.Manager.Start(process.StartParams{
 		Slug:            p.Slug,
+		Index:           idx,
 		Dir:             p.BundleDir,
 		Command:         cmd,
 		Port:            port,
@@ -103,30 +194,20 @@ func Run(p Params) (*Result, error) {
 		CPUQuotaPercent: p.CPUQuotaPercent,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("start: %w", err)
+		return Result{}, fmt.Errorf("start: %w", err)
 	}
 
-	healthCheck := p.HealthCheck
-	if healthCheck == nil {
-		healthCheck = waitHealthy
-	}
-
-	timeout := p.HealthTimeout
-	if timeout == 0 {
-		timeout = 120 * time.Second
-	}
-	if err := healthCheck(port, timeout); err != nil {
-		stopErr := p.Manager.Stop(p.Slug)
-		return nil, errors.Join(fmt.Errorf("health check failed: %w", err), stopErr)
+	if err := hc(port, timeout); err != nil {
+		_ = p.Manager.StopReplica(p.Slug, idx)
+		return Result{}, fmt.Errorf("health: %w", err)
 	}
 
 	targetURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	if err := p.Proxy.Register(p.Slug, targetURL); err != nil {
-		stopErr := p.Manager.Stop(p.Slug)
-		return nil, errors.Join(fmt.Errorf("proxy register: %w", err), stopErr)
+	if err := p.Proxy.RegisterReplica(p.Slug, idx, targetURL); err != nil {
+		_ = p.Manager.StopReplica(p.Slug, idx)
+		return Result{}, fmt.Errorf("register: %w", err)
 	}
-
-	return &Result{PID: info.PID, Port: port}, nil
+	return Result{Index: idx, PID: info.PID, Port: port}, nil
 }
 
 // DetectAppType returns "python" if app.py exists, "r" if app.R exists, or ""
