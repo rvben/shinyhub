@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -12,17 +13,28 @@ import (
 // handleLogs streams log lines for the given app as Server-Sent Events.
 // It sends the last 200 lines as an initial burst, then follows new output.
 // Access is restricted to app managers (owners, admins, operators).
+// The optional query param ?replica=N (default 0) selects which replica's log to stream.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	if _, ok := s.requireManageApp(w, r, slug); !ok {
 		return
 	}
 
+	idx := 0
+	if raw := r.URL.Query().Get("replica"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "invalid replica index")
+			return
+		}
+		idx = n
+	}
+
 	if s.manager == nil {
 		writeError(w, http.StatusNotFound, "no log available")
 		return
 	}
-	lr, ok := s.manager.LogReader(slug)
+	lr, ok := s.manager.LogReader(slug, idx)
 	if !ok {
 		writeError(w, http.StatusNotFound, "no log available")
 		return
