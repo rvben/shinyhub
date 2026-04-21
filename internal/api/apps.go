@@ -366,6 +366,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
 	if err := deploy.ExtractBundle(bundleZip, bundleDir); err != nil {
 		fmt.Fprintf(os.Stderr, "extract bundle %s: %v\n", slug, err)
+		if errors.Is(err, deploy.ErrBundleRejected) {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		if errors.Is(err, deploy.ErrBundleTooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "bundle extracted size exceeds limit")
 			return

@@ -196,6 +196,11 @@ func waitHealthy(port int, timeout time.Duration) error {
 // we also enforce the caps while streaming bytes to disk.
 var ErrBundleTooLarge = errors.New("bundle exceeds extracted size limit")
 
+// ErrBundleRejected is returned by ExtractBundle when a bundle entry violates
+// the content policy (data dirs, forbidden extensions, etc.). Callers can use
+// errors.Is to map this to a 422 Unprocessable Entity response.
+var ErrBundleRejected = errors.New("bundle rejected")
+
 const (
 	// DefaultMaxEntrySize caps the extracted size of a single file inside the
 	// bundle. Matches the upload size cap — a single file can never be larger
@@ -258,7 +263,7 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 			bundle.FilterRejectDatasetDir,
 			bundle.FilterRejectExtension,
 			bundle.FilterRejectFileSize:
-			return fmt.Errorf("bundle entry %q rejected: %s", f.Name, decision)
+			return fmt.Errorf("%w: bundle entry %q: %s", ErrBundleRejected, f.Name, decision)
 		default:
 			return fmt.Errorf("bundle entry %q: unhandled filter decision %v", f.Name, decision)
 		}
