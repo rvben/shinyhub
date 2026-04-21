@@ -40,6 +40,9 @@ var migration009SQL string
 //go:embed migrations/010_replicas.sql
 var migration010SQL string
 
+//go:embed migrations/011_schedules.sql
+var migration011SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -97,6 +100,9 @@ func (s *Store) Migrate() error {
 			!strings.Contains(err.Error(), "no such column") {
 			return fmt.Errorf("migrate 010: %w", err)
 		}
+	}
+	if _, err := s.db.Exec(migration011SQL); err != nil {
+		return fmt.Errorf("migrate 011: %w", err)
 	}
 	return nil
 }
