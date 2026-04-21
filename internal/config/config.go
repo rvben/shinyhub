@@ -136,6 +136,13 @@ type DockerRuntimeConfig struct {
 	Images            DockerImages
 	DefaultMemoryMB   int // 0 = no limit
 	DefaultCPUPercent int // 0 = no limit; 100 = 1 full core
+	// NetworkMode controls the Docker network mode applied to app containers.
+	// "bridge" (default) puts each app on the default Docker bridge with an
+	// explicit 127.0.0.1:port mapping for the proxy — this preserves the
+	// "only the proxy can reach the app" boundary that native mode enforces
+	// via 127.0.0.1 binding. "host" disables network isolation; the container
+	// shares the host network stack. Allowed: "bridge" (default), "host".
+	NetworkMode string
 }
 
 // DockerImages holds the base image names for each app type.
@@ -173,6 +180,7 @@ type rawDockerRuntimeConfig struct {
 	Images            rawDockerImages `yaml:"images"`
 	DefaultMemoryMB   int             `yaml:"default_memory_mb"`
 	DefaultCPUPercent int             `yaml:"default_cpu_percent"`
+	NetworkMode       string          `yaml:"network_mode"`
 }
 
 type rawDockerImages struct {
@@ -278,6 +286,12 @@ func Load(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("runtime.mode: %q is not supported; must be one of native, docker", cfg.Runtime.Mode)
 	}
+	switch cfg.Runtime.Docker.NetworkMode {
+	case "bridge", "host":
+		// allowed
+	default:
+		return nil, fmt.Errorf("runtime.docker.network_mode: %q is not supported; must be one of bridge, host", cfg.Runtime.Docker.NetworkMode)
+	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}
@@ -325,6 +339,7 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 				Python: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
 				R:      "rocker/r-base",
 			},
+			NetworkMode: "bridge",
 		},
 	}
 	if r.Mode != "" {
@@ -332,6 +347,9 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	}
 	if r.Docker.Socket != "" {
 		rc.Docker.Socket = r.Docker.Socket
+	}
+	if r.Docker.NetworkMode != "" {
+		rc.Docker.NetworkMode = r.Docker.NetworkMode
 	}
 	if r.Docker.Images.Python != "" {
 		rc.Docker.Images.Python = r.Docker.Images.Python
@@ -435,6 +453,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SOCKET"); v != "" {
 		cfg.Runtime.Docker.Socket = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_NETWORK_MODE"); v != "" {
+		cfg.Runtime.Docker.NetworkMode = v
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

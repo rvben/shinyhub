@@ -25,7 +25,10 @@ const dockerSocketPath = "/var/run/docker.sock"
 // test is responsible for.
 func dockerRuntimeWithImage(t *testing.T, imageRef string) *DockerRuntime {
 	t.Helper()
-	rt, err := NewDockerRuntime(dockerSocketPath, imageRef, imageRef)
+	// Use "host" network so the integration tests don't need TCP port
+	// publishing on the test daemon's loopback (which would race with parallel
+	// runs that all want the same host port).
+	rt, err := NewDockerRuntime(dockerSocketPath, imageRef, imageRef, "host")
 	if err != nil {
 		t.Skipf("Docker daemon unavailable: %v", err)
 	}
@@ -74,6 +77,11 @@ func ensureDockerImage(t *testing.T, c *dockerClient, imageRef string) {
 
 func newDockerRuntimeWithServer(t *testing.T, handler http.Handler) *DockerRuntime {
 	t.Helper()
+	return newDockerRuntimeWithServerAndMode(t, handler, "host")
+}
+
+func newDockerRuntimeWithServerAndMode(t *testing.T, handler http.Handler, networkMode string) *DockerRuntime {
+	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	client := &dockerClient{base: srv.URL, hc: srv.Client(), stream: srv.Client()}
@@ -81,6 +89,7 @@ func newDockerRuntimeWithServer(t *testing.T, handler http.Handler) *DockerRunti
 		client:      client,
 		pythonImage: "uv-test:latest",
 		rImage:      "r-test:latest",
+		networkMode: networkMode,
 	}
 }
 
@@ -260,6 +269,117 @@ func TestAddSharedMounts_PreCreatesMountTargetHostSide(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatalf("expected target %s to be a directory", target)
+	}
+}
+
+// TestDockerRuntime_AppBindHost_ByMode locks in the per-mode bind address:
+// host-network mode keeps the loopback boundary; bridge mode must bind
+// 0.0.0.0 so the published 127.0.0.1:port mapping actually routes.
+func TestDockerRuntime_AppBindHost_ByMode(t *testing.T) {
+	tests := []struct {
+		mode string
+		want string
+	}{
+		{"host", "127.0.0.1"},
+		{"bridge", "0.0.0.0"},
+		{"", "0.0.0.0"}, // unspecified collapses to bridge semantics
+	}
+	for _, tc := range tests {
+		t.Run(tc.mode, func(t *testing.T) {
+			rt := &DockerRuntime{networkMode: tc.mode}
+			if got := rt.AppBindHost(); got != tc.want {
+				t.Errorf("AppBindHost(mode=%q) = %q, want %q", tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDockerRuntime_Start_BridgeModePublishesPortToLoopback verifies that
+// bridge-network containers ship their listening port back to 127.0.0.1:port
+// via PortBindings — the missing piece that would otherwise leave bridge
+// containers unreachable from the in-process proxy.
+func TestDockerRuntime_Start_BridgeModePublishesPortToLoopback(t *testing.T) {
+	var captured map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"Id": "cont-bridge"})
+	})
+	mux.HandleFunc("/containers/cont-bridge/start", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rt := newDockerRuntimeWithServerAndMode(t, mux, "bridge")
+	if _, err := rt.Start(context.Background(), StartParams{
+		Slug:    "br",
+		Dir:     t.TempDir(),
+		Command: []string{"true"},
+		Port:    20123,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	host, _ := captured["HostConfig"].(map[string]any)
+	if got := host["NetworkMode"]; got != "bridge" {
+		t.Errorf("HostConfig.NetworkMode = %v, want bridge", got)
+	}
+	bindings, _ := host["PortBindings"].(map[string]any)
+	entry, ok := bindings["20123/tcp"].([]any)
+	if !ok || len(entry) == 0 {
+		t.Fatalf("expected PortBindings[20123/tcp] entry, got %v", bindings)
+	}
+	first, _ := entry[0].(map[string]any)
+	if first["HostIp"] != "127.0.0.1" {
+		t.Errorf("HostIp = %v, want 127.0.0.1", first["HostIp"])
+	}
+	if first["HostPort"] != "20123" {
+		t.Errorf("HostPort = %v, want \"20123\"", first["HostPort"])
+	}
+	exposed, _ := captured["ExposedPorts"].(map[string]any)
+	if _, ok := exposed["20123/tcp"]; !ok {
+		t.Errorf("expected ExposedPorts to declare 20123/tcp, got %v", exposed)
+	}
+}
+
+// TestDockerRuntime_Start_HostModeOmitsPortBindings verifies that host-network
+// mode does NOT publish ports — the container is already on the host network
+// stack, so adding PortBindings would be redundant and confusing in `docker ps`.
+func TestDockerRuntime_Start_HostModeOmitsPortBindings(t *testing.T) {
+	var captured map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"Id": "cont-host"})
+	})
+	mux.HandleFunc("/containers/cont-host/start", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rt := newDockerRuntimeWithServerAndMode(t, mux, "host")
+	if _, err := rt.Start(context.Background(), StartParams{
+		Slug:    "hm",
+		Dir:     t.TempDir(),
+		Command: []string{"true"},
+		Port:    20999,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	host, _ := captured["HostConfig"].(map[string]any)
+	if got := host["NetworkMode"]; got != "host" {
+		t.Errorf("HostConfig.NetworkMode = %v, want host", got)
+	}
+	if _, ok := host["PortBindings"]; ok {
+		t.Errorf("HostConfig.PortBindings must be absent in host mode, got %v", host["PortBindings"])
+	}
+	if _, ok := captured["ExposedPorts"]; ok {
+		t.Errorf("ExposedPorts must be absent in host mode, got %v", captured["ExposedPorts"])
 	}
 }
 

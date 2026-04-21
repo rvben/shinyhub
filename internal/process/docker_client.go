@@ -43,16 +43,26 @@ type containerConfig struct {
 	WorkDir     string
 	Mounts      []containerMount
 	Labels      map[string]string
-	MemoryBytes int64  // 0 = unlimited
-	NanoCPUs    int64  // 0 = unlimited; 1e9 = 1 CPU
+	MemoryBytes int64 // 0 = unlimited
+	NanoCPUs    int64 // 0 = unlimited; 1e9 = 1 CPU
 	NetworkMode string
-	AutoRemove  bool // remove container automatically when it exits
+	AutoRemove  bool                   // remove container automatically when it exits
+	Ports       []containerPortBinding // published TCP ports; empty in host-network mode
 }
 
 type containerMount struct {
 	Source string
 	Target string
 	Mode   string // "rw" or "ro"
+}
+
+// containerPortBinding describes a single TCP port published from the
+// container (ContainerPort) to the host (HostIP:HostPort). Used in bridge
+// network mode to expose the app's listener back to the in-process proxy.
+type containerPortBinding struct {
+	ContainerPort int
+	HostPort      int
+	HostIP        string // typically "127.0.0.1"
 }
 
 type containerState struct {
@@ -82,19 +92,37 @@ func (c *dockerClient) createContainer(cfg containerConfig) (string, error) {
 	if networkMode == "" {
 		networkMode = "host"
 	}
+	hostConfig := map[string]any{
+		"Mounts":      mounts,
+		"NetworkMode": networkMode,
+		"Memory":      cfg.MemoryBytes,
+		"NanoCPUs":    cfg.NanoCPUs,
+		"AutoRemove":  cfg.AutoRemove,
+	}
 	body := map[string]any{
 		"Image":      cfg.Image,
 		"Cmd":        cfg.Cmd,
 		"Env":        cfg.Env,
 		"WorkingDir": cfg.WorkDir,
 		"Labels":     cfg.Labels,
-		"HostConfig": map[string]any{
-			"Mounts":      mounts,
-			"NetworkMode": networkMode,
-			"Memory":      cfg.MemoryBytes,
-			"NanoCPUs":    cfg.NanoCPUs,
-			"AutoRemove":  cfg.AutoRemove,
-		},
+		"HostConfig": hostConfig,
+	}
+	// Translate ports to Docker's PortBindings + ExposedPorts shape. The
+	// PortBindings value is a map keyed by "<port>/tcp" → []map{HostIp,HostPort}.
+	// ExposedPorts is required for bridge mode even when PortBindings is set.
+	if len(cfg.Ports) > 0 {
+		exposed := make(map[string]struct{}, len(cfg.Ports))
+		bindings := make(map[string][]map[string]string, len(cfg.Ports))
+		for _, p := range cfg.Ports {
+			key := fmt.Sprintf("%d/tcp", p.ContainerPort)
+			exposed[key] = struct{}{}
+			bindings[key] = append(bindings[key], map[string]string{
+				"HostIp":   p.HostIP,
+				"HostPort": fmt.Sprintf("%d", p.HostPort),
+			})
+		}
+		body["ExposedPorts"] = exposed
+		hostConfig["PortBindings"] = bindings
 	}
 	var resp struct {
 		Id string `json:"Id"`

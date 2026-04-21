@@ -72,6 +72,10 @@ func NewNativeRuntime() *NativeRuntime {
 // Start.
 func (r *NativeRuntime) HostPreparesDeps() bool { return true }
 
+// AppBindHost returns "127.0.0.1": native processes share the host network and
+// must only be reachable via the in-process proxy.
+func (r *NativeRuntime) AppBindHost() string { return "127.0.0.1" }
+
 func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (RunHandle, error) {
 	if len(p.Command) == 0 {
 		return RunHandle{}, fmt.Errorf("command must not be empty")

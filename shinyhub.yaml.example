@@ -50,6 +50,7 @@ runtime:
   max_replicas: 32                    # hard cap enforced by the API  # SHINYHUB_RUNTIME_MAX_REPLICAS
   docker:
     socket: /var/run/docker.sock
+    network_mode: bridge              # "bridge" (default; isolated namespace + 127.0.0.1 port mapping) or "host"  # SHINYHUB_RUNTIME_DOCKER_NETWORK_MODE
     images:
       python: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
       r: rocker/r-base

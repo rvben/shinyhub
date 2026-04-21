@@ -27,6 +27,12 @@ type Runtime interface {
 	// runtimes use the host's PATH and need this; container runtimes prepare
 	// deps inside the image/container, so callers must NOT touch the host.
 	HostPreparesDeps() bool
+	// AppBindHost reports the address an app process should bind its listening
+	// socket to. Native and Docker host-network runtimes return "127.0.0.1" so
+	// only the in-process proxy can reach the app. Docker bridge-network
+	// runtimes return "0.0.0.0" so the published port mapping (which lives in
+	// the container's separate network namespace) is reachable from the host.
+	AppBindHost() string
 }
 
 // ExitInfo summarizes how a one-shot process ended.

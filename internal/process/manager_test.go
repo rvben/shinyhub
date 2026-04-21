@@ -76,6 +76,8 @@ func (f *fakeRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Wri
 
 func (f *fakeRuntime) HostPreparesDeps() bool { return true }
 
+func (f *fakeRuntime) AppBindHost() string { return "127.0.0.1" }
+
 func TestManagerStartStop(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 
@@ -101,6 +103,24 @@ func TestManagerStartStop(t *testing.T) {
 	// verify the process is actually gone
 	if err := syscall.Kill(info.PID, 0); err == nil {
 		t.Error("expected process to be dead after Stop")
+	}
+}
+
+// TestNativeRuntime_AppBindHost asserts the loopback contract for the native
+// runtime: app processes share the host network and must be reachable only via
+// the in-process proxy.
+func TestNativeRuntime_AppBindHost(t *testing.T) {
+	if got := process.NewNativeRuntime().AppBindHost(); got != "127.0.0.1" {
+		t.Errorf("NativeRuntime.AppBindHost = %q, want 127.0.0.1", got)
+	}
+}
+
+// TestManager_AppBindHost_ProxiesRuntime locks the contract that Manager
+// surfaces the runtime's bind host to deploy-time command builders.
+func TestManager_AppBindHost_ProxiesRuntime(t *testing.T) {
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	if got := m.AppBindHost(); got != "127.0.0.1" {
+		t.Errorf("Manager.AppBindHost (native) = %q, want 127.0.0.1", got)
 	}
 }
 
@@ -363,6 +383,8 @@ func (c *captureRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.
 }
 
 func (c *captureRuntime) HostPreparesDeps() bool { return true }
+
+func (c *captureRuntime) AppBindHost() string { return "127.0.0.1" }
 
 func lastValue(env []string, key string) string {
 	out := ""

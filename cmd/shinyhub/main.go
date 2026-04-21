@@ -118,13 +118,14 @@ func main() {
 			cfg.Runtime.Docker.Socket,
 			cfg.Runtime.Docker.Images.Python,
 			cfg.Runtime.Docker.Images.R,
+			cfg.Runtime.Docker.NetworkMode,
 		)
 		if err != nil {
 			slog.Error("docker runtime", "err", err)
 			os.Exit(1)
 		}
 		rt = dockerRT
-		slog.Info("runtime configured", "mode", "docker", "socket", cfg.Runtime.Docker.Socket)
+		slog.Info("runtime configured", "mode", "docker", "socket", cfg.Runtime.Docker.Socket, "network_mode", cfg.Runtime.Docker.NetworkMode)
 	case "native":
 		rt = process.NewNativeRuntime()
 		slog.Info("runtime configured", "mode", "native")

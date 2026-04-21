@@ -193,15 +193,19 @@ func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(in
 	if baseCmd != nil {
 		cmd = baseCmd
 	} else {
+		bindHost := "127.0.0.1"
+		if p.Manager != nil {
+			bindHost = p.Manager.AppBindHost()
+		}
 		switch appType {
 		case "python":
 			workers := p.Workers
 			if workers <= 0 {
 				workers = 1
 			}
-			cmd = buildCommand(p.BundleDir, port, workers)
+			cmd = buildCommand(p.BundleDir, port, workers, bindHost)
 		case "r":
-			cmd = BuildRCommand(p.BundleDir, port)
+			cmd = BuildRCommand(p.BundleDir, port, bindHost)
 		default:
 			return Result{}, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
 		}
@@ -264,9 +268,11 @@ func DetectAppType(bundleDir string) string {
 }
 
 // BuildRCommand returns the command to start an R Shiny app on the given port.
-func BuildRCommand(bundleDir string, port int) []string {
+// bindHost is the address the app listens on inside its execution environment
+// (the host for native, the container for Docker bridge mode).
+func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 	expr := fmt.Sprintf(
-		`shiny::runApp('.', host='127.0.0.1', port=%d, launch.browser=FALSE)`, port)
+		`shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)`, bindHost, port)
 	return []string{"Rscript", "--vanilla", "-e", expr}
 }
 
@@ -274,7 +280,8 @@ func BuildRCommand(bundleDir string, port int) []string {
 // If a pyproject.toml is present, uv sync has already prepared the environment
 // and we use plain `uv run`. If only requirements.txt is present, we pass
 // --with-requirements so uv installs deps into an ephemeral environment.
-func buildCommand(bundleDir string, port, workers int) []string {
+// bindHost has the same meaning as in BuildRCommand.
+func buildCommand(bundleDir string, port, workers int, bindHost string) []string {
 	base := []string{"uv", "run", "--no-project"}
 	if _, err := os.Stat(filepath.Join(bundleDir, "pyproject.toml")); err == nil {
 		// Project mode: environment was synced by process.Sync.
@@ -284,7 +291,7 @@ func buildCommand(bundleDir string, port, workers int) []string {
 	}
 	return append(base,
 		"shiny", "run", "app.py",
-		"--host", "127.0.0.1",
+		"--host", bindHost,
 		"--port", fmt.Sprintf("%d", port),
 	)
 }

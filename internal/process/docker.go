@@ -20,25 +20,51 @@ type DockerRuntime struct {
 	client      *dockerClient
 	pythonImage string
 	rImage      string
+	// networkMode is the Docker network mode applied to every container this
+	// runtime starts. "bridge" (default, isolated namespace + 127.0.0.1 host
+	// port mapping) or "host" (shares the host network stack).
+	networkMode string
 }
 
 // Compile-time interface check.
 var _ Runtime = (*DockerRuntime)(nil)
 
 // NewDockerRuntime creates a DockerRuntime connected to socketPath.
+// networkMode must be "bridge" or "host" (validated by config).
 // Returns an error if the socket is unreachable (verified by pinging the API).
-func NewDockerRuntime(socketPath, pythonImage, rImage string) (*DockerRuntime, error) {
+func NewDockerRuntime(socketPath, pythonImage, rImage, networkMode string) (*DockerRuntime, error) {
 	client := newDockerClient(socketPath)
 	if err := client.get("/_ping", nil); err != nil {
 		return nil, fmt.Errorf("docker socket %s: %w", socketPath, err)
 	}
-	return &DockerRuntime{client: client, pythonImage: pythonImage, rImage: rImage}, nil
+	if networkMode == "" {
+		networkMode = "bridge"
+	}
+	return &DockerRuntime{
+		client:      client,
+		pythonImage: pythonImage,
+		rImage:      rImage,
+		networkMode: networkMode,
+	}, nil
 }
 
 // HostPreparesDeps reports false: dependency installation happens inside the
 // container (via uv/Rscript present in the base image), so callers must not
 // run uv sync / renv::restore on the host.
 func (r *DockerRuntime) HostPreparesDeps() bool { return false }
+
+// AppBindHost returns the address the app should bind inside the container.
+// In host-network mode the container shares the host loopback, so 127.0.0.1
+// keeps the "only the proxy can reach the app" boundary intact. In bridge
+// mode the container has its own network namespace; the listener must bind
+// 0.0.0.0 inside the container so the published 127.0.0.1:port mapping on
+// the host can route to it.
+func (r *DockerRuntime) AppBindHost() string {
+	if r.networkMode == "host" {
+		return "127.0.0.1"
+	}
+	return "0.0.0.0"
+}
 
 // addSharedMounts appends a read-only mount per SharedMount to cfg.Mounts,
 // targeted at /app/data/shared/<source-slug>. Source paths are MkdirAll'd
@@ -94,7 +120,18 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"},
 		},
 		Labels:      labels,
-		NetworkMode: "host",
+		NetworkMode: r.networkMode,
+	}
+	if r.networkMode != "host" && p.Port > 0 {
+		// Bridge (or any non-host) network: publish the container's listening
+		// port back to the host's loopback so only local clients (the in-process
+		// proxy) can reach it. Container-side bind host is set to 0.0.0.0 by
+		// AppBindHost so this mapping actually routes.
+		cfg.Ports = []containerPortBinding{{
+			ContainerPort: p.Port,
+			HostPort:      p.Port,
+			HostIP:        "127.0.0.1",
+		}}
 	}
 	if p.AppDataPath != "" {
 		cfg.Mounts = append(cfg.Mounts,
@@ -257,7 +294,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 			"shinyhub.slug":    p.Slug,
 			"shinyhub.kind":    "schedule-run",
 		},
-		NetworkMode: "host",
+		NetworkMode: r.networkMode,
 		AutoRemove:  true,
 	}
 	if p.AppDataPath != "" {

@@ -360,7 +360,7 @@ func TestRun_NativeStillRunsHostDepInstall(t *testing.T) {
 func TestBuildRCommand_NoRenv(t *testing.T) {
 	dir := t.TempDir()
 
-	cmd := deploy.BuildRCommand(dir, 8080)
+	cmd := deploy.BuildRCommand(dir, 8080, "127.0.0.1")
 	if len(cmd) == 0 {
 		t.Fatal("expected non-empty command")
 	}
@@ -373,6 +373,23 @@ func TestBuildRCommand_NoRenv(t *testing.T) {
 	}
 	if !strings.Contains(full, "8080") {
 		t.Errorf("expected port 8080 in command: %s", full)
+	}
+	if !strings.Contains(full, "host='127.0.0.1'") {
+		t.Errorf("expected host='127.0.0.1' in command: %s", full)
+	}
+}
+
+// TestBuildRCommand_HonorsBindHost verifies the bind host is propagated into
+// the R startup expression — required for Docker bridge mode where the app
+// must listen on 0.0.0.0 inside the container so the published port works.
+func TestBuildRCommand_HonorsBindHost(t *testing.T) {
+	cmd := deploy.BuildRCommand(t.TempDir(), 8080, "0.0.0.0")
+	full := strings.Join(cmd, " ")
+	if !strings.Contains(full, "host='0.0.0.0'") {
+		t.Errorf("expected host='0.0.0.0' in command: %s", full)
+	}
+	if strings.Contains(full, "127.0.0.1") {
+		t.Errorf("did not expect 127.0.0.1 when bindHost is 0.0.0.0: %s", full)
 	}
 }
 
@@ -500,6 +517,7 @@ func TestExtractBundle_RejectsDataDirEntryWithoutCreating(t *testing.T) {
 type fakeContainerRuntime struct{}
 
 func (f *fakeContainerRuntime) HostPreparesDeps() bool { return false }
+func (f *fakeContainerRuntime) AppBindHost() string    { return "0.0.0.0" }
 func (f *fakeContainerRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
 	return process.RunHandle{ContainerID: fmt.Sprintf("fake-%s-%d", p.Slug, p.Index)}, nil
 }

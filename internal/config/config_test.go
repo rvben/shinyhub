@@ -507,6 +507,63 @@ auth:
 	}
 }
 
+func TestRuntime_Docker_NetworkMode_DefaultsToBridge(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Runtime.Docker.NetworkMode, "bridge"; got != want {
+		t.Errorf("Runtime.Docker.NetworkMode default = %q, want %q", got, want)
+	}
+}
+
+func TestRuntime_Docker_NetworkMode_AcceptsHost(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  docker:
+    network_mode: host
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Runtime.Docker.NetworkMode, "host"; got != want {
+		t.Errorf("Runtime.Docker.NetworkMode = %q, want %q", got, want)
+	}
+}
+
+func TestRuntime_Docker_NetworkMode_RejectsUnknown(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  docker:
+    network_mode: macvlan
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown network_mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "network_mode") {
+		t.Fatalf("expected error mentioning network_mode, got %v", err)
+	}
+}
+
+func TestRuntime_Docker_NetworkMode_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_RUNTIME_DOCKER_NETWORK_MODE", "host")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Runtime.Docker.NetworkMode, "host"; got != want {
+		t.Errorf("Runtime.Docker.NetworkMode from env = %q, want %q", got, want)
+	}
+}
+
 func TestRuntime_Mode_RejectsUnknownValue(t *testing.T) {
 	path := writeYAML(t, `
 auth:

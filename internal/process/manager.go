@@ -99,6 +99,11 @@ func (m *Manager) SetAppDataRoot(root string) { m.appDataRoot = root }
 // expected before Start. See Runtime.HostPreparesDeps for the contract.
 func (m *Manager) HostPreparesDeps() bool { return m.runtime.HostPreparesDeps() }
 
+// AppBindHost proxies to the underlying Runtime so deploy code can construct
+// the per-replica command with the right listen address. See
+// Runtime.AppBindHost for the contract.
+func (m *Manager) AppBindHost() string { return m.runtime.AppBindHost() }
+
 // NewManager returns an initialized Manager using the given Runtime.
 func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
