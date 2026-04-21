@@ -212,5 +212,15 @@ func TestSharedData_RejectsSelfMount(t *testing.T) {
 	}
 }
 
+func TestScheduleRuns_FinishMissing_ReturnsErrNotFound(t *testing.T) {
+	store := newScheduleStore(t)
+	err := store.FinishScheduleRun(FinishScheduleRunParams{
+		RunID: 999, Status: "succeeded", ExitCode: 0, FinishedAt: time.Now().UTC(),
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
 func ptrString(s string) *string { return &s }
 func ptrBool(b bool) *bool       { return &b }

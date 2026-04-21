@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -141,7 +142,7 @@ func (s *Store) UpdateSchedule(id int64, p UpdateScheduleParams) error {
 	}
 	sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
 	args = append(args, id)
-	q := "UPDATE app_schedules SET " + joinComma(sets) + " WHERE id = ?"
+	q := "UPDATE app_schedules SET " + strings.Join(sets, ", ") + " WHERE id = ?"
 	res, err := s.db.Exec(q, args...)
 	if err != nil {
 		return fmt.Errorf("update schedule: %w", err)
@@ -212,12 +213,16 @@ func (s *Store) InsertScheduleRun(p InsertScheduleRunParams) (int64, error) {
 }
 
 func (s *Store) FinishScheduleRun(p FinishScheduleRunParams) error {
-	_, err := s.db.Exec(`
+	res, err := s.db.Exec(`
 		UPDATE schedule_runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?`,
 		p.Status, p.ExitCode, p.FinishedAt, p.RunID,
 	)
 	if err != nil {
 		return fmt.Errorf("finish schedule run: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -405,13 +410,3 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 	return &sched, nil
 }
 
-func joinComma(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += ", "
-		}
-		out += p
-	}
-	return out
-}
