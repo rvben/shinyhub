@@ -1,8 +1,16 @@
 .superpowers/
 docs/superpowers/
 go.work
+go.work.sum
 bin/
 tmp/
 .worktrees/
 CLAUDE.md
 CLAUDE.local.md
+
+# Runtime artifacts created when running the server from a checkout
+# (default config writes the SQLite DB and per-app data under ./data).
+/data/
+*.db
+*.db-shm
+*.db-wal

@@ -35,7 +35,7 @@ OAuth or OIDC, and hibernate idle apps automatically.
 ### Docker (recommended)
 
 ```bash
-mkdir -p ./shinyhub-data
+mkdir -p ./data
 cp shinyhub.yaml.example ./shinyhub.yaml
 # Edit shinyhub.yaml: set auth.secret to the output of `openssl rand -hex 32`
 
@@ -43,11 +43,14 @@ docker run -d \
   --name shinyhub \
   -p 8080:8080 \
   -v "$PWD/shinyhub.yaml:/etc/shinyhub/shinyhub.yaml:ro" \
-  -v "$PWD/shinyhub-data:/data" \
+  -v "$PWD/data:/data" \
   -e SHINYHUB_ADMIN_USER=admin \
   -e SHINYHUB_ADMIN_PASSWORD=change-me \
   ghcr.io/rvben/shinyhub:latest
 ```
+
+The mount target `/data` matches the example YAML's `./data/...` paths
+(database, bundles, app data dir all land there).
 
 Open `http://localhost:8080`, log in with the admin credentials you set.
 
@@ -213,8 +216,9 @@ Components:
 
 ## Status
 
-v0.2.0 — first public release. Single-node, self-hosted. Used in production
-by the maintainer. No SLA. Issues and PRs welcome.
+v0.2.x line — single-node, self-hosted. Used in production by the maintainer.
+No SLA. Issues and PRs welcome. See [CHANGELOG.md](CHANGELOG.md) for the
+current release.
 
 ## Links
 

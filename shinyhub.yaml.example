@@ -1,5 +1,10 @@
 # ShinyHub configuration. Copy this file to shinyhub.yaml and edit.
 # Every key here can be overridden by a SHINYHUB_<UPPER_SNAKE> environment variable.
+#
+# Path conventions: the database.dsn and storage.* paths below are relative to
+# the server's working directory. That works for the docker quickstart (which
+# starts at "/") and for "shinyhub --config ./shinyhub.yaml" run from a checkout.
+# For production-style deployments, make them absolute (e.g. /var/lib/shinyhub/...).
 
 database:
   driver: sqlite                      # only driver supported today
