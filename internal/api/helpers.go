@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // writeJSON writes v as JSON with the given HTTP status code. Encode errors
@@ -25,6 +28,24 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	fmt.Fprintf(w, `{"error":%q}`+"\n", msg)
+}
+
+// audit records a mutating action with the authenticated user, request IP, and
+// optional JSON detail blob. detail may be empty.
+func (s *Server) audit(r *http.Request, action, resourceType, resourceID, detail string) {
+	var uid *int64
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		v := u.ID
+		uid = &v
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       uid,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Detail:       detail,
+		IPAddress:    s.clientIP(r),
+	})
 }
 
 // clientIP is a Server method that returns the best-effort client IP.

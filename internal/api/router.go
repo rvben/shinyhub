@@ -184,6 +184,18 @@ func (s *Server) buildRouter() http.Handler {
 		r.Put("/api/apps/{slug}/data/*", s.handleDataPut)
 		r.Delete("/api/apps/{slug}/data/*", s.handleDataDelete)
 
+		r.Get("/api/apps/{slug}/schedules", s.handleListSchedules)
+		r.Post("/api/apps/{slug}/schedules", s.handleCreateSchedule)
+		r.Patch("/api/apps/{slug}/schedules/{id}", s.handlePatchSchedule)
+		r.Delete("/api/apps/{slug}/schedules/{id}", s.handleDeleteSchedule)
+		r.Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
+		r.Get("/api/apps/{slug}/schedules/{id}/runs", s.handleListScheduleRuns)
+		r.Post("/api/apps/{slug}/schedules/{id}/runs/{run_id}/cancel", s.handleCancelScheduleRun)
+
+		r.Get("/api/apps/{slug}/shared-data", s.handleListSharedData)
+		r.Post("/api/apps/{slug}/shared-data", s.handleGrantSharedData)
+		r.Delete("/api/apps/{slug}/shared-data/{source_slug}", s.handleRevokeSharedData)
+
 		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens", s.handleCreateToken)
 		r.Get("/api/tokens", s.handleListTokens)
 		r.Delete("/api/tokens/{id}", s.handleDeleteToken)
