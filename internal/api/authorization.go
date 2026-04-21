@@ -80,6 +80,30 @@ func (s *Server) requireViewApp(w http.ResponseWriter, r *http.Request, slug str
 	return app, u, true
 }
 
+// hasExplicitAccess reports whether u has explicit (non-public, non-shared)
+// access to app — i.e. operator/admin, owner, or an explicit row in
+// app_members. Public or shared visibility on app does NOT qualify. Used by
+// endpoints that need to reject public-only callers without writing a
+// response themselves (the caller must already hold the app pointer).
+//
+// "Not a member" is the expected miss path; only DB errors propagate.
+func (s *Server) hasExplicitAccess(u *auth.ContextUser, app *db.App) (bool, error) {
+	if u == nil || app == nil {
+		return false, nil
+	}
+	if isPrivilegedAppOperator(u) || app.OwnerID == u.ID {
+		return true, nil
+	}
+	role, err := s.store.GetMemberRole(app.Slug, u.ID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return role != "", nil
+}
+
 // requireExplicitAppAccess loads the named app and verifies the caller has
 // explicit access. Unlike requireViewApp, public/shared visibility is NOT
 // sufficient — only one of the following passes:
@@ -104,11 +128,12 @@ func (s *Server) requireExplicitAppAccess(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return nil, nil, false
 	}
-	if isPrivilegedAppOperator(u) || app.OwnerID == u.ID {
-		return app, u, true
+	ok, err := s.hasExplicitAccess(u, app)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return nil, nil, false
 	}
-	role, err := s.store.GetMemberRole(app.Slug, u.ID)
-	if err == nil && role != "" {
+	if ok {
 		return app, u, true
 	}
 	// 404 to avoid confirming slug existence to unauthorized users

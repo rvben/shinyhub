@@ -436,3 +436,74 @@ func TestSchedules_RunLogs_RejectsPublicViewer(t *testing.T) {
 		t.Fatalf("response body leaked log content: %q", rec.Body.String())
 	}
 }
+
+// TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource asserts that
+// the source app's *visibility* is not enough to grant a shared-data mount.
+// A developer who only has public-viewer access to "src" must not be able to
+// mount src's data dir into their own app — read-only or not — because that
+// dir holds whatever business data the source app's owner shipped via
+// `shiny data push`. Only an explicit member, the owner, or a platform
+// operator may grant the mount. See A.2 in the v0.2.2 audit.
+func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	// Source app: public visibility, owned by someone else.
+	hashOwner, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "src-owner", PasswordHash: hashOwner, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
+		t.Fatalf("create src: %v", err)
+	}
+	if err := store.SetAppAccess("src", "public"); err != nil {
+		t.Fatalf("set src public: %v", err)
+	}
+
+	// Caller: a developer who owns their own app but has no explicit access to src.
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	tokenCaller, _ := auth.IssueJWT(2, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "src"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, tokenCaller)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 granting shared-data on public src without explicit access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSchedules_GrantSharedData_AllowedForExplicitMember asserts the happy
+// path still works: when the caller is an explicit member of the source app
+// (any role), the grant succeeds.
+func TestSchedules_GrantSharedData_AllowedForExplicitMember(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hashOwner, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "src-owner", PasswordHash: hashOwner, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
+		t.Fatalf("create src: %v", err)
+	}
+
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	tokenCaller, _ := auth.IssueJWT(2, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	// Make caller an explicit member of src (default role = viewer).
+	if err := store.GrantAppAccess("src", 2); err != nil {
+		t.Fatalf("grant member: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "src"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, tokenCaller)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 granting shared-data with explicit member access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

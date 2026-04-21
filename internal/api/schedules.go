@@ -501,8 +501,12 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := auth.UserFromContext(r.Context())
-	// The caller must have viewer+ on the source app.
-	ok, err = s.canViewApp(user, src)
+	// The caller must have explicit access to the source app. Public or
+	// shared visibility is not enough — granting a read-only mount of
+	// another app's data dir into your own would otherwise let anyone with
+	// developer access to any public app exfiltrate that app's data over a
+	// schedule run they fully control. See A.2 in v0.2.2 audit.
+	ok, err = s.hasExplicitAccess(user, src)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
