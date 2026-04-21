@@ -385,13 +385,14 @@ func newScheduleRunCmd() *cobra.Command {
 			return fmt.Errorf("no runs found")
 		}
 
-		return streamRunLogs(cfg, slug, id, runs[0].ID, cmd)
+		return streamRunLogs(cfg, slug, id, runs[0].ID, true, cmd)
 	}
 	return runCmd
 }
 
 func newScheduleLogsCmd() *cobra.Command {
 	var runID int64
+	var follow bool
 
 	logsCmd := &cobra.Command{
 		Use:   "logs <slug> <name>",
@@ -399,6 +400,7 @@ func newScheduleLogsCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 	}
 	logsCmd.Flags().Int64Var(&runID, "run", 0, "Run ID (default: latest)")
+	logsCmd.Flags().BoolVar(&follow, "follow", false, "Follow until the run finishes")
 
 	logsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
@@ -437,14 +439,16 @@ func newScheduleLogsCmd() *cobra.Command {
 			runID = runs[0].ID
 		}
 
-		return streamRunLogs(cfg, slug, schedID, runID, cmd)
+		return streamRunLogs(cfg, slug, schedID, runID, follow, cmd)
 	}
 	return logsCmd
 }
 
 // streamRunLogs streams (or dumps) logs for a specific schedule run.
-func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, cmd *cobra.Command) error {
-	url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs/%d/logs", cfg.Host, slug, schedID, runID)
+// follow=true keeps the connection open until the run finishes; follow=false
+// asks the server to send the buffered log and close.
+func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow bool, cmd *cobra.Command) error {
+	url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs/%d/logs?follow=%t", cfg.Host, slug, schedID, runID, follow)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)

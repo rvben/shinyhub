@@ -174,6 +174,21 @@ func TestScheduleCmd_RegisteredWithRoot(t *testing.T) {
 	}
 }
 
+// TestSchedule_Logs_HasFollowFlag verifies the logs subcommand exposes --follow.
+func TestSchedule_Logs_HasFollowFlag(t *testing.T) {
+	cmd := newScheduleCmd()
+	logs, _, err := cmd.Find([]string{"logs"})
+	if err != nil {
+		t.Fatalf("find logs: %v", err)
+	}
+	if logs.Flags().Lookup("follow") == nil {
+		t.Error("expected logs subcommand to expose --follow flag")
+	}
+	if logs.Flags().Lookup("run") == nil {
+		t.Error("expected logs subcommand to expose --run flag")
+	}
+}
+
 // TestShareCmd_RegisteredWithRoot verifies share is registered with the root command.
 func TestShareCmd_RegisteredWithRoot(t *testing.T) {
 	found := false
