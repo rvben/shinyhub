@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.2.2](https://github.com/rvben/shinyhub/compare/v0.2.1...v0.2.2) - 2026-04-22
+
+### Added
+
+- **runtime**: default Docker network mode to bridge with loopback port mapping ([20d3a1c](https://github.com/rvben/shinyhub/commit/20d3a1ca61e0613509b0cb2e09bacf1e004f0106))
+
+### Fixed
+
+- **lifecycle**: close hibernation race with CAS-style BeginHibernate ([fc8f870](https://github.com/rvben/shinyhub/commit/fc8f8706a8f6adce071631f318dd2a73b2468066))
+- **deploy**: probe each candidate port for bindability before assigning it ([024d38c](https://github.com/rvben/shinyhub/commit/024d38cef65abefe3c6ddf9d30eebcef2097a32f))
+- **deploy**: skip host-side dep install when runtime is containerized ([ca96264](https://github.com/rvben/shinyhub/commit/ca962647e3f7360fd8507f3eac886b69d1616968))
+- **config**: reject unknown runtime.mode values at startup ([a94ce46](https://github.com/rvben/shinyhub/commit/a94ce46879eca7051104bce95f6f85712d3ae81d))
+- **api**: serialize per-app deploy/restart/rollback with a per-slug mutex ([b2826d8](https://github.com/rvben/shinyhub/commit/b2826d83528937ef10bede2da22b8ab3fe49a339))
+- **data**: reject symlink traversal in Put and Delete ([601a0f9](https://github.com/rvben/shinyhub/commit/601a0f9ba9150102dcce67e9e64c6e331aef24b9))
+- **auth**: bind OAuth state nonce to the originating browser ([4e8fed1](https://github.com/rvben/shinyhub/commit/4e8fed1d2f1f296bfe35d58735324e3deb03f387))
+- **auth**: default OAuth JIT users to viewer role ([2ab7ae0](https://github.com/rvben/shinyhub/commit/2ab7ae0c1e7d445e2bc9ee139e76adb42187ba04))
+- **api**: require explicit access on source app to grant shared-data mount ([11e3dee](https://github.com/rvben/shinyhub/commit/11e3dee4787b4de45ea2ea7fd0026c6cea05b90f))
+- **api**: require manage rights to read schedule run logs ([115ba80](https://github.com/rvben/shinyhub/commit/115ba809d7e8d54e94cbcd53852a59e1c7491630))
+
 ## [0.2.1](https://github.com/rvben/shinyhub/compare/v0.2.0...v0.2.1) - 2026-04-21
 
 ### Added
