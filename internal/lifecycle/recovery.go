@@ -45,7 +45,16 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 		prx.SetPoolSize(app.Slug, app.Replicas)
 		anyAlive := false
 		for _, r := range reps {
-			if r.PID == nil || r.Port == nil {
+			if r.PID == nil {
+				// No PID recorded → treat as crashed so the watcher can restart it.
+				_ = store.UpsertReplica(db.UpsertReplicaParams{
+					AppID: app.ID, Index: r.Index, Status: "crashed",
+				})
+				continue
+			}
+			if r.Port == nil {
+				// PID but no port → corrupted row. Log and skip without status change.
+				slog.Warn("recovery: replica has PID but no port", "slug", app.Slug, "idx", r.Index)
 				continue
 			}
 			if err := syscall.Kill(*r.PID, 0); err != nil {
@@ -77,10 +86,18 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 
 func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister, apps []*db.App) {
 	// Index apps by slug for fast lookup; configure proxy pool sizes up front.
+	// Also pre-fetch replicas for each app so the adoption loop avoids N*M DB reads.
 	bySlug := make(map[string]*db.App, len(apps))
+	replicasByApp := make(map[int64][]*db.Replica, len(apps))
 	for _, a := range apps {
 		bySlug[a.Slug] = a
 		prx.SetPoolSize(a.Slug, a.Replicas)
+		reps, err := store.ListReplicas(a.ID)
+		if err != nil {
+			slog.Error("recovery: list replicas", "slug", a.Slug, "err", err)
+			continue
+		}
+		replicasByApp[a.ID] = reps
 	}
 
 	containers, err := lister.ListByLabel(`{"label":["shinyhub.slug"]}`)
@@ -127,9 +144,8 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 	touched := make(map[string]bool)
 	for _, r := range alive {
 		app := bySlug[r.slug]
-		reps, _ := store.ListReplicas(app.ID)
 		var port int
-		for _, rep := range reps {
+		for _, rep := range replicasByApp[app.ID] {
 			if rep.Index == r.idx && rep.Port != nil {
 				port = *rep.Port
 				break

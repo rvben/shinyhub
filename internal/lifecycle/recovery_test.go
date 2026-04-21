@@ -338,6 +338,28 @@ func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
 	}
 }
 
+func TestRecovery_NilPIDMarkedCrashed(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "nil-pid")
+
+	port := 20099
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: nil, Port: &port, Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='nil-pid'`)
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, nil)
+
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != "crashed" {
+		t.Fatalf("expected replica 0 status=crashed after nil-PID recovery, got %+v", reps)
+	}
+}
+
 func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 	store := mustOpenStore(t)
 	prx := proxy.New()
