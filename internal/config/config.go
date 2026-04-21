@@ -250,7 +250,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Storage.AppDataDir == "" {
 		cfg.Storage.AppDataDir = "./data/app-data"
 	}
-	if cfg.Storage.MaxBundleMB <= 0 {
+	if cfg.Storage.MaxBundleMB < 0 {
 		cfg.Storage.MaxBundleMB = 128
 	}
 	if cfg.Auth.Secret == "" {
