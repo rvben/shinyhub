@@ -113,15 +113,20 @@ func (r *NativeRuntime) Signal(handle RunHandle, sig syscall.Signal) error {
 	return nil
 }
 
-func (r *NativeRuntime) Wait(_ context.Context, handle RunHandle) error {
+func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 	r.mu.Lock()
 	cmd, ok := r.cmds[handle.PID]
-	if !ok {
-		r.mu.Unlock()
-		return nil
+	if ok {
+		delete(r.cmds, handle.PID)
 	}
-	delete(r.cmds, handle.PID)
 	r.mu.Unlock()
+
+	if !ok {
+		// Adopted process: this runtime instance never started it, so we have
+		// no *exec.Cmd to wait on. Poll the kernel for liveness; signal 0 is a
+		// permission/existence probe that returns ESRCH once the PID is gone.
+		return waitForPIDExit(ctx, handle.PID)
+	}
 
 	err := cmd.Wait()
 
@@ -129,6 +134,28 @@ func (r *NativeRuntime) Wait(_ context.Context, handle RunHandle) error {
 	delete(r.procs, handle.PID)
 	r.mu.Unlock()
 	return err
+}
+
+// adoptedPollInterval is how often we re-check a PID we don't own. Two seconds
+// keeps watcher restart latency tight without measurable CPU overhead.
+const adoptedPollInterval = 2 * time.Second
+
+func waitForPIDExit(ctx context.Context, pid int) error {
+	ticker := time.NewTicker(adoptedPollInterval)
+	defer ticker.Stop()
+	for {
+		err := syscall.Kill(pid, 0)
+		if err == syscall.ESRCH {
+			return nil
+		}
+		// EPERM means the PID still exists but is owned by another user; any
+		// other error (including nil) means we should keep polling.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (r *NativeRuntime) Stats(_ context.Context, handle RunHandle) (float64, uint64, error) {
