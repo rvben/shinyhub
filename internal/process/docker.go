@@ -38,10 +38,19 @@ func NewDockerRuntime(socketPath, pythonImage, rImage string) (*DockerRuntime, e
 // addSharedMounts appends a read-only mount per SharedMount to cfg.Mounts,
 // targeted at /app/data/shared/<source-slug>. Source paths are MkdirAll'd
 // host-side so the consumer always has a directory to mount.
-func addSharedMounts(cfg *containerConfig, mounts []SharedMount) error {
+//
+// dataHostPath is the host directory that backs /app/data inside the container.
+// addSharedMounts pre-creates <dataHostPath>/shared/<slug> so the Docker daemon
+// (running as root on Linux) does not auto-create it with root ownership; that
+// would leave undeletable directories in the workspace owned by the daemon.
+func addSharedMounts(cfg *containerConfig, mounts []SharedMount, dataHostPath string) error {
 	for _, m := range mounts {
 		if err := os.MkdirAll(m.HostPath, 0o750); err != nil {
 			return fmt.Errorf("mkdir source data %s: %w", m.HostPath, err)
+		}
+		targetHost := filepath.Join(dataHostPath, "shared", m.SourceSlug)
+		if err := os.MkdirAll(targetHost, 0o750); err != nil {
+			return fmt.Errorf("mkdir mount target %s: %w", targetHost, err)
 		}
 		cfg.Mounts = append(cfg.Mounts, containerMount{
 			Source: filepath.Clean(m.HostPath),
@@ -50,6 +59,16 @@ func addSharedMounts(cfg *containerConfig, mounts []SharedMount) error {
 		})
 	}
 	return nil
+}
+
+// dataHostPath returns the host directory that backs /app/data inside the
+// container for the given StartParams. With an explicit AppDataPath that
+// directory is used directly; otherwise /app/data lives inside the bundle dir.
+func dataHostPath(p StartParams) string {
+	if p.AppDataPath != "" {
+		return p.AppDataPath
+	}
+	return filepath.Join(p.Dir, "data")
 }
 
 func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (RunHandle, error) {
@@ -82,7 +101,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		// last-occurrence-wins so appending here is sufficient.
 		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
 	}
-	if err := addSharedMounts(&cfg, p.SharedMounts); err != nil {
+	if err := addSharedMounts(&cfg, p.SharedMounts, dataHostPath(p)); err != nil {
 		return RunHandle{}, err
 	}
 	if p.MemoryLimitMB > 0 {
@@ -243,7 +262,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 		)
 		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
 	}
-	if err := addSharedMounts(&cfg, p.SharedMounts); err != nil {
+	if err := addSharedMounts(&cfg, p.SharedMounts, dataHostPath(p)); err != nil {
 		return ExitInfo{}, err
 	}
 	if p.MemoryLimitMB > 0 {

@@ -236,6 +236,33 @@ func TestDockerRuntimeStart_NoAppDataPathSkipsDataMounts(t *testing.T) {
 	}
 }
 
+// TestAddSharedMounts_PreCreatesMountTargetHostSide locks in the host-side
+// pre-creation that prevents the Docker daemon from materializing the bind-
+// mount target with root ownership (which would leave the workspace with
+// undeletable directories).
+func TestAddSharedMounts_PreCreatesMountTargetHostSide(t *testing.T) {
+	workspace := t.TempDir()
+	sourceData := t.TempDir()
+	cfg := &containerConfig{WorkDir: "/app"}
+
+	err := addSharedMounts(cfg,
+		[]SharedMount{{SourceSlug: "fetch", HostPath: sourceData}},
+		filepath.Join(workspace, "data"),
+	)
+	if err != nil {
+		t.Fatalf("addSharedMounts: %v", err)
+	}
+
+	target := filepath.Join(workspace, "data", "shared", "fetch")
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected target %s to be a directory", target)
+	}
+}
+
 func TestDockerRuntimeImageForCommand(t *testing.T) {
 	rt := &DockerRuntime{pythonImage: "uv:latest", rImage: "r-base:latest"}
 
