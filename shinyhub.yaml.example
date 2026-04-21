@@ -23,6 +23,10 @@ auth:
   # REQUIRED. 32+ characters. Generate with: openssl rand -hex 32
   # The server refuses to start with this placeholder. Do not ship it.
   secret: change-me-to-a-random-string  # SHINYHUB_AUTH_SECRET
+  # Role assigned to users created on first OAuth/OIDC login.
+  # One of: viewer (default, safe), developer, operator. "admin" is not allowed.
+  # Bump to "developer" when your IdP only ever sees trusted employees.
+  oauth_default_role: viewer            # SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE
 
 storage:
   apps_dir: ./data/apps               # where deployed bundles live

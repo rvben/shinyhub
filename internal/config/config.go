@@ -100,6 +100,12 @@ type ServerConfig struct {
 
 type AuthConfig struct {
 	Secret string `yaml:"secret"`
+	// OAuthDefaultRole is the role assigned to users created via just-in-time
+	// provisioning during OAuth/OIDC sign-in (i.e. first-time login). Allowed
+	// values: "viewer" (default), "developer", "operator". "admin" is
+	// intentionally not permitted — admin must be granted explicitly, never
+	// auto-provisioned from an external IdP.
+	OAuthDefaultRole string `yaml:"oauth_default_role"`
 }
 
 type StorageConfig struct {
@@ -257,6 +263,15 @@ func Load(path string) (*Config, error) {
 	if cfg.Storage.MaxBundleMB < 0 {
 		cfg.Storage.MaxBundleMB = 128
 	}
+	if cfg.Auth.OAuthDefaultRole == "" {
+		cfg.Auth.OAuthDefaultRole = "viewer"
+	}
+	switch cfg.Auth.OAuthDefaultRole {
+	case "viewer", "developer", "operator":
+		// allowed
+	default:
+		return nil, fmt.Errorf("auth.oauth_default_role: %q is not allowed; must be one of viewer, developer, operator", cfg.Auth.OAuthDefaultRole)
+	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}
@@ -342,6 +357,9 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 func applyEnv(cfg *Config) {
 	if v := os.Getenv("SHINYHUB_AUTH_SECRET"); v != "" {
 		cfg.Auth.Secret = v
+	}
+	if v := os.Getenv("SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE"); v != "" {
+		cfg.Auth.OAuthDefaultRole = v
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v

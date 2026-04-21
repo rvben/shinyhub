@@ -105,12 +105,13 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUserByOAuthAccount("oidc", oidcUser.Sub)
 	if errors.Is(err, db.ErrNotFound) {
 		username := deriveOIDCUsername(oidcUser)
+		jitRole := s.jitOAuthRole()
 		var createdUser bool
 		for _, candidate := range []string{username, username + "-" + oidcUser.Sub[:min(8, len(oidcUser.Sub))], username + "-oidc"} {
 			if err2 := s.store.CreateUser(db.CreateUserParams{
 				Username:     candidate,
 				PasswordHash: "",
-				Role:         "developer",
+				Role:         jitRole,
 			}); err2 != nil {
 				fmt.Fprintf(os.Stderr, "oidc: create user %q: %v\n", candidate, err2)
 				continue

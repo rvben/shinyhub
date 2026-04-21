@@ -142,6 +142,20 @@ func (s *Server) requireExplicitAppAccess(w http.ResponseWriter, r *http.Request
 	return nil, nil, false
 }
 
+// jitOAuthRole returns the role to assign to a user being created via
+// just-in-time OAuth/OIDC provisioning. It honors auth.oauth_default_role
+// (validated in config.Load); the empty string falls back to "viewer" so
+// callers don't need to special-case it. We default-deny to "viewer" rather
+// than the historical "developer" so that strangers who happen to authenticate
+// against an enabled IdP can't deploy code.
+func (s *Server) jitOAuthRole() string {
+	role := s.cfg.Auth.OAuthDefaultRole
+	if role == "" {
+		return "viewer"
+	}
+	return role
+}
+
 func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug string) (*db.App, bool) {
 	app, u, ok := s.requireViewApp(w, r, slug)
 	if !ok {

@@ -75,17 +75,18 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUserByOAuthAccount("github", providerID)
 	if errors.Is(err, db.ErrNotFound) {
 		username := ghUser.Login
+		jitRole := s.jitOAuthRole()
 		if err := s.store.CreateUser(db.CreateUserParams{
 			Username:     username,
 			PasswordHash: "",
-			Role:         "developer",
+			Role:         jitRole,
 		}); err != nil {
 			// Username collision — append GitHub ID to make it unique.
 			username = fmt.Sprintf("%s-gh%s", ghUser.Login, providerID)
 			if err2 := s.store.CreateUser(db.CreateUserParams{
 				Username:     username,
 				PasswordHash: "",
-				Role:         "developer",
+				Role:         jitRole,
 			}); err2 != nil {
 				fmt.Fprintf(os.Stderr, "create oauth user: %v\n", err2)
 				writeError(w, http.StatusInternalServerError, "internal server error")
@@ -195,17 +196,18 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 			username = "google-user"
 		}
 
+		jitRole := s.jitOAuthRole()
 		if err := s.store.CreateUser(db.CreateUserParams{
 			Username:     username,
 			PasswordHash: "",
-			Role:         "developer",
+			Role:         jitRole,
 		}); err != nil {
 			// Username collision — append Google ID suffix to make it unique.
 			username = username + "-g" + gUser.ID
 			if err2 := s.store.CreateUser(db.CreateUserParams{
 				Username:     username,
 				PasswordHash: "",
-				Role:         "developer",
+				Role:         jitRole,
 			}); err2 != nil {
 				fmt.Fprintf(os.Stderr, "create google oauth user: %v\n", err2)
 				writeError(w, http.StatusInternalServerError, "internal server error")

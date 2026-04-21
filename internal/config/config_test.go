@@ -440,6 +440,73 @@ func TestLoad_MaxBundleMBZeroMeansNoCap(t *testing.T) {
 	}
 }
 
+func TestAuth_OAuthDefaultRole_DefaultsToViewer(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Auth.OAuthDefaultRole, "viewer"; got != want {
+		t.Errorf("OAuthDefaultRole default = %q, want %q", got, want)
+	}
+}
+
+func TestAuth_OAuthDefaultRole_FromYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  oauth_default_role: developer
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Auth.OAuthDefaultRole, "developer"; got != want {
+		t.Errorf("OAuthDefaultRole = %q, want %q", got, want)
+	}
+}
+
+func TestAuth_OAuthDefaultRole_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE", "operator")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := cfg.Auth.OAuthDefaultRole, "operator"; got != want {
+		t.Errorf("OAuthDefaultRole from env = %q, want %q", got, want)
+	}
+}
+
+func TestAuth_OAuthDefaultRole_RejectsInvalidValue(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  oauth_default_role: superuser
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid oauth_default_role, got nil")
+	}
+	if !strings.Contains(err.Error(), "oauth_default_role") {
+		t.Fatalf("expected error mentioning oauth_default_role, got %v", err)
+	}
+}
+
+func TestAuth_OAuthDefaultRole_RejectsAdmin(t *testing.T) {
+	// Admin must never be auto-granted via JIT provisioning — it's reserved
+	// for the bootstrap admin and explicit promotions.
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  oauth_default_role: admin
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error rejecting admin as JIT default, got nil")
+	}
+}
+
 func TestLoad_MaxBundleMBNegativeNormalized(t *testing.T) {
 	path := writeYAML(t, `
 auth:

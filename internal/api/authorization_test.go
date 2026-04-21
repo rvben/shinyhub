@@ -166,6 +166,23 @@ func TestRequireExplicitAppAccess_UnauthenticatedRejected(t *testing.T) {
 	}
 }
 
+func TestJITOAuthRole_DefaultsToViewer(t *testing.T) {
+	srv, _ := newAuthTestServer(t)
+	// newAuthTestServer leaves Auth.OAuthDefaultRole unset; the helper must
+	// fall back to the safe default rather than panic or return "developer".
+	if got, want := srv.jitOAuthRole(), "viewer"; got != want {
+		t.Errorf("jitOAuthRole() = %q, want %q", got, want)
+	}
+}
+
+func TestJITOAuthRole_HonorsConfig(t *testing.T) {
+	srv, _ := newAuthTestServer(t)
+	srv.cfg.Auth.OAuthDefaultRole = "developer"
+	if got, want := srv.jitOAuthRole(), "developer"; got != want {
+		t.Errorf("jitOAuthRole() = %q, want %q", got, want)
+	}
+}
+
 func TestRequireExplicitAppAccess_MissingSlugIs404(t *testing.T) {
 	srv, store := newAuthTestServer(t)
 	hash, _ := auth.HashPassword("pw")
