@@ -143,6 +143,66 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 	}
 }
 
+func TestRecovery_PartialPool(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "partial-pool")
+
+	// Give app 2 replicas in DB.
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=2 WHERE slug='partial-pool'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replica 0: alive (use current process PID).
+	pidAlive, port0 := os.Getpid(), 20011
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pidAlive, Port: &port0, Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replica 1: dead PID.
+	pidDead, port1 := 99999999, 20012
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 1, PID: &pidDead, Port: &port1, Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, nil)
+
+	// Replica 0 adopted, replica 1 not.
+	if _, ok := mgr.GetReplica("partial-pool", 0); !ok {
+		t.Error("expected replica 0 adopted")
+	}
+	if _, ok := mgr.GetReplica("partial-pool", 1); ok {
+		t.Error("expected replica 1 NOT adopted")
+	}
+
+	// App stays running (at least one replica alive).
+	a, _ := store.GetAppBySlug("partial-pool")
+	if a.Status != "running" {
+		t.Errorf("expected app running, got %s", a.Status)
+	}
+
+	// Replica 1 marked crashed in the replica table.
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep1 *db.Replica
+	for _, r := range reps {
+		if r.Index == 1 {
+			rep1 = r
+			break
+		}
+	}
+	if rep1 == nil || rep1.Status != "crashed" {
+		t.Errorf("expected replica 1 status=crashed, got %+v", rep1)
+	}
+}
+
 func TestRecoverDockerProcesses(t *testing.T) {
 	store := mustOpenStore(t)
 	prx := proxy.New()

@@ -35,8 +35,6 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, l
 }
 
 func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, apps []*db.App) {
-	// TODO(Task 12): rewrite to iterate store.ListReplicas per app using the
-	// replica table instead of the deprecated per-app PID/port fields.
 	for _, app := range apps {
 		reps, err := store.ListReplicas(app.ID)
 		if err != nil || len(reps) == 0 {
@@ -50,6 +48,9 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 				continue
 			}
 			if err := syscall.Kill(*r.PID, 0); err != nil {
+				_ = store.UpsertReplica(db.UpsertReplicaParams{
+					AppID: app.ID, Index: r.Index, Status: "crashed",
+				})
 				continue
 			}
 			mgr.Adopt(app.Slug, process.ProcessInfo{
