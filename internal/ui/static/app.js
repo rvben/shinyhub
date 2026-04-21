@@ -2175,6 +2175,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function parseCronField(s, max) {
     const [base, stepStr] = s.split('/');
     const step = stepStr ? parseInt(stepStr, 10) : 1;
+    if (!Number.isFinite(step) || step <= 0) throw new Error('invalid step');
     if (base === '*') {
       const out = [];
       for (let i = 0; i <= max; i += step) out.push(i);
@@ -2336,7 +2337,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     title.textContent = existing ? 'Edit schedule' : 'Add schedule';
     form.reset();
-    setError(errEl, '');
 
     if (existing) {
       document.getElementById('sched-name').value = existing.name || '';
@@ -2348,11 +2348,11 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('sched-enabled').checked = existing.enabled !== false;
     }
     updateCronPreview(document.getElementById('sched-cron').value);
-    modal.hidden = false;
 
     // Replace the submit handler to capture the current slug/existing binding.
     const newForm = form.cloneNode(true);
     form.parentNode.replaceChild(newForm, form);
+    setError(document.getElementById('schedule-form-error'), '');
 
     // Re-attach cron preview input listener and cancel button.
     newForm.querySelector('#sched-cron').addEventListener('input', e => updateCronPreview(e.target.value));
@@ -2394,6 +2394,8 @@ document.addEventListener('DOMContentLoaded', () => {
       closeScheduleForm();
       await loadSchedules(slug);
     });
+
+    modal.hidden = false;
   }
 
   function closeScheduleForm() {
@@ -2427,9 +2429,13 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${schedID}/runs`);
     } catch {
+      flashToast('Failed to load run history.');
       return;
     }
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      flashToast('Failed to load run history: ' + await resp.text().catch(() => 'error'));
+      return;
+    }
     const runs = await resp.json();
 
     // Reuse existing log pane infrastructure.
@@ -2492,7 +2498,7 @@ document.addEventListener('DOMContentLoaded', () => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({source_slug: sourceSlug}),
     });
-    if (!r.ok) { alert('Mount failed: ' + await r.text()); return; }
+    if (!r.ok) { flashToast('Mount failed: ' + await r.text().catch(() => 'error')); return; }
     await loadSharedData(settingsSlug);
   });
 

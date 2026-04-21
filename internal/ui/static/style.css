@@ -2152,41 +2152,40 @@ main {
 
 .schedules-table table { width: 100%; border-collapse: collapse; }
 .schedules-table th,
-.schedules-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border, #e3e3e3); }
+.schedules-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); }
 .schedules-table .table-actions { white-space: nowrap; }
 
 .shared-data-table .shared-data-list { list-style: none; padding: 0; margin: 0; }
 .shared-data-list li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
 
 .status-pill { padding: 2px 8px; border-radius: 999px; font-size: 0.85em; }
-.status-on  { background: #d1f7d1; color: #1a5; }
-.status-off { background: #f0e0e0; color: #a44; }
+.status-on  { background: var(--green-bg); color: var(--green); }
+.status-off { background: var(--red-bg);   color: var(--red); }
 
-.hint { color: var(--muted, #888); font-size: 0.85em; min-height: 1.2em; margin-bottom: 8px; }
-.settings-help { color: var(--muted, #888); font-size: 0.9em; margin: -4px 0 12px; }
+.settings-help { color: var(--text-muted); font-size: 0.9em; margin: -4px 0 12px; }
 
 .run-history-list { list-style: none; padding: 0; margin: 0; }
-.run-history-list li { border-bottom: 1px solid var(--border, #e3e3e3); }
-.run-history-btn { background: none; border: none; cursor: pointer; padding: 6px 0; color: var(--text, inherit); text-align: left; width: 100%; }
-.run-history-btn:hover { color: var(--cyan-bright, #0af); }
+.run-history-list li { border-bottom: 1px solid var(--line); }
+.run-history-btn { background: none; border: none; cursor: pointer; padding: 6px 0; color: var(--text); text-align: left; width: 100%; }
+.run-history-btn:hover { color: var(--cyan-bright); }
 
 .btn-danger-sm {
   padding: 2px 8px;
   font-size: 0.8em;
   background: transparent;
-  border: 1px solid var(--danger, #c44);
-  color: var(--danger, #c44);
+  border: 1px solid var(--red);
+  color: var(--red);
   border-radius: 4px;
   cursor: pointer;
 }
-.btn-danger-sm:hover { background: var(--danger, #c44); color: #fff; }
+.btn-danger-sm:hover { background: var(--red); color: #fff; }
 
 .toast {
   position: fixed;
   bottom: 20px;
   right: 20px;
-  background: #333;
-  color: #fff;
+  background: var(--surface-3);
+  color: var(--text);
   padding: 10px 16px;
   border-radius: 4px;
   opacity: 0;
