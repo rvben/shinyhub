@@ -381,7 +381,7 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, err := s.store.GetScheduleRun(runID)
-	if err != nil || run.LogPath == "" {
+	if err != nil {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -391,6 +391,10 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	sched, err := s.store.GetSchedule(run.ScheduleID)
 	if err != nil || sched.AppID != app.ID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if run.LogPath == "" {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}

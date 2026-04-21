@@ -291,3 +291,91 @@ func TestSchedules_Cancel_RejectsCrossAppRun(t *testing.T) {
 		t.Fatalf("expected 404 for cross-app run cancel, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestSchedules_RunDetail_RejectsCrossAppRun verifies that a viewer of app B
+// cannot fetch the JSON detail of a run that belongs to a schedule in app A,
+// even when the schedule ID and run ID are known.
+func TestSchedules_RunDetail_RejectsCrossAppRun(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hashA, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
+		t.Fatalf("create app-a: %v", err)
+	}
+
+	hashB, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
+		t.Fatalf("create app-b: %v", err)
+	}
+	tokenB, _ := auth.IssueJWT(2, "owner-b", "developer", "test-secret")
+
+	appA, _ := store.GetAppBySlug("app-a")
+	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appA.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("create schedule: %v", err)
+	}
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "succeeded", Trigger: "schedule",
+		StartedAt: time.Now().UTC(), LogPath: "/tmp/x.log",
+	})
+	if err != nil {
+		t.Fatalf("insert schedule run: %v", err)
+	}
+
+	req := authedRequest(t, "GET", fmt.Sprintf("/api/apps/app-b/schedules/%d/runs/%d", schedID, runID), nil, tokenB)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-app run detail, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSchedules_RunLogs_RejectsCrossAppRun verifies that a viewer of app B
+// cannot stream logs for a run that belongs to a schedule in app A, even when
+// the schedule ID and run ID are known.
+func TestSchedules_RunLogs_RejectsCrossAppRun(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hashA, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
+		t.Fatalf("create app-a: %v", err)
+	}
+
+	hashB, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
+		t.Fatalf("create app-b: %v", err)
+	}
+	tokenB, _ := auth.IssueJWT(2, "owner-b", "developer", "test-secret")
+
+	appA, _ := store.GetAppBySlug("app-a")
+	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appA.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("create schedule: %v", err)
+	}
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "succeeded", Trigger: "schedule",
+		StartedAt: time.Now().UTC(), LogPath: "/tmp/x.log",
+	})
+	if err != nil {
+		t.Fatalf("insert schedule run: %v", err)
+	}
+
+	req := authedRequest(t, "GET", fmt.Sprintf("/api/apps/app-b/schedules/%d/runs/%d/logs", schedID, runID), nil, tokenB)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-app run logs, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
