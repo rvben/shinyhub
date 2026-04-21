@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/bundle"
@@ -285,5 +286,6 @@ func summarizeRejections(r map[bundle.FilterDecision][]string) string {
 		}
 		parts = append(parts, fmt.Sprintf("%s: %s", d, strings.Join(paths, ", ")))
 	}
+	sort.Strings(parts)
 	return "Skipped from bundle (push with `shiny data push`): " + strings.Join(parts, "; ")
 }
