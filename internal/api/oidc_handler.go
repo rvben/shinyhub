@@ -64,6 +64,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auth.SetOAuthStateCookie(w, r, state)
 	http.Redirect(w, r, s.oidcProvider.AuthURL(state), http.StatusFound)
 }
 
@@ -83,10 +84,15 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !auth.VerifyOAuthStateCookie(r, state) {
+		writeError(w, http.StatusBadRequest, "invalid or expired state")
+		return
+	}
 	if err := s.store.ConsumeOAuthState(state); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
+	auth.ClearOAuthStateCookie(w, r)
 
 	tok, err := s.oidcProvider.Exchange(r.Context(), code)
 	if err != nil {

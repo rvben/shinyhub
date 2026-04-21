@@ -33,6 +33,7 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auth.SetOAuthStateCookie(w, r, state)
 	http.Redirect(w, r, s.github.AuthURL(state), http.StatusFound)
 }
 
@@ -51,10 +52,18 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bind the state to the browser that started the login. Verify before
+	// consuming the server-side nonce so a legitimate user with the cookie
+	// can still finish their flow if an attacker's replay arrives first.
+	if !auth.VerifyOAuthStateCookie(r, state) {
+		writeError(w, http.StatusBadRequest, "invalid or expired state")
+		return
+	}
 	if err := s.store.ConsumeOAuthState(state); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
+	auth.ClearOAuthStateCookie(w, r)
 
 	tok, err := s.github.Exchange(r.Context(), code)
 	if err != nil {
@@ -147,6 +156,7 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auth.SetOAuthStateCookie(w, r, state)
 	http.Redirect(w, r, s.googleOAuth.AuthURL(state), http.StatusFound)
 }
 
@@ -165,10 +175,15 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !auth.VerifyOAuthStateCookie(r, state) {
+		writeError(w, http.StatusBadRequest, "invalid or expired state")
+		return
+	}
 	if err := s.store.ConsumeOAuthState(state); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
+	auth.ClearOAuthStateCookie(w, r)
 
 	tok, err := s.googleOAuth.Exchange(r.Context(), code)
 	if err != nil {
