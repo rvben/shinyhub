@@ -36,11 +36,13 @@ func (f *fakeManager) Stop(slug string) error {
 }
 
 type fakeProxy struct {
-	mu           sync.Mutex
-	seen         map[string]time.Time
-	deregistered []string
-	poolSizes    map[string]int
-	onMissFn     func(string)
+	mu              sync.Mutex
+	seen            map[string]time.Time
+	deregistered    []string
+	hibernated      []string
+	hibernateAlways bool // if true, BeginHibernate ignores `since` and always returns true
+	poolSizes       map[string]int
+	onMissFn        func(string)
 }
 
 func newFakeProxy() *fakeProxy {
@@ -60,6 +62,18 @@ func (f *fakeProxy) Deregister(slug string) {
 	f.mu.Lock()
 	f.deregistered = append(f.deregistered, slug)
 	f.mu.Unlock()
+}
+func (f *fakeProxy) BeginHibernate(slug string, since time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.hibernateAlways {
+		if last := f.seen[slug]; last.After(since) {
+			return false
+		}
+	}
+	f.hibernated = append(f.hibernated, slug)
+	delete(f.seen, slug)
+	return true
 }
 func (f *fakeProxy) SetPoolSize(slug string, size int) {
 	f.mu.Lock()
@@ -317,8 +331,8 @@ func TestHibernation_StopsIdleApp(t *testing.T) {
 	if len(mgr.stopped) == 0 || mgr.stopped[0] != "app" {
 		t.Errorf("expected manager.Stop('app'), got %v", mgr.stopped)
 	}
-	if len(prx.deregistered) == 0 || prx.deregistered[0] != "app" {
-		t.Errorf("expected proxy.Deregister('app'), got %v", prx.deregistered)
+	if len(prx.hibernated) == 0 || prx.hibernated[0] != "app" {
+		t.Errorf("expected proxy.BeginHibernate('app'), got %v", prx.hibernated)
 	}
 	if len(st.statusUpdates) == 0 || st.statusUpdates[len(st.statusUpdates)-1].Status != "hibernated" {
 		t.Errorf("expected status=hibernated, got %v", st.statusUpdates)
@@ -332,6 +346,54 @@ func TestHibernation_StopsIdleApp(t *testing.T) {
 	for _, ur := range st.upsertedReplicas {
 		if ur.Status != "stopped" {
 			t.Errorf("expected UpsertReplica status=stopped, got %q", ur.Status)
+		}
+	}
+}
+
+// TestHibernation_AbortsWhenActivityRacesIn covers the read-then-stop race
+// where a request lands between LastSeen() and the hibernate action. The
+// proxy's CAS-style BeginHibernate must reject the hibernate, leaving the
+// app running and avoiding a torn-down replica that's actively serving.
+func TestHibernation_AbortsWhenActivityRacesIn(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	// Snapshot returned by LastSeen says "idle for 2h", so handleIdle proceeds
+	// to BeginHibernate. Between the two calls we simulate a request landing:
+	// the proxy bumps lastSeen to "now", and BeginHibernate must return false.
+	snapshot := time.Now().Add(-2 * time.Hour)
+	prx.seen["app"] = snapshot
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:        1,
+			Slug:      "app",
+			Status:    "running",
+			Replicas:  1,
+			UpdatedAt: time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	// Race the activity in: bump lastSeen so BeginHibernate's CAS check fails.
+	// (The fake's BeginHibernate compares against its `seen` map.)
+	prx.mu.Lock()
+	prx.seen["app"] = time.Now()
+	prx.mu.Unlock()
+
+	w.runOnce()
+
+	if len(mgr.stopped) > 0 {
+		t.Errorf("expected no manager.Stop after race-in activity, got %v", mgr.stopped)
+	}
+	if len(prx.hibernated) > 0 {
+		t.Errorf("expected BeginHibernate to abort, got %v", prx.hibernated)
+	}
+	for _, s := range st.statusUpdates {
+		if s.Status == "hibernated" {
+			t.Errorf("expected no hibernated status update, got %v", st.statusUpdates)
 		}
 	}
 }

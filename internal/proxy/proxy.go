@@ -222,6 +222,39 @@ func (p *Proxy) Deregister(slug string) {
 	p.mu.Unlock()
 }
 
+// BeginHibernate atomically removes slug from the routing table iff no
+// activity has been recorded since `since` and no in-flight request is
+// currently being proxied. On success it returns true and the caller is
+// responsible for stopping the underlying processes. On failure (a request
+// raced in or one is mid-flight) it returns false and the routing table is
+// untouched, so the caller MUST NOT stop anything.
+//
+// The two-signal check (lastSeen and per-replica activeConns) is what makes
+// this safe to call from the hibernation watchdog. lastSeen catches any
+// request that has finished its routing decision and reached RecordActivity
+// while activeConns catches a request that has already picked a replica but
+// has not yet completed.
+func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seenMu.Lock()
+	defer p.seenMu.Unlock()
+
+	if last := p.lastSeen[slug]; last.After(since) {
+		return false
+	}
+	if pool := p.pools[slug]; pool != nil {
+		for _, rep := range pool.replicas {
+			if rep != nil && rep.activeConns.Load() > 0 {
+				return false
+			}
+		}
+		delete(p.pools, slug)
+	}
+	delete(p.lastSeen, slug)
+	return true
+}
+
 // HasLiveReplica reports whether slug has at least one non-nil replica.
 func (p *Proxy) HasLiveReplica(slug string) bool {
 	p.mu.RLock()

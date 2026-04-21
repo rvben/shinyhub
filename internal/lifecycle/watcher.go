@@ -38,6 +38,7 @@ type manager interface {
 type proxyBackend interface {
 	SetOnMiss(fn func(string))
 	LastSeen(slug string) time.Time
+	BeginHibernate(slug string, since time.Time) bool
 	Deregister(slug string)
 	SetPoolSize(slug string, size int)
 }
@@ -247,8 +248,15 @@ func (w *Watcher) handleIdle(slug string) {
 		return
 	}
 
+	// CAS-style hibernate: atomically remove the pool from routing iff no
+	// activity has been recorded since the snapshot AND no request is in
+	// flight. If a request slipped in between LastSeen above and here, abort
+	// without stopping the manager — the next tick will reconsider.
+	if !w.prx.BeginHibernate(slug, lastActivity) {
+		return
+	}
+
 	_ = w.mgr.Stop(slug) // stops all replicas in the pool
-	w.prx.Deregister(slug)
 	for i := 0; i < app.Replicas; i++ {
 		_ = w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped"})
 	}

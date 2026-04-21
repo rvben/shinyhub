@@ -300,6 +300,93 @@ func TestProxy_StickyCookieStale(t *testing.T) {
 	}
 }
 
+func TestProxy_BeginHibernate_AbortsIfActivityRecordedAfterSnapshot(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot lastSeen, then simulate a request landing after the snapshot.
+	snapshot := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	p.RecordActivity("app")
+
+	if p.BeginHibernate("app", snapshot) {
+		t.Fatal("BeginHibernate returned true after activity recorded since snapshot")
+	}
+	if !p.HasLiveReplica("app") {
+		t.Error("pool was removed despite aborted hibernate")
+	}
+	if p.LastSeen("app").IsZero() {
+		t.Error("lastSeen was cleared despite aborted hibernate")
+	}
+}
+
+func TestProxy_BeginHibernate_RemovesPoolWhenIdle(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	p.RecordActivity("app")
+	time.Sleep(2 * time.Millisecond)
+	snapshot := time.Now()
+
+	if !p.BeginHibernate("app", snapshot) {
+		t.Fatal("BeginHibernate returned false when no activity since snapshot")
+	}
+	if p.HasLiveReplica("app") {
+		t.Error("pool was not removed after successful hibernate")
+	}
+	if !p.LastSeen("app").IsZero() {
+		t.Error("lastSeen was not cleared after successful hibernate")
+	}
+}
+
+func TestProxy_BeginHibernate_AbortsWhileRequestInFlight(t *testing.T) {
+	hold := make(chan struct{})
+	released := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(hold)
+		<-released
+	}))
+	// release the handler before backend.Close so the test does not deadlock.
+	defer backend.Close()
+	defer close(released)
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/app/app/", nil)
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	// Wait until the request is mid-proxy (backend handler entered).
+	select {
+	case <-hold:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received in-flight request")
+	}
+
+	// Future-dated snapshot defeats the lastSeen check; only the in-flight
+	// activeConns counter should now block hibernation.
+	snapshot := time.Now().Add(time.Hour)
+	if p.BeginHibernate("app", snapshot) {
+		t.Error("BeginHibernate returned true while a request was in flight")
+	}
+	if !p.HasLiveReplica("app") {
+		t.Error("pool was removed despite in-flight request")
+	}
+}
+
 func TestProxy_LeastConnectionsDistribution(t *testing.T) {
 	var hits0, hits1 atomic.Int64
 	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits0.Add(1) }))
