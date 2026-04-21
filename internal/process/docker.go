@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -36,8 +37,9 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	image := r.imageForCommand(p.Command)
 
 	labels := map[string]string{
-		"shinyhub.managed": "true",
-		"shinyhub.slug":    p.Slug,
+		"shinyhub.managed":       "true",
+		"shinyhub.slug":          p.Slug,
+		"shinyhub.replica_index": strconv.Itoa(p.Index),
 	}
 
 	cfg := containerConfig{

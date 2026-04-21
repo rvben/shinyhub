@@ -219,7 +219,10 @@ func TestRecoverDockerProcesses(t *testing.T) {
 
 	lister := &fakeContainerLister{
 		containers: []process.ContainerInfo{
-			{ID: "cont-abc", Labels: map[string]string{"shinyhub.slug": "docker-app"}},
+			{ID: "cont-abc", Labels: map[string]string{
+				"shinyhub.slug":          "docker-app",
+				"shinyhub.replica_index": "0",
+			}},
 		},
 		pids: map[string]int{"cont-abc": 99001},
 	}
@@ -271,7 +274,10 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	// Only "alive-app" has a running container.
 	lister := &fakeContainerLister{
 		containers: []process.ContainerInfo{
-			{ID: "cont-alive", Labels: map[string]string{"shinyhub.slug": "alive-app"}},
+			{ID: "cont-alive", Labels: map[string]string{
+				"shinyhub.slug":          "alive-app",
+				"shinyhub.replica_index": "0",
+			}},
 		},
 		pids: map[string]int{"cont-alive": 99002},
 	}
@@ -296,5 +302,71 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	}
 	if orphan.Status != "stopped" {
 		t.Errorf("expected orphan-app status=stopped, got %s", orphan.Status)
+	}
+}
+
+func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "multi-docker")
+
+	// Two replicas in DB.
+	port0, pid0, port1, pid1 := 20700, 99010, 20701, 99011
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, PID: &pid0, Port: &port0, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 1, PID: &pid1, Port: &port1, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=2 WHERE slug='multi-docker'`)
+
+	lister := &fakeContainerLister{
+		containers: []process.ContainerInfo{
+			{ID: "c0", Labels: map[string]string{"shinyhub.slug": "multi-docker", "shinyhub.replica_index": "0"}},
+			{ID: "c1", Labels: map[string]string{"shinyhub.slug": "multi-docker", "shinyhub.replica_index": "1"}},
+		},
+		pids: map[string]int{"c0": pid0, "c1": pid1},
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+
+	if _, ok := mgr.GetReplica("multi-docker", 0); !ok {
+		t.Error("want replica 0 adopted")
+	}
+	if _, ok := mgr.GetReplica("multi-docker", 1); !ok {
+		t.Error("want replica 1 adopted")
+	}
+}
+
+func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "shrunk-docker")
+
+	// App has 2 replicas configured.
+	port0, pid0 := 20800, 99020
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, PID: &pid0, Port: &port0, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=2 WHERE slug='shrunk-docker'`)
+
+	// Container presents with idx=5, which is beyond the pool size of 2.
+	lister := &fakeContainerLister{
+		containers: []process.ContainerInfo{
+			{ID: "c-stale", Labels: map[string]string{"shinyhub.slug": "shrunk-docker", "shinyhub.replica_index": "5"}},
+		},
+		pids: map[string]int{"c-stale": 99025},
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+
+	// The stale container is skipped — no replica adopted.
+	if _, ok := mgr.GetReplica("shrunk-docker", 5); ok {
+		t.Error("expected out-of-pool container to be skipped")
+	}
+	// App has no adopted replicas so it gets marked stopped.
+	a, _ := store.GetAppBySlug("shrunk-docker")
+	if a.Status != "stopped" {
+		t.Errorf("expected stopped, got %s", a.Status)
 	}
 }

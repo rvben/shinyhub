@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 	"syscall"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -75,62 +76,88 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 }
 
 func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister, apps []*db.App) {
-	// TODO(Task 13): rewrite to use replica table for port lookup.
-	portBySlug := make(map[string]int)
-	for _, app := range apps {
-		reps, err := store.ListReplicas(app.ID)
-		if err != nil {
-			continue
-		}
-		for _, r := range reps {
-			if r.Port != nil {
-				portBySlug[app.Slug] = *r.Port
-				break
-			}
-		}
+	// Index apps by slug for fast lookup; configure proxy pool sizes up front.
+	bySlug := make(map[string]*db.App, len(apps))
+	for _, a := range apps {
+		bySlug[a.Slug] = a
+		prx.SetPoolSize(a.Slug, a.Replicas)
 	}
 
 	containers, err := lister.ListByLabel(`{"label":["shinyhub.slug"]}`)
 	if err != nil {
-		slog.Error("process recovery: list docker containers", "err", err)
-		for _, app := range apps {
-			markRecoveryStopped(store, app.Slug)
+		slog.Error("recovery: list docker containers", "err", err)
+		for _, a := range apps {
+			markRecoveryStopped(store, a.Slug)
 		}
 		return
 	}
 
-	recovered := make(map[string]bool)
+	type candidate struct {
+		slug string
+		idx  int
+		pid  int
+		cID  string
+	}
+	var alive []candidate
+
 	for _, c := range containers {
 		slug := c.Labels["shinyhub.slug"]
-		port, ok := portBySlug[slug]
+		idxStr := c.Labels["shinyhub.replica_index"]
+		app, ok := bySlug[slug]
 		if !ok {
+			continue // orphan container; leave alone
+		}
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			slog.Warn("recovery: bad replica_index label", "slug", slug, "label", idxStr)
+			continue
+		}
+		if idx >= app.Replicas {
+			slog.Warn("recovery: container index beyond current pool; skipping", "slug", slug, "idx", idx, "pool", app.Replicas)
 			continue
 		}
 		pid, err := lister.InspectPID(c.ID)
 		if err != nil {
-			slog.Error("process recovery: inspect docker container", "slug", slug, "err", err)
-			markRecoveryStopped(store, slug)
+			slog.Error("recovery: inspect docker container", "slug", slug, "idx", idx, "err", err)
 			continue
 		}
-		mgr.Adopt(slug, process.ProcessInfo{
-			Slug:   slug,
-			PID:    pid,
-			Port:   port,
-			Status: process.StatusRunning,
-		}, process.RunHandle{ContainerID: c.ID})
-		targetURL := fmt.Sprintf("http://localhost:%d", port)
-		if err := prx.Register(slug, targetURL); err != nil {
-			slog.Error("process recovery: register docker proxy", "slug", slug, "err", err)
-			markRecoveryStopped(store, slug)
-			continue
-		}
-		recovered[slug] = true
-		slog.Info("process recovery: re-adopted docker container", "slug", slug, "container", c.ID, "port", port)
+		alive = append(alive, candidate{slug, idx, pid, c.ID})
 	}
 
-	for _, app := range apps {
-		if !recovered[app.Slug] {
-			markRecoveryStopped(store, app.Slug)
+	touched := make(map[string]bool)
+	for _, r := range alive {
+		app := bySlug[r.slug]
+		reps, _ := store.ListReplicas(app.ID)
+		var port int
+		for _, rep := range reps {
+			if rep.Index == r.idx && rep.Port != nil {
+				port = *rep.Port
+				break
+			}
+		}
+		if port == 0 {
+			slog.Warn("recovery: no port row for adopted container", "slug", r.slug, "idx", r.idx)
+			continue
+		}
+		mgr.Adopt(r.slug, process.ProcessInfo{
+			Slug:   r.slug,
+			Index:  r.idx,
+			PID:    r.pid,
+			Port:   port,
+			Status: process.StatusRunning,
+		}, process.RunHandle{ContainerID: r.cID})
+		targetURL := fmt.Sprintf("http://localhost:%d", port)
+		if err := prx.RegisterReplica(r.slug, r.idx, targetURL); err != nil {
+			slog.Error("recovery: register docker proxy", "slug", r.slug, "idx", r.idx, "err", err)
+			continue
+		}
+		touched[r.slug] = true
+		slog.Info("recovery: adopted docker container", "slug", r.slug, "idx", r.idx, "pid", r.pid)
+	}
+
+	for _, a := range apps {
+		if !touched[a.Slug] {
+			markRecoveryStopped(store, a.Slug)
 		}
 	}
 }
