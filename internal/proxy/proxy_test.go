@@ -1,10 +1,12 @@
 package proxy_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -229,5 +231,92 @@ func TestProxy_DeregisterReplica(t *testing.T) {
 	p.Deregister("demo")
 	if p.HasLiveReplica("demo") {
 		t.Fatal("expected empty pool")
+	}
+}
+
+func TestProxy_StickyCookie(t *testing.T) {
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "rep0")
+	}))
+	defer b0.Close()
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "rep1")
+	}))
+	defer b1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL)
+	_ = p.RegisterReplica("demo", 1, b1.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	cookies := rec.Result().Cookies()
+	var rep string
+	for _, c := range cookies {
+		if c.Name == "shinyhub_rep_demo" {
+			rep = c.Value
+		}
+	}
+	if rep == "" {
+		t.Fatal("expected shinyhub_rep_demo cookie")
+	}
+	first := rec.Body.String()
+
+	req2 := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	req2.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: rep})
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	if rec2.Body.String() != first {
+		t.Fatalf("sticky failure: first=%s second=%s", first, rec2.Body.String())
+	}
+}
+
+func TestProxy_StickyCookieStale(t *testing.T) {
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "rep0")
+	}))
+	defer b0.Close()
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1"})
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Body.String() != "rep0" {
+		t.Fatalf("stale cookie not ignored: %s", rec.Body.String())
+	}
+	newCookie := ""
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "shinyhub_rep_demo" {
+			newCookie = c.Value
+		}
+	}
+	if newCookie != "0" {
+		t.Fatalf("expected new cookie=0, got %q", newCookie)
+	}
+}
+
+func TestProxy_LeastConnectionsDistribution(t *testing.T) {
+	var hits0, hits1 atomic.Int64
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits0.Add(1) }))
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits1.Add(1) }))
+	defer b0.Close()
+	defer b1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL)
+	_ = p.RegisterReplica("demo", 1, b1.URL)
+
+	for i := 0; i < 20; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if hits0.Load() == 0 || hits1.Load() == 0 {
+		t.Fatalf("expected both replicas to be hit: %d / %d", hits0.Load(), hits1.Load())
 	}
 }

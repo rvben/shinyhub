@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,10 @@ const loadingPage = `<!DOCTYPE html>
 </script>
 </body>
 </html>`
+
+// cookiePrefix is the prefix for the sticky-session cookie name.
+// The full cookie name is cookiePrefix + slug (e.g. "shinyhub_rep_myapp").
+const cookiePrefix = "shinyhub_rep_"
 
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
@@ -242,8 +247,9 @@ func (p *Proxy) Register(slug, targetURL string) error {
 
 // ServeHTTP handles /app/:slug/* requests. When the slug has no live replica,
 // the loading page is served and onMiss is invoked in a goroutine.
-// For multi-replica pools, the first live replica is used; Task 7 will add
-// sticky cookie + least-connections routing.
+// Routing uses a sticky session cookie (shinyhub_rep_<slug>) pinned to a
+// specific replica index. On a cache miss or stale cookie, least-connections
+// with round-robin tie-breaking selects the replica and a new cookie is set.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	slug := extractSlug(r.URL.Path)
 	if slug == "" {
@@ -266,20 +272,68 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pick the first live replica. Task 7 replaces this with sticky cookie +
-	// least-connections selection.
-	var picked *replicaBackend
-	p.mu.RLock()
-	for _, rep := range pool.replicas {
-		if rep != nil {
-			picked = rep
-			break
-		}
+	picked, isStickyHit := p.pickReplica(pool, slug, r)
+	if !isStickyHit {
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookiePrefix + slug,
+			Value:    strconv.Itoa(picked.index),
+			Path:     "/app/" + slug + "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
 	}
-	p.mu.RUnlock()
 
+	picked.activeConns.Add(1)
+	defer picked.activeConns.Add(-1)
 	p.RecordActivity(slug)
 	picked.rp.ServeHTTP(w, r)
+}
+
+// pickReplica selects a backend for the incoming request.
+//
+// First, it checks for a valid sticky cookie. If the pinned replica index is
+// live, that replica is returned and the cookie is left untouched (isStickyHit=true).
+//
+// Otherwise, least-connections is used: the replica with the fewest active
+// connections wins. On a tie, a pool-scoped round-robin counter determines
+// which tied candidate is preferred — this avoids always pinning cookie-less
+// traffic to the lowest-index replica.
+func (p *Proxy) pickReplica(pool *backendPool, slug string, r *http.Request) (*replicaBackend, bool) {
+	if c, err := r.Cookie(cookiePrefix + slug); err == nil {
+		if idx, err := strconv.Atoi(c.Value); err == nil {
+			p.mu.RLock()
+			if idx >= 0 && idx < len(pool.replicas) && pool.replicas[idx] != nil {
+				rep := pool.replicas[idx]
+				p.mu.RUnlock()
+				return rep, true
+			}
+			p.mu.RUnlock()
+		}
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var best *replicaBackend
+	var bestConns int64 = -1
+	for _, rep := range pool.replicas {
+		if rep == nil {
+			continue
+		}
+		c := rep.activeConns.Load()
+		if best == nil || c < bestConns {
+			best = rep
+			bestConns = c
+			continue
+		}
+		if c == bestConns {
+			// Alternate on tie to distribute across equal-load replicas.
+			if pool.rrCounter.Add(1)&1 == 1 {
+				best = rep
+			}
+		}
+	}
+	return best, false
 }
 
 // poolHasAny reports whether the pool contains at least one non-nil replica.
