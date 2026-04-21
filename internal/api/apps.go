@@ -391,7 +391,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// both the version dir and the bundle zip on violation so a rejected
 	// deploy leaves no stale files behind.
 	if s.cfg.Storage.AppQuotaMB > 0 {
-		used, qErr := deploy.CheckAppQuota(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.AppQuotaMB)
+		used, qErr := deploy.CheckAppQuota(s.cfg.Storage.AppsDir, s.cfg.Storage.AppDataDir, slug, s.cfg.Storage.AppQuotaMB)
 		if qErr != nil {
 			_ = os.RemoveAll(bundleDir)
 			_ = os.Remove(bundleZip)

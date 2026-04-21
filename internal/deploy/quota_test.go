@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/data"
 	"github.com/rvben/shinyhub/internal/deploy"
 )
 
@@ -67,7 +68,7 @@ func TestCheckAppQuota_Disabled(t *testing.T) {
 	appsDir := t.TempDir()
 	writeFile(t, filepath.Join(appsDir, "slug", "bundles", "a.zip"), int(2*deploy.MiB))
 
-	used, err := deploy.CheckAppQuota(appsDir, "slug", 0)
+	used, err := deploy.CheckAppQuota(appsDir, "", "slug", 0)
 	if err != nil {
 		t.Fatalf("quotaMB=0 should disable the check, got error: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestCheckAppQuota_WithinLimit(t *testing.T) {
 	appsDir := t.TempDir()
 	writeFile(t, filepath.Join(appsDir, "slug", "bundles", "a.zip"), int(deploy.MiB))
 
-	used, err := deploy.CheckAppQuota(appsDir, "slug", 2)
+	used, err := deploy.CheckAppQuota(appsDir, "", "slug", 2)
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -93,7 +94,7 @@ func TestCheckAppQuota_Exceeded(t *testing.T) {
 	appsDir := t.TempDir()
 	writeFile(t, filepath.Join(appsDir, "slug", "bundles", "a.zip"), int(3*deploy.MiB))
 
-	used, err := deploy.CheckAppQuota(appsDir, "slug", 2)
+	used, err := deploy.CheckAppQuota(appsDir, "", "slug", 2)
 	if err == nil {
 		t.Fatal("expected ErrQuotaExceeded, got nil")
 	}
@@ -107,12 +108,83 @@ func TestCheckAppQuota_Exceeded(t *testing.T) {
 
 func TestCheckAppQuota_MissingSlugDirIsZero(t *testing.T) {
 	appsDir := t.TempDir()
-	used, err := deploy.CheckAppQuota(appsDir, "fresh-app", 2)
+	used, err := deploy.CheckAppQuota(appsDir, "", "fresh-app", 2)
 	if err != nil {
 		t.Fatalf("missing app dir should return 0 bytes, got %v", err)
 	}
 	if used != 0 {
 		t.Errorf("expected 0 bytes for fresh slug, got %d", used)
+	}
+}
+
+func TestCheckAppQuota_IncludesDataDir(t *testing.T) {
+	root := t.TempDir()
+	appsDir := filepath.Join(root, "apps")
+	appDataDir := filepath.Join(root, "appdata")
+
+	// Apps dir contribution: 6 bytes ("bundle").
+	if err := os.MkdirAll(filepath.Join(appsDir, "demo"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appsDir, "demo", "bundle.zip"), []byte("bundle"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Data dir contribution: 6 bytes ("dataaa") plus a 5-byte tempfile we
+	// expect to be excluded.
+	if err := os.MkdirAll(filepath.Join(appDataDir, "demo"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "demo", "x.parquet"), []byte("dataaa"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(appDataDir, "demo", data.UploadTempDir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "demo", data.UploadTempDir, "scratch"), []byte("noooo"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	used, err := deploy.CheckAppQuota(appsDir, appDataDir, "demo", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(12); used != want {
+		t.Fatalf("used = %d, want %d (apps 6 + data 6, temp excluded)", used, want)
+	}
+}
+
+func TestCheckAppQuota_EmptyAppDataDirSkipsDataContribution(t *testing.T) {
+	appsDir := t.TempDir()
+	writeFile(t, filepath.Join(appsDir, "slug", "bundle.zip"), int(deploy.MiB))
+
+	used, err := deploy.CheckAppQuota(appsDir, "", "slug", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used != deploy.MiB {
+		t.Fatalf("used = %d, want %d", used, deploy.MiB)
+	}
+}
+
+func TestCheckAppQuota_DataDirContributesToExceeded(t *testing.T) {
+	root := t.TempDir()
+	appsDir := filepath.Join(root, "apps")
+	appDataDir := filepath.Join(root, "appdata")
+
+	// 1 MiB in apps dir, 2 MiB in data dir → total 3 MiB; quota 2 MiB → exceeded.
+	writeFile(t, filepath.Join(appsDir, "slug", "bundle.zip"), int(deploy.MiB))
+	writeFile(t, filepath.Join(appDataDir, "slug", "big.parquet"), int(2*deploy.MiB))
+
+	used, err := deploy.CheckAppQuota(appsDir, appDataDir, "slug", 2)
+	if err == nil {
+		t.Fatal("expected ErrQuotaExceeded, got nil")
+	}
+	if !errors.Is(err, deploy.ErrQuotaExceeded) {
+		t.Errorf("expected wrapped ErrQuotaExceeded, got %v", err)
+	}
+	if used != 3*deploy.MiB {
+		t.Errorf("used = %d, want %d", used, 3*deploy.MiB)
 	}
 }
 
