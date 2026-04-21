@@ -17,6 +17,11 @@ OAuth or OIDC, and hibernate idle apps automatically.
 - **Per-app env vars & secrets:** encrypted at rest with AES-256-GCM.
 - **Persistent data dir:** each app gets a `data/` directory that survives
   deploys, with `shiny data push|ls|rm` and a UI Data tab.
+- **Scheduled jobs + shared data:** per-app cron schedules that run as
+  short-lived processes against the bundle, independent of whether the app is
+  serving traffic. One app's data dir can be mounted read-only into another at
+  `data/shared/<source-slug>/` to build fetcher → consumer dashboards. See
+  [`docs/schedules.md`](docs/schedules.md).
 - **Audit log:** 27 action types recorded for admin review.
 - **Container isolation (optional):** run each app inside a Docker container
   with CPU and memory limits.
