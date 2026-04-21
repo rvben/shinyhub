@@ -124,7 +124,11 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	replicas, _ := s.store.ListReplicas(app.ID)
+	replicas, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
 	if replicas == nil {
 		replicas = []*db.Replica{}
 	}

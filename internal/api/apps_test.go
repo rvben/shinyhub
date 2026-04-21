@@ -1070,3 +1070,4 @@ func TestAppsAPI_PatchReplicasBelowMinRejected(t *testing.T) {
 		t.Fatalf("expected 400 for replicas=0, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+

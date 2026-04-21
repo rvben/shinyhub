@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,6 +32,11 @@ type Server struct {
 	tokenLimiter  *keyedRateLimiter
 	secretsKey    []byte
 	router        http.Handler
+
+	// redeployMu guards redeployInFlight so that at most one redeployApp goroutine
+	// runs per slug at a time.
+	redeployMu       sync.Mutex
+	redeployInFlight map[string]bool
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil
