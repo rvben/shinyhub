@@ -38,8 +38,9 @@ type StartParams struct {
 	Command         []string
 	Port            int
 	Env             []string
-	MemoryLimitMB   int // 0 = no limit
-	CPUQuotaPercent int // 0 = no limit; 100 = 1 full core
+	AppDataPath     string // host path to per-app data dir; empty disables data-dir wiring in runtime
+	MemoryLimitMB   int    // 0 = no limit
+	CPUQuotaPercent int    // 0 = no limit; 100 = 1 full core
 }
 
 type entry struct {
@@ -107,6 +108,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		if err := os.MkdirAll(appDataPath, 0o750); err != nil {
 			return nil, fmt.Errorf("ensure app data dir: %w", err)
 		}
+		p.AppDataPath = appDataPath
 		p.Env = append(p.Env, "SHINYHUB_APP_DATA="+appDataPath)
 
 		linkPath := filepath.Join(p.Dir, "data")

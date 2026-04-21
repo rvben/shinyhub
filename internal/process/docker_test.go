@@ -67,6 +67,114 @@ func TestDockerRuntimeSignal(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimeStart_AppDataPathBindsTwiceAndOverridesEnv(t *testing.T) {
+	var captured map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		captured = body
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"Id": "cont-data"})
+	})
+	mux.HandleFunc("/containers/cont-data/start", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rt := newDockerRuntimeWithServer(t, mux)
+	hostData := "/var/lib/shinyhub/data/demo"
+
+	_, err := rt.Start(context.Background(), StartParams{
+		Slug:        "demo",
+		Dir:         t.TempDir(),
+		Command:     []string{"uv", "run", "shiny", "run", "app.py"},
+		Port:        9999,
+		AppDataPath: hostData,
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	host, ok := captured["HostConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("no HostConfig in body: %v", captured)
+	}
+	mounts, ok := host["Mounts"].([]any)
+	if !ok {
+		t.Fatalf("no Mounts in HostConfig: %v", host)
+	}
+
+	hasMount := func(target string) bool {
+		for _, m := range mounts {
+			mm, _ := m.(map[string]any)
+			if mm["Source"] == hostData && mm["Target"] == target {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasMount("/app-data") {
+		t.Errorf("missing /app-data mount in: %v", mounts)
+	}
+	if !hasMount("/app/data") {
+		t.Errorf("missing /app/data mount in: %v", mounts)
+	}
+
+	envRaw, _ := captured["Env"].([]any)
+	var lastAppData string
+	for _, e := range envRaw {
+		s, _ := e.(string)
+		if strings.HasPrefix(s, "SHINYHUB_APP_DATA=") {
+			lastAppData = strings.TrimPrefix(s, "SHINYHUB_APP_DATA=")
+		}
+	}
+	if lastAppData != "/app-data" {
+		t.Errorf("SHINYHUB_APP_DATA last value = %q, want /app-data", lastAppData)
+	}
+}
+
+func TestDockerRuntimeStart_NoAppDataPathSkipsDataMounts(t *testing.T) {
+	var captured map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		captured = body
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"Id": "cont-nodata"})
+	})
+	mux.HandleFunc("/containers/cont-nodata/start", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rt := newDockerRuntimeWithServer(t, mux)
+	bundleDir := t.TempDir()
+
+	_, err := rt.Start(context.Background(), StartParams{
+		Slug:    "no-data",
+		Dir:     bundleDir,
+		Command: []string{"uv", "run", "shiny", "run", "app.py"},
+		Port:    9999,
+		// AppDataPath intentionally empty.
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	host, _ := captured["HostConfig"].(map[string]any)
+	mounts, _ := host["Mounts"].([]any)
+	for _, m := range mounts {
+		mm, _ := m.(map[string]any)
+		if mm["Target"] == "/app-data" || mm["Target"] == "/app/data" {
+			t.Errorf("should not have data mount when AppDataPath is empty, got %v", mm)
+		}
+	}
+}
+
 func TestDockerRuntimeImageForCommand(t *testing.T) {
 	rt := &DockerRuntime{pythonImage: "uv:latest", rImage: "r-base:latest"}
 
