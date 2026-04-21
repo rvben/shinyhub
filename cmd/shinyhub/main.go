@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/data"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle"
@@ -55,6 +57,8 @@ func main() {
 		slog.Error("create app-data dir", "err", err)
 		os.Exit(1)
 	}
+
+	sweepOrphanTempfiles(cfg.Storage.AppDataDir)
 
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
@@ -297,6 +301,29 @@ func main() {
 	cancelWatcher()
 	<-watcherDone
 	slog.Info("shutdown complete")
+}
+
+// sweepOrphanTempfiles removes stale entries from each app's
+// .shinyhub-upload-tmp/ directory left behind by interrupted PUT uploads.
+// Failures are logged and otherwise ignored — startup must succeed even when
+// a single app's data dir is unreadable.
+func sweepOrphanTempfiles(appDataRoot string) {
+	entries, err := os.ReadDir(appDataRoot)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("sweep app-data dir", "err", err)
+		}
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		appDir := filepath.Join(appDataRoot, e.Name())
+		if err := data.CleanupUploadTemp(appDir, time.Hour); err != nil {
+			slog.Warn("sweep upload temp", "slug", e.Name(), "err", err)
+		}
+	}
 }
 
 // apiTimeoutHandler wraps the API router with a 30s per-request timeout,
