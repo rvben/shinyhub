@@ -683,16 +683,26 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clean up on-disk state after the DB row is gone. Errors are non-fatal
+	// (the record is already deleted) but are captured in the audit detail so
+	// operators can investigate orphaned bytes.
+	detail := ""
+	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
+		detail = cleanupErr.Error()
+		slog.Error("app delete cleanup failed", "slug", slug, "err", cleanupErr)
+	}
+
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "delete_app",
 			ResourceType: "app",
 			ResourceID:   slug,
+			Detail:       detail,
 			IPAddress:    s.clientIP(r),
 		})
 	}
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
