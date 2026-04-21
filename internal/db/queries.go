@@ -298,6 +298,16 @@ func (s *Store) GetApp(slug string) (*App, error) {
 	return s.GetAppBySlug(slug)
 }
 
+func (s *Store) GetAppByID(id int64) (*App, error) {
+	row := s.db.QueryRow(`
+		SELECT id, slug, name, project_slug, owner_id, access, status,
+		       replicas, deploy_count, hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
+		       created_at, updated_at
+		FROM apps WHERE id = ?`, id)
+	return scanApp(row)
+}
+
 func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	if limit <= 0 {
 		limit = -1 // SQLite treats -1 as no limit
