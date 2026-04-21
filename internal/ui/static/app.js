@@ -138,13 +138,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Classify a single entry (file or directory) relative to the bundle root.
   // Returns one of: 'accept', 'skipCacheDir', 'rejectDataDir',
   // 'rejectDatasetDir', 'rejectExtension', 'rejectFileSize'.
-  // Directory decisions should pass size=0.
+  // Directory decisions should pass size=0. The leading-slash strip keeps
+  // first-segment classification in lockstep with server-side bundle.Inspect,
+  // which operates on paths cleaned via path.Clean.
   function inspectBundleEntry(rules, relPath, size) {
-    const first = relPath.split('/')[0];
+    const clean = relPath.replace(/^\/+/, '');
+    const first = clean.split('/')[0];
     if (first === 'data') return 'rejectDataDir';
     if (first === 'datasets' || first === '.shinyhub-data') return 'rejectDatasetDir';
     if (rules.cacheDirs.includes(first)) return 'skipCacheDir';
-    const lower = relPath.toLowerCase();
+    const lower = clean.toLowerCase();
     for (const ext of rules.dataExtensions) {
       if (lower.endsWith(ext.toLowerCase())) return 'rejectExtension';
     }
