@@ -14,3 +14,9 @@ CLAUDE.local.md
 *.db
 *.db-shm
 *.db-wal
+
+# PyPI wheel build artifacts
+/packaging/python/src/shinyhub/_binary/shinyhub
+/packaging/python/dist/
+/packaging/python/build/
+/packaging/python/src/shinyhub.egg-info/
