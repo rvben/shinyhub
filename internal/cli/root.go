@@ -43,13 +43,13 @@ type cliConfig struct {
 
 func configPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "shiny", "config.json")
+	return filepath.Join(home, ".config", "shinyhub", "config.json")
 }
 
 func loadConfig() (*cliConfig, error) {
 	f, err := os.Open(configPath())
 	if err != nil {
-		return nil, fmt.Errorf("not logged in — run `shiny login` first")
+		return nil, fmt.Errorf("not logged in — run `shinyhub login` first")
 	}
 	defer f.Close()
 	var cfg cliConfig

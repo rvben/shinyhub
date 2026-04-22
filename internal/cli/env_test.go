@@ -42,7 +42,7 @@ func setupCLITest(t *testing.T) (*httptest.Server, *[]capturedReq, func(int, str
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	cfgDir := filepath.Join(home, ".config", "shiny")
+	cfgDir := filepath.Join(home, ".config", "shinyhub")
 	if err := os.MkdirAll(cfgDir, 0700); err != nil {
 		t.Fatal(err)
 	}
