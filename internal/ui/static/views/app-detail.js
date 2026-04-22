@@ -18,6 +18,8 @@ export function mountAppDetail(ctx) {
     TAB_ROUTES.map(t => [t, document.getElementById(`detail-tab-${t}`)]),
   );
 
+  let tabCleanup = null;
+
   return async function mount(params) {
     const { slug } = params;
     const tab = TAB_ROUTES.includes(params.tab) ? params.tab : 'overview';
@@ -55,9 +57,14 @@ export function mountAppDetail(ctx) {
       panels[t].hidden = t !== tab;
     }
 
-    // Render Overview (other tabs rendered in later tasks).
+    if (tabCleanup) { tabCleanup(); tabCleanup = null; }
+
+    // Render the active tab.
     if (tab === 'overview') {
       renderOverview(panels.overview, app, ctx);
+    }
+    if (tab === 'logs') {
+      tabCleanup = renderLogs(panels.logs, app);
     }
 
     view.hidden = false;
@@ -67,11 +74,39 @@ export function mountAppDetail(ctx) {
     return {
       title: `${app.name} · ShinyHub`,
       unmount() {
+        if (tabCleanup) { tabCleanup(); tabCleanup = null; }
         view.hidden = true;
         ctx.metrics.setTargets([]);
       },
     };
   };
+}
+
+function renderLogs(panel, app) {
+  panel.innerHTML = `
+    <div class="logs-toolbar">
+      <label><input id="logs-follow" type="checkbox" checked> Follow</label>
+      <button id="logs-copy" type="button">Copy all</button>
+    </div>
+    <pre id="detail-logs-body" class="detail-logs-body" aria-live="polite"></pre>
+  `;
+  const body = document.getElementById('detail-logs-body');
+  const followCb = document.getElementById('logs-follow');
+  const copyBtn = document.getElementById('logs-copy');
+
+  const es = new EventSource(`/api/apps/${app.slug}/logs`, { withCredentials: true });
+  es.onmessage = (e) => {
+    const atBottom = body.scrollHeight - Math.ceil(body.scrollTop) <= body.clientHeight + 1;
+    body.appendChild(document.createTextNode(e.data + '\n'));
+    if (followCb.checked && atBottom) body.scrollTop = body.scrollHeight;
+  };
+  es.onerror = () => { es.close(); };
+
+  copyBtn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(body.textContent); } catch {}
+  });
+
+  return () => { es.close(); };
 }
 
 function renderOverview(panel, app, ctx) {

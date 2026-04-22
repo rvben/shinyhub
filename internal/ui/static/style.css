@@ -2419,3 +2419,26 @@ main {
 .app-card-body-link { display: block; color: inherit; text-decoration: none; }
 .app-card-body-link:hover strong { text-decoration: underline; }
 .kebab-list button:hover { background: rgba(56, 189, 248, 0.1); color: var(--cyan-bright); }
+
+/* ── App detail: Logs tab ─────────────────────────────────────────────────── */
+
+.detail-logs-body {
+  height: 60vh;
+  overflow: auto;
+  background: var(--bg-deep);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: 'Space Mono', monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.logs-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  gap: 16px;
+}
