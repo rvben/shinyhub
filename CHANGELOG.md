@@ -7,6 +7,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.2.3](https://github.com/rvben/shinyhub/compare/v0.2.2...v0.2.3) - 2026-04-22
+
+### Added
+
+- **ui**: expose per-app hibernate timeout in Settings modal ([3a4c07d](https://github.com/rvben/shinyhub/commit/3a4c07d1ca452dbff57ea179741e31b11fc7842c))
+- **proxy**: forward real client identity and log every proxied request ([e706d66](https://github.com/rvben/shinyhub/commit/e706d666e008a99f0e8b438c75259eb5e1cdce12))
+
+### Fixed
+
+- **ui**: redirect to login when metrics polling returns 401 ([ae41785](https://github.com/rvben/shinyhub/commit/ae417854772776d9a63ad038d3acb1b00bc95a00))
+- **api**: skip per-slug data lock when quota is disabled ([4fef6ac](https://github.com/rvben/shinyhub/commit/4fef6ac98929be10d84f2ad7f1aa0aa484b1107e))
+- **jobs**: release queue slot when a queued run becomes active ([7eb7e43](https://github.com/rvben/shinyhub/commit/7eb7e43292126250eea416f5fb85692a9a5b589b))
+- **jobs**: preserve admission order for back-to-back queue-policy runs ([1c0c3bc](https://github.com/rvben/shinyhub/commit/1c0c3bcdc65da0f611c677df2d7e2102df5df23c))
+- **jobs**: apply per-run timeout at execute time and free queue slot on cancel ([7f04dbd](https://github.com/rvben/shinyhub/commit/7f04dbddb81f81baff35b1efae8b8ef439af2146))
+- **jobs**: register queued run cancel before mu.Lock so Cancel works ([27412e8](https://github.com/rvben/shinyhub/commit/27412e8c5fc5789d1b5bd15c2fbb7b08ced7f231))
+- **server**: exempt data PUT route from 30s API timeout ([f22e08d](https://github.com/rvben/shinyhub/commit/f22e08da6996234c0b67bb461dab94008bbcf9d6))
+- **proxy**: hold route lock across activeConns bump ([e660d3d](https://github.com/rvben/shinyhub/commit/e660d3d293bebbdd97c1d229ed7f1afa294db64d))
+- **jobs**: grow queue overlap semaphore to capacity 2 so it actually queues ([d7613a4](https://github.com/rvben/shinyhub/commit/d7613a4e5349f71ae46489fc1de8c103f0d07729))
+- **api**: serialize per-slug quota check and write in handleDataPut ([93bcc72](https://github.com/rvben/shinyhub/commit/93bcc725d35922035e8f64aa96b3830f0525da41))
+- **auth**: re-resolve JWT user against DB on every request ([440ef6d](https://github.com/rvben/shinyhub/commit/440ef6d02260d27370ab0f996ae5efc1f91223e7))
+- **api**: remove multipart spill files after bundle upload ([cf23606](https://github.com/rvben/shinyhub/commit/cf23606b27fd3cc6bf7b83afda8e495bc77db7bb))
+- **api**: clean up orphan bundle dirs and zips on failed deploy ([3a3c02a](https://github.com/rvben/shinyhub/commit/3a3c02adf1b4aead9411ec9193e04f53ab527ae8))
+- **api**: validate rollback target bundle before stopping live app ([c0d955e](https://github.com/rvben/shinyhub/commit/c0d955e6af8d099255cef2c4c7f15d26632b9ec2))
+- **process**: poll PID for adopted native processes in Wait ([28a93f6](https://github.com/rvben/shinyhub/commit/28a93f6ba26ab9cd21190978c5081879793f2c7d))
+
 ## [0.2.2](https://github.com/rvben/shinyhub/compare/v0.2.1...v0.2.2) - 2026-04-22
 
 ### Added
