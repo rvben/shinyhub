@@ -368,16 +368,58 @@ func sweepOrphanTempfiles(appDataRoot string) {
 }
 
 // apiTimeoutHandler wraps the API router with a 30s per-request timeout,
-// exempting the long-lived SSE log-stream route and the large-file deploy
-// upload route so neither is prematurely cut off.
+// exempting routes that are either long-lived by design or stream a
+// large request body. See isLongLivedAPIRoute for the matrix.
 func apiTimeoutHandler(h http.Handler) http.Handler {
 	timed := http.TimeoutHandler(h, 30*time.Second, `{"error":"request timeout"}`)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Path
-		if strings.HasSuffix(p, "/logs") || strings.HasSuffix(p, "/deploy") {
+		if isLongLivedAPIRoute(r.Method, r.URL.Path) {
 			h.ServeHTTP(w, r)
 			return
 		}
 		timed.ServeHTTP(w, r)
 	})
+}
+
+// isLongLivedAPIRoute reports whether method+path identifies an API
+// route that must bypass the per-request timeout. Three cases qualify:
+//
+//   - GET .../logs — server-sent log stream that stays open by design.
+//   - POST .../deploy — bundle upload, body can be hundreds of MB.
+//   - PUT /api/apps/{slug}/data/<rel> — per-app data upload, also
+//     arbitrary-size. Without this exemption http.TimeoutHandler swaps
+//     the response writer mid-stream at 30s; the handler keeps writing
+//     to a now-disconnected recorder, the file may still complete on
+//     disk, and the client sees an ambiguous "request timeout" body
+//     instead of either a clean success or a clean failure.
+//
+// All other API routes keep the 30s timeout so a slow handler cannot
+// pin a server goroutine indefinitely.
+func isLongLivedAPIRoute(method, path string) bool {
+	if strings.HasSuffix(path, "/logs") || strings.HasSuffix(path, "/deploy") {
+		return true
+	}
+	if method == http.MethodPut && isAppDataUploadPath(path) {
+		return true
+	}
+	return false
+}
+
+// isAppDataUploadPath returns true for paths of the form
+// "/api/apps/<slug>/data/<rel>" where <slug> and <rel> are both
+// non-empty. The leading slug must contain at least one character so a
+// bare "/api/apps/data/foo" (slug == "data") cannot impersonate the
+// data-upload route.
+func isAppDataUploadPath(path string) bool {
+	const prefix = "/api/apps/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	rest := path[len(prefix):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return false
+	}
+	afterSlug := rest[slash+1:]
+	return strings.HasPrefix(afterSlug, "data/") && len(afterSlug) > len("data/")
 }
