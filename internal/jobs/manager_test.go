@@ -422,36 +422,41 @@ func TestManager_Run_OverlapQueue_CancelOfQueuedRunSkipsExecution(t *testing.T) 
 		t.Fatalf("Cancel queued run: %v", err)
 	}
 
-	// Release run #1. Run #2's goroutine acquires mu, observes ctx.Err()
-	// is non-nil, finalises status="cancelled", and returns without
-	// invoking RunOnce.
+	// Release run #1. With cancel-aware slot acquisition, run #2 may
+	// finalise as cancelled before run #1's RunOnce ever returns; wait
+	// for BOTH to finalise before asserting on rt.calls so the count
+	// includes run #1's completion.
 	close(block)
 
-	// Poll for run #2 finalisation. We do not use waitForCalls because
-	// rt.calls must stay at 1 — the assertion below depends on that.
-	// Read FinishedAt and Status under the same lock that FinishScheduleRun
-	// writes under to keep -race happy.
+	// Read FinishedAt and Status under the same lock that
+	// FinishScheduleRun writes under to keep -race happy.
 	deadline := time.Now().Add(2 * time.Second)
 	var (
-		r2Found  bool
+		r1Done   bool
+		r2Done   bool
 		r2Status string
 	)
 	for time.Now().Before(deadline) {
 		st.mu.Lock()
-		r := st.runs[id2]
-		var finished bool
-		if r != nil && r.FinishedAt != nil {
-			finished = true
-			r2Status = r.Status
+		r1 := st.runs[id1]
+		if r1 != nil && r1.FinishedAt != nil {
+			r1Done = true
+		}
+		r2 := st.runs[id2]
+		if r2 != nil && r2.FinishedAt != nil {
+			r2Done = true
+			r2Status = r2.Status
 		}
 		st.mu.Unlock()
-		if finished {
-			r2Found = true
+		if r1Done && r2Done {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !r2Found {
+	if !r1Done {
+		t.Fatal("active run #1 never finalised after release")
+	}
+	if !r2Done {
 		t.Fatal("queued run #2 never finalised after cancel + release")
 	}
 	if r2Status != "cancelled" {
@@ -587,6 +592,100 @@ func TestManager_Run_OverlapQueue_CancelledQueuedRunFreesSlotImmediately(t *test
 	// Drain.
 	close(block)
 	waitForCalls(t, rt, 2, 2*time.Second)
+}
+
+// TestManager_Run_OverlapQueue_PreservesAdmissionOrder verifies that for
+// back-to-back Run() calls under the queue policy, the run admitted first
+// is the one that actually executes first. Without synchronous slot
+// acquisition, two goroutines launched in quick succession race for the
+// per-schedule lock and the later-admitted run can win — breaking
+// admission order and confusing cancellation semantics.
+//
+// The test distinguishes which run entered RunOnce by cancelling the
+// first-admitted run while the active one is blocked. If the first run
+// is the active run (correct order), cancelling it makes RunOnce return
+// (ctx.Done branch) and rt.calls increments to 1. If the second run
+// happened to win the lock instead, cancelling the first (queued) run
+// finalises it without ever entering RunOnce, so rt.calls stays at 0.
+func TestManager_Run_OverlapQueue_PreservesAdmissionOrder(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, block: block}
+	st := newFakeStore(makeSchedule("queue", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	// Back-to-back admissions with no sleep between them so the launched
+	// goroutines race.
+	id1, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	id2, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	// Give goroutines time to schedule and at least one to enter RunOnce.
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the first-admitted run. With correct ordering it is the
+	// active one (in RunOnce); cancellation drives RunOnce to its
+	// ctx.Done branch and increments rt.calls. With wrong ordering it
+	// is queued and rt.calls stays at zero.
+	if err := m.Cancel(id1); err != nil {
+		t.Fatalf("Cancel id1: %v", err)
+	}
+
+	// Poll for run #1 to finalise — bounds the wait.
+	deadline := time.Now().Add(2 * time.Second)
+	var r1Status string
+	for time.Now().Before(deadline) {
+		st.mu.Lock()
+		r := st.runs[id1]
+		var done bool
+		if r != nil && r.FinishedAt != nil {
+			done = true
+			r1Status = r.Status
+		}
+		st.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r1Status != "cancelled" {
+		t.Fatalf("first run status=%q, want cancelled", r1Status)
+	}
+
+	rt.mu.Lock()
+	calls := rt.calls
+	rt.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("after cancelling first-admitted run: rt.calls=%d, want 1 — first-admitted run must have been the active one (entered RunOnce)", calls)
+	}
+
+	// Drain: release the second run.
+	close(block)
+	waitForCalls(t, rt, 2, 2*time.Second)
+
+	deadline = time.Now().Add(2 * time.Second)
+	var r2Status string
+	for time.Now().Before(deadline) {
+		st.mu.Lock()
+		r := st.runs[id2]
+		var done bool
+		if r != nil && r.FinishedAt != nil {
+			done = true
+			r2Status = r.Status
+		}
+		st.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r2Status != "succeeded" {
+		t.Errorf("second run status=%q, want succeeded", r2Status)
+	}
 }
 
 // TestManager_Run_PersistsLogPath verifies that Manager calls SetScheduleRunLogPath

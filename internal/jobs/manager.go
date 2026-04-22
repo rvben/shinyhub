@@ -95,16 +95,16 @@ func (m *Manager) lockFor(schedID int64) *schedLock {
 	return l
 }
 
-// queueChan returns the per-schedule capacity-2 semaphore channel for the
-// given schedule ID, creating it lazily. Capacity is two so the queue policy
-// admits one active run plus one waiting behind it; further concurrent runs
-// are recorded as skipped_overlap. A capacity of one would make queue behave
-// identically to skip — every overlapping run dropped. Must be called with
-// m.mu held.
+// queueChan returns the per-schedule capacity-1 semaphore channel for the
+// given schedule ID, creating it lazily. The semaphore counts only queued
+// (waiting) runs — the active run is tracked separately by the per-schedule
+// schedLock. Capacity one therefore means "at most one waiting run behind
+// the active one"; further concurrent runs are recorded as skipped_overlap.
+// Must be called with m.mu held.
 func (m *Manager) queueChan(schedID int64) chan struct{} {
 	ch, ok := m.queues[schedID]
 	if !ok {
-		ch = make(chan struct{}, 2)
+		ch = make(chan struct{}, 1)
 		m.queues[schedID] = ch
 	}
 	return ch
@@ -196,25 +196,50 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, u
 	return runID, nil
 }
 
-// runWithQueue serializes runs via a capacity-2 channel semaphore: at most
-// one run executes at a time (per-schedule lock) and at most one further
-// run waits behind it. Any additional concurrent run finds the semaphore
-// full and is recorded as skipped_overlap.
+// runWithQueue serializes runs of one schedule with at most one active and
+// at most one waiting behind it. Additional concurrent runs are recorded as
+// skipped_overlap.
+//
+// The schedule lock is acquired synchronously inside Run() — never inside
+// the launched goroutine — so admission order is preserved across
+// back-to-back triggers. If two callers race to admit at the same time,
+// the channel send is atomic and one wins cleanly; without synchronous
+// acquisition the launched goroutines could run in either order regardless
+// of which Run() returned first.
 //
 // The cancel context is registered up-front, before slot.lock starts to
-// wait. The acquisition itself is context-aware: if Cancel() arrives
-// while the run is queued, slot.lock returns false and the goroutine
-// frees its semaphore slot synchronously and finalises the run as
-// cancelled — without first having to wait for the active run to
-// release the lock. This keeps queue-slot accounting honest: cancelled
-// queued runs immediately make room for new admissions.
+// wait, so a Cancel() RPC reaches a still-queued run. The acquisition
+// itself is context-aware: when Cancel arrives while a run is queued,
+// slot.lock returns false and the goroutine frees its semaphore slot and
+// finalises the run as cancelled without first waiting for the active run
+// to release the lock.
 func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, userID *int64) (int64, error) {
 	m.mu.Lock()
 	sem := m.queueChan(sched.ID)
 	slot := m.lockFor(sched.ID)
 	m.mu.Unlock()
 
-	// Try to queue non-blocking. If channel is full, skip.
+	// Fast path: if the slot is free, become the active run synchronously
+	// here in the caller's goroutine. This locks in admission order before
+	// any goroutine is launched.
+	if slot.tryLock() {
+		runID, err := m.insertRunRow(sched, trigger, userID)
+		if err != nil {
+			slot.unlock()
+			return 0, err
+		}
+		ctx, cancel := m.buildRunContext()
+		m.registerActive(runID, cancel)
+		go func() {
+			defer slot.unlock()
+			defer cancel()
+			defer m.unregisterActive(runID)
+			m.execute(ctx, sched, app, runID, trigger, userID)
+		}()
+		return runID, nil
+	}
+
+	// Slot is held by an active run. Try to take the single queue slot.
 	select {
 	case sem <- struct{}{}:
 	default:
@@ -237,7 +262,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 		if !slot.lock(ctx) {
 			// Cancel arrived while waiting in the queue. Free the
 			// queue slot first so a new admission can take our place,
-			// then finalise as cancelled. We never acquired the lock,
+			// then finalise as cancelled. We never acquired the slot,
 			// so do not call slot.unlock.
 			<-sem
 			m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
