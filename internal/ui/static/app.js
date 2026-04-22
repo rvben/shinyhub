@@ -1,6 +1,8 @@
 import { createRouter } from '/static/router.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
+import { mountUsers } from '/static/views/users.js';
+import { mountAuditLog } from '/static/views/audit-log.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -1399,9 +1401,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   logPaneClose.addEventListener('click', closeLogs);
 
-  tabApps.addEventListener('click',  () => showView('apps'));
-  tabUsers.addEventListener('click', () => showView('users'));
-  tabAudit.addEventListener('click', () => showView('audit'));
   usersRefresh.addEventListener('click', () => loadUsers());
   newUserButton.addEventListener('click', openNewUserModal);
   newUserClose.addEventListener('click', closeNewUserModal);
@@ -2245,6 +2244,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const router = createRouter();
 
+  function updateActiveNav(pathname) {
+    for (const el of document.querySelectorAll('[data-nav]')) {
+      const url = new URL(el.href);
+      const active = url.pathname === pathname
+        || (pathname === '/' && url.pathname === '/')
+        || (pathname.startsWith('/apps/') && url.pathname === '/');
+      el.classList.toggle('tab-active', active);
+      if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+    }
+  }
+
   const ctx = {
     state,
     metrics,
@@ -2253,9 +2263,16 @@ document.addEventListener('DOMContentLoaded', () => {
     onUnauthorized: handleUnauthorized,
     canManageApp,
     renderGridVerbatim,
+    updateActiveNav,
   };
 
-  router.register('/', () => mountAppsGrid(ctx));
+  router.register('/', () => {
+    const view = mountAppsGrid(ctx);
+    updateActiveNav(location.pathname);
+    return view;
+  });
+  router.register('/users', () => mountUsers({ ...ctx, loadUsers }));
+  router.register('/audit-log', () => mountAuditLog({ ...ctx, loadAuditEvents }));
 
   async function initialize() {
     loadProviders();
