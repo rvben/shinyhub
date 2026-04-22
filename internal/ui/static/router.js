@@ -15,6 +15,7 @@
 export function createRouter() {
   const routes = [];
   let current = null;
+  let generation = 0;
 
   function register(pattern, mountFn) {
     const keys = [];
@@ -41,23 +42,29 @@ export function createRouter() {
   }
 
   async function mount(path, search) {
+    const gen = ++generation;
     if (current && typeof current.unmount === 'function') {
       try { current.unmount(); } catch (e) { console.error('unmount', e); }
     }
     current = null;
     const hit = match(path);
     if (!hit) {
-      console.warn('router: no match for', path);
-      navigate('/', { replace: true });
+      if (path !== '/') {
+        console.warn('router: no match for', path);
+        navigate('/', { replace: true });
+      }
       return;
     }
     const view = await hit.route.mountFn(hit.params, search);
-    current = view || {};
-    if (current && current.title) {
-      document.title = current.title;
-    } else {
-      document.title = 'ShinyHub';
+    if (gen !== generation) {
+      // A later navigation has superseded us. Discard this result.
+      if (view && typeof view.unmount === 'function') {
+        try { view.unmount(); } catch (e) { console.error('unmount', e); }
+      }
+      return;
     }
+    current = view || {};
+    document.title = (current && current.title) || 'ShinyHub';
   }
 
   function navigate(path, opts = {}) {
