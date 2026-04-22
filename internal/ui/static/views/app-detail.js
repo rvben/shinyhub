@@ -3,6 +3,7 @@
 // now Overview is the only one with a renderer and other tabs show "Coming
 // soon" placeholders.
 const TAB_ROUTES = ['overview', 'logs', 'deployments', 'configuration', 'data', 'access'];
+const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
 
 export function mountAppDetail(ctx) {
   const view = document.getElementById('app-detail-view');
@@ -29,20 +30,28 @@ export function mountAppDetail(ctx) {
       history.replaceState({}, '', `/apps/${slug}`);
     }
 
+    const resp = await ctx.api(`/api/apps/${slug}`);
+    if (resp.status === 404) { ctx.navigate('/'); return {}; }
+    if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
+    if (!resp.ok) { return {}; }
+    const app = await resp.json();
+
+    const canManage = ctx.canManageApp(ctx.state.user, app);
+
+    if (!canManage && MANAGER_ONLY_TABS.has(tab)) {
+      ctx.navigate(`/apps/${slug}`, { replace: true });
+      return {};
+    }
+
     // Populate tab hrefs so middle-click / cmd-click open real URLs.
     for (const t of TAB_ROUTES) {
+      tabEls[t].hidden = !canManage && MANAGER_ONLY_TABS.has(t);
       tabEls[t].setAttribute('href', t === 'overview' ? `/apps/${slug}` : `/apps/${slug}/${t}`);
       tabEls[t].classList.toggle('active', t === tab);
       tabEls[t].setAttribute('aria-selected', String(t === tab));
       if (t === tab) tabEls[t].setAttribute('aria-current', 'page');
       else tabEls[t].removeAttribute('aria-current');
     }
-
-    const resp = await ctx.api(`/api/apps/${slug}`);
-    if (resp.status === 404) { ctx.navigate('/'); return {}; }
-    if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
-    if (!resp.ok) { return {}; }
-    const app = await resp.json();
 
     document.getElementById('app-detail-heading').textContent = app.name;
     document.getElementById('app-detail-slug').textContent = '/' + app.slug;
