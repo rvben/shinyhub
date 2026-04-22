@@ -1,3 +1,7 @@
+import { createRouter } from '/static/router.js';
+import { createMetricsController } from '/static/metrics-controller.js';
+import { mountAppsGrid } from '/static/views/apps-grid.js';
+
 function setHidden(element, hidden) {
   element.hidden = hidden;
 }
@@ -218,13 +222,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function renderApps() {
-    appGrid.textContent = '';
-    const empty = state.apps.length === 0;
-    emptyState.hidden = !empty;
+  // Renders apps into the provided grid and empty-state elements. Takes explicit
+  // DOM references so mountAppsGrid can call it from the view module without
+  // closing over the closure-level appGrid/emptyState constants.
+  function renderGridVerbatim(apps, gridEl, emptyEl) {
+    gridEl.textContent = '';
+    const empty = apps.length === 0;
+    emptyEl.hidden = !empty;
     if (empty) renderEmptyStateCopy();
 
-    for (const app of state.apps) {
+    for (const app of apps) {
       const card = document.createElement('div');
       card.className = 'app-card';
 
@@ -319,12 +326,12 @@ document.addEventListener('DOMContentLoaded', () => {
       card.appendChild(meta);
       card.appendChild(metricsLine);
       card.appendChild(actions);
-      appGrid.appendChild(card);
-
-      if (app.status === 'running') {
-        fetchMetrics(app.slug);
-      }
+      gridEl.appendChild(card);
     }
+  }
+
+  function renderApps() {
+    renderGridVerbatim(state.apps, appGrid, emptyState);
   }
 
   function showView(name) {
@@ -340,7 +347,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function showLoggedOut() {
     closeLogs();
-    clearInterval(state.metricsInterval);
+    metrics.setTargets([]);
     state.metricsInterval = null;
     state.user = null;
     state.apps = [];
@@ -2159,8 +2166,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = await response.json();
     showLoggedIn(payload);
     passwordInput.value = '';
-    await loadApps();
-    startMetricsPolling();
+    router.start();
   });
 
   refreshButton.addEventListener('click', () => {
@@ -2199,20 +2205,6 @@ document.addEventListener('DOMContentLoaded', () => {
     el.textContent = `CPU ${cpu}% · ${ram} RAM`;
   }
 
-  // Poll metrics every 10 seconds for all running apps.
-  function startMetricsPolling() {
-    clearInterval(state.metricsInterval);
-    state.metricsInterval = null;
-    if (!state.apps.some(a => a.status === 'running')) return;
-    state.metricsInterval = setInterval(() => {
-      for (const app of state.apps) {
-        if (app.status === 'running') {
-          fetchMetrics(app.slug);
-        }
-      }
-    }, 10_000);
-  }
-
   async function loadProviders() {
     try {
       const resp = await api('/api/auth/providers');
@@ -2237,6 +2229,34 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch (e) { /* non-critical */ }
   }
+
+  const metrics = createMetricsController({
+    intervalMs: 10000,
+    onMetrics: (slug, m) => {
+      const el = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
+      if (!el) return;
+      if (m.status !== 'running') { el.textContent = ''; return; }
+      const cpu = m.cpu_percent.toFixed(1);
+      const ram = m.rss_bytes >= 1 << 20
+        ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
+        : (m.rss_bytes / 1024).toFixed(0) + ' KB';
+      el.textContent = `CPU ${cpu}% · ${ram} RAM`;
+    },
+  });
+
+  const router = createRouter();
+
+  const ctx = {
+    state,
+    metrics,
+    api,
+    navigate: (p, o) => router.navigate(p, o),
+    onUnauthorized: handleUnauthorized,
+    canManageApp,
+    renderGridVerbatim,
+  };
+
+  router.register('/', () => mountAppsGrid(ctx));
 
   async function initialize() {
     loadProviders();
@@ -2263,8 +2283,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const payload = await response.json();
     showLoggedIn(payload);
-    await loadApps();
-    startMetricsPolling();
+    router.start();
     handleDeployHash();
   }
 
