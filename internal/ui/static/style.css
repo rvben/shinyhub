@@ -2442,3 +2442,19 @@ main {
   margin-bottom: 8px;
   gap: 16px;
 }
+
+/* ── App detail: Deployments tab ─────────────────────────────────────────── */
+
+.deployments-list { list-style: none; padding: 0; margin: 0; }
+.deployment-row {
+  display: grid;
+  grid-template-columns: 5rem 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.deployment-version { font-family: 'Space Mono', monospace; color: var(--cyan-bright); }
+.deployment-when { color: var(--text-muted); font-size: 0.9rem; }
+.deployment-user { color: var(--text-soft); font-size: 0.9rem; }
+.rollback-btn { padding: 4px 10px; font-size: 0.85rem; }

@@ -91,10 +91,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const resetPwInput    = document.getElementById('reset-password-input');
   const resetPwUsername = document.getElementById('reset-password-username');
   const resetPwError    = document.getElementById('reset-password-error');
-  const historyModal    = document.getElementById('history-modal');
-  const historyAppName  = document.getElementById('history-app-name');
-  const historyList     = document.getElementById('history-list');
-
   const newAppButton       = document.getElementById('new-app-button');
   const newAppModal        = document.getElementById('new-app-modal');
   const newAppClose        = document.getElementById('new-app-close');
@@ -301,7 +297,7 @@ document.addEventListener('DOMContentLoaded', () => {
           historyButton.type = 'button';
           historyButton.textContent = 'History';
           historyButton.setAttribute('aria-label', `Deployment history for ${app.name}`);
-          historyButton.addEventListener('click', () => openHistoryModal(app.slug));
+          historyButton.addEventListener('click', () => router.navigate(`/apps/${app.slug}/deployments`));
           actions.appendChild(historyButton);
 
           const logsButton = document.createElement('button');
@@ -779,7 +775,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Access modal ---
 
   let settingsSlug = null;
-  let historySlug = null;
 
   async function openSettingsModal(app) {
     settingsSlug = app.slug;
@@ -1260,112 +1255,6 @@ document.addEventListener('DOMContentLoaded', () => {
     xhr.send(file);
   }
 
-  async function openHistoryModal(slug) {
-    historySlug = slug;
-    const app = state.apps.find(a => a.slug === slug);
-    historyAppName.textContent = app ? app.name : slug;
-    historyList.textContent = '';
-    historyModal.hidden = false;
-    document.getElementById('history-modal-close').focus();
-    historyList.innerHTML = '<li style="color:var(--text-muted);padding:0.5rem 0">Loading…</li>';
-
-    let resp;
-    try {
-      resp = await api(`/api/apps/${slug}/deployments`);
-    } catch {
-      historyList.innerHTML = '<li style="color:var(--text-muted)">Failed to load deployments</li>';
-      return;
-    }
-    if (!resp.ok) {
-      historyList.innerHTML = '<li style="color:var(--text-muted)">Failed to load deployments</li>';
-      return;
-    }
-
-    let deployments;
-    try {
-      deployments = (await resp.json()) || [];
-    } catch {
-      historyList.innerHTML = '<li style="color:var(--text-muted)">Failed to load deployments</li>';
-      return;
-    }
-    if (historySlug !== slug) return;  // modal was superseded by a later open
-    historyList.textContent = '';
-
-    for (const d of deployments) {
-      const li = document.createElement('li');
-      if (d.status === 'active') li.className = 'deployment-active';
-
-      const meta = document.createElement('div');
-      meta.className = 'deployment-meta';
-
-      const versionRow = document.createElement('div');
-
-      const versionEl = document.createElement('code');
-      versionEl.className = 'deployment-version';
-      const isHash = /^[0-9a-f]{8,}$/i.test(d.version);
-      versionEl.textContent = isHash ? d.version.slice(0, 7) : d.version;
-      versionRow.appendChild(versionEl);
-
-      const statusBadge = document.createElement('span');
-      statusBadge.className = `badge badge-${d.status}`;
-      statusBadge.textContent = d.status;
-      versionRow.appendChild(statusBadge);
-
-      meta.appendChild(versionRow);
-
-      const dateEl = document.createElement('div');
-      dateEl.className = 'deployment-date';
-      const ts = new Date(d.created_at);
-      dateEl.textContent = relativeTime(ts);
-      dateEl.title = ts.toISOString();
-      meta.appendChild(dateEl);
-
-      li.appendChild(meta);
-
-      if (d.status === 'success') {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = 'Rollback';
-        btn.addEventListener('click', () => rollbackTo(slug, d.id));
-        li.appendChild(btn);
-      } else if (d.status === 'active') {
-        const label = document.createElement('span');
-        label.style.cssText = 'color:var(--text-muted);font-size:0.72rem';
-        label.textContent = 'current';
-        li.appendChild(label);
-      }
-
-      historyList.appendChild(li);
-    }
-  }
-
-  function closeHistoryModal() {
-    historyModal.hidden = true;
-    historySlug = null;
-  }
-
-  async function rollbackTo(slug, deploymentId) {
-    let resp;
-    try {
-      resp = await api(`/api/apps/${slug}/rollback`, {
-        method: 'PUT',
-        body: JSON.stringify({ deployment_id: deploymentId }),
-      });
-    } catch {
-      historyList.insertAdjacentHTML('beforeend',
-        '<li style="color:var(--red);padding:0.5rem 0">Network error — rollback not sent</li>');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      historyList.insertAdjacentHTML('beforeend',
-        '<li style="color:var(--red);padding:0.5rem 0">Rollback failed</li>');
-      return;
-    }
-    closeHistoryModal();
-    window.setTimeout(loadApps, 1000);
-  }
-
   async function refreshMemberList() {
     if (!settingsSlug) return;
     const list = document.getElementById('members-list');
@@ -1426,8 +1315,6 @@ document.addEventListener('DOMContentLoaded', () => {
         closeNewAppModal();
       } else if (!document.getElementById('settings-modal').hidden) {
         closeSettingsModal();
-      } else if (!historyModal.hidden) {
-        closeHistoryModal();
       } else if (!newUserModal.hidden) {
         closeNewUserModal();
       } else if (!resetPwModal.hidden) {
@@ -1469,11 +1356,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Data tab: upload form submit.
   document.getElementById('data-upload-form').addEventListener('submit', uploadDataFile);
-
-  document.getElementById('history-modal-close').addEventListener('click', closeHistoryModal);
-  historyModal.addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeHistoryModal();
-  });
 
   // Visibility radio change → PATCH access level.
   document.querySelectorAll('input[name="access-level"]').forEach(radio => {

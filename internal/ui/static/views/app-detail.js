@@ -66,6 +66,9 @@ export function mountAppDetail(ctx) {
     if (tab === 'logs') {
       tabCleanup = renderLogs(panels.logs, app);
     }
+    if (tab === 'deployments') {
+      await renderDeployments(panels.deployments, app, ctx);
+    }
 
     view.hidden = false;
     ctx.updateActiveNav(location.pathname);
@@ -107,6 +110,39 @@ function renderLogs(panel, app) {
   });
 
   return () => { es.close(); };
+}
+
+async function renderDeployments(panel, app, ctx) {
+  panel.innerHTML = `<ul id="detail-deployments-list" class="deployments-list"></ul><p id="detail-deployments-empty" class="env-empty" hidden>No deployments yet.</p>`;
+  const list = document.getElementById('detail-deployments-list');
+  const empty = document.getElementById('detail-deployments-empty');
+  const resp = await ctx.api(`/api/apps/${app.slug}/deployments`);
+  if (!resp.ok) { list.textContent = 'Failed to load deployments.'; return; }
+  const rows = await resp.json();
+  if (rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
+  for (const d of rows) {
+    const li = document.createElement('li');
+    li.className = 'deployment-row';
+    li.innerHTML = `
+      <span class="deployment-version">v${d.version}</span>
+      <span class="deployment-when">${new Date(d.created_at).toLocaleString()}</span>
+      <span class="deployment-user">${d.deployed_by ?? '—'}</span>
+      <button type="button" class="rollback-btn" data-id="${d.id}">Roll back</button>
+    `;
+    list.appendChild(li);
+  }
+  list.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.rollback-btn');
+    if (!btn) return;
+    if (!window.confirm(`Roll back ${app.name} to deployment ${btn.dataset.id}?`)) return;
+    const r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
+    });
+    if (r.ok) { ctx.navigate(`/apps/${app.slug}`); }
+    else { alert('Rollback failed.'); }
+  });
 }
 
 function renderOverview(panel, app, ctx) {
