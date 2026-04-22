@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestDataPush_DefaultDestIsBasename(t *testing.T) {
@@ -175,14 +177,16 @@ func TestDataRm_NotFound(t *testing.T) {
 // TestDataCmd_RegisteredWithRoot verifies that the data command tree
 // is registered with the root cobra command.
 func TestDataCmd_RegisteredWithRoot(t *testing.T) {
+	root := &cobra.Command{Use: "root"}
+	AddCommandsTo(root)
 	found := false
-	for _, cmd := range rootCmd.Commands() {
+	for _, cmd := range root.Commands() {
 		if cmd.Use == "data" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'data' command to be registered with rootCmd")
+		t.Error("expected 'data' command to be registered with root")
 	}
 }

@@ -1,7 +1,16 @@
 package main
 
-import "github.com/rvben/shinyhub/internal/cli"
+import (
+	"os"
+
+	"github.com/rvben/shinyhub/internal/cli"
+	"github.com/spf13/cobra"
+)
 
 func main() {
-	cli.Execute()
+	root := &cobra.Command{Use: "shiny", Short: "deprecated — use shinyhub"}
+	cli.AddCommandsTo(root)
+	if err := root.Execute(); err != nil {
+		os.Exit(1)
+	}
 }

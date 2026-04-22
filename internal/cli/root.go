@@ -12,7 +12,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// version is set at build time via -ldflags "-X github.com/rvben/shinyhub/cli.version=vX.Y.Z".
+// version is set by the parent binary (cmd/shinyhub) via SetVersion,
+// which plumbs it in from `-ldflags "-X main.version=vX.Y.Z"`.
 var version = "dev"
 
 // httpClient is the shared HTTP client for all CLI commands.
@@ -20,20 +21,17 @@ var version = "dev"
 // connections, use http.DefaultClient directly.
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-var rootCmd = &cobra.Command{
-	Use:     "shiny",
-	Short:   "ShinyHub CLI — deploy and manage Shiny apps",
-	Version: version,
+// SetVersion updates the version string reported by CLI subcommands.
+// Called by the parent binary's init() so both the server (`shinyhub serve`)
+// and the CLI subcommands report the same version.
+func SetVersion(v string) {
+	version = v
 }
 
-func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
-}
-
-func init() {
-	rootCmd.AddCommand(loginCmd, deployCmd, appsCmd, tokensCmd, envCmd, dataCmd, scheduleCmd, shareCmd)
+// AddCommandsTo registers every CLI subcommand onto the supplied root command.
+// This is how cmd/shinyhub grafts the CLI tree onto the top-level `shinyhub` binary.
+func AddCommandsTo(root *cobra.Command) {
+	root.AddCommand(loginCmd, deployCmd, appsCmd, tokensCmd, envCmd, dataCmd, scheduleCmd, shareCmd)
 }
 
 type cliConfig struct {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestSchedule_Add_ShellwordsCmd verifies that --cmd parses the shell string
@@ -162,15 +164,17 @@ func TestSchedule_Rm_ResolvesNameToID(t *testing.T) {
 
 // TestScheduleCmd_RegisteredWithRoot verifies schedule is registered with the root command.
 func TestScheduleCmd_RegisteredWithRoot(t *testing.T) {
+	root := &cobra.Command{Use: "root"}
+	AddCommandsTo(root)
 	found := false
-	for _, cmd := range rootCmd.Commands() {
+	for _, cmd := range root.Commands() {
 		if cmd.Use == "schedule" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'schedule' command to be registered with rootCmd")
+		t.Error("expected 'schedule' command to be registered with root")
 	}
 }
 
@@ -191,14 +195,16 @@ func TestSchedule_Logs_HasFollowFlag(t *testing.T) {
 
 // TestShareCmd_RegisteredWithRoot verifies share is registered with the root command.
 func TestShareCmd_RegisteredWithRoot(t *testing.T) {
+	root := &cobra.Command{Use: "root"}
+	AddCommandsTo(root)
 	found := false
-	for _, cmd := range rootCmd.Commands() {
+	for _, cmd := range root.Commands() {
 		if cmd.Use == "share" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'share' command to be registered with rootCmd")
+		t.Error("expected 'share' command to be registered with root")
 	}
 }
