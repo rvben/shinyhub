@@ -387,6 +387,106 @@ func TestProxy_BeginHibernate_AbortsWhileRequestInFlight(t *testing.T) {
 	}
 }
 
+// pausingWriter wraps an httptest.ResponseRecorder and blocks the first
+// call to Header() until release is closed. Used to pause ServeHTTP at the
+// SetCookie call site, which sits between pickReplica and the activeConns
+// bump — exactly the window where a stale read of activeConns could let
+// BeginHibernate succeed concurrently.
+type pausingWriter struct {
+	*httptest.ResponseRecorder
+	once    sync.Once
+	paused  chan struct{}
+	release chan struct{}
+}
+
+func (p *pausingWriter) Header() http.Header {
+	p.once.Do(func() {
+		close(p.paused)
+		<-p.release
+	})
+	return p.ResponseRecorder.Header()
+}
+
+// TestProxy_ServeHTTP_HoldsRouteLockThroughActiveConnsBump asserts that
+// ServeHTTP holds the route-table read lock from the moment it consults
+// p.pools through the increment of activeConns. Without this lock window,
+// the watchdog can call BeginHibernate after pickReplica has chosen a
+// replica but before activeConns has been bumped — winning the race and
+// stopping the backend processes that the in-flight request is about to
+// reach.
+func TestProxy_ServeHTTP_HoldsRouteLockThroughActiveConnsBump(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	pw := &pausingWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		paused:           make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		req := httptest.NewRequest(http.MethodGet, "/app/app/", nil)
+		p.ServeHTTP(pw, req)
+	}()
+
+	// Wait until ServeHTTP is paused inside SetCookie — the request has
+	// passed pickReplica but has not yet bumped activeConns.
+	select {
+	case <-pw.paused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP never reached the SetCookie call")
+	}
+
+	// Future-dated snapshot defeats the lastSeen check; the only thing
+	// that can keep BeginHibernate from succeeding here is the route-lock
+	// window held by ServeHTTP across the activeConns bump.
+	hibernateResult := make(chan bool, 1)
+	go func() {
+		hibernateResult <- p.BeginHibernate("app", time.Now().Add(time.Hour))
+	}()
+
+	select {
+	case ok := <-hibernateResult:
+		t.Fatalf("BeginHibernate returned %v during the route-decision window — the route lock is not held across activeConns bump", ok)
+	case <-time.After(75 * time.Millisecond):
+		// Expected: BeginHibernate is blocked on p.mu.Lock() while
+		// ServeHTTP holds the read lock.
+	}
+
+	// Release ServeHTTP. After this it bumps activeConns, releases the
+	// read lock, and forwards to the backend. BeginHibernate then
+	// acquires the write lock, observes activeConns>0, and returns false.
+	close(pw.release)
+
+	select {
+	case <-served:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not complete after release")
+	}
+
+	select {
+	case ok := <-hibernateResult:
+		if ok {
+			t.Error("BeginHibernate returned true after racing with an in-flight request")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("BeginHibernate did not return after ServeHTTP released the route lock")
+	}
+
+	if !p.HasLiveReplica("app") {
+		t.Error("pool was removed despite a request that was in flight when BeginHibernate was attempted")
+	}
+}
+
 func TestProxy_LeastConnectionsDistribution(t *testing.T) {
 	var hits0, hits1 atomic.Int64
 	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits0.Add(1) }))

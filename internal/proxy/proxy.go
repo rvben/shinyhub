@@ -290,12 +290,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hold the route-table read lock from the pool fetch through the
+	// activeConns bump. BeginHibernate takes the write lock and inspects
+	// activeConns under it; if we released the read lock before the bump,
+	// BeginHibernate could observe activeConns=0 for a replica we have
+	// already chosen, hibernate the pool, and stop the very backends we
+	// are about to forward to.
 	p.mu.RLock()
 	pool := p.pools[slug]
 	onMiss := p.onMiss
-	p.mu.RUnlock()
-
 	if pool == nil || !poolHasAny(pool) {
+		p.mu.RUnlock()
 		if onMiss != nil {
 			go onMiss(slug)
 		}
@@ -305,7 +310,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	picked, isStickyHit := p.pickReplica(pool, slug, r)
+	picked, isStickyHit := p.pickReplicaLocked(pool, slug, r)
 	if !isStickyHit {
 		http.SetCookie(w, &http.Cookie{
 			Name:     cookiePrefix + slug,
@@ -315,37 +320,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			SameSite: http.SameSiteLaxMode,
 		})
 	}
-
 	picked.activeConns.Add(1)
+	p.mu.RUnlock()
 	defer picked.activeConns.Add(-1)
+
 	p.RecordActivity(slug)
 	picked.rp.ServeHTTP(w, r)
 }
 
-// pickReplica selects a backend for the incoming request.
+// pickReplicaLocked selects a backend for the incoming request. The caller
+// must hold p.mu (read or write); this function does not lock so that
+// ServeHTTP can hold the read lock continuously from the pool fetch
+// through the activeConns bump (see ServeHTTP for why that matters).
 //
-// First, it checks for a valid sticky cookie. If the pinned replica index is
-// live, that replica is returned and the cookie is left untouched (isStickyHit=true).
+// First, it checks for a valid sticky cookie. If the pinned replica index
+// is live, that replica is returned and the cookie is left untouched
+// (isStickyHit=true).
 //
 // Otherwise, least-connections is used: the replica with the fewest active
 // connections wins. On a tie, a pool-scoped round-robin counter determines
-// which tied candidate is preferred — this avoids always pinning cookie-less
-// traffic to the lowest-index replica.
-func (p *Proxy) pickReplica(pool *backendPool, slug string, r *http.Request) (*replicaBackend, bool) {
+// which tied candidate is preferred — this avoids always pinning
+// cookie-less traffic to the lowest-index replica.
+func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Request) (*replicaBackend, bool) {
 	if c, err := r.Cookie(cookiePrefix + slug); err == nil {
 		if idx, err := strconv.Atoi(c.Value); err == nil {
-			p.mu.RLock()
 			if idx >= 0 && idx < len(pool.replicas) && pool.replicas[idx] != nil {
-				rep := pool.replicas[idx]
-				p.mu.RUnlock()
-				return rep, true
+				return pool.replicas[idx], true
 			}
-			p.mu.RUnlock()
 		}
 	}
-
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 
 	var best *replicaBackend
 	var bestConns int64 = -1
