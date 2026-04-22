@@ -34,6 +34,8 @@ export function mountAppDetail(ctx) {
       tabEls[t].setAttribute('href', t === 'overview' ? `/apps/${slug}` : `/apps/${slug}/${t}`);
       tabEls[t].classList.toggle('active', t === tab);
       tabEls[t].setAttribute('aria-selected', String(t === tab));
+      if (t === tab) tabEls[t].setAttribute('aria-current', 'page');
+      else tabEls[t].removeAttribute('aria-current');
     }
 
     const resp = await ctx.api(`/api/apps/${slug}`);

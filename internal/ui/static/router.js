@@ -65,6 +65,11 @@ export function createRouter() {
     }
     current = view || {};
     document.title = (current && current.title) || 'ShinyHub';
+    const h1 = document.querySelector('main section:not([hidden]) h1');
+    if (h1) {
+      if (!h1.hasAttribute('tabindex')) h1.setAttribute('tabindex', '-1');
+      h1.focus({ preventScroll: true });
+    }
   }
 
   function navigate(path, opts = {}) {
