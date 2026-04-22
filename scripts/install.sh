@@ -62,4 +62,4 @@ else
 fi
 
 printf 'Installed shinyhub to %s\n' "$INSTALL_DIR"
-printf "Run 'shinyhub --help' to get started.\n"
+printf "Run 'shinyhub --help' to get started, or 'shinyhub serve' to start the server.\n"

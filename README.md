@@ -75,8 +75,9 @@ curl -fsSL https://raw.githubusercontent.com/rvben/shinyhub/main/scripts/install
 cp shinyhub.yaml.example shinyhub.yaml
 # Set auth.secret to a 32-byte random value.
 
-SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
-  shinyhub serve --config ./shinyhub.yaml
+SHINYHUB_CONFIG=./shinyhub.yaml \
+  SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
+  shinyhub serve
 ```
 
 ### From source

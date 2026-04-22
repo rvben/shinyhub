@@ -16,7 +16,7 @@ builds:
       - -s -w -X main.version={{.Version}}
 
 archives:
-  - id: combined
+  - id: shinyhub
     ids: [shinyhub]
     name_template: "shinyhub_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
