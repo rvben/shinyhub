@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.2.4](https://github.com/rvben/shinyhub/compare/v0.2.3...v0.2.4) - 2026-04-22
+
+### Breaking Changes
+
+- **cmd**: merge shiny CLI into shinyhub binary with subcommands ([e960e44](https://github.com/rvben/shinyhub/commit/e960e44d7cf80917a2a0946ba084d86fac5fddb9))
+
+### Added
+
+- **packaging**: publish sdist as stub for unsupported platforms ([2face79](https://github.com/rvben/shinyhub/commit/2face79b5463083d3e60b1b5d5ef1cfb0e1a121d))
+- **packaging**: add PyPI wheel skeleton ([c1d5e9b](https://github.com/rvben/shinyhub/commit/c1d5e9bfff6f5133f4834958095514439d36be9d))
+- **cmd**: merge shiny CLI into shinyhub binary with subcommands ([e960e44](https://github.com/rvben/shinyhub/commit/e960e44d7cf80917a2a0946ba084d86fac5fddb9))
+
+### Fixed
+
+- address code review feedback on pypi branch ([64c79bc](https://github.com/rvben/shinyhub/commit/64c79bc45c5b2f60fe1037e3efc173e9e56caa34))
+- **docker**: include serve subcommand in ENTRYPOINT ([b08bb1a](https://github.com/rvben/shinyhub/commit/b08bb1a1eda541bb453dd2cf00b3e4f66f7ad74d))
+
 ## [0.2.3](https://github.com/rvben/shinyhub/compare/v0.2.2...v0.2.3) - 2026-04-22
 
 ### Added
