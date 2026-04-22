@@ -3,6 +3,7 @@ import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
+import { mountAppDetail } from '/static/views/app-detail.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -323,9 +324,14 @@ document.addEventListener('DOMContentLoaded', () => {
       metricsLine.className = 'app-metrics';
       metricsLine.dataset.slug = app.slug;
 
-      card.appendChild(header);
-      card.appendChild(meta);
-      card.appendChild(metricsLine);
+      const link = document.createElement('a');
+      link.href = `/apps/${app.slug}`;
+      link.setAttribute('data-nav', '');
+      link.className = 'app-card-body-link';
+      link.appendChild(header);
+      link.appendChild(meta);
+      link.appendChild(metricsLine);
+      card.appendChild(link);
       card.appendChild(actions);
       gridEl.appendChild(card);
     }
@@ -2231,14 +2237,35 @@ document.addEventListener('DOMContentLoaded', () => {
   const metrics = createMetricsController({
     intervalMs: 10000,
     onMetrics: (slug, m) => {
-      const el = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
-      if (!el) return;
-      if (m.status !== 'running') { el.textContent = ''; return; }
-      const cpu = m.cpu_percent.toFixed(1);
-      const ram = m.rss_bytes >= 1 << 20
-        ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
-        : (m.rss_bytes / 1024).toFixed(0) + ' KB';
-      el.textContent = `CPU ${cpu}% · ${ram} RAM`;
+      // Grid card.
+      const gridEl = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
+      if (gridEl) {
+        if (m.status !== 'running') {
+          gridEl.textContent = '';
+        } else {
+          const cpu = m.cpu_percent.toFixed(1);
+          const ram = m.rss_bytes >= 1 << 20
+            ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
+            : (m.rss_bytes / 1024).toFixed(0) + ' KB';
+          gridEl.textContent = `CPU ${cpu}% · ${ram} RAM`;
+        }
+      }
+      // Detail header (only when the detail view for this slug is visible).
+      const detailView = document.getElementById('app-detail-view');
+      if (!detailView.hidden && location.pathname.startsWith(`/apps/${slug}`)) {
+        const cpuEl = document.getElementById('app-detail-cpu');
+        const ramEl = document.getElementById('app-detail-ram');
+        if (m.status !== 'running') {
+          cpuEl.textContent = 'CPU —';
+          ramEl.textContent = 'RAM —';
+          return;
+        }
+        cpuEl.textContent = `CPU ${m.cpu_percent.toFixed(1)}%`;
+        const ramMb = m.rss_bytes >= 1 << 20
+          ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
+          : (m.rss_bytes / 1024).toFixed(0) + ' KB';
+        ramEl.textContent = `RAM ${ramMb}`;
+      }
     },
   });
 
@@ -2266,6 +2293,11 @@ document.addEventListener('DOMContentLoaded', () => {
     updateActiveNav,
   };
 
+  const appDetailMount = mountAppDetail({
+    ...ctx,
+    openDeployModal,
+  });
+
   router.register('/', () => {
     const view = mountAppsGrid(ctx);
     updateActiveNav(location.pathname);
@@ -2273,6 +2305,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   router.register('/users', () => mountUsers({ ...ctx, loadUsers }));
   router.register('/audit-log', () => mountAuditLog({ ...ctx, loadAuditEvents }));
+  router.register('/apps/:slug',      (p) => appDetailMount({ ...p, tab: 'overview' }));
+  router.register('/apps/:slug/:tab', (p) => appDetailMount(p));
 
   async function initialize() {
     loadProviders();

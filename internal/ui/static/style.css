@@ -2407,4 +2407,15 @@ main {
   cursor: pointer;
   border-radius: 4px;
 }
+
+/* ── App detail: Overview tab ─────────────────────────────────────────────── */
+
+.overview-card { padding: 20px; border: 1px solid var(--line); border-radius: 8px; }
+.overview-dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; margin: 16px 0; }
+.overview-dl dt { color: var(--text-dim); }
+.overview-links { display: flex; gap: 16px; margin-top: 12px; }
+.overview-links a { color: var(--accent); text-decoration: none; }
+.overview-links a:hover { text-decoration: underline; }
+.app-card-body-link { display: block; color: inherit; text-decoration: none; }
+.app-card-body-link:hover strong { text-decoration: underline; }
 .kebab-list button:hover { background: rgba(56, 189, 248, 0.1); color: var(--cyan-bright); }
