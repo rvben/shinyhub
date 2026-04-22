@@ -57,11 +57,9 @@ tar -xzf "${TARBALL}"
 # Install to INSTALL_DIR, using sudo if the directory is not writable.
 if [ -w "$INSTALL_DIR" ]; then
   install -m 755 shinyhub "$INSTALL_DIR/shinyhub"
-  install -m 755 shiny    "$INSTALL_DIR/shiny"
 else
   sudo install -m 755 shinyhub "$INSTALL_DIR/shinyhub"
-  sudo install -m 755 shiny    "$INSTALL_DIR/shiny"
 fi
 
-printf 'Installed shinyhub and shiny to %s\n' "$INSTALL_DIR"
+printf 'Installed shinyhub to %s\n' "$INSTALL_DIR"
 printf "Run 'shinyhub --help' to get started.\n"
