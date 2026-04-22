@@ -764,24 +764,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(logPane, true);
   }
 
-  // --- Access modal ---
-
   let settingsSlug = null;
-
-  async function openSettingsModal(app) {
-    settingsSlug = app.slug;
-    document.getElementById('settings-app-name').textContent = app.name;
-
-    populateGeneralTab(app);
-    populateAccessPanel(app);
-    switchSettingsTab('general');
-
-    document.getElementById('settings-modal').hidden = false;
-    // Move focus to the close button for keyboard/screen-reader users.
-    document.getElementById('settings-modal-close').focus();
-
-    await refreshMemberList();
-  }
 
   function populateAccessPanel(app) {
     // Set visibility radio to current access level.
@@ -905,52 +888,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(document.getElementById('delete-error'), '');
   }
 
-  function closeSettingsModal() {
-    document.getElementById('settings-modal').hidden = true;
-    settingsSlug = null;
-    closeEnvForm();
-    // Reset data tab state.
-    const dataForm = document.getElementById('data-upload-form');
-    if (dataForm) dataForm.reset();
-    const dataProgress = document.getElementById('data-progress');
-    if (dataProgress) dataProgress.hidden = true;
-    const dataError = document.getElementById('data-error');
-    if (dataError) setError(dataError, '');
-    const dataTbody = document.getElementById('data-list');
-    if (dataTbody) dataTbody.innerHTML = '';
-    switchSettingsTab('general');
-  }
-
   // --- Environment tab ---
 
   let envEditingKey = null;
-
-  function switchSettingsTab(tabName) {
-    if (document.getElementById('settings-modal').hidden) return;
-    document.querySelectorAll('.settings-tab').forEach(t => {
-      const active = t.dataset.tab === tabName;
-      t.classList.toggle('active', active);
-      t.setAttribute('aria-selected', String(active));
-    });
-    document.getElementById('settings-general-panel').hidden = tabName !== 'general';
-    document.getElementById('settings-access-panel').hidden = tabName !== 'access';
-    document.getElementById('settings-env-panel').hidden = tabName !== 'env';
-    document.getElementById('settings-data-panel').hidden = tabName !== 'data';
-    document.getElementById('settings-schedules-panel').hidden = tabName !== 'schedules';
-    document.getElementById('settings-shared-data-panel').hidden = tabName !== 'shared-data';
-    if (tabName === 'env' && settingsSlug) {
-      refreshEnvList(settingsSlug);
-    }
-    if (tabName === 'data' && settingsSlug) {
-      refreshDataTab(settingsSlug);
-    }
-    if (tabName === 'schedules' && settingsSlug) {
-      loadSchedules(settingsSlug);
-    }
-    if (tabName === 'shared-data' && settingsSlug) {
-      loadSharedData(settingsSlug);
-    }
-  }
 
   async function refreshEnvList(slug) {
     const tbody = document.querySelector('#env-list tbody');
@@ -1309,8 +1249,6 @@ document.addEventListener('DOMContentLoaded', () => {
         closeDeployModal();
       } else if (!newAppModal.hidden) {
         closeNewAppModal();
-      } else if (!document.getElementById('settings-modal').hidden) {
-        closeSettingsModal();
       } else if (!newUserModal.hidden) {
         closeNewUserModal();
       } else if (!resetPwModal.hidden) {
@@ -1331,17 +1269,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   resetPwModal.addEventListener('click', e => {
     if (e.target === e.currentTarget) closeResetPasswordModal();
-  });
-
-  // Close modal on × or overlay click.
-  document.getElementById('settings-modal-close').addEventListener('click', closeSettingsModal);
-  document.getElementById('settings-modal').addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeSettingsModal();
-  });
-
-  // Settings tab switching.
-  document.querySelectorAll('.settings-tab').forEach(btn => {
-    btn.addEventListener('click', () => switchSettingsTab(btn.dataset.tab));
   });
 
   // General tab: hibernate radio + save button.
