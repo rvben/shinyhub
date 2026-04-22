@@ -178,21 +178,24 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 	// concurrent uploads each see the same pre-write used_bytes, both pass
 	// their quota check, and the on-disk total exceeds the cap. The lock is
 	// released before maybeRestartForChange so a slow restart does not block
-	// other uploads.
-	releaseDataLock := s.acquireDataLock(slug)
-	dataLockHeld := true
-	releaseOnce := func() {
-		if dataLockHeld {
-			releaseDataLock()
-			dataLockHeld = false
-		}
-	}
-	defer releaseOnce()
-
-	// Quota check: measure current combined usage (app bundles + data dir), then
-	// account for any existing file at the destination (overwrite-aware).
+	// other uploads. When quotas are disabled there is nothing to serialize,
+	// so the lock is skipped entirely — concurrent uploads to different files
+	// in the same slug then proceed in parallel.
 	quotaBytes := int64(s.cfg.Storage.AppQuotaMB) << 20
+	releaseOnce := func() {}
 	if quotaBytes > 0 {
+		releaseDataLock := s.acquireDataLock(slug)
+		dataLockHeld := true
+		releaseOnce = func() {
+			if dataLockHeld {
+				releaseDataLock()
+				dataLockHeld = false
+			}
+		}
+		defer releaseOnce()
+
+		// Quota check: measure current combined usage (app bundles + data dir), then
+		// account for any existing file at the destination (overwrite-aware).
 		used, err := s.appUsedBytes(slug)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "measure app size")
