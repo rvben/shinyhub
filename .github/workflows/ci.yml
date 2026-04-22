@@ -32,6 +32,4 @@ jobs:
         run: go test ./... -count=1
 
       - name: Build
-        run: |
-          go build -o /tmp/shinyhub ./cmd/shinyhub
-          go build -o /tmp/shiny ./cmd/shiny
+        run: go build -o /tmp/shinyhub ./cmd/shinyhub
