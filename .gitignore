@@ -20,3 +20,4 @@ CLAUDE.local.md
 /packaging/python/dist/
 /packaging/python/build/
 /packaging/python/src/shinyhub.egg-info/
+/packaging/python/__pycache__/

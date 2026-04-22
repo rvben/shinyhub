@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "shinyhub"
 dynamic = ["version"]
 description = "Self-hosted platform for deploying and managing Shiny apps."
-readme = "../../README.md"
+readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [
@@ -38,11 +38,24 @@ path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shinyhub"]
-# force-include is the hatchling escape hatch for files outside the
-# normal package-glob walk. CI writes the binary here right before
-# `python -m build` runs.
-force-include = { "src/shinyhub/_binary/shinyhub" = "shinyhub/_binary/shinyhub" }
 
-# Build hook sets the platform tag from SHINYHUB_WHEEL_PLATFORM.
+# Build hook owns binary inclusion + platform tag. It raises when the
+# binary is absent, which is what pip sees when falling back to sdist
+# on an unsupported platform.
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/shinyhub",
+  "pyproject.toml",
+  "hatch_build.py",
+  "README.md",
+]
+# The binary is wheel-only. Keeping it out of the sdist is what makes
+# the sdist a usable stub: pip falls back to building a wheel from it
+# on unsupported platforms, the wheel build detects the missing binary,
+# and the build fails with a clear error.
+exclude = [
+  "src/shinyhub/_binary/shinyhub",
+]

@@ -121,8 +121,35 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  sdist:
+    # Source distribution is a stub: no binary, so any wheel built from
+    # it on an unsupported platform fails with a clear error message
+    # (see packaging/python/hatch_build.py::PlatformTagHook).
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build hatchling
+          export SHINYHUB_WHEEL_VERSION="${GITHUB_REF_NAME#v}"
+          python -m build --sdist packaging/python/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: packaging/python/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: wheels
+    needs: [wheels, sdist]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -134,9 +161,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-          pattern: wheel-*
 
-      - name: List downloaded wheels
+      - name: List downloaded artifacts
         run: ls -la dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1

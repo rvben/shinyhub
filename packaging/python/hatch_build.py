@@ -10,11 +10,26 @@ CI exports two env vars before invoking ``python -m build``:
 
 Local sanity builds without either env var get sensible defaults so the
 build does not blow up; those wheels are only ever used for smoke tests.
+
+When pip falls back to building a wheel from the sdist (because no
+matching binary wheel exists for the user's platform), ``PlatformTagHook``
+raises a ``RuntimeError`` with a clear explanation — see the
+binary-existence check in ``initialize``.
 """
 import os
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from hatchling.metadata.plugin.interface import MetadataHookInterface
+
+
+UNSUPPORTED_PLATFORM_MESSAGE = """\
+shinyhub does not ship a prebuilt binary for your platform.
+Supported: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64.
+
+For other platforms:
+  - Use the Docker image: ghcr.io/rvben/shinyhub:latest
+  - Or build from source: https://github.com/rvben/shinyhub#from-source
+"""
 
 
 class VersionHook(MetadataHookInterface):
@@ -29,11 +44,21 @@ class VersionHook(MetadataHookInterface):
 
 
 class PlatformTagHook(BuildHookInterface):
-    """Sets the wheel's platform tag from SHINYHUB_WHEEL_PLATFORM."""
+    """Includes the Go binary and sets the wheel's platform tag.
+
+    Runs for the wheel target only; sdist builds skip this hook, so
+    publishing an sdist does not require the binary to be present.
+    """
 
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict) -> None:
+        binary = os.path.join(self.root, "src", "shinyhub", "_binary", "shinyhub")
+        if not os.path.isfile(binary):
+            raise RuntimeError(UNSUPPORTED_PLATFORM_MESSAGE)
+
+        build_data["force_include"][binary] = "shinyhub/_binary/shinyhub"
+
         platform = os.environ.get("SHINYHUB_WHEEL_PLATFORM")
         if not platform:
             # Local sanity builds: let hatchling assign a default. CI always
