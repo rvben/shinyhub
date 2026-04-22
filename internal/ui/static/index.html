@@ -114,6 +114,56 @@
       </div>
     </section>
 
+    <section id="app-detail-view" hidden aria-labelledby="app-detail-heading">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="/" data-nav>← Apps</a>
+      </nav>
+      <header class="app-detail-header">
+        <div class="app-detail-title-row">
+          <h1 id="app-detail-heading" class="app-detail-title"></h1>
+          <span id="app-detail-status" class="badge"></span>
+        </div>
+        <div class="app-detail-meta">
+          <span id="app-detail-slug"></span>
+          <span class="meta-sep">·</span>
+          <span id="app-detail-deploy-count"></span>
+        </div>
+        <div class="app-detail-metrics">
+          <span id="app-detail-cpu">CPU —</span>
+          <span class="meta-sep">·</span>
+          <span id="app-detail-ram">RAM —</span>
+          <span class="meta-sep">·</span>
+          <span id="app-detail-uptime">Uptime —</span>
+        </div>
+        <div class="app-detail-actions">
+          <a id="app-detail-open" href="" target="_blank" rel="noopener noreferrer" hidden>Open</a>
+          <button id="app-detail-deploy" type="button" class="btn-primary">Deploy</button>
+          <div class="kebab-menu">
+            <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">⋯</button>
+            <ul id="app-detail-kebab-menu" class="kebab-list" role="menu" hidden>
+              <li role="menuitem"><button id="app-detail-restart" type="button">Restart</button></li>
+            </ul>
+          </div>
+        </div>
+      </header>
+      <nav class="settings-tabs" role="tablist" aria-label="App sections">
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      >Overview</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="logs"          id="detail-tab-logs"          >Logs</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="deployments"   id="detail-tab-deployments"   >Deployments</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="configuration" id="detail-tab-configuration" >Configuration</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="data"          id="detail-tab-data"          >Data</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="access"        id="detail-tab-access"        >Access</a>
+      </nav>
+      <div class="app-detail-panels">
+        <section id="detail-overview-panel"      class="settings-tab-panel" role="tabpanel"></section>
+        <section id="detail-logs-panel"          class="settings-tab-panel" role="tabpanel" hidden></section>
+        <section id="detail-deployments-panel"   class="settings-tab-panel" role="tabpanel" hidden></section>
+        <section id="detail-configuration-panel" class="settings-tab-panel" role="tabpanel" hidden></section>
+        <section id="detail-data-panel"          class="settings-tab-panel" role="tabpanel" hidden></section>
+        <section id="detail-access-panel"        class="settings-tab-panel" role="tabpanel" hidden></section>
+      </div>
+    </section>
+
   <!-- Log pane: hidden overlay that shows SSE log output for one app -->
   <div id="log-pane" class="log-pane" hidden role="log" aria-label="Application logs">
     <div class="log-pane-header">
