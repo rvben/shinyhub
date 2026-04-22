@@ -164,6 +164,75 @@ func TestPatchApp_ResetToGlobalDefault(t *testing.T) {
 	}
 }
 
+// hibernate_timeout_minutes=0 disables hibernation for the app and is distinct
+// from null (use global default). The UI's "Never hibernate" radio sends 0.
+func TestPatchApp_NeverHibernate(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body, _ := json.Marshal(map[string]any{"hibernate_timeout_minutes": 0})
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["hibernate_timeout_minutes"] != float64(0) {
+		t.Errorf("expected hibernate_timeout_minutes=0 in response, got %v", resp["hibernate_timeout_minutes"])
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	if app.HibernateTimeoutMinutes == nil || *app.HibernateTimeoutMinutes != 0 {
+		t.Errorf("expected DB value 0 (never hibernate), got %v", app.HibernateTimeoutMinutes)
+	}
+}
+
+func TestPatchApp_HibernateTimeoutRejectsNegative(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body := []byte(`{"hibernate_timeout_minutes": -5}`)
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for negative timeout, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	if app.HibernateTimeoutMinutes != nil {
+		t.Errorf("expected DB unchanged on rejection, got %v", app.HibernateTimeoutMinutes)
+	}
+}
+
+func TestPatchApp_HibernateTimeoutRejectsNonInteger(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body := []byte(`{"hibernate_timeout_minutes": "60"}`)
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for string value, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestListApps_FilteredByAccess(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

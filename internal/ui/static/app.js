@@ -782,11 +782,110 @@ document.addEventListener('DOMContentLoaded', () => {
     dangerZone.hidden = !canManageApp(state.user, app);
     document.getElementById('delete-confirm-slug').textContent = app.slug;
 
+    populateGeneralTab(app);
+    switchSettingsTab('general');
+
     document.getElementById('settings-modal').hidden = false;
     // Move focus to the close button for keyboard/screen-reader users.
     document.getElementById('settings-modal-close').focus();
 
     await refreshMemberList();
+  }
+
+  // --- General tab ---
+
+  function hibernateModeFromValue(minutes) {
+    if (minutes === null || minutes === undefined) return 'default';
+    if (minutes === 0) return 'never';
+    return 'custom';
+  }
+
+  function populateGeneralTab(app) {
+    const mode = hibernateModeFromValue(app.hibernate_timeout_minutes);
+    document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
+      r.checked = r.value === mode;
+    });
+
+    const customInput = document.getElementById('hibernate-custom-minutes');
+    customInput.value = mode === 'custom' ? String(app.hibernate_timeout_minutes) : '';
+    customInput.disabled = mode !== 'custom';
+
+    const canEdit = canManageApp(state.user, app);
+    document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
+      r.disabled = !canEdit;
+    });
+    if (!canEdit) customInput.disabled = true;
+    document.getElementById('hibernate-save-btn').hidden = !canEdit;
+
+    setError(document.getElementById('hibernate-error'), '');
+    setHidden(document.getElementById('hibernate-status'), true);
+  }
+
+  function onHibernateModeChange() {
+    const selected = document.querySelector('input[name="hibernate-mode"]:checked');
+    const customInput = document.getElementById('hibernate-custom-minutes');
+    const isCustom = selected && selected.value === 'custom';
+    customInput.disabled = !isCustom;
+    if (isCustom && !customInput.value) customInput.value = '60';
+    if (isCustom) customInput.focus();
+    setError(document.getElementById('hibernate-error'), '');
+    setHidden(document.getElementById('hibernate-status'), true);
+  }
+
+  async function saveHibernateSettings() {
+    if (!settingsSlug) return;
+    const errEl = document.getElementById('hibernate-error');
+    const statusEl = document.getElementById('hibernate-status');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+
+    const selected = document.querySelector('input[name="hibernate-mode"]:checked');
+    if (!selected) {
+      setError(errEl, 'Pick an option.');
+      return;
+    }
+
+    let payload;
+    if (selected.value === 'default') {
+      payload = { hibernate_timeout_minutes: null };
+    } else if (selected.value === 'never') {
+      payload = { hibernate_timeout_minutes: 0 };
+    } else {
+      const raw = document.getElementById('hibernate-custom-minutes').value.trim();
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n) || n < 1) {
+        setError(errEl, 'Enter a whole number of minutes (1 or more).');
+        return;
+      }
+      payload = { hibernate_timeout_minutes: n };
+    }
+
+    const btn = document.getElementById('hibernate-save-btn');
+    btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      btn.disabled = false;
+      setError(errEl, 'Failed to save. Check your connection.');
+      return;
+    }
+    btn.disabled = false;
+
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to save.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+
+    statusEl.textContent = 'Saved.';
+    setHidden(statusEl, false);
+    await loadApps();
   }
 
   function resetDangerZone() {
@@ -811,7 +910,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (dataError) setError(dataError, '');
     const dataTbody = document.getElementById('data-list');
     if (dataTbody) dataTbody.innerHTML = '';
-    switchSettingsTab('access');
+    switchSettingsTab('general');
   }
 
   // --- Environment tab ---
@@ -824,6 +923,7 @@ document.addEventListener('DOMContentLoaded', () => {
       t.classList.toggle('active', active);
       t.setAttribute('aria-selected', String(active));
     });
+    document.getElementById('settings-general-panel').hidden = tabName !== 'general';
     document.getElementById('settings-access-panel').hidden = tabName !== 'access';
     document.getElementById('settings-env-panel').hidden = tabName !== 'env';
     document.getElementById('settings-data-panel').hidden = tabName !== 'data';
@@ -1340,6 +1440,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.settings-tab').forEach(btn => {
     btn.addEventListener('click', () => switchSettingsTab(btn.dataset.tab));
   });
+
+  // General tab: hibernate radio + save button.
+  document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
+    r.addEventListener('change', onHibernateModeChange);
+  });
+  document.getElementById('hibernate-save-btn').addEventListener('click', saveHibernateSettings);
 
   // Environment tab: add button, form submit/cancel.
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));

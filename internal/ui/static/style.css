@@ -1891,6 +1891,10 @@ main {
   display: contents;
 }
 
+.settings-tab-panel[hidden] {
+  display: none;
+}
+
 /* ── Environment tab ── */
 .env-header {
   display: flex;
@@ -2194,3 +2198,53 @@ main {
   pointer-events: none;
 }
 .toast.show { opacity: 1; }
+
+/* General tab — hibernate options */
+.hibernate-options label {
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+.hibernate-options label > span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.hibernate-option-title {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+.hibernate-option-help {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+.hibernate-custom-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+.hibernate-custom-row input[type="number"] {
+  width: 6rem;
+  padding: 0.35rem 0.5rem;
+  font-family: var(--mono);
+  background: var(--bg-deep);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+}
+.hibernate-custom-row input[type="number"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.hibernate-custom-unit {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.hibernate-status {
+  font-size: 0.85rem;
+  color: var(--green, #4ade80);
+  margin-left: 0.6rem;
+  align-self: center;
+}

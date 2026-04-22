@@ -239,14 +239,52 @@
           <button id="settings-modal-close" type="button" aria-label="Close settings modal">×</button>
         </div>
         <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
-          <button type="button" class="settings-tab active" role="tab" aria-selected="true" aria-controls="settings-access-panel" data-tab="access">Access</button>
+          <button type="button" class="settings-tab active" role="tab" aria-selected="true" aria-controls="settings-general-panel" data-tab="general">General</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-access-panel" data-tab="access">Access</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-env-panel" data-tab="env">Environment</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-data-panel" data-tab="data">Data</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-schedules-panel" data-tab="schedules">Schedules</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settings-shared-data-panel" data-tab="shared-data">Shared data</button>
         </div>
         <div class="modal-body">
-          <section id="settings-access-panel" class="settings-tab-panel" role="tabpanel">
+          <section id="settings-general-panel" class="settings-tab-panel" role="tabpanel">
+            <fieldset class="access-level hibernate-options">
+              <legend>Hibernation</legend>
+              <label>
+                <input type="radio" name="hibernate-mode" value="default">
+                <span>
+                  <span class="hibernate-option-title">Use global default</span>
+                  <span class="hibernate-option-help">Apps idle for the server-wide threshold are stopped.</span>
+                </span>
+              </label>
+              <label>
+                <input type="radio" name="hibernate-mode" value="never">
+                <span>
+                  <span class="hibernate-option-title">Never hibernate</span>
+                  <span class="hibernate-option-help">Keep this app running continuously. Useful for apps with large in-memory state.</span>
+                </span>
+              </label>
+              <label>
+                <input type="radio" name="hibernate-mode" value="custom">
+                <span>
+                  <span class="hibernate-option-title">Custom timeout</span>
+                  <span class="hibernate-option-help">Hibernate after this many minutes of inactivity.</span>
+                  <span class="hibernate-custom-row">
+                    <input id="hibernate-custom-minutes" type="number" min="1" max="525600" step="1"
+                           inputmode="numeric" autocomplete="off" disabled aria-label="Custom hibernate timeout in minutes">
+                    <span class="hibernate-custom-unit">minutes</span>
+                  </span>
+                </span>
+              </label>
+            </fieldset>
+            <div class="env-form-actions">
+              <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden>Save</button>
+              <span id="hibernate-status" class="hibernate-status" hidden></span>
+            </div>
+            <p id="hibernate-error" class="error" hidden></p>
+          </section>
+
+          <section id="settings-access-panel" class="settings-tab-panel" role="tabpanel" hidden>
             <fieldset class="access-level">
               <legend>Visibility</legend>
               <label><input type="radio" name="access-level" value="private"> Private</label>
