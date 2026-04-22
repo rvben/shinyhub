@@ -2,8 +2,48 @@ package main
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
+
+func TestRootCmd_HasServeSubcommand(t *testing.T) {
+	for _, sub := range rootCmd.Commands() {
+		if sub.Name() == "serve" {
+			return
+		}
+	}
+	t.Fatalf("rootCmd does not have a `serve` subcommand; has: %v", rootCmd.Commands())
+}
+
+func TestRootCmd_HasDeploySubcommand(t *testing.T) {
+	for _, sub := range rootCmd.Commands() {
+		if sub.Name() == "deploy" {
+			return
+		}
+	}
+	t.Fatalf("rootCmd does not have a `deploy` subcommand (CLI tree not grafted); has: %v", rootCmd.Commands())
+}
+
+func TestRootCmd_UseIsShinyhub(t *testing.T) {
+	if rootCmd.Use != "shinyhub" {
+		t.Fatalf("rootCmd.Use = %q, want \"shinyhub\"", rootCmd.Use)
+	}
+}
+
+func TestRootCmd_VersionMatchesLdflags(t *testing.T) {
+	// main's `version` var is "dev" in tests (no ldflags). Confirm it's wired
+	// into the cobra Version field so `shinyhub --version` reports something.
+	if rootCmd.Version == "" {
+		t.Fatal("rootCmd.Version is empty; should be set to the ldflags-injected version")
+	}
+}
+
+func TestRootCmd_HelpMentionsShinyhub(t *testing.T) {
+	out := rootCmd.Short + " " + rootCmd.Long
+	if !strings.Contains(strings.ToLower(out), "shinyhub") {
+		t.Fatalf("rootCmd help does not mention shinyhub: Short=%q Long=%q", rootCmd.Short, rootCmd.Long)
+	}
+}
 
 // TestIsLongLivedAPIRoute documents which routes bypass the 30s API
 // timeout. The data PUT path streams large user files and must be

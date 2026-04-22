@@ -17,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/cli"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/data"
 	"github.com/rvben/shinyhub/internal/db"
@@ -30,42 +31,68 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/secrets"
 	"github.com/rvben/shinyhub/internal/ui"
+	"github.com/spf13/cobra"
 )
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z".
-// It defaults to "dev" for local builds.
+// It defaults to "dev" for local builds. Propagated to internal/cli via
+// cli.SetVersion in init().
 var version = "dev"
 
-func main() {
-	logger := logging.New()
-	slog.SetDefault(logger)
+var rootCmd = &cobra.Command{
+	Use:     "shinyhub",
+	Short:   "ShinyHub — self-hosted platform for deploying and managing Shiny apps",
+	Version: version,
+}
 
+var serveCmd = &cobra.Command{
+	Use:   "serve",
+	Short: "Run the ShinyHub server",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		logger := logging.New()
+		slog.SetDefault(logger)
+		return runServe(ctx, logger)
+	},
+}
+
+func init() {
+	cli.SetVersion(version)
+	rootCmd.Version = version
+	rootCmd.AddCommand(serveCmd)
+	cli.AddCommandsTo(rootCmd)
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func runServe(ctx context.Context, logger *slog.Logger) error {
 	cfgPath := "shinyhub.yaml"
 	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
 		cfgPath = v
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		slog.Error("load config", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	if err := os.MkdirAll(cfg.Storage.AppsDir, 0755); err != nil {
-		slog.Error("create apps dir", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("create apps dir: %w", err)
 	}
 
 	if err := os.MkdirAll(cfg.Storage.AppDataDir, 0o755); err != nil {
-		slog.Error("create app-data dir", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("create app-data dir: %w", err)
 	}
 
 	sweepOrphanTempfiles(cfg.Storage.AppDataDir)
 
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
-		slog.Error("open db", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -73,8 +100,7 @@ func main() {
 		}
 	}()
 	if err := store.Migrate(); err != nil {
-		slog.Error("db migrate", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("db migrate: %w", err)
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
@@ -86,15 +112,13 @@ func main() {
 	if adminUser := os.Getenv("SHINYHUB_ADMIN_USER"); adminUser != "" {
 		adminPass := os.Getenv("SHINYHUB_ADMIN_PASSWORD")
 		if adminPass == "" {
-			slog.Error("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
-			os.Exit(1)
+			return fmt.Errorf("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
 		}
 		_, err := store.GetUserByUsername(adminUser)
 		if errors.Is(err, db.ErrNotFound) {
 			hash, err := auth.HashPassword(adminPass)
 			if err != nil {
-				slog.Error("hash admin password", "err", err)
-				os.Exit(1)
+				return fmt.Errorf("hash admin password: %w", err)
 			}
 			if err := store.CreateUser(db.CreateUserParams{
 				Username:     adminUser,
@@ -106,8 +130,7 @@ func main() {
 				slog.Info("admin user created", "username", adminUser)
 			}
 		} else if err != nil {
-			slog.Error("check admin user", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("check admin user: %w", err)
 		}
 	}
 
@@ -121,8 +144,7 @@ func main() {
 			cfg.Runtime.Docker.NetworkMode,
 		)
 		if err != nil {
-			slog.Error("docker runtime", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("docker runtime: %w", err)
 		}
 		rt = dockerRT
 		slog.Info("runtime configured", "mode", "docker", "socket", cfg.Runtime.Docker.Socket, "network_mode", cfg.Runtime.Docker.NetworkMode)
@@ -131,8 +153,7 @@ func main() {
 		slog.Info("runtime configured", "mode", "native")
 	default:
 		// Unreachable: config.Load validates Runtime.Mode before we get here.
-		slog.Error("unsupported runtime mode", "mode", cfg.Runtime.Mode)
-		os.Exit(1)
+		return fmt.Errorf("unsupported runtime mode: %s", cfg.Runtime.Mode)
 	}
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	mgr.SetEnvResolver(func(slug string) ([]string, error) {
@@ -219,8 +240,7 @@ func main() {
 		)
 		oidcCancel()
 		if err != nil {
-			slog.Error("oidc init", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("oidc init: %w", err)
 		}
 		srv.SetOIDCProvider(p)
 		slog.Info("oidc configured", "display_name", cfg.OAuth.OIDC.DisplayName, "issuer", cfg.OAuth.OIDC.IssuerURL)
@@ -255,9 +275,6 @@ func main() {
 	}
 	lifecycle.RecoverProcesses(store, mgr, prx, lister)
 
-	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
 	defer cancelWatcher()
 	watcherDone := make(chan struct{})
@@ -272,8 +289,7 @@ func main() {
 	schedCtx, cancelSched := context.WithCancel(context.Background())
 	defer cancelSched()
 	if err := sched.Start(schedCtx); err != nil {
-		slog.Error("start scheduler", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("start scheduler: %w", err)
 	}
 	slog.Info("scheduler started")
 
@@ -329,8 +345,7 @@ func main() {
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		slog.Error("listen", "addr", addr, "err", err)
-		os.Exit(1)
+		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
 	serveErr := make(chan error, 1)
@@ -348,10 +363,9 @@ func main() {
 		if err != nil {
 			cancelSched()
 			cancelWatcher()
-			slog.Error("http server", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("http server: %w", err)
 		}
-	case <-rootCtx.Done():
+	case <-ctx.Done():
 		slog.Info("shutdown signal received, draining")
 	}
 
@@ -365,6 +379,7 @@ func main() {
 	cancelWatcher()
 	<-watcherDone
 	slog.Info("shutdown complete")
+	return nil
 }
 
 // sweepOrphanTempfiles removes stale entries from each app's
