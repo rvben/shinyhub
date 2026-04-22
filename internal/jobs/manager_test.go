@@ -374,6 +374,85 @@ func TestManager_Run_OverlapQueue_QueuesOneAndSkipsRest(t *testing.T) {
 	waitForCalls(t, rt, 2, 2*time.Second)
 }
 
+// TestManager_Run_OverlapQueue_CancelOfQueuedRunSkipsExecution verifies that
+// cancelling a queued (not-yet-running) overlap is honored: the run must be
+// finalized as "cancelled" without ever invoking RunOnce. Prior to the fix,
+// registerActive only happened inside execute, so a queued goroutine blocked
+// on the per-schedule mutex had no entry in m.active and Cancel silently
+// no-op'd; once the active run finished the queued run executed anyway.
+func TestManager_Run_OverlapQueue_CancelOfQueuedRunSkipsExecution(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, block: block}
+	st := newFakeStore(makeSchedule("queue", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	// Run #1 — starts and blocks inside RunOnce, holding the per-schedule lock.
+	id1, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	_ = id1
+	// Let the goroutine reach RunOnce so the per-schedule lock is held.
+	// We can't waitForCalls here — fakeRuntime only increments calls
+	// after the block channel closes.
+	time.Sleep(50 * time.Millisecond)
+
+	// Run #2 — queues behind #1 (semaphore admits, mu.Lock blocks).
+	id2, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	// Cancel the queued run BEFORE the active run finishes. The cancel
+	// must reach the queued goroutine via its registered context.
+	if err := m.Cancel(id2); err != nil {
+		t.Fatalf("Cancel queued run: %v", err)
+	}
+
+	// Release run #1. Run #2's goroutine acquires mu, observes ctx.Err()
+	// is non-nil, finalises status="cancelled", and returns without
+	// invoking RunOnce.
+	close(block)
+
+	// Poll for run #2 finalisation. We do not use waitForCalls because
+	// rt.calls must stay at 1 — the assertion below depends on that.
+	// Read FinishedAt and Status under the same lock that FinishScheduleRun
+	// writes under to keep -race happy.
+	deadline := time.Now().Add(2 * time.Second)
+	var (
+		r2Found  bool
+		r2Status string
+	)
+	for time.Now().Before(deadline) {
+		st.mu.Lock()
+		r := st.runs[id2]
+		var finished bool
+		if r != nil && r.FinishedAt != nil {
+			finished = true
+			r2Status = r.Status
+		}
+		st.mu.Unlock()
+		if finished {
+			r2Found = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !r2Found {
+		t.Fatal("queued run #2 never finalised after cancel + release")
+	}
+	if r2Status != "cancelled" {
+		t.Errorf("queued run after cancel: status=%q, want %q", r2Status, "cancelled")
+	}
+
+	rt.mu.Lock()
+	calls := rt.calls
+	rt.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("RunOnce calls=%d, want 1 — queued run must not execute after cancel", calls)
+	}
+}
+
 // TestManager_Run_PersistsLogPath verifies that Manager calls SetScheduleRunLogPath
 // with a non-empty path after opening the log file for a run.
 func TestManager_Run_PersistsLogPath(t *testing.T) {

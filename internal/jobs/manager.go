@@ -145,9 +145,14 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, u
 		return 0, err
 	}
 
+	ctx, cancel := m.buildRunContext(sched)
+	m.registerActive(runID, cancel)
+
 	go func() {
 		defer mu.Unlock()
-		m.execute(sched, app, runID, trigger, userID)
+		defer cancel()
+		defer m.unregisterActive(runID)
+		m.execute(ctx, sched, app, runID, trigger, userID)
 	}()
 
 	return runID, nil
@@ -157,6 +162,12 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, u
 // one run executes at a time (per-schedule mutex) and at most one further
 // run waits behind it. Any additional concurrent run finds the semaphore
 // full and is recorded as skipped_overlap.
+//
+// The cancel context is registered up-front, before mu.Lock blocks the
+// queued goroutine. Without that, Cancel() on a run waiting for its turn
+// would silently no-op and the run would still execute when its turn
+// arrived. After acquiring mu the goroutine checks ctx.Err() and
+// short-circuits to status="cancelled" without invoking the runtime.
 func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, userID *int64) (int64, error) {
 	m.mu.Lock()
 	sem := m.queueChan(sched.ID)
@@ -176,11 +187,24 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 		return 0, err
 	}
 
+	ctx, cancel := m.buildRunContext(sched)
+	m.registerActive(runID, cancel)
+
 	go func() {
 		defer func() { <-sem }()
+		defer cancel()
+		defer m.unregisterActive(runID)
+
 		mu.Lock()
 		defer mu.Unlock()
-		m.execute(sched, app, runID, trigger, userID)
+
+		if ctx.Err() != nil {
+			// Cancel arrived while we were queued; do not invoke the
+			// runtime — just record the run as cancelled.
+			m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
+			return
+		}
+		m.execute(ctx, sched, app, runID, trigger, userID)
 	}()
 
 	return runID, nil
@@ -192,8 +216,28 @@ func (m *Manager) runConcurrent(sched *db.Schedule, app *db.App, trigger string,
 	if err != nil {
 		return 0, err
 	}
-	go m.execute(sched, app, runID, trigger, userID)
+
+	ctx, cancel := m.buildRunContext(sched)
+	m.registerActive(runID, cancel)
+
+	go func() {
+		defer cancel()
+		defer m.unregisterActive(runID)
+		m.execute(ctx, sched, app, runID, trigger, userID)
+	}()
+
 	return runID, nil
+}
+
+// buildRunContext returns the cancellation context used for one schedule
+// run, honoring the schedule's timeout. The caller owns the cancel func
+// and must defer it (cancel is also placed in m.active so a Cancel() RPC
+// can trigger it from outside).
+func (m *Manager) buildRunContext(sched *db.Schedule) (context.Context, context.CancelFunc) {
+	if sched.TimeoutSeconds > 0 {
+		return context.WithTimeout(context.Background(), time.Duration(sched.TimeoutSeconds)*time.Second)
+	}
+	return context.WithCancel(context.Background())
 }
 
 // insertRunRow creates a schedule_runs row with status "running" and returns its ID.
@@ -233,21 +277,11 @@ func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int6
 }
 
 // execute performs the actual command run: building params, calling RunOnce,
-// and recording the final status. It is always called in a goroutine.
-func (m *Manager) execute(sched *db.Schedule, app *db.App, runID int64, trigger string, userID *int64) {
-	// Build timeout context.
-	var ctx context.Context
-	var cancel context.CancelFunc
-	if sched.TimeoutSeconds > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(sched.TimeoutSeconds)*time.Second)
-	} else {
-		ctx, cancel = context.WithCancel(context.Background())
-	}
-	defer cancel()
-
-	m.registerActive(runID, cancel)
-	defer m.unregisterActive(runID)
-
+// and recording the final status. It is always called in a goroutine. ctx
+// is owned and cancelled by the caller; execute does not register/unregister
+// it, because for the queue policy the cancel must be observable while the
+// goroutine is still blocked on the per-schedule mutex (see runWithQueue).
+func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, runID int64, trigger string, userID *int64) {
 	// Build log file path and create directory.
 	logDir := filepath.Join(m.appsDir, app.Slug, "schedules", fmt.Sprintf("%d", sched.ID))
 	if err := os.MkdirAll(logDir, 0o750); err != nil {
