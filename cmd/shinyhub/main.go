@@ -326,6 +326,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		w.Write([]byte(`{"ready":true}`))
 	})
 	mux.Handle("/static/", ui.Handler())
+
+	// SPA routes: /apps/<slug>..., /users, /audit-log. The SPA handler 404s
+	// anything outside its allowlist, so legitimate unknowns still return 404
+	// rather than rendering the SPA shell.
+	spa := ui.SPAHandler()
+	mux.Handle("/apps/", spa)
+	mux.Handle("/users", spa)
+	mux.Handle("/audit-log", spa)
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
