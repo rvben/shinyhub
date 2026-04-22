@@ -62,3 +62,61 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  wheels:
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64, wheel-platform: manylinux_2_17_x86_64 }
+          - { goos: linux,  goarch: arm64, wheel-platform: manylinux_2_17_aarch64 }
+          - { goos: darwin, goarch: amd64, wheel-platform: macosx_11_0_x86_64 }
+          - { goos: darwin, goarch: arm64, wheel-platform: macosx_11_0_arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download binary from GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TARBALL="shinyhub_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          mkdir -p /tmp/dl
+          gh release download "$TAG" -p "$TARBALL" -D /tmp/dl
+          tar -xzf "/tmp/dl/$TARBALL" -C /tmp/dl
+          install -m 755 /tmp/dl/shinyhub packaging/python/src/shinyhub/_binary/shinyhub
+
+      - name: Build wheel
+        env:
+          SHINYHUB_WHEEL_PLATFORM: ${{ matrix.wheel-platform }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build hatchling
+          export SHINYHUB_WHEEL_VERSION="${GITHUB_REF_NAME#v}"
+          python -m build --wheel packaging/python/
+
+      - name: Smoke-test wheel on native runner
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install packaging/python/dist/*.whl
+          OUT="$(/tmp/venv/bin/shinyhub --version)"
+          echo "Binary reported: $OUT"
+          EXPECTED="${GITHUB_REF_NAME#v}"
+          echo "$OUT" | grep -q "$EXPECTED" \
+            || { echo "shinyhub --version output '$OUT' does not contain '$EXPECTED'"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: packaging/python/dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
