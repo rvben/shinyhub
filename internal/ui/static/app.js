@@ -312,7 +312,7 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsButton.className = 'btn btn-settings';
         settingsButton.textContent = 'Settings';
         settingsButton.setAttribute('aria-label', `Open settings for ${app.name}`);
-        settingsButton.addEventListener('click', () => openSettingsModal(app));
+        settingsButton.addEventListener('click', () => router.navigate(`/apps/${app.slug}/configuration`));
         actions.appendChild(settingsButton);
       }
 
@@ -780,6 +780,18 @@ document.addEventListener('DOMContentLoaded', () => {
     settingsSlug = app.slug;
     document.getElementById('settings-app-name').textContent = app.name;
 
+    populateGeneralTab(app);
+    populateAccessPanel(app);
+    switchSettingsTab('general');
+
+    document.getElementById('settings-modal').hidden = false;
+    // Move focus to the close button for keyboard/screen-reader users.
+    document.getElementById('settings-modal-close').focus();
+
+    await refreshMemberList();
+  }
+
+  function populateAccessPanel(app) {
     // Set visibility radio to current access level.
     const radios = document.querySelectorAll('input[name="access-level"]');
     radios.forEach(r => { r.checked = r.value === app.access; });
@@ -794,15 +806,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const dangerZone = document.getElementById('danger-zone');
     dangerZone.hidden = !canManageApp(state.user, app);
     document.getElementById('delete-confirm-slug').textContent = app.slug;
-
-    populateGeneralTab(app);
-    switchSettingsTab('general');
-
-    document.getElementById('settings-modal').hidden = false;
-    // Move focus to the close button for keyboard/screen-reader users.
-    document.getElementById('settings-modal-close').focus();
-
-    await refreshMemberList();
   }
 
   // --- General tab ---
@@ -931,6 +934,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let envEditingKey = null;
 
   function switchSettingsTab(tabName) {
+    if (document.getElementById('settings-modal').hidden) return;
     document.querySelectorAll('.settings-tab').forEach(t => {
       const active = t.dataset.tab === tabName;
       t.classList.toggle('active', active);
@@ -1454,8 +1458,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    closeSettingsModal();
-    await loadApps();
+    router.navigate('/');
   });
 
   function renderNewAppSnippet(slug) {
@@ -2173,6 +2176,14 @@ document.addEventListener('DOMContentLoaded', () => {
     canManageApp,
     renderGridVerbatim,
     updateActiveNav,
+    setSettingsSlug: (slug) => { settingsSlug = slug; },
+    populateGeneralTab,
+    populateAccessPanel,
+    refreshEnvList,
+    refreshDataTab,
+    loadSchedules,
+    loadSharedData,
+    refreshMemberList,
   };
 
   const appDetailMount = mountAppDetail({

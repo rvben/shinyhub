@@ -69,6 +69,15 @@ export function mountAppDetail(ctx) {
     if (tab === 'deployments') {
       await renderDeployments(panels.deployments, app, ctx);
     }
+    if (tab === 'configuration') {
+      renderConfiguration(panels.configuration, app, ctx);
+    }
+    if (tab === 'data') {
+      renderData(panels.data, app, ctx);
+    }
+    if (tab === 'access') {
+      renderAccess(panels.access, app, ctx);
+    }
 
     view.hidden = false;
     ctx.updateActiveNav(location.pathname);
@@ -183,4 +192,23 @@ function renderOverview(panel, app, ctx) {
       </div>
     </section>
   `;
+}
+
+function renderConfiguration(panel, app, ctx) {
+  ctx.setSettingsSlug(app.slug);
+  ctx.populateGeneralTab(app);
+  ctx.refreshEnvList(app.slug);
+  ctx.loadSchedules(app.slug);
+}
+
+function renderData(panel, app, ctx) {
+  ctx.setSettingsSlug(app.slug);
+  ctx.refreshDataTab(app.slug);
+  ctx.loadSharedData(app.slug);
+}
+
+function renderAccess(panel, app, ctx) {
+  ctx.setSettingsSlug(app.slug);
+  ctx.populateAccessPanel(app);
+  ctx.refreshMemberList();
 }

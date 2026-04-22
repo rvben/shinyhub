@@ -1415,7 +1415,8 @@ main {
   align-items: center;
 }
 
-.modal-card form label {
+.modal-card form label,
+.settings-tab-panel form label {
   display: block;
   margin-top: 0.75rem;
   font-size: 0.82rem;
@@ -1428,7 +1429,13 @@ main {
 .modal-card form input[type="number"],
 .modal-card form input:not([type]),
 .modal-card form select,
-.modal-card form textarea {
+.modal-card form textarea,
+.settings-tab-panel input[type="text"],
+.settings-tab-panel input[type="password"],
+.settings-tab-panel input[type="email"],
+.settings-tab-panel input[type="number"],
+.settings-tab-panel select,
+.settings-tab-panel textarea {
   width: 100%;
   margin-top: 0.25rem;
   padding: 0.55rem 0.75rem;
@@ -1442,7 +1449,8 @@ main {
   transition: border-color var(--ease), box-shadow var(--ease);
 }
 
-.modal-card form textarea {
+.modal-card form textarea,
+.settings-tab-panel textarea {
   resize: vertical;
   min-height: 4.5rem;
   line-height: 1.4;
@@ -1454,13 +1462,20 @@ main {
 .modal-card form input[type="number"]:focus,
 .modal-card form input:not([type]):focus,
 .modal-card form select:focus,
-.modal-card form textarea:focus {
+.modal-card form textarea:focus,
+.settings-tab-panel input[type="text"]:focus,
+.settings-tab-panel input[type="password"]:focus,
+.settings-tab-panel input[type="email"]:focus,
+.settings-tab-panel input[type="number"]:focus,
+.settings-tab-panel select:focus,
+.settings-tab-panel textarea:focus {
   outline: none;
   border-color: var(--cyan-bright);
   box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
 }
 
-.modal-card form input[type="checkbox"] {
+.modal-card form input[type="checkbox"],
+.settings-tab-panel input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
   width: 15px;
@@ -1476,13 +1491,15 @@ main {
   transition: all var(--ease);
 }
 
-.modal-card form input[type="checkbox"]:checked {
+.modal-card form input[type="checkbox"]:checked,
+.settings-tab-panel input[type="checkbox"]:checked {
   border-color: var(--cyan-bright);
   background: var(--cyan-bright);
   box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
 }
 
-.modal-card form input[type="checkbox"]:checked::after {
+.modal-card form input[type="checkbox"]:checked::after,
+.settings-tab-panel input[type="checkbox"]:checked::after {
   content: '';
   position: absolute;
   top: 1px;
@@ -1494,18 +1511,21 @@ main {
   transform: rotate(45deg);
 }
 
-.modal-card form input[type="checkbox"]:focus-visible {
+.modal-card form input[type="checkbox"]:focus-visible,
+.settings-tab-panel input[type="checkbox"]:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(56,189,248,0.25);
 }
 
-.modal-card form label:has(> input[type="checkbox"]) {
+.modal-card form label:has(> input[type="checkbox"]),
+.settings-tab-panel label:has(> input[type="checkbox"]) {
   display: flex;
   align-items: center;
   cursor: pointer;
 }
 
-.modal-card form select {
+.modal-card form select,
+.settings-tab-panel select {
   font-family: var(--font);
   appearance: none;
   -webkit-appearance: none;
