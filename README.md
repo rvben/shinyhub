@@ -8,7 +8,7 @@ OAuth or OIDC, and hibernate idle apps automatically.
 
 ## Features
 
-- **Deploy from CLI:** `shiny deploy` uploads a bundle and brings the app up.
+- **Deploy from CLI:** `shinyhub deploy` uploads a bundle and brings the app up.
 - **Reverse proxy:** one URL per app under `/app/<slug>/`.
 - **Hibernation:** idle apps are stopped and restarted on demand.
 - **Auth:** username/password, GitHub OAuth, Google OAuth, or generic OIDC
@@ -16,7 +16,7 @@ OAuth or OIDC, and hibernate idle apps automatically.
 - **Access control:** public, private, or shared apps; member roles.
 - **Per-app env vars & secrets:** encrypted at rest with AES-256-GCM.
 - **Persistent data dir:** each app gets a `data/` directory that survives
-  deploys, with `shiny data push|ls|rm` and a UI Data tab.
+  deploys, with `shinyhub data push|ls|rm` and a UI Data tab.
 - **Scheduled jobs + shared data:** per-app cron schedules that run as
   short-lived processes against the bundle, independent of whether the app is
   serving traffic. One app's data dir can be mounted read-only into another at
@@ -31,6 +31,18 @@ OAuth or OIDC, and hibernate idle apps automatically.
 - **Single binary, SQLite, no external deps.**
 
 ## Quick start
+
+### Install from PyPI
+
+ShinyHub is published to PyPI. If you have `uv` or `pip`:
+
+```bash
+uv tool install shinyhub      # installs shinyhub into an isolated tool venv
+# or, one-shot without installing:
+uvx shinyhub deploy ./my-app --slug demo
+# or, with pip:
+pip install shinyhub
+```
 
 ### Docker (recommended)
 
@@ -64,7 +76,7 @@ cp shinyhub.yaml.example shinyhub.yaml
 # Set auth.secret to a 32-byte random value.
 
 SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
-  shinyhub --config ./shinyhub.yaml
+  shinyhub serve --config ./shinyhub.yaml
 ```
 
 ### From source
@@ -73,7 +85,6 @@ SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
 git clone https://github.com/rvben/shinyhub.git
 cd shinyhub
 go build -o bin/shinyhub ./cmd/shinyhub
-go build -o bin/shiny ./cmd/shiny
 ```
 
 ## Configuration
@@ -98,11 +109,11 @@ can never be read back through the API or UI.
 ### CLI
 
 ```
-shiny env set demo AWS_REGION=eu-west-1
-shiny env set demo AWS_SECRET_ACCESS_KEY --secret --stdin    # value from stdin
-shiny env set demo LOG_LEVEL=debug --restart                 # restart the app after setting
-shiny env ls  demo
-shiny env rm  demo OLD_VAR
+shinyhub env set demo AWS_REGION=eu-west-1
+shinyhub env set demo AWS_SECRET_ACCESS_KEY --secret --stdin    # value from stdin
+shinyhub env set demo LOG_LEVEL=debug --restart                 # restart the app after setting
+shinyhub env ls  demo
+shinyhub env rm  demo OLD_VAR
 ```
 
 Keys must match `[A-Z_][A-Z0-9_]*`. Values are capped at 64 KiB each, with
@@ -155,10 +166,10 @@ where the first segment is a file, directory, or symlink named `data` (a 422
 with the offending path). Push data in separately:
 
 ```
-shiny data push <slug> ./seed.parquet
-shiny data push <slug> ./big.csv --dest datasets/2026.csv --restart
-shiny data ls   <slug>
-shiny data rm   <slug> stale.csv
+shinyhub data push <slug> ./seed.parquet
+shinyhub data push <slug> ./big.csv --dest datasets/2026.csv --restart
+shinyhub data ls   <slug>
+shinyhub data rm   <slug> stale.csv
 ```
 
 The same operations are available from the UI under **Settings → Data**.
@@ -197,8 +208,8 @@ or DuckDB in read-write mode does not survive multi-process writes.
 └────────────┘             │                  │
                            │  ┌────────────┐  │
 ┌────────────┐    CLI      │  │  API + UI  │  │
-│  shiny     │────────────▶│  ├────────────┤  │
-│  CLI       │             │  │   Proxy    │──┼──▶  app processes
+│  shinyhub  │────────────▶│  ├────────────┤  │
+│  deploy    │             │  │   Proxy    │──┼──▶  app processes
 └────────────┘             │  ├────────────┤  │     (native or Docker)
                            │  │   SQLite   │  │
                            │  └────────────┘  │
@@ -207,8 +218,8 @@ or DuckDB in read-write mode does not survive multi-process writes.
 
 Components:
 
-- `cmd/shinyhub` — server (HTTP + proxy + lifecycle).
-- `cmd/shiny` — developer CLI.
+- `cmd/shinyhub` — single binary: `shinyhub serve` (HTTP + proxy + lifecycle) and developer subcommands (`deploy`, `login`, `apps`, `env`, `data`, …).
+- `internal/cli` — developer subcommand implementations.
 - `internal/api` — chi-routed HTTP handlers.
 - `internal/process` — native or Docker app process lifecycle.
 - `internal/proxy` — reverse proxy.
