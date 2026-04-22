@@ -286,34 +286,26 @@ document.addEventListener('DOMContentLoaded', () => {
         actions.appendChild(deployButton);
 
         if (!neverDeployed) {
-          const restartButton = document.createElement('button');
-          restartButton.type = 'button';
-          restartButton.textContent = 'Restart';
-          restartButton.setAttribute('aria-label', `Restart ${app.name}`);
-          restartButton.addEventListener('click', () => restart(app.slug));
-          actions.appendChild(restartButton);
-
-          const historyButton = document.createElement('button');
-          historyButton.type = 'button';
-          historyButton.textContent = 'History';
-          historyButton.setAttribute('aria-label', `Deployment history for ${app.name}`);
-          historyButton.addEventListener('click', () => router.navigate(`/apps/${app.slug}/deployments`));
-          actions.appendChild(historyButton);
-
-          const logsButton = document.createElement('button');
-          logsButton.type = 'button';
-          logsButton.textContent = 'Logs';
-          logsButton.setAttribute('aria-label', `View logs for ${app.name}`);
-          logsButton.addEventListener('click', () => openLogs(app.slug));
-          actions.appendChild(logsButton);
+          const kebab = document.createElement('div');
+          kebab.className = 'kebab-menu';
+          kebab.innerHTML = `
+            <button type="button" aria-haspopup="menu" aria-expanded="false">⋯</button>
+            <ul class="kebab-list" role="menu" hidden>
+              <li role="menuitem"><button type="button" data-kebab="restart">Restart</button></li>
+            </ul>
+          `;
+          const kebabBtn = kebab.querySelector('button');
+          kebabBtn.setAttribute('aria-label', `More actions for ${app.name}`);
+          const kebabList = kebab.querySelector('.kebab-list');
+          kebabBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const open = !kebabList.hidden;
+            kebabList.hidden = open;
+            kebabBtn.setAttribute('aria-expanded', String(!open));
+          });
+          kebabList.querySelector('[data-kebab="restart"]').addEventListener('click', () => restart(app.slug));
+          actions.appendChild(kebab);
         }
-
-        const settingsButton = document.createElement('button');
-        settingsButton.className = 'btn btn-settings';
-        settingsButton.textContent = 'Settings';
-        settingsButton.setAttribute('aria-label', `Open settings for ${app.name}`);
-        settingsButton.addEventListener('click', () => router.navigate(`/apps/${app.slug}/configuration`));
-        actions.appendChild(settingsButton);
       }
 
       const metricsLine = document.createElement('div');
@@ -1327,6 +1319,11 @@ document.addEventListener('DOMContentLoaded', () => {
         closeLogs();
       }
     }
+  });
+
+  document.addEventListener('click', () => {
+    for (const el of document.querySelectorAll('.kebab-list')) el.hidden = true;
+    for (const el of document.querySelectorAll('.kebab-menu [aria-expanded]')) el.setAttribute('aria-expanded', 'false');
   });
 
   newUserModal.addEventListener('click', e => {
