@@ -107,6 +107,464 @@ func TestProxyRegisterInvalidURL(t *testing.T) {
 	}
 }
 
+func TestProxySetsForwardingHeaders(t *testing.T) {
+	var (
+		gotRealIP       string
+		gotForwardedFor string
+		gotProto        string
+		gotForwHost     string
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRealIP = r.Header.Get("X-Real-IP")
+		gotForwardedFor = r.Header.Get("X-Forwarded-For")
+		gotProto = r.Header.Get("X-Forwarded-Proto")
+		gotForwHost = r.Header.Get("X-Forwarded-Host")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.RemoteAddr = "203.0.113.5:54321"
+	req.Host = "shinyhub.example.com"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if gotRealIP != "203.0.113.5" {
+		t.Errorf("X-Real-IP: expected 203.0.113.5, got %q", gotRealIP)
+	}
+	if gotForwardedFor != "203.0.113.5" {
+		t.Errorf("X-Forwarded-For: expected 203.0.113.5, got %q", gotForwardedFor)
+	}
+	if gotProto != "http" {
+		t.Errorf("X-Forwarded-Proto: expected http, got %q", gotProto)
+	}
+	if gotForwHost != "shinyhub.example.com" {
+		t.Errorf("X-Forwarded-Host: expected shinyhub.example.com, got %q", gotForwHost)
+	}
+}
+
+func TestProxyEmitsAccessLog(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("hi"))
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var got proxy.AccessLogEntry
+	var count int
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		mu.Lock()
+		got = e
+		count++
+		mu.Unlock()
+	})
+
+	req := httptest.NewRequest("GET", "/app/app/some/path", nil)
+	req.RemoteAddr = "203.0.113.5:54321"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected 1 access-log entry, got %d", count)
+	}
+	if got.Slug != "app" {
+		t.Errorf("Slug: expected app, got %q", got.Slug)
+	}
+	if got.Method != "GET" {
+		t.Errorf("Method: expected GET, got %q", got.Method)
+	}
+	if got.Path != "/app/app/some/path" {
+		t.Errorf("Path: expected /app/app/some/path, got %q", got.Path)
+	}
+	if got.Status != http.StatusCreated {
+		t.Errorf("Status: expected 201, got %d", got.Status)
+	}
+	if got.Bytes != 2 {
+		t.Errorf("Bytes: expected 2, got %d", got.Bytes)
+	}
+	if got.ClientIP != "203.0.113.5" {
+		t.Errorf("ClientIP: expected 203.0.113.5, got %q", got.ClientIP)
+	}
+	if got.Peer != "203.0.113.5:54321" {
+		t.Errorf("Peer: expected 203.0.113.5:54321, got %q", got.Peer)
+	}
+	if got.Duration <= 0 {
+		t.Errorf("Duration: expected > 0, got %v", got.Duration)
+	}
+}
+
+func TestProxyAccessLogUsesClientIPResolver(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	// Simulates a trusted-proxy-aware resolver that trusts the peer and
+	// returns the leftmost X-Forwarded-For IP as the real client.
+	p.SetClientIPResolver(func(r *http.Request) string {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return strings.TrimSpace(strings.SplitN(xff, ",", 2)[0])
+		}
+		return ""
+	})
+
+	var mu sync.Mutex
+	var got proxy.AccessLogEntry
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		mu.Lock()
+		got = e
+		mu.Unlock()
+	})
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.RemoteAddr = "10.0.0.1:45678"
+	req.Header.Set("X-Forwarded-For", "198.51.100.77")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got.ClientIP != "198.51.100.77" {
+		t.Errorf("ClientIP: expected resolver output 198.51.100.77, got %q", got.ClientIP)
+	}
+	if got.Peer != "10.0.0.1:45678" {
+		t.Errorf("Peer: expected raw RemoteAddr 10.0.0.1:45678, got %q", got.Peer)
+	}
+}
+
+func TestProxyAccessLogOnLoadingPage(t *testing.T) {
+	p := proxy.New()
+
+	var mu sync.Mutex
+	var got proxy.AccessLogEntry
+	var count int
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		mu.Lock()
+		got = e
+		count++
+		mu.Unlock()
+	})
+
+	req := httptest.NewRequest("GET", "/app/unknown/", nil)
+	req.RemoteAddr = "203.0.113.9:12345"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected 1 access-log entry for loading page, got %d", count)
+	}
+	if got.Slug != "unknown" {
+		t.Errorf("Slug: expected unknown, got %q", got.Slug)
+	}
+	if got.Status != http.StatusOK {
+		t.Errorf("Status: expected 200, got %d", got.Status)
+	}
+	if got.ReplicaIndex != -1 {
+		t.Errorf("ReplicaIndex: expected -1 (no replica), got %d", got.ReplicaIndex)
+	}
+}
+
+func TestProxySetsForwardedHeader(t *testing.T) {
+	var gotForwarded string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotForwarded = r.Header.Get("Forwarded")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.RemoteAddr = "203.0.113.5:54321"
+	req.Host = "apps.example.com"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if !strings.Contains(gotForwarded, `for="203.0.113.5:54321"`) {
+		t.Errorf("Forwarded missing for=...: %q", gotForwarded)
+	}
+	if !strings.Contains(gotForwarded, "proto=http") {
+		t.Errorf("Forwarded missing proto: %q", gotForwarded)
+	}
+	if !strings.Contains(gotForwarded, `host="apps.example.com"`) {
+		t.Errorf("Forwarded missing host: %q", gotForwarded)
+	}
+}
+
+func TestProxyPreservesIncomingForwarded(t *testing.T) {
+	var gotForwarded string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotForwarded = r.Header.Get("Forwarded")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.RemoteAddr = "10.0.0.1:8888"
+	req.Host = "internal-shinyhub.lan"
+	req.Header.Set("Forwarded", `for="203.0.113.5:443";proto=https;host="edge.example.com"`)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if !strings.Contains(gotForwarded, `for="203.0.113.5:443"`) {
+		t.Errorf("Forwarded should be preserved with upstream for=..., got %q", gotForwarded)
+	}
+	if !strings.Contains(gotForwarded, "proto=https") {
+		t.Errorf("Forwarded should preserve proto=https, got %q", gotForwarded)
+	}
+}
+
+func TestProxyAccessLogCapturesBackendStatus(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var got proxy.AccessLogEntry
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		mu.Lock()
+		got = e
+		mu.Unlock()
+	})
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.RemoteAddr = "203.0.113.1:5555"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got.Status != http.StatusInternalServerError {
+		t.Errorf("Status: expected 500, got %d", got.Status)
+	}
+	if got.Bytes == 0 {
+		t.Errorf("Bytes: expected > 0 for error body, got %d", got.Bytes)
+	}
+}
+
+func TestProxyAccessLogStickyReplica(t *testing.T) {
+	var serves atomic.Int64
+	backend0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serves.Add(1)
+		w.Write([]byte("r0"))
+	}))
+	defer backend0.Close()
+	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serves.Add(1)
+		w.Write([]byte("r1"))
+	}))
+	defer backend1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("app", 2)
+	if err := p.RegisterReplica("app", 0, backend0.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.RegisterReplica("app", 1, backend1.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	entries := make([]proxy.AccessLogEntry, 0, 2)
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		mu.Lock()
+		entries = append(entries, e)
+		mu.Unlock()
+	})
+
+	// First request: no cookie → sticky must be false.
+	req1 := httptest.NewRequest("GET", "/app/app/", nil)
+	rec1 := httptest.NewRecorder()
+	p.ServeHTTP(rec1, req1)
+
+	var cookieVal string
+	for _, c := range rec1.Result().Cookies() {
+		if strings.HasPrefix(c.Name, "shinyhub_rep_") {
+			cookieVal = c.Value
+		}
+	}
+	if cookieVal == "" {
+		t.Fatal("expected sticky cookie on first response")
+	}
+
+	// Second request: present the cookie → sticky must be true and route
+	// to the same replica the cookie pins.
+	req2 := httptest.NewRequest("GET", "/app/app/", nil)
+	req2.AddCookie(&http.Cookie{Name: "shinyhub_rep_app", Value: cookieVal})
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 access-log entries, got %d", len(entries))
+	}
+	if entries[0].Sticky {
+		t.Errorf("first request: Sticky should be false (no cookie)")
+	}
+	if entries[0].ReplicaIndex < 0 || entries[0].ReplicaIndex > 1 {
+		t.Errorf("first request: ReplicaIndex out of range: %d", entries[0].ReplicaIndex)
+	}
+	if !entries[1].Sticky {
+		t.Errorf("second request: Sticky should be true (cookie present)")
+	}
+	if strconvItoa(entries[1].ReplicaIndex) != cookieVal {
+		t.Errorf("second request: ReplicaIndex %d should match cookie %q", entries[1].ReplicaIndex, cookieVal)
+	}
+}
+
+func strconvItoa(i int) string { return fmt.Sprintf("%d", i) }
+
+func TestProxyForwardedIPv6(t *testing.T) {
+	var gotForwarded, gotRealIP string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotForwarded = r.Header.Get("Forwarded")
+		gotRealIP = r.Header.Get("X-Real-IP")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.RemoteAddr = "[2001:db8::1]:54321"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// RFC 7239 §6: IPv6 addresses MUST be bracketed inside the quoted for= value.
+	if !strings.Contains(gotForwarded, `for="[2001:db8::1]:54321"`) {
+		t.Errorf("Forwarded: expected bracketed IPv6, got %q", gotForwarded)
+	}
+	// X-Real-IP is the IP without brackets or port.
+	if gotRealIP != "2001:db8::1" {
+		t.Errorf("X-Real-IP: expected 2001:db8::1, got %q", gotRealIP)
+	}
+}
+
+func TestProxyAccessLogNilLoggerIsSafe(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	// Never calling SetAccessLogger → logger remains nil; must not panic.
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// Explicitly clearing with nil must also be safe.
+	p.SetAccessLogger(func(proxy.AccessLogEntry) {})
+	p.SetAccessLogger(nil)
+	p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/app/app/", nil))
+}
+
+func TestProxyAccessLogConcurrent(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	var count atomic.Int64
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		if e.Slug != "app" || e.Status != http.StatusOK {
+			t.Errorf("unexpected entry: %+v", e)
+		}
+		count.Add(1)
+	})
+
+	const N = 50
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("GET", "/app/app/", nil)
+			p.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+	}
+	wg.Wait()
+	if got := count.Load(); got != N {
+		t.Errorf("expected %d entries, got %d", N, got)
+	}
+}
+
+func TestProxyPreservesIncomingForwardingHeaders(t *testing.T) {
+	var (
+		gotRealIP   string
+		gotProto    string
+		gotForwHost string
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRealIP = r.Header.Get("X-Real-IP")
+		gotProto = r.Header.Get("X-Forwarded-Proto")
+		gotForwHost = r.Header.Get("X-Forwarded-Host")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an edge proxy (nginx/caddy) that already terminated TLS
+	// and populated the forwarding headers for us.
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.RemoteAddr = "10.0.0.1:45678"
+	req.Host = "internal-shinyhub.lan"
+	req.Header.Set("X-Real-IP", "203.0.113.5")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "apps.example.com")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if gotRealIP != "203.0.113.5" {
+		t.Errorf("X-Real-IP should be preserved, got %q", gotRealIP)
+	}
+	if gotProto != "https" {
+		t.Errorf("X-Forwarded-Proto should be preserved, got %q", gotProto)
+	}
+	if gotForwHost != "apps.example.com" {
+		t.Errorf("X-Forwarded-Host should be preserved, got %q", gotForwHost)
+	}
+}
+
 func TestProxyStripsPrefix(t *testing.T) {
 	var receivedPath string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

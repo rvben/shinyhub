@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -100,11 +101,45 @@ type backendPool struct {
 	rrCounter atomic.Int64
 }
 
+// AccessLogEntry describes a single proxied request. It is passed to the
+// callback registered via SetAccessLogger so callers can emit structured
+// logs, metrics, or audit records without the proxy package depending on a
+// particular logging library.
+//
+// For routed requests (a replica handled the request) ReplicaIndex is the
+// zero-based pool index and Sticky reports whether the sticky-session cookie
+// selected the replica. For loading-page responses (no live replica)
+// ReplicaIndex is -1.
+type AccessLogEntry struct {
+	Slug         string
+	Method       string
+	Path         string
+	Status       int
+	Bytes        int64
+	Duration     time.Duration
+	ClientIP     string // trusted-proxy-aware client IP (see SetClientIPResolver)
+	Peer         string // raw r.RemoteAddr (direct TCP peer)
+	ReplicaIndex int    // -1 when no replica served the request
+	Sticky       bool
+}
+
+// accessLogFn and clientIPFn are named function types so atomic.Pointer can
+// hold them. They are set once at startup and read on every request, so
+// atomic.Pointer avoids the lock traffic a sync.RWMutex would incur while
+// still permitting a safe nil-to-value transition.
+type (
+	accessLogFn func(AccessLogEntry)
+	clientIPFn  func(*http.Request) string
+)
+
 // Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
 	mu     sync.RWMutex
 	pools  map[string]*backendPool
 	onMiss func(slug string)
+
+	accessLog atomic.Pointer[accessLogFn]
+	clientIP  atomic.Pointer[clientIPFn]
 
 	seenMu   sync.RWMutex
 	lastSeen map[string]time.Time
@@ -115,6 +150,34 @@ func New() *Proxy {
 		pools:    make(map[string]*backendPool),
 		lastSeen: make(map[string]time.Time),
 	}
+}
+
+// SetAccessLogger registers a callback invoked once per proxied request
+// (including responses served from the loading page). Pass nil to disable.
+// Safe to call concurrently with ServeHTTP; subsequent requests observe the
+// new value atomically.
+func (p *Proxy) SetAccessLogger(fn func(AccessLogEntry)) {
+	if fn == nil {
+		p.accessLog.Store(nil)
+		return
+	}
+	f := accessLogFn(fn)
+	p.accessLog.Store(&f)
+}
+
+// SetClientIPResolver registers a function that returns the trusted-proxy-aware
+// client IP for an incoming request. When unset (or when the resolver returns
+// ""), the proxy falls back to the host portion of r.RemoteAddr. This is how
+// the surrounding Server injects its trusted-proxy configuration into the
+// proxy without forming an import cycle. Safe to call concurrently with
+// ServeHTTP.
+func (p *Proxy) SetClientIPResolver(fn func(*http.Request) string) {
+	if fn == nil {
+		p.clientIP.Store(nil)
+		return
+	}
+	f := clientIPFn(fn)
+	p.clientIP.Store(&f)
 }
 
 // SetOnMiss registers a callback invoked (in a goroutine) when a request
@@ -184,6 +247,40 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
 	rp.Director = func(req *http.Request) {
+		// Populate standard forwarding headers so backend apps (uvicorn with
+		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
+		// reconstruct the external request. We only set when absent so an
+		// edge proxy (nginx/Caddy) terminating TLS upstream keeps authority.
+		// Go's ReverseProxy appends the direct peer to X-Forwarded-For
+		// after the Director runs; we don't duplicate that.
+		//
+		// The RFC 7239 Forwarded header carries the client source port
+		// alongside the IP — useful for backends that parse it. Uvicorn's
+		// ProxyHeadersMiddleware does NOT read Forwarded and hardcodes
+		// scope["client"] port to 0 whenever it sees X-Forwarded-For; that
+		// zero-port behaviour is an uvicorn design choice, not something
+		// this proxy can fix from here.
+		scheme := "http"
+		if req.TLS != nil {
+			scheme = "https"
+		}
+		if req.Header.Get("X-Forwarded-Host") == "" && req.Host != "" {
+			req.Header.Set("X-Forwarded-Host", req.Host)
+		}
+		if req.Header.Get("X-Forwarded-Proto") == "" {
+			req.Header.Set("X-Forwarded-Proto", scheme)
+		}
+		if req.Header.Get("X-Real-IP") == "" {
+			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil && clientIP != "" {
+				req.Header.Set("X-Real-IP", clientIP)
+			}
+		}
+		if req.Header.Get("Forwarded") == "" {
+			if fwd := buildForwarded(req, scheme); fwd != "" {
+				req.Header.Set("Forwarded", fwd)
+			}
+		}
+
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
 		prefix := "/app/" + slugCopy
@@ -290,6 +387,36 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wrap the writer so we can capture status + bytes for the access log.
+	// The recorder delegates Flush/Hijack/ReadFrom so streaming responses,
+	// WebSocket upgrades, and the sendfile fast path keep working.
+	rec := newStatusRecorder(w)
+	start := time.Now()
+	replicaIndex := -1
+	sticky := false
+	defer func() {
+		logPtr := p.accessLog.Load()
+		if logPtr == nil {
+			return
+		}
+		var resolver func(*http.Request) string
+		if rp := p.clientIP.Load(); rp != nil {
+			resolver = *rp
+		}
+		(*logPtr)(AccessLogEntry{
+			Slug:         slug,
+			Method:       r.Method,
+			Path:         r.URL.Path,
+			Status:       rec.status,
+			Bytes:        rec.bytes,
+			Duration:     time.Since(start),
+			ClientIP:     resolveClientIP(resolver, r),
+			Peer:         r.RemoteAddr,
+			ReplicaIndex: replicaIndex,
+			Sticky:       sticky,
+		})
+	}()
+
 	// Hold the route-table read lock from the pool fetch through the
 	// activeConns bump. BeginHibernate takes the write lock and inspects
 	// activeConns under it; if we released the read lock before the bump,
@@ -304,15 +431,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if onMiss != nil {
 			go onMiss(slug)
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(loadingPage)) //nolint:errcheck
+		rec.Header().Set("Content-Type", "text/html; charset=utf-8")
+		rec.WriteHeader(http.StatusOK)
+		rec.Write([]byte(loadingPage)) //nolint:errcheck
 		return
 	}
 
 	picked, isStickyHit := p.pickReplicaLocked(pool, slug, r)
+	replicaIndex = picked.index
+	sticky = isStickyHit
 	if !isStickyHit {
-		http.SetCookie(w, &http.Cookie{
+		http.SetCookie(rec, &http.Cookie{
 			Name:     cookiePrefix + slug,
 			Value:    strconv.Itoa(picked.index),
 			Path:     "/app/" + slug + "/",
@@ -325,7 +454,56 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer picked.activeConns.Add(-1)
 
 	p.RecordActivity(slug)
-	picked.rp.ServeHTTP(w, r)
+	picked.rp.ServeHTTP(rec, r)
+}
+
+// resolveClientIP returns the trusted-proxy-aware client IP when a resolver is
+// registered, falling back to the host portion of r.RemoteAddr otherwise.
+func resolveClientIP(resolver func(*http.Request) string, r *http.Request) string {
+	if resolver != nil {
+		if ip := resolver(r); ip != "" {
+			return ip
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// buildForwarded constructs an RFC 7239 Forwarded header value from the
+// inbound request. Returns "" when there is no useful information to convey
+// (no peer and no host). The client source port is included in the for=
+// element so backends that parse Forwarded (Django, some Go middleware) can
+// log a non-zero port — something X-Forwarded-For cannot express.
+func buildForwarded(req *http.Request, scheme string) string {
+	parts := make([]string, 0, 3)
+	if forTok := forwardedForToken(req.RemoteAddr); forTok != "" {
+		parts = append(parts, "for="+forTok)
+	}
+	parts = append(parts, "proto="+scheme)
+	if req.Host != "" {
+		parts = append(parts, `host="`+req.Host+`"`)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ";")
+}
+
+// forwardedForToken renders an RFC 7239 for= parameter value from a raw
+// "host:port" RemoteAddr. IPv6 literals are bracketed per RFC 7239 §6.
+// Returns "" when the address cannot be parsed.
+func forwardedForToken(remoteAddr string) string {
+	host, port, err := net.SplitHostPort(remoteAddr)
+	if err != nil || host == "" {
+		return ""
+	}
+	if strings.Contains(host, ":") {
+		return `"[` + host + `]:` + port + `"`
+	}
+	return `"` + host + `:` + port + `"`
 }
 
 // pickReplicaLocked selects a backend for the incoming request. The caller

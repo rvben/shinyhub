@@ -181,6 +181,29 @@ func main() {
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetSecretsKey(secretsKey)
 
+	// Emit a structured access log for every proxied app request. Using the
+	// Server's trusted-proxy-aware ClientIP keeps the "client" field honest
+	// when shinyhub itself sits behind an edge proxy; this is independent of
+	// anything the backend app (uvicorn/httpuv) chooses to print in its own
+	// log and gives operators a reliable per-slug audit trail.
+	prx.SetClientIPResolver(srv.ClientIP)
+	prx.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		attrs := []any{
+			"slug", e.Slug,
+			"method", e.Method,
+			"path", e.Path,
+			"status", e.Status,
+			"bytes", e.Bytes,
+			"duration_ms", e.Duration.Milliseconds(),
+			"client_ip", e.ClientIP,
+			"peer", e.Peer,
+		}
+		if e.ReplicaIndex >= 0 {
+			attrs = append(attrs, "replica", e.ReplicaIndex, "sticky", e.Sticky)
+		}
+		slog.Info("proxy_access", attrs...)
+	})
+
 	if cfg.Runtime.Mode == "docker" {
 		srv.SetSampler(&process.RuntimeSampler{Runtime: rt})
 	}
