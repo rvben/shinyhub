@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -377,6 +378,13 @@ func TestRun_DockerSkipsHostDepInstall(t *testing.T) {
 // runtimes still need on-host preparation (no container to cache deps inside),
 // so the hook MUST be invoked exactly once per Run.
 func TestRun_NativeStillRunsHostDepInstall(t *testing.T) {
+	// Command must be nil to exercise the appType branch in resolveBootParams,
+	// which is where the python sync hook fires. bootReplica then derives
+	// `uv run …` from the bundle, so the test process needs uv on PATH.
+	if _, err := exec.LookPath("uv"); err != nil {
+		t.Skip("uv not in PATH — skipping native dep-install test")
+	}
+
 	bundle := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte(""), 0644); err != nil {
 		t.Fatal(err)
@@ -398,8 +406,7 @@ func TestRun_NativeStillRunsHostDepInstall(t *testing.T) {
 		Slug: "native-app", BundleDir: bundle, Replicas: 1,
 		Manager: mgr, Proxy: proxy.New(),
 		HealthCheck: func(int, time.Duration) error { return nil },
-		// Inject a benign command so we don't depend on uv being installed.
-		Command: nil, // force the appType branch
+		Command:     nil,
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
