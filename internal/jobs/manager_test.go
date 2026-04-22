@@ -688,6 +688,78 @@ func TestManager_Run_OverlapQueue_PreservesAdmissionOrder(t *testing.T) {
 	}
 }
 
+// TestManager_Run_OverlapQueue_QueueSlotFreedWhenDequeued verifies that
+// promoting a queued run to active releases its queue-semaphore slot, so
+// a fresh trigger can take its place behind the now-active run.
+// Otherwise the queue policy collapses to a one-active-only policy:
+// every trigger that arrives while a formerly-queued run is executing is
+// recorded as skipped_overlap even though no run is actually waiting.
+func TestManager_Run_OverlapQueue_QueueSlotFreedWhenDequeued(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, block: block}
+	st := newFakeStore(makeSchedule("queue", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	// Run #1 — active, blocks in RunOnce.
+	id1, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Run #2 — queues behind #1.
+	if _, err := m.Run(1, "cron", nil); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	// Cancel #1 so it exits RunOnce. The queued #2 will then acquire
+	// the slot and itself block in RunOnce on the same channel.
+	if err := m.Cancel(id1); err != nil {
+		t.Fatalf("Cancel id1: %v", err)
+	}
+
+	// Wait for #2 to enter RunOnce. deadlinesAtEntry length is the
+	// count of RunOnce entries (incremented before block).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rt.mu.Lock()
+		entries := len(rt.deadlinesAtEntry)
+		rt.mu.Unlock()
+		if entries >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rt.mu.Lock()
+	entries := len(rt.deadlinesAtEntry)
+	rt.mu.Unlock()
+	if entries < 2 {
+		t.Fatal("Run #2 never entered RunOnce after Run #1 was cancelled")
+	}
+
+	// Run #2 is now the active run. The queue slot must have been
+	// freed when #2 was promoted, so #3 must queue (status="running"),
+	// not be rejected.
+	id3, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("third Run: %v", err)
+	}
+	st.mu.Lock()
+	r3 := st.runs[id3]
+	var r3Status string
+	if r3 != nil {
+		r3Status = r3.Status
+	}
+	st.mu.Unlock()
+	if r3Status != "running" {
+		t.Errorf("after Run #2 became active, Run #3 status=%q, want %q — queue slot must be freed when a queued run starts executing",
+			r3Status, "running")
+	}
+
+	// Drain.
+	close(block)
+}
+
 // TestManager_Run_PersistsLogPath verifies that Manager calls SetScheduleRunLogPath
 // with a non-empty path after opening the log file for a run.
 func TestManager_Run_PersistsLogPath(t *testing.T) {

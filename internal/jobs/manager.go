@@ -268,8 +268,12 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 			m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
 			return
 		}
+		// Promoted from queued to active. Free the queue slot now —
+		// not at goroutine exit — so one new run can wait behind us
+		// during execution. Holding sem through execute would collapse
+		// the queue policy to "skip" (one active, no queued).
+		<-sem
 		defer slot.unlock()
-		defer func() { <-sem }()
 		m.execute(ctx, sched, app, runID, trigger, userID)
 	}()
 
