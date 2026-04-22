@@ -23,7 +23,7 @@ builds:
     goos: [linux, darwin]
     goarch: [amd64, arm64]
     ldflags:
-      - -s -w -X github.com/rvben/shinyhub/cli.version={{.Version}}
+      - -s -w -X github.com/rvben/shinyhub/internal/cli.version={{.Version}}
 
 archives:
   - id: combined
