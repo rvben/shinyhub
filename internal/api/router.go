@@ -47,6 +47,14 @@ type Server struct {
 	// when an HTTP-driven deploy is already running.
 	deployLocksMu sync.Mutex
 	deployLocks   map[string]*sync.Mutex
+
+	// dataLocksMu guards the dataLocks map. Each slug gets its own
+	// sync.Mutex held across the quota-check + write phase of handleDataPut
+	// so two concurrent uploads cannot each read the pre-write usage and
+	// jointly exceed the per-app quota. This lock is separate from
+	// deployLocks so a slow upload does not block deploys/restarts.
+	dataLocksMu sync.Mutex
+	dataLocks   map[string]*sync.Mutex
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil

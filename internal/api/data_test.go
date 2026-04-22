@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/api"
@@ -235,6 +236,64 @@ func TestDataPut_QuotaOverwriteAware(t *testing.T) {
 	// Overwrite a.bin with 50 KiB → (900-900)+50=50 KiB → should succeed.
 	if code := send(t, "a.bin", 50*KiB); code != http.StatusOK {
 		t.Fatalf("overwrite a.bin (50 KiB): expected 200, got %d", code)
+	}
+}
+
+// TestDataPut_QuotaConcurrentWritesDoNotExceed exercises the per-slug quota
+// race: without serialization, N concurrent uploads each read used_bytes
+// before any of them have written, every one passes its quota check, and the
+// final on-disk usage blows past the cap. With the per-slug data lock the
+// reads and writes are serialized so at least one upload is rejected with
+// 413 and the on-disk total stays within the quota.
+func TestDataPut_QuotaConcurrentWritesDoNotExceed(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 1) // 1 MiB cap
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	const KiB = 1024
+	const concurrency = 8
+	const writeSize = 200 * KiB // 8 * 200 KiB = 1600 KiB > 1 MiB cap
+
+	var wg sync.WaitGroup
+	codes := make([]int, concurrency)
+	body := bytes.Repeat([]byte("x"), writeSize)
+	for i := 0; i < concurrency; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := dataPutReq(t, "demo", fmt.Sprintf("a%d.bin", i), body, token)
+			rr := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rr, req)
+			codes[i] = rr.Code
+		}()
+	}
+	wg.Wait()
+
+	// At least one upload must have been rejected — 8 * 200 KiB = 1600 KiB
+	// exceeds the 1 MiB cap, so the quota gate must reject some writes.
+	rejected := 0
+	for _, c := range codes {
+		if c == http.StatusRequestEntityTooLarge {
+			rejected++
+		}
+	}
+	if rejected == 0 {
+		t.Fatalf("expected at least one 413 with %d concurrent writes summing %d KiB > 1 MiB; got codes=%v",
+			concurrency, concurrency*writeSize/KiB, codes)
+	}
+
+	// Final on-disk usage must respect the 1 MiB cap.
+	used, err := deploy.DirSize(filepath.Join(dataDir, "demo"))
+	if err != nil {
+		t.Fatalf("measure dataDir: %v", err)
+	}
+	const quotaBytes = 1 << 20
+	if used > quotaBytes {
+		t.Fatalf("on-disk usage %d bytes exceeds quota %d bytes; codes=%v",
+			used, quotaBytes, codes)
 	}
 }
 

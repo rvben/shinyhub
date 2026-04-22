@@ -37,6 +37,32 @@ func (s *Server) acquireDeployLock(slug string) (release func()) {
 	return m.Unlock
 }
 
+// dataLockFor returns the per-slug mutex used to serialize the quota check
+// and disk write inside handleDataPut. Without it two concurrent uploads can
+// each read the same pre-write usage, both pass the quota check, and the
+// resulting on-disk total exceeds the per-app cap.
+func (s *Server) dataLockFor(slug string) *sync.Mutex {
+	s.dataLocksMu.Lock()
+	defer s.dataLocksMu.Unlock()
+	if s.dataLocks == nil {
+		s.dataLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := s.dataLocks[slug]
+	if !ok {
+		m = &sync.Mutex{}
+		s.dataLocks[slug] = m
+	}
+	return m
+}
+
+// acquireDataLock blocks until the per-slug data write lock is held. The
+// returned func releases it; pair with `defer release()` at the call site.
+func (s *Server) acquireDataLock(slug string) (release func()) {
+	m := s.dataLockFor(slug)
+	m.Lock()
+	return m.Unlock
+}
+
 // tryAcquireDeployLock is the non-blocking variant. It returns nil if the
 // lock is currently held by another goroutine, or the release func when
 // acquired. Use this from coalescing code paths (e.g. the async redeploy

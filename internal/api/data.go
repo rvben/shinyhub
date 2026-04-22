@@ -174,6 +174,21 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 
 	appDataDir := data.AppDataDir(s.cfg.Storage.AppDataDir, slug)
 
+	// Serialize the quota-check + write phase per slug. Without this, two
+	// concurrent uploads each see the same pre-write used_bytes, both pass
+	// their quota check, and the on-disk total exceeds the cap. The lock is
+	// released before maybeRestartForChange so a slow restart does not block
+	// other uploads.
+	releaseDataLock := s.acquireDataLock(slug)
+	dataLockHeld := true
+	releaseOnce := func() {
+		if dataLockHeld {
+			releaseDataLock()
+			dataLockHeld = false
+		}
+	}
+	defer releaseOnce()
+
 	// Quota check: measure current combined usage (app bundles + data dir), then
 	// account for any existing file at the destination (overwrite-aware).
 	quotaBytes := int64(s.cfg.Storage.AppQuotaMB) << 20
@@ -205,6 +220,10 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 	body := http.MaxBytesReader(w, r.Body, r.ContentLength)
 
 	fi, putErr := data.Put(appDataDir, cleanRel, body, r.ContentLength)
+	// Release the per-slug data lock as soon as the write commits so the
+	// follow-up restart (which acquires its own deploy lock) does not stall
+	// other uploads. Audit logging and the restart hop run lock-free.
+	releaseOnce()
 	if putErr != nil {
 		// Distinguish disk-full from other I/O errors.
 		var pathErr *os.PathError
