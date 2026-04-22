@@ -151,7 +151,7 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		ResourceType: "app",
 		ResourceID:   slug,
 		Detail:       string(detail),
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 
 	restarted, restartErr := s.maybeRestartForChange(r, app, slug)
@@ -200,7 +200,7 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 		ResourceType: "app",
 		ResourceID:   slug,
 		Detail:       string(detail),
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 
 	s.maybeRestartForChange(r, app, slug)

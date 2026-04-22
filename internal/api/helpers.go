@@ -44,14 +44,16 @@ func (s *Server) audit(r *http.Request, action, resourceType, resourceID, detail
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
 		Detail:       detail,
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 }
 
-// clientIP is a Server method that returns the best-effort client IP.
-// X-Forwarded-For is only trusted when the direct peer (RemoteAddr) is within
-// a configured trusted proxy CIDR, preventing clients from spoofing the header.
-func (s *Server) clientIP(r *http.Request) string {
+// ClientIP returns the best-effort client IP. X-Forwarded-For is only trusted
+// when the direct peer (RemoteAddr) is within a configured trusted proxy CIDR,
+// preventing clients from spoofing the header. Exposed so other subsystems
+// (e.g. the reverse proxy access log) can share the same trust policy without
+// duplicating it.
+func (s *Server) ClientIP(r *http.Request) string {
 	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		peerHost = r.RemoteAddr

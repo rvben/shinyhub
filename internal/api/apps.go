@@ -134,7 +134,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Action:       "create_app",
 		ResourceType: "app",
 		ResourceID:   req.Slug,
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusCreated, app)
 }
@@ -402,7 +402,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
-			ResourceID: slug, IPAddress: s.clientIP(r),
+			ResourceID: slug, IPAddress: s.ClientIP(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, app)
@@ -595,7 +595,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "deploy",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, updatedApp)
@@ -729,7 +729,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "rollback",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	// Rollbacks are not counted as deploys — deploy_count tracks forward deployments only.
@@ -820,7 +820,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "restart",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, updatedApp)
@@ -870,7 +870,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 			ResourceType: "app",
 			ResourceID:   slug,
 			Detail:       detail,
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	w.WriteHeader(http.StatusOK)
@@ -933,7 +933,7 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "stop",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, app)
@@ -971,7 +971,7 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "set_access", ResourceType: "app",
-			ResourceID: slug, IPAddress: s.clientIP(r),
+			ResourceID: slug, IPAddress: s.ClientIP(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, app)
@@ -1013,7 +1013,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 			ResourceType: "app",
 			ResourceID:   slug,
 			Detail:       fmt.Sprintf("user_id=%d", req.UserID),
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1067,7 +1067,7 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 			ResourceType: "app",
 			ResourceID:   slug,
 			Detail:       fmt.Sprintf("user_id=%d", userID),
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1205,7 +1205,7 @@ func (s *Server) logQuotaRejected(r *http.Request, slug string, usedBytes int64)
 		ResourceType: "app",
 		ResourceID:   slug,
 		Detail:       fmt.Sprintf("used=%d bytes, quota=%d MiB", usedBytes, s.cfg.Storage.AppQuotaMB),
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 }
 

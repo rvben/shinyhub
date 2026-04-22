@@ -130,7 +130,7 @@ func (s *Server) handleDataDelete(w http.ResponseWriter, r *http.Request) {
 		ResourceType: "app",
 		ResourceID:   slug,
 		Detail:       string(detail),
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 
 	w.WriteHeader(http.StatusNoContent)
@@ -259,7 +259,7 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 		ResourceType: "app",
 		ResourceID:   slug,
 		Detail:       string(detail),
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 
 	resp := map[string]any{

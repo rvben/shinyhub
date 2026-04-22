@@ -108,7 +108,7 @@ func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.loginLimiter.allow(s.clientIP(r)) {
+	if !s.loginLimiter.allow(s.ClientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
@@ -125,7 +125,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				Action:       "login_failed",
 				ResourceType: "user",
 				ResourceID:   req.Username,
-				IPAddress:    s.clientIP(r),
+				IPAddress:    s.ClientIP(r),
 			})
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -145,7 +145,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Action:       "login",
 		ResourceType: "user",
 		ResourceID:   user.Username,
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusOK, loginResponse{
 		Token: token,
@@ -154,7 +154,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.loginLimiter.allow(s.clientIP(r)) {
+	if !s.loginLimiter.allow(s.ClientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
@@ -171,7 +171,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 				Action:       "login_failed",
 				ResourceType: "user",
 				ResourceID:   req.Username,
-				IPAddress:    s.clientIP(r),
+				IPAddress:    s.ClientIP(r),
 			})
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -191,7 +191,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		Action:       "login",
 		ResourceType: "user",
 		ResourceID:   user.Username,
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 	auth.SetSessionCookie(w, r, token)
 	ctxUser := &auth.ContextUser{ID: user.ID, Username: user.Username, Role: user.Role}
@@ -217,7 +217,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			Action:       "logout",
 			ResourceType: "user",
 			ResourceID:   u.Username,
-			IPAddress:    s.clientIP(r),
+			IPAddress:    s.ClientIP(r),
 		})
 	}
 	auth.ClearSessionCookie(w, r)
@@ -301,7 +301,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		Action:       "create_token",
 		ResourceType: "token",
 		ResourceID:   req.Name,
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{Token: rawKey})
 }
@@ -355,7 +355,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		Action:       "delete_token",
 		ResourceType: "token",
 		ResourceID:   strconv.FormatInt(id, 10),
-		IPAddress:    s.clientIP(r),
+		IPAddress:    s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
