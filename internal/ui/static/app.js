@@ -30,7 +30,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const state = {
     user: null,
     apps: [],
-    metricsInterval: null,
     auditPage: 0,
     auditHasMore: false,
     canCreateApps: false,
@@ -348,7 +347,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function showLoggedOut() {
     closeLogs();
     metrics.setTargets([]);
-    state.metricsInterval = null;
     state.user = null;
     state.apps = [];
     state.auditPage = 0;
@@ -407,6 +405,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     state.apps = (await response.json()) || [];
     renderApps();
+    metrics.setTargets(state.apps.map(a => a.slug));
   }
 
   async function loadAuditEvents(page) {
@@ -2283,7 +2282,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const payload = await response.json();
     showLoggedIn(payload);
-    router.start();
+    await router.start();
     handleDeployHash();
   }
 

@@ -74,7 +74,7 @@ export function createRouter() {
     } else {
       history.pushState({}, '', full);
     }
-    mount(location.pathname, location.search);
+    return mount(location.pathname, location.search);
   }
 
   function onPopState() {
@@ -98,7 +98,7 @@ export function createRouter() {
   function start() {
     window.addEventListener('popstate', onPopState);
     document.addEventListener('click', onClick);
-    mount(location.pathname, location.search);
+    return mount(location.pathname, location.search);
   }
 
   return { register, navigate, start };
