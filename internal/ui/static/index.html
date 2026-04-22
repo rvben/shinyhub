@@ -141,18 +141,18 @@
           <div class="kebab-menu">
             <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">⋯</button>
             <ul id="app-detail-kebab-menu" class="kebab-list" role="menu" hidden>
-              <li role="menuitem"><button id="app-detail-restart" type="button">Restart</button></li>
+              <li><button id="app-detail-restart" type="button" role="menuitem">Restart</button></li>
             </ul>
           </div>
         </div>
       </header>
       <nav class="settings-tabs" role="tablist" aria-label="App sections">
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      >Overview</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="logs"          id="detail-tab-logs"          >Logs</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="deployments"   id="detail-tab-deployments"   >Deployments</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="configuration" id="detail-tab-configuration" >Configuration</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="data"          id="detail-tab-data"          >Data</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="access"        id="detail-tab-access"        >Access</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      aria-controls="detail-overview-panel"      aria-selected="true"  >Overview</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="logs"          id="detail-tab-logs"          aria-controls="detail-logs-panel"          aria-selected="false" >Logs</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="deployments"   id="detail-tab-deployments"   aria-controls="detail-deployments-panel"   aria-selected="false" >Deployments</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="configuration" id="detail-tab-configuration" aria-controls="detail-configuration-panel" aria-selected="false" >Configuration</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="data"          id="detail-tab-data"          aria-controls="detail-data-panel"          aria-selected="false" >Data</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="access"        id="detail-tab-access"        aria-controls="detail-access-panel"        aria-selected="false" >Access</a>
       </nav>
       <div class="app-detail-panels">
         <section id="detail-overview-panel"      class="settings-tab-panel" role="tabpanel"></section>

@@ -2354,6 +2354,7 @@ main {
 .breadcrumb a:hover { color: var(--cyan-bright); }
 
 .app-detail-header {
+  position: relative;
   border-bottom: 1px solid var(--line);
   padding-bottom: 20px;
   margin-bottom: 20px;
@@ -2380,7 +2381,6 @@ main {
   gap: 8px;
   align-items: center;
 }
-.app-detail-header { position: relative; }
 
 .kebab-menu { position: relative; }
 .kebab-list {
