@@ -151,7 +151,7 @@
 
               <div class="modal-actions">
                 <button type="button" id="new-app-cancel">Cancel</button>
-                <button type="submit" id="new-app-submit">Create</button>
+                <button type="submit" id="new-app-submit" class="btn-primary">Create</button>
               </div>
             </form>
 
@@ -185,7 +185,7 @@
             <p>App created.</p>
             <p class="hint">Run the commands above, or use the <strong>Deploy</strong> button on the card to push a bundle from this browser.</p>
             <div class="modal-actions">
-              <button type="button" id="new-app-done">Done</button>
+              <button type="button" id="new-app-done" class="btn-primary">Done</button>
             </div>
           </section>
         </div>
@@ -226,6 +226,31 @@
           <div class="modal-actions">
             <button type="button" id="deploy-cancel">Cancel</button>
             <button type="button" id="deploy-submit" class="btn-primary" disabled>Deploy</button>
+          </div>
+
+          <hr class="handoff-card-divider" aria-hidden="true">
+
+          <div>
+            <p class="handoff-section-label">Or deploy from your CLI</p>
+            <div class="snippet">
+              <pre><code id="deploy-cli-snippet"></code></pre>
+              <button type="button" id="deploy-cli-snippet-copy" class="copy-btn"
+                      aria-label="Copy CLI commands to clipboard">
+                <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
+                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                     stroke-linejoin="round" aria-hidden="true">
+                  <rect x="4" y="3" width="8" height="10" rx="1.2"/>
+                  <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
+                </svg>
+                <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
+                     stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                     stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
+                </svg>
+                <span class="copy-label" aria-hidden="true">Copy</span>
+                <span class="sr-only" id="deploy-cli-snippet-status" aria-live="polite"></span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -300,7 +325,7 @@
               <div class="grant-row">
                 <label for="grant-username" class="sr-only">Username to grant access</label>
                 <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
-                <button id="grant-btn" type="button">Grant</button>
+                <button id="grant-btn" type="button" class="btn-primary">Grant</button>
               </div>
               <p id="grant-error" class="error" hidden></p>
             </section>
@@ -504,7 +529,7 @@
             <label><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
             <p id="schedule-form-error" class="error" hidden></p>
             <div class="modal-actions">
-              <button type="button" class="env-btn-secondary" id="schedule-form-cancel">Cancel</button>
+              <button type="button" id="schedule-form-cancel">Cancel</button>
               <button type="submit" class="btn-primary">Save</button>
             </div>
           </form>

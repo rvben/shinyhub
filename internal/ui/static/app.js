@@ -123,6 +123,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const deployError        = document.getElementById('deploy-error');
   const deployCancel       = document.getElementById('deploy-cancel');
   const deploySubmit       = document.getElementById('deploy-submit');
+  const deployCliSnippet   = document.getElementById('deploy-cli-snippet');
+  const deployCliCopy      = document.getElementById('deploy-cli-snippet-copy');
+  const deployCliCopyLabel = deployCliCopy.querySelector('.copy-label');
+  const deployCliCopyStatus = document.getElementById('deploy-cli-snippet-status');
 
   const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
@@ -270,7 +274,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (canManageApp(state.user, app)) {
         const deployButton = document.createElement('button');
         deployButton.type = 'button';
-        deployButton.textContent = neverDeployed ? 'Deploy first bundle' : 'Deploy';
+        deployButton.textContent = 'Deploy';
         if (neverDeployed) deployButton.className = 'btn-primary';
         deployButton.setAttribute('aria-label', `Deploy new bundle to ${app.name}`);
         deployButton.addEventListener('click', () => openDeployModal(app));
@@ -1566,8 +1570,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const username = (state.user && state.user.username) || '<your-name>';
     const effectiveSlug = slug && slug.length > 0 ? slug : '<slug>';
     newAppSnippet.textContent =
-      `shiny login --host ${origin} --username ${username}\n` +
-      `shiny deploy --slug ${effectiveSlug} .`;
+      `shinyhub login --host ${origin} --username ${username}\n` +
+      `shinyhub deploy --slug ${effectiveSlug} .`;
   }
 
   const newAppDivider = document.querySelector('#new-app-modal .handoff-card-divider');
@@ -1698,8 +1702,17 @@ document.addEventListener('DOMContentLoaded', () => {
     resetDeployModal();
     deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, rejections: new Map(), xhr: null };
     deployAppName.textContent = app.name;
+    renderDeployCliSnippet(app.slug);
     deployModal.hidden = false;
     deployDropzone.focus();
+  }
+
+  function renderDeployCliSnippet(slug) {
+    const origin = window.location.origin;
+    const username = (state.user && state.user.username) || '<your-name>';
+    deployCliSnippet.textContent =
+      `shinyhub login --host ${origin} --username ${username}\n` +
+      `shinyhub deploy --slug ${slug} .`;
   }
 
   function closeDeployModal() {
@@ -2097,6 +2110,20 @@ document.addEventListener('DOMContentLoaded', () => {
         newAppSnippetCopy.classList.remove('is-copied');
         if (newAppSnippetCopyLabel)  newAppSnippetCopyLabel.textContent  = 'Copy';
         if (newAppSnippetCopyStatus) newAppSnippetCopyStatus.textContent = '';
+      }, 1800);
+    } catch { /* clipboard blocked; user can select text manually */ }
+  });
+
+  deployCliCopy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(deployCliSnippet.textContent);
+      deployCliCopy.classList.add('is-copied');
+      if (deployCliCopyLabel)  deployCliCopyLabel.textContent  = 'Copied';
+      if (deployCliCopyStatus) deployCliCopyStatus.textContent = 'Copied to clipboard';
+      setTimeout(() => {
+        deployCliCopy.classList.remove('is-copied');
+        if (deployCliCopyLabel)  deployCliCopyLabel.textContent  = 'Copy';
+        if (deployCliCopyStatus) deployCliCopyStatus.textContent = '';
       }, 1800);
     } catch { /* clipboard blocked; user can select text manually */ }
   });

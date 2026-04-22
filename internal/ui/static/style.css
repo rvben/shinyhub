@@ -1144,7 +1144,7 @@ main {
   color: var(--cyan-bright) !important;
 }
 
-/* Primary CTA on app cards — used on "Deploy first bundle" */
+/* Primary CTA on app cards — used on the empty-state "Deploy" button */
 .app-actions .btn-primary {
   background: var(--cyan-bright);
   color: var(--bg-deep);
@@ -2204,7 +2204,38 @@ main {
 
 .env-form-row input[type="file"] {
   color: var(--text-soft);
-  font-size: 0.8rem;
+  font-size: 0.85rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.env-form-row input[type="file"]::file-selector-button {
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-soft);
+  background: var(--bg-deep);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 6px 12px;
+  margin-right: 0.75rem;
+  cursor: pointer;
+  transition: all var(--ease);
+}
+
+.env-form-row input[type="file"]::file-selector-button:hover {
+  color: var(--cyan-bright);
+  border-color: var(--cyan-bright);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.env-form-row input[type="file"]:focus-visible {
+  outline: none;
+}
+.env-form-row input[type="file"]:focus-visible::file-selector-button {
+  border-color: var(--cyan-bright);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25);
 }
 
 /* ── Schedules & Shared Data tabs ── */
