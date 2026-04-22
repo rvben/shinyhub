@@ -16,6 +16,44 @@ import (
 	"github.com/rvben/shinyhub/internal/secrets"
 )
 
+// schedLock is a context-aware mutex used to serialize runs of a single
+// schedule. Unlike sync.Mutex it supports cancellable acquisition: a
+// caller can give up waiting if its context is cancelled, releasing
+// resources (notably the queue-semaphore slot) without first waiting
+// for the active run to finish.
+//
+// Implemented as a 1-buffered channel: send = lock, receive = unlock.
+type schedLock struct {
+	ch chan struct{}
+}
+
+func newSchedLock() *schedLock { return &schedLock{ch: make(chan struct{}, 1)} }
+
+// tryLock acquires the lock without blocking. Returns true on success.
+func (l *schedLock) tryLock() bool {
+	select {
+	case l.ch <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// lock blocks until the lock is acquired or ctx is cancelled. Returns
+// true on acquisition, false if ctx finished first.
+func (l *schedLock) lock(ctx context.Context) bool {
+	select {
+	case l.ch <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// unlock releases the lock. Must only be called by a goroutine that
+// previously acquired it via tryLock or lock.
+func (l *schedLock) unlock() { <-l.ch }
+
 // Manager orchestrates scheduled command runs end-to-end: enforcing overlap
 // policies, building run contexts, recording run rows, invoking the runtime,
 // and updating final status.
@@ -26,10 +64,10 @@ type Manager struct {
 	appsDir    string
 	appDataDir string
 
-	mu      sync.Mutex
-	locks   map[int64]*sync.Mutex   // per-schedule mutex for "skip"/"queue" policies
-	queues  map[int64]chan struct{}  // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
-	active  map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
+	mu     sync.Mutex
+	locks  map[int64]*schedLock         // per-schedule lock for "skip"/"queue" policies
+	queues map[int64]chan struct{}      // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
+	active map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
 }
 
 // NewManager constructs a Manager. secretsKey may be nil if no env vars are encrypted.
@@ -40,21 +78,21 @@ func NewManager(rt process.Runtime, st Store, secretsKey []byte, appsDir, appDat
 		secretsKey: secretsKey,
 		appsDir:    appsDir,
 		appDataDir: appDataDir,
-		locks:      make(map[int64]*sync.Mutex),
+		locks:      make(map[int64]*schedLock),
 		queues:     make(map[int64]chan struct{}),
 		active:     make(map[int64]context.CancelFunc),
 	}
 }
 
-// lockFor returns the per-schedule mutex for the given schedule ID, creating
+// lockFor returns the per-schedule lock for the given schedule ID, creating
 // it lazily. Must be called with m.mu held.
-func (m *Manager) lockFor(schedID int64) *sync.Mutex {
-	mu, ok := m.locks[schedID]
+func (m *Manager) lockFor(schedID int64) *schedLock {
+	l, ok := m.locks[schedID]
 	if !ok {
-		mu = &sync.Mutex{}
-		m.locks[schedID] = mu
+		l = newSchedLock()
+		m.locks[schedID] = l
 	}
-	return mu
+	return l
 }
 
 // queueChan returns the per-schedule capacity-2 semaphore channel for the
@@ -131,8 +169,8 @@ func (m *Manager) Run(scheduleID int64, trigger string, userID *int64) (int64, e
 // If one is already running, it records a skipped_overlap row and returns.
 func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, userID *int64) (int64, error) {
 	m.mu.Lock()
-	mu := m.lockFor(sched.ID)
-	acquired := mu.TryLock()
+	slot := m.lockFor(sched.ID)
+	acquired := slot.tryLock()
 	m.mu.Unlock()
 
 	if !acquired {
@@ -141,15 +179,15 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, u
 
 	runID, err := m.insertRunRow(sched, trigger, userID)
 	if err != nil {
-		mu.Unlock()
+		slot.unlock()
 		return 0, err
 	}
 
-	ctx, cancel := m.buildRunContext(sched)
+	ctx, cancel := m.buildRunContext()
 	m.registerActive(runID, cancel)
 
 	go func() {
-		defer mu.Unlock()
+		defer slot.unlock()
 		defer cancel()
 		defer m.unregisterActive(runID)
 		m.execute(ctx, sched, app, runID, trigger, userID)
@@ -159,19 +197,21 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, u
 }
 
 // runWithQueue serializes runs via a capacity-2 channel semaphore: at most
-// one run executes at a time (per-schedule mutex) and at most one further
+// one run executes at a time (per-schedule lock) and at most one further
 // run waits behind it. Any additional concurrent run finds the semaphore
 // full and is recorded as skipped_overlap.
 //
-// The cancel context is registered up-front, before mu.Lock blocks the
-// queued goroutine. Without that, Cancel() on a run waiting for its turn
-// would silently no-op and the run would still execute when its turn
-// arrived. After acquiring mu the goroutine checks ctx.Err() and
-// short-circuits to status="cancelled" without invoking the runtime.
+// The cancel context is registered up-front, before slot.lock starts to
+// wait. The acquisition itself is context-aware: if Cancel() arrives
+// while the run is queued, slot.lock returns false and the goroutine
+// frees its semaphore slot synchronously and finalises the run as
+// cancelled — without first having to wait for the active run to
+// release the lock. This keeps queue-slot accounting honest: cancelled
+// queued runs immediately make room for new admissions.
 func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, userID *int64) (int64, error) {
 	m.mu.Lock()
 	sem := m.queueChan(sched.ID)
-	mu := m.lockFor(sched.ID)
+	slot := m.lockFor(sched.ID)
 	m.mu.Unlock()
 
 	// Try to queue non-blocking. If channel is full, skip.
@@ -187,23 +227,24 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 		return 0, err
 	}
 
-	ctx, cancel := m.buildRunContext(sched)
+	ctx, cancel := m.buildRunContext()
 	m.registerActive(runID, cancel)
 
 	go func() {
-		defer func() { <-sem }()
 		defer cancel()
 		defer m.unregisterActive(runID)
 
-		mu.Lock()
-		defer mu.Unlock()
-
-		if ctx.Err() != nil {
-			// Cancel arrived while we were queued; do not invoke the
-			// runtime — just record the run as cancelled.
+		if !slot.lock(ctx) {
+			// Cancel arrived while waiting in the queue. Free the
+			// queue slot first so a new admission can take our place,
+			// then finalise as cancelled. We never acquired the lock,
+			// so do not call slot.unlock.
+			<-sem
 			m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
 			return
 		}
+		defer slot.unlock()
+		defer func() { <-sem }()
 		m.execute(ctx, sched, app, runID, trigger, userID)
 	}()
 
@@ -217,7 +258,7 @@ func (m *Manager) runConcurrent(sched *db.Schedule, app *db.App, trigger string,
 		return 0, err
 	}
 
-	ctx, cancel := m.buildRunContext(sched)
+	ctx, cancel := m.buildRunContext()
 	m.registerActive(runID, cancel)
 
 	go func() {
@@ -229,14 +270,14 @@ func (m *Manager) runConcurrent(sched *db.Schedule, app *db.App, trigger string,
 	return runID, nil
 }
 
-// buildRunContext returns the cancellation context used for one schedule
-// run, honoring the schedule's timeout. The caller owns the cancel func
-// and must defer it (cancel is also placed in m.active so a Cancel() RPC
-// can trigger it from outside).
-func (m *Manager) buildRunContext(sched *db.Schedule) (context.Context, context.CancelFunc) {
-	if sched.TimeoutSeconds > 0 {
-		return context.WithTimeout(context.Background(), time.Duration(sched.TimeoutSeconds)*time.Second)
-	}
+// buildRunContext returns a cancel-only context used for the lifetime of
+// one schedule run from queue admission to completion. The schedule's
+// per-run timeout is applied later, inside execute, so the timeout
+// window starts when the runtime actually runs — not while the run is
+// still waiting in the queue. The caller owns cancel and must defer it
+// (the same cancel is registered in m.active so a Cancel() RPC can
+// trigger it from outside).
+func (m *Manager) buildRunContext() (context.Context, context.CancelFunc) {
 	return context.WithCancel(context.Background())
 }
 
@@ -280,8 +321,20 @@ func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int6
 // and recording the final status. It is always called in a goroutine. ctx
 // is owned and cancelled by the caller; execute does not register/unregister
 // it, because for the queue policy the cancel must be observable while the
-// goroutine is still blocked on the per-schedule mutex (see runWithQueue).
+// goroutine is still blocked acquiring the per-schedule lock (see
+// runWithQueue).
+//
+// The schedule's per-run timeout is applied here, deriving runCtx from
+// ctx. Timing the timeout from execute (rather than from queue admission)
+// guarantees a queued run gets its full configured timeout window once
+// it actually starts running.
 func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, runID int64, trigger string, userID *int64) {
+	runCtx := ctx
+	if sched.TimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, time.Duration(sched.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
 	// Build log file path and create directory.
 	logDir := filepath.Join(m.appsDir, app.Slug, "schedules", fmt.Sprintf("%d", sched.ID))
 	if err := os.MkdirAll(logDir, 0o750); err != nil {
@@ -375,7 +428,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 
 	// Run the command.
 	var logWriter io.Writer = logFile
-	info, runErr := m.rt.RunOnce(ctx, params, logWriter)
+	info, runErr := m.rt.RunOnce(runCtx, params, logWriter)
 
 	// Determine final status.
 	status := "succeeded"
@@ -383,7 +436,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	switch {
 	case runErr != nil:
 		status = "failed"
-	case info.Signaled && ctx.Err() == context.DeadlineExceeded:
+	case info.Signaled && runCtx.Err() == context.DeadlineExceeded:
 		status = "timed_out"
 	case info.Signaled:
 		status = "cancelled"

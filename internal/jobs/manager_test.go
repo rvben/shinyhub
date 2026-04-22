@@ -18,9 +18,15 @@ import (
 type fakeRuntime struct {
 	process.Runtime
 
-	mu        sync.Mutex
-	calls     int
+	mu         sync.Mutex
+	calls      int
 	lastParams process.StartParams
+
+	// deadlinesAtEntry records, for each RunOnce invocation, the time
+	// remaining on ctx's deadline at the moment RunOnce was entered. A
+	// value of -1 means no deadline was set on the context. Tests use
+	// this to verify that timeouts begin at execution time, not earlier.
+	deadlinesAtEntry []time.Duration
 
 	// block, when non-nil, is received by RunOnce before returning.
 	// Set to a non-nil channel to simulate a long-running process.
@@ -31,6 +37,13 @@ type fakeRuntime struct {
 }
 
 func (f *fakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	f.mu.Lock()
+	if d, ok := ctx.Deadline(); ok {
+		f.deadlinesAtEntry = append(f.deadlinesAtEntry, time.Until(d))
+	} else {
+		f.deadlinesAtEntry = append(f.deadlinesAtEntry, -1)
+	}
+	f.mu.Unlock()
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -451,6 +464,129 @@ func TestManager_Run_OverlapQueue_CancelOfQueuedRunSkipsExecution(t *testing.T) 
 	if calls != 1 {
 		t.Errorf("RunOnce calls=%d, want 1 — queued run must not execute after cancel", calls)
 	}
+}
+
+// TestManager_Run_OverlapQueue_TimeoutStartsAfterDequeue verifies that for
+// the queue policy a queued run's timeout window begins when the runtime
+// actually starts — not when the run was admitted to the queue. Previously
+// the timeout context was created up-front, so a queued run's deadline ate
+// into its execution window: a run that waited 700ms in queue with a 1s
+// timeout would only have ~300ms left when it finally executed, even
+// though the user expected a full 1s.
+func TestManager_Run_OverlapQueue_TimeoutStartsAfterDequeue(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, block: block}
+	st := newFakeStore(makeSchedule("queue", 1), makeApp()) // 1s per-run timeout
+	m := newTestManager(t, rt, st)
+
+	// Run #1 — starts and blocks holding the per-schedule lock.
+	if _, err := m.Run(1, "cron", nil); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Run #2 — queues behind #1.
+	if _, err := m.Run(1, "cron", nil); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	// Spend most of the 1s timeout waiting in the queue.
+	time.Sleep(700 * time.Millisecond)
+
+	// Release #1 so #2 dequeues and runs. The block channel is closed,
+	// so #2's RunOnce returns immediately after recording its deadline.
+	close(block)
+
+	waitForCalls(t, rt, 2, 3*time.Second)
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.deadlinesAtEntry) < 2 {
+		t.Fatalf("expected 2 captured deadlines, got %d", len(rt.deadlinesAtEntry))
+	}
+	// Run #2 must enter RunOnce with close to a full 1s of timeout left,
+	// not the residue (~300ms) left after queuing for 700ms.
+	if rt.deadlinesAtEntry[1] < 600*time.Millisecond {
+		t.Errorf("queued run entered RunOnce with %v left on deadline; want > 600ms — timeout must start at execute, not queue admission",
+			rt.deadlinesAtEntry[1])
+	}
+}
+
+// TestManager_Run_OverlapQueue_CancelledQueuedRunFreesSlotImmediately
+// verifies that cancelling a queued run releases its queue slot without
+// waiting for the active run to finish. Previously the queued goroutine
+// was blocked on a sync.Mutex.Lock that ignored ctx cancellation, so its
+// queue-semaphore slot stayed occupied until the active run released the
+// per-schedule lock. Until then a new Run() correctly admittable into
+// the queue was wrongly recorded as skipped_overlap.
+func TestManager_Run_OverlapQueue_CancelledQueuedRunFreesSlotImmediately(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, block: block}
+	st := newFakeStore(makeSchedule("queue", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	// Run #1 — starts and blocks holding the per-schedule lock.
+	if _, err := m.Run(1, "cron", nil); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Run #2 — queues behind #1 (sem now full: 1 active + 1 queued).
+	id2, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	// Cancel the queued run. The cancellation must propagate to the
+	// schedule-lock acquisition and free the queue slot immediately.
+	if err := m.Cancel(id2); err != nil {
+		t.Fatalf("Cancel queued run: %v", err)
+	}
+
+	// Wait for #2 to be finalised as cancelled. With the bug, this never
+	// happens until run #1 finishes; assert a tight bound so the failure
+	// mode is obvious.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var r2Status string
+	for time.Now().Before(deadline) {
+		st.mu.Lock()
+		r := st.runs[id2]
+		var done bool
+		if r != nil && r.FinishedAt != nil {
+			done = true
+			r2Status = r.Status
+		}
+		st.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r2Status != "cancelled" {
+		t.Fatalf("queued run #2 not finalised as cancelled within 500ms (got %q) — cancellation must release the queue slot synchronously",
+			r2Status)
+	}
+
+	// Run #3 — must be admittable now that #2's slot has been freed.
+	id3, err := m.Run(1, "cron", nil)
+	if err != nil {
+		t.Fatalf("third Run: %v", err)
+	}
+	st.mu.Lock()
+	r3 := st.runs[id3]
+	var r3Status string
+	if r3 != nil {
+		r3Status = r3.Status
+	}
+	st.mu.Unlock()
+	if r3Status != "running" {
+		t.Errorf("third run after cancelling queued #2: status=%q, want %q — cancellation must free the queue slot",
+			r3Status, "running")
+	}
+
+	// Drain.
+	close(block)
+	waitForCalls(t, rt, 2, 2*time.Second)
 }
 
 // TestManager_Run_PersistsLogPath verifies that Manager calls SetScheduleRunLogPath
