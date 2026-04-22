@@ -28,7 +28,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	locks   map[int64]*sync.Mutex   // per-schedule mutex for "skip"/"queue" policies
-	queues  map[int64]chan struct{}  // per-schedule capacity-1 semaphore for "queue" policy
+	queues  map[int64]chan struct{}  // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
 	active  map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
 }
 
@@ -57,12 +57,16 @@ func (m *Manager) lockFor(schedID int64) *sync.Mutex {
 	return mu
 }
 
-// queueChan returns the per-schedule capacity-1 semaphore channel for the
-// given schedule ID, creating it lazily. Must be called with m.mu held.
+// queueChan returns the per-schedule capacity-2 semaphore channel for the
+// given schedule ID, creating it lazily. Capacity is two so the queue policy
+// admits one active run plus one waiting behind it; further concurrent runs
+// are recorded as skipped_overlap. A capacity of one would make queue behave
+// identically to skip — every overlapping run dropped. Must be called with
+// m.mu held.
 func (m *Manager) queueChan(schedID int64) chan struct{} {
 	ch, ok := m.queues[schedID]
 	if !ok {
-		ch = make(chan struct{}, 1)
+		ch = make(chan struct{}, 2)
 		m.queues[schedID] = ch
 	}
 	return ch
@@ -149,9 +153,10 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, u
 	return runID, nil
 }
 
-// runWithQueue serializes runs via a capacity-1 channel semaphore. If the
-// semaphore is already full (one run active, one queued), the incoming run is
-// skipped.
+// runWithQueue serializes runs via a capacity-2 channel semaphore: at most
+// one run executes at a time (per-schedule mutex) and at most one further
+// run waits behind it. Any additional concurrent run finds the semaphore
+// full and is recorded as skipped_overlap.
 func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, userID *int64) (int64, error) {
 	m.mu.Lock()
 	sem := m.queueChan(sched.ID)

@@ -321,6 +321,59 @@ func TestManager_Run_OverlapSkip_DropsConcurrent(t *testing.T) {
 	waitForCalls(t, rt, 1, 2*time.Second)
 }
 
+// TestManager_Run_OverlapQueue_QueuesOneAndSkipsRest exercises the
+// overlap=queue policy: while a run is in flight, exactly one further run
+// must be queued behind it; only the third (and beyond) must be recorded as
+// skipped_overlap. Previously the per-schedule semaphore had capacity 1, so
+// queue behaved identically to skip — every concurrent run was dropped
+// instead of waiting for its turn.
+func TestManager_Run_OverlapQueue_QueuesOneAndSkipsRest(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, block: block}
+	st := newFakeStore(makeSchedule("queue", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	// Run #1 — starts, blocks inside RunOnce.
+	if _, err := m.Run(1, "cron", nil); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	// Let the goroutine reach RunOnce so the per-schedule lock is held.
+	time.Sleep(50 * time.Millisecond)
+
+	// Run #2 — must queue (sits waiting on the per-schedule lock).
+	if _, err := m.Run(1, "cron", nil); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	// Run #3 — semaphore is full (1 active + 1 queued), so this must skip.
+	if _, err := m.Run(1, "cron", nil); err != nil {
+		t.Fatalf("third Run: %v", err)
+	}
+
+	// Snapshot the inserted run statuses while #1 is still blocked.
+	st.mu.Lock()
+	var running, skipped int
+	for _, r := range st.runs {
+		switch r.Status {
+		case "running":
+			running++
+		case "skipped_overlap":
+			skipped++
+		}
+	}
+	st.mu.Unlock()
+
+	if running != 2 || skipped != 1 {
+		t.Fatalf("queue policy must accept 1 active + 1 queued and skip the rest; got running=%d skipped=%d",
+			running, skipped)
+	}
+
+	// Drain: closing the block channel releases the active run; the queued
+	// run then acquires the lock, hits the (already-closed) block, and runs.
+	close(block)
+	waitForCalls(t, rt, 2, 2*time.Second)
+}
+
 // TestManager_Run_PersistsLogPath verifies that Manager calls SetScheduleRunLogPath
 // with a non-empty path after opening the log file for a run.
 func TestManager_Run_PersistsLogPath(t *testing.T) {
