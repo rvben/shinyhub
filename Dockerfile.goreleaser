@@ -11,4 +11,4 @@ ENV SHINYHUB_CONFIG=/etc/shinyhub/shinyhub.yaml
 EXPOSE 8080
 
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/shinyhub"]
+ENTRYPOINT ["/usr/local/bin/shinyhub", "serve"]
