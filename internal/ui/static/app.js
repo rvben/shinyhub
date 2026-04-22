@@ -2050,6 +2050,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       return;
     }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) return;
     const m = await resp.json();
     const el = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
