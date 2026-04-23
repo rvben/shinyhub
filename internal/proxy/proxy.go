@@ -95,10 +95,15 @@ type replicaBackend struct {
 
 // backendPool holds a fixed-size slice of replicas for one slug.
 // rrCounter is used for round-robin tie-breaking in least-connections selection.
+//
+// maxSessions is the per-replica active-connection cap. When every non-nil
+// replica is at or above this value, new requests without a valid sticky
+// cookie are shed with 503 (see ServeHTTP). A value of 0 disables the cap.
 type backendPool struct {
-	size      int
-	replicas  []*replicaBackend
-	rrCounter atomic.Int64
+	size        int
+	replicas    []*replicaBackend
+	rrCounter   atomic.Int64
+	maxSessions int
 }
 
 // AccessLogEntry describes a single proxied request. It is passed to the
@@ -206,6 +211,8 @@ func (p *Proxy) LastSeen(slug string) time.Time {
 // SetPoolSize initialises or resizes the replica pool for slug.
 // It is idempotent: growing preserves existing replicas; shrinking drops
 // trailing slots. Callers must invoke this before RegisterReplica.
+// The per-replica session cap is preserved across resizes; set it separately
+// via SetPoolCap.
 func (p *Proxy) SetPoolSize(slug string, size int) {
 	if size < 1 {
 		size = 1
@@ -224,6 +231,25 @@ func (p *Proxy) SetPoolSize(slug string, size int) {
 		pool.replicas = append(pool.replicas, nil)
 	}
 	pool.size = size
+}
+
+// SetPoolCap sets the per-replica active-session cap for slug. Once every
+// non-nil replica reaches this count, new requests without a valid sticky
+// cookie are shed with 503 Retry-After. A value of 0 means unlimited.
+// Creates the pool (size 1) if it does not yet exist so callers can configure
+// the cap before spawning replicas.
+func (p *Proxy) SetPoolCap(slug string, max int) {
+	if max < 0 {
+		max = 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok {
+		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		p.pools[slug] = pool
+	}
+	pool.maxSessions = max
 }
 
 // RegisterReplica registers a backend URL at the given index within slug's pool.
@@ -352,6 +378,43 @@ func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
 	return true
 }
 
+// ReplicaSessionCounts returns a snapshot of the active connection count
+// for each replica slot in slug's pool, indexed by replica index. Slots
+// with a nil backend return -1. The returned slice length equals the
+// current pool size; returns nil if the pool is not registered.
+//
+// Intended for the metrics endpoint; callers should treat the result as
+// a best-effort sample, not a synchronised read (each entry is loaded
+// independently).
+func (p *Proxy) ReplicaSessionCounts(slug string) []int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return nil
+	}
+	out := make([]int64, len(pool.replicas))
+	for i, rep := range pool.replicas {
+		if rep == nil {
+			out[i] = -1
+			continue
+		}
+		out[i] = rep.activeConns.Load()
+	}
+	return out
+}
+
+// PoolCap returns the per-replica session cap for slug, or 0 if the pool is
+// not registered or the cap is disabled.
+func (p *Proxy) PoolCap(slug string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if pool := p.pools[slug]; pool != nil {
+		return pool.maxSessions
+	}
+	return 0
+}
+
 // HasLiveReplica reports whether slug has at least one non-nil replica.
 func (p *Proxy) HasLiveReplica(slug string) bool {
 	p.mu.RLock()
@@ -437,7 +500,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	picked, isStickyHit := p.pickReplicaLocked(pool, slug, r)
+	picked, isStickyHit, saturated := p.pickReplicaLocked(pool, slug, r)
+	if saturated {
+		// All replicas are at or above the per-replica cap and the caller has
+		// no valid sticky cookie, so this is a brand-new session. Shed it
+		// rather than overload a replica that's already full. The
+		// Retry-After hint is conservative: 5 s is long enough that a
+		// just-finishing session has a realistic chance of freeing a slot,
+		// short enough that the client doesn't perceive a complete outage.
+		p.mu.RUnlock()
+		rec.Header().Set("Retry-After", "5")
+		http.Error(rec, "Service temporarily at capacity, please retry.", http.StatusServiceUnavailable)
+		return
+	}
 	replicaIndex = picked.index
 	sticky = isStickyHit
 	if !isStickyHit {
@@ -513,22 +588,25 @@ func forwardedForToken(remoteAddr string) string {
 //
 // First, it checks for a valid sticky cookie. If the pinned replica index
 // is live, that replica is returned and the cookie is left untouched
-// (isStickyHit=true).
+// (isStickyHit=true). Sticky hits always forward, even when the replica
+// is at or above the session cap — denying an established session would
+// kill a live WS and surface as a user-visible disconnect.
 //
 // Otherwise, least-connections is used: the replica with the fewest active
 // connections wins. On a tie, a pool-scoped round-robin counter determines
 // which tied candidate is preferred — this avoids always pinning
-// cookie-less traffic to the lowest-index replica.
-func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Request) (*replicaBackend, bool) {
+// cookie-less traffic to the lowest-index replica. If the least-loaded
+// replica is at or above the cap (and the cap is non-zero), the saturated
+// flag is set so ServeHTTP can shed the request with 503.
+func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Request) (best *replicaBackend, isSticky, saturated bool) {
 	if c, err := r.Cookie(cookiePrefix + slug); err == nil {
 		if idx, err := strconv.Atoi(c.Value); err == nil {
 			if idx >= 0 && idx < len(pool.replicas) && pool.replicas[idx] != nil {
-				return pool.replicas[idx], true
+				return pool.replicas[idx], true, false
 			}
 		}
 	}
 
-	var best *replicaBackend
 	var bestConns int64 = -1
 	for _, rep := range pool.replicas {
 		if rep == nil {
@@ -547,7 +625,10 @@ func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Reques
 			}
 		}
 	}
-	return best, false
+	if best != nil && pool.maxSessions > 0 && bestConns >= int64(pool.maxSessions) {
+		saturated = true
+	}
+	return best, false, saturated
 }
 
 // poolHasAny reports whether the pool contains at least one non-nil replica.

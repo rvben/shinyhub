@@ -965,3 +965,238 @@ func TestProxy_LeastConnectionsDistribution(t *testing.T) {
 		t.Fatalf("expected both replicas to be hit: %d / %d", hits0.Load(), hits1.Load())
 	}
 }
+
+// blockingBackend returns a test server whose handler blocks on the provided
+// release channel. Callers must close(release) to let in-flight requests
+// drain before the test returns; otherwise goroutines leak past the test.
+func blockingBackend(release chan struct{}) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+}
+
+// waitForCount polls ReplicaSessionCounts until the predicate matches or the
+// deadline elapses; returns the last sampled counts either way.
+func waitForCount(p *proxy.Proxy, slug string, pred func([]int64) bool) []int64 {
+	deadline := time.Now().Add(2 * time.Second)
+	var counts []int64
+	for time.Now().Before(deadline) {
+		counts = p.ReplicaSessionCounts(slug)
+		if pred(counts) {
+			return counts
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return counts
+}
+
+// TestProxy_SessionCap_Sheds503WhenAllSaturated verifies that when every
+// replica in the pool has reached the per-replica cap, a new cookie-less
+// request is rejected with 503 + Retry-After rather than forwarded.
+func TestProxy_SessionCap_Sheds503WhenAllSaturated(t *testing.T) {
+	release := make(chan struct{})
+	b0 := blockingBackend(release)
+	defer b0.Close()
+	b1 := blockingBackend(release)
+	defer b1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL)
+	_ = p.RegisterReplica("demo", 1, b1.URL)
+	p.SetPoolCap("demo", 1) // 1 in-flight per replica = 2 total capacity
+
+	// Launch 2 requests that will block in the backend handlers, pinning
+	// activeConns at 1 per replica. Each is cookie-less so the least-
+	// connections picker routes them to distinct replicas.
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+			p.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+	}
+	counts := waitForCount(p, "demo", func(c []int64) bool {
+		return len(c) == 2 && c[0] >= 1 && c[1] >= 1
+	})
+	if len(counts) != 2 || counts[0] < 1 || counts[1] < 1 {
+		close(release)
+		wg.Wait()
+		t.Fatalf("pool not saturated: %v", counts)
+	}
+
+	// Now the assertion under test: a new cookie-less request must be shed.
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when pool saturated, got %d", rec.Code)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Error("expected Retry-After header on 503 shedding response")
+	}
+
+	close(release)
+	wg.Wait()
+}
+
+// TestProxy_SessionCap_StickyCookieBypassesCap verifies that a request with a
+// valid sticky cookie is forwarded even when the chosen replica is at or
+// above the cap — the cap exists to stop *new* sessions overwhelming the
+// pool; dropping an established session would kill a live WS connection.
+func TestProxy_SessionCap_StickyCookieBypassesCap(t *testing.T) {
+	release := make(chan struct{})
+	b0 := blockingBackend(release)
+	defer b0.Close()
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "sticky-ok")
+	}))
+	defer b1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL)
+	_ = p.RegisterReplica("demo", 1, b1.URL)
+	p.SetPoolCap("demo", 1)
+
+	// Pin one in-flight request against replica 0 so it sits at cap.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+		req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0"})
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	counts := waitForCount(p, "demo", func(c []int64) bool { return len(c) == 2 && c[0] >= 1 })
+	if counts[0] < 1 {
+		close(release)
+		wg.Wait()
+		t.Fatalf("replica 0 never saturated: %v", counts)
+	}
+
+	// Sticky cookie to replica 1 must short-circuit the saturation check
+	// and forward — without the sticky bypass the test would 503.
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1"})
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected sticky hit to forward (200), got %d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "sticky-ok" {
+		t.Errorf("expected sticky reply from replica 1, got %q", rec.Body.String())
+	}
+
+	close(release)
+	wg.Wait()
+}
+
+// TestProxy_SessionCap_ZeroMeansUnlimited verifies that cap=0 disables the
+// saturation check even when connection counts are high: a new cookie-less
+// request is forwarded rather than shed.
+func TestProxy_SessionCap_ZeroMeansUnlimited(t *testing.T) {
+	release := make(chan struct{})
+	b0 := blockingBackend(release)
+	defer b0.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	_ = p.RegisterReplica("demo", 0, b0.URL)
+	p.SetPoolCap("demo", 0) // explicit "unlimited"
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	if c := waitForCount(p, "demo", func(c []int64) bool { return len(c) == 1 && c[0] >= 1 }); c[0] < 1 {
+		close(release)
+		wg.Wait()
+		t.Fatalf("replica 0 never became busy: %v", c)
+	}
+
+	// With cap=0, a cookie-less request must not 503. It will block in the
+	// backend handler (because cap=0 lets us past the gate and the backend
+	// is still blocked on release), so drive it on a goroutine and assert
+	// the recorded status is NOT 503 after a brief settling delay.
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	rec := httptest.NewRecorder()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.ServeHTTP(rec, req)
+	}()
+	// A 503 shed happens synchronously before the backend is touched, so
+	// 50 ms is ample to rule it out without race-ing with a slow backend.
+	time.Sleep(50 * time.Millisecond)
+	if rec.Code == http.StatusServiceUnavailable {
+		t.Errorf("cap=0 must not shed: got 503")
+	}
+
+	close(release)
+	wg.Wait()
+}
+
+// TestProxy_ReplicaSessionCounts_ReflectsInFlight verifies that
+// ReplicaSessionCounts returns -1 for empty slots and tracks live connections.
+func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {
+	release := make(chan struct{})
+	b0 := blockingBackend(release)
+	defer b0.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2) // 2 slots, but only slot 0 is registered
+	_ = p.RegisterReplica("demo", 0, b0.URL)
+
+	counts := p.ReplicaSessionCounts("demo")
+	if len(counts) != 2 {
+		close(release)
+		t.Fatalf("expected 2 slots, got %d", len(counts))
+	}
+	if counts[0] != 0 {
+		t.Errorf("expected slot 0 idle with count=0, got %d", counts[0])
+	}
+	if counts[1] != -1 {
+		t.Errorf("expected nil slot 1 to return -1, got %d", counts[1])
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	got := waitForCount(p, "demo", func(c []int64) bool { return len(c) == 2 && c[0] == 1 })
+	if got[0] != 1 {
+		t.Errorf("expected slot 0 to show 1 in-flight, got %d", got[0])
+	}
+	if got[1] != -1 {
+		t.Errorf("nil slot 1 should still be -1, got %d", got[1])
+	}
+
+	close(release)
+	wg.Wait()
+}
+
+// TestProxy_PoolCap_ReadsBack verifies PoolCap returns whatever SetPoolCap
+// last stored (and 0 for unknown slugs).
+func TestProxy_PoolCap_ReadsBack(t *testing.T) {
+	p := proxy.New()
+	if got := p.PoolCap("nope"); got != 0 {
+		t.Errorf("unknown slug should return 0, got %d", got)
+	}
+	p.SetPoolCap("demo", 10)
+	if got := p.PoolCap("demo"); got != 10 {
+		t.Errorf("expected cap=10, got %d", got)
+	}
+	p.SetPoolCap("demo", 0)
+	if got := p.PoolCap("demo"); got != 0 {
+		t.Errorf("expected cap=0 after reset, got %d", got)
+	}
+}
