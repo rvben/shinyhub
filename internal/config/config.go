@@ -128,6 +128,11 @@ type RuntimeConfig struct {
 	Docker          DockerRuntimeConfig
 	DefaultReplicas int
 	MaxReplicas     int
+	// DefaultMaxSessionsPerReplica is the fallback session cap enforced by the
+	// proxy when an app's own max_sessions_per_replica is 0. Once every replica
+	// reaches this many active connections, new cookie-less requests are shed
+	// with 503. 0 here disables the cap entirely (unlimited).
+	DefaultMaxSessionsPerReplica int
 }
 
 // DockerRuntimeConfig holds Docker-specific runtime settings.
@@ -169,10 +174,11 @@ type rawLifecycleConfig struct {
 }
 
 type rawRuntimeConfig struct {
-	Mode            string                 `yaml:"mode"`
-	Docker          rawDockerRuntimeConfig `yaml:"docker"`
-	DefaultReplicas int                    `yaml:"default_replicas"`
-	MaxReplicas     int                    `yaml:"max_replicas"`
+	Mode                         string                 `yaml:"mode"`
+	Docker                       rawDockerRuntimeConfig `yaml:"docker"`
+	DefaultReplicas              int                    `yaml:"default_replicas"`
+	MaxReplicas                  int                    `yaml:"max_replicas"`
+	DefaultMaxSessionsPerReplica int                    `yaml:"default_max_sessions_per_replica"`
 }
 
 type rawDockerRuntimeConfig struct {
@@ -369,11 +375,22 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	if r.MaxReplicas > 0 {
 		rc.MaxReplicas = r.MaxReplicas
 	}
+	if r.DefaultMaxSessionsPerReplica >= 0 {
+		rc.DefaultMaxSessionsPerReplica = r.DefaultMaxSessionsPerReplica
+	}
 	if rc.DefaultReplicas <= 0 {
 		rc.DefaultReplicas = 1
 	}
 	if rc.MaxReplicas <= 0 {
 		rc.MaxReplicas = 32
+	}
+	// Profiling spike showed single-event-loop p99 stays healthy to c=10 and
+	// degrades sharply beyond that, with some apps erroring at c=30. 10 is
+	// conservative and safe as a platform-wide default; operators can opt out
+	// per-app by setting max_sessions_per_replica=0 explicitly (which falls
+	// back to this default) or bump it when their app tolerates more.
+	if rc.DefaultMaxSessionsPerReplica == 0 {
+		rc.DefaultMaxSessionsPerReplica = 10
 	}
 	return rc
 }
@@ -481,6 +498,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SHINYHUB_RUNTIME_MAX_REPLICAS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.Runtime.MaxReplicas = n
+		}
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.Runtime.DefaultMaxSessionsPerReplica = n
 		}
 	}
 }
