@@ -108,13 +108,14 @@ func (s *Server) redeployApp(slug string) {
 	}
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:            slug,
-		BundleDir:       current.BundleDir,
-		Replicas:        app.Replicas,
-		Manager:         s.manager,
-		Proxy:           s.proxy,
-		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		Slug:                  slug,
+		BundleDir:             current.BundleDir,
+		Replicas:              app.Replicas,
+		Manager:               s.manager,
+		Proxy:                 s.proxy,
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 	})
 	if err != nil {
 		slog.Error("redeployApp: deploy failed", "slug", slug, "err", err)

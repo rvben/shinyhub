@@ -199,18 +199,20 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Parse and validate all fields first so a bad request never causes a
 	// partial write (e.g. hibernate_timeout persisted while name rejected).
 	var (
-		hibernateTimeout        *int
-		setHibernateTimeout     bool
-		newName                 string
-		setName                 bool
-		newProjectSlug          string
-		setProjectSlug          bool
-		memoryLimitMB           *int
-		setMemoryLimitMB        bool
-		cpuQuotaPercent         *int
-		setCPUQuotaPercent      bool
-		newReplicas             int
-		setReplicas             bool
+		hibernateTimeout         *int
+		setHibernateTimeout      bool
+		newName                  string
+		setName                  bool
+		newProjectSlug           string
+		setProjectSlug           bool
+		memoryLimitMB            *int
+		setMemoryLimitMB         bool
+		cpuQuotaPercent          *int
+		setCPUQuotaPercent       bool
+		newReplicas              int
+		setReplicas              bool
+		newMaxSessions           int
+		setMaxSessions           bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -291,6 +293,21 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newReplicas, setReplicas = n, true
+	}
+
+	if rawVal, present := raw["max_sessions_per_replica"]; present {
+		var n int
+		if err := json.Unmarshal(rawVal, &n); err != nil {
+			writeError(w, http.StatusBadRequest, "max_sessions_per_replica must be an integer")
+			return
+		}
+		// 0 explicitly means "fall back to the runtime default"; upper bound
+		// mirrors the DB CHECK constraint (migration 012).
+		if n < 0 || n > 1000 {
+			writeError(w, http.StatusBadRequest, "max_sessions_per_replica must be between 0 and 1000")
+			return
+		}
+		newMaxSessions, setMaxSessions = n, true
 	}
 
 	// Apply all validated writes.
@@ -387,6 +404,30 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if existing.Status == "running" {
 			go s.redeployApp(slug)
+		}
+	}
+
+	if setMaxSessions {
+		existing, err := s.store.GetApp(slug)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if err := s.store.UpdateAppMaxSessionsPerReplica(existing.ID, newMaxSessions); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if s.proxy != nil {
+			s.proxy.SetPoolCap(slug,
+				deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 		}
 	}
 
@@ -521,13 +562,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:            slug,
-		BundleDir:       bundleDir,
-		Replicas:        app.Replicas,
-		Manager:         s.manager,
-		Proxy:           s.proxy,
-		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		Slug:                  slug,
+		BundleDir:             bundleDir,
+		Replicas:              app.Replicas,
+		Manager:               s.manager,
+		Proxy:                 s.proxy,
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
@@ -671,13 +713,14 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:            slug,
-		BundleDir:       prev.BundleDir,
-		Replicas:        app.Replicas,
-		Manager:         s.manager,
-		Proxy:           s.proxy,
-		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		Slug:                  slug,
+		BundleDir:             prev.BundleDir,
+		Replicas:              app.Replicas,
+		Manager:               s.manager,
+		Proxy:                 s.proxy,
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
@@ -771,13 +814,14 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:            slug,
-		BundleDir:       current.BundleDir,
-		Replicas:        app.Replicas,
-		Manager:         s.manager,
-		Proxy:           s.proxy,
-		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		Slug:                  slug,
+		BundleDir:             current.BundleDir,
+		Replicas:              app.Replicas,
+		Manager:               s.manager,
+		Proxy:                 s.proxy,
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "restart %s: %v\n", slug, err)
@@ -1120,8 +1164,29 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, userLookupResponse{ID: user.ID, Username: user.Username})
 }
 
-type metricsResponse struct {
+type replicaMetrics struct {
+	Index      int     `json:"index"`
 	Status     string  `json:"status"`
+	PID        int     `json:"pid,omitempty"`
+	CPUPercent float64 `json:"cpu_percent,omitempty"`
+	RSSBytes   int64   `json:"rss_bytes,omitempty"`
+	// Sessions is the proxy's best-effort live connection count for this
+	// replica. Omitted (and -1 internally) when the replica slot is empty.
+	Sessions int64 `json:"sessions"`
+}
+
+type metricsResponse struct {
+	// Status is the app-level status: "running" if any replica is running,
+	// otherwise the dominant replica status (or the DB-recorded status if
+	// no replicas are tracked yet).
+	Status string `json:"status"`
+	// SessionsCap is the per-replica session cap currently in effect for
+	// this pool. 0 means uncapped.
+	SessionsCap int              `json:"sessions_cap"`
+	Replicas    []replicaMetrics `json:"replicas"`
+	// Legacy fields preserved so existing clients (dashboard card poller)
+	// keep working while they adopt the per-replica view. These mirror the
+	// first running replica.
 	PID        int     `json:"pid,omitempty"`
 	CPUPercent float64 `json:"cpu_percent,omitempty"`
 	RSSBytes   int64   `json:"rss_bytes,omitempty"`
@@ -1134,39 +1199,69 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp := metricsResponse{Status: app.Status, Replicas: []replicaMetrics{}}
+
 	if s.manager == nil {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: app.Status})
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	info, ok := s.manager.GetReplica(slug, 0)
-	if !ok {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: app.Status})
-		return
+	var sessionCounts []int64
+	if s.proxy != nil {
+		sessionCounts = s.proxy.ReplicaSessionCounts(slug)
+		resp.SessionsCap = s.proxy.PoolCap(slug)
 	}
-	if info.Status != process.StatusRunning {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: string(info.Status)})
+
+	infos := s.manager.AllForSlug(slug)
+	if len(infos) == 0 {
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	handle, ok := s.manager.HandleReplica(slug, 0)
-	if !ok {
-		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusStopped)})
-		return
-	}
-	stats, err := s.sampler.Sample(handle)
-	if err != nil {
-		// Process may have exited between status check and sample.
-		writeJSON(w, http.StatusOK, metricsResponse{Status: string(process.StatusStopped)})
-		return
+	// Sessions-count slice may be shorter than infos if SetPoolSize raced
+	// with a Deregister; clamp lookups to avoid out-of-range reads.
+	sessionAt := func(i int) int64 {
+		if i < len(sessionCounts) {
+			return sessionCounts[i]
+		}
+		return -1
 	}
 
-	writeJSON(w, http.StatusOK, metricsResponse{
-		Status:     string(info.Status),
-		PID:        info.PID,
-		CPUPercent: stats.CPUPercent,
-		RSSBytes:   stats.RSSBytes,
-	})
+	anyRunning := false
+	for i, info := range infos {
+		rm := replicaMetrics{Index: i, Sessions: sessionAt(i)}
+		if info == nil {
+			rm.Status = string(process.StatusStopped)
+			resp.Replicas = append(resp.Replicas, rm)
+			continue
+		}
+		rm.Status = string(info.Status)
+		rm.PID = info.PID
+		if info.Status == process.StatusRunning {
+			if handle, ok := s.manager.HandleReplica(slug, i); ok {
+				if stats, err := s.sampler.Sample(handle); err == nil {
+					rm.CPUPercent = stats.CPUPercent
+					rm.RSSBytes = stats.RSSBytes
+				} else {
+					rm.Status = string(process.StatusStopped)
+				}
+			} else {
+				rm.Status = string(process.StatusStopped)
+			}
+			if rm.Status == string(process.StatusRunning) && !anyRunning {
+				anyRunning = true
+				resp.PID = rm.PID
+				resp.CPUPercent = rm.CPUPercent
+				resp.RSSBytes = rm.RSSBytes
+			}
+		}
+		resp.Replicas = append(resp.Replicas, rm)
+	}
+	if anyRunning {
+		resp.Status = string(process.StatusRunning)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {

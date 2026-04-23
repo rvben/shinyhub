@@ -242,13 +242,14 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		s.proxy.Deregister(slug)
 	}
 	result, runErr := s.deployRun(deploy.Params{
-		Slug:            slug,
-		BundleDir:       current.BundleDir,
-		Replicas:        app.Replicas,
-		Manager:         s.manager,
-		Proxy:           s.proxy,
-		MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		Slug:                  slug,
+		BundleDir:             current.BundleDir,
+		Replicas:              app.Replicas,
+		Manager:               s.manager,
+		Proxy:                 s.proxy,
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 	})
 	if runErr != nil {
 		// The old process is gone; reflect that in the DB so callers don't
