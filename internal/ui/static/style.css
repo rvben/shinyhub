@@ -2418,11 +2418,31 @@ main {
 /* ── App detail: Overview tab ─────────────────────────────────────────────── */
 
 .overview-card { padding: 20px; border: 1px solid var(--line); border-radius: 8px; }
+.overview-card + .overview-card { margin-top: 16px; }
 .overview-dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; margin: 16px 0; }
 .overview-dl dt { color: var(--text-dim); }
 .overview-links { display: flex; gap: 16px; margin-top: 12px; }
 .overview-links a { color: var(--accent); text-decoration: none; }
 .overview-links a:hover { text-decoration: underline; }
+
+.overview-replicas h3 { display: flex; align-items: baseline; gap: 8px; }
+.overview-replicas-cap { color: var(--text-muted); font-size: 0.85rem; font-weight: normal; }
+.replicas-list { list-style: none; padding: 0; margin: 12px 0 0; }
+.replicas-empty { color: var(--text-muted); font-size: 0.9rem; padding: 6px 0; }
+.replica-row {
+  display: grid;
+  grid-template-columns: 3rem auto 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9rem;
+}
+.replica-row:last-child { border-bottom: none; }
+.replica-index { font-family: 'Space Mono', monospace; color: var(--cyan-bright); }
+.replica-sessions { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+.replica-sessions-saturated { color: var(--danger, #f87171); font-weight: 600; }
+.replica-cpu, .replica-ram { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .app-card-body-link { display: block; color: inherit; text-decoration: none; }
 .app-card-body-link:hover strong { text-decoration: underline; }
 .kebab-list button:hover { background: rgba(56, 189, 248, 0.1); color: var(--cyan-bright); }

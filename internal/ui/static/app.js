@@ -2067,16 +2067,58 @@ document.addEventListener('DOMContentLoaded', () => {
         if (m.status !== 'running') {
           cpuEl.textContent = 'CPU —';
           ramEl.textContent = 'RAM —';
-          return;
+        } else {
+          cpuEl.textContent = `CPU ${m.cpu_percent.toFixed(1)}%`;
+          const ramMb = m.rss_bytes >= 1 << 20
+            ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
+            : (m.rss_bytes / 1024).toFixed(0) + ' KB';
+          ramEl.textContent = `RAM ${ramMb}`;
         }
-        cpuEl.textContent = `CPU ${m.cpu_percent.toFixed(1)}%`;
-        const ramMb = m.rss_bytes >= 1 << 20
-          ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
-          : (m.rss_bytes / 1024).toFixed(0) + ' KB';
-        ramEl.textContent = `RAM ${ramMb}`;
+        renderReplicasPanel(m);
       }
     },
   });
+
+  function renderReplicasPanel(m) {
+    const listEl = document.getElementById('overview-replicas-list');
+    const capEl = document.getElementById('overview-replicas-cap');
+    if (!listEl || !capEl) return;
+    const cap = Number(m.sessions_cap || 0);
+    capEl.textContent = cap > 0 ? `(cap ${cap} sessions/replica)` : '(uncapped)';
+    const replicas = Array.isArray(m.replicas) ? m.replicas : [];
+    if (replicas.length === 0) {
+      listEl.innerHTML = '<li class="replicas-empty">No replicas tracked yet.</li>';
+      return;
+    }
+    listEl.innerHTML = '';
+    for (const r of replicas) {
+      const li = document.createElement('li');
+      li.className = 'replica-row';
+      const status = r.status || 'stopped';
+      const sessions = Number(r.sessions ?? -1);
+      const sessionsText = sessions < 0
+        ? '—'
+        : (cap > 0 ? `${sessions}/${cap}` : String(sessions));
+      const saturated = cap > 0 && sessions >= cap;
+      const cpu = (status === 'running' && typeof r.cpu_percent === 'number')
+        ? `${r.cpu_percent.toFixed(1)}%`
+        : '—';
+      const rssBytes = Number(r.rss_bytes || 0);
+      const ram = (status === 'running' && rssBytes > 0)
+        ? (rssBytes >= 1 << 20
+            ? (rssBytes / (1 << 20)).toFixed(0) + ' MB'
+            : (rssBytes / 1024).toFixed(0) + ' KB')
+        : '—';
+      li.innerHTML = `
+        <span class="replica-index">#${r.index}</span>
+        <span class="badge badge-${status}">${status}</span>
+        <span class="replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ` / cap` : ''}">${sessionsText} sessions</span>
+        <span class="replica-cpu">CPU ${cpu}</span>
+        <span class="replica-ram">RAM ${ram}</span>
+      `;
+      listEl.appendChild(li);
+    }
+  }
 
   const router = createRouter();
 

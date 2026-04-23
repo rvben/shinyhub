@@ -202,6 +202,12 @@ function renderOverview(panel, app, ctx) {
         <a href="/apps/${app.slug}/deployments" data-nav>Deployment history →</a>
       </div>
     </section>
+    <section class="overview-card overview-replicas">
+      <h3>Replicas <span id="overview-replicas-cap" class="overview-replicas-cap"></span></h3>
+      <ul id="overview-replicas-list" class="replicas-list" aria-live="polite">
+        <li class="replicas-empty">Waiting for metrics…</li>
+      </ul>
+    </section>
   `;
 }
 
