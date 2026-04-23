@@ -247,6 +247,7 @@ type App struct {
 	Access                  string    `json:"access"`
 	Status                  string    `json:"status"`
 	Replicas                int       `json:"replicas"`
+	MaxSessionsPerReplica   int       `json:"max_sessions_per_replica"`
 	DeployCount             int       `json:"deploy_count"`
 	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes"`
 	MemoryLimitMB           *int      `json:"memory_limit_mb"`
@@ -286,7 +287,8 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	row := s.db.QueryRow(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, deploy_count, hibernate_timeout_minutes,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps WHERE slug = ?`, slug)
@@ -301,7 +303,8 @@ func (s *Store) GetApp(slug string) (*App, error) {
 func (s *Store) GetAppByID(id int64) (*App, error) {
 	row := s.db.QueryRow(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, deploy_count, hibernate_timeout_minutes,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps WHERE id = ?`, id)
@@ -314,7 +317,8 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	}
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, deploy_count, hibernate_timeout_minutes,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps ORDER BY created_at DESC
@@ -339,7 +343,8 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 func (s *Store) ListRunningApps() ([]*App, error) {
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, deploy_count, hibernate_timeout_minutes,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps WHERE status = 'running'`)
@@ -364,7 +369,8 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	}
 	rows, err := s.db.Query(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, deploy_count, hibernate_timeout_minutes,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at
 		FROM apps
@@ -1133,6 +1139,23 @@ func (s *Store) UpdateAppReplicas(appID int64, n int) error {
 	return nil
 }
 
+// UpdateAppMaxSessionsPerReplica sets the per-replica session cap. A value of
+// 0 means "use the runtime-wide default".
+func (s *Store) UpdateAppMaxSessionsPerReplica(appID int64, n int) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		n, appID,
+	)
+	if err != nil {
+		return fmt.Errorf("update max_sessions_per_replica: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // boolToInt converts a bool to the integer representation used in SQLite.
 func boolToInt(b bool) int {
 	if b {
@@ -1151,7 +1174,7 @@ func scanApp(s scanner) (*App, error) {
 	var projectSlug sql.NullString
 	err := s.Scan(
 		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
-		&a.Status, &a.Replicas, &a.DeployCount,
+		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
 	)

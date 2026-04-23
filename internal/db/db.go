@@ -43,6 +43,9 @@ var migration010SQL string
 //go:embed migrations/011_schedules.sql
 var migration011SQL string
 
+//go:embed migrations/012_session_cap.sql
+var migration012SQL string
+
 type Store struct {
 	db *sql.DB
 }
@@ -103,6 +106,11 @@ func (s *Store) Migrate() error {
 	}
 	if _, err := s.db.Exec(migration011SQL); err != nil {
 		return fmt.Errorf("migrate 011: %w", err)
+	}
+	if _, err := s.db.Exec(migration012SQL); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migrate 012: %w", err)
+		}
 	}
 	return nil
 }
