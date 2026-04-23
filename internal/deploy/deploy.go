@@ -115,6 +115,11 @@ type Params struct {
 	HealthTimeout   time.Duration // 0 means the 120 s default
 	MemoryLimitMB   int          // 0 = no limit
 	CPUQuotaPercent int          // 0 = no limit; 100 = 1 full core
+	// MaxSessionsPerReplica caps the per-replica active connection count the
+	// proxy will route cookie-less requests to; saturated pools shed with
+	// 503 + Retry-After. 0 = unlimited (caller should resolve the runtime
+	// default before calling).
+	MaxSessionsPerReplica int
 	// HealthCheck is called after each replica starts to verify it is ready.
 	// If nil, the default HTTP health poller is used.
 	// Set to a no-op function in tests that do not serve HTTP.
@@ -188,6 +193,7 @@ func Run(p Params) (*PoolResult, error) {
 	}
 
 	p.Proxy.SetPoolSize(p.Slug, p.Replicas)
+	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
 
 	baseCmd, appType, hc, timeout, err := resolveBootParams(p)
 	if err != nil {
@@ -528,4 +534,14 @@ func ResolveCPUQuotaPercent(perAppPct *int, defaultPct int) int {
 		return *perAppPct
 	}
 	return defaultPct
+}
+
+// ResolveMaxSessionsPerReplica returns perApp if non-zero, otherwise defaultVal.
+// Unlike the memory/CPU helpers, perApp is a plain int because the DB column is
+// NOT NULL DEFAULT 0 and 0 explicitly means "fall back to the runtime default".
+func ResolveMaxSessionsPerReplica(perApp, defaultVal int) int {
+	if perApp > 0 {
+		return perApp
+	}
+	return defaultVal
 }

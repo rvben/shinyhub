@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -20,8 +21,10 @@ type ContainerLister interface {
 
 // RecoverProcesses re-adopts running app processes after a server restart.
 // For native runtime, pass nil for lister (PID-based recovery is used).
-// For docker runtime, pass the DockerRuntime as lister.
-func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister) {
+// For docker runtime, pass the DockerRuntime as lister. defaultMaxSessions is
+// the runtime-wide session-cap fallback applied when an app has
+// max_sessions_per_replica == 0.
+func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister, defaultMaxSessions int) {
 	apps, err := store.ListRunningApps()
 	if err != nil {
 		slog.Error("process recovery: list running apps", "err", err)
@@ -29,13 +32,13 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, l
 	}
 
 	if lister != nil {
-		recoverDockerProcesses(store, mgr, prx, lister, apps)
+		recoverDockerProcesses(store, mgr, prx, lister, apps, defaultMaxSessions)
 		return
 	}
-	recoverNativeProcesses(store, mgr, prx, apps)
+	recoverNativeProcesses(store, mgr, prx, apps, defaultMaxSessions)
 }
 
-func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, apps []*db.App) {
+func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, apps []*db.App, defaultMaxSessions int) {
 	for _, app := range apps {
 		reps, err := store.ListReplicas(app.ID)
 		if err != nil || len(reps) == 0 {
@@ -43,6 +46,7 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 			continue
 		}
 		prx.SetPoolSize(app.Slug, app.Replicas)
+		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
 		anyAlive := false
 		for _, r := range reps {
 			if r.PID == nil {
@@ -84,7 +88,7 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 	}
 }
 
-func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister, apps []*db.App) {
+func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, lister ContainerLister, apps []*db.App, defaultMaxSessions int) {
 	// Index apps by slug for fast lookup; configure proxy pool sizes up front.
 	// Also pre-fetch replicas for each app so the adoption loop avoids N*M DB reads.
 	bySlug := make(map[string]*db.App, len(apps))
@@ -92,6 +96,7 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 	for _, a := range apps {
 		bySlug[a.Slug] = a
 		prx.SetPoolSize(a.Slug, a.Replicas)
+		prx.SetPoolCap(a.Slug, deploy.ResolveMaxSessionsPerReplica(a.MaxSessionsPerReplica, defaultMaxSessions))
 		reps, err := store.ListReplicas(a.ID)
 		if err != nil {
 			slog.Error("recovery: list replicas", "slug", a.Slug, "err", err)

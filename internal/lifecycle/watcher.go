@@ -19,6 +19,9 @@ type Config struct {
 	WatchInterval      time.Duration // loop tick period; default 15s
 	RestartMaxAttempts int           // max consecutive crash restarts before degraded; default 5
 	HibernateTimeout   time.Duration // global idle timeout; 0 = disabled globally
+	// DefaultMaxSessionsPerReplica is the runtime-wide session cap fallback
+	// applied on wake when an app has max_sessions_per_replica == 0.
+	DefaultMaxSessionsPerReplica int
 }
 
 // replicaKey uniquely identifies a single replica within a slug.
@@ -41,6 +44,7 @@ type proxyBackend interface {
 	BeginHibernate(slug string, since time.Time) bool
 	Deregister(slug string)
 	SetPoolSize(slug string, size int)
+	SetPoolCap(slug string, max int)
 }
 
 // appStore is the subset of *db.Store used by the Watcher.
@@ -292,6 +296,7 @@ func (w *Watcher) OnMiss(slug string) {
 		}
 
 		w.prx.SetPoolSize(slug, app.Replicas)
+		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 
 		var wg sync.WaitGroup
 		var started atomic.Int32

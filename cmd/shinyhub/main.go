@@ -251,19 +251,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
 		return deploy.RunReplica(deploy.Params{
-			Slug:            slug,
-			BundleDir:       bundleDir,
-			Manager:         mgr,
-			Proxy:           prx,
-			MemoryLimitMB:   deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
-			CPUQuotaPercent: deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
+			Slug:                  slug,
+			BundleDir:             bundleDir,
+			Manager:               mgr,
+			Proxy:                 prx,
+			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
+			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
+			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
 		}, index)
 	}
 
 	lcCfg := lifecycle.Config{
-		WatchInterval:      cfg.Lifecycle.WatchInterval,
-		RestartMaxAttempts: cfg.Lifecycle.RestartMaxAttempts,
-		HibernateTimeout:   cfg.Lifecycle.HibernateTimeout,
+		WatchInterval:                cfg.Lifecycle.WatchInterval,
+		RestartMaxAttempts:           cfg.Lifecycle.RestartMaxAttempts,
+		HibernateTimeout:             cfg.Lifecycle.HibernateTimeout,
+		DefaultMaxSessionsPerReplica: cfg.Runtime.DefaultMaxSessionsPerReplica,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
@@ -272,7 +274,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if dockerRT, ok := rt.(lifecycle.ContainerLister); ok {
 		lister = dockerRT
 	}
-	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+	lifecycle.RecoverProcesses(store, mgr, prx, lister, cfg.Runtime.DefaultMaxSessionsPerReplica)
 
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
 	defer cancelWatcher()

@@ -42,6 +42,7 @@ type fakeProxy struct {
 	hibernated      []string
 	hibernateAlways bool // if true, BeginHibernate ignores `since` and always returns true
 	poolSizes       map[string]int
+	poolCaps        map[string]int
 	onMissFn        func(string)
 }
 
@@ -49,6 +50,7 @@ func newFakeProxy() *fakeProxy {
 	return &fakeProxy{
 		seen:      make(map[string]time.Time),
 		poolSizes: make(map[string]int),
+		poolCaps:  make(map[string]int),
 	}
 }
 
@@ -78,6 +80,11 @@ func (f *fakeProxy) BeginHibernate(slug string, since time.Time) bool {
 func (f *fakeProxy) SetPoolSize(slug string, size int) {
 	f.mu.Lock()
 	f.poolSizes[slug] = size
+	f.mu.Unlock()
+}
+func (f *fakeProxy) SetPoolCap(slug string, max int) {
+	f.mu.Lock()
+	f.poolCaps[slug] = max
 	f.mu.Unlock()
 }
 

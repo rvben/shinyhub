@@ -77,7 +77,7 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
 
 	// App should now be stopped in the DB.
 	a, err := store.GetAppBySlug("myapp")
@@ -98,7 +98,8 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil) // must not panic
+	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0) // must not panic
+
 
 	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
@@ -123,7 +124,7 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
 
 	// App should still be running in the DB.
 	a, err := store.GetAppBySlug("myapp")
@@ -170,7 +171,7 @@ func TestRecovery_PartialPool(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
 
 	// Replica 0 adopted, replica 1 not.
 	if _, ok := mgr.GetReplica("partial-pool", 0); !ok {
@@ -228,7 +229,7 @@ func TestRecoverDockerProcesses(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 
-	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
 
 	info, ok := mgr.GetReplica("docker-app", 0)
 	if !ok {
@@ -283,7 +284,7 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 
-	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
 
 	// "alive-app" should be adopted.
 	if _, ok := mgr.GetReplica("alive-app", 0); !ok {
@@ -328,7 +329,7 @@ func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
 
 	if _, ok := mgr.GetReplica("multi-docker", 0); !ok {
 		t.Error("want replica 0 adopted")
@@ -352,7 +353,7 @@ func TestRecovery_NilPIDMarkedCrashed(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
 
 	reps, _ := store.ListReplicas(app.ID)
 	if len(reps) != 1 || reps[0].Status != "crashed" {
@@ -380,7 +381,7 @@ func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 		pids: map[string]int{"c-stale": 99025},
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	lifecycle.RecoverProcesses(store, mgr, prx, lister)
+	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
 
 	// The stale container is skipped — no replica adopted.
 	if _, ok := mgr.GetReplica("shrunk-docker", 5); ok {
