@@ -9,6 +9,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.2.5](https://github.com/rvben/shinyhub/compare/v0.2.4...v0.2.5) - 2026-04-24
+
+### Added
+
+- **ui**: show admission ceiling live in Scaling fieldset ([daf5d4b](https://github.com/rvben/shinyhub/commit/daf5d4b0ad74796101937cfc58b7849134612d53))
+- **ui**: add Scaling fieldset to Configuration tab ([41a4698](https://github.com/rvben/shinyhub/commit/41a46988b1c1c17280c7415f4abdbdf3e84ec285))
+- **cli**: add --replicas and --max-sessions-per-replica to apps set ([54d0241](https://github.com/rvben/shinyhub/commit/54d0241945b48bbdbaed1fc4023964808ca61077))
+- **ui**: show per-replica sessions badge in Overview tab ([9f97c79](https://github.com/rvben/shinyhub/commit/9f97c7950d00699856fb62e90fbac4c807739fbc))
+- **api**: fan out metrics per replica and expose max_sessions_per_replica ([b3e155d](https://github.com/rvben/shinyhub/commit/b3e155d4cc88e8c89d69f059a28ac0bf77878100))
+- **deploy**: thread session cap through deploy/lifecycle/recovery ([8a7d01a](https://github.com/rvben/shinyhub/commit/8a7d01a2e771c6567abdc02b54cfb80e6a95a4d0))
+- **proxy**: shed 503 when all replicas saturated ([3333d67](https://github.com/rvben/shinyhub/commit/3333d67df4f16993cff18327a1f6698490752e3a))
+- **config**: add runtime default for per-replica session cap ([aa3fa91](https://github.com/rvben/shinyhub/commit/aa3fa9134aa052bb81ba7f11ee6054ed1dd581c2))
+- **db**: add migration 012 for max_sessions_per_replica column ([e5417ea](https://github.com/rvben/shinyhub/commit/e5417ea073c86d461d009224ec31a56ac1d90ae9))
+- **ui**: focus + aria-current on navigation ([1da9b28](https://github.com/rvben/shinyhub/commit/1da9b289c5d583e507de6edc8208abef04811619))
+- **ui**: simplify app grid card to two actions + kebab ([82cce3f](https://github.com/rvben/shinyhub/commit/82cce3f5f5ebc68296c822e89437044600bf5124))
+- **ui**: migrate configuration/data/access panels into detail page ([34d7d58](https://github.com/rvben/shinyhub/commit/34d7d587be42aa58c802f0d0ffa67fd443a88499))
+- **ui**: move deployment history into Deployments tab ([5ecebad](https://github.com/rvben/shinyhub/commit/5ecebad9ff122c9a6f0e7ddc6bd5f6d9112802de))
+- **ui**: add Logs tab to app detail page ([25acb87](https://github.com/rvben/shinyhub/commit/25acb87eb3ec2cce566f7a6a0ce1a39897f43212))
+- **ui**: add app detail page with overview tab ([9ae4f74](https://github.com/rvben/shinyhub/commit/9ae4f740512557d4b6ffbd60828f8ef9943944ef))
+- **ui**: route /users and /audit-log via client router ([4613919](https://github.com/rvben/shinyhub/commit/4613919bd519a68d2397200328703847270d4e7d))
+- **ui**: add metrics polling controller ([6e5a514](https://github.com/rvben/shinyhub/commit/6e5a5149a06ef37bc29f93ddd7bc436e26d571aa))
+- **ui**: add app detail page skeleton ([b35d846](https://github.com/rvben/shinyhub/commit/b35d8469e6cb39b3687caeb9d4913dccdd7c70e0))
+- **ui**: add client-side router module ([13a4ee4](https://github.com/rvben/shinyhub/commit/13a4ee4c1bfdf6906387414e830d477c07f725ad))
+- **ui**: route SPA paths to index.html ([06ad56c](https://github.com/rvben/shinyhub/commit/06ad56c8dc3c5528cdce458bc5571f5060ad942b))
+- **ui**: add SPA fallback handler for routed UI paths ([a3d9375](https://github.com/rvben/shinyhub/commit/a3d93755ebfb76cc79b7d02e2ec384585ad51bd3))
+- **ui**: add CLI snippet to Deploy modal and unify modal button styles ([0697aef](https://github.com/rvben/shinyhub/commit/0697aefe40318878efe870dd9a5f29424dc2dd22))
+
+### Fixed
+
+- **ui**: unwrap app-detail response body ([45de18d](https://github.com/rvben/shinyhub/commit/45de18d09fce5cff2297fe1ae9f526757224b76d))
+- **ui**: hide management-only detail tabs from viewers ([d51fa64](https://github.com/rvben/shinyhub/commit/d51fa64307cd0d54fbfeb4e43e8efeda75f5fa76))
+- **ui**: await initial router mount and refresh metrics on loadApps ([2795563](https://github.com/rvben/shinyhub/commit/27955636a6fc029cdcc50990202c09d2ebaf38d4))
+- **ui**: improve a11y of app detail page tabs and kebab menu ([f494b2c](https://github.com/rvben/shinyhub/commit/f494b2c57b8e48d84e87ca78042e0497271b49bb))
+- **ui**: guard router mount against races and unregistered-path recursion ([c85640f](https://github.com/rvben/shinyhub/commit/c85640f23e5005af0a224081646f18fe1efeb3c2))
+- **ui**: apply dark theme to modal textareas, number inputs, and checkboxes ([155c840](https://github.com/rvben/shinyhub/commit/155c84052724f0f748c9a018fb0f3c6274ee6795))
+
 ## [0.2.4](https://github.com/rvben/shinyhub/compare/v0.2.3...v0.2.4) - 2026-04-22
 
 ### Breaking Changes
