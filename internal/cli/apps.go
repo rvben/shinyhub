@@ -151,7 +151,9 @@ var appsRestartCmd = &cobra.Command{
 }
 
 var appsSetFlags struct {
-	hibernateTimeout int
+	hibernateTimeout      int
+	replicas              int
+	maxSessionsPerReplica int
 }
 
 var appsSetCmd = &cobra.Command{
@@ -190,11 +192,25 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 func init() {
 	appsSetCmd.Flags().IntVar(&appsSetFlags.hibernateTimeout, "hibernate-timeout", 0,
 		"Idle timeout minutes before hibernation (-1 = reset to global default, 0 = disable, N = N minutes)")
+	appsSetCmd.Flags().IntVar(&appsSetFlags.replicas, "replicas", 0,
+		"Number of replica processes serving this app (>= 1)")
+	appsSetCmd.Flags().IntVar(&appsSetFlags.maxSessionsPerReplica, "max-sessions-per-replica", -1,
+		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
 }
 
 func runAppsSet(cmd *cobra.Command, args []string) error {
-	if !cmd.Flags().Changed("hibernate-timeout") {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout)")
+	hibernateChanged := cmd.Flags().Changed("hibernate-timeout")
+	replicasChanged := cmd.Flags().Changed("replicas")
+	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
+
+	if !hibernateChanged && !replicasChanged && !capChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --max-sessions-per-replica)")
+	}
+	if replicasChanged && appsSetFlags.replicas < 1 {
+		return fmt.Errorf("--replicas must be >= 1")
+	}
+	if capChanged && (appsSetFlags.maxSessionsPerReplica < 0 || appsSetFlags.maxSessionsPerReplica > 1000) {
+		return fmt.Errorf("--max-sessions-per-replica must be between 0 and 1000")
 	}
 
 	cfg, err := loadConfig()
@@ -203,14 +219,25 @@ func runAppsSet(cmd *cobra.Command, args []string) error {
 	}
 	slug := args[0]
 
-	// -1 → send null (reset to global default); 0+ → send the value.
-	var minutes *int
-	if appsSetFlags.hibernateTimeout >= 0 {
-		m := appsSetFlags.hibernateTimeout
-		minutes = &m
+	payload := map[string]any{}
+
+	if hibernateChanged {
+		// -1 → send null (reset to global default); 0+ → send the value.
+		var minutes *int
+		if appsSetFlags.hibernateTimeout >= 0 {
+			m := appsSetFlags.hibernateTimeout
+			minutes = &m
+		}
+		payload["hibernate_timeout_minutes"] = minutes
+	}
+	if replicasChanged {
+		payload["replicas"] = appsSetFlags.replicas
+	}
+	if capChanged {
+		payload["max_sessions_per_replica"] = appsSetFlags.maxSessionsPerReplica
 	}
 
-	body, err := json.Marshal(map[string]any{"hibernate_timeout_minutes": minutes})
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -231,13 +258,26 @@ func runAppsSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("set failed (%s): %s", resp.Status, out)
 	}
 
-	switch {
-	case minutes == nil:
-		fmt.Printf("%s: hibernate-timeout reset to global default\n", slug)
-	case *minutes == 0:
-		fmt.Printf("%s: hibernation disabled\n", slug)
-	default:
-		fmt.Printf("%s: hibernate-timeout set to %d minutes\n", slug, *minutes)
+	if hibernateChanged {
+		minutes, _ := payload["hibernate_timeout_minutes"].(*int)
+		switch {
+		case minutes == nil:
+			fmt.Printf("%s: hibernate-timeout reset to global default\n", slug)
+		case *minutes == 0:
+			fmt.Printf("%s: hibernation disabled\n", slug)
+		default:
+			fmt.Printf("%s: hibernate-timeout set to %d minutes\n", slug, *minutes)
+		}
+	}
+	if replicasChanged {
+		fmt.Printf("%s: replicas set to %d\n", slug, appsSetFlags.replicas)
+	}
+	if capChanged {
+		if appsSetFlags.maxSessionsPerReplica == 0 {
+			fmt.Printf("%s: max-sessions-per-replica reset to runtime default\n", slug)
+		} else {
+			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, appsSetFlags.maxSessionsPerReplica)
+		}
 	}
 	return nil
 }

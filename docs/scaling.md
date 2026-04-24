@@ -25,7 +25,17 @@ replicas × max_sessions_per_replica = concurrent new sessions served before 503
 
 ## Setting the knobs
 
-**Via API** (until a UI/CLI surface exists):
+**Via CLI:**
+
+```bash
+shinyhub apps set <slug> --replicas 3 --max-sessions-per-replica 10
+```
+
+Either flag may be set on its own; `--max-sessions-per-replica 0` resets the
+cap to the runtime default. Both knobs are validated client-side (replicas
+`>= 1`, cap `0..1000`) and applied atomically by `PATCH /api/apps/<slug>`.
+
+**Via API** (for tooling integrations):
 
 ```bash
 curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
