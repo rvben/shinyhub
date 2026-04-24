@@ -821,6 +821,21 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('scaling-save-btn').hidden = !canEdit;
     setError(document.getElementById('scaling-error'), '');
     setHidden(document.getElementById('scaling-status'), true);
+    updateScalingCeiling();
+  }
+
+  function updateScalingCeiling() {
+    const el = document.getElementById('scaling-ceiling');
+    if (!el) return;
+    const r = parseInt(document.getElementById('scaling-replicas').value, 10);
+    const c = parseInt(document.getElementById('scaling-cap').value, 10);
+    if (!Number.isFinite(r) || r < 1) { el.textContent = ''; return; }
+    if (!Number.isFinite(c) || c < 0) { el.textContent = ''; return; }
+    if (c === 0) {
+      el.innerHTML = `Admission ceiling: <strong>${r}</strong> replica${r === 1 ? '' : 's'} × runtime default cap.`;
+    } else {
+      el.innerHTML = `Admission ceiling: <strong>${r} × ${c} = ${r * c}</strong> concurrent new sessions before 503.`;
+    }
   }
 
   function onHibernateModeChange() {
@@ -1337,6 +1352,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('hibernate-save-btn').addEventListener('click', saveHibernateSettings);
   document.getElementById('scaling-save-btn').addEventListener('click', saveScalingSettings);
+  document.getElementById('scaling-replicas').addEventListener('input', updateScalingCeiling);
+  document.getElementById('scaling-cap').addEventListener('input', updateScalingCeiling);
 
   // Environment tab: add button, form submit/cancel.
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));

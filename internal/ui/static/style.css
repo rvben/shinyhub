@@ -2386,6 +2386,22 @@ main {
   opacity: 0.45;
   cursor: not-allowed;
 }
+.scaling-ceiling {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  background: var(--bg-deep);
+  border-left: 2px solid var(--accent, #4ade80);
+  border-radius: 3px;
+}
+.scaling-ceiling:empty {
+  display: none;
+}
+.scaling-ceiling strong {
+  color: var(--text);
+  font-weight: 600;
+}
 
 /* ── App detail page ── */
 
