@@ -173,6 +173,8 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Frontend consumer: internal/ui/static/views/app-detail.js unwraps body.app.
+	// Guarded by TestAppDetailUnwrapsGetAppResponse in internal/ui/contract_test.go.
 	writeJSON(w, http.StatusOK, map[string]any{"app": app, "replicas_status": replicas})
 }
 
