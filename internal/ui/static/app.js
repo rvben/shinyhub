@@ -810,6 +810,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     setError(document.getElementById('hibernate-error'), '');
     setHidden(document.getElementById('hibernate-status'), true);
+
+    // Scaling fieldset: replicas + per-replica session cap.
+    const replicasInput = document.getElementById('scaling-replicas');
+    const capInput = document.getElementById('scaling-cap');
+    replicasInput.value = String(app.replicas ?? 1);
+    capInput.value = String(app.max_sessions_per_replica ?? 0);
+    replicasInput.disabled = !canEdit;
+    capInput.disabled = !canEdit;
+    document.getElementById('scaling-save-btn').hidden = !canEdit;
+    setError(document.getElementById('scaling-error'), '');
+    setHidden(document.getElementById('scaling-status'), true);
   }
 
   function onHibernateModeChange() {
@@ -852,6 +863,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const btn = document.getElementById('hibernate-save-btn');
+    btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      btn.disabled = false;
+      setError(errEl, 'Failed to save. Check your connection.');
+      return;
+    }
+    btn.disabled = false;
+
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to save.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+
+    statusEl.textContent = 'Saved.';
+    setHidden(statusEl, false);
+    await loadApps();
+  }
+
+  async function saveScalingSettings() {
+    if (!settingsSlug) return;
+    const errEl = document.getElementById('scaling-error');
+    const statusEl = document.getElementById('scaling-status');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+
+    const replicasRaw = document.getElementById('scaling-replicas').value.trim();
+    const capRaw = document.getElementById('scaling-cap').value.trim();
+    const replicas = parseInt(replicasRaw, 10);
+    const cap = parseInt(capRaw, 10);
+    if (!Number.isFinite(replicas) || replicas < 1) {
+      setError(errEl, 'Replicas must be a whole number ≥ 1.');
+      return;
+    }
+    if (!Number.isFinite(cap) || cap < 0 || cap > 1000) {
+      setError(errEl, 'Max sessions per replica must be between 0 and 1000.');
+      return;
+    }
+
+    const payload = { replicas, max_sessions_per_replica: cap };
+    const btn = document.getElementById('scaling-save-btn');
     btn.disabled = true;
     let resp;
     try {
@@ -1276,6 +1336,7 @@ document.addEventListener('DOMContentLoaded', () => {
     r.addEventListener('change', onHibernateModeChange);
   });
   document.getElementById('hibernate-save-btn').addEventListener('click', saveHibernateSettings);
+  document.getElementById('scaling-save-btn').addEventListener('click', saveScalingSettings);
 
   // Environment tab: add button, form submit/cancel.
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));

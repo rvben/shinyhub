@@ -194,6 +194,31 @@
               <span id="hibernate-status" class="hibernate-status" hidden></span>
             </div>
             <p id="hibernate-error" class="error" hidden></p>
+
+            <fieldset class="access-level scaling-options">
+              <legend>Scaling</legend>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Replicas</span>
+                  <span class="scaling-option-help">Number of identical processes serving this app's traffic. More replicas help CPU-bound apps; each replica has its own memory.</span>
+                </span>
+                <input id="scaling-replicas" type="number" min="1" max="32" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Number of replica processes">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Max sessions per replica</span>
+                  <span class="scaling-option-help">Per-replica admission cap for new cookieless sessions. <code>0</code> uses the runtime default (typically 10). Beyond the cap, new users get a 503 with Retry-After.</span>
+                </span>
+                <input id="scaling-cap" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Maximum new sessions per replica">
+              </label>
+            </fieldset>
+            <div class="env-form-actions">
+              <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden>Save</button>
+              <span id="scaling-status" class="hibernate-status" hidden></span>
+            </div>
+            <p id="scaling-error" class="error" hidden></p>
           </section>
 
           <section id="settings-env-panel">
