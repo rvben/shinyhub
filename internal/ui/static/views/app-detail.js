@@ -34,7 +34,9 @@ export function mountAppDetail(ctx) {
     if (resp.status === 404) { ctx.navigate('/'); return {}; }
     if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
     if (!resp.ok) { return {}; }
-    const app = await resp.json();
+    // GET /api/apps/:slug returns {app, replicas_status}; we only need the app.
+    const body = await resp.json();
+    const app = body.app || body;
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
 
