@@ -21,6 +21,8 @@ import (
 func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "body.app",
 		"GET /api/apps/:slug returns {app, replicas_status}; see internal/api/apps.go handleGetApp")
+	assertContains(t, "views/app-detail.js", "body.replicas_status",
+		"GET /api/apps/:slug returns {app, replicas_status}; the Overview Replicas panel seeds from replicas_status")
 }
 
 // TestEnvListUnwrapsResponse guards the env-list consumer.

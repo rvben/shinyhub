@@ -34,9 +34,10 @@ export function mountAppDetail(ctx) {
     if (resp.status === 404) { ctx.navigate('/'); return {}; }
     if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
     if (!resp.ok) { return {}; }
-    // GET /api/apps/:slug returns {app, replicas_status}; we only need the app.
+    // GET /api/apps/:slug returns {app, replicas_status}.
     const body = await resp.json();
     const app = body.app || body;
+    const replicasStatus = Array.isArray(body.replicas_status) ? body.replicas_status : [];
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
 
@@ -74,7 +75,7 @@ export function mountAppDetail(ctx) {
 
     // Render the active tab.
     if (tab === 'overview') {
-      renderOverview(panels.overview, app, ctx);
+      renderOverview(panels.overview, app, replicasStatus, ctx);
     }
     if (tab === 'logs') {
       tabCleanup = renderLogs(panels.logs, app);
@@ -167,7 +168,7 @@ async function renderDeployments(panel, app, ctx) {
   });
 }
 
-function renderOverview(panel, app, ctx) {
+function renderOverview(panel, app, replicasStatus, ctx) {
   if (app.deploy_count === 0) {
     panel.innerHTML = `
       <section class="emptystate-card">
@@ -211,6 +212,34 @@ function renderOverview(panel, app, ctx) {
       </ul>
     </section>
   `;
+
+  // Seed the Replicas list from /api/apps/:slug's replicas_status so the
+  // panel shows index + status immediately. Sessions / CPU / RAM stay as
+  // placeholders until the metrics poll fills them in.
+  seedReplicasFromStatus(app, replicasStatus);
+}
+
+function seedReplicasFromStatus(app, replicasStatus) {
+  const listEl = document.getElementById('overview-replicas-list');
+  const capEl = document.getElementById('overview-replicas-cap');
+  if (!listEl || !capEl) return;
+  const cap = Number(app.max_sessions_per_replica || 0);
+  if (cap > 0) capEl.textContent = `(cap ${cap} sessions/replica)`;
+  if (replicasStatus.length === 0) return;
+  listEl.innerHTML = '';
+  for (const r of replicasStatus) {
+    const li = document.createElement('li');
+    li.className = 'replica-row';
+    const status = r.status || 'stopped';
+    li.innerHTML = `
+      <span class="replica-index">#${r.index}</span>
+      <span class="badge badge-${status}">${status}</span>
+      <span class="replica-sessions">— sessions</span>
+      <span class="replica-cpu">CPU —</span>
+      <span class="replica-ram">RAM —</span>
+    `;
+    listEl.appendChild(li);
+  }
 }
 
 function renderConfiguration(panel, app, ctx) {
