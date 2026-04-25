@@ -176,6 +176,53 @@ func TestAppsSet_RequiresAtLeastOneFlag(t *testing.T) {
 	}
 }
 
+// TestAppsSet_MaxSessionsSentinelMinusOne verifies that explicitly passing -1
+// (the flag's own default) is treated as "not provided" and does not trigger
+// the range validator.
+func TestAppsSet_MaxSessionsSentinelMinusOne(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	resetAppsSetFlags(t)
+
+	// -1 is the cobra default for max-sessions-per-replica; if it were treated
+	// as a real value it would fail the 0..1000 validator. Passing it together
+	// with --replicas should succeed and not include max_sessions_per_replica in
+	// the payload.
+	appsCmd.SetArgs([]string{"set", "demo", "--replicas", "2", "--max-sessions-per-replica", "-1"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if _, present := body["max_sessions_per_replica"]; present {
+		t.Errorf("max_sessions_per_replica should be absent when -1 sentinel is passed, got %v", body["max_sessions_per_replica"])
+	}
+}
+
+// TestAppsSet_RejectsInvalidNegativeHibernateTimeout verifies that negative
+// hibernate-timeout values other than -1 are rejected with a clear error.
+func TestAppsSet_RejectsInvalidNegativeHibernateTimeout(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	resetAppsSetFlags(t)
+
+	appsCmd.SetArgs([]string{"set", "demo", "--hibernate-timeout", "-2"})
+	err := appsCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --hibernate-timeout -2, got nil")
+	}
+	if !strings.Contains(err.Error(), "hibernate-timeout") {
+		t.Errorf("error should mention hibernate-timeout, got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
+	}
+}
+
 // TestAppsLogs_ServerErrorExitsNonZero asserts that a 4xx/5xx from the log
 // streaming endpoint is returned as a non-nil error (exit non-zero in the CLI).
 func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {
