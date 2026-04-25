@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/spf13/cobra"
@@ -45,16 +47,18 @@ var deployCmd = &cobra.Command{
 }
 
 var deployFlags struct {
-	slug   string
-	wait   bool
-	git    string // git repo URL; if set, clone instead of using local dir
-	branch string // branch/tag to check out (default: default branch)
-	subdir string // subdirectory within the repo containing the app
+	slug        string
+	wait        bool
+	waitTimeout int // seconds
+	git         string // git repo URL; if set, clone instead of using local dir
+	branch      string // branch/tag to check out (default: default branch)
+	subdir      string // subdirectory within the repo containing the app
 }
 
 func init() {
 	deployCmd.Flags().StringVar(&deployFlags.slug, "slug", "", "App slug (defaults to directory name)")
 	deployCmd.Flags().BoolVar(&deployFlags.wait, "wait", false, "Wait until deployment is healthy")
+	deployCmd.Flags().IntVar(&deployFlags.waitTimeout, "wait-timeout", 60, "Seconds to wait for healthy status when --wait is set")
 	deployCmd.Flags().StringVar(&deployFlags.git, "git", "", "Git repository URL to clone and deploy")
 	deployCmd.Flags().StringVar(&deployFlags.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	deployCmd.Flags().StringVar(&deployFlags.subdir, "subdir", "", "Subdirectory within repo containing the app")
@@ -142,8 +146,61 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("deploy failed (%s): %s", resp.Status, out)
 	}
-	fmt.Printf("Deployed: %s\n", out)
+
+	// Extract deployment number from the response so we can print a clean summary.
+	var appResp map[string]any
+	deployCount := 0
+	if err := json.Unmarshal(out, &appResp); err == nil {
+		if v, ok := appResp["deploy_count"].(float64); ok {
+			deployCount = int(v)
+		}
+	}
+	if deployCount > 0 {
+		fmt.Printf("Deployed %s (deployment #%d)\nURL: %s/app/%s/\n", slug, deployCount, cfg.Host, slug)
+	} else {
+		fmt.Printf("Deployed %s\nURL: %s/app/%s/\n", slug, cfg.Host, slug)
+	}
+
+	if deployFlags.wait {
+		if err := waitForHealthy(cfg, slug, time.Duration(deployFlags.waitTimeout)*time.Second); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// waitForHealthy polls GET /api/apps/{slug} until status is "running" or
+// the deadline expires. It prints progress dots to stdout.
+func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	interval := 2 * time.Second
+	fmt.Printf("Waiting for %s to be healthy", slug)
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		resp, err := httpClient.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			var result struct {
+				App struct {
+					Status string `json:"status"`
+				} `json:"app"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+				if result.App.Status == "running" {
+					fmt.Println(" ready.")
+					return nil
+				}
+			}
+		}
+		fmt.Print(".")
+		time.Sleep(interval)
+	}
+	fmt.Println()
+	return fmt.Errorf("timed out after %s waiting for %s to be healthy", timeout, slug)
 }
 
 func ensureApp(cfg *cliConfig, slug string) error {
