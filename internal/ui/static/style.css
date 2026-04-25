@@ -583,13 +583,41 @@ main {
 .badge-failed   { background: var(--red-bg);      color: var(--red); }
 .badge-pending  { background: var(--yellow-bg);   color: var(--yellow); }
 
-/* Audit action badges */
-.badge-action-deploy       { background: var(--green-bg);        color: var(--green); }
-.badge-action-restart      { background: var(--accent-glow);     color: var(--cyan-bright); }
-.badge-action-rollback     { background: var(--accent-glow);     color: var(--cyan-bright); }
-.badge-action-login        { background: var(--gray-bg);         color: var(--text-soft); }
-.badge-action-login_failed { background: var(--red-bg);          color: var(--red); }
-.badge-action-default      { background: var(--gray-bg);         color: var(--text-soft); }
+/* Audit action badges — grouped by semantic color:
+   green = deploy/restart/rollback
+   blue  = config changes (app, user, env, data, schedule)
+   amber = security-sensitive (token, access grant/revoke)
+   red   = destructive or failure
+   gray  = auth / informational */
+.badge-action-deploy              { background: var(--green-bg);   color: var(--green); }
+.badge-action-restart             { background: var(--green-bg);   color: var(--green); }
+.badge-action-rollback            { background: var(--green-bg);   color: var(--green); }
+.badge-action-login               { background: var(--gray-bg);    color: var(--text-soft); }
+.badge-action-login_failed        { background: var(--red-bg);     color: var(--red); }
+.badge-action-logout              { background: var(--gray-bg);    color: var(--text-soft); }
+.badge-action-create_app          { background: var(--accent-dim); color: var(--electric); }
+.badge-action-update_app          { background: var(--accent-dim); color: var(--electric); }
+.badge-action-delete_app          { background: var(--red-bg);     color: var(--red); }
+.badge-action-stop                { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-set_access          { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-create_user         { background: var(--accent-dim); color: var(--electric); }
+.badge-action-update_user         { background: var(--accent-dim); color: var(--electric); }
+.badge-action-delete_user         { background: var(--red-bg);     color: var(--red); }
+.badge-action-reset_user_password { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-create_token        { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-delete_token        { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-env-set             { background: var(--accent-dim); color: var(--electric); }
+.badge-action-env-delete          { background: var(--red-bg);     color: var(--red); }
+.badge-action-data-push           { background: var(--accent-dim); color: var(--electric); }
+.badge-action-data-delete         { background: var(--red-bg);     color: var(--red); }
+.badge-action-schedule_create     { background: var(--accent-dim); color: var(--electric); }
+.badge-action-schedule_delete     { background: var(--red-bg);     color: var(--red); }
+.badge-action-grant_access        { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-revoke_access       { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-shared_data_grant   { background: var(--accent-dim); color: var(--electric); }
+.badge-action-shared_data_revoke  { background: var(--red-bg);     color: var(--red); }
+.badge-action-deploy_rejected_quota { background: var(--red-bg);   color: var(--red); }
+.badge-action-default             { background: var(--gray-bg);    color: var(--text-soft); }
 
 /* ── Metrics ── */
 .app-metrics {
@@ -2289,8 +2317,12 @@ main {
   transition: opacity 0.2s;
   z-index: 10000;
   pointer-events: none;
+  max-width: 320px;
+  font-size: 0.875rem;
 }
 .toast.show { opacity: 1; }
+.toast-success { background: var(--green-bg);  color: var(--green);  border: 1px solid rgba(74,222,128,0.3); }
+.toast-error   { background: var(--red-bg);    color: var(--red);    border: 1px solid rgba(248,113,113,0.3); }
 
 /* General tab — hibernate options */
 .hibernate-options label {

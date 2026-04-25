@@ -432,7 +432,32 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderAuditEvents(events) {
     auditBody.textContent = '';
 
-    const knownActions = ['deploy', 'restart', 'rollback', 'login', 'login_failed'];
+    const knownActions = [
+      // Deployment actions (green)
+      'deploy', 'restart', 'rollback',
+      // Auth actions
+      'login', 'login_failed', 'logout',
+      // App lifecycle (blue — config)
+      'create_app', 'update_app', 'delete_app', 'stop', 'set_access',
+      // User management (blue — config)
+      'create_user', 'update_user', 'delete_user', 'reset_user_password',
+      // Token management (amber — security)
+      'create_token', 'delete_token',
+      // Environment (blue — config)
+      'env.set', 'env.delete',
+      // Data (blue — config)
+      'data.push', 'data.delete',
+      // Schedules (blue — config)
+      'schedule_create', 'schedule_delete',
+      // Access management (amber — security)
+      'grant_access', 'revoke_access',
+      // Shared data (blue — config)
+      'shared_data_grant', 'shared_data_revoke',
+      // OAuth user creation
+      'create_user',
+      // Deploy quota rejection (red)
+      'deploy_rejected_quota',
+    ];
 
     for (const e of events) {
       const tr = document.createElement('tr');
@@ -452,9 +477,12 @@ document.addEventListener('DOMContentLoaded', () => {
       // Action badge
       const actionCell = document.createElement('td');
       const badge = document.createElement('span');
-      badge.className = 'badge ' + (knownActions.includes(e.action)
-        ? `badge-action-${e.action}`
-        : 'badge-action-default');
+      // Replace dots with hyphens so the class name is valid CSS and
+      // matches the stylesheet's .badge-action-env-set etc. selectors.
+      const actionClass = knownActions.includes(e.action)
+        ? `badge-action-${e.action.replace(/\./g, '-')}`
+        : 'badge-action-default';
+      badge.className = `badge ${actionClass}`;
       badge.textContent = e.action;
       actionCell.appendChild(badge);
       tr.appendChild(actionCell);
@@ -767,9 +795,13 @@ document.addEventListener('DOMContentLoaded', () => {
   let settingsSlug = null;
 
   function populateAccessPanel(app) {
-    // Set visibility radio to current access level.
+    // Set visibility radio to current access level; mark confirmed so change
+    // listeners know the baseline to revert to on failure.
     const radios = document.querySelectorAll('input[name="access-level"]');
-    radios.forEach(r => { r.checked = r.value === app.access; });
+    radios.forEach(r => {
+      r.checked = r.value === app.access;
+      r.dataset.confirmed = String(r.value === app.access);
+    });
 
     // Clear previous state.
     document.getElementById('members-list').innerHTML = '';
@@ -1381,22 +1413,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Visibility radio change → PATCH access level.
   document.querySelectorAll('input[name="access-level"]').forEach(radio => {
-    radio.addEventListener('change', async () => {
+    radio.addEventListener('change', async (e) => {
       if (!settingsSlug) return;
       const slug = settingsSlug;
+      const newValue = radio.value;
+      // Track the previous value so we can revert on failure.
+      const previous = [...document.querySelectorAll('input[name="access-level"]')]
+        .find(r => r !== radio && r.dataset.confirmed === 'true')
+        ?.value;
+      // Mark this radio as confirmed so future changes know the baseline.
+      document.querySelectorAll('input[name="access-level"]').forEach(r => {
+        r.dataset.confirmed = String(r === radio);
+      });
+
       let resp;
       try {
         resp = await api(`/api/apps/${slug}/access`, {
           method: 'PATCH',
-          body: JSON.stringify({ access: radio.value }),
+          body: JSON.stringify({ access: newValue }),
         });
       } catch {
+        // Revert radio to the previous value.
+        document.querySelectorAll('input[name="access-level"]').forEach(r => {
+          r.checked = r.value === (previous ?? newValue);
+          r.dataset.confirmed = String(r.value === (previous ?? newValue));
+        });
+        flashToast('Failed to update access', 'error');
         return;
       }
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        // Revert radio to the previous value.
+        document.querySelectorAll('input[name="access-level"]').forEach(r => {
+          r.checked = r.value === (previous ?? newValue);
+          r.dataset.confirmed = String(r.value === (previous ?? newValue));
+        });
+        flashToast('Failed to update access', 'error');
+        return;
+      }
       // Update local state so card reflects the new level.
       const app = state.apps.find(a => a.slug === slug);
-      if (app) app.access = radio.value;
+      if (app) app.access = newValue;
+      flashToast('Access updated', 'success');
     });
   });
 
@@ -1414,8 +1471,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // Resolve username → user_id.
       const lookupResp = await api(`/api/users/${encodeURIComponent(username)}`);
       if (!lookupResp.ok) {
-        errEl.textContent = lookupResp.status === 404 ? 'User not found' : 'Lookup failed';
+        const msg = lookupResp.status === 404 ? 'User not found' : 'Lookup failed';
+        errEl.textContent = msg;
         errEl.hidden = false;
+        flashToast(msg, 'error');
         return;
       }
       const user = await lookupResp.json();
@@ -1426,12 +1485,19 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({ user_id: user.id }),
       });
       if (!grantResp.ok) {
-        errEl.textContent = 'Grant failed';
+        let grantMsg = 'Grant failed';
+        try {
+          const j = await grantResp.json();
+          if (j && j.error) grantMsg = j.error;
+        } catch { /* non-JSON */ }
+        errEl.textContent = grantMsg;
         errEl.hidden = false;
+        flashToast(grantMsg, 'error');
         return;
       }
       document.getElementById('grant-username').value = '';
       await refreshMemberList();
+      flashToast(`Granted ${username} as viewer`, 'success');
     } finally {
       grantBtn.disabled = false;
       grantBtn.textContent = 'Grant';
@@ -2315,16 +2381,20 @@ document.addEventListener('DOMContentLoaded', () => {
     return String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   }
 
-  function flashToast(msg) {
+  // Show a brief accessible toast notification.
+  // type: 'info' (default), 'success', or 'error'
+  function flashToast(msg, type = 'info') {
     const t = document.createElement('div');
-    t.className = 'toast';
+    t.className = `toast toast-${type}`;
+    t.setAttribute('role', 'status');
+    t.setAttribute('aria-live', 'polite');
     t.textContent = msg;
     document.body.appendChild(t);
     requestAnimationFrame(() => t.classList.add('show'));
     setTimeout(() => {
       t.classList.remove('show');
       setTimeout(() => t.remove(), 200);
-    }, 2000);
+    }, 3000);
   }
 
   // Cron preview helpers.
