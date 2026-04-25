@@ -159,16 +159,21 @@ func runAppsRollback(cmd *cobra.Command, args []string) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("rollback failed: %s", out)
+		return fmt.Errorf("rollback failed: %s", strings.TrimSpace(string(out)))
 	}
-	fmt.Printf("rollback: %s\n", out)
+	if cmd.Flags().Changed("to") {
+		fmt.Printf("%s: rolled back to deployment %d\n", slug, rollbackFlags.deploymentID)
+	} else {
+		fmt.Printf("%s: rolled back to previous deployment\n", slug)
+	}
 	return nil
 }
 
 var appsRestartCmd = &cobra.Command{
-	Use:  "restart <slug>",
-	Args: cobra.ExactArgs(1),
-	RunE: rollbackOrRestart("restart", "POST"),
+	Use:   "restart <slug>",
+	Short: "Restart a running app",
+	Args:  cobra.ExactArgs(1),
+	RunE:  rollbackOrRestart("restart", "POST"),
 }
 
 var appsSetFlags struct {
@@ -203,9 +208,9 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("%s failed: %s", action, out)
+			return fmt.Errorf("%s failed: %s", action, strings.TrimSpace(string(out)))
 		}
-		fmt.Printf("%s: %s\n", action, out)
+		fmt.Printf("%s: %s\n", slug, action+"ed")
 		return nil
 	}
 }

@@ -55,7 +55,7 @@ func newEnvCmd() *cobra.Command {
 		}
 
 		if !envKeyRegex.MatchString(key) {
-			return fmt.Errorf("invalid env key %q: must match ^[A-Z_][A-Z0-9_]*$", key)
+			return fmt.Errorf("env var keys must be uppercase letters, digits and underscores (e.g. FOO_BAR); %q is invalid", key)
 		}
 
 		cfg, err := loadConfig()

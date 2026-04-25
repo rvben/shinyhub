@@ -28,10 +28,22 @@ func SetVersion(v string) {
 	version = v
 }
 
+// silenceUsageOnError sets SilenceUsage on cmd and all its descendants so
+// cobra does not print the full usage block when a RunE returns an error.
+// Usage printing is only helpful for argument/flag syntax errors, not for
+// runtime errors like HTTP 4xx/5xx responses.
+func silenceUsageOnError(cmd *cobra.Command) {
+	cmd.SilenceUsage = true
+	for _, sub := range cmd.Commands() {
+		silenceUsageOnError(sub)
+	}
+}
+
 // AddCommandsTo registers every CLI subcommand onto the supplied root command.
 // This is how cmd/shinyhub grafts the CLI tree onto the top-level `shinyhub` binary.
 func AddCommandsTo(root *cobra.Command) {
 	root.AddCommand(loginCmd, deployCmd, appsCmd, tokensCmd, envCmd, dataCmd, scheduleCmd, shareCmd)
+	silenceUsageOnError(root)
 }
 
 type cliConfig struct {
