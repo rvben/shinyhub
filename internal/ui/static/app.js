@@ -814,8 +814,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Scaling fieldset: replicas + per-replica session cap.
     const replicasInput = document.getElementById('scaling-replicas');
     const capInput = document.getElementById('scaling-cap');
-    replicasInput.value = String(app.replicas ?? 1);
+    const currentReplicas = app.replicas ?? 1;
+    replicasInput.value = String(currentReplicas);
     capInput.value = String(app.max_sessions_per_replica ?? 0);
+    replicasInput.dataset.original = String(currentReplicas);
+    replicasInput.dataset.appStatus = String(app.status ?? '');
     replicasInput.disabled = !canEdit;
     capInput.disabled = !canEdit;
     document.getElementById('scaling-save-btn').hidden = !canEdit;
@@ -923,6 +926,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!Number.isFinite(cap) || cap < 0 || cap > 1000) {
       setError(errEl, 'Max sessions per replica must be between 0 and 1000.');
       return;
+    }
+
+    // Replica-count changes restart the app (apps.go redeployApp), which
+    // drops every active session. Cap changes are hot. Confirm before the
+    // disruptive case.
+    const replicasInput = document.getElementById('scaling-replicas');
+    const originalReplicas = parseInt(replicasInput.dataset.original ?? '', 10);
+    const wasRunning = replicasInput.dataset.appStatus === 'running';
+    if (wasRunning && Number.isFinite(originalReplicas) && replicas !== originalReplicas) {
+      const ok = window.confirm(
+        `Changing replicas from ${originalReplicas} to ${replicas} will restart the app and drop all active sessions. Continue?`,
+      );
+      if (!ok) return;
     }
 
     const payload = { replicas, max_sessions_per_replica: cap };
