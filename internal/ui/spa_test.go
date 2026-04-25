@@ -19,6 +19,7 @@ func TestSPAHandler_ServesIndexForUIRoutes(t *testing.T) {
 		"/apps/replica-smoke/access",
 		"/users",
 		"/audit-log",
+		"/login",
 	}
 	h := ui.SPAHandler()
 	for _, path := range cases {

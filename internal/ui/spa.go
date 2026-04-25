@@ -28,7 +28,7 @@ func SPAHandler() http.Handler {
 
 func isUIPath(path string) bool {
 	switch path {
-	case "/users", "/audit-log":
+	case "/login", "/users", "/audit-log":
 		return true
 	}
 	return appDetailPath.MatchString(path)
