@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/spf13/cobra"
@@ -33,7 +34,15 @@ func init() {
 func runLogin(cmd *cobra.Command, args []string) error {
 	f := loginFlags
 	if f.token != "" {
-		return saveConfig(&cliConfig{Host: f.host, Token: f.token})
+		// Verify the token is accepted by the server before persisting it.
+		if err := verifyToken(f.host, f.token); err != nil {
+			return fmt.Errorf("token rejected by server: %w", err)
+		}
+		if err := saveConfig(&cliConfig{Host: f.host, Token: f.token}); err != nil {
+			return err
+		}
+		fmt.Printf("Logged in. Saved credentials to %s\n", configPath())
+		return nil
 	}
 
 	body, _ := json.Marshal(map[string]string{"username": f.username, "password": f.password})
@@ -57,6 +66,30 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	if err := saveConfig(&cliConfig{Host: f.host, Token: result.Token}); err != nil {
 		return err
 	}
-	fmt.Println("Logged in successfully.")
+	fmt.Printf("Logged in. Saved credentials to %s\n", configPath())
+	return nil
+}
+
+// verifyToken does a GET /api/auth/me round-trip to confirm the token is
+// accepted by the server before it is persisted to the config file.
+func verifyToken(host, token string) error {
+	req, err := http.NewRequest("GET", host+"/api/auth/me", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("connect to server: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		out, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+	}
+	if resp.StatusCode >= 400 {
+		out, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+	}
 	return nil
 }
