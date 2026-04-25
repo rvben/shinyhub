@@ -171,6 +171,13 @@ func TestEnvSet_RejectsInvalidKey(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for lowercase key, got nil")
 	}
+	// Error message should be human-friendly and include the invalid key.
+	if err != nil && !strings.Contains(err.Error(), "FOO_BAR") {
+		t.Errorf("error should reference example FOO_BAR, got: %v", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "foo") {
+		t.Errorf("error should include the invalid key 'foo', got: %v", err)
+	}
 
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests, got %d", len(*reqs))
