@@ -61,10 +61,10 @@ func TestNeverDeployed_ManagerSeesCLISnippet(t *testing.T) {
 	if !strings.Contains(body, "Fresh App") {
 		t.Errorf("expected app name in body, got %q", body)
 	}
-	if !strings.Contains(body, "shiny login --host http://shiny.example.com --username owner") {
+	if !strings.Contains(body, "shinyhub login --host http://shiny.example.com --username owner") {
 		t.Errorf("expected login snippet with real username, got %q", body)
 	}
-	if !strings.Contains(body, "shiny deploy --slug newapp") {
+	if !strings.Contains(body, "shinyhub deploy --slug newapp") {
 		t.Errorf("expected deploy snippet with slug, got %q", body)
 	}
 	if !strings.Contains(body, `href="http://shiny.example.com/#deploy=newapp"`) {
@@ -109,7 +109,7 @@ func TestNeverDeployed_NonManagerSeesUnpublishedNotice(t *testing.T) {
 	if !strings.Contains(body, "being prepared by its owner") {
 		t.Errorf("expected non-manager 'being prepared' notice, got %q", body)
 	}
-	if strings.Contains(body, "shiny login") {
+	if strings.Contains(body, "shinyhub login") {
 		t.Errorf("non-manager should not see CLI snippet, got %q", body)
 	}
 	if strings.Contains(body, "#deploy=") {
