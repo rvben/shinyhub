@@ -17,8 +17,8 @@ var appsCmd = &cobra.Command{Use: "apps", Short: "Manage apps"}
 var tokensCmd = &cobra.Command{Use: "tokens", Short: "Manage API tokens"}
 
 func init() {
-	appsCmd.AddCommand(appsListCmd, appsLogsCmd, appsRollbackCmd, appsRestartCmd, appsSetCmd, appsAccessCmd)
-	tokensCmd.AddCommand(tokensCreateCmd)
+	appsCmd.AddCommand(appsListCmd, appsLogsCmd, appsRollbackCmd, appsRestartCmd, appsSetCmd, appsAccessCmd, appsDeleteCmd, appsStopCmd, appsDeploymentsCmd)
+	tokensCmd.AddCommand(tokensCreateCmd, tokensListCmd, tokensRevokeCmd)
 }
 
 var appsListCmd = &cobra.Command{
@@ -386,5 +386,260 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 		fmt.Println("Store this — it will not be shown again.")
 	}
 	_ = os.Stdout.Sync()
+	return nil
+}
+
+// ── apps delete ─────────────────────────────────────────────────────────────
+
+var appsDeleteFlags struct {
+	yes bool
+}
+
+var appsDeleteCmd = &cobra.Command{
+	Use:   "delete <slug>",
+	Short: "Permanently delete an app and all its data",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAppsDelete,
+}
+
+func init() {
+	appsDeleteCmd.Flags().BoolVar(&appsDeleteFlags.yes, "yes", false, "Skip confirmation prompt")
+}
+
+func runAppsDelete(cmd *cobra.Command, args []string) error {
+	slug := args[0]
+
+	if !appsDeleteFlags.yes {
+		fmt.Printf("This will permanently delete app %q and all its data. Type the slug to confirm: ", slug)
+		var confirm string
+		if _, err := fmt.Fscan(cmd.InOrStdin(), &confirm); err != nil {
+			return fmt.Errorf("read confirmation: %w", err)
+		}
+		if confirm != slug {
+			return fmt.Errorf("confirmation did not match slug %q — aborted", slug)
+		}
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("DELETE", cfg.Host+"/api/apps/"+slug, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("delete failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("%s: deleted\n", slug)
+	return nil
+}
+
+// ── apps stop ───────────────────────────────────────────────────────────────
+
+var appsStopCmd = &cobra.Command{
+	Use:   "stop <slug>",
+	Short: "Stop a running app",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAppsStop,
+}
+
+func runAppsStop(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/stop", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("stop failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("%s: stopped\n", slug)
+	return nil
+}
+
+// ── apps deployments ────────────────────────────────────────────────────────
+
+var appsDeploymentsFlags struct {
+	jsonOutput bool
+}
+
+var appsDeploymentsCmd = &cobra.Command{
+	Use:   "deployments <slug>",
+	Short: "List deployment history for an app",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAppsDeployments,
+}
+
+func init() {
+	appsDeploymentsCmd.Flags().BoolVar(&appsDeploymentsFlags.jsonOutput, "json", false, "Output as JSON")
+}
+
+func runAppsDeployments(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/deployments", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+
+	if appsDeploymentsFlags.jsonOutput {
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+
+	var deployments []struct {
+		ID        int64  `json:"id"`
+		Version   string `json:"version"`
+		Status    string `json:"status"`
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal(out, &deployments); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if len(deployments) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No deployments.")
+		return nil
+	}
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "%-6s %-20s %-12s %s\n", "ID", "VERSION", "STATUS", "CREATED")
+	for _, d := range deployments {
+		created := d.CreatedAt
+		if len(created) > 19 {
+			created = created[:19]
+		}
+		row := fmt.Sprintf("%-6d %-20s %-12s %s", d.ID, d.Version, d.Status, created)
+		fmt.Fprintln(w, strings.TrimRight(row, " "))
+	}
+	return nil
+}
+
+// ── tokens list ─────────────────────────────────────────────────────────────
+
+var tokensListFlags struct {
+	jsonOutput bool
+}
+
+var tokensListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List your API tokens",
+	RunE:  runTokensList,
+}
+
+func init() {
+	tokensListCmd.Flags().BoolVar(&tokensListFlags.jsonOutput, "json", false, "Output as JSON")
+}
+
+func runTokensList(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+
+	if tokensListFlags.jsonOutput {
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+
+	var tokens []struct {
+		ID        int64  `json:"id"`
+		Name      string `json:"name"`
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal(out, &tokens); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if len(tokens) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No tokens.")
+		return nil
+	}
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "%-6s %-24s %s\n", "ID", "NAME", "CREATED")
+	for _, t := range tokens {
+		created := t.CreatedAt
+		if len(created) > 19 {
+			created = created[:19]
+		}
+		row := fmt.Sprintf("%-6d %-24s %s", t.ID, t.Name, created)
+		fmt.Fprintln(w, strings.TrimRight(row, " "))
+	}
+	return nil
+}
+
+// ── tokens revoke ───────────────────────────────────────────────────────────
+
+var tokensRevokeCmd = &cobra.Command{
+	Use:   "revoke <id>",
+	Short: "Revoke an API token by ID",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTokensRevoke,
+}
+
+func runTokensRevoke(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	id := args[0]
+	req, err := http.NewRequest("DELETE", cfg.Host+"/api/tokens/"+id, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("revoke failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("token %s: revoked\n", id)
 	return nil
 }

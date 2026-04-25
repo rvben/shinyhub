@@ -251,3 +251,164 @@ func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {
 	}
 }
 
+// TestAppsStop sends a POST /api/apps/{slug}/stop and expects a clean message.
+func TestAppsStop(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{"slug":"demo","status":"stopped"}`)
+
+	appsCmd.SetArgs([]string{"stop", "demo"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	req := (*reqs)[0]
+	if req.Method != "POST" || req.Path != "/api/apps/demo/stop" {
+		t.Errorf("unexpected %s %s", req.Method, req.Path)
+	}
+}
+
+// TestAppsStop_ServerError ensures a non-2xx response is propagated as an error.
+func TestAppsStop_ServerError(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(404, `{"error":"not found"}`)
+
+	appsCmd.SetArgs([]string{"stop", "missing"})
+	err := appsCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for 404, got nil")
+	}
+}
+
+// TestAppsDelete_WithYesFlag tests deletion bypassing the confirmation prompt.
+func TestAppsDelete_WithYesFlag(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+	appsDeleteFlags.yes = false // reset
+
+	appsCmd.SetArgs([]string{"delete", "demo", "--yes"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	req := (*reqs)[0]
+	if req.Method != "DELETE" || req.Path != "/api/apps/demo" {
+		t.Errorf("unexpected %s %s", req.Method, req.Path)
+	}
+}
+
+// TestAppsDelete_WithConfirmation tests the interactive confirmation flow.
+func TestAppsDelete_WithConfirmation(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+	appsDeleteFlags.yes = false
+
+	// Correct confirmation: user types the slug.
+	appsDeleteCmd.SetIn(strings.NewReader("demo\n"))
+	appsCmd.SetArgs([]string{"delete", "demo"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error with correct confirmation: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+}
+
+// TestAppsDelete_WrongConfirmation ensures a wrong confirmation aborts without
+// making any network call.
+func TestAppsDelete_WrongConfirmation(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	appsDeleteFlags.yes = false
+
+	appsDeleteCmd.SetIn(strings.NewReader("wrong\n"))
+	appsCmd.SetArgs([]string{"delete", "demo"})
+	err := appsCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for wrong confirmation, got nil")
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("error should mention 'aborted', got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when aborted, got %d", len(*reqs))
+	}
+}
+
+// TestAppsDeployments lists deployment history.
+func TestAppsDeployments(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}]`)
+	// Reset json flag.
+	appsDeploymentsFlags.jsonOutput = false
+	for _, name := range []string{"json"} {
+		f := appsDeploymentsCmd.Flags().Lookup(name)
+		if f != nil {
+			f.Changed = false
+		}
+	}
+
+	var buf strings.Builder
+	appsDeploymentsCmd.SetOut(&buf)
+	appsCmd.SetArgs([]string{"deployments", "demo"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "ID") {
+		t.Errorf("expected header row with ID, got: %q", out)
+	}
+	if !strings.Contains(out, "3") {
+		t.Errorf("expected deployment ID 3, got: %q", out)
+	}
+}
+
+// TestTokensList lists API tokens.
+func TestTokensList(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"id":1,"name":"ci-token","created_at":"2026-01-01T00:00:00Z"}]`)
+	tokensListFlags.jsonOutput = false
+	for _, name := range []string{"json"} {
+		f := tokensListCmd.Flags().Lookup(name)
+		if f != nil {
+			f.Changed = false
+		}
+	}
+
+	var buf strings.Builder
+	tokensListCmd.SetOut(&buf)
+	tokensCmd.SetArgs([]string{"list"})
+	if err := tokensCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "ci-token") {
+		t.Errorf("expected output to contain 'ci-token', got: %q", out)
+	}
+}
+
+// TestTokensRevoke sends a DELETE request to revoke a token by ID.
+func TestTokensRevoke(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+
+	tokensCmd.SetArgs([]string{"revoke", "42"})
+	if err := tokensCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	req := (*reqs)[0]
+	if req.Method != "DELETE" || req.Path != "/api/tokens/42" {
+		t.Errorf("unexpected %s %s", req.Method, req.Path)
+	}
+}
+
