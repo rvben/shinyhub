@@ -19,13 +19,34 @@ import (
 // buttons on the detail page. This test ensures app-detail.js keeps reading
 // from body.app so the class of regression can't recur.
 func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
-	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
+	assertContains(t, "views/app-detail.js", "body.app",
+		"GET /api/apps/:slug returns {app, replicas_status}; see internal/api/apps.go handleGetApp")
+}
+
+// TestEnvListUnwrapsResponse guards the env-list consumer.
+// GET /api/apps/:slug/env returns {env: [...]} (internal/api/env.go
+// handleEnvList) and refreshEnvList in app.js reads data.env.
+func TestEnvListUnwrapsResponse(t *testing.T) {
+	assertContains(t, "app.js", "data.env",
+		"GET /api/apps/:slug/env returns {env: [...]}; see internal/api/env.go handleEnvList")
+}
+
+// TestDataTabUnwrapsResponse guards the data-tab consumer.
+// GET /api/apps/:slug/data returns {files, quota_mb, used_bytes}
+// (internal/api/data.go handleDataList) and refreshDataTab in app.js
+// reads env.files.
+func TestDataTabUnwrapsResponse(t *testing.T) {
+	assertContains(t, "app.js", "env.files",
+		"GET /api/apps/:slug/data returns {files, quota_mb, used_bytes}; see internal/api/data.go handleDataList")
+}
+
+func assertContains(t *testing.T, path, needle, contract string) {
+	t.Helper()
+	b, err := fs.ReadFile(ui.Static(), path)
 	if err != nil {
-		t.Fatalf("read app-detail.js: %v", err)
+		t.Fatalf("read %s: %v", path, err)
 	}
-	src := string(b)
-	if !strings.Contains(src, "body.app") {
-		t.Fatalf("app-detail.js must unwrap the GET /api/apps/:slug response via body.app; " +
-			"see internal/api/apps.go handleGetApp for the {app, replicas_status} shape")
+	if !strings.Contains(string(b), needle) {
+		t.Fatalf("%s must contain %q to honor contract: %s", path, needle, contract)
 	}
 }
