@@ -61,17 +61,30 @@ func newDataPushCmd() *cobra.Command {
 }
 
 func newDataLsCmd() *cobra.Command {
+	var flags struct {
+		jsonOutput bool
+	}
 	lsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List files in an app's persistent data dir",
 		Args:  cobra.ExactArgs(1),
 	}
+	lsCmd.Flags().BoolVar(&flags.jsonOutput, "json", false, "Output as JSON")
 	lsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
+		}
+
+		if flags.jsonOutput {
+			raw, err := runDataLsRaw(cfg.Host, cfg.Token, slug)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+			return nil
 		}
 
 		out, err := runDataLs(cfg.Host, cfg.Token, slug)
@@ -182,6 +195,27 @@ func runDataPush(host, token, slug, localFile, dest string, restart bool) error 
 	}
 
 	return nil
+}
+
+// runDataLsRaw returns the raw JSON body from the data list endpoint.
+func runDataLsRaw(host, token, slug string) ([]byte, error) {
+	req, err := http.NewRequest("GET", host+"/api/apps/"+slug+"/data", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(token))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("server returned %s: %s", resp.Status, body)
+	}
+	return body, nil
 }
 
 // runDataLs lists files in an app's data dir and returns a formatted string.

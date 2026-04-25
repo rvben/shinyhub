@@ -95,11 +95,16 @@ func newEnvCmd() *cobra.Command {
 		return nil
 	}
 
+	var lsFlags struct {
+		jsonOutput bool
+	}
+
 	envLsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List environment variables for an app",
 		Args:  cobra.ExactArgs(1),
 	}
+	envLsCmd.Flags().BoolVar(&lsFlags.jsonOutput, "json", false, "Output as JSON")
 	envLsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 
@@ -120,9 +125,14 @@ func newEnvCmd() *cobra.Command {
 		}
 		defer resp.Body.Close()
 
+		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			out, _ := io.ReadAll(resp.Body)
 			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+		}
+
+		if lsFlags.jsonOutput {
+			fmt.Fprintln(cmd.OutOrStdout(), string(out))
+			return nil
 		}
 
 		var result struct {
@@ -134,11 +144,12 @@ func newEnvCmd() *cobra.Command {
 				UpdatedAt int64  `json:"updated_at"`
 			} `json:"env"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if err := json.Unmarshal(out, &result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%-24s %s\n", "KEY", "VALUE")
+		w := cmd.OutOrStdout()
+		fmt.Fprintf(w, "%-24s %s\n", "KEY", "VALUE")
 		for _, v := range result.Env {
 			displayValue := v.Value
 			switch {
@@ -147,7 +158,8 @@ func newEnvCmd() *cobra.Command {
 			case v.Set && v.Value == "":
 				displayValue = "(empty)"
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%-24s %s\n", v.Key, displayValue)
+			row := fmt.Sprintf("%-24s %s", v.Key, displayValue)
+			fmt.Fprintln(w, strings.TrimRight(row, " "))
 		}
 		return nil
 	}

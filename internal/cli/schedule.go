@@ -58,6 +58,27 @@ func lookupScheduleID(cfg *cliConfig, slug, name string) (int64, error) {
 	return 0, fmt.Errorf("schedule %q not found for app %q", name, slug)
 }
 
+// listSchedulesRaw returns the raw JSON response body for an app's schedules.
+func listSchedulesRaw(cfg *cliConfig, slug string) ([]byte, error) {
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("server returned %s: %s", resp.Status, body)
+	}
+	return body, nil
+}
+
 // listSchedules fetches all schedules for the given app slug.
 func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)
@@ -85,37 +106,52 @@ func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 }
 
 func newScheduleLsCmd() *cobra.Command {
-	return &cobra.Command{
+	var flags struct {
+		jsonOutput bool
+	}
+	lsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List scheduled jobs for an app",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
-			schedules, err := listSchedules(cfg, args[0])
-			if err != nil {
-				return err
-			}
-			if len(schedules) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No schedules.")
-				return nil
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%-6s  %-24s  %-20s  %-8s  %s\n",
-				"ID", "NAME", "CRON", "ENABLED", "COMMAND")
-			for _, s := range schedules {
-				cmdStr := strings.Join(s.Command, " ")
-				enabled := "true"
-				if !s.Enabled {
-					enabled = "false"
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%-6d  %-24s  %-20s  %-8s  %s\n",
-					s.ID, s.Name, s.CronExpr, enabled, cmdStr)
-			}
-			return nil
-		},
 	}
+	lsCmd.Flags().BoolVar(&flags.jsonOutput, "json", false, "Output as JSON")
+	lsCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		if flags.jsonOutput {
+			raw, err := listSchedulesRaw(cfg, args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+			return nil
+		}
+
+		schedules, err := listSchedules(cfg, args[0])
+		if err != nil {
+			return err
+		}
+		if len(schedules) == 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), "No schedules.")
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%-6s  %-24s  %-20s  %-8s  %s\n",
+			"ID", "NAME", "CRON", "ENABLED", "COMMAND")
+		for _, s := range schedules {
+			cmdStr := strings.Join(s.Command, " ")
+			enabled := "true"
+			if !s.Enabled {
+				enabled = "false"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%-6d  %-24s  %-20s  %-8s  %s\n",
+				s.ID, s.Name, s.CronExpr, enabled, cmdStr)
+		}
+		return nil
+	}
+	return lsCmd
 }
 
 func newScheduleAddCmd() *cobra.Command {
