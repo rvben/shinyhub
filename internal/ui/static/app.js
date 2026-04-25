@@ -255,9 +255,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const meta = document.createElement('div');
       meta.className = 'app-meta';
 
+      const slugWrap = document.createElement('span');
+      slugWrap.className = 'app-slug-wrap';
       const slug = document.createElement('span');
       slug.textContent = `/${app.slug}`;
-      meta.appendChild(slug);
+      slugWrap.appendChild(slug);
+      slugWrap.appendChild(makeCopyButton(app.slug, `Copy slug ${app.slug}`));
+      meta.appendChild(slugWrap);
 
       const deployCount = document.createElement('span');
       deployCount.textContent = `${app.deploy_count} deploys`;
@@ -567,13 +571,16 @@ document.addEventListener('DOMContentLoaded', () => {
       // Username
       const nameCell = document.createElement('td');
       nameCell.className = 'users-username';
-      nameCell.textContent = u.username;
+      const usernameText = document.createElement('span');
+      usernameText.textContent = u.username;
+      nameCell.appendChild(usernameText);
       if (u.id === selfId) {
         const tag = document.createElement('span');
         tag.className = 'users-self-tag';
         tag.textContent = 'you';
         nameCell.appendChild(tag);
       }
+      nameCell.appendChild(makeCopyButton(u.username, `Copy username ${u.username}`));
       tr.appendChild(nameCell);
 
       // Role (editable select; disabled for self)
@@ -2460,6 +2467,44 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  }
+
+  // Show a brief accessible toast notification.
+  // type: 'info' (default), 'success', or 'error'
+  // Create a small icon-only copy button that copies `text` to the clipboard.
+  // Uses the same is-copied / SVG pattern as the snippet copy buttons.
+  function makeCopyButton(text, label) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn copy-btn-inline';
+    btn.setAttribute('aria-label', label || `Copy ${text}`);
+    btn.innerHTML = `
+      <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
+           stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <rect x="4" y="3" width="8" height="10" rx="1.2"/>
+        <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
+      </svg>
+      <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
+      </svg>
+      <span class="sr-only" aria-live="polite"></span>`;
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.classList.add('is-copied');
+        btn.querySelector('[aria-live]').textContent = 'Copied';
+        setTimeout(() => {
+          btn.classList.remove('is-copied');
+          btn.querySelector('[aria-live]').textContent = '';
+        }, 1800);
+      } catch { /* clipboard blocked */ }
+    });
+    return btn;
   }
 
   // Show a brief accessible toast notification.

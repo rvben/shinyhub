@@ -1710,6 +1710,28 @@ main {
 .copy-btn.is-copied .copy-icon-clipboard { display: none; }
 .copy-btn.is-copied .copy-icon-check { display: inline-block; }
 
+/* Compact icon-only copy button used inline next to slugs / usernames */
+.copy-btn-inline {
+  align-self: center;
+  margin: 0;
+  padding: 0.1rem 0.2rem;
+  background: transparent;
+  border-color: transparent;
+  opacity: 0;
+  transition: opacity var(--ease), border-color var(--ease), color var(--ease);
+}
+.copy-btn-inline svg { width: 12px; height: 12px; }
+/* Show on hover of the parent container */
+.app-slug-wrap:hover .copy-btn-inline,
+.users-username:hover .copy-btn-inline,
+.copy-btn-inline:focus { opacity: 1; }
+
+.app-slug-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
 /* === Empty-state page: never-deployed app (server-rendered) === */
 
 .emptystate-page {
