@@ -10,6 +10,54 @@ import (
 	"testing"
 )
 
+
+func TestValidSlugRE(t *testing.T) {
+	valid := []string{"myapp", "my-app", "app123", "a", "a0"}
+	for _, s := range valid {
+		if !validSlugRE.MatchString(s) {
+			t.Errorf("expected %q to be valid, but validSlugRE rejected it", s)
+		}
+	}
+	invalid := []string{"MyApp", "UPPER", "my_app", "-leading", "trailing-", "my app", ""}
+	for _, s := range invalid {
+		if validSlugRE.MatchString(s) {
+			t.Errorf("expected %q to be invalid, but validSlugRE accepted it", s)
+		}
+	}
+}
+
+// TestDeploy_SlugValidation tests the slug validation logic directly.
+// The invalid slug must be rejected before any network call is made.
+func TestDeploy_SlugValidation(t *testing.T) {
+	cases := []struct {
+		slug    string
+		wantErr bool
+	}{
+		{"my-app", false},
+		{"myapp", false},
+		{"MyApp", true},
+		{"UPPER", true},
+		{"my_app", true},
+		{"-leading", true},
+		{"trailing-", true},
+		{"my app", true},
+		{"", false}, // empty means "derive from dir name"
+	}
+	for _, tc := range cases {
+		if tc.slug == "" {
+			continue // auto-derived slugs are not user-validated here
+		}
+		matched := validSlugRE.MatchString(tc.slug)
+		isInvalid := !matched
+		if tc.wantErr && !isInvalid {
+			t.Errorf("slug %q should be invalid but regex accepted it", tc.slug)
+		}
+		if !tc.wantErr && isInvalid {
+			t.Errorf("slug %q should be valid but regex rejected it", tc.slug)
+		}
+	}
+}
+
 func TestSanitizeSlug(t *testing.T) {
 	cases := []struct {
 		in   string

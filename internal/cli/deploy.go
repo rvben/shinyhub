@@ -19,6 +19,10 @@ import (
 )
 
 var slugInvalidRE = regexp.MustCompile(`[^a-z0-9]+`)
+// validSlugRE matches slugs that start with an alphanumeric character, end
+// with an alphanumeric character, and contain only lowercase letters, digits,
+// and hyphens — matching the server's constraint.
+var validSlugRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // sanitizeSlug lowercases the name, replaces runs of non-alphanumeric characters
 // with a single dash, and trims leading/trailing dashes to produce a slug that
@@ -87,6 +91,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			slug = sanitizeSlug(repoName)
 		} else {
 			slug = sanitizeSlug(filepath.Base(abs))
+		}
+	} else {
+		// Validate the user-supplied slug locally before making any network call.
+		if !validSlugRE.MatchString(slug) {
+			return fmt.Errorf("invalid slug %q: must match [a-z0-9][a-z0-9-]{0,62} (lowercase letters, digits, and hyphens only)", slug)
 		}
 	}
 
