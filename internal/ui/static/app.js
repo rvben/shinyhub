@@ -2142,8 +2142,15 @@ document.addEventListener('DOMContentLoaded', () => {
     router.start();
   });
 
-  refreshButton.addEventListener('click', () => {
-    loadApps();
+  refreshButton.addEventListener('click', async () => {
+    refreshButton.disabled = true;
+    refreshButton.textContent = 'Refreshing…';
+    try {
+      await loadApps();
+    } finally {
+      refreshButton.disabled = false;
+      refreshButton.textContent = 'Refresh';
+    }
   });
 
   logoutButton.addEventListener('click', async () => {
@@ -2328,6 +2335,9 @@ document.addEventListener('DOMContentLoaded', () => {
   router.register('/apps/:slug/:tab', (p) => appDetailMount(p));
 
   async function initialize() {
+    // Persist any /#deploy=<slug> hash before the auth check so the slug
+    // survives the login redirect in case the user is not authenticated.
+    persistDeployHash();
     loadProviders();
     setError(loginError, '');
 
@@ -2356,16 +2366,34 @@ document.addEventListener('DOMContentLoaded', () => {
     handleDeployHash();
   }
 
-  // Honour /#deploy=<slug> from the server-rendered empty-state page:
-  // after the apps list has loaded, scroll to the matching card and open the
-  // deploy modal. Clears the hash afterwards so refreshing doesn't re-trigger.
-  function handleDeployHash() {
+  // Honour /#deploy=<slug> from the server-rendered empty-state page.
+  // The hash is saved to localStorage so it survives a login redirect:
+  // if the user is not authenticated when they visit /#deploy=<slug>,
+  // the hash is persisted here and consumed after login completes.
+  // After the apps list has loaded the deploy modal is opened and the
+  // stored slug is cleared so refreshing doesn't re-trigger.
+  function persistDeployHash() {
     const match = /^#deploy=([a-z0-9][a-z0-9-]{0,62})$/i.exec(window.location.hash);
     if (!match) return;
-    const slug = match[1];
-    const app = state.apps.find(a => a.slug === slug);
-    // Clear hash without adding a history entry.
+    try { localStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
+    // Clear the hash without adding a history entry.
     history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+
+  function handleDeployHash() {
+    // Check hash first, then fall back to localStorage.
+    const hashMatch = /^#deploy=([a-z0-9][a-z0-9-]{0,62})$/i.exec(window.location.hash);
+    let slug = hashMatch ? hashMatch[1] : null;
+    if (!slug) {
+      try { slug = localStorage.getItem('pendingDeploy'); } catch { /* storage may be blocked */ }
+    }
+    if (!slug) return;
+    // Consume the stored slug so it only fires once.
+    try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
+    // Clear the hash without adding a history entry.
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+
+    const app = state.apps.find(a => a.slug === slug);
     if (!app) return;
     if (!canManageApp(state.user, app)) return;
     const card = [...appGrid.querySelectorAll('.app-card')].find(

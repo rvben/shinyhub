@@ -952,12 +952,17 @@ main {
 .modal-header button {
   background: none;
   border: none;
-  font-size: 1.3rem;
   cursor: pointer;
   color: var(--text-muted);
   line-height: 1;
-  padding: 0.15rem 0.45rem;
+  /* 32×32 minimum hit target (WCAG 2.5.5) */
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0.25rem;
   border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transition: all var(--ease);
 }
 
