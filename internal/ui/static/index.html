@@ -51,6 +51,15 @@
       <div class="toolbar">
         <h1>Apps</h1>
         <div class="toolbar-actions">
+          <label for="apps-search" class="sr-only">Search apps</label>
+          <input id="apps-search" type="search" class="apps-search" placeholder="Search…" autocomplete="off" aria-label="Filter apps by name or slug">
+          <label for="apps-sort" class="sr-only">Sort apps</label>
+          <select id="apps-sort" class="apps-sort" aria-label="Sort apps">
+            <option value="default">Default order</option>
+            <option value="name">Name A–Z</option>
+            <option value="deploy">Most recent deploy</option>
+            <option value="status">Status</option>
+          </select>
           <button id="new-app-button" type="button" hidden>+ New app</button>
           <button id="refresh-button" type="button">Refresh</button>
         </div>

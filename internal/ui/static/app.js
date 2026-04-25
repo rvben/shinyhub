@@ -326,7 +326,36 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderApps() {
-    renderGridVerbatim(state.apps, appGrid, emptyState);
+    const searchEl = document.getElementById('apps-search');
+    const sortEl   = document.getElementById('apps-sort');
+
+    let apps = state.apps.slice();
+
+    // Filter by search query.
+    const q = (searchEl ? searchEl.value : '').trim().toLowerCase();
+    if (q) {
+      apps = apps.filter(a =>
+        a.name.toLowerCase().includes(q) || a.slug.toLowerCase().includes(q),
+      );
+    }
+
+    // Sort.
+    const sortKey = sortEl ? sortEl.value : 'default';
+    if (sortKey === 'name') {
+      apps.sort((a, b) => a.name.localeCompare(b.name));
+    } else if (sortKey === 'deploy') {
+      apps.sort((a, b) => {
+        const ta = a.last_deployed_at ? new Date(a.last_deployed_at).getTime() : 0;
+        const tb = b.last_deployed_at ? new Date(b.last_deployed_at).getTime() : 0;
+        return tb - ta;
+      });
+    } else if (sortKey === 'status') {
+      const order = { running: 0, stopped: 1, failed: 2 };
+      apps.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+    }
+    // 'default' keeps server order.
+
+    renderGridVerbatim(apps, appGrid, emptyState);
   }
 
   function showView(name) {
@@ -1365,6 +1394,30 @@ document.addEventListener('DOMContentLoaded', () => {
   resetPwForm.addEventListener('submit', submitResetPassword);
   auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1));
   auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1));
+
+  // Apps search + sort. Restore previous values from sessionStorage.
+  const appsSearchEl = document.getElementById('apps-search');
+  const appsSortEl   = document.getElementById('apps-sort');
+  if (appsSearchEl) {
+    try {
+      const saved = sessionStorage.getItem('appsSearch');
+      if (saved) appsSearchEl.value = saved;
+    } catch { /* storage may be blocked */ }
+    appsSearchEl.addEventListener('input', () => {
+      try { sessionStorage.setItem('appsSearch', appsSearchEl.value); } catch { /* ignore */ }
+      renderApps();
+    });
+  }
+  if (appsSortEl) {
+    try {
+      const saved = sessionStorage.getItem('appsSort');
+      if (saved) appsSortEl.value = saved;
+    } catch { /* storage may be blocked */ }
+    appsSortEl.addEventListener('change', () => {
+      try { sessionStorage.setItem('appsSort', appsSortEl.value); } catch { /* ignore */ }
+      renderApps();
+    });
+  }
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {

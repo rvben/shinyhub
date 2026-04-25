@@ -1435,6 +1435,40 @@ main {
   align-items: center;
 }
 
+/* Apps grid search + sort controls */
+.apps-search {
+  background: var(--surface-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.82rem;
+  padding: 0.35rem 0.65rem;
+  width: 180px;
+  transition: border-color var(--ease);
+}
+.apps-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.apps-search::placeholder { color: var(--text-muted); }
+
+.apps-sort {
+  background: var(--surface-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.82rem;
+  padding: 0.35rem 0.65rem;
+  cursor: pointer;
+  transition: border-color var(--ease);
+}
+.apps-sort:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .modal-card form label,
 .settings-tab-panel form label {
   display: block;
