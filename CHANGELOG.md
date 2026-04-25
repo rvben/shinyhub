@@ -10,6 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.2.6](https://github.com/rvben/shinyhub/compare/v0.2.5...v0.2.6) - 2026-04-25
+
+### Added
+
+- **ui**: seed Overview Replicas panel from replicas_status ([be93f2f](https://github.com/rvben/shinyhub/commit/be93f2f3c0fc0328ed9cbdda0f562fe767e72329))
+- **ui**: confirm before replica-count change drops sessions ([ea8a5ab](https://github.com/rvben/shinyhub/commit/ea8a5abb5c80e7f0ed3d48271cd73566fac0892f))
+
 ## [0.2.5](https://github.com/rvben/shinyhub/compare/v0.2.4...v0.2.5) - 2026-04-24
 
 ### Added
