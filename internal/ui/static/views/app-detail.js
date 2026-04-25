@@ -136,36 +136,86 @@ function renderLogs(panel, app) {
 }
 
 async function renderDeployments(panel, app, ctx) {
-  panel.innerHTML = `<ul id="detail-deployments-list" class="deployments-list"></ul><p id="detail-deployments-empty" class="env-empty" hidden>No deployments yet.</p>`;
+  panel.innerHTML = `
+    <ul id="detail-deployments-list" class="deployments-list"></ul>
+    <p id="detail-deployments-empty" class="env-empty" hidden>No deployments yet.</p>
+    <div id="detail-deployments-error" class="deployments-error" hidden>
+      <p class="error"></p>
+      <button type="button" class="btn-row" id="detail-deployments-retry">Retry</button>
+    </div>`;
   const list = document.getElementById('detail-deployments-list');
   const empty = document.getElementById('detail-deployments-empty');
-  const resp = await ctx.api(`/api/apps/${app.slug}/deployments`);
-  if (!resp.ok) { list.textContent = 'Failed to load deployments.'; return; }
-  const rows = await resp.json();
-  if (rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
-  for (const d of rows) {
-    const li = document.createElement('li');
-    li.className = 'deployment-row';
-    li.innerHTML = `
-      <span class="deployment-version">v${d.version}</span>
-      <span class="deployment-when">${new Date(d.created_at).toLocaleString()}</span>
-      <span class="deployment-user">${d.deployed_by ?? '—'}</span>
-      <button type="button" class="rollback-btn" data-id="${d.id}">Roll back</button>
-    `;
-    list.appendChild(li);
-  }
-  list.addEventListener('click', async (e) => {
-    const btn = e.target.closest('.rollback-btn');
-    if (!btn) return;
-    if (!window.confirm(`Roll back ${app.name} to deployment ${btn.dataset.id}?`)) return;
-    const r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
+  const errWrap = document.getElementById('detail-deployments-error');
+
+  async function load() {
+    list.hidden = false;
+    list.textContent = '';
+    empty.hidden = true;
+    errWrap.hidden = true;
+
+    let resp;
+    try {
+      resp = await ctx.api(`/api/apps/${app.slug}/deployments`);
+    } catch {
+      errWrap.querySelector('.error').textContent = 'Network error — could not load deployments.';
+      errWrap.hidden = false;
+      list.hidden = true;
+      return;
+    }
+
+    // 404 with empty body or an empty array both mean no deployments yet.
+    if (resp.status === 404) {
+      empty.hidden = false;
+      list.hidden = true;
+      return;
+    }
+    if (!resp.ok) {
+      let msg = `Failed to load deployments (HTTP ${resp.status}).`;
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { /* non-JSON */ }
+      errWrap.querySelector('.error').textContent = msg;
+      errWrap.hidden = false;
+      list.hidden = true;
+      return;
+    }
+
+    let rows;
+    try { rows = await resp.json(); } catch {
+      errWrap.querySelector('.error').textContent = 'Invalid response from server.';
+      errWrap.hidden = false;
+      list.hidden = true;
+      return;
+    }
+
+    if (!rows || rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
+
+    for (const d of rows) {
+      const li = document.createElement('li');
+      li.className = 'deployment-row';
+      li.innerHTML = `
+        <span class="deployment-version">v${d.version}</span>
+        <span class="deployment-when">${new Date(d.created_at).toLocaleString()}</span>
+        <span class="deployment-user">${d.deployed_by ?? '—'}</span>
+        <button type="button" class="rollback-btn" data-id="${d.id}">Roll back</button>
+      `;
+      list.appendChild(li);
+    }
+
+    list.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.rollback-btn');
+      if (!btn) return;
+      if (!window.confirm(`Roll back ${app.name} to deployment ${btn.dataset.id}?`)) return;
+      const r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
+      });
+      if (r.ok) { ctx.navigate(`/apps/${app.slug}`); }
+      else { alert('Rollback failed.'); }
     });
-    if (r.ok) { ctx.navigate(`/apps/${app.slug}`); }
-    else { alert('Rollback failed.'); }
-  });
+  }
+
+  document.getElementById('detail-deployments-retry').addEventListener('click', load);
+  await load();
 }
 
 function renderOverview(panel, app, replicasStatus, ctx) {
