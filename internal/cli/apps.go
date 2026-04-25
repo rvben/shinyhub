@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -84,6 +85,10 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		out, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		fmt.Println(scanner.Text())

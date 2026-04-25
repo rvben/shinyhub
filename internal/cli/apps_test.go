@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -171,6 +173,34 @@ func TestAppsSet_RequiresAtLeastOneFlag(t *testing.T) {
 	}
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests, got %d", len(*reqs))
+	}
+}
+
+// TestAppsLogs_ServerErrorExitsNonZero asserts that a 4xx/5xx from the log
+// streaming endpoint is returned as a non-nil error (exit non-zero in the CLI).
+func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {
+	// runAppsLogs uses http.DefaultClient (no timeout) for SSE; point it at a
+	// real httptest server accessible over the loopback interface.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"app not found"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	appsCmd.SetArgs([]string{"logs", "noapp"})
+	err := appsCmd.Execute()
+	if err == nil {
+		t.Fatal("expected non-nil error on 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should contain status code 404, got: %v", err)
 	}
 }
 
