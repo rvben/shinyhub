@@ -41,9 +41,20 @@ func (l *schedLock) tryLock() bool {
 
 // lock blocks until the lock is acquired or ctx is cancelled. Returns
 // true on acquisition, false if ctx finished first.
+//
+// Cancellation always wins over acquisition: when the active holder
+// releases the lock at the same instant that ctx.Done() fires, Go's
+// select picks one of the two ready cases at random. Without the
+// post-acquisition re-check, a cancelled queued run would sometimes
+// take the slot and execute anyway. Recover by releasing the lock and
+// reporting cancellation.
 func (l *schedLock) lock(ctx context.Context) bool {
 	select {
 	case l.ch <- struct{}{}:
+		if ctx.Err() != nil {
+			<-l.ch
+			return false
+		}
 		return true
 	case <-ctx.Done():
 		return false

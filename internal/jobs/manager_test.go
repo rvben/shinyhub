@@ -756,8 +756,12 @@ func TestManager_Run_OverlapQueue_QueueSlotFreedWhenDequeued(t *testing.T) {
 			r3Status, "running")
 	}
 
-	// Drain.
+	// Drain. Wait for both #2 and #3 to complete RunOnce before returning,
+	// otherwise the in-flight goroutines keep writing to t.TempDir() while
+	// t.Cleanup tries to remove the directory — surfaces as a flaky
+	// "directory not empty" failure under -race.
 	close(block)
+	waitForCalls(t, rt, 3, 2*time.Second)
 }
 
 // TestManager_Run_PersistsLogPath verifies that Manager calls SetScheduleRunLogPath
