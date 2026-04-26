@@ -17,24 +17,21 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/bundle"
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
 
 var slugInvalidRE = regexp.MustCompile(`[^a-z0-9]+`)
-// validSlugRE matches slugs that start with an alphanumeric character, end
-// with an alphanumeric character, and contain only lowercase letters, digits,
-// and hyphens — matching the server's constraint.
-var validSlugRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // sanitizeSlug lowercases the name, replaces runs of non-alphanumeric characters
-// with a single dash, and trims leading/trailing dashes to produce a slug that
-// matches the server's ^[a-z0-9][a-z0-9-]{0,62}$ constraint.
+// with a single dash, and trims leading/trailing dashes so the result matches
+// the canonical slug rule (see internal/slug).
 func sanitizeSlug(name string) string {
 	s := strings.ToLower(name)
 	s = slugInvalidRE.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
-	if len(s) > 63 {
-		s = s[:63]
+	if len(s) > slugpkg.MaxLen {
+		s = s[:slugpkg.MaxLen]
 	}
 	return s
 }
@@ -102,8 +99,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		// Validate the user-supplied slug locally before making any network call.
-		if !validSlugRE.MatchString(slug) {
-			return fmt.Errorf("invalid slug %q: must match [a-z0-9][a-z0-9-]{0,62} (lowercase letters, digits, and hyphens only)", slug)
+		if !slugpkg.Valid(slug) {
+			return fmt.Errorf("invalid slug %q: must be %s", slug, slugpkg.HumanRule)
 		}
 	}
 

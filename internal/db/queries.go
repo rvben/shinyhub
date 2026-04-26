@@ -239,22 +239,37 @@ func (s *Store) APIKeyNameExists(userID int64, name string) (bool, error) {
 // --- Apps ---
 
 type App struct {
-	ID                      int64     `json:"id"`
-	Slug                    string    `json:"slug"`
-	Name                    string    `json:"name"`
-	ProjectSlug             string    `json:"project_slug,omitempty"`
-	OwnerID                 int64     `json:"owner_id"`
-	Access                  string    `json:"access"`
-	Status                  string    `json:"status"`
-	Replicas                int       `json:"replicas"`
-	MaxSessionsPerReplica   int       `json:"max_sessions_per_replica"`
-	DeployCount             int       `json:"deploy_count"`
-	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes"`
-	MemoryLimitMB           *int      `json:"memory_limit_mb"`
-	CPUQuotaPercent         *int      `json:"cpu_quota_percent"`
-	CreatedAt               time.Time `json:"created_at"`
-	UpdatedAt               time.Time `json:"updated_at"`
+	ID                      int64      `json:"id"`
+	Slug                    string     `json:"slug"`
+	Name                    string     `json:"name"`
+	ProjectSlug             string     `json:"project_slug,omitempty"`
+	OwnerID                 int64      `json:"owner_id"`
+	Access                  string     `json:"access"`
+	Status                  string     `json:"status"`
+	Replicas                int        `json:"replicas"`
+	MaxSessionsPerReplica   int        `json:"max_sessions_per_replica"`
+	DeployCount             int        `json:"deploy_count"`
+	HibernateTimeoutMinutes *int       `json:"hibernate_timeout_minutes"`
+	MemoryLimitMB           *int       `json:"memory_limit_mb"`
+	CPUQuotaPercent         *int       `json:"cpu_quota_percent"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	// LastDeployedAt is the created_at of the most-recent deployment row,
+	// or nil if the app has never been deployed. Joined in via the
+	// deploymentSummarySQL fragment below.
+	LastDeployedAt *time.Time `json:"last_deployed_at,omitempty"`
+	// CurrentVersion is the version string of the most-recent deployment,
+	// or empty if the app has never been deployed.
+	CurrentVersion string `json:"current_version,omitempty"`
 }
+
+// deploymentSummarySQL is the SELECT fragment that adds last_deployed_at and
+// current_version to any apps query. Kept as a constant so all five App
+// queries (ListApps, ListAppsVisibleToUser, ListRunningApps, GetAppBySlug,
+// GetAppByID) stay in sync.
+const deploymentSummarySQL = `
+		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id) AS last_deployed_at,
+		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version`
 
 type CreateAppParams struct {
 	Slug        string
@@ -290,7 +305,7 @@ func (s *Store) GetAppBySlug(slug string) (*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at
+		       created_at, updated_at,`+deploymentSummarySQL+`
 		FROM apps WHERE slug = ?`, slug)
 	return scanApp(row)
 }
@@ -306,7 +321,7 @@ func (s *Store) GetAppByID(id int64) (*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at
+		       created_at, updated_at,`+deploymentSummarySQL+`
 		FROM apps WHERE id = ?`, id)
 	return scanApp(row)
 }
@@ -320,7 +335,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at
+		       created_at, updated_at,`+deploymentSummarySQL+`
 		FROM apps ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -346,7 +361,7 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at
+		       created_at, updated_at,`+deploymentSummarySQL+`
 		FROM apps WHERE status = 'running'`)
 	if err != nil {
 		return nil, err
@@ -372,7 +387,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at
+		       created_at, updated_at,`+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		   OR access = 'shared'
@@ -1190,12 +1205,17 @@ type scanner interface {
 
 func scanApp(s scanner) (*App, error) {
 	var a App
-	var projectSlug sql.NullString
+	var projectSlug, currentVersion sql.NullString
+	// last_deployed_at is the result of MAX(deployments.created_at). SQLite
+	// aggregates lose the original column type, so the driver returns the
+	// value as a string. We parse it manually below.
+	var lastDeployedAtRaw sql.NullString
 	err := s.Scan(
 		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
 		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
+		&lastDeployedAtRaw, &currentVersion,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1206,5 +1226,31 @@ func scanApp(s scanner) (*App, error) {
 	if projectSlug.Valid {
 		a.ProjectSlug = projectSlug.String
 	}
+	if lastDeployedAtRaw.Valid {
+		if t, ok := parseSQLiteTime(lastDeployedAtRaw.String); ok {
+			a.LastDeployedAt = &t
+		}
+	}
+	if currentVersion.Valid {
+		a.CurrentVersion = currentVersion.String
+	}
 	return &a, nil
+}
+
+// parseSQLiteTime parses the timestamp formats SQLite emits for DATETIME
+// columns and aggregates over them. CURRENT_TIMESTAMP uses
+// "2006-01-02 15:04:05"; values written via Go's time.Time round-trip as
+// RFC3339Nano. Returns (zero, false) on unrecognised input.
+func parseSQLiteTime(s string) (time.Time, bool) {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }

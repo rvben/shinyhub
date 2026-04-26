@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/rvben/shinyhub/internal/ui"
 )
 
@@ -67,6 +68,49 @@ func TestAppDetailPreservesOverviewURL(t *testing.T) {
 	if strings.Contains(string(b), "history.replaceState({}, '', `/apps/${slug}`)") {
 		t.Fatal("app-detail.js must not silently rewrite /apps/<slug>/overview to /apps/<slug>; preserve the user's URL")
 	}
+}
+
+// TestDeployHashHandlerWaitsForApps guards Codex review #1: handleDeployHash
+// must wait for state.apps to populate before looking up the slug. Without
+// this guard the post-login redirect from /#deploy=<slug> drops the slug
+// before the matching app exists in memory, and the deploy modal never opens.
+//
+// We assert two things: (a) handleDeployHash is async (b) the route mount in
+// views/apps-grid.js awaits the initial /api/apps load before resolving so
+// `await router.start()` actually waits for state.apps. Either guarantee is
+// enough on its own; we want both to remain in place.
+func TestDeployHashHandlerWaitsForApps(t *testing.T) {
+	assertContains(t, "app.js", "async function handleDeployHash",
+		"handleDeployHash must be async so it can wait for state.apps before consuming the slug")
+	assertContains(t, "app.js", "await handleDeployHash()",
+		"the call site must await handleDeployHash so the chain completes before paint")
+	assertContains(t, "views/apps-grid.js", "export async function mountAppsGrid",
+		"mountAppsGrid must be async and await its initial load so router.start() waits for state.apps")
+}
+
+// TestAccessVisibilityToggleSerialized guards Codex review #3: the
+// access-visibility radio handler must serialize overlapping toggles so a
+// rapid sequence of clicks cannot leave the UI desynced from the server.
+// We assert the two pieces of the fix are present: a generation counter and
+// a disabled-state writer that freezes the radio group during PATCH.
+func TestAccessVisibilityToggleSerialized(t *testing.T) {
+	assertContains(t, "app.js", "accessGen",
+		"the access-visibility handler must use a generation counter to discard stale responses")
+	assertContains(t, "app.js", "setAccessRadiosDisabled(true)",
+		"the access-visibility handler must disable the radio group while a PATCH is in flight")
+}
+
+// TestSlugPatternStaysInSyncWithGoValidator guards against the SPA and the
+// Go slug validator drifting apart. The regex literal in app.js and the
+// `pattern=` attribute in index.html must both encode the canonical rule
+// owned by internal/slug.
+func TestSlugPatternStaysInSyncWithGoValidator(t *testing.T) {
+	jsRegex := "/^" + slugpkg.Pattern + "$/"
+	assertContains(t, "app.js", jsRegex,
+		"SPA SLUG_RE must match internal/slug.Pattern; update both when changing the rule")
+	htmlPattern := `pattern="` + slugpkg.Pattern + `"`
+	assertContains(t, "index.html", htmlPattern,
+		"new-app-slug input pattern attribute must match internal/slug.Pattern")
 }
 
 func assertContains(t *testing.T, path, needle, contract string) {

@@ -144,7 +144,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const deployCliCopyLabel = deployCliCopy.querySelector('.copy-label');
   const deployCliCopyStatus = document.getElementById('deploy-cli-snippet-status');
 
-  const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+  // Mirrors internal/slug.Pattern. RFC-1123 hostname label: 1–63 chars,
+  // lowercase alphanumerics and hyphens, must start and end with an alphanumeric.
+  const SLUG_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
   let BUNDLE_RULES = null;
   async function loadBundleRules() {
@@ -867,13 +869,21 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   let settingsSlug = null;
+  // accessGen increments on every visibility-radio toggle (and on every panel
+  // re-population) so an in-flight PATCH whose response is no longer relevant
+  // can be ignored. See the change handler below for usage.
+  let accessGen = 0;
 
   function populateAccessPanel(app) {
     // Set visibility radio to current access level; mark confirmed so change
-    // listeners know the baseline to revert to on failure.
+    // listeners know the baseline to revert to on failure. Bumping the
+    // generation invalidates any in-flight PATCH from a previously-viewed
+    // app whose response would otherwise still try to mutate this panel.
+    accessGen++;
     const radios = document.querySelectorAll('input[name="access-level"]');
     radios.forEach(r => {
       r.checked = r.value === app.access;
+      r.disabled = false;
       r.dataset.confirmed = String(r.value === app.access);
     });
 
@@ -1528,20 +1538,37 @@ document.addEventListener('DOMContentLoaded', () => {
   // Data tab: upload form submit.
   document.getElementById('data-upload-form').addEventListener('submit', uploadDataFile);
 
-  // Visibility radio change → PATCH access level.
-  document.querySelectorAll('input[name="access-level"]').forEach(radio => {
-    radio.addEventListener('change', async (e) => {
+  // Visibility radio change → PATCH access level. The handler serializes
+  // overlapping toggles so rapid clicks can't desync the UI from the server:
+  //  - the whole radio group is disabled while a PATCH is in flight, giving
+  //    the user clear feedback that the change is pending;
+  //  - each PATCH is tagged with a generation; if a newer toggle fires
+  //    before the previous response lands the older response is ignored;
+  //  - the "confirmed" baseline is only advanced once the server acks.
+  function accessRadios() {
+    return document.querySelectorAll('input[name="access-level"]');
+  }
+  function setAccessRadiosDisabled(disabled) {
+    accessRadios().forEach(r => { r.disabled = disabled; });
+  }
+  function applyConfirmed(value) {
+    accessRadios().forEach(r => {
+      r.checked = r.value === value;
+      r.dataset.confirmed = String(r.value === value);
+    });
+  }
+  accessRadios().forEach(radio => {
+    radio.addEventListener('change', async () => {
       if (!settingsSlug) return;
       const slug = settingsSlug;
       const newValue = radio.value;
-      // Track the previous value so we can revert on failure.
-      const previous = [...document.querySelectorAll('input[name="access-level"]')]
-        .find(r => r !== radio && r.dataset.confirmed === 'true')
-        ?.value;
-      // Mark this radio as confirmed so future changes know the baseline.
-      document.querySelectorAll('input[name="access-level"]').forEach(r => {
-        r.dataset.confirmed = String(r === radio);
-      });
+      // Snapshot the last confirmed value so we can revert on failure
+      // without clobbering a still-in-flight earlier toggle.
+      const previous = [...accessRadios()]
+        .find(r => r.dataset.confirmed === 'true')
+        ?.value ?? newValue;
+      const myGen = ++accessGen;
+      setAccessRadiosDisabled(true);
 
       let resp;
       try {
@@ -1550,26 +1577,24 @@ document.addEventListener('DOMContentLoaded', () => {
           body: JSON.stringify({ access: newValue }),
         });
       } catch {
-        // Revert radio to the previous value.
-        document.querySelectorAll('input[name="access-level"]').forEach(r => {
-          r.checked = r.value === (previous ?? newValue);
-          r.dataset.confirmed = String(r.value === (previous ?? newValue));
-        });
+        if (myGen !== accessGen) return; // newer toggle already in flight
+        applyConfirmed(previous);
+        setAccessRadiosDisabled(false);
         flashToast('Failed to update access', 'error');
         return;
       }
+      if (myGen !== accessGen) return;   // newer toggle already in flight
       if (!resp.ok) {
-        // Revert radio to the previous value.
-        document.querySelectorAll('input[name="access-level"]').forEach(r => {
-          r.checked = r.value === (previous ?? newValue);
-          r.dataset.confirmed = String(r.value === (previous ?? newValue));
-        });
+        applyConfirmed(previous);
+        setAccessRadiosDisabled(false);
         flashToast('Failed to update access', 'error');
         return;
       }
-      // Update local state so card reflects the new level.
+      // Server accepted our value; advance baseline and unfreeze.
+      applyConfirmed(newValue);
       const app = state.apps.find(a => a.slug === slug);
       if (app) app.access = newValue;
+      setAccessRadiosDisabled(false);
       flashToast('Access updated', 'success');
     });
   });
@@ -1717,7 +1742,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const projectSlug = newAppProject.value.trim();
 
     if (!SLUG_RE.test(slug)) {
-      setError(newAppError, 'Slug must be 1–63 lowercase letters, digits, or dashes (cannot start with a dash).');
+      setError(newAppError, 'Slug must be 1–63 lowercase letters, digits, or hyphens, starting and ending with a letter or digit.');
       newAppSlug.focus();
       return;
     }
@@ -2425,6 +2450,7 @@ document.addEventListener('DOMContentLoaded', () => {
     onUnauthorized: handleUnauthorized,
     canManageApp,
     renderGridVerbatim,
+    applyGridFilters: renderApps,
     updateActiveNav,
     setSettingsSlug: (slug) => { settingsSlug = slug; },
     populateGeneralTab,
@@ -2505,7 +2531,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = await response.json();
     showLoggedIn(payload);
     await router.start();
-    handleDeployHash();
+    await handleDeployHash();
   }
 
   // Honour /#deploy=<slug> from the server-rendered empty-state page.
@@ -2514,30 +2540,50 @@ document.addEventListener('DOMContentLoaded', () => {
   // the hash is persisted here and consumed after login completes.
   // After the apps list has loaded the deploy modal is opened and the
   // stored slug is cleared so refreshing doesn't re-trigger.
+  // DEPLOY_HASH_RE captures a slug after `#deploy=`. The slug rule mirrors
+  // SLUG_RE (RFC-1123 label) but is wrapped in a single capturing group.
+  const DEPLOY_HASH_RE = /^#deploy=([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/i;
+
   function persistDeployHash() {
-    const match = /^#deploy=([a-z0-9][a-z0-9-]{0,62})$/i.exec(window.location.hash);
+    const match = DEPLOY_HASH_RE.exec(window.location.hash);
     if (!match) return;
     try { localStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
     // Clear the hash without adding a history entry.
     history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
-  function handleDeployHash() {
+  async function handleDeployHash() {
     // Check hash first, then fall back to localStorage.
-    const hashMatch = /^#deploy=([a-z0-9][a-z0-9-]{0,62})$/i.exec(window.location.hash);
+    const hashMatch = DEPLOY_HASH_RE.exec(window.location.hash);
     let slug = hashMatch ? hashMatch[1] : null;
     if (!slug) {
       try { slug = localStorage.getItem('pendingDeploy'); } catch { /* storage may be blocked */ }
     }
     if (!slug) return;
-    // Consume the stored slug so it only fires once.
-    try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
-    // Clear the hash without adding a history entry.
+    // Clear the hash without adding a history entry. Do this before any
+    // async work so a refresh during the load doesn't re-trigger.
     history.replaceState(null, '', window.location.pathname + window.location.search);
 
+    // Ensure the apps list is populated. The user may have landed on a
+    // non-`/` route (e.g. /apps/foo) so the grid mount didn't run, or the
+    // grid mount may not have completed yet on first paint.
+    if (!state.apps.length) {
+      await loadApps();
+    }
+
     const app = state.apps.find(a => a.slug === slug);
-    if (!app) return;
-    if (!canManageApp(state.user, app)) return;
+    if (!app) {
+      // App vanished between persist and consume (deleted, or user no longer
+      // has visibility). Drop the pending slug so it doesn't loop forever.
+      try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
+      return;
+    }
+    if (!canManageApp(state.user, app)) {
+      try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
+      return;
+    }
+    // Only consume the stored slug once we've confirmed we can act on it.
+    try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
     const card = [...appGrid.querySelectorAll('.app-card')].find(
       c => c.querySelector('.app-meta span')?.textContent === `/${slug}`
     );

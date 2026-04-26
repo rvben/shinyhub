@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 )
@@ -836,5 +837,99 @@ func TestReplicas_DeleteReplicasAbove(t *testing.T) {
 	}
 	if len(reps) != 0 {
 		t.Fatalf("want 0 replicas after DeleteReplicasAbove(0), got %d", len(reps))
+	}
+}
+
+// TestApp_DeploymentSummaryFields asserts that GetAppBySlug, GetAppByID and
+// ListApps populate LastDeployedAt + CurrentVersion from the most recent
+// deployment row. The grid sort and the detail-card "Deployed" line both
+// depend on these fields; the SPA has no other source for either value.
+//
+// Regression guard: SQLite's MAX(created_at) aggregate strips column type
+// metadata, so the driver returns a string. scanApp must parse it via
+// parseSQLiteTime — if that path breaks, the apps queries return HTTP 500.
+func TestApp_DeploymentSummaryFields(t *testing.T) {
+	store := mustOpenDB(t)
+	user := mustCreateUser(t, store, "owner", "developer")
+
+	// App with no deployments — both fields should be zero values.
+	never := mustCreateApp(t, store, "never", user.ID)
+	if never.LastDeployedAt != nil {
+		t.Errorf("never-deployed app: LastDeployedAt = %v, want nil", never.LastDeployedAt)
+	}
+	if never.CurrentVersion != "" {
+		t.Errorf("never-deployed app: CurrentVersion = %q, want empty", never.CurrentVersion)
+	}
+
+	// App with two deployments — fields should reflect the most recent one.
+	app := mustCreateApp(t, store, "demo", user.ID)
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v1", BundleDir: "/tmp/v1", Status: "succeeded",
+	}); err != nil {
+		t.Fatalf("create deploy v1: %v", err)
+	}
+	// SQLite CURRENT_TIMESTAMP has 1s resolution; sleep a smidge so the
+	// MAX(created_at) aggregate can pick the v2 row deterministically.
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v2", BundleDir: "/tmp/v2", Status: "succeeded",
+	}); err != nil {
+		t.Fatalf("create deploy v2: %v", err)
+	}
+
+	got, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("GetAppBySlug: %v", err)
+	}
+	if got.CurrentVersion != "v2" {
+		t.Errorf("GetAppBySlug: CurrentVersion = %q, want v2", got.CurrentVersion)
+	}
+	if got.LastDeployedAt == nil {
+		t.Fatalf("GetAppBySlug: LastDeployedAt = nil, want a parsed time")
+	}
+	if got.LastDeployedAt.IsZero() {
+		t.Errorf("GetAppBySlug: LastDeployedAt is zero, want a parsed time")
+	}
+
+	// GetAppByID must return the same fields.
+	byID, err := store.GetAppByID(app.ID)
+	if err != nil {
+		t.Fatalf("GetAppByID: %v", err)
+	}
+	if byID.CurrentVersion != "v2" {
+		t.Errorf("GetAppByID: CurrentVersion = %q, want v2", byID.CurrentVersion)
+	}
+	if byID.LastDeployedAt == nil || byID.LastDeployedAt.IsZero() {
+		t.Errorf("GetAppByID: LastDeployedAt = %v, want non-zero", byID.LastDeployedAt)
+	}
+
+	// ListApps must populate fields for every row.
+	all, err := store.ListApps(100, 0)
+	if err != nil {
+		t.Fatalf("ListApps: %v", err)
+	}
+	var listedDemo, listedNever *db.App
+	for i := range all {
+		switch all[i].Slug {
+		case "demo":
+			listedDemo = all[i]
+		case "never":
+			listedNever = all[i]
+		}
+	}
+	if listedDemo == nil || listedNever == nil {
+		t.Fatalf("ListApps: missing demo or never; got %d apps", len(all))
+	}
+	if listedDemo.CurrentVersion != "v2" {
+		t.Errorf("ListApps demo: CurrentVersion = %q, want v2", listedDemo.CurrentVersion)
+	}
+	if listedDemo.LastDeployedAt == nil || listedDemo.LastDeployedAt.IsZero() {
+		t.Errorf("ListApps demo: LastDeployedAt = %v, want non-zero", listedDemo.LastDeployedAt)
+	}
+	if listedNever.LastDeployedAt != nil {
+		t.Errorf("ListApps never: LastDeployedAt = %v, want nil", listedNever.LastDeployedAt)
+	}
+	if listedNever.CurrentVersion != "" {
+		t.Errorf("ListApps never: CurrentVersion = %q, want empty", listedNever.CurrentVersion)
 	}
 }

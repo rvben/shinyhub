@@ -3,13 +3,15 @@ package ui
 import (
 	"net/http"
 	"regexp"
+
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
-// appDetailPath matches /apps/<slug> and /apps/<slug>/<tab>. <slug> must be a
-// valid app slug: lowercase letters, digits, dashes, 1-63 chars, starting with
-// a letter or digit. <tab> is an optional lowercase identifier; unknown tab
-// names are still served — the client router treats unknown tabs as Overview.
-var appDetailPath = regexp.MustCompile(`^/apps/[a-z0-9][a-z0-9-]{0,62}(/[a-z-]+)?/?$`)
+// appDetailPath matches /apps/<slug> and /apps/<slug>/<tab>. <slug> follows
+// the canonical slug rule (see internal/slug). <tab> is an optional lowercase
+// identifier; unknown tab names are still served — the client router treats
+// unknown tabs as Overview.
+var appDetailPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `(/[a-z-]+)?/?$`)
 
 // SPAHandler returns an http.Handler that serves the embedded index.html for
 // client-side-rendered UI paths (/apps/<slug>..., /users, /audit-log) and 404s

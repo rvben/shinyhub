@@ -12,52 +12,33 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
-
-func TestValidSlugRE(t *testing.T) {
-	valid := []string{"myapp", "my-app", "app123", "a", "a0"}
-	for _, s := range valid {
-		if !validSlugRE.MatchString(s) {
-			t.Errorf("expected %q to be valid, but validSlugRE rejected it", s)
-		}
-	}
-	invalid := []string{"MyApp", "UPPER", "my_app", "-leading", "trailing-", "my app", ""}
-	for _, s := range invalid {
-		if validSlugRE.MatchString(s) {
-			t.Errorf("expected %q to be invalid, but validSlugRE accepted it", s)
-		}
-	}
-}
-
-// TestDeploy_SlugValidation tests the slug validation logic directly.
-// The invalid slug must be rejected before any network call is made.
-func TestDeploy_SlugValidation(t *testing.T) {
+// TestDeploy_SlugValidation_DelegatesToSharedPackage guards against the CLI
+// regex drifting from the shared validator. The CLI used to define its own
+// regex that differed from the API server's, which let users create slugs in
+// the UI that the CLI then refused to deploy.
+func TestDeploy_SlugValidation_DelegatesToSharedPackage(t *testing.T) {
 	cases := []struct {
-		slug    string
-		wantErr bool
+		slug  string
+		valid bool
 	}{
-		{"my-app", false},
-		{"myapp", false},
-		{"MyApp", true},
-		{"UPPER", true},
-		{"my_app", true},
-		{"-leading", true},
-		{"trailing-", true},
-		{"my app", true},
-		{"", false}, // empty means "derive from dir name"
+		{"my-app", true},
+		{"myapp", true},
+		{"a", true},
+		{"a0", true},
+		{"MyApp", false},
+		{"UPPER", false},
+		{"my_app", false},
+		{"-leading", false},
+		{"trailing-", false}, // DNS labels cannot end in a hyphen
+		{"my app", false},
 	}
 	for _, tc := range cases {
-		if tc.slug == "" {
-			continue // auto-derived slugs are not user-validated here
-		}
-		matched := validSlugRE.MatchString(tc.slug)
-		isInvalid := !matched
-		if tc.wantErr && !isInvalid {
-			t.Errorf("slug %q should be invalid but regex accepted it", tc.slug)
-		}
-		if !tc.wantErr && isInvalid {
-			t.Errorf("slug %q should be valid but regex rejected it", tc.slug)
+		if got := slugpkg.Valid(tc.slug); got != tc.valid {
+			t.Errorf("slugpkg.Valid(%q) = %v, want %v", tc.slug, got, tc.valid)
 		}
 	}
 }
