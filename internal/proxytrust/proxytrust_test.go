@@ -28,23 +28,20 @@ func TestPeerIsTrusted(t *testing.T) {
 	cases := []struct {
 		name       string
 		remoteAddr string
+		nets       []*net.IPNet
 		want       bool
 	}{
-		{"loopback inside trusted CIDR", "127.0.0.1:5000", true},
-		{"private inside trusted CIDR", "10.1.2.3:5000", true},
-		{"public outside any CIDR", "203.0.113.7:44444", false},
-		{"empty CIDR list rejects everything", "127.0.0.1:5000", false},
-		{"malformed RemoteAddr falls back without panicking", "garbage", false},
+		{"loopback inside trusted CIDR", "127.0.0.1:5000", nets, true},
+		{"private inside trusted CIDR", "10.1.2.3:5000", nets, true},
+		{"public outside any CIDR", "203.0.113.7:44444", nets, false},
+		{"empty CIDR list rejects everything", "127.0.0.1:5000", nil, false},
+		{"malformed RemoteAddr falls back without panicking", "garbage", nets, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/", nil)
 			req.RemoteAddr = tc.remoteAddr
-			usedNets := nets
-			if tc.name == "empty CIDR list rejects everything" {
-				usedNets = nil
-			}
-			got := proxytrust.PeerIsTrusted(req, usedNets)
+			got := proxytrust.PeerIsTrusted(req, tc.nets)
 			if got != tc.want {
 				t.Errorf("PeerIsTrusted(%q)=%v, want %v", tc.remoteAddr, got, tc.want)
 			}
