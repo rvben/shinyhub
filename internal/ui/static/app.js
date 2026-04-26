@@ -182,15 +182,19 @@ document.addEventListener('DOMContentLoaded', () => {
   let slugEdited = false;
 
   // Derive a slug from a display name: strip diacritics, lowercase, replace
-  // runs of non-alphanumerics with dashes, trim dashes, cap at 63 chars.
+  // runs of non-alphanumerics with dashes, cap at 63 chars, *then* trim
+  // leading/trailing dashes. Truncation must happen before the trailing-dash
+  // trim — otherwise a long input landing on `-` at byte 63 produces a slug
+  // ending in `-`, which SLUG_RE rejects and the modal silently refuses to
+  // submit. Mirrors internal/cli/deploy.go sanitizeSlug; both must agree.
   function slugify(name) {
     return name
       .normalize('NFKD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 63);
+      .slice(0, 63)
+      .replace(/^-+|-+$/g, '');
   }
 
   function readCookie(name) {
@@ -2563,15 +2567,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // consumeNextParam reads a same-origin `next=<path>` query parameter from
   // the current URL, validates it, removes it from the address bar, and
-  // navigates to it. Returns true if a navigation was triggered. The /app
-  // access-denied page (internal/access/middleware.go renderAccessDeniedPage)
-  // sends unauthenticated browsers to /?next=<original>; before this hook
-  // existed the SPA dropped the parameter and always landed users on /.
+  // navigates to it. Returns true if a navigation was triggered.
   //
-  // Same-origin enforcement: the value must be a relative path starting with
-  // a single `/` and must not begin with `//` (protocol-relative) or contain
-  // `\` (Windows-separator normalization). It must not be `/` or `/login`
-  // (those would no-op or loop). Anything else falls through silently.
+  // Producer: internal/access/middleware.go renderAccessDeniedPage sends
+  // unauthenticated browsers to /?next=<original>, where <original> is the
+  // RequestURI of the protected app — which always lives under /app/<slug>
+  // (the proxy path served outside the SPA). The earlier consumer handed
+  // these to router.navigate(), but the SPA router has no /app/... route
+  // so mount() fell through to the no-match branch and replaced the URL
+  // with /. The user never made it back to the app they asked for.
+  //
+  // Strategy: any path that's not part of the SPA (anything outside the
+  // SPA_ROUTE_PREFIXES allow-list) is dispatched as a full document
+  // navigation via window.location.replace(). SPA paths still go through
+  // the router so we don't reload the world for an in-app route.
+  //
+  // Same-origin enforcement: the value must be a relative path starting
+  // with a single `/`, must not begin with `//` (protocol-relative), and
+  // must not contain `\` (Windows-separator normalization). It must not be
+  // `/` or `/login` (those would no-op or loop). Anything else falls
+  // through silently.
+  const SPA_ROUTE_PREFIXES = ['/apps/', '/users', '/audit-log'];
   function consumeNextParam() {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('next');
@@ -2584,7 +2600,16 @@ document.addEventListener('DOMContentLoaded', () => {
     history.replaceState(null, '', cleaned);
     if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return false;
     if (raw === '/' || raw === '/login') return false;
-    router.navigate(raw, { replace: true });
+    const isSpaRoute = SPA_ROUTE_PREFIXES.some(p =>
+      p.endsWith('/') ? raw.startsWith(p) : (raw === p || raw.startsWith(p + '/') || raw.startsWith(p + '?')),
+    );
+    if (isSpaRoute) {
+      router.navigate(raw, { replace: true });
+    } else {
+      // Proxy / static / unknown path — SPA can't handle it. Hard-navigate
+      // so /app/<slug>/ actually loads through internal/proxy.
+      window.location.replace(raw);
+    }
     return true;
   }
 

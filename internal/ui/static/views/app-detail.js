@@ -174,18 +174,36 @@ async function renderDeployments(panel, app, ctx) {
     if (!btn) return;
     if (!window.confirm(`Roll back ${app.name} to deployment ${btn.dataset.id}?`)) return;
     // Disable the button immediately so a double-click can't fire two POSTs
-    // before navigation completes.
+    // before navigation completes. Every code path below MUST re-enable it
+    // unless we've already navigated away — otherwise a transport failure
+    // leaves the user staring at a permanently-disabled button.
     btn.disabled = true;
-    const r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
-    });
-    if (r.ok) { ctx.navigate(`/apps/${app.slug}`); }
-    else {
+    let r;
+    try {
+      r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
+      });
+    } catch {
       btn.disabled = false;
-      alert('Rollback failed.');
+      alert('Rollback failed: network error.');
+      return;
     }
+    if (r.status === 401) {
+      btn.disabled = false;
+      ctx.onUnauthorized();
+      return;
+    }
+    if (r.ok) {
+      // Navigating away unmounts this view; no need to re-enable the button.
+      ctx.navigate(`/apps/${app.slug}`);
+      return;
+    }
+    btn.disabled = false;
+    let msg = 'Rollback failed.';
+    try { const j = await r.json(); if (j && j.error) msg = `Rollback failed: ${j.error}`; } catch { /* non-JSON */ }
+    alert(msg);
   };
 
   async function load() {

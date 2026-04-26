@@ -16,6 +16,12 @@ export function createRouter() {
   const routes = [];
   let current = null;
   let generation = 0;
+  // start() is invoked from two places: the bootstrap path in initialize()
+  // and the interactive login submit handler (see app.js). Without this
+  // guard, a logout → login cycle would attach a second pair of click /
+  // popstate listeners, causing a single SPA navigation to push duplicate
+  // history entries and mount the target view twice.
+  let started = false;
 
   function register(pattern, mountFn) {
     const keys = [];
@@ -101,8 +107,11 @@ export function createRouter() {
   }
 
   function start() {
-    window.addEventListener('popstate', onPopState);
-    document.addEventListener('click', onClick);
+    if (!started) {
+      window.addEventListener('popstate', onPopState);
+      document.addEventListener('click', onClick);
+      started = true;
+    }
     return mount(location.pathname, location.search);
   }
 

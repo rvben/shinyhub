@@ -113,6 +113,78 @@ func TestAccessVisibilityToggleSerialized(t *testing.T) {
 		"the access-visibility handler must disable the radio group while a PATCH is in flight")
 }
 
+// TestSPASlugifyTruncatesBeforeTrim guards parity with the CLI's
+// sanitizeSlug: the order MUST be slice(0,63) → trim trailing dashes, not
+// trim → slice. With trim-then-slice an input long enough to land on `-`
+// at byte 63 produces a slug ending in `-`, which SLUG_RE rejects. The
+// fix on the CLI side (TestSanitizeSlug_TruncationProducesValidSlug) is
+// useless if the SPA derivation drifts.
+//
+// We assert the structure of the slugify chain in app.js by requiring
+// slice(0, 63) appears *before* the trailing-dash trim regex. We also
+// simulate the chain in Go on a known-pathological input and assert the
+// result satisfies slugpkg.Valid.
+func TestSPASlugifyTruncatesBeforeTrim(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	// Find the slugify function body. We don't parse JS — we look for the
+	// two ordered tokens `slice(0, 63)` and `replace(/^-+|-+$/g, '')` and
+	// require the slice to come first.
+	sliceIdx := strings.Index(src, ".slice(0, 63)")
+	trimIdx := strings.Index(src, ".replace(/^-+|-+$/g, '')")
+	if sliceIdx < 0 || trimIdx < 0 {
+		t.Fatalf("app.js slugify: cannot locate .slice(0, 63) (%d) or trailing-dash trim (%d); both must be present", sliceIdx, trimIdx)
+	}
+	if sliceIdx > trimIdx {
+		t.Fatal("app.js slugify: .slice(0, 63) appears AFTER the trailing-dash trim. The order MUST be slice → trim, otherwise long names produce slugs ending in `-` (which SLUG_RE rejects). See internal/cli/deploy.go sanitizeSlug for the canonical order.")
+	}
+
+	// Behavioral check on a Go-side simulation: emulate the chain on the
+	// pathological input and assert the result is valid. We can't run JS
+	// in a Go test, so we approximate: lowercase + ASCII-only input passes
+	// through normalize/diacritic strip unchanged, so the only differences
+	// from the JS chain are the regex engines, which agree on this input.
+	in := strings.Repeat("a", 62) + "-bcdef"
+	got := goEmulateSlugify(in)
+	if len(got) > slugpkg.MaxLen {
+		t.Errorf("emulated slugify(%q): len=%d > %d", in, len(got), slugpkg.MaxLen)
+	}
+	if !slugpkg.Valid(got) {
+		t.Errorf("emulated slugify(%q) = %q; slugpkg.Valid rejects it. The SPA slugify must agree with the canonical rule.", in, got)
+	}
+}
+
+// goEmulateSlugify mirrors app.js slugify() for ASCII inputs so the contract
+// test can assert behavior without a JS runtime. Diacritic stripping is a
+// no-op for ASCII so we only need lower → non-alphanum→`-` → slice(0,63) →
+// trim leading/trailing dashes.
+func goEmulateSlugify(in string) string {
+	s := strings.ToLower(in)
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		alnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if alnum {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	out := b.String()
+	if len(out) > slugpkg.MaxLen {
+		out = out[:slugpkg.MaxLen]
+	}
+	out = strings.Trim(out, "-")
+	return out
+}
+
 // TestSlugPatternStaysInSyncWithGoValidator guards against the SPA and the
 // Go slug validator drifting apart. The regex literal in app.js and the
 // `pattern=` attribute in index.html must both encode the canonical rule
@@ -126,13 +198,42 @@ func TestSlugPatternStaysInSyncWithGoValidator(t *testing.T) {
 		"new-app-slug input pattern attribute must match internal/slug.Pattern")
 }
 
+// TestRouterStartIsIdempotent guards against listener-stacking on the
+// bootstrap → logout → login cycle. router.start() is called from both
+// the initialize() bootstrap and the interactive login submit handler;
+// without an idempotency guard the document accumulates duplicate click
+// and popstate listeners on every login, causing a single SPA navigation
+// to push duplicate history entries and mount the same view twice.
+//
+// We assert the router source declares a `started` flag and gates the
+// listener attachment on it.
+func TestRouterStartIsIdempotent(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "router.js")
+	if err != nil {
+		t.Fatalf("read router.js: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "let started = false") {
+		t.Fatal("router.js must declare `let started = false` so start() is idempotent across login → logout → login")
+	}
+	if !strings.Contains(src, "if (!started) {") {
+		t.Fatal("router.js start() must gate listener attachment with `if (!started)` to avoid stacking handlers on repeat invocations")
+	}
+}
+
 // TestSPAConsumesNextQueryParam guards the access-denied → log-in →
 // original-app round trip. internal/access/middleware.go renderAccessDeniedPage
-// builds /?next=<original> when an unauthenticated browser hits a private app;
-// the SPA used to ignore the parameter and dump every user on /. Both the
-// bootstrap (initialize) path and the interactive login submit handler must
-// call consumeNextParam after router.start() so the user lands on the page
-// they originally requested.
+// builds /?next=<RequestURI> when an unauthenticated browser hits a private
+// app at /app/<slug>/...; the SPA used to ignore the parameter and dump every
+// user on /. Both the bootstrap (initialize) path and the interactive login
+// submit handler must call consumeNextParam after router.start() so the user
+// lands on the page they originally requested.
+//
+// Critically: the producer's path is /app/<slug>/... (proxy-served, NOT a
+// SPA route). consumeNextParam MUST hard-navigate (window.location.replace)
+// for paths outside the SPA route allow-list — handing /app/... to
+// router.navigate falls through to the no-match branch and lands the user
+// on / again, which silently regresses the entire fix.
 func TestSPAConsumesNextQueryParam(t *testing.T) {
 	b, err := fs.ReadFile(ui.Static(), "app.js")
 	if err != nil {
@@ -147,13 +248,21 @@ func TestSPAConsumesNextQueryParam(t *testing.T) {
 	// count the ()-suffixed call form to require >=2 invocations (bootstrap
 	// + interactive-login).
 	if got < 2 {
-		t.Fatalf("app.js: consumeNextParam() called %d time(s); want at least 2 (bootstrap path AND interactive login submit handler) so a logged-out user reaching /?next=/apps/foo gets returned to /apps/foo after logging in", got)
+		t.Fatalf("app.js: consumeNextParam() called %d time(s); want at least 2 (bootstrap path AND interactive login submit handler) so a logged-out user reaching /?next=/app/foo/ gets returned to /app/foo/ after logging in", got)
 	}
 	if !strings.Contains(src, "internal/access/middleware.go") {
-		// The fix references the access middleware in a code comment so a
-		// reader can find the producer of the next= parameter. Asserting on
-		// the comment keeps the breadcrumb intact.
 		t.Fatal("app.js: consumeNextParam should reference internal/access/middleware.go in a comment so future readers can find the producer of the next= parameter")
+	}
+	// The proxy path /app/<slug>/ is NOT a SPA route. consumeNextParam must
+	// hard-navigate it via window.location.replace; router.navigate would
+	// land on / instead.
+	if !strings.Contains(src, "window.location.replace(raw)") {
+		t.Fatal("app.js: consumeNextParam must use window.location.replace(raw) for non-SPA paths — the access-denied next= value is /app/<slug>/..., which the SPA router cannot mount. Without a hard navigation the user is dumped on / after login.")
+	}
+	// A SPA-route allow-list must exist so /apps/<slug> still goes through
+	// the router (avoiding a full reload for an in-SPA target).
+	if !strings.Contains(src, "SPA_ROUTE_PREFIXES") {
+		t.Fatal("app.js: consumeNextParam must consult a SPA route allow-list (SPA_ROUTE_PREFIXES) so SPA paths take router.navigate while non-SPA paths take window.location.replace")
 	}
 }
 
@@ -164,6 +273,11 @@ func TestSPAConsumesNextQueryParam(t *testing.T) {
 // (creating duplicate rollback deployments). Using `list.onclick = ...`
 // outside load() makes the single-handler invariant structural — any
 // re-binding replaces the previous handler instead of stacking.
+//
+// We also pin the transport-failure recovery: the click handler MUST wrap
+// the POST in try/catch and re-enable the button on any non-success path.
+// Otherwise a network error leaves btn.disabled = true forever and the
+// user has no retry path.
 func TestRollbackHandlerBoundOnce(t *testing.T) {
 	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
 	if err != nil {
@@ -175,6 +289,16 @@ func TestRollbackHandlerBoundOnce(t *testing.T) {
 	}
 	if strings.Contains(src, "list.addEventListener('click'") {
 		t.Fatal("app-detail.js: must not use list.addEventListener('click', ...) for the rollback delegate; that stacks listeners across Retry clicks")
+	}
+	// Transport-failure recovery: the rollback POST must be wrapped in a
+	// try/catch so a network error re-enables the button.
+	if !strings.Contains(src, "Rollback failed: network error") {
+		t.Fatal("app-detail.js: rollback handler must catch transport errors with a `Rollback failed: network error` message and re-enable the button — otherwise btn.disabled = true sticks forever")
+	}
+	// 401 must route through ctx.onUnauthorized so the user sees the login
+	// view instead of a silent stuck state.
+	if !strings.Contains(src, "ctx.onUnauthorized()") {
+		t.Fatal("app-detail.js: rollback handler must route 401 through ctx.onUnauthorized() so an expired session falls back to the login view")
 	}
 }
 
