@@ -382,6 +382,46 @@ func TestNewUserSnippetIsRunnable(t *testing.T) {
 	}
 }
 
+// TestSPAConsumesLogoutQueryParam guards the 403-loop fix. The access
+// middleware emits /?logout=1&next=<original> on a 403 page so the user
+// can sign in as a different account; without server-side session
+// invalidation the SPA's /api/auth/me would silently re-authenticate the
+// same wrong user and bounce them back to the same 403. The SPA must
+// detect ?logout=1 and POST /api/auth/logout BEFORE the auth check, and
+// must strip the param from the URL so a refresh doesn't loop logout.
+func TestSPAConsumesLogoutQueryParam(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "function consumeLogoutParam(") {
+		t.Fatal("app.js: must define consumeLogoutParam(); see internal/access/middleware.go renderAccessDeniedPage which advertises /?logout=1&next=<original> on 403 pages")
+	}
+	if !strings.Contains(src, "params.get('logout')") {
+		t.Fatal("app.js consumeLogoutParam must read ?logout= from URLSearchParams")
+	}
+	if !strings.Contains(src, "/api/auth/logout") {
+		t.Fatal("app.js consumeLogoutParam must POST /api/auth/logout to clear the wrong session before /api/auth/me re-authenticates it")
+	}
+	// The logout call must happen BEFORE the /api/auth/me request in
+	// initialize(); otherwise the SPA silently re-auths the wrong user and
+	// the user bounces back to the same 403. We pin ordering by requiring
+	// `await consumeLogoutParam()` to appear in the source before the
+	// `await api('/api/auth/me')` call.
+	logoutIdx := strings.Index(src, "await consumeLogoutParam()")
+	meIdx := strings.Index(src, "await api('/api/auth/me')")
+	if logoutIdx < 0 {
+		t.Fatal("app.js initialize() must `await consumeLogoutParam()` so the wrong session is cleared before the auth check")
+	}
+	if meIdx < 0 {
+		t.Fatal("app.js initialize() must call await api('/api/auth/me') so we can verify ordering with consumeLogoutParam")
+	}
+	if logoutIdx > meIdx {
+		t.Fatal("app.js: consumeLogoutParam() must run BEFORE /api/auth/me — otherwise the SPA re-authenticates the wrong session and the user bounces back to the same 403 page")
+	}
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)

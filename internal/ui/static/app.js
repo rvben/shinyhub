@@ -2518,6 +2518,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Persist any /#deploy=<slug> hash before the auth check so the slug
     // survives the login redirect in case the user is not authenticated.
     persistDeployHash();
+    // /?logout=1 means the access middleware sent a 403 page because the
+    // current session belonged to a user without access to the protected
+    // app. We must clear that session BEFORE /api/auth/me so the SPA shows
+    // the login form instead of silently re-authenticating the same wrong
+    // user and bouncing them back to the same 403.
+    await consumeLogoutParam();
     loadProviders();
     setError(loginError, '');
 
@@ -2563,6 +2569,24 @@ document.addEventListener('DOMContentLoaded', () => {
     try { localStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
     // Clear the hash without adding a history entry.
     history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+
+  // consumeLogoutParam looks for `?logout=1` in the URL and, if present,
+  // best-effort clears the current session by POSTing /api/auth/logout
+  // before stripping the param. The access middleware emits this link on
+  // 403 pages so a user signed in as the wrong account isn't silently
+  // re-authenticated and bounced back to the same 403. Errors are
+  // swallowed because the worst case (server unreachable) is the same as
+  // not being signed in — the SPA will show the login form regardless.
+  async function consumeLogoutParam() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('logout') !== '1') return;
+    params.delete('logout');
+    const search = params.toString();
+    history.replaceState(null, '', window.location.pathname + (search ? '?' + search : ''));
+    try {
+      await api('/api/auth/logout', { method: 'POST' });
+    } catch { /* fall through; auth/me will surface the right state */ }
   }
 
   // consumeNextParam reads a same-origin `next=<path>` query parameter from
