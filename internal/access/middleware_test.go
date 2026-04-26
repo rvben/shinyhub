@@ -66,11 +66,17 @@ func TestAccess_PrivateApp_NoAuth_Rejected(t *testing.T) {
 // Browser navigation requests must get a styled HTML "Sign in" page rather
 // than plain text "unauthorized" — that page is what the user sees when they
 // open a private app URL while logged out.
+//
+// Critically, the page must NOT include the app's name. Doing so would let
+// an unauthenticated caller enumerate private app titles by guessing slugs.
+// The test apps are deliberately given a recognisable name so a regression
+// that re-leaks it fails this assertion loudly.
 func TestAccess_PrivateApp_BrowserNav_GetsStyledHTMLPage(t *testing.T) {
 	store := makeStore(t)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
 	owner, _ := store.GetUserByUsername("owner")
-	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Quarterly Report", OwnerID: owner.ID})
+	const privateAppName = "Quarterly Report"
+	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: privateAppName, OwnerID: owner.ID})
 
 	mw := access.Middleware(store, "test-secret", nil)
 	handler := mw(http.HandlerFunc(next))
@@ -91,11 +97,53 @@ func TestAccess_PrivateApp_BrowserNav_GetsStyledHTMLPage(t *testing.T) {
 	if !strings.Contains(body, "Sign in to access this app") {
 		t.Errorf("body missing headline: %s", body)
 	}
-	if !strings.Contains(body, "Quarterly Report") {
-		t.Errorf("body should name the app so the user knows what they were trying to open: %s", body)
+	if strings.Contains(body, privateAppName) {
+		t.Errorf("body LEAKS private app name %q — anyone guessing the slug can enumerate titles. Body: %s", privateAppName, body)
 	}
 	if !strings.Contains(body, "/?next=%2Fapp%2Fsecret%2F") {
 		t.Errorf("body should link to login with next= param so the user can return after auth: %s", body)
+	}
+}
+
+// 403 page (logged in as the wrong account) must NOT just link to /?next=.
+// Re-using the existing session would re-authorise the same wrong user and
+// loop back to the same 403. The link must include logout=1 so the SPA's
+// bootstrap calls /api/auth/logout before showing the login form. Without
+// this distinction, the "Log in" CTA on the 403 page is a literal infinite
+// loop for any user who is signed in to the wrong account.
+func TestAccess_Forbidden_BrowserNav_LinksToLogoutThenLogin(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	bob, _ := store.GetUserByUsername("bob")
+	const privateAppName = "Quarterly Report"
+	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: privateAppName, OwnerID: owner.ID})
+
+	bobToken, _ := auth.IssueJWT(bob.ID, "bob", "developer", "test-secret")
+
+	mw := access.Middleware(store, "test-secret", nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/secret/", nil)
+	req.AddCookie(&http.Cookie{Name: "shiny_session", Value: bobToken})
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "logout=1") {
+		t.Errorf("403 page must link to /?logout=1&next=... so the SPA logs the wrong-account session out before showing login. Body: %s", body)
+	}
+	if !strings.Contains(body, "next=%2Fapp%2Fsecret%2F") {
+		t.Errorf("403 page must preserve next= so the user lands back on the app after re-auth: %s", body)
+	}
+	if strings.Contains(body, privateAppName) {
+		t.Errorf("403 body LEAKS app name %q to a non-member: %s", privateAppName, body)
 	}
 }
 

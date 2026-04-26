@@ -51,7 +51,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker) func
 			// UserCanAccessApp check.
 			user := extractUser(r, jwtSecret, revoked)
 			if user == nil {
-				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app", app.Name)
+				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app")
 				return
 			}
 
@@ -67,7 +67,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker) func
 				return
 			}
 			if !ok {
-				writeAccessDenied(w, r, http.StatusForbidden, "You don't have access to this app", app.Name)
+				writeAccessDenied(w, r, http.StatusForbidden, "You don't have access to this app")
 				return
 			}
 
@@ -99,12 +99,17 @@ func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker)
 // (so the user sees a real "sign in" affordance instead of plain text), and a
 // JSON envelope for API requests so existing CLI/SDK clients keep parsing the
 // same shape they always have.
-func writeAccessDenied(w http.ResponseWriter, r *http.Request, status int, headline, appName string) {
+//
+// The HTML page intentionally does NOT include the app's name. Anything in
+// app metadata (name, project) is private — leaking it on the access-denied
+// path would let an unauthenticated caller enumerate private app titles by
+// guessing slugs.
+func writeAccessDenied(w http.ResponseWriter, r *http.Request, status int, headline string) {
 	if wantsHTML(r) {
 		nextURL := r.URL.RequestURI()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(status)
-		_, _ = w.Write(renderAccessDeniedPage(headline, appName, nextURL))
+		_, _ = w.Write(renderAccessDeniedPage(status, headline, nextURL))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -142,16 +147,42 @@ func wantsHTML(r *http.Request) bool {
 	return false
 }
 
-func renderAccessDeniedPage(headline, appName, nextURL string) []byte {
+// renderAccessDeniedPage builds the styled HTML shown to a browser that hit a
+// private app without (401) or with the wrong (403) credentials. The body
+// never names the app — see writeAccessDenied for the rationale.
+//
+// The login link is built so the user lands back on the original app after
+// re-authentication:
+//   - 401 (no session): /?next=<original>. The SPA renders the login form;
+//     after success consumeNextParam() hard-navigates to <original>.
+//   - 403 (wrong session): /?logout=1&next=<original>. The current session
+//     would otherwise re-authorise the same wrong user and bounce them back
+//     to the same 403 page. The SPA's initialize() consumes ?logout=1 by
+//     POSTing /api/auth/logout before showing the login form, so the user
+//     gets a chance to sign in as a different account.
+//
+// The button label tracks the same distinction: "Log in" for 401,
+// "Sign in as a different user" for 403.
+func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
 	loginHref := "/"
+	loginLabel := "Log in"
+	body := "This app is private. Sign in to continue."
+	if status == http.StatusForbidden {
+		loginLabel = "Sign in as a different user"
+		body = "Your account doesn't have access to this app. Sign in with a different account."
+	}
 	if nextURL != "" {
-		loginHref = "/?next=" + url.QueryEscape(nextURL)
+		params := url.Values{"next": {nextURL}}
+		if status == http.StatusForbidden {
+			params.Set("logout", "1")
+		}
+		loginHref = "/?" + params.Encode()
 	}
 	const tpl = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>HEADLINE — APP</title>
+<title>HEADLINE</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          display: flex; align-items: center; justify-content: center;
@@ -168,15 +199,16 @@ func renderAccessDeniedPage(headline, appName, nextURL string) []byte {
 <body>
   <div class="box">
     <h1>HEADLINE</h1>
-    <p>The app <strong>APP</strong> is private. Log in with an account that has access.</p>
-    <a class="btn" href="LOGIN">Log in</a>
+    <p>BODY</p>
+    <a class="btn" href="LOGIN">LABEL</a>
   </div>
 </body>
 </html>`
 	out := strings.NewReplacer(
 		"HEADLINE", htmlEscape(headline),
-		"APP", htmlEscape(appName),
+		"BODY", htmlEscape(body),
 		"LOGIN", htmlEscape(loginHref),
+		"LABEL", htmlEscape(loginLabel),
 	).Replace(tpl)
 	return []byte(out)
 }
