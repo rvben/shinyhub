@@ -302,6 +302,51 @@ func TestRollbackHandlerBoundOnce(t *testing.T) {
 	}
 }
 
+// TestDeploymentsLoadDoesNotMask404AsEmpty guards the deployments tab error
+// surface. The server (internal/api/apps.go handleListDeployments) returns
+// `200 []` for an existing app with no deployments, and only emits 404 when
+// the app is missing or the user has no view access (via requireViewApp).
+// Treating any 404 as "No deployments yet" therefore hides real authorization
+// or routing errors as a benign empty state. The buggy block was
+//
+//	if (resp.status === 404) {
+//	  empty.hidden = false;
+//	  list.hidden = true;
+//	  return;
+//	}
+//
+// directly above the generic !resp.ok branch in the deployments load(). It
+// must not return — 404 should fall into the !resp.ok branch so the server's
+// error envelope is shown. We search for the conjunction of a 404 check and
+// an `empty.hidden = false` assignment within a small window so the test
+// doesn't false-positive on the legitimate "GET /api/apps/:slug returned 404
+// → navigate home" branch in mount().
+func TestDeploymentsLoadDoesNotMask404AsEmpty(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
+	if err != nil {
+		t.Fatalf("read app-detail.js: %v", err)
+	}
+	src := string(b)
+	// Walk every `resp.status === 404` occurrence and check whether the next
+	// ~120 bytes contain `empty.hidden = false`. That pairing is unique to the
+	// deployments-load bug.
+	rest := src
+	for {
+		i := strings.Index(rest, "resp.status === 404")
+		if i < 0 {
+			break
+		}
+		end := i + 120
+		if end > len(rest) {
+			end = len(rest)
+		}
+		if strings.Contains(rest[i:end], "empty.hidden = false") {
+			t.Fatal("app-detail.js: deployments load() must not map `resp.status === 404` to an empty state — handleListDeployments returns 200 [] for empty, so 404 means missing app / no view access and must surface as an error via the !resp.ok branch")
+		}
+		rest = rest[i+len("resp.status === 404"):]
+	}
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)

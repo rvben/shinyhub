@@ -222,12 +222,6 @@ async function renderDeployments(panel, app, ctx) {
       return;
     }
 
-    // 404 with empty body or an empty array both mean no deployments yet.
-    if (resp.status === 404) {
-      empty.hidden = false;
-      list.hidden = true;
-      return;
-    }
     if (!resp.ok) {
       let msg = `Failed to load deployments (HTTP ${resp.status}).`;
       try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { /* non-JSON */ }
