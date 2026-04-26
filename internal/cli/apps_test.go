@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -308,6 +309,12 @@ func TestAppsDelete_WithConfirmation(t *testing.T) {
 	setResp(200, "")
 	appsDeleteFlags.yes = false
 
+	// The runAppsDelete tty gate refuses non-interactive callers without
+	// --yes. Tests simulate the tty so the confirmation path runs.
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
 	// Correct confirmation: user types the slug.
 	appsDeleteCmd.SetIn(strings.NewReader("demo\n"))
 	appsCmd.SetArgs([]string{"delete", "demo"})
@@ -325,6 +332,10 @@ func TestAppsDelete_WrongConfirmation(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 	appsDeleteFlags.yes = false
 
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
 	appsDeleteCmd.SetIn(strings.NewReader("wrong\n"))
 	appsCmd.SetArgs([]string{"delete", "demo"})
 	err := appsCmd.Execute()
@@ -336,6 +347,59 @@ func TestAppsDelete_WrongConfirmation(t *testing.T) {
 	}
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests when aborted, got %d", len(*reqs))
+	}
+}
+
+// TestAppsDelete_NonTtyWithoutYesReturnsClearError pins the tty gate. Before
+// the gate, `shinyhub apps delete demo < /dev/null` (a CI/cron pattern) hung
+// on the prompt or surfaced a confusing "read confirmation: EOF". The fix
+// must short-circuit with an error pointing at `--yes` and must NOT issue any
+// DELETE request.
+func TestAppsDelete_NonTtyWithoutYesReturnsClearError(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+	appsDeleteFlags.yes = false
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return false }
+
+	appsCmd.SetArgs([]string{"delete", "demo"})
+	err := appsCmd.Execute()
+	if err == nil {
+		t.Fatal("expected non-tty error pointing at --yes, got nil")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("error should mention `--yes` so automation has a clear path, got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when refusing non-tty without --yes, got %d", len(*reqs))
+	}
+}
+
+// TestAppsDelete_PromptGoesToStderr pins that the destructive-confirmation
+// prompt is written to stderr so `shinyhub apps delete foo | tee log` keeps
+// stdout clean for the success line.
+func TestAppsDelete_PromptGoesToStderr(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, "")
+	appsDeleteFlags.yes = false
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	var stderr bytes.Buffer
+	appsDeleteCmd.SetIn(strings.NewReader("demo\n"))
+	appsDeleteCmd.SetErr(&stderr)
+	t.Cleanup(func() { appsDeleteCmd.SetErr(nil) })
+
+	appsCmd.SetArgs([]string{"delete", "demo"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "permanently delete app") {
+		t.Errorf("destructive prompt should land on stderr; got %q", stderr.String())
 	}
 }
 

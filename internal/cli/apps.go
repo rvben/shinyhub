@@ -585,7 +585,17 @@ func runAppsDelete(cmd *cobra.Command, args []string) error {
 	slug := args[0]
 
 	if !appsDeleteFlags.yes {
-		fmt.Printf("This will permanently delete app %q and all its data. Type the slug to confirm: ", slug)
+		// Without --yes the destructive `apps delete` flow REQUIRES a
+		// confirmation. When stdin isn't a tty (CI, cron, `< /dev/null`,
+		// piped scripts) the previous code blocked forever on the read or
+		// surfaced a confusing "read confirmation: EOF". Refuse fast with
+		// a message that points at --yes so automation has a clear path.
+		if !isStdinTTY() {
+			return fmt.Errorf("apps delete requires interactive confirmation; pass --yes to skip the prompt for non-interactive use")
+		}
+		// Prompt goes to stderr so a `shinyhub apps delete foo | tee log`
+		// pipeline keeps stdout for the success line only.
+		fmt.Fprintf(cmd.ErrOrStderr(), "This will permanently delete app %q and all its data. Type the slug to confirm: ", slug)
 		var confirm string
 		if _, err := fmt.Fscan(cmd.InOrStdin(), &confirm); err != nil {
 			return fmt.Errorf("read confirmation: %w", err)
