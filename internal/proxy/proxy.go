@@ -143,10 +143,10 @@ type (
 
 // Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
-	mu          sync.RWMutex
-	pools       map[string]*backendPool
-	onMiss      func(slug string)
-	slugExists  func(slug string) bool
+	mu         sync.RWMutex
+	pools      map[string]*backendPool
+	onMiss     func(slug string)
+	slugExists func(slug string) (bool, error)
 
 	accessLog atomic.Pointer[accessLogFn]
 	clientIP  atomic.Pointer[clientIPFn]
@@ -200,10 +200,13 @@ func (p *Proxy) SetOnMiss(fn func(string)) {
 
 // SetSlugExists registers a synchronous predicate that the proxy uses to
 // distinguish a known-but-not-running slug (serve loading page) from a
-// completely unknown slug (return 404). When unset, the proxy falls back to
-// always serving the loading page on miss — matching the legacy behaviour
+// completely unknown slug (return 404). The predicate returns
+// (exists, lookupErr); a non-nil err signals the lookup itself failed
+// (DB unavailable, context cancelled, etc.) — the proxy must not interpret
+// this as "slug missing" and 404 the user. When unset, the proxy falls back
+// to always serving the loading page on miss — matching the legacy behaviour
 // from before the predicate was wired up.
-func (p *Proxy) SetSlugExists(fn func(string) bool) {
+func (p *Proxy) SetSlugExists(fn func(string) (bool, error)) {
 	p.mu.Lock()
 	p.slugExists = fn
 	p.mu.Unlock()
@@ -508,11 +511,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	slugExists := p.slugExists
 	if pool == nil || !poolHasAny(pool) {
 		p.mu.RUnlock()
-		// If we have a predicate and it says the slug is unknown, return a
-		// real 404 instead of looping the user on the loading page forever.
-		if slugExists != nil && !slugExists(slug) {
-			http.NotFound(rec, r)
-			return
+		// If we have a predicate and it confidently says the slug is unknown,
+		// return a real 404 instead of looping the user on the loading page
+		// forever. A non-nil lookupErr means the predicate couldn't tell —
+		// e.g. the DB was momentarily unavailable. Treating that as "missing"
+		// would confusingly 404 a perfectly valid app while the database
+		// recovers; instead we fall through to the loading page (the
+		// pre-predicate default) and let the caller log the error.
+		if slugExists != nil {
+			exists, lookupErr := slugExists(slug)
+			if lookupErr == nil && !exists {
+				http.NotFound(rec, r)
+				return
+			}
 		}
 		if onMiss != nil {
 			go onMiss(slug)

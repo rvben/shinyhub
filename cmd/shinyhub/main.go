@@ -211,9 +211,22 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// proxy returns 404 for typos / deleted apps instead of looping the
 	// loading page indefinitely. The lookup hits SQLite (cached page) and
 	// only runs on miss, so the cost is negligible.
-	prx.SetSlugExists(func(slug string) bool {
+	//
+	// We distinguish "row missing" (db.ErrNotFound → return false, nil → 404)
+	// from "lookup itself failed" (DB unavailable, ctx cancelled → return
+	// false, err → fall through to loading page). Conflating them would 404
+	// a real app whenever SQLite hiccupped, masking transient infra issues
+	// as a permanent "deleted app" UX.
+	prx.SetSlugExists(func(slug string) (bool, error) {
 		_, err := store.GetAppBySlug(slug)
-		return err == nil
+		if err == nil {
+			return true, nil
+		}
+		if errors.Is(err, db.ErrNotFound) {
+			return false, nil
+		}
+		slog.Warn("proxy_slug_lookup_failed", "slug", slug, "error", err.Error())
+		return false, err
 	})
 	prx.SetAccessLogger(func(e proxy.AccessLogEntry) {
 		attrs := []any{

@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -634,7 +635,7 @@ func TestProxy_ServesLoadingPageOnMiss(t *testing.T) {
 
 func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
 	p := proxy.New()
-	p.SetSlugExists(func(slug string) bool { return slug == "known" })
+	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
 	var onMissCalled bool
 	p.SetOnMiss(func(string) { onMissCalled = true })
 
@@ -650,9 +651,40 @@ func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
 	}
 }
 
+// TestProxy_LookupErrorFallsThroughToLoadingPage guards against the bug where
+// any GetAppBySlug failure (DB unavailable, context cancelled, etc.) was
+// mapped to "slug missing" and returned 404 — so a momentary database hiccup
+// looked like a permanently deleted app. The predicate's err return must NOT
+// be conflated with !exists; the proxy must fall through to the loading page
+// (legacy default) and let the caller log the lookup error.
+func TestProxy_LookupErrorFallsThroughToLoadingPage(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) (bool, error) {
+		return false, errors.New("database is locked")
+	})
+	done := make(chan struct{})
+	p.SetOnMiss(func(string) { close(done) })
+
+	req := httptest.NewRequest("GET", "/app/maybe-real/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected loading page (200) on lookup error, got %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Starting app") {
+		t.Errorf("expected loading page body, got %q", rec.Body.String())
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("onMiss should still fire on lookup error — the slug might exist; we just couldn't tell")
+	}
+}
+
 func TestProxy_ServesLoadingPageWhenSlugKnown(t *testing.T) {
 	p := proxy.New()
-	p.SetSlugExists(func(slug string) bool { return true })
+	p.SetSlugExists(func(slug string) (bool, error) { return true, nil })
 	done := make(chan struct{})
 	p.SetOnMiss(func(string) { close(done) })
 
