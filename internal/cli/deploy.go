@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -173,22 +174,58 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 }
 
 // waitForHealthy polls GET /api/apps/{slug} until status is "running" or
-// the deadline expires. It prints progress dots to stdout.
+// the deadline expires. It prints progress dots to stdout. A 4xx response
+// (auth, gone, forbidden) is treated as fatal: continuing to poll would only
+// delay the inevitable failure and waste the user's --wait-timeout. 5xx and
+// transport errors are treated as transient and keep the loop going.
 func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	interval := 2 * time.Second
 	fmt.Printf("Waiting for %s to be healthy", slug)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		ready, err := pollAppStatus(cfg, slug)
 		if err == nil && ready {
 			fmt.Println(" ready.")
 			return nil
 		}
+		if err != nil {
+			lastErr = err
+			var he *httpStatusError
+			if errors.As(err, &he) && he.fatal() {
+				fmt.Println()
+				return fmt.Errorf("checking %s: %w", slug, err)
+			}
+		}
 		fmt.Print(".")
 		time.Sleep(interval)
 	}
 	fmt.Println()
+	if lastErr != nil {
+		return fmt.Errorf("timed out after %s waiting for %s to be healthy (last error: %v)", timeout, slug, lastErr)
+	}
 	return fmt.Errorf("timed out after %s waiting for %s to be healthy", timeout, slug)
+}
+
+// httpStatusError carries the response status code and body so callers can
+// distinguish fatal (4xx) from transient (5xx) HTTP failures while still
+// surfacing the server's error envelope to the user.
+type httpStatusError struct {
+	statusCode int
+	body       string
+}
+
+func (e *httpStatusError) Error() string {
+	if e.body != "" {
+		return fmt.Sprintf("HTTP %d: %s", e.statusCode, strings.TrimSpace(e.body))
+	}
+	return fmt.Sprintf("HTTP %d", e.statusCode)
+}
+
+// fatal returns true for 4xx codes — auth, not-found, forbidden — which won't
+// resolve themselves on retry. 5xx is treated as transient.
+func (e *httpStatusError) fatal() bool {
+	return e.statusCode >= 400 && e.statusCode < 500
 }
 
 // pollAppStatus issues a single GET /api/apps/{slug} and reports whether the
@@ -196,6 +233,11 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 // response body is closed before the next poll — `defer` inside the loop in
 // waitForHealthy used to leak file descriptors for the lifetime of the
 // command on long --wait-timeout values.
+//
+// A non-2xx response is returned as an *httpStatusError so the caller can
+// distinguish "permanent" failures (401/403/404) from transient ones (5xx).
+// Without this, every error silently degraded to "not running" and the user
+// waited the full --wait-timeout for an outcome that was already decided.
 func pollAppStatus(cfg *cliConfig, slug string) (bool, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
@@ -207,6 +249,10 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, error) {
 		return false, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+	}
 	var result struct {
 		App struct {
 			Status string `json:"status"`

@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -258,6 +260,85 @@ func TestPollAppStatus_RunningAndStarting(t *testing.T) {
 			t.Errorf("ready = true, want false")
 		}
 	})
+}
+
+// TestPollAppStatus_NonOKStatusReturnsHTTPError guards against the previous
+// behaviour where any non-2xx response (token expired, app gone, server 500)
+// silently decoded into a zero-value status and degraded to ready=false.
+// waitForHealthy then polled until --wait-timeout for an outcome that was
+// already decided. pollAppStatus must surface *httpStatusError so the caller
+// can distinguish fatal (4xx) vs transient (5xx).
+func TestPollAppStatus_NonOKStatusReturnsHTTPError(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		body       string
+		fatal      bool
+	}{
+		{"401 unauthorized is fatal", http.StatusUnauthorized, `{"error":"invalid token"}`, true},
+		{"403 forbidden is fatal", http.StatusForbidden, `{"error":"no view access"}`, true},
+		{"404 not found is fatal", http.StatusNotFound, ``, true},
+		{"500 server error is transient", http.StatusInternalServerError, `internal error`, false},
+		{"502 bad gateway is transient", http.StatusBadGateway, `upstream timeout`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			ready, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
+			if err == nil {
+				t.Fatalf("pollAppStatus: expected error for HTTP %d, got nil", tc.statusCode)
+			}
+			if ready {
+				t.Errorf("ready = true, want false on HTTP %d", tc.statusCode)
+			}
+			var he *httpStatusError
+			if !errors.As(err, &he) {
+				t.Fatalf("pollAppStatus: error %v is not *httpStatusError; waitForHealthy can't classify it", err)
+			}
+			if he.statusCode != tc.statusCode {
+				t.Errorf("httpStatusError.statusCode = %d, want %d", he.statusCode, tc.statusCode)
+			}
+			if he.fatal() != tc.fatal {
+				t.Errorf("httpStatusError.fatal() = %v, want %v for HTTP %d", he.fatal(), tc.fatal, tc.statusCode)
+			}
+			if tc.body != "" && !strings.Contains(he.Error(), strings.TrimSpace(tc.body)) {
+				t.Errorf("httpStatusError.Error() = %q, want it to surface server body %q", he.Error(), tc.body)
+			}
+		})
+	}
+}
+
+// TestWaitForHealthy_FailFastOn4xx guards the user-visible behaviour: if the
+// token is invalid or the app vanished, waitForHealthy must return promptly
+// instead of polling for the full --wait-timeout. We use a tight timeout so a
+// regression (no fail-fast) blows up the test runner instead of silently
+// passing.
+func TestWaitForHealthy_FailFastOn4xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid token"}`))
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	err := waitForHealthy(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", 30*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("waitForHealthy: expected error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid token") {
+		t.Errorf("error should surface server body, got %q", err.Error())
+	}
+	// Fail-fast: should return well under the 30s timeout. Allow generous
+	// slack for slow CI but flag anything that suggests the loop kept polling.
+	if elapsed > 5*time.Second {
+		t.Errorf("waitForHealthy took %v on 401; should fail fast in <5s, not poll until --wait-timeout", elapsed)
+	}
 }
 
 func TestEnsureApp_FallsBackToRawBodyWhenNotJSON(t *testing.T) {
