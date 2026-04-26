@@ -2308,12 +2308,25 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   logoutButton.addEventListener('click', async () => {
+    // Distinguish transport errors from server-side rejections. The previous
+    // unconditional showLoggedOut() lied to the user when the POST returned a
+    // non-OK status (e.g. 403 from a missing CSRF cookie): the SPA showed the
+    // login form locally but the server session stayed alive, so a refresh
+    // logged them straight back in. We only clear local state when the server
+    // actually killed the session — 204 (success) or 401 (already gone).
+    // Anything else surfaces an error and keeps the user signed in.
+    let resp;
     try {
-      await api('/api/auth/logout', {method: 'POST'});
+      resp = await api('/api/auth/logout', {method: 'POST'});
     } catch {
-      // Logging out should still reset local UI state even if the request fails.
+      flashToast('Logout failed: network error', 'error');
+      return;
     }
-    showLoggedOut();
+    if (resp.ok || resp.status === 401) {
+      showLoggedOut();
+      return;
+    }
+    flashToast(`Logout failed (${resp.status})`, 'error');
   });
 
   async function fetchMetrics(slug) {

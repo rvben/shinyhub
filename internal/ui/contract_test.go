@@ -463,6 +463,42 @@ func TestSPAConsumesLogoutQueryParam(t *testing.T) {
 	}
 }
 
+// TestSPALogoutButtonRespectsServerOutcome guards against the logout button
+// lying to the user. The previous handler swallowed every fetch outcome and
+// called showLoggedOut() unconditionally, so a 403 (missing CSRF cookie) or
+// 500 left the server session alive while the SPA showed the login form
+// locally — a single refresh logged the user straight back in. The handler
+// must only clear local state on success (resp.ok) or 401 (already gone),
+// and surface a flashToast on the failure branch so the user knows the
+// logout didn't take effect.
+func TestSPALogoutButtonRespectsServerOutcome(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	const handlerSig = "logoutButton.addEventListener('click', async ()"
+	hStart := strings.Index(src, handlerSig)
+	if hStart < 0 {
+		t.Fatal("app.js: missing logoutButton click handler")
+	}
+	rest := src[hStart:]
+	end := strings.Index(rest, "\n  async function ")
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+	if !strings.Contains(body, "/api/auth/logout") {
+		t.Fatal("logout handler must POST /api/auth/logout")
+	}
+	if !strings.Contains(body, "resp.ok || resp.status === 401") {
+		t.Fatal("logout handler must guard showLoggedOut() on `resp.ok || resp.status === 401` so a server-side reject (403 missing CSRF, 500) doesn't lie to the user about being signed out")
+	}
+	if !strings.Contains(body, "flashToast") {
+		t.Fatal("logout handler must surface a flashToast on the failure branch so the user knows the logout didn't take effect server-side")
+	}
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)
