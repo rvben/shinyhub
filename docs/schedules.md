@@ -16,7 +16,7 @@ Via the UI: **Settings ⚙ → Schedules → + Add schedule**.
 Via the CLI:
 
 ```bash
-shiny schedule add fetch \
+shinyhub schedule add fetch \
     --name daily-fetch \
     --cron "0 6 * * *" \
     --cmd "python helpers/fetch.py" \
@@ -38,7 +38,7 @@ Fields:
 ## Triggering manually
 
 ```bash
-shiny schedule run fetch daily-fetch --follow
+shinyhub schedule run fetch daily-fetch --follow
 ```
 
 `--follow` tails the run's log until exit.
@@ -50,7 +50,7 @@ or more **consumers** that render dashboards. Mount the fetcher's data dir
 read-only into each consumer:
 
 ```bash
-shiny share add report --from fetch
+shinyhub share add report --from fetch
 ```
 
 The consumer now sees `data/shared/fetch/` as a read-only directory inside
@@ -67,7 +67,7 @@ RO by convention).
 
 `report` (the consumer):
 
-- Mount: `shiny share add report --from fetch`
+- Mount: `shinyhub share add report --from fetch`
 - In `app.py`: `pd.read_parquet("data/shared/fetch/latest.parquet")`
 
 The consumer reads stale data while the next fetch runs; on success the

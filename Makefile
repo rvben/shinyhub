@@ -1,8 +1,10 @@
-.PHONY: build test lint run dev goreleaser-check
+.PHONY: build clean test lint run dev goreleaser-check
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
-	go build -o bin/shiny ./cmd/shiny
+
+clean:
+	rm -rf bin tmp
 
 test:
 	go test ./... -count=1
@@ -11,7 +13,7 @@ lint:
 	go vet ./...
 
 run: build
-	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production ./bin/shinyhub
+	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production ./bin/shinyhub serve
 
 # dev runs the server with live reload via air. Go changes trigger a rebuild;
 # edits to internal/ui/static/ are served from disk (no rebuild) thanks to

@@ -353,5 +353,5 @@ func summarizeRejections(r map[bundle.FilterDecision][]string) string {
 		parts = append(parts, fmt.Sprintf("%s: %s", d, strings.Join(paths, ", ")))
 	}
 	sort.Strings(parts)
-	return "Skipped from bundle (push with `shiny data push`): " + strings.Join(parts, "; ")
+	return "Skipped from bundle (push with `shinyhub data push`): " + strings.Join(parts, "; ")
 }

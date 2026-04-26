@@ -1,5 +1,5 @@
 // Package data implements the persistent per-app storage area exposed via
-// `PUT/DELETE/GET /api/apps/:slug/data[/*path]` and the `shiny data` CLI.
+// `PUT/DELETE/GET /api/apps/:slug/data[/*path]` and the `shinyhub data` CLI.
 package data
 
 import (

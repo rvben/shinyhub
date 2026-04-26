@@ -442,7 +442,7 @@ func TestSchedules_RunLogs_RejectsPublicViewer(t *testing.T) {
 // A developer who only has public-viewer access to "src" must not be able to
 // mount src's data dir into their own app — read-only or not — because that
 // dir holds whatever business data the source app's owner shipped via
-// `shiny data push`. Only an explicit member, the owner, or a platform
+// `shinyhub data push`. Only an explicit member, the owner, or a platform
 // operator may grant the mount. See A.2 in the v0.2.2 audit.
 func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
