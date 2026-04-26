@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"syscall"
 
@@ -47,7 +46,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		if err := saveConfig(&cliConfig{Host: f.host, Token: f.token}); err != nil {
 			return err
 		}
-		fmt.Printf("Logged in. Saved credentials to %s\n", configPath())
+		fmt.Fprintf(cmd.OutOrStdout(), "Logged in. Saved credentials to %s\n", configPath())
 		return nil
 	}
 
@@ -60,15 +59,20 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	// strings are passed through unchanged (which the server rejects with a
 	// clear 401, the same as before).
 	if isStdinTTY() {
+		// Prompts and the password echo go to stderr so they don't pollute
+		// stdout for callers like `shinyhub login --token X | jq ...`.
+		// Line input is read from cmd.InOrStdin() so tests can drive the
+		// flow without a real tty; the password path still goes through
+		// term.ReadPassword on the real fd because it has to disable echo.
 		if f.username == "" {
-			u, err := promptLine(cmd.OutOrStdout(), "Username: ")
+			u, err := promptLine(cmd.InOrStdin(), cmd.ErrOrStderr(), "Username: ")
 			if err != nil {
 				return fmt.Errorf("read username: %w", err)
 			}
 			f.username = u
 		}
 		if f.password == "" {
-			p, err := promptPassword(cmd.OutOrStdout(), "Password: ")
+			p, err := promptPassword(cmd.ErrOrStderr(), "Password: ")
 			if err != nil {
 				return fmt.Errorf("read password: %w", err)
 			}
@@ -97,7 +101,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	if err := saveConfig(&cliConfig{Host: f.host, Token: result.Token}); err != nil {
 		return err
 	}
-	fmt.Printf("Logged in. Saved credentials to %s\n", configPath())
+	fmt.Fprintf(cmd.OutOrStdout(), "Logged in. Saved credentials to %s\n", configPath())
 	return nil
 }
 
@@ -116,13 +120,13 @@ var (
 	}
 )
 
-// promptLine writes prompt to w, reads a line from stdin, and returns the
+// promptLine writes prompt to w, reads a line from r, and returns the
 // trimmed value. EOF on an empty line is treated as an error so the caller
 // gets a clear failure instead of POSTing an empty username.
-func promptLine(w io.Writer, prompt string) (string, error) {
+func promptLine(r io.Reader, w io.Writer, prompt string) (string, error) {
 	fmt.Fprint(w, prompt)
-	r := bufio.NewReader(os.Stdin)
-	line, err := r.ReadString('\n')
+	br := bufio.NewReader(r)
+	line, err := br.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
@@ -135,7 +139,9 @@ func promptLine(w io.Writer, prompt string) (string, error) {
 
 // promptPassword writes prompt to w and reads a line from stdin without
 // echoing. A trailing newline is printed afterwards because ReadPassword
-// suppresses the user's own.
+// suppresses the user's own. Reads always go through the readPassword seam
+// because term.ReadPassword has to operate on the real terminal fd to
+// disable echo — there is no portable way to do that on a generic Reader.
 func promptPassword(w io.Writer, prompt string) (string, error) {
 	fmt.Fprint(w, prompt)
 	pw, err := readPassword()

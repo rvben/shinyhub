@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -158,6 +159,88 @@ func TestRunLogin_NoPromptWhenStdinIsPipe(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401") {
 		t.Errorf("error should surface server status, got: %v", err)
+	}
+}
+
+// TestRunLogin_PromptsRouteThroughCobraStreams pins the cobra-streams
+// contract for the interactive login path. Previously the prompts went
+// to cmd.OutOrStdout() and the line input came from os.Stdin directly,
+// which meant:
+//
+//  1. `shinyhub login | cmd` would interleave "Username: " and "Password: "
+//     into the consumer's stdin — invisible-to-the-user breakage.
+//  2. Tests had to fake a real tty to drive the username path because the
+//     reader was hard-coded to os.Stdin instead of cmd.InOrStdin().
+//
+// The fix routes prompts through cmd.ErrOrStderr() and reads usernames
+// from cmd.InOrStdin(). This test drives both prompts via test streams
+// and asserts: prompts land on stderr, success message lands on stdout,
+// neither cross-contaminates, and the values reach the server.
+func TestRunLogin_PromptsRouteThroughCobraStreams(t *testing.T) {
+	var seen struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &seen)
+		_, _ = w.Write([]byte(`{"token":"shk_streams"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("HOME", t.TempDir())
+
+	origIsTTY, origReadPw := isStdinTTY, readPassword
+	t.Cleanup(func() { isStdinTTY, readPassword = origIsTTY, origReadPw })
+	isStdinTTY = func() bool { return true }
+	readPassword = func() (string, error) { return "hunter2", nil }
+
+	// Both flags empty so both prompts fire.
+	loginFlags.host = srv.URL
+	loginFlags.username = ""
+	loginFlags.password = ""
+	loginFlags.token = ""
+	t.Cleanup(func() {
+		loginFlags.host = ""
+		loginFlags.username = ""
+		loginFlags.password = ""
+		loginFlags.token = ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetIn(strings.NewReader("alice\n"))
+
+	if err := runLogin(cmd, nil); err != nil {
+		t.Fatalf("runLogin: %v", err)
+	}
+
+	if seen.Username != "alice" {
+		t.Errorf("server saw username=%q, want %q (read from cmd.InOrStdin)", seen.Username, "alice")
+	}
+	if seen.Password != "hunter2" {
+		t.Errorf("server saw password=%q, want %q (read via readPassword seam)", seen.Password, "hunter2")
+	}
+
+	// Prompts must go to stderr so a `shinyhub login | jq ...` pipeline
+	// keeps stdout clean for the success message.
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "Username: ") {
+		t.Errorf("stderr should contain `Username: ` prompt; got %q", errOut)
+	}
+	if !strings.Contains(errOut, "Password: ") {
+		t.Errorf("stderr should contain `Password: ` prompt; got %q", errOut)
+	}
+
+	// Stdout must NOT carry the prompts and MUST carry the success message.
+	out := stdout.String()
+	if strings.Contains(out, "Username: ") || strings.Contains(out, "Password: ") {
+		t.Errorf("stdout must not contain prompt text (would corrupt downstream pipes); got %q", out)
+	}
+	if !strings.Contains(out, "Logged in.") {
+		t.Errorf("stdout should contain the `Logged in.` success message; got %q", out)
 	}
 }
 
