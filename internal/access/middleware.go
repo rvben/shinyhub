@@ -161,15 +161,29 @@ func wantsHTML(r *http.Request) bool {
 //     POSTing /api/auth/logout before showing the login form, so the user
 //     gets a chance to sign in as a different account.
 //
+// The 403 button additionally sets a `shiny_logout_intent` sessionStorage
+// marker via an inline onclick handler. The SPA's consumeLogoutParam()
+// only honours `?logout=1` when that marker is present and same-origin
+// same-tab — so an attacker can't craft an external link to
+// /?logout=1&next=/app/anything/ and trigger a GET-driven logout for an
+// unrelated session. sessionStorage is per-tab per-origin and persists
+// across the in-tab navigation triggered by clicking the link.
+//
 // The button label tracks the same distinction: "Log in" for 401,
 // "Sign in as a different user" for 403.
 func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
 	loginHref := "/"
 	loginLabel := "Log in"
 	body := "This app is private. Sign in to continue."
+	// onclick is empty for 401 (no logout to trigger) and sets the same-tab
+	// logout-intent marker for 403. The marker binds /?logout=1 honour to
+	// a real click on this page — without it, an external link to
+	// /?logout=1&next=/app/.../ does nothing in the SPA.
+	loginOnclick := ""
 	if status == http.StatusForbidden {
 		loginLabel = "Sign in as a different user"
 		body = "Your account doesn't have access to this app. Sign in with a different account."
+		loginOnclick = "try{sessionStorage.setItem('shiny_logout_intent','1')}catch(e){}"
 	}
 	if nextURL != "" {
 		params := url.Values{"next": {nextURL}}
@@ -200,7 +214,7 @@ func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
   <div class="box">
     <h1>HEADLINE</h1>
     <p>BODY</p>
-    <a class="btn" href="LOGIN">LABEL</a>
+    <a class="btn" href="LOGIN" onclick="ONCLICK">LABEL</a>
   </div>
 </body>
 </html>`
@@ -208,6 +222,7 @@ func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
 		"HEADLINE", htmlEscape(headline),
 		"BODY", htmlEscape(body),
 		"LOGIN", htmlEscape(loginHref),
+		"ONCLICK", htmlEscape(loginOnclick),
 		"LABEL", htmlEscape(loginLabel),
 	).Replace(tpl)
 	return []byte(out)

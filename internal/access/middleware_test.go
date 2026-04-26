@@ -145,6 +145,47 @@ func TestAccess_Forbidden_BrowserNav_LinksToLogoutThenLogin(t *testing.T) {
 	if strings.Contains(body, privateAppName) {
 		t.Errorf("403 body LEAKS app name %q to a non-member: %s", privateAppName, body)
 	}
+	// The CTA must set a same-tab sessionStorage marker before navigating.
+	// Without this, an external link to /?logout=1&next=/app/anything/
+	// could trigger a GET-driven logout in any tab. The SPA's
+	// consumeLogoutParam refuses to act unless the marker is present, so
+	// the producer must plant it on real clicks. The literal apostrophes
+	// in the JS are HTML-escaped to &#39; in the rendered attribute, so we
+	// match against the escaped form.
+	if !strings.Contains(body, "shiny_logout_intent") {
+		t.Errorf("403 CTA must set sessionStorage `shiny_logout_intent` via onclick so the SPA can distinguish a real click on this page from an external/forged link. Body: %s", body)
+	}
+	if !strings.Contains(body, "sessionStorage.setItem(") {
+		t.Errorf("403 CTA must call sessionStorage.setItem so the marker survives the in-tab navigation. Body: %s", body)
+	}
+}
+
+// 401 page (no session) must NOT plant the logout-intent marker. The
+// marker is exclusively a 403-handoff signal — leaking it on the 401 path
+// would let a logged-out user trigger the logout flow on a different
+// session if they happened to share the tab via account switch.
+func TestAccess_Unauthorized_BrowserNav_DoesNotPlantLogoutMarker(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Quarterly Report", OwnerID: owner.ID})
+
+	mw := access.Middleware(store, "test-secret", nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/secret/", nil)
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "shiny_logout_intent") {
+		t.Errorf("401 page must not plant the logout-intent marker — that's a 403-only signal. Body: %s", body)
+	}
 }
 
 // CLI/SDK callers (Authorization header set) must keep getting the legacy

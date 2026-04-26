@@ -2586,24 +2586,37 @@ document.addEventListener('DOMContentLoaded', () => {
   // 403-handoff so the caller can skip /api/auth/me and go straight to
   // the login form.
   //
-  // Pairing requirement: only honour ?logout=1 when paired with a
-  // ?next=/app/<slug>/... value, because that's the only producer (see
-  // internal/access/middleware.go renderAccessDeniedPage). A bare
-  // ?logout=1 likely came from a stale tab, an external link, or a
-  // copy-pasted URL — silently logging the user out on navigation alone
-  // would be a GET-driven state change. If the pairing doesn't match we
-  // strip the param and continue without the POST so the user keeps
-  // their session.
+  // Forgery defence has two layers:
   //
-  // We always strip ?logout=1 from the URL (whether or not we acted on
-  // it) so a refresh can't loop the logout request.
+  //  1. Same-tab marker: the 403 page sets a `shiny_logout_intent`
+  //     sessionStorage entry via an onclick handler before navigation
+  //     (see internal/access/middleware.go renderAccessDeniedPage). The
+  //     SPA only honours `?logout=1` when that marker is present —
+  //     external links (other tab, other origin, phishing email) can't
+  //     plant the marker, so they can't trigger a GET-driven logout.
+  //     The marker is consumed (removed) on read so it can't replay.
+  //
+  //  2. Pairing: the URL must also carry `?next=/app/<slug>/...`. The
+  //     producer always pairs both; checking either alone leaves an
+  //     attacker too much wiggle room.
+  //
+  // We always strip `?logout=1` from the URL (whether or not we acted
+  // on it) so a refresh can't loop the logout request, and we always
+  // remove the sessionStorage marker so a stale entry can't poison a
+  // future page load.
   async function consumeLogoutParam() {
     const params = new URLSearchParams(window.location.search);
     if (params.get('logout') !== '1') return false;
     const next = params.get('next') || '';
+    let intent = null;
+    try {
+      intent = sessionStorage.getItem('shiny_logout_intent');
+      sessionStorage.removeItem('shiny_logout_intent');
+    } catch { /* sessionStorage may be blocked */ }
     params.delete('logout');
     const search = params.toString();
     history.replaceState(null, '', window.location.pathname + (search ? '?' + search : ''));
+    if (intent !== '1') return false;
     if (!next.startsWith('/app/')) return false;
     try {
       await api('/api/auth/logout', { method: 'POST' });

@@ -412,6 +412,18 @@ func TestSPAConsumesLogoutQueryParam(t *testing.T) {
 	if !strings.Contains(src, "/api/auth/logout") {
 		t.Fatal("app.js consumeLogoutParam must POST /api/auth/logout to clear the wrong session before /api/auth/me re-authenticates it")
 	}
+	// Same-tab marker: the 403 CTA in internal/access/middleware.go plants
+	// `shiny_logout_intent` in sessionStorage before navigation. The SPA
+	// must require + consume that marker so an external link to
+	// /?logout=1&next=/app/anything/ can't trigger a GET-driven logout in
+	// an unrelated session — sessionStorage is per-tab per-origin and
+	// can't be planted from a third-party referrer.
+	if !strings.Contains(src, "sessionStorage.getItem('shiny_logout_intent')") {
+		t.Fatal("app.js consumeLogoutParam must read the `shiny_logout_intent` sessionStorage marker so external/forged /?logout=1 links don't trigger a logout. The marker is planted by the 403 page in internal/access/middleware.go renderAccessDeniedPage.")
+	}
+	if !strings.Contains(src, "sessionStorage.removeItem('shiny_logout_intent')") {
+		t.Fatal("app.js consumeLogoutParam must consume (removeItem) the `shiny_logout_intent` marker so a stale entry can't replay a logout on a future page load")
+	}
 	// Pairing guard: ?logout=1 must require ?next=/app/... before POSTing
 	// /api/auth/logout. Otherwise any external link to /?logout=1 logs
 	// the current SPA user out on navigation alone.
