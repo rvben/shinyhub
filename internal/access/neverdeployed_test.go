@@ -25,7 +25,7 @@ func TestNeverDeployed_PassThroughWhenDeployed(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil)(next)
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/app/app/", nil)
 	rec := httptest.NewRecorder()
@@ -46,7 +46,7 @@ func TestNeverDeployed_ManagerSeesCLISnippet(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("next handler should not be invoked for never-deployed app")
 	})
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil)(next)
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/app/newapp/", nil)
 	req.Host = "shiny.example.com"
@@ -96,7 +96,7 @@ func TestNeverDeployed_NonManagerSeesUnpublishedNotice(t *testing.T) {
 
 	token, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")
 
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("next handler should not be invoked for never-deployed app")
 	}))
 
@@ -120,7 +120,7 @@ func TestNeverDeployed_NonManagerSeesUnpublishedNotice(t *testing.T) {
 func TestNeverDeployed_NoSlugPassThrough(t *testing.T) {
 	store := makeStore(t)
 	called := false
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	}))
 
@@ -136,7 +136,7 @@ func TestNeverDeployed_NoSlugPassThrough(t *testing.T) {
 func TestNeverDeployed_UnknownAppPassThrough(t *testing.T) {
 	store := makeStore(t)
 	called := false
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	}))
 

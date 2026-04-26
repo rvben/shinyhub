@@ -319,8 +319,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiTimeoutHandler(srv.Router()))
-	emptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked)(prx)
-	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked)(emptyState)
+	// Re-resolve JWT-claimed users against the live DB on every /app/* hit
+	// so role demotions and account deletions take effect immediately.
+	// Without this an admin's still-valid JWT keeps the admin-bypass path
+	// open through the access middleware until the token expires — the same
+	// staleness bug the API middleware already guards against via its own
+	// userLookup wiring (see internal/api/router.go).
+	appUserLookup := func(id int64) (*auth.ContextUser, error) {
+		u, err := store.GetUserByID(id)
+		if err != nil {
+			return nil, err
+		}
+		return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+	}
+	emptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(prx)
+	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(emptyState)
 	mux.Handle("/app/", appHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

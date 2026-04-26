@@ -24,7 +24,11 @@ type neverDeployedStore interface {
 // It must be installed between the access middleware and the proxy, so that
 // by the time this handler runs the caller has already been authorized to
 // see the app at all.
-func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked auth.RevocationChecker) func(http.Handler) http.Handler {
+//
+// userLookup, when supplied, re-resolves the JWT-claimed user against the
+// live database on every request so role demotions take effect immediately.
+// See Middleware for the full rationale.
+func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			slug := extractSlug(r.URL.Path)
@@ -37,7 +41,7 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 				next.ServeHTTP(w, r)
 				return
 			}
-			user := extractUser(r, jwtSecret, revoked)
+			user := extractUser(r, jwtSecret, revoked, userLookup)
 			manager := canManageApp(st, app, user)
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")

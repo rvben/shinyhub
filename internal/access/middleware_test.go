@@ -33,7 +33,7 @@ func TestAccess_PublicApp_NoAuth(t *testing.T) {
 	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: owner.ID})
 	store.SetAppAccess("pub", "public")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/pub/", nil)
@@ -51,7 +51,7 @@ func TestAccess_PrivateApp_NoAuth_Rejected(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -78,7 +78,7 @@ func TestAccess_PrivateApp_BrowserNav_GetsStyledHTMLPage(t *testing.T) {
 	const privateAppName = "Quarterly Report"
 	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: privateAppName, OwnerID: owner.ID})
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/secret/", nil)
@@ -122,7 +122,7 @@ func TestAccess_Forbidden_BrowserNav_LinksToLogoutThenLogin(t *testing.T) {
 
 	bobToken, _ := auth.IssueJWT(bob.ID, "bob", "developer", "test-secret")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/secret/", nil)
@@ -170,7 +170,7 @@ func TestAccess_Unauthorized_BrowserNav_DoesNotPlantLogoutMarker(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Quarterly Report", OwnerID: owner.ID})
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/secret/", nil)
@@ -196,7 +196,7 @@ func TestAccess_PrivateApp_APICall_GetsJSON(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/api/data", nil)
@@ -224,7 +224,7 @@ func TestAccess_PrivateApp_OwnerAccess(t *testing.T) {
 
 	token, _ := auth.IssueJWT(owner.ID, "owner", "admin", "test-secret")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -245,7 +245,7 @@ func TestAccess_PrivateApp_CookieAuth(t *testing.T) {
 
 	token, _ := auth.IssueJWT(owner.ID, "owner", "admin", "test-secret")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -269,7 +269,7 @@ func TestAccess_PrivateApp_GrantedUser(t *testing.T) {
 
 	token, _ := auth.IssueJWT(alice.ID, "alice", "developer", "test-secret")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -293,7 +293,7 @@ func TestAccess_PrivateApp_NonMember_Forbidden(t *testing.T) {
 
 	token, _ := auth.IssueJWT(bob.ID, "bob", "developer", "test-secret")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
@@ -318,7 +318,7 @@ func TestAccess_SharedApp_AuthenticatedUser(t *testing.T) {
 
 	token, _ := auth.IssueJWT(stranger.ID, "stranger", "developer", "test-secret")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/shared-app/", nil)
@@ -328,6 +328,70 @@ func TestAccess_SharedApp_AuthenticatedUser(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("shared app: authenticated user expected 200, got %d", rec.Code)
+	}
+}
+
+// TestAccess_PrivateApp_DemotedAdmin_LosesBypass guards the live-DB
+// re-resolution path. An admin's JWT carries role="admin" until it
+// expires (potentially hours). Without a live userLookup, that stale
+// claim keeps the admin-bypass open after the user has been demoted —
+// the same staleness bug the API middleware fixes via its own
+// userLookup wiring (internal/api/router.go). The access middleware
+// MUST behave the same way for /app/* traffic; otherwise revoking
+// admin powers doesn't actually revoke access to any private app.
+//
+// We exercise both paths:
+//   - With nil userLookup: the stale "admin" claim wins (legacy /
+//     test-only behaviour) and the request goes through.
+//   - With a live userLookup that returns the post-demotion role:
+//     the bypass is gone and a non-member 403 is returned.
+func TestAccess_PrivateApp_DemotedAdmin_LosesBypass(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "exadmin", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	exadmin, _ := store.GetUserByUsername("exadmin")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+
+	// JWT was minted while exadmin was still admin.
+	token, _ := auth.IssueJWT(exadmin.ID, "exadmin", "admin", "test-secret")
+
+	// Demote the admin in the DB. The token is unchanged.
+	if err := store.UpdateUserRole(exadmin.ID, "developer"); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+
+	// Live lookup: read the current role from DB on every request.
+	live := func(id int64) (*auth.ContextUser, error) {
+		u, err := store.GetUserByID(id)
+		if err != nil {
+			return nil, err
+		}
+		return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+	}
+
+	doRequest := func(t *testing.T, lookup auth.UserLookup) int {
+		t.Helper()
+		mw := access.Middleware(store, "test-secret", nil, lookup)
+		handler := mw(http.HandlerFunc(next))
+		req := httptest.NewRequest("GET", "/app/priv/", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Sanity: with no live lookup, the stale "admin" claim still wins.
+	// This pins the *unfixed* behaviour so a future regression that
+	// quietly disables userLookup wiring shows up as the test pair
+	// flipping in lockstep instead of silently re-opening the bypass.
+	if got := doRequest(t, nil); got != http.StatusOK {
+		t.Fatalf("nil userLookup: stale admin claim should bypass (got %d, want 200) — this case documents the pre-fix behaviour", got)
+	}
+
+	// With the live lookup, the demotion takes effect immediately.
+	if got := doRequest(t, live); got != http.StatusForbidden {
+		t.Fatalf("live userLookup: demoted admin should be 403 (got %d) — role demotion must take effect without waiting for token expiry", got)
 	}
 }
 
@@ -342,7 +406,7 @@ func TestAccess_PrivateApp_OperatorBypasses(t *testing.T) {
 
 	token, _ := auth.IssueJWT(ops.ID, "ops", "operator", "test-secret")
 
-	mw := access.Middleware(store, "test-secret", nil)
+	mw := access.Middleware(store, "test-secret", nil, nil)
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)

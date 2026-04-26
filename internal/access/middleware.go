@@ -21,7 +21,15 @@ type store interface {
 // authenticated user must be the owner or an explicit member. The optional
 // RevocationChecker is consulted so tokens revoked on logout can no longer
 // reach private apps either.
-func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker) func(http.Handler) http.Handler {
+//
+// userLookup, when supplied, re-resolves the JWT-claimed user against the
+// live database on every request — this is what makes role demotions and
+// account deletions take effect immediately. Without it, an admin with a
+// valid JWT keeps the admin-bypass path through this middleware until the
+// token expires (potentially hours), even after being demoted to "user" or
+// deleted entirely. Production wiring MUST supply this; tests may pass nil
+// when they want to assert behaviour purely from the JWT claims.
+func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			slug := extractSlug(r.URL.Path)
@@ -49,7 +57,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker) func
 			// operators, and any authenticated user on shared apps bypass the
 			// membership check; other roles on private apps must pass the
 			// UserCanAccessApp check.
-			user := extractUser(r, jwtSecret, revoked)
+			user := extractUser(r, jwtSecret, revoked, userLookup)
 			if user == nil {
 				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app")
 				return
@@ -76,23 +84,24 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker) func
 	}
 }
 
-// extractUser tries to parse a valid JWT from the Authorization header or the
-// session cookie. Returns nil if no valid token is found.
-func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker) *auth.ContextUser {
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		token := strings.TrimPrefix(h, "Bearer ")
-		if u, err := auth.ParseJWT(token, secret, revoked); err == nil {
-			return u
-		}
+// extractUser authenticates the request from a JWT in the Authorization
+// header (Bearer scheme) or the session cookie. We pass nil for keyLookup
+// to AuthenticateRequest so "Token <api-key>" requests fall through as
+// unauthenticated — API keys are CLI/SDK identities and have no concept
+// of a browser session, so they shouldn't grant access to /app/* anyway.
+//
+// When userLookup is supplied, the JWT-claimed identity is re-resolved
+// against the live database on every request; this defeats stale-claim
+// attacks where a demoted admin's still-valid JWT would otherwise keep
+// granting bypass access until token expiry. With nil userLookup the
+// claim-derived role is used as-is — that path exists only for tests
+// that pre-date the live-resolve plumbing.
+func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) *auth.ContextUser {
+	user, _, err := auth.AuthenticateRequest(r, secret, nil, userLookup, revoked)
+	if err != nil {
+		return nil
 	}
-
-	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
-		if u, err := auth.ParseJWT(c.Value, secret, revoked); err == nil {
-			return u
-		}
-	}
-
-	return nil
+	return user
 }
 
 // writeAccessDenied returns a styled HTML page for browser navigation requests
