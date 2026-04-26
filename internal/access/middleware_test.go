@@ -107,11 +107,14 @@ func TestAccess_PrivateApp_BrowserNav_GetsStyledHTMLPage(t *testing.T) {
 
 // 403 page (logged in as the wrong account) must NOT just link to /?next=.
 // Re-using the existing session would re-authorise the same wrong user and
-// loop back to the same 403. The link must include logout=1 so the SPA's
-// bootstrap calls /api/auth/logout before showing the login form. Without
-// this distinction, the "Log in" CTA on the 403 page is a literal infinite
-// loop for any user who is signed in to the wrong account.
-func TestAccess_Forbidden_BrowserNav_LinksToLogoutThenLogin(t *testing.T) {
+// loop back to the same 403. The CTA is an HTML <form> POSTing to
+// /api/auth/handoff so the server clears the cookie before the user lands on
+// the login form. The previous implementation used a /?logout=1 anchor gated
+// by a sessionStorage marker planted via onclick — that broke when the
+// access-denied page was opened in a brand-new tab (Cmd+Click), because the
+// new tab had no marker and the SPA refused to log out, bouncing the user
+// straight back to the same 403. Form POSTs have no per-tab dependency.
+func TestAccess_Forbidden_BrowserNav_HandsOffViaFormPOST(t *testing.T) {
 	store := makeStore(t)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: "h", Role: "developer"})
@@ -136,35 +139,32 @@ func TestAccess_Forbidden_BrowserNav_LinksToLogoutThenLogin(t *testing.T) {
 		t.Fatalf("expected 403, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "logout=1") {
-		t.Errorf("403 page must link to /?logout=1&next=... so the SPA logs the wrong-account session out before showing login. Body: %s", body)
+	if !strings.Contains(body, `<form method="POST" action="/api/auth/handoff">`) {
+		t.Errorf("403 CTA must be a <form method=POST action=/api/auth/handoff> so the server clears the cookie regardless of which tab the page is in. Body: %s", body)
 	}
-	if !strings.Contains(body, "next=%2Fapp%2Fsecret%2F") {
-		t.Errorf("403 page must preserve next= so the user lands back on the app after re-auth: %s", body)
+	if !strings.Contains(body, `<input type="hidden" name="next" value="/app/secret/">`) {
+		t.Errorf("403 CTA must carry the original RequestURI as a hidden `next` field so the user lands back on the app after re-auth. Body: %s", body)
 	}
 	if strings.Contains(body, privateAppName) {
 		t.Errorf("403 body LEAKS app name %q to a non-member: %s", privateAppName, body)
 	}
-	// The CTA must set a same-tab sessionStorage marker before navigating.
-	// Without this, an external link to /?logout=1&next=/app/anything/
-	// could trigger a GET-driven logout in any tab. The SPA's
-	// consumeLogoutParam refuses to act unless the marker is present, so
-	// the producer must plant it on real clicks. The literal apostrophes
-	// in the JS are HTML-escaped to &#39; in the rendered attribute, so we
-	// match against the escaped form.
-	if !strings.Contains(body, "shiny_logout_intent") {
-		t.Errorf("403 CTA must set sessionStorage `shiny_logout_intent` via onclick so the SPA can distinguish a real click on this page from an external/forged link. Body: %s", body)
+	// The previous design's failure modes must not regress.
+	if strings.Contains(body, "logout=1") {
+		t.Errorf("403 page must not link to /?logout=1 — handoff is server-side now. Body: %s", body)
 	}
-	if !strings.Contains(body, "sessionStorage.setItem(") {
-		t.Errorf("403 CTA must call sessionStorage.setItem so the marker survives the in-tab navigation. Body: %s", body)
+	if strings.Contains(body, "shiny_logout_intent") {
+		t.Errorf("403 page must not plant a sessionStorage marker — the form POST does the handoff server-side, no per-tab marker needed. Body: %s", body)
+	}
+	if strings.Contains(body, "<a class=\"btn\"") {
+		t.Errorf("403 CTA must be a <form>+<button>, not an <a>: an anchor opens in a new tab on Cmd+Click and the handoff is lost. Body: %s", body)
 	}
 }
 
-// 401 page (no session) must NOT plant the logout-intent marker. The
-// marker is exclusively a 403-handoff signal — leaking it on the 401 path
-// would let a logged-out user trigger the logout flow on a different
-// session if they happened to share the tab via account switch.
-func TestAccess_Unauthorized_BrowserNav_DoesNotPlantLogoutMarker(t *testing.T) {
+// 401 page (no session) keeps the simple anchor → /?next=<original> pattern
+// because there's no session to revoke. It must NOT carry the handoff form
+// (which is a 403-only signal) and must NOT plant the now-removed
+// sessionStorage marker.
+func TestAccess_Unauthorized_BrowserNav_LinksToLoginWithNext(t *testing.T) {
 	store := makeStore(t)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -183,8 +183,14 @@ func TestAccess_Unauthorized_BrowserNav_DoesNotPlantLogoutMarker(t *testing.T) {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 	body := rec.Body.String()
+	if !strings.Contains(body, `href="/?next=%2Fapp%2Fsecret%2F"`) {
+		t.Errorf("401 page must link to /?next=<original> so the user lands back on the app after login. Body: %s", body)
+	}
+	if strings.Contains(body, "/api/auth/handoff") {
+		t.Errorf("401 page must not carry the handoff form — there's no session to revoke. Body: %s", body)
+	}
 	if strings.Contains(body, "shiny_logout_intent") {
-		t.Errorf("401 page must not plant the logout-intent marker — that's a 403-only signal. Body: %s", body)
+		t.Errorf("401 page must not plant the logout-intent marker — that's a 403-only signal and the marker is no longer used at all. Body: %s", body)
 	}
 }
 
@@ -228,7 +234,7 @@ func TestAccess_PrivateApp_OwnerAccess(t *testing.T) {
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -273,7 +279,7 @@ func TestAccess_PrivateApp_GrantedUser(t *testing.T) {
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -297,7 +303,7 @@ func TestAccess_PrivateApp_NonMember_Forbidden(t *testing.T) {
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -322,7 +328,7 @@ func TestAccess_SharedApp_AuthenticatedUser(t *testing.T) {
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/shared-app/", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -375,7 +381,7 @@ func TestAccess_PrivateApp_DemotedAdmin_LosesBypass(t *testing.T) {
 		mw := access.Middleware(store, "test-secret", nil, lookup)
 		handler := mw(http.HandlerFunc(next))
 		req := httptest.NewRequest("GET", "/app/priv/", nil)
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		return rec.Code
@@ -395,6 +401,37 @@ func TestAccess_PrivateApp_DemotedAdmin_LosesBypass(t *testing.T) {
 	}
 }
 
+// /app/* is the path a Shiny app's own frontend uses to talk back to its
+// own backend, so it commonly carries an `Authorization: Bearer ...`
+// header meant for the embedded app — not for ShinyHub. The access
+// middleware MUST authenticate strictly from the session cookie on
+// /app/* and ignore any Authorization header, otherwise the embedded
+// app's header gets routed into ShinyHub's JWT validator and rejects a
+// perfectly valid browser session with a 401.
+func TestAccess_PrivateApp_IgnoresAppAuthorizationHeader(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "admin", "test-secret")
+
+	mw := access.Middleware(store, "test-secret", nil, nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/priv/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	// The embedded Shiny app sends its OWN authorization header. ShinyHub
+	// must ignore it and use the cookie instead.
+	req.Header.Set("Authorization", "Bearer some-other-systems-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("cookie-with-foreign-Authorization: expected 200, got %d — Authorization header on /app/* must not block a valid session cookie", rec.Code)
+	}
+}
+
 func TestAccess_PrivateApp_OperatorBypasses(t *testing.T) {
 	store := makeStore(t)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
@@ -410,7 +447,7 @@ func TestAccess_PrivateApp_OperatorBypasses(t *testing.T) {
 	handler := mw(http.HandlerFunc(next))
 
 	req := httptest.NewRequest("GET", "/app/priv/", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

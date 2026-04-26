@@ -2537,23 +2537,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Persist any /#deploy=<slug> hash before the auth check so the slug
     // survives the login redirect in case the user is not authenticated.
     persistDeployHash();
-    // /?logout=1 means the access middleware sent a 403 page because the
-    // current session belonged to a user without access to the protected
-    // app. consumeLogoutParam returns true when it acted on a legitimate
-    // 403-handoff link; in that case we MUST skip /api/auth/me so we don't
-    // silently re-authenticate the same wrong user. Even if the POST
-    // /api/auth/logout failed (CSRF reject, network error), going straight
-    // to the login form is the correct UX — the next /api/auth/login
-    // replaces the cookie regardless. Without this short-circuit a failed
-    // logout looped the user back to the same 403 page.
-    const wantsLogout = await consumeLogoutParam();
     loadProviders();
     setError(loginError, '');
-
-    if (wantsLogout) {
-      showLoggedOut();
-      return;
-    }
 
     let response;
     try {
@@ -2605,50 +2590,6 @@ document.addEventListener('DOMContentLoaded', () => {
     try { sessionStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
     // Clear the hash without adding a history entry.
     history.replaceState(null, '', window.location.pathname + window.location.search);
-  }
-
-  // consumeLogoutParam looks for `?logout=1` in the URL and, if it is the
-  // 403-handoff link the access middleware emits, best-effort clears the
-  // current session by POSTing /api/auth/logout. Returns true on a real
-  // 403-handoff so the caller can skip /api/auth/me and go straight to
-  // the login form.
-  //
-  // Forgery defence has two layers:
-  //
-  //  1. Same-tab marker: the 403 page sets a `shiny_logout_intent`
-  //     sessionStorage entry via an onclick handler before navigation
-  //     (see internal/access/middleware.go renderAccessDeniedPage). The
-  //     SPA only honours `?logout=1` when that marker is present —
-  //     external links (other tab, other origin, phishing email) can't
-  //     plant the marker, so they can't trigger a GET-driven logout.
-  //     The marker is consumed (removed) on read so it can't replay.
-  //
-  //  2. Pairing: the URL must also carry `?next=/app/<slug>/...`. The
-  //     producer always pairs both; checking either alone leaves an
-  //     attacker too much wiggle room.
-  //
-  // We always strip `?logout=1` from the URL (whether or not we acted
-  // on it) so a refresh can't loop the logout request, and we always
-  // remove the sessionStorage marker so a stale entry can't poison a
-  // future page load.
-  async function consumeLogoutParam() {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('logout') !== '1') return false;
-    const next = params.get('next') || '';
-    let intent = null;
-    try {
-      intent = sessionStorage.getItem('shiny_logout_intent');
-      sessionStorage.removeItem('shiny_logout_intent');
-    } catch { /* sessionStorage may be blocked */ }
-    params.delete('logout');
-    const search = params.toString();
-    history.replaceState(null, '', window.location.pathname + (search ? '?' + search : ''));
-    if (intent !== '1') return false;
-    if (!next.startsWith('/app/')) return false;
-    try {
-      await api('/api/auth/logout', { method: 'POST' });
-    } catch { /* fall through; we still skip /api/auth/me to break the 403 loop */ }
-    return true;
   }
 
   // consumeNextParam reads a same-origin `next=<path>` query parameter from

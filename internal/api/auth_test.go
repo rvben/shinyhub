@@ -565,3 +565,138 @@ func TestSessionLoginIncludesCanCreateApps_Developer(t *testing.T) {
 		t.Errorf("developer should see can_create_apps=true, got false")
 	}
 }
+
+// Handoff happy path: a same-origin POST with a valid session cookie revokes
+// the JWT, clears the cookie, and 303-redirects to /?next=<safe-next>. This
+// is the path the access-denied 403 page exercises when a user signed in to
+// the wrong account clicks "Sign in as a different user". The form lives on
+// an HTML page rendered outside the SPA, so the SPA's CSRF token isn't
+// available — Origin/Referer same-origin is the defence in depth here.
+func TestSessionHandoff_RevokesAndRedirects(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "developer")
+	claims, err := auth.ValidateJWT(token, "test-secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := bytes.NewBufferString("next=%2Fapp%2Fsecret%2F")
+	req := httptest.NewRequest("POST", "/api/auth/handoff", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/?next=%2Fapp%2Fsecret%2F" {
+		t.Errorf("Location = %q, want /?next=%%2Fapp%%2Fsecret%%2F", got)
+	}
+
+	// The session cookie must be expired so the next request to /api/auth/me
+	// returns 401 and the SPA shows the login form.
+	cookies := rec.Result().Cookies()
+	var cleared bool
+	for _, c := range cookies {
+		if c.Name == auth.SessionCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("expected expired session cookie, got %+v", cookies)
+	}
+
+	// The JWT must now be on the revocation list — without this a stolen
+	// cookie could continue to authenticate until natural expiry.
+	revoked, err := store.IsTokenRevoked(claims.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !revoked {
+		t.Error("expected jti to be on the revocation list after handoff")
+	}
+}
+
+// Cross-origin POST is rejected: a malicious site can fire an HTML form POST
+// at us, but the browser attaches a third-party Origin header. The handler
+// must refuse before clearing the cookie or revoking anything.
+func TestSessionHandoff_RejectsCrossOrigin(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "developer")
+	claims, _ := auth.ValidateJWT(token, "test-secret", nil)
+
+	form := bytes.NewBufferString("next=%2Fapp%2Fsecret%2F")
+	req := httptest.NewRequest("POST", "/api/auth/handoff", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin handoff = %d, want 403", rec.Code)
+	}
+	revoked, _ := store.IsTokenRevoked(claims.ID)
+	if revoked {
+		t.Error("cross-origin handoff must not revoke the JWT")
+	}
+}
+
+// A POST with no Origin and no Referer is also rejected. A bare same-origin
+// claim isn't enough on its own — privacy extensions sometimes strip both
+// headers, and we'd rather fail closed than open a CSRF hole.
+func TestSessionHandoff_RejectsMissingOriginAndReferer(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "developer")
+
+	form := bytes.NewBufferString("next=%2Fapp%2Fsecret%2F")
+	req := httptest.NewRequest("POST", "/api/auth/handoff", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("origin-less handoff = %d, want 403", rec.Code)
+	}
+}
+
+// Open-redirect guard: an attacker-supplied `next` pointing to a different
+// host (or to a protocol-relative URL) must be ignored — we redirect to the
+// bare login page instead. Otherwise the handoff is a phishing pivot:
+// "click here to switch accounts" → POST → 303 to evil.example.com.
+func TestSessionHandoff_ScrubsUnsafeNext(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "developer")
+
+	cases := []struct {
+		name string
+		next string
+	}{
+		{"protocol-relative", "//evil.example.com/"},
+		{"absolute URL", "https://evil.example.com/"},
+		{"backslash trick", "/\\evil.example.com"},
+		{"bare slash loops", "/"},
+		{"bare /login loops", "/login"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			form := bytes.NewBufferString("next=" + tc.next)
+			req := httptest.NewRequest("POST", "/api/auth/handoff", form)
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Origin", "http://"+req.Host)
+			req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("expected 303, got %d", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); got != "/" {
+				t.Errorf("unsafe next %q yielded Location %q, want /", tc.next, got)
+			}
+		})
+	}
+}

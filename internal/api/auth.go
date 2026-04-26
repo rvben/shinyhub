@@ -7,7 +7,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -358,6 +360,106 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSessionHandoff terminates the current browser session server-side and
+// redirects to the login form. Used by the access-denied 403 page so a user
+// signed in to the wrong account can switch users in one click.
+//
+// This endpoint is registered OUTSIDE the bearer+CSRF middleware group: the
+// 403 page is rendered by an unauthenticated context (well, an *insufficiently*
+// authenticated one), and crucially the page may be opened in a fresh tab
+// where the SPA hasn't bootstrapped — so it has no CSRF token to send. The
+// previous design (a GET-driven /?logout=1 link gated by an onclick
+// sessionStorage marker) only worked when the click happened in the same tab
+// the marker was planted in; Cmd+Click / Ctrl+Click on the link opened a new
+// tab where the marker was missing, the SPA refused to log out, and the user
+// bounced straight back to the same 403 page.
+//
+// Defence against cross-site forgery: we require Origin or Referer to match
+// our own host. A malicious site can POST to us, but the browser will either
+// attach a third-party Origin header (which we reject) or — if neither header
+// is sent — we reject the request outright. This is the same pattern Django,
+// Rails et al. use for their double-submit-cookie escape hatch.
+func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginPost(r) {
+		http.Error(w, "cross-origin handoff rejected", http.StatusForbidden)
+		return
+	}
+
+	// Best-effort: revoke the JWT so it can't be reused for the rest of its
+	// signed lifetime. A bad/expired/missing cookie is fine — we still clear
+	// it and redirect; the goal is "next request starts unauthenticated", not
+	// "we successfully revoked something specific".
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil && c.Value != "" {
+		if claims, err := auth.ValidateJWT(c.Value, s.cfg.Auth.Secret, s.revocationChecker()); err == nil {
+			expiry := time.Time{}
+			if claims.ExpiresAt != nil {
+				expiry = claims.ExpiresAt.Time
+			}
+			if err := s.store.RevokeToken(claims.ID, claims.UserID, expiry); err != nil {
+				slog.Warn("revoke token on handoff", "user", claims.Subject, "err", err)
+			}
+			s.store.LogAuditEvent(db.AuditEventParams{
+				UserID:       &claims.UserID,
+				Action:       "logout_handoff",
+				ResourceType: "user",
+				ResourceID:   claims.Subject,
+				IPAddress:    s.ClientIP(r),
+			})
+		}
+	}
+
+	auth.ClearSessionCookie(w, r)
+
+	target := "/"
+	if next := safeNextPath(r.FormValue("next")); next != "" {
+		target = "/?next=" + url.QueryEscape(next)
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// sameOriginPost reports whether the request appears to come from our own
+// origin. We require either Origin or Referer to be present and to match the
+// request's Host. Browsers attach Origin to all unsafe cross-origin requests,
+// so a third-party POST from evil.example.com will either carry
+// `Origin: https://evil.example.com` (rejected) or — if Origin is suppressed —
+// a `Referer: https://evil.example.com/...` (also rejected). A request with
+// neither header is rejected too; that closes the gap where a privacy-focused
+// extension strips both.
+func sameOriginPost(r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
+	}
+	if referer := r.Header.Get("Referer"); referer != "" {
+		u, err := url.Parse(referer)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
+	}
+	return false
+}
+
+// safeNextPath returns raw if it looks like a same-origin path the SPA can
+// safely redirect to, otherwise "". Mirrors the SPA's consumeNextParam
+// validation (relative path starting with a single `/`, no `//` protocol-
+// relative form, no `\` Windows separator, not the bare `/` or `/login`).
+func safeNextPath(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.Contains(raw, "\\") {
+		return ""
+	}
+	if raw == "/" || raw == "/login" {
+		return ""
+	}
+	return raw
 }
 
 // generateAPIKey creates a cryptographically random 32-byte token and returns

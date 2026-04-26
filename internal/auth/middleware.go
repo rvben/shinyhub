@@ -126,6 +126,20 @@ func authenticateSessionCookie(r *http.Request, secret string, userLookup UserLo
 	return &authResult{User: user, Token: tokenFromClaims(claims)}, nil
 }
 
+// AuthenticateBrowserSession authenticates a request strictly from the
+// session cookie, ignoring any Authorization header. Used by middleware
+// that fronts user-facing /app/* routes: Shiny apps regularly forward
+// their own Authorization headers to their own backend through that
+// path, and routing those headers into ShinyHub's JWT validator would
+// reject perfectly valid browser sessions with a spurious 401.
+func AuthenticateBrowserSession(r *http.Request, secret string, userLookup UserLookup, revoked RevocationChecker) (*ContextUser, *TokenInfo, error) {
+	res, err := authenticateSessionCookie(r, secret, userLookup, revoked)
+	if err != nil || res == nil {
+		return nil, nil, err
+	}
+	return res.User, res.Token, nil
+}
+
 // AuthenticateRequest authenticates a request from either an Authorization
 // header or the browser session cookie. If an Authorization header is present,
 // it takes precedence over the cookie and must be valid. JWT paths

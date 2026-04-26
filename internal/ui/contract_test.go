@@ -382,84 +382,38 @@ func TestNewUserSnippetIsRunnable(t *testing.T) {
 	}
 }
 
-// TestSPAConsumesLogoutQueryParam guards the 403-loop fix. The access
-// middleware emits /?logout=1&next=<original> on a 403 page so the user
-// can sign in as a different account. Two failure modes must stay closed:
-//
-//  1. If POST /api/auth/logout silently fails (CSRF reject, network),
-//     the SPA must NOT proceed to /api/auth/me — that would re-auth the
-//     same wrong user and bounce them back to the same 403. We pin the
-//     short-circuit by requiring initialize() to skip /api/auth/me when
-//     consumeLogoutParam returns truthy.
-//
-//  2. /?logout=1 must NOT be honoured as a bare query param. That would
-//     turn any external link to /?logout=1 into a GET-driven logout for
-//     a normal SPA session. The producer (internal/access/middleware.go
-//     renderAccessDeniedPage) always pairs it with a ?next=/app/<slug>/
-//     value; the SPA must require the same pairing before POSTing.
-func TestSPAConsumesLogoutQueryParam(t *testing.T) {
+// TestSPADoesNotShipClientSideLogoutDance guards against a regression to the
+// previous `?logout=1` + sessionStorage marker design. The 403 access-denied
+// page now hands off via a server-side POST to /api/auth/handoff (see
+// internal/access/middleware.go renderHandoffPage and internal/api/auth.go
+// handleSessionHandoff) — by the time the SPA loads, the cookie is already
+// cleared and the JWT is revoked. Any leftover client-side logout dance is
+// dead code, and worse: the old design only worked when the access-denied
+// page was clicked in the same tab the marker was planted in, so Cmd+Click
+// → new tab broke account switching entirely. We pin the absence of every
+// hook the old design relied on.
+func TestSPADoesNotShipClientSideLogoutDance(t *testing.T) {
 	b, err := fs.ReadFile(ui.Static(), "app.js")
 	if err != nil {
 		t.Fatalf("read app.js: %v", err)
 	}
 	src := string(b)
-	if !strings.Contains(src, "function consumeLogoutParam(") {
-		t.Fatal("app.js: must define consumeLogoutParam(); see internal/access/middleware.go renderAccessDeniedPage which advertises /?logout=1&next=<original> on 403 pages")
+	if strings.Contains(src, "consumeLogoutParam") {
+		t.Error("app.js: consumeLogoutParam must be removed — handoff is server-side via POST /api/auth/handoff (internal/api/auth.go). The client-side dance only worked in the same tab the 403 page was opened in.")
 	}
-	if !strings.Contains(src, "params.get('logout')") {
-		t.Fatal("app.js consumeLogoutParam must read ?logout= from URLSearchParams")
+	if strings.Contains(src, "shiny_logout_intent") {
+		t.Error("app.js: shiny_logout_intent sessionStorage marker must be removed — the new server-side handoff has no per-tab dependency.")
 	}
-	if !strings.Contains(src, "/api/auth/logout") {
-		t.Fatal("app.js consumeLogoutParam must POST /api/auth/logout to clear the wrong session before /api/auth/me re-authenticates it")
-	}
-	// Same-tab marker: the 403 CTA in internal/access/middleware.go plants
-	// `shiny_logout_intent` in sessionStorage before navigation. The SPA
-	// must require + consume that marker so an external link to
-	// /?logout=1&next=/app/anything/ can't trigger a GET-driven logout in
-	// an unrelated session — sessionStorage is per-tab per-origin and
-	// can't be planted from a third-party referrer.
-	if !strings.Contains(src, "sessionStorage.getItem('shiny_logout_intent')") {
-		t.Fatal("app.js consumeLogoutParam must read the `shiny_logout_intent` sessionStorage marker so external/forged /?logout=1 links don't trigger a logout. The marker is planted by the 403 page in internal/access/middleware.go renderAccessDeniedPage.")
-	}
-	if !strings.Contains(src, "sessionStorage.removeItem('shiny_logout_intent')") {
-		t.Fatal("app.js consumeLogoutParam must consume (removeItem) the `shiny_logout_intent` marker so a stale entry can't replay a logout on a future page load")
-	}
-	// Pairing guard: ?logout=1 must require ?next=/app/... before POSTing
-	// /api/auth/logout. Otherwise any external link to /?logout=1 logs
-	// the current SPA user out on navigation alone.
-	if !strings.Contains(src, "next.startsWith('/app/')") {
-		t.Fatal("app.js consumeLogoutParam must gate the POST on next.startsWith('/app/') so /?logout=1 doesn't become a GET-driven logout for any unrelated session")
+	if strings.Contains(src, "params.get('logout')") {
+		t.Error("app.js: must not key behaviour on ?logout= — the 403 page POSTs to /api/auth/handoff instead of redirecting through /?logout=1.")
 	}
 
-	// Ordering: consumeLogoutParam must precede /api/auth/me so the
-	// wrong session can be cleared before any re-auth attempt.
-	logoutIdx := strings.Index(src, "await consumeLogoutParam()")
-	meIdx := strings.Index(src, "await api('/api/auth/me')")
-	if logoutIdx < 0 {
-		t.Fatal("app.js initialize() must `await consumeLogoutParam()` so the wrong session is cleared before the auth check")
-	}
-	if meIdx < 0 {
-		t.Fatal("app.js initialize() must call await api('/api/auth/me') so we can verify ordering with consumeLogoutParam")
-	}
-	if logoutIdx > meIdx {
-		t.Fatal("app.js: consumeLogoutParam() must run BEFORE /api/auth/me — otherwise the SPA re-authenticates the wrong session and the user bounces back to the same 403 page")
-	}
-
-	// Short-circuit: when consumeLogoutParam acted, initialize() must
-	// skip /api/auth/me and go straight to showLoggedOut(). Otherwise a
-	// failed logout (e.g. CSRF reject) silently re-authorises the wrong
-	// user. We pin this by requiring `if (wantsLogout)` followed by
-	// `showLoggedOut()` and an early `return` between consumeLogoutParam
-	// and the /api/auth/me call.
-	if !strings.Contains(src, "const wantsLogout = await consumeLogoutParam()") {
-		t.Fatal("app.js initialize() must capture consumeLogoutParam's return value as `wantsLogout` so a successful 403-handoff can short-circuit /api/auth/me")
-	}
-	bridge := src[logoutIdx:meIdx]
-	if !strings.Contains(bridge, "if (wantsLogout)") {
-		t.Fatal("app.js initialize(): between consumeLogoutParam and /api/auth/me there must be `if (wantsLogout)` so the auth check is skipped on a 403-handoff (otherwise a failed logout loops back to the same 403)")
-	}
-	if !strings.Contains(bridge, "showLoggedOut()") {
-		t.Fatal("app.js initialize(): the wantsLogout branch must call showLoggedOut() so the user sees the login form instead of /api/auth/me re-authenticating the wrong session")
+	// Bootstrap must hit /api/auth/me directly. After a successful handoff the
+	// 303 lands the browser on /?next=<original> with the cookie already
+	// cleared, so /api/auth/me returns 401 and the SPA shows the login form
+	// — no client-side short-circuit needed.
+	if !strings.Contains(src, "await api('/api/auth/me')") {
+		t.Fatal("app.js initialize() must call await api('/api/auth/me') as the auth check")
 	}
 }
 

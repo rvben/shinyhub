@@ -162,6 +162,13 @@ func (s *Server) buildRouter() http.Handler {
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
 	r.Post("/api/auth/session", s.handleSessionLogin)
+	// Server-side handoff used by the access-denied 403 page so a user signed
+	// in to the wrong account can switch users in one click. Lives outside the
+	// bearer+CSRF group on purpose: it's invoked by an HTML <form> POST from a
+	// page that may be opened in a brand-new tab where the SPA hasn't bootstrapped
+	// (so there's no CSRF token cookie yet). The handler does its own Origin/Referer
+	// same-origin check; see handleSessionHandoff for the reasoning.
+	r.Post("/api/auth/handoff", s.handleSessionHandoff)
 	r.Get("/api/auth/github/login", s.handleGitHubLogin)
 	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
 	r.Get("/api/auth/google/login", s.handleGoogleLogin)

@@ -84,11 +84,13 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 	}
 }
 
-// extractUser authenticates the request from a JWT in the Authorization
-// header (Bearer scheme) or the session cookie. We pass nil for keyLookup
-// to AuthenticateRequest so "Token <api-key>" requests fall through as
-// unauthenticated — API keys are CLI/SDK identities and have no concept
-// of a browser session, so they shouldn't grant access to /app/* anyway.
+// extractUser authenticates the request strictly from the session cookie.
+// Authorization headers are intentionally ignored: /app/* is the path a
+// Shiny app's own frontend uses to talk back to its own backend, and
+// those calls regularly carry an `Authorization: Bearer ...` (or `Basic`)
+// header meant for the embedded app. Routing that header into ShinyHub's
+// JWT validator would reject perfectly valid browser sessions with a
+// spurious 401. CLI/SDK callers use /api/* instead.
 //
 // When userLookup is supplied, the JWT-claimed identity is re-resolved
 // against the live database on every request; this defeats stale-claim
@@ -97,7 +99,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 // claim-derived role is used as-is — that path exists only for tests
 // that pre-date the live-resolve plumbing.
 func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) *auth.ContextUser {
-	user, _, err := auth.AuthenticateRequest(r, secret, nil, userLookup, revoked)
+	user, _, err := auth.AuthenticateBrowserSession(r, secret, userLookup, revoked)
 	if err != nil {
 		return nil
 	}
@@ -160,46 +162,37 @@ func wantsHTML(r *http.Request) bool {
 // private app without (401) or with the wrong (403) credentials. The body
 // never names the app — see writeAccessDenied for the rationale.
 //
-// The login link is built so the user lands back on the original app after
-// re-authentication:
-//   - 401 (no session): /?next=<original>. The SPA renders the login form;
-//     after success consumeNextParam() hard-navigates to <original>.
-//   - 403 (wrong session): /?logout=1&next=<original>. The current session
-//     would otherwise re-authorise the same wrong user and bounce them back
-//     to the same 403 page. The SPA's initialize() consumes ?logout=1 by
-//     POSTing /api/auth/logout before showing the login form, so the user
-//     gets a chance to sign in as a different account.
+// The CTA differs by status so the user reaches the login form by the right
+// path:
 //
-// The 403 button additionally sets a `shiny_logout_intent` sessionStorage
-// marker via an inline onclick handler. The SPA's consumeLogoutParam()
-// only honours `?logout=1` when that marker is present and same-origin
-// same-tab — so an attacker can't craft an external link to
-// /?logout=1&next=/app/anything/ and trigger a GET-driven logout for an
-// unrelated session. sessionStorage is per-tab per-origin and persists
-// across the in-tab navigation triggered by clicking the link.
+//   - 401 (no session): a plain anchor to /?next=<original>. The SPA renders
+//     the login form; after success consumeNextParam() hard-navigates to
+//     <original>.
+//
+//   - 403 (wrong session): an HTML <form> that POSTs to /api/auth/handoff
+//     with `next=<original>` as a hidden field. The endpoint revokes the
+//     current session server-side, clears the cookie, and 303-redirects to
+//     /?next=<original>. Using a form POST instead of an `<a href>` to
+//     /?logout=1 means the handoff works even when the access-denied page
+//     was opened in a brand-new tab (Cmd+Click / Ctrl+Click on a link in
+//     the address bar): the previous design depended on a sessionStorage
+//     marker planted by an onclick handler in the same tab, and the new
+//     tab had no such marker — so the user bounced straight back to the
+//     same 403. The form POST has no per-tab dependency.
 //
 // The button label tracks the same distinction: "Log in" for 401,
 // "Sign in as a different user" for 403.
 func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
-	loginHref := "/"
-	loginLabel := "Log in"
-	body := "This app is private. Sign in to continue."
-	// onclick is empty for 401 (no logout to trigger) and sets the same-tab
-	// logout-intent marker for 403. The marker binds /?logout=1 honour to
-	// a real click on this page — without it, an external link to
-	// /?logout=1&next=/app/.../ does nothing in the SPA.
-	loginOnclick := ""
 	if status == http.StatusForbidden {
-		loginLabel = "Sign in as a different user"
-		body = "Your account doesn't have access to this app. Sign in with a different account."
-		loginOnclick = "try{sessionStorage.setItem('shiny_logout_intent','1')}catch(e){}"
+		return renderHandoffPage(headline, nextURL)
 	}
+	return renderLoginRedirectPage(headline, nextURL)
+}
+
+func renderLoginRedirectPage(headline, nextURL string) []byte {
+	loginHref := "/"
 	if nextURL != "" {
-		params := url.Values{"next": {nextURL}}
-		if status == http.StatusForbidden {
-			params.Set("logout", "1")
-		}
-		loginHref = "/?" + params.Encode()
+		loginHref = "/?" + url.Values{"next": {nextURL}}.Encode()
 	}
 	const tpl = `<!DOCTYPE html>
 <html lang="en">
@@ -222,17 +215,52 @@ func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
 <body>
   <div class="box">
     <h1>HEADLINE</h1>
-    <p>BODY</p>
-    <a class="btn" href="LOGIN" onclick="ONCLICK">LABEL</a>
+    <p>This app is private. Sign in to continue.</p>
+    <a class="btn" href="LOGIN">Log in</a>
   </div>
 </body>
 </html>`
 	out := strings.NewReplacer(
 		"HEADLINE", htmlEscape(headline),
-		"BODY", htmlEscape(body),
 		"LOGIN", htmlEscape(loginHref),
-		"ONCLICK", htmlEscape(loginOnclick),
-		"LABEL", htmlEscape(loginLabel),
+	).Replace(tpl)
+	return []byte(out)
+}
+
+func renderHandoffPage(headline, nextURL string) []byte {
+	const tpl = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HEADLINE</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         display: flex; align-items: center; justify-content: center;
+         height: 100vh; margin: 0; background: #f8f9fa; color: #212529; }
+  .box { text-align: center; max-width: 420px; padding: 0 1rem; }
+  h1   { font-size: 1.25rem; margin: 0 0 0.5rem; color: #495057; }
+  p    { color: #868e96; font-size: 0.875rem; line-height: 1.4; margin: 0 0 1.25rem; }
+  form { margin: 0; }
+  button.btn { display: inline-block; padding: 0.55rem 1.1rem; font-size: 0.875rem;
+               background: #0d6efd; color: #fff; border: 0; border-radius: 4px;
+               cursor: pointer; font-family: inherit; }
+  button.btn:hover { background: #0b5ed7; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>HEADLINE</h1>
+    <p>Your account doesn't have access to this app. Sign in with a different account.</p>
+    <form method="POST" action="/api/auth/handoff">
+      <input type="hidden" name="next" value="NEXT">
+      <button type="submit" class="btn">Sign in as a different user</button>
+    </form>
+  </div>
+</body>
+</html>`
+	out := strings.NewReplacer(
+		"HEADLINE", htmlEscape(headline),
+		"NEXT", htmlEscape(nextURL),
 	).Replace(tpl)
 	return []byte(out)
 }
