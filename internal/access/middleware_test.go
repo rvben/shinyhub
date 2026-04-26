@@ -3,6 +3,7 @@ package access_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/access"
@@ -59,6 +60,70 @@ func TestAccess_PrivateApp_NoAuth_Rejected(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("private app no auth: expected 401, got %d", rec.Code)
+	}
+}
+
+// Browser navigation requests must get a styled HTML "Sign in" page rather
+// than plain text "unauthorized" — that page is what the user sees when they
+// open a private app URL while logged out.
+func TestAccess_PrivateApp_BrowserNav_GetsStyledHTMLPage(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Quarterly Report", OwnerID: owner.ID})
+
+	mw := access.Middleware(store, "test-secret", nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/secret/", nil)
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("expected text/html, got %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Sign in to access this app") {
+		t.Errorf("body missing headline: %s", body)
+	}
+	if !strings.Contains(body, "Quarterly Report") {
+		t.Errorf("body should name the app so the user knows what they were trying to open: %s", body)
+	}
+	if !strings.Contains(body, "/?next=%2Fapp%2Fsecret%2F") {
+		t.Errorf("body should link to login with next= param so the user can return after auth: %s", body)
+	}
+}
+
+// CLI/SDK callers (Authorization header set) must keep getting the legacy
+// JSON envelope so existing scripts don't break.
+func TestAccess_PrivateApp_APICall_GetsJSON(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+
+	mw := access.Middleware(store, "test-secret", nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/priv/api/data", nil)
+	req.Header.Set("Authorization", "Bearer bogus")
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("expected application/json, got %q", ct)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"error":"unauthorized"}` {
+		t.Errorf("expected JSON envelope, got %q", got)
 	}
 }
 

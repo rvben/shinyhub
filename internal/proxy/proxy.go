@@ -139,9 +139,10 @@ type (
 
 // Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
-	mu     sync.RWMutex
-	pools  map[string]*backendPool
-	onMiss func(slug string)
+	mu          sync.RWMutex
+	pools       map[string]*backendPool
+	onMiss      func(slug string)
+	slugExists  func(slug string) bool
 
 	accessLog atomic.Pointer[accessLogFn]
 	clientIP  atomic.Pointer[clientIPFn]
@@ -190,6 +191,17 @@ func (p *Proxy) SetClientIPResolver(fn func(*http.Request) string) {
 func (p *Proxy) SetOnMiss(fn func(string)) {
 	p.mu.Lock()
 	p.onMiss = fn
+	p.mu.Unlock()
+}
+
+// SetSlugExists registers a synchronous predicate that the proxy uses to
+// distinguish a known-but-not-running slug (serve loading page) from a
+// completely unknown slug (return 404). When unset, the proxy falls back to
+// always serving the loading page on miss — matching the legacy behaviour
+// from before the predicate was wired up.
+func (p *Proxy) SetSlugExists(fn func(string) bool) {
+	p.mu.Lock()
+	p.slugExists = fn
 	p.mu.Unlock()
 }
 
@@ -489,8 +501,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mu.RLock()
 	pool := p.pools[slug]
 	onMiss := p.onMiss
+	slugExists := p.slugExists
 	if pool == nil || !poolHasAny(pool) {
 		p.mu.RUnlock()
+		// If we have a predicate and it says the slug is unknown, return a
+		// real 404 instead of looping the user on the loading page forever.
+		if slugExists != nil && !slugExists(slug) {
+			http.NotFound(rec, r)
+			return
+		}
 		if onMiss != nil {
 			go onMiss(slug)
 		}

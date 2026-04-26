@@ -207,6 +207,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// anything the backend app (uvicorn/httpuv) chooses to print in its own
 	// log and gives operators a reliable per-slug audit trail.
 	prx.SetClientIPResolver(srv.ClientIP)
+	// Distinguish unknown-slug requests from hibernated-app requests so the
+	// proxy returns 404 for typos / deleted apps instead of looping the
+	// loading page indefinitely. The lookup hits SQLite (cached page) and
+	// only runs on miss, so the cost is negligible.
+	prx.SetSlugExists(func(slug string) bool {
+		_, err := store.GetAppBySlug(slug)
+		return err == nil
+	})
 	prx.SetAccessLogger(func(e proxy.AccessLogEntry) {
 		attrs := []any{
 			"slug", e.Slug,

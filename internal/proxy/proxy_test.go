@@ -632,6 +632,47 @@ func TestProxy_ServesLoadingPageOnMiss(t *testing.T) {
 	}
 }
 
+func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) bool { return slug == "known" })
+	var onMissCalled bool
+	p.SetOnMiss(func(string) { onMissCalled = true })
+
+	req := httptest.NewRequest("GET", "/app/typo/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown slug, got %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	if onMissCalled {
+		t.Error("onMiss should not fire for an unknown slug — wakeup is only meaningful for slugs that exist")
+	}
+}
+
+func TestProxy_ServesLoadingPageWhenSlugKnown(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) bool { return true })
+	done := make(chan struct{})
+	p.SetOnMiss(func(string) { close(done) })
+
+	req := httptest.NewRequest("GET", "/app/sleeping/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected loading page (200) for known hibernated slug, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Starting app") {
+		t.Errorf("expected loading page body, got %q", rec.Body.String())
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("onMiss should fire for known hibernated slug")
+	}
+}
+
 func TestProxy_CallsOnMissCallback(t *testing.T) {
 	p := proxy.New()
 	var mu sync.Mutex

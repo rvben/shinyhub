@@ -3,6 +3,8 @@ package cli
 import (
 	"archive/zip"
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,6 +154,51 @@ func TestZipDir_OmitsDataAndCacheDirs(t *testing.T) {
 	}
 	if !strings.Contains(summary, "seed.parquet") {
 		t.Errorf("summary should mention seed.parquet: %q", summary)
+	}
+}
+
+// ensureApp must surface the server's error envelope so the user sees
+// "quota exceeded" / "invalid slug" / etc. instead of the generic
+// "could not create app".
+func TestEnsureApp_SurfacesServerErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/full":
+			w.WriteHeader(http.StatusNotFound)
+		case "/api/apps":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"app quota exceeded"}`))
+		default:
+			t.Errorf("unexpected request to %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "full")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "app quota exceeded") {
+		t.Errorf("error should surface the server message, got %q", err.Error())
+	}
+}
+
+func TestEnsureApp_FallsBackToRawBodyWhenNotJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/proxy":
+			w.WriteHeader(http.StatusNotFound)
+		case "/api/apps":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("upstream timeout"))
+		}
+	}))
+	defer srv.Close()
+
+	err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "proxy")
+	if err == nil || !strings.Contains(err.Error(), "upstream timeout") {
+		t.Errorf("expected raw body in error, got %v", err)
 	}
 }
 

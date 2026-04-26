@@ -613,6 +613,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		AppID:     app.ID,
 		Version:   version,
 		BundleDir: bundleDir,
+		Status:    "succeeded",
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -755,6 +756,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		AppID:     app.ID,
 		Version:   prev.Version,
 		BundleDir: prev.BundleDir,
+		Status:    "succeeded",
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "record rollback deployment for %s: %v\n", slug, err)
 		// app is running; don't fail the request over a record error

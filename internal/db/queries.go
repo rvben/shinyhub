@@ -550,12 +550,20 @@ type CreateDeploymentParams struct {
 	AppID     int64
 	Version   string
 	BundleDir string
+	// Status records the terminal outcome of the deploy attempt. Callers pass
+	// "succeeded" or "failed". Empty defaults to "pending" — only appropriate
+	// for callers that intend to UpdateDeploymentStatus afterwards.
+	Status string
 }
 
 func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) {
+	status := p.Status
+	if status == "" {
+		status = "pending"
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO deployments (app_id, version, bundle_dir) VALUES (?, ?, ?)`,
-		p.AppID, p.Version, p.BundleDir,
+		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+		p.AppID, p.Version, p.BundleDir, status,
 	)
 	if err != nil {
 		return nil, err
@@ -564,7 +572,7 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	if err != nil {
 		return nil, fmt.Errorf("last insert id: %w", err)
 	}
-	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: "pending"}, nil
+	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: status}, nil
 }
 
 func (s *Store) UpdateDeploymentStatus(id int64, status string) error {

@@ -230,9 +230,21 @@ func ensureApp(cfg *cliConfig, slug string) error {
 	if err != nil {
 		return err
 	}
-	cr.Body.Close()
+	defer cr.Body.Close()
 	if cr.StatusCode != 201 {
-		return fmt.Errorf("could not create app %s", slug)
+		raw, _ := io.ReadAll(cr.Body)
+		// Try to surface the server's `{"error": "..."}` envelope, falling
+		// back to the raw body so the user gets enough context to diagnose
+		// quota / permission / validation failures.
+		msg := strings.TrimSpace(string(raw))
+		var env struct{ Error string `json:"error"` }
+		if err := json.Unmarshal(raw, &env); err == nil && env.Error != "" {
+			msg = env.Error
+		}
+		if msg == "" {
+			msg = cr.Status
+		}
+		return fmt.Errorf("could not create app %s: %s", slug, msg)
 	}
 	return nil
 }
