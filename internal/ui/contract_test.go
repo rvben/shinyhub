@@ -463,6 +463,36 @@ func TestSPAConsumesLogoutQueryParam(t *testing.T) {
 	}
 }
 
+// TestSPAPendingDeployUsesPerTabStorage guards against cross-tab bleed of
+// the deploy intent. The /#deploy=<slug> empty-state hash is persisted so
+// it survives the in-tab login redirect; the storage choice MUST be
+// sessionStorage (per-tab per-origin), not localStorage. localStorage is
+// shared across every tab on the same origin — a second tab logging in
+// as a different account would see the marker, fail the membership check,
+// and clear it, losing the original tab's deploy hint and surfacing a
+// confusing modal for an app it doesn't own.
+func TestSPAPendingDeployUsesPerTabStorage(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	if strings.Contains(src, "localStorage.setItem('pendingDeploy'") ||
+		strings.Contains(src, "localStorage.getItem('pendingDeploy'") ||
+		strings.Contains(src, "localStorage.removeItem('pendingDeploy'") {
+		t.Fatal("app.js: pendingDeploy must use sessionStorage, not localStorage. localStorage bleeds across tabs on the same origin and lets a second tab (different account) consume or clobber the originating tab's deploy intent.")
+	}
+	if !strings.Contains(src, "sessionStorage.setItem('pendingDeploy'") {
+		t.Fatal("app.js: persistDeployHash must call sessionStorage.setItem('pendingDeploy', ...) to persist the deploy intent across the in-tab login redirect")
+	}
+	if !strings.Contains(src, "sessionStorage.getItem('pendingDeploy')") {
+		t.Fatal("app.js: handleDeployHash must read sessionStorage.getItem('pendingDeploy') as a fallback when no #deploy= hash is present")
+	}
+	if !strings.Contains(src, "sessionStorage.removeItem('pendingDeploy')") {
+		t.Fatal("app.js: handleDeployHash must clear sessionStorage on consume/no-permission paths so the entry can't loop")
+	}
+}
+
 // TestSPALogoutButtonRespectsServerOutcome guards against the logout button
 // lying to the user. The previous handler swallowed every fetch outcome and
 // called showLoggedOut() unconditionally, so a 403 (missing CSRF cookie) or

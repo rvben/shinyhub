@@ -2576,11 +2576,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Honour /#deploy=<slug> from the server-rendered empty-state page.
-  // The hash is saved to localStorage so it survives a login redirect:
-  // if the user is not authenticated when they visit /#deploy=<slug>,
-  // the hash is persisted here and consumed after login completes.
-  // After the apps list has loaded the deploy modal is opened and the
-  // stored slug is cleared so refreshing doesn't re-trigger.
+  // The hash is saved to sessionStorage so it survives the in-tab login
+  // redirect: if the user is not authenticated when they visit
+  // /#deploy=<slug>, the hash is persisted here and consumed after login
+  // completes. After the apps list has loaded the deploy modal is opened
+  // and the stored slug is cleared so refreshing doesn't re-trigger.
+  //
+  // We intentionally use sessionStorage rather than localStorage so the
+  // pending intent stays scoped to the originating tab. localStorage would
+  // bleed the slug to every tab on the same origin: a second tab logging
+  // in as a different account would see the marker, fail the membership
+  // check, and clear it — losing the original tab's deploy hint and
+  // surfacing a confusing modal for an app it doesn't own.
+  //
   // DEPLOY_HASH_RE captures a slug after `#deploy=`. The slug rule mirrors
   // SLUG_RE (RFC-1123 label) but is wrapped in a single capturing group.
   const DEPLOY_HASH_RE = /^#deploy=([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/i;
@@ -2588,7 +2596,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function persistDeployHash() {
     const match = DEPLOY_HASH_RE.exec(window.location.hash);
     if (!match) return;
-    try { localStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
+    try { sessionStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
     // Clear the hash without adding a history entry.
     history.replaceState(null, '', window.location.pathname + window.location.search);
   }
@@ -2686,11 +2694,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function handleDeployHash() {
-    // Check hash first, then fall back to localStorage.
+    // Check hash first, then fall back to sessionStorage (per-tab so the
+    // intent doesn't bleed across tabs / accounts).
     const hashMatch = DEPLOY_HASH_RE.exec(window.location.hash);
     let slug = hashMatch ? hashMatch[1] : null;
     if (!slug) {
-      try { slug = localStorage.getItem('pendingDeploy'); } catch { /* storage may be blocked */ }
+      try { slug = sessionStorage.getItem('pendingDeploy'); } catch { /* storage may be blocked */ }
     }
     if (!slug) return;
     // Clear the hash without adding a history entry. Do this before any
@@ -2708,15 +2717,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!app) {
       // App vanished between persist and consume (deleted, or user no longer
       // has visibility). Drop the pending slug so it doesn't loop forever.
-      try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
+      try { sessionStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
       return;
     }
     if (!canManageApp(state.user, app)) {
-      try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
+      try { sessionStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
       return;
     }
     // Only consume the stored slug once we've confirmed we can act on it.
-    try { localStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
+    try { sessionStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
     const card = [...appGrid.querySelectorAll('.app-card')].find(
       c => c.querySelector('.app-meta span')?.textContent === `/${slug}`
     );
