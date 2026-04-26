@@ -29,6 +29,14 @@ function relativeTime(date) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+// formatStatus turns the lowercase wire-status (`running`, `stopped`,
+// `degraded`, …) into a sentence-case label for badge text. Badges no
+// longer use `text-transform: uppercase`, so the source casing matters.
+function formatStatus(status) {
+  if (!status) return '';
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const state = {
     user: null,
@@ -51,6 +59,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const refreshButton = document.getElementById('refresh-button');
   const logoutButton = document.getElementById('logout-button');
   const sessionUser = document.getElementById('session-user');
+  const serverHost  = document.getElementById('server-host');
+  if (serverHost) serverHost.textContent = window.location.host;
   const appGrid = document.getElementById('app-grid');
   const emptyState = document.getElementById('empty-state');
   const emptyStateHeading = document.getElementById('empty-state-heading');
@@ -86,6 +96,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const newUserPassword = document.getElementById('new-user-password');
   const newUserRole     = document.getElementById('new-user-role');
   const newUserError    = document.getElementById('new-user-error');
+  const newUserSnippet  = document.getElementById('new-user-snippet');
+  const newUserSnippetCopy = document.getElementById('new-user-snippet-copy');
   const resetPwModal    = document.getElementById('reset-password-modal');
   const resetPwClose    = document.getElementById('reset-password-close');
   const resetPwCancel   = document.getElementById('reset-password-cancel');
@@ -250,7 +262,7 @@ document.addEventListener('DOMContentLoaded', () => {
         badge.textContent = 'Awaiting deploy';
       } else {
         badge.className = `badge badge-${app.status}`;
-        badge.textContent = app.status;
+        badge.textContent = formatStatus(app.status);
       }
       header.appendChild(badge);
 
@@ -266,7 +278,8 @@ document.addEventListener('DOMContentLoaded', () => {
       meta.appendChild(slugWrap);
 
       const deployCount = document.createElement('span');
-      deployCount.textContent = `${app.deploy_count} deploys`;
+      const n = app.deploy_count || 0;
+      deployCount.textContent = `${n} ${n === 1 ? 'deploy' : 'deploys'}`;
       meta.appendChild(deployCount);
 
       const actions = document.createElement('div');
@@ -746,9 +759,18 @@ document.addEventListener('DOMContentLoaded', () => {
     closeResetPasswordModal();
   }
 
+  function renderNewUserSnippet() {
+    if (!newUserSnippet) return;
+    const origin = window.location.origin;
+    const username = newUserUsername.value.trim() || '<username>';
+    newUserSnippet.textContent =
+      `shinyhub login --host ${origin} --username ${username}`;
+  }
+
   function openNewUserModal() {
     newUserForm.reset();
     setError(newUserError, '');
+    renderNewUserSnippet();
     newUserModal.hidden = false;
     newUserUsername.focus();
   }
@@ -1412,6 +1434,25 @@ document.addEventListener('DOMContentLoaded', () => {
   newUserClose.addEventListener('click', closeNewUserModal);
   newUserCancel.addEventListener('click', closeNewUserModal);
   newUserForm.addEventListener('submit', submitNewUser);
+  newUserUsername.addEventListener('input', renderNewUserSnippet);
+
+  if (newUserSnippetCopy) {
+    const copyLabel  = newUserSnippetCopy.querySelector('.copy-label');
+    const copyStatus = document.getElementById('new-user-snippet-status');
+    newUserSnippetCopy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(newUserSnippet.textContent);
+        newUserSnippetCopy.classList.add('is-copied');
+        if (copyLabel)  copyLabel.textContent  = 'Copied';
+        if (copyStatus) copyStatus.textContent = 'Copied to clipboard';
+        setTimeout(() => {
+          newUserSnippetCopy.classList.remove('is-copied');
+          if (copyLabel)  copyLabel.textContent  = 'Copy';
+          if (copyStatus) copyStatus.textContent = '';
+        }, 2000);
+      } catch { /* clipboard unavailable */ }
+    });
+  }
   resetPwClose.addEventListener('click', closeResetPasswordModal);
   resetPwCancel.addEventListener('click', closeResetPasswordModal);
   resetPwForm.addEventListener('submit', submitResetPassword);
@@ -1757,7 +1798,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function openDeployModal(app) {
     resetDeployModal();
     deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, rejections: new Map(), xhr: null };
-    deployAppName.textContent = app.name;
+    deployAppName.textContent = app.name ? `: ${app.name}` : '';
     renderDeployCliSnippet(app.slug);
     deployModal.hidden = false;
     deployDropzone.focus();
@@ -2354,7 +2395,7 @@ document.addEventListener('DOMContentLoaded', () => {
         : '—';
       li.innerHTML = `
         <span class="replica-index">#${r.index}</span>
-        <span class="badge badge-${status}">${status}</span>
+        <span class="badge badge-${status}">${formatStatus(status)}</span>
         <span class="replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ` / cap` : ''}">${sessionsText} sessions</span>
         <span class="replica-cpu">CPU ${cpu}</span>
         <span class="replica-ram">RAM ${ram}</span>

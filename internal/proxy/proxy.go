@@ -27,21 +27,25 @@ const loadingPage = `<!DOCTYPE html>
 <noscript><meta http-equiv="refresh" content="3"></noscript>
 <title>Starting app…</title>
 <style>
-  body { font-family: sans-serif; display: flex; align-items: center;
-         justify-content: center; height: 100vh; margin: 0; background: #f8f9fa; }
+  html, body { background: #030510; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         display: flex; align-items: center; justify-content: center;
+         height: 100vh; margin: 0; color: #E8EEFF; }
   .box { text-align: center; max-width: 420px; padding: 0 1rem; }
-  .spinner { width: 40px; height: 40px; border: 4px solid #dee2e6;
-             border-top-color: #0d6efd; border-radius: 50%;
-             animation: spin 0.8s linear infinite; margin: 0 auto 1rem; }
+  .spinner { width: 40px; height: 40px; border: 4px solid rgba(56,189,248,0.18);
+             border-top-color: #38BDF8; border-radius: 50%;
+             animation: spin 0.8s linear infinite; margin: 0 auto 1rem;
+             box-shadow: 0 0 12px rgba(56,189,248,0.25); }
   @keyframes spin { to { transform: rotate(360deg); } }
-  h1 { font-size: 1.25rem; color: #495057; margin: 0; }
-  p  { color: #868e96; font-size: 0.875rem; margin-top: 0.5rem; line-height: 1.4; }
+  h1 { font-size: 1.25rem; color: #E8EEFF; margin: 0; font-weight: 600; }
+  p  { color: #6B7AA3; font-size: 0.875rem; margin-top: 0.5rem; line-height: 1.4; }
   button { margin-top: 1rem; padding: 0.5rem 1rem; font-size: 0.875rem;
-           background: #0d6efd; color: #fff; border: 0; border-radius: 4px;
-           cursor: pointer; }
-  button:hover { background: #0b5ed7; }
+           background: linear-gradient(135deg, #38BDF8, #2DD4BF);
+           color: #030510; border: 0; border-radius: 4px; cursor: pointer;
+           font-weight: 600; }
+  button:hover { filter: brightness(1.1); }
   .error .spinner { display: none; }
-  .error h1 { color: #dc3545; }
+  .error h1 { color: #F87171; }
 </style>
 </head>
 <body>

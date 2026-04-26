@@ -157,6 +157,18 @@ nav {
   letter-spacing: -0.02em;
 }
 
+.server-host {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  letter-spacing: 0;
+  padding: 0.18rem 0.5rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+.server-host:empty { display: none; }
+
 .session-user {
   margin-left: auto;
   color: var(--text-muted);
@@ -261,6 +273,15 @@ main {
 }
 
 .login-box form { display: grid; gap: 0.6rem; }
+
+.login-box .login-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: -0.3rem;
+}
 
 .login-box input {
   display: block;
@@ -550,13 +571,13 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  font-size: 0.64rem;
+  font-size: 0.7rem;
   padding: 0.24rem 0.6rem;
   border-radius: 99px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  font-family: var(--mono);
-  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-family: var(--font);
+  text-transform: none;
   white-space: nowrap;
 }
 

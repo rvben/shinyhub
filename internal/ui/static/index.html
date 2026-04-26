@@ -19,6 +19,7 @@
       <span class="sparkle sparkle-brand" aria-hidden="true"></span>
       Shiny<span class="brand-hub">Hub</span>
     </span>
+    <span id="server-host" class="server-host" aria-label="Server"></span>
     <span id="session-user" class="session-user"></span>
     <button id="logout-button" type="button" hidden>Logout</button>
   </nav>
@@ -34,10 +35,10 @@
       <div class="login-box">
         <h2>Sign in</h2>
         <form id="login-form" aria-describedby="login-error">
-          <label for="login-username" class="sr-only">Username</label>
-          <input id="login-username" placeholder="Username" type="text" autocomplete="username" required>
-          <label for="login-password" class="sr-only">Password</label>
-          <input id="login-password" placeholder="Password" type="password" autocomplete="current-password" required>
+          <label for="login-username" class="login-label">Username</label>
+          <input id="login-username" type="text" autocomplete="username" required>
+          <label for="login-password" class="login-label">Password</label>
+          <input id="login-password" type="password" autocomplete="current-password" required>
           <button type="submit">Login</button>
         </form>
         <p id="login-error" class="error" hidden></p>
@@ -305,7 +306,7 @@
           </section>
 
           <section id="settings-shared-data-panel">
-            <p class="settings-help">Mount another app's persistent data dir read-only at <code>data/shared/&lt;slug&gt;/</code>.</p>
+            <p class="settings-help">Mount another app's persistent data dir read-only — it appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app.</p>
             <div id="shared-data-list" class="shared-data-table"></div>
             <button type="button" class="btn-primary" id="shared-data-add-btn">+ Mount data from another app</button>
           </section>
@@ -434,7 +435,7 @@
          role="dialog" aria-modal="true" aria-labelledby="deploy-modal-heading">
       <div class="modal-card">
         <div class="modal-header">
-          <h2 id="deploy-modal-heading" class="modal-title">Deploy: <span id="deploy-app-name"></span></h2>
+          <h2 id="deploy-modal-heading" class="modal-title">Deploy<span id="deploy-app-name"></span></h2>
           <button id="deploy-modal-close" type="button" aria-label="Close deploy modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
         </div>
         <div class="modal-body">
@@ -525,6 +526,31 @@
               <button type="submit" id="new-user-submit" class="btn-primary">Create</button>
             </div>
           </form>
+
+          <hr class="handoff-card-divider" aria-hidden="true">
+
+          <div>
+            <p class="handoff-section-label">Share this with the new user to log in</p>
+            <div class="snippet">
+              <pre><code id="new-user-snippet"></code></pre>
+              <button type="button" id="new-user-snippet-copy" class="copy-btn"
+                      aria-label="Copy CLI commands to clipboard">
+                <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
+                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                     stroke-linejoin="round" aria-hidden="true">
+                  <rect x="4" y="3" width="8" height="10" rx="1.2"/>
+                  <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
+                </svg>
+                <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
+                     stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                     stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
+                </svg>
+                <span class="copy-label" aria-hidden="true">Copy</span>
+                <span class="sr-only" id="new-user-snippet-status" aria-live="polite"></span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -9,6 +9,11 @@ function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+function formatStatus(status) {
+  if (!status) return '';
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
 export function mountAppDetail(ctx) {
   const view = document.getElementById('app-detail-view');
   const panels = {
@@ -71,7 +76,7 @@ export function mountAppDetail(ctx) {
       statusEl.textContent = 'Awaiting deploy';
       statusEl.className = 'badge badge-new';
     } else {
-      statusEl.textContent = app.status;
+      statusEl.textContent = formatStatus(app.status);
       statusEl.className = 'badge badge-' + app.status;
     }
     const openLink = document.getElementById('app-detail-open');
@@ -295,7 +300,7 @@ function seedReplicasFromStatus(app, replicasStatus) {
     const status = r.status || 'stopped';
     li.innerHTML = `
       <span class="replica-index">#${r.index}</span>
-      <span class="badge badge-${status}">${status}</span>
+      <span class="badge badge-${status}">${formatStatus(status)}</span>
       <span class="replica-sessions">— sessions</span>
       <span class="replica-cpu">CPU —</span>
       <span class="replica-ram">RAM —</span>
