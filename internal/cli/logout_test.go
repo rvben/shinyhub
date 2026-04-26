@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -91,6 +92,117 @@ func TestLogout_RemovesConfigEvenWhenServerUnreachable(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("config file should still be removed when server is unreachable, stat err: %v", err)
+	}
+}
+
+// TestLogout_WarnsWhenEnvCredsRemain verifies that when SHINYHUB_TOKEN is
+// set in the environment, runLogout surfaces a clear warning telling the
+// user to unset it. Without that warning the CLI prints "Logged out" while
+// the next command silently re-authenticates from env — particularly bad
+// for API keys (shk_) which have no server-side revocation endpoint.
+func TestLogout_WarnsWhenEnvCredsRemain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHINYHUB_HOST", srv.URL)
+	t.Setenv("SHINYHUB_TOKEN", "shk_envonly")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
+
+	var stdout, stderr bytes.Buffer
+	logoutCmd.SetOut(&stdout)
+	logoutCmd.SetErr(&stderr)
+	t.Cleanup(func() {
+		logoutCmd.SetOut(nil)
+		logoutCmd.SetErr(nil)
+	})
+
+	if err := runLogout(logoutCmd, nil); err != nil {
+		t.Fatalf("runLogout: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "SHINYHUB_TOKEN") {
+		t.Fatalf("expected logout output to warn about SHINYHUB_TOKEN env var; got:\n%s", out)
+	}
+	if !strings.Contains(out, "unset SHINYHUB_HOST SHINYHUB_TOKEN") {
+		t.Fatalf("expected logout output to suggest `unset SHINYHUB_HOST SHINYHUB_TOKEN` (both vars are set); got:\n%s", out)
+	}
+}
+
+// TestLogout_WarnsWhenOnlyTokenEnvSet verifies the env-warning still fires
+// when SHINYHUB_TOKEN is set without SHINYHUB_HOST (host comes from the
+// config file). The warning must mention only SHINYHUB_TOKEN — telling the
+// user to unset a variable they never set is confusing.
+func TestLogout_WarnsWhenOnlyTokenEnvSet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHINYHUB_HOST", "")
+	t.Setenv("SHINYHUB_TOKEN", "shk_envtoken")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
+
+	if err := saveConfig(&cliConfig{Host: srv.URL, Token: "shk_filetoken"}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	logoutCmd.SetOut(&stdout)
+	t.Cleanup(func() { logoutCmd.SetOut(nil) })
+
+	if err := runLogout(logoutCmd, nil); err != nil {
+		t.Fatalf("runLogout: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "unset SHINYHUB_TOKEN") {
+		t.Fatalf("expected logout output to suggest `unset SHINYHUB_TOKEN`; got:\n%s", out)
+	}
+	if strings.Contains(out, "SHINYHUB_HOST") {
+		t.Fatalf("expected warning to mention only SHINYHUB_TOKEN (HOST not set); got:\n%s", out)
+	}
+}
+
+// TestLogout_NoEnvWarningWhenEnvUnset verifies the warning is suppressed in
+// the common case where credentials live only in the config file. Adding
+// noise to the file-only happy path would degrade UX.
+func TestLogout_NoEnvWarningWhenEnvUnset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHINYHUB_HOST", "")
+	t.Setenv("SHINYHUB_TOKEN", "")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
+
+	if err := saveConfig(&cliConfig{Host: srv.URL, Token: "shk_clean"}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	logoutCmd.SetOut(&stdout)
+	t.Cleanup(func() { logoutCmd.SetOut(nil) })
+
+	if err := runLogout(logoutCmd, nil); err != nil {
+		t.Fatalf("runLogout: %v", err)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "SHINYHUB_TOKEN") || strings.Contains(out, "SHINYHUB_HOST") {
+		t.Fatalf("expected no env-var warning when env is unset; got:\n%s", out)
 	}
 }
 

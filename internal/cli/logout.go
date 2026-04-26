@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -37,10 +38,35 @@ func runLogout(cmd *cobra.Command, args []string) error {
 	}
 
 	path := configPath()
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	fileRemoved := false
+	if err := os.Remove(path); err == nil {
+		fileRemoved = true
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove %s: %w", path, err)
 	}
-	fmt.Fprintf(out, "Logged out. Removed %s\n", path)
+
+	if fileRemoved {
+		fmt.Fprintf(out, "Logged out. Removed %s\n", path)
+	} else {
+		fmt.Fprintln(out, "Logged out.")
+	}
+
+	// Warn when the environment still supplies credentials. SHINYHUB_TOKEN
+	// takes precedence over (and survives the removal of) the on-disk
+	// config file, so without an explicit `unset` the very next command
+	// would silently re-authenticate from env — making the "Logged out"
+	// message a lie. This matters most for API keys (shk_ prefix), which
+	// have no server-side revocation endpoint: the env-sourced key remains
+	// fully valid until the user removes it from their shell.
+	if envToken := os.Getenv("SHINYHUB_TOKEN"); envToken != "" {
+		vars := "SHINYHUB_TOKEN"
+		if os.Getenv("SHINYHUB_HOST") != "" {
+			vars = "SHINYHUB_HOST and SHINYHUB_TOKEN"
+		}
+		fmt.Fprintf(out,
+			"Note: %s still set in your environment; subsequent commands will continue to authenticate. Run `unset %s` to fully sign out.\n",
+			vars, strings.ReplaceAll(vars, " and ", " "))
+	}
 	return nil
 }
 
