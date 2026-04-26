@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"net"
 	"net/http"
 )
 
@@ -28,7 +29,11 @@ var csrfSafeMethods = map[string]struct{}{
 //     value to match the X-CSRF-Token header.
 //   - Requests with an Authorization header (Bearer/Token) bypass CSRF checks:
 //     token auth is not vulnerable to CSRF.
-func CSRFMiddleware() func(http.Handler) http.Handler {
+//
+// trustedNets is the configured list of trusted-proxy CIDRs; it gates whether
+// X-Forwarded-Proto is honoured when deciding the Secure flag on the minted
+// CSRF cookie. Pass cfg.TrustedProxyNets.
+func CSRFMiddleware(trustedNets []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") != "" {
@@ -37,7 +42,7 @@ func CSRFMiddleware() func(http.Handler) http.Handler {
 			}
 
 			if _, safe := csrfSafeMethods[r.Method]; safe {
-				ensureCSRFCookie(w, r)
+				ensureCSRFCookie(w, r, trustedNets)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -59,7 +64,7 @@ func CSRFMiddleware() func(http.Handler) http.Handler {
 
 // ensureCSRFCookie sets a csrf_token cookie on the response when the request
 // has a session cookie but no csrf_token cookie yet.
-func ensureCSRFCookie(w http.ResponseWriter, r *http.Request) {
+func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, trustedNets []*net.IPNet) {
 	if _, err := r.Cookie(SessionCookieName); err != nil {
 		return
 	}
@@ -76,7 +81,7 @@ func ensureCSRFCookie(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: false,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   cookieSecure(r),
+		Secure:   cookieSecure(r, trustedNets),
 		MaxAge:   int(jwtExpiry.Seconds()),
 	})
 }

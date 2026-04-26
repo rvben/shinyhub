@@ -3,11 +3,12 @@ package access
 import (
 	"fmt"
 	"html"
+	"net"
 	"net/http"
-	"strings"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/proxytrust"
 )
 
 type neverDeployedStore interface {
@@ -29,7 +30,12 @@ type neverDeployedStore interface {
 // userLookup, when supplied, re-resolves the JWT-claimed user against the
 // live database on every request so role demotions take effect immediately.
 // See Middleware for the full rationale.
-func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) func(http.Handler) http.Handler {
+//
+// trustedProxyNets gates whether X-Forwarded-Host / X-Forwarded-Proto are
+// honoured when reconstructing the origin for the manager's `shinyhub login
+// --host <origin>` snippet. Without the gate any direct caller could inject
+// a phishing host into a snippet that the manager copy-pastes into a shell.
+func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup, trustedProxyNets []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			slug := extractSlug(r.URL.Path)
@@ -67,7 +73,7 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(renderNeverDeployedPage(app, user, manager, requestOrigin(r))))
+			_, _ = w.Write([]byte(renderNeverDeployedPage(app, user, manager, requestOrigin(r, trustedProxyNets))))
 		})
 	}
 }
@@ -84,21 +90,12 @@ func canManageApp(st neverDeployedStore, app *db.App, user *auth.ContextUser) bo
 }
 
 // requestOrigin reconstructs the public origin (scheme://host) the user
-// reached us on, preferring X-Forwarded-* headers when a trusted proxy set
-// them.
-func requestOrigin(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if v := r.Header.Get("X-Forwarded-Proto"); v != "" {
-		scheme = strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
-	}
-	host := r.Host
-	if v := r.Header.Get("X-Forwarded-Host"); v != "" {
-		host = strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
-	}
-	return scheme + "://" + host
+// reached us on, honouring X-Forwarded-* headers only when the direct peer
+// is in trustedProxyNets. Otherwise an attacker connecting directly could
+// inject `X-Forwarded-Host: evil.example.com` and have the rendered manager
+// snippet point at a phishing host.
+func requestOrigin(r *http.Request, trustedProxyNets []*net.IPNet) string {
+	return proxytrust.Scheme(r, trustedProxyNets) + "://" + proxytrust.Host(r, trustedProxyNets)
 }
 
 const clipboardIconSVG = `<svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="8" height="10" rx="1.2"/><path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/></svg>`

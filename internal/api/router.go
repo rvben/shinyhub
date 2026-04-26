@@ -179,7 +179,7 @@ func (s *Server) buildRouter() http.Handler {
 
 	// All other endpoints require either an auth header or a valid session cookie.
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.userLookup, s.revocationChecker())
-	csrf := auth.CSRFMiddleware()
+	csrf := auth.CSRFMiddleware(s.cfg.TrustedProxyNets)
 	r.Group(func(r chi.Router) {
 		r.Use(bearer)
 		r.Use(csrf)

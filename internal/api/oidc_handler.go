@@ -64,7 +64,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth.SetOAuthStateCookie(w, r, state)
+	auth.SetOAuthStateCookie(w, r, state, s.cfg.TrustedProxyNets)
 	http.Redirect(w, r, s.oidcProvider.AuthURL(state), http.StatusFound)
 }
 
@@ -92,7 +92,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	auth.ClearOAuthStateCookie(w, r)
+	auth.ClearOAuthStateCookie(w, r, s.cfg.TrustedProxyNets)
 
 	tok, err := s.oidcProvider.Exchange(r.Context(), code)
 	if err != nil {
@@ -157,7 +157,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth.SetSessionCookie(w, r, jwtToken)
+	auth.SetSessionCookie(w, r, jwtToken, s.cfg.TrustedProxyNets)
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),

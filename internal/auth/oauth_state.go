@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/subtle"
+	"net"
 	"net/http"
 	"time"
 )
@@ -36,15 +37,17 @@ func oauthStateCookie(value string, secure bool) *http.Cookie {
 // SetOAuthStateCookie writes the state nonce to a short-lived, HttpOnly,
 // SameSite=Lax cookie scoped to /api/auth/. Call this in the login handler
 // immediately after generating the state, with the same value passed to the
-// IdP authorization URL.
-func SetOAuthStateCookie(w http.ResponseWriter, r *http.Request, state string) {
-	http.SetCookie(w, oauthStateCookie(state, cookieSecure(r)))
+// IdP authorization URL. trustedNets is the configured list of trusted-proxy
+// CIDRs; pass cfg.TrustedProxyNets so the Secure flag is set correctly
+// behind a TLS-terminating reverse proxy.
+func SetOAuthStateCookie(w http.ResponseWriter, r *http.Request, state string, trustedNets []*net.IPNet) {
+	http.SetCookie(w, oauthStateCookie(state, cookieSecure(r, trustedNets)))
 }
 
 // ClearOAuthStateCookie deletes the binding cookie. Call after a successful
 // callback so a stale cookie can't be reused.
-func ClearOAuthStateCookie(w http.ResponseWriter, r *http.Request) {
-	c := oauthStateCookie("", cookieSecure(r))
+func ClearOAuthStateCookie(w http.ResponseWriter, r *http.Request, trustedNets []*net.IPNet) {
+	c := oauthStateCookie("", cookieSecure(r, trustedNets))
 	c.MaxAge = -1
 	c.Expires = time.Unix(0, 0)
 	http.SetCookie(w, c)

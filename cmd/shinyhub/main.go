@@ -332,7 +332,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
 	}
-	emptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(prx)
+	emptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(prx)
 	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(emptyState)
 	mux.Handle("/app/", appHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

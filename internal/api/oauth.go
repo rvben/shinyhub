@@ -33,7 +33,7 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth.SetOAuthStateCookie(w, r, state)
+	auth.SetOAuthStateCookie(w, r, state, s.cfg.TrustedProxyNets)
 	http.Redirect(w, r, s.github.AuthURL(state), http.StatusFound)
 }
 
@@ -63,7 +63,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	auth.ClearOAuthStateCookie(w, r)
+	auth.ClearOAuthStateCookie(w, r, s.cfg.TrustedProxyNets)
 
 	tok, err := s.github.Exchange(r.Context(), code)
 	if err != nil {
@@ -129,7 +129,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth.SetSessionCookie(w, r, jwtToken)
+	auth.SetSessionCookie(w, r, jwtToken, s.cfg.TrustedProxyNets)
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
@@ -156,7 +156,7 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth.SetOAuthStateCookie(w, r, state)
+	auth.SetOAuthStateCookie(w, r, state, s.cfg.TrustedProxyNets)
 	http.Redirect(w, r, s.googleOAuth.AuthURL(state), http.StatusFound)
 }
 
@@ -183,7 +183,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	auth.ClearOAuthStateCookie(w, r)
+	auth.ClearOAuthStateCookie(w, r, s.cfg.TrustedProxyNets)
 
 	tok, err := s.googleOAuth.Exchange(r.Context(), code)
 	if err != nil {
@@ -256,7 +256,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth.SetSessionCookie(w, r, jwtToken)
+	auth.SetSessionCookie(w, r, jwtToken, s.cfg.TrustedProxyNets)
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),

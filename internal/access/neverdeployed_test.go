@@ -1,6 +1,7 @@
 package access_test
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,15 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 )
+
+func mustCIDR(t *testing.T, cidr string) []*net.IPNet {
+	t.Helper()
+	_, n, err := net.ParseCIDR(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []*net.IPNet{n}
+}
 
 func TestNeverDeployed_PassThroughWhenDeployed(t *testing.T) {
 	store := makeStore(t)
@@ -28,7 +38,7 @@ func TestNeverDeployed_PassThroughWhenDeployed(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(next)
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/app/app/", nil)
 	rec := httptest.NewRecorder()
@@ -58,7 +68,7 @@ func TestNeverDeployed_PassThroughWhenCounterLagsDeploymentRow(t *testing.T) {
 	}
 
 	called := false
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -82,7 +92,7 @@ func TestNeverDeployed_ManagerSeesCLISnippet(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("next handler should not be invoked for never-deployed app")
 	})
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(next)
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, nil)(next)
 
 	req := httptest.NewRequest("GET", "/app/newapp/", nil)
 	req.Host = "shiny.example.com"
@@ -132,7 +142,7 @@ func TestNeverDeployed_NonManagerSeesUnpublishedNotice(t *testing.T) {
 
 	token, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")
 
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("next handler should not be invoked for never-deployed app")
 	}))
 
@@ -156,7 +166,7 @@ func TestNeverDeployed_NonManagerSeesUnpublishedNotice(t *testing.T) {
 func TestNeverDeployed_NoSlugPassThrough(t *testing.T) {
 	store := makeStore(t)
 	called := false
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	}))
 
@@ -172,7 +182,7 @@ func TestNeverDeployed_NoSlugPassThrough(t *testing.T) {
 func TestNeverDeployed_UnknownAppPassThrough(t *testing.T) {
 	store := makeStore(t)
 	called := false
-	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	}))
 
@@ -182,5 +192,71 @@ func TestNeverDeployed_UnknownAppPassThrough(t *testing.T) {
 
 	if !called {
 		t.Fatal("expected pass-through when app does not exist (proxy's loading page owns that case)")
+	}
+}
+
+// Phishing-assist regression: a direct caller (peer NOT in trustedProxyNets)
+// must not be able to inject `X-Forwarded-Host` or `X-Forwarded-Proto` into
+// the rendered manager snippet. The snippet is shown verbatim and copy-pasted
+// into a shell, so a spoofed origin would point the manager's `shinyhub
+// login --host <...>` at an attacker-controlled host.
+func TestNeverDeployed_ManagerSnippet_IgnoresXForwardedFromUntrustedPeer(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "newapp", Name: "Fresh App", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, mustCIDR(t, "127.0.0.0/8"))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next handler should not be invoked")
+	}))
+
+	req := httptest.NewRequest("GET", "/app/newapp/", nil)
+	req.Host = "shiny.example.com"
+	req.RemoteAddr = "203.0.113.7:44444" // public peer, not a trusted proxy
+	req.Header.Set("X-Forwarded-Host", "evil.example.com")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "evil.example.com") {
+		t.Errorf("untrusted peer must not be able to inject X-Forwarded-Host into the rendered snippet — body contained evil.example.com: %s", body)
+	}
+	if !strings.Contains(body, "shinyhub login --host http://shiny.example.com --username owner") {
+		t.Errorf("snippet should fall back to r.Host when peer is untrusted, got %q", body)
+	}
+}
+
+// Mirror image: a trusted proxy IS allowed to set X-Forwarded-Host/Proto.
+// This is the production-default case — without it the snippet would point
+// managers at the upstream socket address (commonly 127.0.0.1:<port>).
+func TestNeverDeployed_ManagerSnippet_HonorsXForwardedFromTrustedProxy(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "newapp", Name: "Fresh App", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	handler := access.NeverDeployedMiddleware(store, "test-secret", nil, nil, mustCIDR(t, "127.0.0.0/8"))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next handler should not be invoked")
+	}))
+
+	req := httptest.NewRequest("GET", "/app/newapp/", nil)
+	req.Host = "127.0.0.1:8080" // upstream socket address
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Forwarded-Host", "shiny.example.com")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "shinyhub login --host https://shiny.example.com --username owner") {
+		t.Errorf("trusted-proxy XFH+XFP should drive the rendered origin, got %q", body)
+	}
+	if strings.Contains(body, "127.0.0.1") {
+		t.Errorf("rendered origin should not leak the upstream socket address, got %q", body)
 	}
 }

@@ -195,7 +195,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		ResourceID:   user.Username,
 		IPAddress:    s.ClientIP(r),
 	})
-	auth.SetSessionCookie(w, r, token)
+	auth.SetSessionCookie(w, r, token, s.cfg.TrustedProxyNets)
 	ctxUser := &auth.ContextUser{ID: user.ID, Username: user.Username, Role: user.Role}
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
@@ -222,7 +222,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
-	auth.ClearSessionCookie(w, r)
+	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -240,7 +240,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		auth.SetSessionCookie(w, r, freshToken)
+		auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role},
@@ -410,7 +410,7 @@ func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	auth.ClearSessionCookie(w, r)
+	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
 
 	target := "/"
 	if next := safeNextPath(r.FormValue("next")); next != "" {

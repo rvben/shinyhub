@@ -3,13 +3,12 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/proxytrust"
 )
 
 // writeJSON writes v as JSON with the given HTTP status code. Encode errors
@@ -48,67 +47,17 @@ func (s *Server) audit(r *http.Request, action, resourceType, resourceID, detail
 	})
 }
 
-// ClientIP returns the best-effort client IP. X-Forwarded-For is only trusted
-// when the direct peer (RemoteAddr) is within a configured trusted proxy CIDR,
-// preventing clients from spoofing the header. Exposed so other subsystems
-// (e.g. the reverse proxy access log) can share the same trust policy without
-// duplicating it.
+// ClientIP returns the best-effort client IP, honouring X-Forwarded-For only
+// when the direct peer is in the configured trusted-proxy CIDRs. Exposed so
+// other subsystems (e.g. the reverse proxy access log) share the same trust
+// policy without duplicating it.
 func (s *Server) ClientIP(r *http.Request) string {
-	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		peerHost = r.RemoteAddr
-	}
-	peerIP := net.ParseIP(peerHost)
-	xff := r.Header.Get("X-Forwarded-For")
-	if peerIP != nil && xff != "" {
-		for _, n := range s.cfg.TrustedProxyNets {
-			if n.Contains(peerIP) {
-				if idx := strings.Index(xff, ","); idx >= 0 {
-					return strings.TrimSpace(xff[:idx])
-				}
-				return strings.TrimSpace(xff)
-			}
-		}
-	}
-	return peerHost
+	return proxytrust.ClientIP(r, s.cfg.TrustedProxyNets)
 }
 
-// effectiveHost returns the public host the user reached us on, preferring
-// X-Forwarded-Host when the direct peer is a configured trusted proxy. Plain
-// r.Host is wrong behind a reverse proxy: the inbound TCP connection terminates
-// at the proxy, so r.Host is whatever the proxy addressed us at (often
-// 127.0.0.1:<port> or a Unix socket alias) — not the public hostname the
-// browser sees. Comparing such an r.Host against a browser-supplied Origin
-// header would reject every same-origin request in production.
-//
-// X-Forwarded-Host is only trusted when the direct peer is in
-// TrustedProxyNets, mirroring ClientIP's policy: an attacker who can reach us
-// directly cannot fake the header to bypass the same-origin check.
+// effectiveHost returns the public host the user reached us on, honouring
+// X-Forwarded-Host only when the direct peer is in the configured
+// trusted-proxy CIDRs. See proxytrust.Host for the rationale.
 func (s *Server) effectiveHost(r *http.Request) string {
-	if s.peerIsTrustedProxy(r) {
-		if v := r.Header.Get("X-Forwarded-Host"); v != "" {
-			return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
-		}
-	}
-	return r.Host
-}
-
-// peerIsTrustedProxy reports whether the direct TCP peer (RemoteAddr) is
-// within a configured trusted proxy CIDR. Used as the gate for honouring
-// X-Forwarded-* headers.
-func (s *Server) peerIsTrustedProxy(r *http.Request) bool {
-	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		peerHost = r.RemoteAddr
-	}
-	peerIP := net.ParseIP(peerHost)
-	if peerIP == nil {
-		return false
-	}
-	for _, n := range s.cfg.TrustedProxyNets {
-		if n.Contains(peerIP) {
-			return true
-		}
-	}
-	return false
+	return proxytrust.Host(r, s.cfg.TrustedProxyNets)
 }

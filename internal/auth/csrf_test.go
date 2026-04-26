@@ -16,7 +16,7 @@ func okHandler() http.Handler {
 }
 
 func TestCSRF_GETAlwaysAllowed(t *testing.T) {
-	h := auth.CSRFMiddleware()(okHandler())
+	h := auth.CSRFMiddleware(nil)(okHandler())
 	req := httptest.NewRequest("GET", "/api/apps", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
 	rr := httptest.NewRecorder()
@@ -30,7 +30,7 @@ func TestCSRF_GETAlwaysAllowed(t *testing.T) {
 }
 
 func TestCSRF_POSTWithBearerBypasses(t *testing.T) {
-	h := auth.CSRFMiddleware()(okHandler())
+	h := auth.CSRFMiddleware(nil)(okHandler())
 	req := httptest.NewRequest("POST", "/api/apps", nil)
 	req.Header.Set("Authorization", "Bearer abc")
 	rr := httptest.NewRecorder()
@@ -41,7 +41,7 @@ func TestCSRF_POSTWithBearerBypasses(t *testing.T) {
 }
 
 func TestCSRF_POSTMissingTokenRejected(t *testing.T) {
-	h := auth.CSRFMiddleware()(okHandler())
+	h := auth.CSRFMiddleware(nil)(okHandler())
 	req := httptest.NewRequest("POST", "/api/apps", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
 	rr := httptest.NewRecorder()
@@ -52,7 +52,7 @@ func TestCSRF_POSTMissingTokenRejected(t *testing.T) {
 }
 
 func TestCSRF_POSTMatchingTokenAllowed(t *testing.T) {
-	h := auth.CSRFMiddleware()(okHandler())
+	h := auth.CSRFMiddleware(nil)(okHandler())
 	req := httptest.NewRequest("POST", "/api/apps", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
 	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "matching-token"})
@@ -65,7 +65,7 @@ func TestCSRF_POSTMatchingTokenAllowed(t *testing.T) {
 }
 
 func TestCSRF_POSTMismatchedTokenRejected(t *testing.T) {
-	h := auth.CSRFMiddleware()(okHandler())
+	h := auth.CSRFMiddleware(nil)(okHandler())
 	req := httptest.NewRequest("POST", "/api/apps", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
 	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "cookie-token"})
