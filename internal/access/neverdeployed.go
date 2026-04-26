@@ -13,6 +13,7 @@ import (
 type neverDeployedStore interface {
 	GetAppBySlug(slug string) (*db.App, error)
 	GetMemberRole(slug string, userID int64) (string, error)
+	HasAnyDeployment(appID int64) (bool, error)
 }
 
 // NeverDeployedMiddleware short-circuits /app/<slug>/ requests for apps that
@@ -37,7 +38,26 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 				return
 			}
 			app, err := st.GetAppBySlug(slug)
-			if err != nil || app == nil || app.DeployCount > 0 {
+			if err != nil || app == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Key off the durable deployments table, not deploy_count.
+			// deploy_count is a denormalized counter and may briefly lag
+			// behind the deployments row if its post-deploy increment hits
+			// a transient DB error — keying off the counter would otherwise
+			// trap a freshly-deployed app behind this gate forever despite
+			// the pool already serving traffic.
+			hasDeploy, err := st.HasAnyDeployment(app.ID)
+			if err != nil {
+				// Fail open: if we can't tell, don't intercept. The proxy
+				// behind this middleware has its own "no upstream" handling
+				// and the access middleware in front has already authorised
+				// the user to see the app at all.
+				next.ServeHTTP(w, r)
+				return
+			}
+			if hasDeploy {
 				next.ServeHTTP(w, r)
 				return
 			}

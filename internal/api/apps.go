@@ -593,13 +593,24 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
 	}
-	// Bookkeeping after the proxy switch: the new pool is already serving
-	// traffic, so a transient DB hiccup here must NOT surface as "deploy
-	// failed" — that would push the caller into a retry loop on top of an
-	// already-running deploy. Log loudly so an operator notices the
-	// reconciliation gap (status watchdog will eventually correct
-	// running-status; deploy_count and the deployment history row are
-	// genuinely lost on failure but the app is fine).
+	// Bookkeeping after the proxy switch. Two writes here are different
+	// kinds of important and are handled differently:
+	//
+	//  1. UpdateAppStatus("running") and IncrementDeployCount are
+	//     soft state. The watchdog reconciles status; the never-deployed
+	//     gate keys off the durable deployments row (HasAnyDeployment),
+	//     not deploy_count. Log+continue is safe — neither failure traps
+	//     the user out of an app whose pool is already live.
+	//
+	//  2. CreateDeployment is authoritative: it is the pointer the
+	//     scheduler, watcher wake, restart, and rollback all consult to
+	//     find the live bundle. If we let this failure pass silently, the
+	//     next restart/wake/schedule run reads the previous deployment
+	//     row and silently reverts the running pool to the OLD bundle.
+	//     We therefore fail closed (500). The bundle stays on disk
+	//     (keepFiles=true) so a follow-up deploy succeeds without
+	//     re-uploading; PruneOldVersions sweeps any duplicate after the
+	//     retry succeeds.
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
@@ -617,7 +628,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		BundleDir: bundleDir,
 		Status:    "succeeded",
 	}); err != nil {
-		slog.Error("deploy: record deployment row failed; pool is live", "slug", slug, "version", version, "err", err)
+		slog.Error("deploy: record deployment row failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
+		writeError(w, http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit")
+		return
 	}
 
 	// Prune old version directories beyond the retention limit.
@@ -745,13 +758,12 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
 	}
-	// Bookkeeping after the proxy switch: the rolled-back pool is already
-	// serving traffic, so a transient DB hiccup here must NOT surface as
-	// "rollback failed" — that would push the caller into a retry loop on top
-	// of an already-running rollback. Log loudly so an operator notices the
-	// reconciliation gap (status watchdog will eventually correct
-	// running-status; the rollback history row is genuinely lost on failure
-	// but the app is fine).
+	// UpdateAppStatus is soft state — the watchdog reconciles. CreateDeployment
+	// is authoritative: it is the pointer restart/wake/schedule consult to
+	// find the live bundle. If we let CreateDeployment fail silently here, a
+	// later restart would read the previous deployment row (the bundle we
+	// just rolled back FROM) and silently un-roll-back the app. Fail closed
+	// (500) on that one; the bundle on disk is unchanged so a retry is safe.
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
@@ -765,7 +777,9 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		BundleDir: prev.BundleDir,
 		Status:    "succeeded",
 	}); err != nil {
-		slog.Error("rollback: record deployment row failed; pool is live", "slug", slug, "version", prev.Version, "err", err)
+		slog.Error("rollback: record deployment row failed; pool is live but next restart/wake/schedule would silently un-roll-back to the previous bundle — failing the request so the caller retries", "slug", slug, "version", prev.Version, "err", err)
+		writeError(w, http.StatusInternalServerError, "rollback succeeded but recording it failed; retry to commit")
+		return
 	}
 
 	updatedApp, err := s.store.GetAppBySlug(slug)

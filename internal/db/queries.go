@@ -649,6 +649,20 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	return ds, rows.Err()
 }
 
+// HasAnyDeployment reports whether at least one deployment row exists for
+// the given app. Used by the never-deployed gate as the authoritative
+// "first deploy has happened" signal — keying off the durable deployments
+// row instead of the deploy_count counter means a transient counter-write
+// failure cannot lock users out of an app whose pool is already live.
+func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM deployments WHERE app_id = ?)`, appID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 // GetDeploymentBySlugAndID fetches a single deployment by its ID, verified
 // to belong to the app identified by slug. Returns ErrNotFound if the
 // deployment does not exist or belongs to a different app.
