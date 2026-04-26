@@ -75,17 +75,30 @@ func TestAppDetailPreservesOverviewURL(t *testing.T) {
 // this guard the post-login redirect from /#deploy=<slug> drops the slug
 // before the matching app exists in memory, and the deploy modal never opens.
 //
-// We assert two things: (a) handleDeployHash is async (b) the route mount in
+// We assert: (a) handleDeployHash is async, (b) the route mount in
 // views/apps-grid.js awaits the initial /api/apps load before resolving so
-// `await router.start()` actually waits for state.apps. Either guarantee is
-// enough on its own; we want both to remain in place.
+// `await router.start()` actually waits for state.apps, (c) BOTH the
+// bootstrap path (initialize) and the interactive login submit handler
+// await handleDeployHash() — codex review found the second was missing,
+// which silently broke the logged-out → /#deploy=<slug> → log-in → modal
+// flow.
 func TestDeployHashHandlerWaitsForApps(t *testing.T) {
 	assertContains(t, "app.js", "async function handleDeployHash",
 		"handleDeployHash must be async so it can wait for state.apps before consuming the slug")
-	assertContains(t, "app.js", "await handleDeployHash()",
-		"the call site must await handleDeployHash so the chain completes before paint")
 	assertContains(t, "views/apps-grid.js", "export async function mountAppsGrid",
 		"mountAppsGrid must be async and await its initial load so router.start() waits for state.apps")
+
+	// Both the bootstrap and the interactive login paths must consume the
+	// pending deploy hash. Counting occurrences guards against either path
+	// silently dropping the call.
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	got := strings.Count(string(b), "await handleDeployHash()")
+	if got < 2 {
+		t.Fatalf("app.js: `await handleDeployHash()` appears %d time(s); want at least 2 (bootstrap path in initialize() AND interactive login submit handler). A logged-out user landing on /#deploy=<slug> persists the slug; if the login path doesn't consume it, the deploy modal never opens after login.", got)
+	}
 }
 
 // TestAccessVisibilityToggleSerialized guards Codex review #3: the
@@ -111,6 +124,58 @@ func TestSlugPatternStaysInSyncWithGoValidator(t *testing.T) {
 	htmlPattern := `pattern="` + slugpkg.Pattern + `"`
 	assertContains(t, "index.html", htmlPattern,
 		"new-app-slug input pattern attribute must match internal/slug.Pattern")
+}
+
+// TestSPAConsumesNextQueryParam guards the access-denied → log-in →
+// original-app round trip. internal/access/middleware.go renderAccessDeniedPage
+// builds /?next=<original> when an unauthenticated browser hits a private app;
+// the SPA used to ignore the parameter and dump every user on /. Both the
+// bootstrap (initialize) path and the interactive login submit handler must
+// call consumeNextParam after router.start() so the user lands on the page
+// they originally requested.
+func TestSPAConsumesNextQueryParam(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "function consumeNextParam(") {
+		t.Fatal("app.js: must define consumeNextParam(); see internal/access/middleware.go renderAccessDeniedPage which advertises /?next=<original>")
+	}
+	got := strings.Count(src, "consumeNextParam()")
+	// One definition site is matched by `consumeNextParam(` above; here we
+	// count the ()-suffixed call form to require >=2 invocations (bootstrap
+	// + interactive-login).
+	if got < 2 {
+		t.Fatalf("app.js: consumeNextParam() called %d time(s); want at least 2 (bootstrap path AND interactive login submit handler) so a logged-out user reaching /?next=/apps/foo gets returned to /apps/foo after logging in", got)
+	}
+	if !strings.Contains(src, "internal/access/middleware.go") {
+		// The fix references the access middleware in a code comment so a
+		// reader can find the producer of the next= parameter. Asserting on
+		// the comment keeps the breadcrumb intact.
+		t.Fatal("app.js: consumeNextParam should reference internal/access/middleware.go in a comment so future readers can find the producer of the next= parameter")
+	}
+}
+
+// TestRollbackHandlerBoundOnce guards against the duplicate-handler bug in
+// renderDeployments. The earlier code called list.addEventListener('click',
+// ...) inside load(), so every Retry attached another delegate and a single
+// Roll back click fanned out into N concurrent POST /rollback requests
+// (creating duplicate rollback deployments). Using `list.onclick = ...`
+// outside load() makes the single-handler invariant structural — any
+// re-binding replaces the previous handler instead of stacking.
+func TestRollbackHandlerBoundOnce(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
+	if err != nil {
+		t.Fatalf("read app-detail.js: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "list.onclick =") {
+		t.Fatal("app-detail.js: rollback delegate must be attached as `list.onclick = ...` so re-renders replace rather than stack the handler")
+	}
+	if strings.Contains(src, "list.addEventListener('click'") {
+		t.Fatal("app-detail.js: must not use list.addEventListener('click', ...) for the rollback delegate; that stacks listeners across Retry clicks")
+	}
 }
 
 func assertContains(t *testing.T, path, needle, contract string) {

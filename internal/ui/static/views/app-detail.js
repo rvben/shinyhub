@@ -164,6 +164,30 @@ async function renderDeployments(panel, app, ctx) {
   const empty = document.getElementById('detail-deployments-empty');
   const errWrap = document.getElementById('detail-deployments-error');
 
+  // Bind the rollback delegate exactly once per render. The earlier code
+  // registered it inside load(), so every Retry attached another listener
+  // and a single Roll back click fanned out into N concurrent POSTs.
+  // Using onclick (not addEventListener) makes the single-handler invariant
+  // structurally enforced — re-assignment replaces the previous delegate.
+  list.onclick = async (e) => {
+    const btn = e.target.closest('.rollback-btn');
+    if (!btn) return;
+    if (!window.confirm(`Roll back ${app.name} to deployment ${btn.dataset.id}?`)) return;
+    // Disable the button immediately so a double-click can't fire two POSTs
+    // before navigation completes.
+    btn.disabled = true;
+    const r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
+    });
+    if (r.ok) { ctx.navigate(`/apps/${app.slug}`); }
+    else {
+      btn.disabled = false;
+      alert('Rollback failed.');
+    }
+  };
+
   async function load() {
     list.hidden = false;
     list.textContent = '';
@@ -216,19 +240,6 @@ async function renderDeployments(panel, app, ctx) {
       `;
       list.appendChild(li);
     }
-
-    list.addEventListener('click', async (e) => {
-      const btn = e.target.closest('.rollback-btn');
-      if (!btn) return;
-      if (!window.confirm(`Roll back ${app.name} to deployment ${btn.dataset.id}?`)) return;
-      const r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
-      });
-      if (r.ok) { ctx.navigate(`/apps/${app.slug}`); }
-      else { alert('Rollback failed.'); }
-    });
   }
 
   document.getElementById('detail-deployments-retry').addEventListener('click', load);

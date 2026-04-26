@@ -61,6 +61,35 @@ func TestSanitizeSlug(t *testing.T) {
 	}
 }
 
+// TestSanitizeSlug_TruncationProducesValidSlug guards against the bug where
+// sanitizeSlug trimmed trailing dashes *before* truncating, so an input long
+// enough to be cut at a `-` character produced a slug ending in `-` — which
+// slugpkg.Valid rejects, causing a server-side 400 on deploy.
+//
+// Each case is constructed so that the 63rd byte after dash-collapsing is `-`.
+// We assert (a) the output is no longer than 63 chars and (b) slugpkg.Valid
+// accepts it.
+func TestSanitizeSlug_TruncationProducesValidSlug(t *testing.T) {
+	cases := []string{
+		// 62 'a's then a dash then more — truncating to 63 lands on '-'.
+		strings.Repeat("a", 62) + "-bcdef",
+		// Many short tokens separated by spaces — each space becomes a dash.
+		// Long enough that truncation will land in the middle of a dash run.
+		strings.Repeat("ab ", 30),
+		// Pathological: alternating chars and dashes for >63 bytes.
+		strings.Repeat("a-", 40),
+	}
+	for _, in := range cases {
+		got := sanitizeSlug(in)
+		if len(got) > slugpkg.MaxLen {
+			t.Errorf("sanitizeSlug(%q): len=%d > %d", in, len(got), slugpkg.MaxLen)
+		}
+		if !slugpkg.Valid(got) {
+			t.Errorf("sanitizeSlug(%q) = %q, which slugpkg.Valid rejects", in, got)
+		}
+	}
+}
+
 func TestGitClone_InvalidURL(t *testing.T) {
 	dir, err := gitClone("not-a-url", "main", "")
 	if err == nil {
@@ -193,6 +222,42 @@ func TestDeploy_RequiresExplicitDirArgument(t *testing.T) {
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests when arg validation fails, got %d", len(*reqs))
 	}
+}
+
+// TestPollAppStatus_RunningAndStarting guards the contract of the helper
+// extracted from waitForHealthy. The extraction was driven by an fd leak —
+// the previous loop body called `defer resp.Body.Close()` inside the
+// polling for-range, so bodies stayed open until the command returned.
+// Running each poll inside its own function ensures `defer` fires per
+// iteration; this test pins the function's true/false return semantics so
+// nobody silently inlines the loop again.
+func TestPollAppStatus_RunningAndStarting(t *testing.T) {
+	t.Run("running returns true", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+		}))
+		defer srv.Close()
+		ready, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
+		if err != nil {
+			t.Fatalf("pollAppStatus: %v", err)
+		}
+		if !ready {
+			t.Errorf("ready = false, want true")
+		}
+	})
+	t.Run("starting returns false", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
+		}))
+		defer srv.Close()
+		ready, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
+		if err != nil {
+			t.Fatalf("pollAppStatus: %v", err)
+		}
+		if ready {
+			t.Errorf("ready = true, want false")
+		}
+	})
 }
 
 func TestEnsureApp_FallsBackToRawBodyWhenNotJSON(t *testing.T) {

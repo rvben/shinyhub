@@ -2281,7 +2281,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = await response.json();
     showLoggedIn(payload);
     passwordInput.value = '';
-    router.start();
+    // Mirror the bootstrap path: await router.start() so state.apps is
+    // populated before handleDeployHash consumes the persisted slug.
+    // Without the await + handleDeployHash call here, a logged-out user
+    // who landed on /#deploy=<slug> would persist the slug, log in, and
+    // then never get the deploy modal (the bootstrap path doesn't run on
+    // an interactive login).
+    await router.start();
+    consumeNextParam();
+    await handleDeployHash();
   });
 
   refreshButton.addEventListener('click', async () => {
@@ -2531,6 +2539,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = await response.json();
     showLoggedIn(payload);
     await router.start();
+    consumeNextParam();
     await handleDeployHash();
   }
 
@@ -2550,6 +2559,33 @@ document.addEventListener('DOMContentLoaded', () => {
     try { localStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
     // Clear the hash without adding a history entry.
     history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+
+  // consumeNextParam reads a same-origin `next=<path>` query parameter from
+  // the current URL, validates it, removes it from the address bar, and
+  // navigates to it. Returns true if a navigation was triggered. The /app
+  // access-denied page (internal/access/middleware.go renderAccessDeniedPage)
+  // sends unauthenticated browsers to /?next=<original>; before this hook
+  // existed the SPA dropped the parameter and always landed users on /.
+  //
+  // Same-origin enforcement: the value must be a relative path starting with
+  // a single `/` and must not begin with `//` (protocol-relative) or contain
+  // `\` (Windows-separator normalization). It must not be `/` or `/login`
+  // (those would no-op or loop). Anything else falls through silently.
+  function consumeNextParam() {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('next');
+    if (!raw) return false;
+    // Strip the param from the URL regardless of validity so the bad value
+    // can't loop forever on refresh.
+    params.delete('next');
+    const search = params.toString();
+    const cleaned = window.location.pathname + (search ? '?' + search : '');
+    history.replaceState(null, '', cleaned);
+    if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return false;
+    if (raw === '/' || raw === '/login') return false;
+    router.navigate(raw, { replace: true });
+    return true;
   }
 
   async function handleDeployHash() {

@@ -24,15 +24,17 @@ import (
 var slugInvalidRE = regexp.MustCompile(`[^a-z0-9]+`)
 
 // sanitizeSlug lowercases the name, replaces runs of non-alphanumeric characters
-// with a single dash, and trims leading/trailing dashes so the result matches
-// the canonical slug rule (see internal/slug).
+// with a single dash, and produces a result that satisfies the canonical slug
+// rule (see internal/slug). Truncation happens before the trailing-dash trim
+// because cutting a 64th-position dash off mid-string would otherwise leave a
+// slug ending in `-`, which slugpkg.Valid rejects.
 func sanitizeSlug(name string) string {
 	s := strings.ToLower(name)
 	s = slugInvalidRE.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
 	if len(s) > slugpkg.MaxLen {
 		s = s[:slugpkg.MaxLen]
 	}
+	s = strings.Trim(s, "-")
 	return s
 }
 
@@ -177,31 +179,43 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 	interval := 2 * time.Second
 	fmt.Printf("Waiting for %s to be healthy", slug)
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			var result struct {
-				App struct {
-					Status string `json:"status"`
-				} `json:"app"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
-				if result.App.Status == "running" {
-					fmt.Println(" ready.")
-					return nil
-				}
-			}
+		ready, err := pollAppStatus(cfg, slug)
+		if err == nil && ready {
+			fmt.Println(" ready.")
+			return nil
 		}
 		fmt.Print(".")
 		time.Sleep(interval)
 	}
 	fmt.Println()
 	return fmt.Errorf("timed out after %s waiting for %s to be healthy", timeout, slug)
+}
+
+// pollAppStatus issues a single GET /api/apps/{slug} and reports whether the
+// app is running. It exists as a separate function so each iteration's
+// response body is closed before the next poll — `defer` inside the loop in
+// waitForHealthy used to leak file descriptors for the lifetime of the
+// command on long --wait-timeout values.
+func pollAppStatus(cfg *cliConfig, slug string) (bool, error) {
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
+	if err != nil {
+		return false, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		App struct {
+			Status string `json:"status"`
+		} `json:"app"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+	return result.App.Status == "running", nil
 }
 
 func ensureApp(cfg *cliConfig, slug string) error {
