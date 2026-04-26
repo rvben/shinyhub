@@ -75,10 +75,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		defer os.RemoveAll(cloned)
 		dir = cloned
 	} else {
-		dir = "."
-		if len(args) > 0 {
-			dir = args[0]
+		// Require an explicit directory argument so a stray `shinyhub deploy`
+		// from the wrong working directory cannot silently bundle whatever
+		// happens to be in $PWD (e.g. /tmp, the project root with data/apps/,
+		// $HOME). Pass `.` to opt in to the current directory.
+		if len(args) == 0 {
+			return fmt.Errorf("missing directory argument: pass `.` to deploy the current directory or a path like `./app`")
 		}
+		dir = args[0]
 	}
 
 	abs, err := filepath.Abs(dir)

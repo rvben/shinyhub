@@ -368,6 +368,124 @@ func TestAppsDeployments(t *testing.T) {
 	}
 }
 
+// TestAppsStart sends a POST /api/apps/{slug}/restart and reports "started"
+// instead of "restarted" so the verb in the output matches what the user typed.
+func TestAppsStart(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{"slug":"demo","status":"running"}`)
+
+	var buf strings.Builder
+	appsStartCmd.SetOut(&buf)
+	appsCmd.SetArgs([]string{"start", "demo"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	req := (*reqs)[0]
+	if req.Method != "POST" || req.Path != "/api/apps/demo/restart" {
+		t.Errorf("expected POST /api/apps/demo/restart, got %s %s", req.Method, req.Path)
+	}
+	if got := buf.String(); !strings.Contains(got, "demo: started") {
+		t.Errorf("expected output to contain 'demo: started', got %q", got)
+	}
+	if strings.Contains(buf.String(), "restarted") {
+		t.Errorf("output should say 'started', not 'restarted', got %q", buf.String())
+	}
+}
+
+// TestAppsStart_ServerError ensures a non-2xx response propagates as an error.
+func TestAppsStart_ServerError(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(409, `{"error":"app has never been deployed"}`)
+
+	appsCmd.SetArgs([]string{"start", "fresh"})
+	err := appsCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for 409, got nil")
+	}
+	if !strings.Contains(err.Error(), "never been deployed") {
+		t.Errorf("error should surface the server message, got: %v", err)
+	}
+}
+
+// TestAppsShow renders the app envelope returned by GET /api/apps/<slug>.
+// The test pins the field labels so accidental rewordings break loudly.
+func TestAppsShow(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo App","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":15,"deploy_count":3,"hibernate_timeout_minutes":null,"memory_limit_mb":512,"cpu_quota_percent":100,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"running","pid":1235,"port":34568}]}`)
+	appsShowFlags.jsonOutput = false
+
+	var buf strings.Builder
+	appsShowCmd.SetOut(&buf)
+	appsCmd.SetArgs([]string{"show", "demo"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 || (*reqs)[0].Method != "GET" || (*reqs)[0].Path != "/api/apps/demo" {
+		t.Fatalf("expected GET /api/apps/demo, got %+v", *reqs)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"Slug:        demo",
+		"Name:        Demo App",
+		"Status:      running",
+		"Access:      private",
+		"Deploys:     3",
+		"Replicas:    2",
+		"Max sess/r:  15",
+		"Hibernate:   (global default)",
+		"Memory:      512 MB",
+		"CPU:         100%",
+		"INDEX  STATUS",
+		"1234",
+		"34567",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// TestAppsShow_JSON passes through the raw envelope when --json is set.
+func TestAppsShow_JSON(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	body := `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"public","status":"running","replicas":1,"max_sessions_per_replica":10,"deploy_count":1},"replicas_status":[]}`
+	setResp(200, body)
+	appsShowFlags.jsonOutput = false
+
+	var buf strings.Builder
+	appsShowCmd.SetOut(&buf)
+	appsCmd.SetArgs([]string{"show", "demo", "--json"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := strings.TrimSpace(buf.String())
+	if out != body {
+		t.Errorf("--json should pass body through verbatim\n got: %q\nwant: %q", out, body)
+	}
+}
+
+// TestAppsShow_NotFound surfaces a 404 as a non-zero exit with the server
+// message attached so scripts can branch on missing apps.
+func TestAppsShow_NotFound(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(404, `{"error":"app not found"}`)
+	appsShowFlags.jsonOutput = false
+
+	appsCmd.SetArgs([]string{"show", "missing"})
+	err := appsCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should include status 404, got %v", err)
+	}
+}
+
 // TestTokensList lists API tokens.
 func TestTokensList(t *testing.T) {
 	_, _, setResp := setupCLITest(t)

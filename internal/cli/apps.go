@@ -17,7 +17,7 @@ var appsCmd = &cobra.Command{Use: "apps", Short: "Manage apps"}
 var tokensCmd = &cobra.Command{Use: "tokens", Short: "Manage API tokens"}
 
 func init() {
-	appsCmd.AddCommand(appsListCmd, appsLogsCmd, appsRollbackCmd, appsRestartCmd, appsSetCmd, appsAccessCmd, appsDeleteCmd, appsStopCmd, appsDeploymentsCmd)
+	appsCmd.AddCommand(appsListCmd, appsShowCmd, appsLogsCmd, appsRollbackCmd, appsRestartCmd, appsStartCmd, appsSetCmd, appsAccessCmd, appsDeleteCmd, appsStopCmd, appsDeploymentsCmd)
 	tokensCmd.AddCommand(tokensCreateCmd, tokensListCmd, tokensRevokeCmd)
 }
 
@@ -73,6 +73,121 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 	for _, a := range apps {
 		row := fmt.Sprintf("%-20s %-10s %-12v", a["slug"], a["status"], a["deploy_count"])
 		fmt.Fprintln(w, strings.TrimRight(row, " "))
+	}
+	return nil
+}
+
+// ── apps show ───────────────────────────────────────────────────────────────
+
+var appsShowFlags struct {
+	jsonOutput bool
+}
+
+var appsShowCmd = &cobra.Command{
+	Use:   "show <slug>",
+	Short: "Show detailed information about an app",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAppsShow,
+}
+
+func init() {
+	appsShowCmd.Flags().BoolVar(&appsShowFlags.jsonOutput, "json", false, "Output as JSON")
+}
+
+func runAppsShow(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+
+	if appsShowFlags.jsonOutput {
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+
+	var resp2 struct {
+		App struct {
+			Slug                    string  `json:"slug"`
+			Name                    string  `json:"name"`
+			OwnerID                 int64   `json:"owner_id"`
+			Access                  string  `json:"access"`
+			Status                  string  `json:"status"`
+			Replicas                int     `json:"replicas"`
+			MaxSessionsPerReplica   int     `json:"max_sessions_per_replica"`
+			DeployCount             int     `json:"deploy_count"`
+			HibernateTimeoutMinutes *int    `json:"hibernate_timeout_minutes"`
+			MemoryLimitMB           *int    `json:"memory_limit_mb"`
+			CPUQuotaPercent         *int    `json:"cpu_quota_percent"`
+			ProjectSlug             string  `json:"project_slug,omitempty"`
+			CreatedAt               string  `json:"created_at"`
+			UpdatedAt               string  `json:"updated_at"`
+		} `json:"app"`
+		ReplicasStatus []struct {
+			Index  int    `json:"index"`
+			Status string `json:"status"`
+			PID    *int   `json:"pid"`
+			Port   *int   `json:"port"`
+		} `json:"replicas_status"`
+	}
+	if err := json.Unmarshal(out, &resp2); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	w := cmd.OutOrStdout()
+	a := resp2.App
+	fmt.Fprintf(w, "Slug:        %s\n", a.Slug)
+	fmt.Fprintf(w, "Name:        %s\n", a.Name)
+	fmt.Fprintf(w, "Status:      %s\n", a.Status)
+	fmt.Fprintf(w, "Access:      %s\n", a.Access)
+	fmt.Fprintf(w, "Owner:       user #%d\n", a.OwnerID)
+	if a.ProjectSlug != "" {
+		fmt.Fprintf(w, "Project:     %s\n", a.ProjectSlug)
+	}
+	fmt.Fprintf(w, "Deploys:     %d\n", a.DeployCount)
+	fmt.Fprintf(w, "Replicas:    %d\n", a.Replicas)
+	fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
+	if a.HibernateTimeoutMinutes != nil {
+		fmt.Fprintf(w, "Hibernate:   %d min\n", *a.HibernateTimeoutMinutes)
+	} else {
+		fmt.Fprintln(w, "Hibernate:   (global default)")
+	}
+	if a.MemoryLimitMB != nil {
+		fmt.Fprintf(w, "Memory:      %d MB\n", *a.MemoryLimitMB)
+	}
+	if a.CPUQuotaPercent != nil {
+		fmt.Fprintf(w, "CPU:         %d%%\n", *a.CPUQuotaPercent)
+	}
+	if len(a.CreatedAt) >= 10 {
+		fmt.Fprintf(w, "Created:     %s\n", a.CreatedAt[:10])
+	}
+	if len(resp2.ReplicasStatus) > 0 {
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "Replicas:")
+		fmt.Fprintf(w, "  %-6s %-10s %-8s %s\n", "INDEX", "STATUS", "PID", "PORT")
+		for _, r := range resp2.ReplicasStatus {
+			pid, port := "-", "-"
+			if r.PID != nil {
+				pid = fmt.Sprintf("%d", *r.PID)
+			}
+			if r.Port != nil {
+				port = fmt.Sprintf("%d", *r.Port)
+			}
+			fmt.Fprintf(w, "  %-6d %-10s %-8s %s\n", r.Index, r.Status, pid, port)
+		}
 	}
 	return nil
 }
@@ -174,6 +289,45 @@ var appsRestartCmd = &cobra.Command{
 	Short: "Restart a running app",
 	Args:  cobra.ExactArgs(1),
 	RunE:  rollbackOrRestart("restart", "POST"),
+}
+
+// appsStartCmd is a friendlier alias for `apps restart`. The server's restart
+// endpoint redeploys the current bundle whether the app is running or
+// stopped, so it is also the right verb for "bring this stopped app back up".
+var appsStartCmd = &cobra.Command{
+	Use:   "start <slug>",
+	Short: "Start a stopped app (alias for `restart`)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  callRestartAs("started"),
+}
+
+// callRestartAs hits POST /api/apps/{slug}/restart but reports the action
+// using a different past-tense verb (e.g. "started" instead of "restarted")
+// so `apps start` reads naturally without duplicating the HTTP plumbing.
+func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		slug := args[0]
+		req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart", nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("start failed: %s", strings.TrimSpace(string(out)))
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", slug, pastTense)
+		return nil
+	}
 }
 
 var appsSetFlags struct {

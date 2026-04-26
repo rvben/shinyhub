@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 
@@ -181,6 +183,34 @@ func TestEnsureApp_SurfacesServerErrorBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "app quota exceeded") {
 		t.Errorf("error should surface the server message, got %q", err.Error())
+	}
+}
+
+// TestDeploy_RequiresExplicitDirArgument guards against the "stray
+// `shinyhub deploy` from $PWD" footgun. Without an explicit positional arg
+// the command should refuse to run rather than silently bundling the
+// current working directory.
+func TestDeploy_RequiresExplicitDirArgument(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	// Reset deploy flags so a previous --git or --slug doesn't leak in.
+	deployFlags.git = ""
+	deployFlags.slug = ""
+	deployFlags.wait = false
+	deployFlags.branch = ""
+	deployFlags.subdir = ""
+
+	rootForTest := &cobra.Command{Use: "root"}
+	rootForTest.AddCommand(deployCmd)
+	rootForTest.SetArgs([]string{"deploy"})
+	err := rootForTest.Execute()
+	if err == nil {
+		t.Fatal("expected error when no directory argument is given, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing directory argument") {
+		t.Errorf("error should mention 'missing directory argument', got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when arg validation fails, got %d", len(*reqs))
 	}
 }
 

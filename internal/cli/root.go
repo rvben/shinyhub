@@ -39,10 +39,17 @@ func silenceUsageOnError(cmd *cobra.Command) {
 	}
 }
 
-// AddCommandsTo registers every CLI subcommand onto the supplied root command.
-// This is how cmd/shinyhub grafts the CLI tree onto the top-level `shinyhub` binary.
+// configPathOverride is set by the --config persistent flag. Empty means
+// "use the default path (or SHINYHUB_CONFIG)".
+var configPathOverride string
+
+// AddCommandsTo registers every CLI subcommand onto the supplied root command
+// and attaches the global `--config` flag so any subcommand can be retargeted
+// at a different credential file without re-running `login`.
 func AddCommandsTo(root *cobra.Command) {
-	root.AddCommand(loginCmd, deployCmd, appsCmd, tokensCmd, envCmd, dataCmd, scheduleCmd, shareCmd)
+	root.PersistentFlags().StringVar(&configPathOverride, "config", "",
+		"Path to credentials file (overrides $SHINYHUB_CONFIG and the default)")
+	root.AddCommand(loginCmd, logoutCmd, deployCmd, appsCmd, tokensCmd, envCmd, dataCmd, scheduleCmd, shareCmd)
 	silenceUsageOnError(root)
 }
 
@@ -51,20 +58,51 @@ type cliConfig struct {
 	Token string `json:"token"`
 }
 
+// configPath returns the effective credentials path, honouring (in order):
+//   1. the --config persistent flag,
+//   2. the SHINYHUB_CONFIG environment variable,
+//   3. ~/.config/shinyhub/config.json (default).
 func configPath() string {
+	if configPathOverride != "" {
+		return configPathOverride
+	}
+	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
+		return v
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "shinyhub", "config.json")
 }
 
+// loadConfig returns the effective credentials. The on-disk file is the
+// baseline; SHINYHUB_HOST and SHINYHUB_TOKEN env vars override individual
+// fields so a one-off command can target a different server (or use a CI
+// token) without clobbering the saved config. If the env vars supply both
+// fields the on-disk file is not required.
 func loadConfig() (*cliConfig, error) {
+	cfg := cliConfig{
+		Host:  os.Getenv("SHINYHUB_HOST"),
+		Token: os.Getenv("SHINYHUB_TOKEN"),
+	}
 	f, err := os.Open(configPath())
 	if err != nil {
+		if cfg.Host != "" && cfg.Token != "" {
+			return &cfg, nil
+		}
 		return nil, fmt.Errorf("not logged in — run `shinyhub login` first")
 	}
 	defer f.Close()
-	var cfg cliConfig
-	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
+	var fileCfg cliConfig
+	if err := json.NewDecoder(f).Decode(&fileCfg); err != nil {
 		return nil, err
+	}
+	if cfg.Host == "" {
+		cfg.Host = fileCfg.Host
+	}
+	if cfg.Token == "" {
+		cfg.Token = fileCfg.Token
+	}
+	if cfg.Host == "" || cfg.Token == "" {
+		return nil, fmt.Errorf("incomplete credentials at %s — re-run `shinyhub login`", configPath())
 	}
 	return &cfg, nil
 }
