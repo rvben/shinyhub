@@ -222,6 +222,12 @@ async function renderDeployments(panel, app, ctx) {
       return;
     }
 
+    // Session expired: route through the same logged-out flow the rest of
+    // the SPA uses. Falling into the generic !resp.ok branch would show
+    // "Failed to load deployments (HTTP 401)" while the rest of the page
+    // still looks signed in — client and server session state diverge
+    // until the user refreshes.
+    if (resp.status === 401) { ctx.onUnauthorized(); return; }
     if (!resp.ok) {
       let msg = `Failed to load deployments (HTTP ${resp.status}).`;
       try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { /* non-JSON */ }

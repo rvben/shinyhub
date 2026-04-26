@@ -1587,6 +1587,12 @@ document.addEventListener('DOMContentLoaded', () => {
         flashToast('Failed to update access', 'error');
         return;
       }
+      // Session expired: short-circuit to the login flow rather than
+      // showing a generic "Failed to update access" toast while the rest
+      // of the page still looks signed in. Run this BEFORE the gen check
+      // — a stale 401 still means the session is dead, and a newer
+      // attempt would only get the same 401.
+      if (resp.status === 401) { await handleUnauthorized(); return; }
       if (myGen !== accessGen) return;   // newer toggle already in flight
       if (!resp.ok) {
         applyConfirmed(previous);
