@@ -593,17 +593,22 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
 	}
+	// Bookkeeping after the proxy switch: the new pool is already serving
+	// traffic, so a transient DB hiccup here must NOT surface as "deploy
+	// failed" — that would push the caller into a retry loop on top of an
+	// already-running deploy. Log loudly so an operator notices the
+	// reconciliation gap (status watchdog will eventually correct
+	// running-status; deploy_count and the deployment history row are
+	// genuinely lost on failure but the app is fine).
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		slog.Error("deploy: persist running status failed; pool is live", "slug", slug, "err", err)
 	}
 
 	if err := s.store.IncrementDeployCount(slug); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		slog.Error("deploy: increment deploy_count failed; pool is live", "slug", slug, "err", err)
 	}
 
 	if _, err := s.store.CreateDeployment(db.CreateDeploymentParams{
@@ -612,8 +617,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		BundleDir: bundleDir,
 		Status:    "succeeded",
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		slog.Error("deploy: record deployment row failed; pool is live", "slug", slug, "version", version, "err", err)
 	}
 
 	// Prune old version directories beyond the retention limit.
@@ -741,12 +745,18 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
 	}
+	// Bookkeeping after the proxy switch: the rolled-back pool is already
+	// serving traffic, so a transient DB hiccup here must NOT surface as
+	// "rollback failed" — that would push the caller into a retry loop on top
+	// of an already-running rollback. Log loudly so an operator notices the
+	// reconciliation gap (status watchdog will eventually correct
+	// running-status; the rollback history row is genuinely lost on failure
+	// but the app is fine).
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		slog.Error("rollback: persist running status failed; pool is live", "slug", slug, "err", err)
 	}
 
 	if _, err := s.store.CreateDeployment(db.CreateDeploymentParams{
@@ -755,8 +765,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		BundleDir: prev.BundleDir,
 		Status:    "succeeded",
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "record rollback deployment for %s: %v\n", slug, err)
-		// app is running; don't fail the request over a record error
+		slog.Error("rollback: record deployment row failed; pool is live", "slug", slug, "version", prev.Version, "err", err)
 	}
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
@@ -843,12 +852,17 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
 	}
+	// Bookkeeping after the proxy switch: the restarted pool is already
+	// serving traffic, so a transient DB hiccup here must NOT surface as
+	// "restart failed" — that would push the caller into a retry loop on top
+	// of an already-running restart. Log loudly so an operator notices the
+	// reconciliation gap (status watchdog will eventually correct
+	// running-status).
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		slog.Error("restart: persist running status failed; pool is live", "slug", slug, "err", err)
 	}
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
