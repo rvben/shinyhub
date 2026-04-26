@@ -140,14 +140,18 @@ func httpStatusErrorString(status int) string {
 }
 
 // wantsHTML reports whether the request is a browser navigation that would
-// benefit from a styled HTML response. We treat presence of an Authorization
-// header (CLI/SDK) as definitive: those callers always want JSON. Otherwise
-// the standard browser fetch metadata (Sec-Fetch-Mode: navigate) and Accept
-// header heuristics are applied.
+// benefit from a styled HTML response. We rely on standard browser fetch
+// metadata: Sec-Fetch-Mode: navigate is set by all current browsers on
+// top-level navigations, and Accept: text/html covers older clients and the
+// occasional curl-with-headers smoke test.
+//
+// We deliberately do NOT short-circuit on Authorization: an embedded Shiny
+// app may forward its own Bearer token on top-level navigations to /app/*.
+// Treating that as "this is a CLI, return JSON" would silently swap the
+// styled access-denied page for a raw JSON body in the browser tab. CLI
+// callers send neither Sec-Fetch-Mode: navigate nor Accept: text/html, so
+// they correctly fall through to JSON without any explicit header check.
 func wantsHTML(r *http.Request) bool {
-	if r.Header.Get("Authorization") != "" {
-		return false
-	}
 	if r.Header.Get("Sec-Fetch-Mode") == "navigate" {
 		return true
 	}

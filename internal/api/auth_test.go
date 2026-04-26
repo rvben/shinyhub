@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,6 +38,14 @@ func buildStaleJWT(userID int64, username, role, secret string) (token string, i
 
 func newTestServer(t *testing.T) (*api.Server, *db.Store) {
 	t.Helper()
+	return newTestServerWithTrustedProxies(t, nil)
+}
+
+// newTestServerWithTrustedProxies builds a test server whose ClientIP /
+// effectiveHost trust the supplied CIDRs. Pass CIDR strings like "127.0.0.0/8";
+// pass nil for the no-proxy case (matches newTestServer).
+func newTestServerWithTrustedProxies(t *testing.T, cidrs []string) (*api.Server, *db.Store) {
+	t.Helper()
 	store, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -44,9 +53,18 @@ func newTestServer(t *testing.T) (*api.Server, *db.Store) {
 	if err := store.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	var nets []*net.IPNet
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			t.Fatalf("parse trusted proxy CIDR %q: %v", c, err)
+		}
+		nets = append(nets, n)
+	}
 	cfg := &config.Config{
-		Auth:    config.AuthConfig{Secret: "test-secret"},
-		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+		Auth:             config.AuthConfig{Secret: "test-secret"},
+		Storage:          config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+		TrustedProxyNets: nets,
 	}
 	srv := api.New(cfg, store, nil, nil) // no manager/proxy for auth tests
 	t.Cleanup(func() { store.Close() })
@@ -698,5 +716,59 @@ func TestSessionHandoff_ScrubsUnsafeNext(t *testing.T) {
 				t.Errorf("unsafe next %q yielded Location %q, want /", tc.next, got)
 			}
 		})
+	}
+}
+
+// Behind a reverse proxy, r.Host is whatever the proxy addressed us at
+// (commonly 127.0.0.1:<port> or a Unix socket alias) — never the public
+// hostname the browser put in Origin. Without effectiveHost the same-origin
+// check would 403 every legitimate handoff in production. This test pins that
+// X-Forwarded-Host from a peer in TrustedProxyNets is honoured.
+func TestSessionHandoff_HonorsXForwardedHostFromTrustedProxy(t *testing.T) {
+	srv, store := newTestServerWithTrustedProxies(t, []string{"127.0.0.0/8"})
+	token, _ := seedUserAndJWT(t, store, "alice", "developer")
+
+	form := bytes.NewBufferString("next=%2Fapp%2Fsecret%2F")
+	req := httptest.NewRequest("POST", "/api/auth/handoff", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:54321" // direct peer is the trusted proxy
+	req.Host = "127.0.0.1:8080"        // upstream socket address
+	req.Header.Set("X-Forwarded-Host", "hub.example.com")
+	req.Header.Set("Origin", "https://hub.example.com")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("proxied handoff = %d, want 303: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Mirror image: an attacker who can reach us directly (i.e. peer is NOT in
+// TrustedProxyNets) cannot fake X-Forwarded-Host to bypass the same-origin
+// check. The header is ignored, the comparison falls back to r.Host, and the
+// foreign Origin is rejected.
+func TestSessionHandoff_IgnoresXForwardedHostFromUntrustedPeer(t *testing.T) {
+	srv, store := newTestServerWithTrustedProxies(t, []string{"127.0.0.0/8"})
+	token, _ := seedUserAndJWT(t, store, "alice", "developer")
+	claims, _ := auth.ValidateJWT(token, "test-secret", nil)
+
+	form := bytes.NewBufferString("next=%2Fapp%2Fsecret%2F")
+	req := httptest.NewRequest("POST", "/api/auth/handoff", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "203.0.113.7:44444" // public peer, not a trusted proxy
+	req.Host = "hub.example.com"
+	req.Header.Set("X-Forwarded-Host", "evil.example.com")
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("untrusted-peer XFH spoof = %d, want 403", rec.Code)
+	}
+	revoked, _ := store.IsTokenRevoked(claims.ID)
+	if revoked {
+		t.Error("rejected handoff must not revoke the JWT")
 	}
 }

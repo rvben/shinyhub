@@ -455,3 +455,74 @@ func TestAccess_PrivateApp_OperatorBypasses(t *testing.T) {
 		t.Errorf("operator bypass: expected 200, got %d", rec.Code)
 	}
 }
+
+// An embedded Shiny app may forward its own `Authorization: Bearer ...`
+// header on a top-level navigation to /app/<slug>/. If the user is signed out
+// (no session cookie), the access middleware must still respect the browser
+// fetch-metadata signals and serve the styled HTML access-denied page —
+// otherwise the foreign Authorization header silently swaps the page for a
+// raw `{"error":"unauthorized"}` JSON body in the browser tab.
+func TestAccess_Unauthorized_BrowserNav_WithForeignAuthHeader_GetsHTML(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Quarterly Report", OwnerID: owner.ID})
+
+	mw := access.Middleware(store, "test-secret", nil, nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/secret/", nil)
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	// The embedded app forwards its OWN bearer token. The middleware already
+	// ignores Authorization on /app/* (cookie-only auth); the response format
+	// must equally not be skewed by the header's presence.
+	req.Header.Set("Authorization", "Bearer some-other-systems-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Authorization header on a browser navigation must NOT downgrade the styled HTML page to JSON, got Content-Type %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "Sign in to access this app") {
+		t.Errorf("body should be the styled HTML page, got %q", rec.Body.String())
+	}
+}
+
+// Mirror image for the 403 case: an embedded app forwarding its own bearer
+// token while the user is signed in as the wrong account must still see the
+// styled HTML handoff form, not a JSON envelope.
+func TestAccess_Forbidden_BrowserNav_WithForeignAuthHeader_GetsHTML(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	bob, _ := store.GetUserByUsername("bob")
+	store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Quarterly Report", OwnerID: owner.ID})
+
+	bobToken, _ := auth.IssueJWT(bob.ID, "bob", "developer", "test-secret")
+
+	mw := access.Middleware(store, "test-secret", nil, nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/secret/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: bobToken})
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Authorization", "Bearer some-other-systems-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Authorization header on a browser navigation must NOT downgrade the styled HTML page to JSON, got Content-Type %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), `<form method="POST" action="/api/auth/handoff">`) {
+		t.Errorf("body should carry the handoff form, got %q", rec.Body.String())
+	}
+}

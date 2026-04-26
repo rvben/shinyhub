@@ -382,7 +382,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 // is sent — we reject the request outright. This is the same pattern Django,
 // Rails et al. use for their double-submit-cookie escape hatch.
 func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
-	if !sameOriginPost(r) {
+	if !s.sameOriginPost(r) {
 		http.Error(w, "cross-origin handoff rejected", http.StatusForbidden)
 		return
 	}
@@ -421,26 +421,35 @@ func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 
 // sameOriginPost reports whether the request appears to come from our own
 // origin. We require either Origin or Referer to be present and to match the
-// request's Host. Browsers attach Origin to all unsafe cross-origin requests,
-// so a third-party POST from evil.example.com will either carry
+// request's effective host. Browsers attach Origin to all unsafe cross-origin
+// requests, so a third-party POST from evil.example.com will either carry
 // `Origin: https://evil.example.com` (rejected) or — if Origin is suppressed —
 // a `Referer: https://evil.example.com/...` (also rejected). A request with
 // neither header is rejected too; that closes the gap where a privacy-focused
 // extension strips both.
-func sameOriginPost(r *http.Request) bool {
+//
+// Comparison uses effectiveHost, not r.Host, so the check works behind a
+// reverse proxy. Behind nginx/Caddy/Traefik the inbound TCP connection
+// terminates at the proxy, so r.Host is whatever the proxy addressed us at
+// (often 127.0.0.1:<port> or a Unix socket alias) — never the public hostname
+// the browser put in Origin. effectiveHost trusts X-Forwarded-Host only when
+// the direct peer is in TrustedProxyNets, so an attacker who can reach us
+// directly cannot fake the header to bypass this check.
+func (s *Server) sameOriginPost(r *http.Request) bool {
+	host := s.effectiveHost(r)
 	if origin := r.Header.Get("Origin"); origin != "" {
 		u, err := url.Parse(origin)
 		if err != nil || u.Host == "" {
 			return false
 		}
-		return strings.EqualFold(u.Host, r.Host)
+		return strings.EqualFold(u.Host, host)
 	}
 	if referer := r.Header.Get("Referer"); referer != "" {
 		u, err := url.Parse(referer)
 		if err != nil || u.Host == "" {
 			return false
 		}
-		return strings.EqualFold(u.Host, r.Host)
+		return strings.EqualFold(u.Host, host)
 	}
 	return false
 }

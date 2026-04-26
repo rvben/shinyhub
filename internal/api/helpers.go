@@ -72,3 +72,43 @@ func (s *Server) ClientIP(r *http.Request) string {
 	}
 	return peerHost
 }
+
+// effectiveHost returns the public host the user reached us on, preferring
+// X-Forwarded-Host when the direct peer is a configured trusted proxy. Plain
+// r.Host is wrong behind a reverse proxy: the inbound TCP connection terminates
+// at the proxy, so r.Host is whatever the proxy addressed us at (often
+// 127.0.0.1:<port> or a Unix socket alias) — not the public hostname the
+// browser sees. Comparing such an r.Host against a browser-supplied Origin
+// header would reject every same-origin request in production.
+//
+// X-Forwarded-Host is only trusted when the direct peer is in
+// TrustedProxyNets, mirroring ClientIP's policy: an attacker who can reach us
+// directly cannot fake the header to bypass the same-origin check.
+func (s *Server) effectiveHost(r *http.Request) string {
+	if s.peerIsTrustedProxy(r) {
+		if v := r.Header.Get("X-Forwarded-Host"); v != "" {
+			return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
+		}
+	}
+	return r.Host
+}
+
+// peerIsTrustedProxy reports whether the direct TCP peer (RemoteAddr) is
+// within a configured trusted proxy CIDR. Used as the gate for honouring
+// X-Forwarded-* headers.
+func (s *Server) peerIsTrustedProxy(r *http.Request) bool {
+	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peerHost = r.RemoteAddr
+	}
+	peerIP := net.ParseIP(peerHost)
+	if peerIP == nil {
+		return false
+	}
+	for _, n := range s.cfg.TrustedProxyNets {
+		if n.Contains(peerIP) {
+			return true
+		}
+	}
+	return false
+}
