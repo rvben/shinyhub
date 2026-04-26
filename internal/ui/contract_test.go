@@ -42,6 +42,33 @@ func TestDataTabUnwrapsResponse(t *testing.T) {
 		"GET /api/apps/:slug/data returns {files, quota_mb, used_bytes}; see internal/api/data.go handleDataList")
 }
 
+// TestAuditUnwrapsEnvelope guards the audit-log consumer.
+// GET /api/audit returns {events, total, has_more} (internal/api/audit.go
+// handleListAuditEvents). The UI's loadAuditEvents must read body.has_more
+// to enable/disable the Next button — the previous heuristic of "fetch 101
+// rows and check length > 100" disabled Next even when more pages existed.
+func TestAuditUnwrapsEnvelope(t *testing.T) {
+	assertContains(t, "app.js", "body.has_more",
+		"GET /api/audit returns {events, total, has_more}; see internal/api/audit.go handleListAuditEvents")
+	assertContains(t, "app.js", "body.events",
+		"GET /api/audit returns {events, total, has_more}; consumer must read body.events")
+}
+
+// TestAppDetailPreservesOverviewURL guards against silent URL rewrites.
+// /apps/<slug>/overview is a legitimate explicit-tab URL — it must not be
+// replaced with /apps/<slug>. The presence of the canonicalising
+// `history.replaceState` in mountAppDetail was the bug; this test fails
+// if it comes back.
+func TestAppDetailPreservesOverviewURL(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
+	if err != nil {
+		t.Fatalf("read app-detail.js: %v", err)
+	}
+	if strings.Contains(string(b), "history.replaceState({}, '', `/apps/${slug}`)") {
+		t.Fatal("app-detail.js must not silently rewrite /apps/<slug>/overview to /apps/<slug>; preserve the user's URL")
+	}
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)

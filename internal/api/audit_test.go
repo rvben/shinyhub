@@ -36,18 +36,28 @@ func TestAuditListIncludesUsername(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []struct {
-		Action   string  `json:"action"`
-		Username *string `json:"username"`
+	var resp struct {
+		Events []struct {
+			Action   string  `json:"action"`
+			Username *string `json:"username"`
+		} `json:"events"`
+		Total   int64 `json:"total"`
+		HasMore bool  `json:"has_more"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&events); err != nil {
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	if len(resp.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(resp.Events))
 	}
-	if events[0].Username == nil || *events[0].Username != "alice" {
-		t.Errorf("expected username=alice in response, got %v", events[0].Username)
+	if resp.Events[0].Username == nil || *resp.Events[0].Username != "alice" {
+		t.Errorf("expected username=alice in response, got %v", resp.Events[0].Username)
+	}
+	if resp.Total != 1 {
+		t.Errorf("expected total=1, got %d", resp.Total)
+	}
+	if resp.HasMore {
+		t.Errorf("expected has_more=false for single-page result, got true")
 	}
 }
 
@@ -78,17 +88,19 @@ func TestAuditListAnonymousEventHasNoUsername(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []struct {
-		Username *string `json:"username"`
+	var resp struct {
+		Events []struct {
+			Username *string `json:"username"`
+		} `json:"events"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&events); err != nil {
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	if len(resp.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(resp.Events))
 	}
-	if events[0].Username != nil {
-		t.Errorf("expected no username field for anonymous event, got %v", *events[0].Username)
+	if resp.Events[0].Username != nil {
+		t.Errorf("expected no username field for anonymous event, got %v", *resp.Events[0].Username)
 	}
 }
 
@@ -123,12 +135,14 @@ func TestListAuditEvents_Admin(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var events []map[string]any
-	json.NewDecoder(rec.Body).Decode(&events)
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	var resp struct {
+		Events []map[string]any `json:"events"`
 	}
-	if events[0]["action"] != "deploy" {
-		t.Errorf("expected action=deploy, got %v", events[0]["action"])
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if len(resp.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(resp.Events))
+	}
+	if resp.Events[0]["action"] != "deploy" {
+		t.Errorf("expected action=deploy, got %v", resp.Events[0]["action"])
 	}
 }

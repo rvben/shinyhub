@@ -917,6 +917,17 @@ func (s *Store) LogAuditEvent(p AuditEventParams) {
 	}
 }
 
+// CountAuditEvents returns the total number of rows in audit_events. Used by
+// the API handler to compute has_more for pagination — without a total the UI
+// can only guess and ends up disabling Next/Prev when more rows exist.
+func (s *Store) CountAuditEvents() (int64, error) {
+	var n int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count audit events: %w", err)
+	}
+	return n, nil
+}
+
 // ListAuditEvents returns audit events ordered newest-first with pagination.
 // Each event includes the username of the acting user via a LEFT JOIN on users,
 // so anonymous events (no user_id) are still returned with a nil Username.

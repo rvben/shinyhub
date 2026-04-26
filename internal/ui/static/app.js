@@ -42,6 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const loginView = document.getElementById('login-view');
   const appsView = document.getElementById('apps-view');
+  const appDetailView = document.getElementById('app-detail-view');
   const loginForm = document.getElementById('login-form');
   const usernameInput = document.getElementById('login-username');
   const passwordInput = document.getElementById('login-password');
@@ -64,6 +65,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const auditView   = document.getElementById('audit-view');
   const auditError  = document.getElementById('audit-error');
   const auditBody   = document.getElementById('audit-body');
+  const auditEmpty  = document.getElementById('audit-empty');
   const auditPrev   = document.getElementById('audit-prev');
   const auditNext   = document.getElementById('audit-next');
   const auditRange  = document.getElementById('audit-range');
@@ -388,6 +390,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(appsView, true);
     setHidden(usersView, true);
     setHidden(auditView, true);
+    setHidden(appDetailView, true);
     tabBar.hidden = true;
     setError(loginError, '');
     setError(appError, '');
@@ -404,7 +407,9 @@ document.addEventListener('DOMContentLoaded', () => {
     tabAudit.hidden = payload.user.role !== 'admin';
     tabUsers.hidden = payload.user.role !== 'admin';
     newAppButton.hidden = !state.canCreateApps;
-    showView('apps');
+    // The router (started by the caller) will mount the view that matches
+    // the current URL — do not pre-show apps-view here, it leaks through
+    // on direct loads of /users, /audit-log, /apps/<slug>.
   }
 
   async function handleUnauthorized() {
@@ -442,7 +447,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const offset = page * 100;
     let resp;
     try {
-      resp = await api(`/api/audit?limit=101&offset=${offset}`);
+      resp = await api(`/api/audit?limit=100&offset=${offset}`);
     } catch {
       setError(auditError, 'Network error');
       return;
@@ -450,20 +455,27 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(auditError, 'Failed to load audit log'); return; }
 
-    let events;
+    let body;
     try {
-      events = (await resp.json()) || [];
+      body = await resp.json();
     } catch {
       setError(auditError, 'Invalid response from server');
       return;
     }
-    state.auditHasMore = events.length > 100;
+    // Server returns {events, total, has_more}; legacy callers may still get
+    // a bare array if anything reverts the API, so be defensive.
+    const events = Array.isArray(body) ? body : (body.events || []);
+    state.auditHasMore = Array.isArray(body)
+      ? events.length === 100
+      : !!body.has_more;
+    state.auditTotal = Array.isArray(body) ? null : (body.total ?? null);
     state.auditPage = page;
-    renderAuditEvents(events.slice(0, 100));
+    renderAuditEvents(events);
   }
 
   function renderAuditEvents(events) {
     auditBody.textContent = '';
+    if (auditEmpty) auditEmpty.hidden = events.length !== 0;
 
     const knownActions = [
       // Deployment actions (green)
@@ -536,9 +548,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const start = state.auditPage * 100 + 1;
     const end   = state.auditPage * 100 + events.length;
-    auditRange.textContent = events.length === 0
-      ? 'No events'
-      : `Showing ${start}–${end}`;
+    if (events.length === 0) {
+      auditRange.textContent = 'No events';
+    } else if (state.auditTotal != null) {
+      auditRange.textContent = `Showing ${start}–${end} of ${state.auditTotal}`;
+    } else {
+      auditRange.textContent = `Showing ${start}–${end}`;
+    }
     auditPrev.disabled = state.auditPage === 0;
     auditNext.disabled = !state.auditHasMore;
   }
@@ -2384,15 +2400,40 @@ document.addEventListener('DOMContentLoaded', () => {
     openDeployModal,
   });
 
+  // Hide every top-level page section before mounting a new view so a
+  // sibling view never bleeds through. The previous-view unmount() handles
+  // this on SPA transitions, but on a direct page load (e.g. reload on
+  // /users) there is no previous view to clean up — the sections inherit
+  // whatever showLoggedIn left them in.
+  function hideAllPageViews() {
+    appsView.hidden = true;
+    usersView.hidden = true;
+    auditView.hidden = true;
+    appDetailView.hidden = true;
+  }
+
   router.register('/', () => {
+    hideAllPageViews();
     const view = mountAppsGrid(ctx);
     updateActiveNav(location.pathname);
     return view;
   });
-  router.register('/users', () => mountUsers({ ...ctx, loadUsers }));
-  router.register('/audit-log', () => mountAuditLog({ ...ctx, loadAuditEvents }));
-  router.register('/apps/:slug',      (p) => appDetailMount({ ...p, tab: 'overview' }));
-  router.register('/apps/:slug/:tab', (p) => appDetailMount(p));
+  router.register('/users', () => {
+    hideAllPageViews();
+    return mountUsers({ ...ctx, loadUsers });
+  });
+  router.register('/audit-log', () => {
+    hideAllPageViews();
+    return mountAuditLog({ ...ctx, loadAuditEvents });
+  });
+  router.register('/apps/:slug', (p) => {
+    hideAllPageViews();
+    return appDetailMount({ ...p, tab: 'overview' });
+  });
+  router.register('/apps/:slug/:tab', (p) => {
+    hideAllPageViews();
+    return appDetailMount(p);
+  });
 
   async function initialize() {
     // Persist any /#deploy=<slug> hash before the auth check so the slug

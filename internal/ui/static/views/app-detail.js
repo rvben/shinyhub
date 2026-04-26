@@ -5,6 +5,10 @@
 const TAB_ROUTES = ['overview', 'logs', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
 
+function pluralize(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 export function mountAppDetail(ctx) {
   const view = document.getElementById('app-detail-view');
   const panels = {
@@ -25,10 +29,10 @@ export function mountAppDetail(ctx) {
     const { slug } = params;
     const tab = TAB_ROUTES.includes(params.tab) ? params.tab : 'overview';
 
-    // Canonicalize /apps/<slug>/overview → /apps/<slug>.
-    if (params.tab === 'overview') {
-      history.replaceState({}, '', `/apps/${slug}`);
-    }
+    // Preserve the user's URL: /apps/<slug>/overview is a legitimate route
+    // (every other tab keeps its segment, so /overview should too). The
+    // previous version replaced it with /apps/<slug>, which surprised users
+    // who pasted/bookmarked the explicit overview URL.
 
     const resp = await ctx.api(`/api/apps/${slug}`);
     if (resp.status === 404) { ctx.navigate('/'); return {}; }
@@ -58,10 +62,18 @@ export function mountAppDetail(ctx) {
 
     document.getElementById('app-detail-heading').textContent = app.name;
     document.getElementById('app-detail-slug').textContent = '/' + app.slug;
-    document.getElementById('app-detail-deploy-count').textContent = `${app.deploy_count} deploys`;
+    const deployCountEl = document.getElementById('app-detail-deploy-count');
+    deployCountEl.textContent = pluralize(app.deploy_count, 'deploy', 'deploys');
     const statusEl = document.getElementById('app-detail-status');
-    statusEl.textContent = app.status;
-    statusEl.className = 'badge badge-' + app.status;
+    // Mirror the apps-grid behaviour: an app with zero deploys is not
+    // "degraded" — there's nothing wrong with it, it just hasn't run yet.
+    if ((app.deploy_count || 0) === 0) {
+      statusEl.textContent = 'Awaiting deploy';
+      statusEl.className = 'badge badge-new';
+    } else {
+      statusEl.textContent = app.status;
+      statusEl.className = 'badge badge-' + app.status;
+    }
     const openLink = document.getElementById('app-detail-open');
     openLink.href = `/app/${app.slug}/`;
     openLink.hidden = app.status !== 'running';
