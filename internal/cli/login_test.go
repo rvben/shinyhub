@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestVerifyToken_Unauthorized(t *testing.T) {
@@ -50,6 +54,110 @@ func TestVerifyToken_OK(t *testing.T) {
 
 	if err := verifyToken(srv.URL, "shk_good"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestRunLogin_PromptsForPasswordWhenStdinIsTTY guards the new-user handoff
+// snippet. The snippet shown in the admin's "New user" modal is just
+// `shinyhub login --host X --username Y` — without a `--password` flag the
+// previous behaviour POSTed an empty password and surfaced "login failed:
+// 401 Unauthorized" with no hint about how to recover. Interactive sessions
+// must now prompt for the missing password (via term.ReadPassword in
+// production; stubbed here) so the snippet is runnable as-is.
+func TestRunLogin_PromptsForPasswordWhenStdinIsTTY(t *testing.T) {
+	// Capture the JSON body the server receives so we can assert that the
+	// prompted password was forwarded — not the empty string from the flag.
+	var seen struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/auth/login" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &seen)
+		_, _ = w.Write([]byte(`{"token":"shk_via_prompt"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// Redirect the config write to a temp dir so the test doesn't clobber
+	// the developer's real ~/.shinyhub/config.yaml.
+	t.Setenv("HOME", t.TempDir())
+
+	// Stub the tty + ReadPassword seams.
+	origIsTTY, origReadPw := isStdinTTY, readPassword
+	t.Cleanup(func() { isStdinTTY, readPassword = origIsTTY, origReadPw })
+	isStdinTTY = func() bool { return true }
+	readPassword = func() (string, error) { return "secret123", nil }
+
+	// Reset and configure the package-level loginFlags the way the CLI
+	// would after parsing `shinyhub login --host X --username alice`.
+	loginFlags.host = srv.URL
+	loginFlags.username = "alice"
+	loginFlags.password = ""
+	loginFlags.token = ""
+	t.Cleanup(func() {
+		loginFlags.host = ""
+		loginFlags.username = ""
+		loginFlags.password = ""
+		loginFlags.token = ""
+	})
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	if err := runLogin(cmd, nil); err != nil {
+		t.Fatalf("runLogin: %v", err)
+	}
+	if seen.Username != "alice" {
+		t.Errorf("server saw username=%q, want %q", seen.Username, "alice")
+	}
+	if seen.Password != "secret123" {
+		t.Errorf("server saw password=%q, want the prompted value", seen.Password)
+	}
+}
+
+// TestRunLogin_NoPromptWhenStdinIsPipe guards the script-friendly path. When
+// stdin is not a tty (e.g. the user pipes credentials from a secrets manager),
+// the login command must not block on a prompt — it should pass the empty
+// flags through unchanged so the server's existing 401 surfaces with the same
+// behaviour as before.
+func TestRunLogin_NoPromptWhenStdinIsPipe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("HOME", t.TempDir())
+
+	origIsTTY, origReadPw := isStdinTTY, readPassword
+	t.Cleanup(func() { isStdinTTY, readPassword = origIsTTY, origReadPw })
+	isStdinTTY = func() bool { return false }
+	readPassword = func() (string, error) {
+		t.Fatal("readPassword must not be called when stdin is a pipe; would block forever in CI")
+		return "", nil
+	}
+
+	loginFlags.host = srv.URL
+	loginFlags.username = "alice"
+	loginFlags.password = ""
+	loginFlags.token = ""
+	t.Cleanup(func() {
+		loginFlags.host = ""
+		loginFlags.username = ""
+		loginFlags.password = ""
+		loginFlags.token = ""
+	})
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	err := runLogin(cmd, nil)
+	if err == nil {
+		t.Fatal("expected 401 error from server, got nil")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("error should surface server status, got: %v", err)
 	}
 }
 

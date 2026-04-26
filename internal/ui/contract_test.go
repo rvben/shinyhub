@@ -347,6 +347,41 @@ func TestDeploymentsLoadDoesNotMask404AsEmpty(t *testing.T) {
 	}
 }
 
+// TestNewUserSnippetIsRunnable guards the new-user handoff. The snippet is
+// shown to the admin who creates a new user and shared via Slack/email with
+// the recipient; the recipient must be able to paste it into a shell and have
+// it work. Two failure modes drove the fix:
+//
+//  1. The original snippet was `shinyhub login --host X --username Y` with no
+//     password flag and no prompt — the recipient got "login failed: 401" and
+//     no hint about what to do. The CLI now prompts interactively for a
+//     missing password (see internal/cli/login.go), so this snippet is
+//     runnable as-is.
+//
+//  2. The snippet must not include `--password <value>` because that leaks
+//     the password into shell history (and into the clipboard via the copy
+//     button). Generating a snippet with a literal password would be a
+//     regression.
+//
+// We assert the renderer emits the prompt-friendly form and never the
+// password-baked form.
+func TestNewUserSnippetIsRunnable(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "shinyhub login --host ${origin} --username ${username}") {
+		t.Fatal("app.js renderNewUserSnippet must emit `shinyhub login --host ${origin} --username ${username}` so the new user can paste-and-run; the CLI prompts for the missing password (see internal/cli/login.go runLogin)")
+	}
+	// Belt and braces: no `--password ` form should be produced anywhere in
+	// the rendered snippets — that would leak credentials into shell history
+	// and the clipboard.
+	if strings.Contains(src, "--password ${") || strings.Contains(src, "--password \"") {
+		t.Fatal("app.js: handoff snippets must not include `--password <value>`; the CLI prompts interactively, and embedding the password leaks it into shell history and the clipboard")
+	}
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)
