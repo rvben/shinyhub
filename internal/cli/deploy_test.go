@@ -92,6 +92,41 @@ func TestSanitizeSlug_TruncationProducesValidSlug(t *testing.T) {
 	}
 }
 
+// TestDeploy_DerivedSlugInvalid_FailsLocally guards against the local
+// path: a directory whose basename sanitizes to an empty/invalid slug
+// (e.g. "---", emoji-only, all punctuation) used to fall through into
+// /api/apps/ and surface a confusing server-side 404 or 400. The CLI
+// must catch this before any network call so the user gets a clear
+// "pass --slug explicitly" hint instead.
+func TestDeploy_DerivedSlugInvalid_FailsLocally(t *testing.T) {
+	// `---` collapses to "" through sanitizeSlug (regex replaces non-
+	// alphanumerics with `-`, then strings.Trim strips leading/trailing
+	// dashes). Other equivalent triggers: a single `.`, an emoji-only
+	// name, etc. — they all produce an empty result that slugpkg.Valid
+	// rejects.
+	parent := t.TempDir()
+	badDir := filepath.Join(parent, "---")
+	if err := os.MkdirAll(badDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	prevSlug, prevGit := deployFlags.slug, deployFlags.git
+	deployFlags.slug = ""
+	deployFlags.git = ""
+	t.Cleanup(func() {
+		deployFlags.slug = prevSlug
+		deployFlags.git = prevGit
+	})
+
+	err := runDeploy(deployCmd, []string{badDir})
+	if err == nil {
+		t.Fatal("expected error from invalid derived slug, got nil — runDeploy should reject before any network call")
+	}
+	if !strings.Contains(err.Error(), "could not derive a valid slug") {
+		t.Fatalf("expected error mentioning 'could not derive a valid slug' so the user knows to pass --slug, got: %v", err)
+	}
+}
+
 func TestGitClone_InvalidURL(t *testing.T) {
 	dir, err := gitClone("not-a-url", "main", "")
 	if err == nil {

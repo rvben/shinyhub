@@ -91,7 +91,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	slug := deployFlags.slug
+	derived := false
 	if slug == "" {
+		derived = true
 		if deployFlags.git != "" {
 			// Derive slug from the repo name (last path component, strip .git suffix).
 			repoName := filepath.Base(deployFlags.git)
@@ -100,11 +102,19 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		} else {
 			slug = sanitizeSlug(filepath.Base(abs))
 		}
-	} else {
-		// Validate the user-supplied slug locally before making any network call.
-		if !slugpkg.Valid(slug) {
-			return fmt.Errorf("invalid slug %q: must be %s", slug, slugpkg.HumanRule)
+	}
+	// Validate locally before any network call. The derived path matters
+	// just as much as the user-supplied path: sanitizeSlug can collapse a
+	// non-ASCII directory name (e.g. an emoji-only repo, "---", a single
+	// `.`) to an empty or otherwise invalid string, which would otherwise
+	// hit `/api/apps/` with a malformed URL and surface a confusing 404
+	// instead of a clear local error.
+	if !slugpkg.Valid(slug) {
+		if derived {
+			return fmt.Errorf("could not derive a valid slug from %q (got %q): pass --slug explicitly. Slug rule: %s",
+				filepath.Base(abs), slug, slugpkg.HumanRule)
 		}
+		return fmt.Errorf("invalid slug %q: must be %s", slug, slugpkg.HumanRule)
 	}
 
 	cfg, err := loadConfig()
