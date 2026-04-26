@@ -2520,12 +2520,21 @@ document.addEventListener('DOMContentLoaded', () => {
     persistDeployHash();
     // /?logout=1 means the access middleware sent a 403 page because the
     // current session belonged to a user without access to the protected
-    // app. We must clear that session BEFORE /api/auth/me so the SPA shows
-    // the login form instead of silently re-authenticating the same wrong
-    // user and bouncing them back to the same 403.
-    await consumeLogoutParam();
+    // app. consumeLogoutParam returns true when it acted on a legitimate
+    // 403-handoff link; in that case we MUST skip /api/auth/me so we don't
+    // silently re-authenticate the same wrong user. Even if the POST
+    // /api/auth/logout failed (CSRF reject, network error), going straight
+    // to the login form is the correct UX — the next /api/auth/login
+    // replaces the cookie regardless. Without this short-circuit a failed
+    // logout looped the user back to the same 403 page.
+    const wantsLogout = await consumeLogoutParam();
     loadProviders();
     setError(loginError, '');
+
+    if (wantsLogout) {
+      showLoggedOut();
+      return;
+    }
 
     let response;
     try {
@@ -2571,22 +2580,35 @@ document.addEventListener('DOMContentLoaded', () => {
     history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
-  // consumeLogoutParam looks for `?logout=1` in the URL and, if present,
-  // best-effort clears the current session by POSTing /api/auth/logout
-  // before stripping the param. The access middleware emits this link on
-  // 403 pages so a user signed in as the wrong account isn't silently
-  // re-authenticated and bounced back to the same 403. Errors are
-  // swallowed because the worst case (server unreachable) is the same as
-  // not being signed in — the SPA will show the login form regardless.
+  // consumeLogoutParam looks for `?logout=1` in the URL and, if it is the
+  // 403-handoff link the access middleware emits, best-effort clears the
+  // current session by POSTing /api/auth/logout. Returns true on a real
+  // 403-handoff so the caller can skip /api/auth/me and go straight to
+  // the login form.
+  //
+  // Pairing requirement: only honour ?logout=1 when paired with a
+  // ?next=/app/<slug>/... value, because that's the only producer (see
+  // internal/access/middleware.go renderAccessDeniedPage). A bare
+  // ?logout=1 likely came from a stale tab, an external link, or a
+  // copy-pasted URL — silently logging the user out on navigation alone
+  // would be a GET-driven state change. If the pairing doesn't match we
+  // strip the param and continue without the POST so the user keeps
+  // their session.
+  //
+  // We always strip ?logout=1 from the URL (whether or not we acted on
+  // it) so a refresh can't loop the logout request.
   async function consumeLogoutParam() {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('logout') !== '1') return;
+    if (params.get('logout') !== '1') return false;
+    const next = params.get('next') || '';
     params.delete('logout');
     const search = params.toString();
     history.replaceState(null, '', window.location.pathname + (search ? '?' + search : ''));
+    if (!next.startsWith('/app/')) return false;
     try {
       await api('/api/auth/logout', { method: 'POST' });
-    } catch { /* fall through; auth/me will surface the right state */ }
+    } catch { /* fall through; we still skip /api/auth/me to break the 403 loop */ }
+    return true;
   }
 
   // consumeNextParam reads a same-origin `next=<path>` query parameter from

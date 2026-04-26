@@ -384,11 +384,19 @@ func TestNewUserSnippetIsRunnable(t *testing.T) {
 
 // TestSPAConsumesLogoutQueryParam guards the 403-loop fix. The access
 // middleware emits /?logout=1&next=<original> on a 403 page so the user
-// can sign in as a different account; without server-side session
-// invalidation the SPA's /api/auth/me would silently re-authenticate the
-// same wrong user and bounce them back to the same 403. The SPA must
-// detect ?logout=1 and POST /api/auth/logout BEFORE the auth check, and
-// must strip the param from the URL so a refresh doesn't loop logout.
+// can sign in as a different account. Two failure modes must stay closed:
+//
+//  1. If POST /api/auth/logout silently fails (CSRF reject, network),
+//     the SPA must NOT proceed to /api/auth/me — that would re-auth the
+//     same wrong user and bounce them back to the same 403. We pin the
+//     short-circuit by requiring initialize() to skip /api/auth/me when
+//     consumeLogoutParam returns truthy.
+//
+//  2. /?logout=1 must NOT be honoured as a bare query param. That would
+//     turn any external link to /?logout=1 into a GET-driven logout for
+//     a normal SPA session. The producer (internal/access/middleware.go
+//     renderAccessDeniedPage) always pairs it with a ?next=/app/<slug>/
+//     value; the SPA must require the same pairing before POSTing.
 func TestSPAConsumesLogoutQueryParam(t *testing.T) {
 	b, err := fs.ReadFile(ui.Static(), "app.js")
 	if err != nil {
@@ -404,11 +412,15 @@ func TestSPAConsumesLogoutQueryParam(t *testing.T) {
 	if !strings.Contains(src, "/api/auth/logout") {
 		t.Fatal("app.js consumeLogoutParam must POST /api/auth/logout to clear the wrong session before /api/auth/me re-authenticates it")
 	}
-	// The logout call must happen BEFORE the /api/auth/me request in
-	// initialize(); otherwise the SPA silently re-auths the wrong user and
-	// the user bounces back to the same 403. We pin ordering by requiring
-	// `await consumeLogoutParam()` to appear in the source before the
-	// `await api('/api/auth/me')` call.
+	// Pairing guard: ?logout=1 must require ?next=/app/... before POSTing
+	// /api/auth/logout. Otherwise any external link to /?logout=1 logs
+	// the current SPA user out on navigation alone.
+	if !strings.Contains(src, "next.startsWith('/app/')") {
+		t.Fatal("app.js consumeLogoutParam must gate the POST on next.startsWith('/app/') so /?logout=1 doesn't become a GET-driven logout for any unrelated session")
+	}
+
+	// Ordering: consumeLogoutParam must precede /api/auth/me so the
+	// wrong session can be cleared before any re-auth attempt.
 	logoutIdx := strings.Index(src, "await consumeLogoutParam()")
 	meIdx := strings.Index(src, "await api('/api/auth/me')")
 	if logoutIdx < 0 {
@@ -419,6 +431,23 @@ func TestSPAConsumesLogoutQueryParam(t *testing.T) {
 	}
 	if logoutIdx > meIdx {
 		t.Fatal("app.js: consumeLogoutParam() must run BEFORE /api/auth/me — otherwise the SPA re-authenticates the wrong session and the user bounces back to the same 403 page")
+	}
+
+	// Short-circuit: when consumeLogoutParam acted, initialize() must
+	// skip /api/auth/me and go straight to showLoggedOut(). Otherwise a
+	// failed logout (e.g. CSRF reject) silently re-authorises the wrong
+	// user. We pin this by requiring `if (wantsLogout)` followed by
+	// `showLoggedOut()` and an early `return` between consumeLogoutParam
+	// and the /api/auth/me call.
+	if !strings.Contains(src, "const wantsLogout = await consumeLogoutParam()") {
+		t.Fatal("app.js initialize() must capture consumeLogoutParam's return value as `wantsLogout` so a successful 403-handoff can short-circuit /api/auth/me")
+	}
+	bridge := src[logoutIdx:meIdx]
+	if !strings.Contains(bridge, "if (wantsLogout)") {
+		t.Fatal("app.js initialize(): between consumeLogoutParam and /api/auth/me there must be `if (wantsLogout)` so the auth check is skipped on a 403-handoff (otherwise a failed logout loops back to the same 403)")
+	}
+	if !strings.Contains(bridge, "showLoggedOut()") {
+		t.Fatal("app.js initialize(): the wantsLogout branch must call showLoggedOut() so the user sees the login form instead of /api/auth/me re-authenticating the wrong session")
 	}
 }
 
