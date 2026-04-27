@@ -11,6 +11,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.3.0](https://github.com/rvben/shinyhub/compare/v0.2.6...v0.3.0) - 2026-04-27
+
+### Added
+
+- **cli**: prompt for missing password and username on login ([f3071d5](https://github.com/rvben/shinyhub/commit/f3071d5989a6187fa7132906db454ac5800d1265))
+- **ui**: polish copy + identity — dark loading page, server host, snippet on new user ([daeb975](https://github.com/rvben/shinyhub/commit/daeb9756f1ace64fed025dac8dccc02e745a0eb5))
+- **cli**: add logout, apps start/show, --config override, deploy guard ([480b75b](https://github.com/rvben/shinyhub/commit/480b75bca0f38074b6a8fa0551964a95e41c8a46))
+- **ui**: copy-to-clipboard for app slugs and usernames ([55b50f6](https://github.com/rvben/shinyhub/commit/55b50f61ed668ce83f95a4d1327037b36b2f53cf))
+- **ui**: client-side search and sort for apps grid ([92ab3c8](https://github.com/rvben/shinyhub/commit/92ab3c81086afcf68cde7b4e13a7c70ae44f1161))
+- **ui**: serve SPA shell for /login route ([c5cdec3](https://github.com/rvben/shinyhub/commit/c5cdec3a5610670ab9dbf7f953b0f6be2b9800da))
+- **cli**: --json output flag for list commands ([e6e2522](https://github.com/rvben/shinyhub/commit/e6e2522290c99ef321c1d1c2ca98f9df4707973e))
+- **cli**: add apps delete, apps stop, apps deployments, tokens list and revoke ([35d843a](https://github.com/rvben/shinyhub/commit/35d843a9ebdf6a52cbd652e71d3431b6f47514ec))
+- **cli**: implement deploy --wait with status polling and clean deploy output ([1a5df97](https://github.com/rvben/shinyhub/commit/1a5df97e8474dae8b87d5dd08117ad24f8a6e790))
+
+### Fixed
+
+- **auth,access**: centralise X-Forwarded-* trust gate via proxytrust package ([6a9286b](https://github.com/rvben/shinyhub/commit/6a9286b53f35150375b08e8635c160574cc464c8))
+- **api,access**: respect proxied host in handoff CSRF check; styled error page for embedded-auth-header browsers ([d94a2f1](https://github.com/rvben/shinyhub/commit/d94a2f1c841d828be734d5d89fb4591c5ceb49eb))
+- **access**: harden /app/* — ignore embedded-app Authorization, hand off 403 server-side ([6bd7f15](https://github.com/rvben/shinyhub/commit/6bd7f151f67c8edd150e357bdef5f59a34da2a12))
+- **api,access**: make CreateDeployment authoritative; gate by deployments row ([b4f8255](https://github.com/rvben/shinyhub/commit/b4f8255d6fcd4049576748a1dadad6a1727714fa))
+- **jobs**: honor cancellation when slot.lock select races with release ([fc0b86f](https://github.com/rvben/shinyhub/commit/fc0b86f46faa343869adbfd0b1487340605b06a8))
+- **api**: keep deploy/restart/rollback 200 when post-orchestration bookkeeping fails ([7d52b10](https://github.com/rvben/shinyhub/commit/7d52b1029352066ead6d8631063f2dc9868330e0))
+- **ui**: route 401 to login flow for deployments tab and access toggle ([97fba86](https://github.com/rvben/shinyhub/commit/97fba864839071309f6c37b5465ecdb877566ef7))
+- **cli**: validate auto-derived slug locally before any network call ([02c2eb2](https://github.com/rvben/shinyhub/commit/02c2eb2d27fcb3de5c4e58c8920222f62206518b))
+- **access**: re-resolve JWT user from DB so role demotions take effect ([813e9d5](https://github.com/rvben/shinyhub/commit/813e9d5b5c97c71dad7325d382175ffb57961877))
+- **cli**: warn when env vars override the just-removed credentials ([886f355](https://github.com/rvben/shinyhub/commit/886f355a4623d05115d3e8eb1421eaa8fcf9321c))
+- **ui**: scope pendingDeploy intent to the originating tab ([36b275c](https://github.com/rvben/shinyhub/commit/36b275c3a17fe6d11dc60bb8c5e80cd255ca85c9))
+- **ui**: keep user signed in when logout POST is rejected by server ([b8ac030](https://github.com/rvben/shinyhub/commit/b8ac030a4c7f7ee0a6f7463a4317be12166ed60e))
+- **ui**: bind ?logout=1 to a same-tab marker to block GET-driven logout ([8941a1c](https://github.com/rvben/shinyhub/commit/8941a1c74ee01ac4e0dd1c824b977bc06c85fad6))
+- **ui**: pair ?logout=1 with /app/ next= and short-circuit auth re-check ([1a5f917](https://github.com/rvben/shinyhub/commit/1a5f917042c9e83906f001082a7034bf57003132))
+- **cli**: refuse non-interactive apps delete without --yes ([06babbb](https://github.com/rvben/shinyhub/commit/06babbb895f3a419cfd775c92c86396b3b3a7b0f))
+- **ui**: clear wrong session on /?logout=1 before bootstrapping SPA ([e9501ef](https://github.com/rvben/shinyhub/commit/e9501ef83c2eb9ac748383ba0899ac75e634576a))
+- **access**: drop app name from denied page and route 403 through logout ([50e0bba](https://github.com/rvben/shinyhub/commit/50e0bba78137dc42485b5a26f04db6e59a9265fe))
+- **proxy**: distinguish slug-not-found from slug-lookup-error ([52a3018](https://github.com/rvben/shinyhub/commit/52a301826985de69ba3f31dc175f64d935f7beba))
+- **cli**: surface non-2xx HTTP status from pollAppStatus ([200b2ef](https://github.com/rvben/shinyhub/commit/200b2ef5ec8d10491e1029e37b79fffa0c314b2e))
+- **ui**: surface deployments errors instead of masking 404 as empty ([e27fe1d](https://github.com/rvben/shinyhub/commit/e27fe1d70fb1b135f7ecb3176d58dec731345d9f))
+- address codex round-3 review findings ([b75883b](https://github.com/rvben/shinyhub/commit/b75883b9e9ac5acac4511edc221050b2e1daf0bb))
+- address codex review follow-ups ([2ee72d1](https://github.com/rvben/shinyhub/commit/2ee72d162f6e1ebacdc1abde828b128902aa84d3))
+- address codex review findings ([7adcee3](https://github.com/rvben/shinyhub/commit/7adcee33f4d9d9c2d2c6b584de550c3a2148f66f))
+- **ui**: SPA bleed-through, overview URL, never-deployed status, audit pagination ([40cff5e](https://github.com/rvben/shinyhub/commit/40cff5e4a521b92189c74fdce070e7b361cc5384))
+- **api**: finalize deployment status, 404 unknown slugs, surface CLI errors ([691d5c1](https://github.com/rvben/shinyhub/commit/691d5c16bd05a93b1aa7245ebba994947b9059c6))
+- **build**: drop deleted shiny binary, add make clean, fix air dev command ([cee605e](https://github.com/rvben/shinyhub/commit/cee605ed19c4f1130bebc3f3578734e948b70211))
+- **ui**: distinguish empty deployments from API errors in history tab ([3b1f16a](https://github.com/rvben/shinyhub/commit/3b1f16abc6bca5cbba50f98c724418a8e640a8b9))
+- **ui**: toast feedback for access visibility change and member grant ([da0c70d](https://github.com/rvben/shinyhub/commit/da0c70d376a82d1856dc14a3c85bdb1607f0106f))
+- **access**: use shinyhub binary name in never-deployed snippet ([ede5a83](https://github.com/rvben/shinyhub/commit/ede5a832f2b813ebabcf62e07d12c8fc26afac73))
+- **cli**: verify token with server round-trip on login --token ([e881076](https://github.com/rvben/shinyhub/commit/e88107669df278fe4931503d0f0e8d592fe2db01))
+- **cli**: validate slug locally before making a network call on deploy ([fb98e1d](https://github.com/rvben/shinyhub/commit/fb98e1ddfdffa458effea7dda6bc2acbdc67d644))
+- **cli**: treat -1 as unset sentinel for max-sessions-per-replica, reject invalid negative hibernate-timeout ([f9c93ab](https://github.com/rvben/shinyhub/commit/f9c93aba821e4ccf606e849b9bb44b5aa8589527))
+- **cli**: exit non-zero when apps logs receives a server error ([df1ed8c](https://github.com/rvben/shinyhub/commit/df1ed8cf157c6418a492740fc076e756d3af1c98))
+
 ## [0.2.6](https://github.com/rvben/shinyhub/compare/v0.2.5...v0.2.6) - 2026-04-25
 
 ### Added
