@@ -12,6 +12,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.3.1](https://github.com/rvben/shinyhub/compare/v0.3.0...v0.3.1) - 2026-05-12
+
+### Fixed
+
+- **process,jobs**: inject SHINYHUB_APP_DATA in native runtime for Start and RunOnce ([f309f93](https://github.com/rvben/shinyhub/commit/f309f93fd1ae3fff334f8fdd506ea833276eba3f))
+- **process**: normalize app data root to absolute path ([7808879](https://github.com/rvben/shinyhub/commit/7808879781d0831f7a17cf0e839427652426b5b9))
+
 ## [0.3.0](https://github.com/rvben/shinyhub/compare/v0.2.6...v0.3.0) - 2026-04-27
 
 ### Added
