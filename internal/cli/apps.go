@@ -518,6 +518,10 @@ func init() {
 
 var tokenName string
 
+var tokensCreateFlags struct {
+	format string
+}
+
 var tokensCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a new API token",
@@ -527,9 +531,25 @@ var tokensCreateCmd = &cobra.Command{
 func init() {
 	tokensCreateCmd.Flags().StringVar(&tokenName, "name", "", "Name for the token (required)")
 	tokensCreateCmd.MarkFlagRequired("name")
+	tokensCreateCmd.Flags().StringVar(&tokensCreateFlags.format, "format", "text", "Output format: text or json")
+}
+
+// tokenCreateResult holds the fields returned by the server on token creation.
+type tokenCreateResult struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Token     string `json:"token"`
+	CreatedAt string `json:"created_at"`
 }
 
 func runTokensCreate(cmd *cobra.Command, args []string) error {
+	switch tokensCreateFlags.format {
+	case "text", "json":
+		// valid
+	default:
+		return fmt.Errorf("--format must be %q or %q, got %q", "text", "json", tokensCreateFlags.format)
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -552,14 +572,20 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
-	var result map[string]string
+	var result tokenCreateResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
-	if token, ok := result["token"]; ok {
-		fmt.Printf("API token: %s\n", token)
-		fmt.Println("Store this — it will not be shown again.")
+	if tokensCreateFlags.format == "json" {
+		out, err := json.Marshal(result)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
 	}
+	fmt.Fprintf(cmd.OutOrStdout(), "API token: %s\n", result.Token)
+	fmt.Fprintln(cmd.OutOrStdout(), "Store this — it will not be shown again.")
 	_ = os.Stdout.Sync()
 	return nil
 }
@@ -732,6 +758,36 @@ func runAppsDeployments(cmd *cobra.Command, args []string) error {
 
 // ── tokens list ─────────────────────────────────────────────────────────────
 
+// tokenInfo is a safe view of an API key, matching the server's list response.
+type tokenInfo struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
+// fetchTokens retrieves all tokens for the authenticated user.
+func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
+	req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	var tokens []tokenInfo
+	if err := json.Unmarshal(out, &tokens); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return tokens, nil
+}
+
 var tokensListFlags struct {
 	jsonOutput bool
 }
@@ -751,33 +807,29 @@ func runTokensList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
-	}
 
 	if tokensListFlags.jsonOutput {
+		req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		}
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
 	}
 
-	var tokens []struct {
-		ID        int64  `json:"id"`
-		Name      string `json:"name"`
-		CreatedAt string `json:"created_at"`
-	}
-	if err := json.Unmarshal(out, &tokens); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+	tokens, err := fetchTokens(cfg)
+	if err != nil {
+		return err
 	}
 	if len(tokens) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No tokens.")
@@ -798,20 +850,62 @@ func runTokensList(cmd *cobra.Command, args []string) error {
 
 // ── tokens revoke ───────────────────────────────────────────────────────────
 
+var tokensRevokeFlags struct {
+	name string
+}
+
 var tokensRevokeCmd = &cobra.Command{
-	Use:   "revoke <id>",
-	Short: "Revoke an API token by ID",
-	Args:  cobra.ExactArgs(1),
+	Use:   "revoke [<id>]",
+	Short: "Revoke an API token by ID or name",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runTokensRevoke,
 }
 
+func init() {
+	tokensRevokeCmd.Flags().StringVar(&tokensRevokeFlags.name, "name", "", "Revoke the token with this name")
+}
+
 func runTokensRevoke(cmd *cobra.Command, args []string) error {
+	hasID := len(args) == 1
+	hasName := tokensRevokeFlags.name != ""
+
+	if hasID && hasName {
+		return fmt.Errorf("specify either id or --name, not both")
+	}
+	if !hasID && !hasName {
+		return fmt.Errorf("provide a token id or --name")
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	id := args[0]
-	req, err := http.NewRequest("DELETE", cfg.Host+"/api/tokens/"+id, nil)
+
+	var tokenID string
+	if hasID {
+		tokenID = args[0]
+	} else {
+		tokens, err := fetchTokens(cfg)
+		if err != nil {
+			return err
+		}
+		var matches []tokenInfo
+		for _, t := range tokens {
+			if t.Name == tokensRevokeFlags.name {
+				matches = append(matches, t)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return fmt.Errorf("no token named %q", tokensRevokeFlags.name)
+		case 1:
+			tokenID = fmt.Sprintf("%d", matches[0].ID)
+		default:
+			return fmt.Errorf("multiple tokens named %q; revoke by id instead", tokensRevokeFlags.name)
+		}
+	}
+
+	req, err := http.NewRequest("DELETE", cfg.Host+"/api/tokens/"+tokenID, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -825,6 +919,6 @@ func runTokensRevoke(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("revoke failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
 	}
-	fmt.Printf("token %s: revoked\n", id)
+	fmt.Fprintf(cmd.OutOrStdout(), "token %s: revoked\n", tokenID)
 	return nil
 }

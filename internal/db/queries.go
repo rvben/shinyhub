@@ -160,15 +160,26 @@ type CreateAPIKeyParams struct {
 	Name    string
 }
 
-func (s *Store) CreateAPIKey(p CreateAPIKeyParams) error {
-	_, err := s.db.Exec(
+// CreateAPIKey inserts a new API key and returns the inserted row's ID and
+// creation timestamp.
+func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
+	result, err := s.db.Exec(
 		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?)`,
 		p.UserID, p.KeyHash, p.Name,
 	)
 	if err != nil {
-		return fmt.Errorf("create api key: %w", err)
+		return 0, time.Time{}, fmt.Errorf("create api key: %w", err)
 	}
-	return nil
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("create api key last id: %w", err)
+	}
+	var createdAt time.Time
+	err = s.db.QueryRow(`SELECT created_at FROM api_keys WHERE id = ?`, id).Scan(&createdAt)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("create api key created_at: %w", err)
+	}
+	return id, createdAt, nil
 }
 
 func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {

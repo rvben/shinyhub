@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -426,6 +427,45 @@ func TestListTokens_AfterCreate(t *testing.T) {
 	}
 	if keys[0]["id"] == nil {
 		t.Error("expected id in response")
+	}
+}
+
+func TestCreateToken_ResponseIncludesAllFields(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("alice")
+	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"name": "ci"})
+	req := authedRequest(t, "POST", "/api/tokens", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if _, ok := resp["id"].(float64); !ok {
+		t.Errorf("expected numeric id field, got %T (%v)", resp["id"], resp["id"])
+	}
+	if resp["name"] != "ci" {
+		t.Errorf("expected name=ci, got %v", resp["name"])
+	}
+	tok, ok := resp["token"].(string)
+	if !ok || !strings.HasPrefix(tok, "shk_") {
+		t.Errorf("expected token starting with shk_, got %v", resp["token"])
+	}
+	createdAt, ok := resp["created_at"].(string)
+	if !ok {
+		t.Fatalf("expected created_at string, got %T", resp["created_at"])
+	}
+	if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
+		t.Errorf("created_at not RFC3339: %q (%v)", createdAt, err)
 	}
 }
 
