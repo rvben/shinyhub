@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -472,6 +473,54 @@ func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) 
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 granting shared-data on public src without explicit access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSchedules_Create_DuplicateName_Returns409 verifies that posting a second
+// schedule with the same name for the same app returns 409 Conflict with a
+// JSON body that identifies the conflict (not a generic 500).
+func TestSchedules_Create_DuplicateName_Returns409(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug:    "my-app",
+		Name:    "My App",
+		OwnerID: 1,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	// First POST — must succeed.
+	req := authedRequest(t, "POST", "/api/apps/my-app/schedules", validScheduleBody(t), token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Second POST with the same name — must return 409, not 500.
+	req = authedRequest(t, "POST", "/api/apps/my-app/schedules", validScheduleBody(t), token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate POST: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode 409 body: %v", err)
+	}
+	errMsg, _ := body["error"].(string)
+	if errMsg == "" {
+		t.Fatalf("409 body missing 'error' field: %v", body)
+	}
+	if !strings.Contains(errMsg, "already exists") {
+		t.Errorf("409 error message should describe the conflict, got: %q", errMsg)
 	}
 }
 

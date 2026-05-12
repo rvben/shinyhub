@@ -162,6 +162,45 @@ func TestSchedule_Rm_ResolvesNameToID(t *testing.T) {
 	}
 }
 
+// TestSchedule_Add_IfNotExists_409ExitsZero verifies that when the server returns
+// 409 Conflict and --if-not-exists is set, the CLI exits 0 with no output.
+func TestSchedule_Add_IfNotExists_409ExitsZero(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(409, `{"error":"schedule with that name already exists for this app"}`)
+
+	var outBuf, errBuf bytes.Buffer
+	cmd := newScheduleCmd()
+	cmd.SetOut(&outBuf)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"add", "demo", "--name", "fetch", "--cron", "0 * * * *", "--cmd", "python run.py", "--if-not-exists"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("expected nil error with --if-not-exists on 409, got: %v", err)
+	}
+	if out := outBuf.String(); out != "" {
+		t.Errorf("expected no stdout with --if-not-exists on 409, got: %q", out)
+	}
+	if errOut := errBuf.String(); errOut != "" {
+		t.Errorf("expected no stderr with --if-not-exists on 409, got: %q", errOut)
+	}
+}
+
+// TestSchedule_Add_NoIfNotExists_409Errors verifies that without --if-not-exists
+// a 409 response from the server surfaces as an error (existing behaviour).
+func TestSchedule_Add_NoIfNotExists_409Errors(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(409, `{"error":"schedule with that name already exists for this app"}`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"add", "demo", "--name", "fetch", "--cron", "0 * * * *", "--cmd", "python run.py"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error without --if-not-exists on 409, got nil")
+	}
+	if !strings.Contains(err.Error(), "409") {
+		t.Errorf("error should mention status code 409, got: %v", err)
+	}
+}
+
 // TestScheduleCmd_RegisteredWithRoot verifies schedule is registered with the root command.
 func TestScheduleCmd_RegisteredWithRoot(t *testing.T) {
 	root := &cobra.Command{Use: "root"}

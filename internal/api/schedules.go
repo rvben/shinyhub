@@ -106,6 +106,10 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		MissedPolicy: req.MissedPolicy,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrScheduleNameExists) {
+			writeError(w, http.StatusConflict, db.ErrScheduleNameExists.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

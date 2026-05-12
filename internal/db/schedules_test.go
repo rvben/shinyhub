@@ -251,5 +251,30 @@ func TestScheduleRuns_SetLogPath(t *testing.T) {
 	}
 }
 
+// TestSchedules_CreateDuplicate_ReturnsErrScheduleNameExists verifies that
+// inserting a second schedule with the same (app_id, name) returns
+// ErrScheduleNameExists and that errors.Is matches the sentinel.
+func TestSchedules_CreateDuplicate_ReturnsErrScheduleNameExists(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "dup")
+
+	params := CreateScheduleParams{
+		AppID: appID, Name: "daily", CronExpr: "0 6 * * *",
+		CommandJSON: `["python","run.py"]`, Enabled: true, TimeoutSeconds: 300,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	}
+	if _, err := store.CreateSchedule(params); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	_, err := store.CreateSchedule(params)
+	if err == nil {
+		t.Fatal("expected error on duplicate name, got nil")
+	}
+	if !errors.Is(err, ErrScheduleNameExists) {
+		t.Fatalf("expected errors.Is(err, ErrScheduleNameExists), got: %v", err)
+	}
+}
+
 func ptrString(s string) *string { return &s }
 func ptrBool(b bool) *bool       { return &b }
