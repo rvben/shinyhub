@@ -4,12 +4,39 @@ import (
 	"bytes"
 	"context"
 	"os/exec"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
 )
+
+// safeBuffer is a bytes.Buffer protected by a mutex so the test goroutine and
+// the os/exec stdout-copy goroutine can share it without racing. Plain
+// bytes.Buffer is unsafe for concurrent Write+Read.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *safeBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
 
 func TestNativeRuntimeStartStop(t *testing.T) {
 	rt := process.NewNativeRuntime()
@@ -42,6 +69,78 @@ func TestNativeRuntimeStartStop(t *testing.T) {
 
 	if err := syscall.Kill(handle.PID, 0); err == nil {
 		t.Error("expected process to be dead after Signal+Wait")
+	}
+}
+
+// TestNativeRuntimeStart_InjectsAppDataEnv guards the long-running-process
+// path: when the Manager has stamped p.AppDataPath onto StartParams, the
+// runtime must put SHINYHUB_APP_DATA in the child env so apps can locate
+// their persistent data dir. Symmetric to RunOnce; both call sites share the
+// contract via nativeChildEnv.
+func TestNativeRuntimeStart_InjectsAppDataEnv(t *testing.T) {
+	rt := process.NewNativeRuntime()
+	appData := t.TempDir()
+	var buf safeBuffer
+
+	handle, err := rt.Start(context.Background(), process.StartParams{
+		Slug: "envprobe", Dir: t.TempDir(),
+		// Print env to stdout, then exec a long sleep so the test controls
+		// teardown via Signal+Wait.
+		Command:     []string{"sh", "-c", "printf %s \"$SHINYHUB_APP_DATA\"; exec sleep 30"},
+		AppDataPath: appData,
+	}, &buf)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Signal(handle, syscall.SIGTERM)
+		_ = rt.Wait(context.Background(), handle)
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if buf.Len() > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := buf.String(); got != appData {
+		t.Errorf("SHINYHUB_APP_DATA in child = %q, want %q", got, appData)
+	}
+}
+
+// TestNativeRuntimeStart_PlatformOverridesUserAppDataEnv verifies that a
+// user-supplied SHINYHUB_APP_DATA in StartParams.Env cannot shadow the
+// platform value derived from StartParams.AppDataPath on the long-running
+// path. Sibling of the RunOnce variant.
+func TestNativeRuntimeStart_PlatformOverridesUserAppDataEnv(t *testing.T) {
+	rt := process.NewNativeRuntime()
+	appData := t.TempDir()
+	var buf safeBuffer
+
+	handle, err := rt.Start(context.Background(), process.StartParams{
+		Slug: "envprobe2", Dir: t.TempDir(),
+		Command:     []string{"sh", "-c", "printf %s \"$SHINYHUB_APP_DATA\"; exec sleep 30"},
+		Env:         []string{"SHINYHUB_APP_DATA=/evil"},
+		AppDataPath: appData,
+	}, &buf)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Signal(handle, syscall.SIGTERM)
+		_ = rt.Wait(context.Background(), handle)
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if buf.Len() > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := buf.String(); got != appData {
+		t.Errorf("SHINYHUB_APP_DATA = %q, want %q (platform must win over user env)", got, appData)
 	}
 }
 

@@ -3,6 +3,7 @@ package jobs_test
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -211,6 +212,35 @@ func newTestManager(t *testing.T, rt *fakeRuntime, st *fakeStore) *jobs.Manager 
 	t.Helper()
 	dir := t.TempDir()
 	return jobs.NewManager(rt, st, nil, dir, dir)
+}
+
+// TestManager_Run_PassesAppDataPathToRuntime guards the contract between
+// jobs.Manager and the runtime: every scheduled run must hand StartParams a
+// per-app AppDataPath. The runtime turns that into SHINYHUB_APP_DATA in the
+// child env (verified at the process-package layer); the jobs-package
+// responsibility is just to compute and pass the path. Without this guard a
+// future refactor could silently drop the field again — as happened pre-fix
+// when only Manager.Start (long-running) injected the var and RunOnce
+// (schedules) did not.
+func TestManager_Run_PassesAppDataPathToRuntime(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	dir := t.TempDir()
+	m := jobs.NewManager(rt, st, nil, dir, dir)
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+
+	rt.mu.Lock()
+	got := rt.lastParams.AppDataPath
+	rt.mu.Unlock()
+
+	want := filepath.Join(dir, "test-app")
+	if got != want {
+		t.Errorf("RunOnce StartParams.AppDataPath = %q, want %q", got, want)
+	}
 }
 
 // TestManager_Run_HappyPath verifies that a successful run (exit code 0)

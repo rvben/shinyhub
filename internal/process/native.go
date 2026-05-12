@@ -14,6 +14,20 @@ import (
 	gops "github.com/shirou/gopsutil/v4/process"
 )
 
+// nativeChildEnv returns the env slice for a native child process: the
+// inherited host env (minus SHINYHUB_*), then the caller-supplied app env,
+// then platform-controlled vars (currently SHINYHUB_APP_DATA when set on the
+// params). Platform vars are appended last so that a user-supplied
+// SHINYHUB_APP_DATA in p.Env cannot shadow the platform value — os/exec
+// resolves duplicate keys by last occurrence.
+func nativeChildEnv(p StartParams) []string {
+	env := append(filteredEnv(), p.Env...)
+	if p.AppDataPath != "" {
+		env = append(env, "SHINYHUB_APP_DATA="+p.AppDataPath)
+	}
+	return env
+}
+
 // applySharedMounts symlinks each shared mount under p.Dir/data/shared/<slug>.
 // Idempotent: existing correct symlinks are left alone; wrong ones return an
 // error so we never silently corrupt a bundle. RO is a convention for native
@@ -85,7 +99,7 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	}
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
-	cmd.Env = append(filteredEnv(), p.Env...)
+	cmd.Env = nativeChildEnv(p)
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
 	// Place the child in its own process group so signals can be sent to the
@@ -200,7 +214,7 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	}
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
-	cmd.Env = append(filteredEnv(), p.Env...)
+	cmd.Env = nativeChildEnv(p)
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

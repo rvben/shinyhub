@@ -205,6 +205,87 @@ func TestDockerRuntimeStart_AppDataPathBindsTwiceAndOverridesEnv(t *testing.T) {
 	}
 }
 
+// TestDockerRuntimeRunOnce_AppDataPathBindsTwiceAndOverridesEnv mirrors the
+// Start-path test for the one-shot/schedule path. Both must bind the host
+// data dir at /app-data and /app/data, and both must set
+// SHINYHUB_APP_DATA=/app-data so user-supplied env can't shadow the
+// platform value. Without this test, the schedule path could regress
+// silently — exactly what happened on the native runtime.
+func TestDockerRuntimeRunOnce_AppDataPathBindsTwiceAndOverridesEnv(t *testing.T) {
+	var captured map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		captured = body
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"Id": "cont-oneshot"})
+	})
+	mux.HandleFunc("/containers/cont-oneshot/start", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/containers/cont-oneshot/attach", func(w http.ResponseWriter, r *http.Request) {
+		// Attach upgrades to a hijacked TCP stream. The test daemon never
+		// produces output; closing immediately is enough.
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/containers/cont-oneshot/wait", func(w http.ResponseWriter, r *http.Request) {
+		// Report a clean exit so RunOnce returns without hitting the kill path.
+		json.NewEncoder(w).Encode(map[string]int{"StatusCode": 0})
+	})
+
+	rt := newDockerRuntimeWithServer(t, mux)
+	hostData := "/var/lib/shinyhub/data/demo"
+
+	if _, err := rt.RunOnce(context.Background(), StartParams{
+		Slug: "demo", Dir: t.TempDir(),
+		Command:     []string{"python", "helpers/show_env.py"},
+		Env:         []string{"SHINYHUB_APP_DATA=/evil"},
+		AppDataPath: hostData,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	host, ok := captured["HostConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("no HostConfig in body: %v", captured)
+	}
+	mounts, ok := host["Mounts"].([]any)
+	if !ok {
+		t.Fatalf("no Mounts in HostConfig: %v", host)
+	}
+
+	hasMount := func(target string) bool {
+		for _, m := range mounts {
+			mm, _ := m.(map[string]any)
+			if mm["Source"] == hostData && mm["Target"] == target {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasMount("/app-data") {
+		t.Errorf("missing /app-data mount in: %v", mounts)
+	}
+	if !hasMount("/app/data") {
+		t.Errorf("missing /app/data mount in: %v", mounts)
+	}
+
+	envRaw, _ := captured["Env"].([]any)
+	var lastAppData string
+	for _, e := range envRaw {
+		s, _ := e.(string)
+		if strings.HasPrefix(s, "SHINYHUB_APP_DATA=") {
+			lastAppData = strings.TrimPrefix(s, "SHINYHUB_APP_DATA=")
+		}
+	}
+	if lastAppData != "/app-data" {
+		t.Errorf("SHINYHUB_APP_DATA last value = %q, want /app-data", lastAppData)
+	}
+}
+
 func TestDockerRuntimeStart_NoAppDataPathSkipsDataMounts(t *testing.T) {
 	var captured map[string]any
 	mux := http.NewServeMux()

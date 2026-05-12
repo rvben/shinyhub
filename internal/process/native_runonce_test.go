@@ -57,6 +57,80 @@ func TestNativeRuntime_RunOnce_TimeoutKills(t *testing.T) {
 	}
 }
 
+// TestNativeRuntime_RunOnce_InjectsAppDataEnv guards the contract that
+// SHINYHUB_APP_DATA is present in the child env on the one-shot (schedule)
+// execution path whenever StartParams.AppDataPath is set. Regressing this
+// causes scheduled jobs to lose access to their persistent data dir.
+func TestNativeRuntime_RunOnce_InjectsAppDataEnv(t *testing.T) {
+	rt := NewNativeRuntime()
+	appData := t.TempDir()
+	var buf bytes.Buffer
+	p := StartParams{
+		Slug: "x", Dir: t.TempDir(),
+		Command:     []string{"sh", "-c", "printf %s \"$SHINYHUB_APP_DATA\""},
+		AppDataPath: appData,
+	}
+	info, err := rt.RunOnce(context.Background(), p, &buf)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if info.Code != 0 {
+		t.Fatalf("exit=%d output=%q", info.Code, buf.String())
+	}
+	if got := buf.String(); got != appData {
+		t.Errorf("SHINYHUB_APP_DATA in child = %q, want %q", got, appData)
+	}
+}
+
+// TestNativeRuntime_RunOnce_PlatformOverridesUserAppDataEnv verifies the
+// platform value (from p.AppDataPath) wins over a user-supplied
+// SHINYHUB_APP_DATA in p.Env. os/exec resolves duplicate keys by last
+// occurrence, so the runtime must append the platform value last.
+func TestNativeRuntime_RunOnce_PlatformOverridesUserAppDataEnv(t *testing.T) {
+	rt := NewNativeRuntime()
+	appData := t.TempDir()
+	var buf bytes.Buffer
+	p := StartParams{
+		Slug: "x", Dir: t.TempDir(),
+		Command:     []string{"sh", "-c", "printf %s \"$SHINYHUB_APP_DATA\""},
+		Env:         []string{"SHINYHUB_APP_DATA=/evil"},
+		AppDataPath: appData,
+	}
+	info, err := rt.RunOnce(context.Background(), p, &buf)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if info.Code != 0 {
+		t.Fatalf("exit=%d output=%q", info.Code, buf.String())
+	}
+	if got := buf.String(); got != appData {
+		t.Errorf("SHINYHUB_APP_DATA = %q, want %q (platform must win over user env)", got, appData)
+	}
+}
+
+// TestNativeRuntime_RunOnce_OmitsAppDataEnvWhenUnset verifies that the
+// runtime does not invent a SHINYHUB_APP_DATA when p.AppDataPath is empty.
+// "unset" must remain distinguishable from "empty string".
+func TestNativeRuntime_RunOnce_OmitsAppDataEnvWhenUnset(t *testing.T) {
+	rt := NewNativeRuntime()
+	var buf bytes.Buffer
+	p := StartParams{
+		Slug: "x", Dir: t.TempDir(),
+		// Use ${VAR+set} to distinguish unset from empty.
+		Command: []string{"sh", "-c", "printf %s \"${SHINYHUB_APP_DATA+set}\""},
+	}
+	info, err := rt.RunOnce(context.Background(), p, &buf)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if info.Code != 0 {
+		t.Fatalf("exit=%d output=%q", info.Code, buf.String())
+	}
+	if got := buf.String(); got != "" {
+		t.Errorf("SHINYHUB_APP_DATA should be unset, got %q", got)
+	}
+}
+
 func TestNativeRuntime_RunOnce_SymlinksSharedMounts(t *testing.T) {
 	rt := NewNativeRuntime()
 	bundleDir := t.TempDir()
