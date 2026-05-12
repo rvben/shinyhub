@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -184,17 +185,27 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 }
 
 // waitForHealthy polls GET /api/apps/{slug} until status is "running" or
-// the deadline expires. It prints progress dots to stdout. A 4xx response
-// (auth, gone, forbidden) is treated as fatal: continuing to poll would only
-// delay the inevitable failure and waste the user's --wait-timeout. 5xx and
-// transport errors are treated as transient and keep the loop going.
+// the deadline expires. It writes progress dots to stdout and any failure
+// log tail to os.Stderr.
 func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
+	return waitForHealthyWithOutput(cfg, slug, timeout, os.Stderr)
+}
+
+// waitForHealthyWithOutput is the testable core of waitForHealthy. It polls
+// until the app is running, timed out, or enters a terminal failed state.
+// On failure it fetches the last 20 log lines and writes them to errOut,
+// followed by a hint pointing to the full logs command.
+//
+// A 4xx poll response (auth, gone, forbidden) is treated as fatal: continuing
+// to poll would only delay the inevitable failure. 5xx and transport errors
+// are treated as transient and keep the loop going.
+func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
 	deadline := time.Now().Add(timeout)
 	interval := 2 * time.Second
 	fmt.Printf("Waiting for %s to be healthy", slug)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		ready, err := pollAppStatus(cfg, slug)
+		ready, status, err := pollAppStatus(cfg, slug)
 		if err == nil && ready {
 			fmt.Println(" ready.")
 			return nil
@@ -207,14 +218,78 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 				return fmt.Errorf("checking %s: %w", slug, err)
 			}
 		}
+		if isTerminalStatus(status) {
+			fmt.Println()
+			printLogTail(cfg, slug, errOut)
+			return fmt.Errorf("%s %s during startup — check logs above or run: shinyhub apps logs %s", slug, status, slug)
+		}
 		fmt.Print(".")
 		time.Sleep(interval)
 	}
 	fmt.Println()
+	printLogTail(cfg, slug, errOut)
 	if lastErr != nil {
 		return fmt.Errorf("timed out after %s waiting for %s to be healthy (last error: %v)", timeout, slug, lastErr)
 	}
 	return fmt.Errorf("timed out after %s waiting for %s to be healthy", timeout, slug)
+}
+
+// isTerminalStatus reports whether an app status indicates a non-recoverable
+// failure during startup (as opposed to a transient state like "starting" or
+// "stopped", which is a normal intentional stop). Only "crashed" is unambiguously
+// a failed-startup state.
+func isTerminalStatus(status string) bool {
+	return status == "crashed"
+}
+
+// printLogTail fetches the last 20 lines of the app log via the SSE endpoint
+// and writes them to w, followed by a hint for the full logs command.
+// On fetch error or non-2xx response, a warning line is written to w so the
+// caller always sees actionable output even when the log endpoint is unavailable.
+func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
+	const tailLines = 20
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/logs?follow=false", nil)
+	if err != nil {
+		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
+		return
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", resp.Status)
+		return
+	}
+	lines := parseSSELines(resp.Body, tailLines)
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "--- last log lines ---")
+	for _, l := range lines {
+		fmt.Fprintln(w, l)
+	}
+	fmt.Fprintf(w, "--- run `shinyhub apps logs %s` for full logs ---\n", slug)
+}
+
+// parseSSELines reads Server-Sent Events from r and returns the last n
+// non-empty data lines. Comment lines (starting with ':') are ignored.
+func parseSSELines(r io.Reader, n int) []string {
+	var all []string
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			all = append(all, strings.TrimPrefix(line, "data: "))
+		}
+	}
+	if len(all) <= n {
+		return all
+	}
+	return all[len(all)-n:]
 }
 
 // httpStatusError carries the response status code and body so callers can
@@ -239,29 +314,27 @@ func (e *httpStatusError) fatal() bool {
 }
 
 // pollAppStatus issues a single GET /api/apps/{slug} and reports whether the
-// app is running. It exists as a separate function so each iteration's
-// response body is closed before the next poll — `defer` inside the loop in
-// waitForHealthy used to leak file descriptors for the lifetime of the
+// app is running and the current status string. It exists as a separate
+// function so each iteration's response body is closed before the next poll —
+// `defer` inside the loop would keep bodies open for the lifetime of the
 // command on long --wait-timeout values.
 //
 // A non-2xx response is returned as an *httpStatusError so the caller can
 // distinguish "permanent" failures (401/403/404) from transient ones (5xx).
-// Without this, every error silently degraded to "not running" and the user
-// waited the full --wait-timeout for an outcome that was already decided.
-func pollAppStatus(cfg *cliConfig, slug string) (bool, error) {
+func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
-		return false, fmt.Errorf("build request: %w", err)
+		return false, "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return false, &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+		return false, "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
 	var result struct {
 		App struct {
@@ -269,9 +342,10 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, error) {
 		} `json:"app"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return result.App.Status == "running", nil
+	status := result.App.Status
+	return status == "running", status, nil
 }
 
 func ensureApp(cfg *cliConfig, slug string) error {

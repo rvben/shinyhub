@@ -274,12 +274,15 @@ func TestPollAppStatus_RunningAndStarting(t *testing.T) {
 			_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
 		}))
 		defer srv.Close()
-		ready, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
+		ready, status, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
 		if err != nil {
 			t.Fatalf("pollAppStatus: %v", err)
 		}
 		if !ready {
 			t.Errorf("ready = false, want true")
+		}
+		if status != "running" {
+			t.Errorf("status = %q, want \"running\"", status)
 		}
 	})
 	t.Run("starting returns false", func(t *testing.T) {
@@ -287,12 +290,15 @@ func TestPollAppStatus_RunningAndStarting(t *testing.T) {
 			_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
 		}))
 		defer srv.Close()
-		ready, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
+		ready, status, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
 		if err != nil {
 			t.Fatalf("pollAppStatus: %v", err)
 		}
 		if ready {
 			t.Errorf("ready = true, want false")
+		}
+		if status != "starting" {
+			t.Errorf("status = %q, want \"starting\"", status)
 		}
 	})
 }
@@ -323,7 +329,7 @@ func TestPollAppStatus_NonOKStatusReturnsHTTPError(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			ready, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
+			ready, _, err := pollAppStatus(&cliConfig{Host: srv.URL, Token: "tok"}, "demo")
 			if err == nil {
 				t.Fatalf("pollAppStatus: expected error for HTTP %d, got nil", tc.statusCode)
 			}
@@ -391,6 +397,214 @@ func TestEnsureApp_FallsBackToRawBodyWhenNotJSON(t *testing.T) {
 	err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "proxy")
 	if err == nil || !strings.Contains(err.Error(), "upstream timeout") {
 		t.Errorf("expected raw body in error, got %v", err)
+	}
+}
+
+// TestParseSSELines_LastN verifies that parseSSELines reads SSE data: lines
+// from an io.Reader and returns the last n lines.
+func TestParseSSELines_LastN(t *testing.T) {
+	lines := []string{
+		"line one",
+		"line two",
+		"line three",
+		"line four",
+		"line five",
+	}
+	var buf strings.Builder
+	for _, l := range lines {
+		buf.WriteString("data: " + l + "\n\n")
+	}
+	// Also include a heartbeat comment to verify it is ignored.
+	buf.WriteString(": heartbeat\n\n")
+
+	got := parseSSELines(strings.NewReader(buf.String()), 3)
+	want := []string{"line three", "line four", "line five"}
+	if len(got) != len(want) {
+		t.Fatalf("parseSSELines returned %d lines, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestParseSSELines_FewerThanN verifies that parseSSELines returns all lines
+// when the stream contains fewer than n lines.
+func TestParseSSELines_FewerThanN(t *testing.T) {
+	var buf strings.Builder
+	buf.WriteString("data: only line\n\n")
+
+	got := parseSSELines(strings.NewReader(buf.String()), 20)
+	if len(got) != 1 || got[0] != "only line" {
+		t.Errorf("parseSSELines returned %v, want [\"only line\"]", got)
+	}
+}
+
+// TestParseSSELines_Empty verifies that parseSSELines returns nil on empty input.
+func TestParseSSELines_Empty(t *testing.T) {
+	got := parseSSELines(strings.NewReader(""), 20)
+	if len(got) != 0 {
+		t.Errorf("parseSSELines on empty input returned %v, want empty", got)
+	}
+}
+
+// TestWaitForHealthy_TimeoutPrintsLogTail verifies that when waitForHealthy
+// times out, it fetches the app logs and prints the tail to stderr.
+func TestWaitForHealthy_TimeoutPrintsLogTail(t *testing.T) {
+	sseBody := "data: Error in library(shiny) : there is no package called 'shiny'\n\n" +
+		"data: Execution halted\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo" && r.URL.RawQuery == "":
+			_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo/logs":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(sseBody))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := waitForHealthyWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", 50*time.Millisecond, &stderrBuf)
+
+	if err == nil {
+		t.Fatal("waitForHealthyWithOutput: expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error should mention timed out, got %q", err.Error())
+	}
+
+	stderr := stderrBuf.String()
+	if !strings.Contains(stderr, "Error in library(shiny)") {
+		t.Errorf("stderr should contain log line, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "Execution halted") {
+		t.Errorf("stderr should contain log line, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "shinyhub apps logs demo") {
+		t.Errorf("stderr should contain hint pointing to shinyhub apps logs, got %q", stderr)
+	}
+}
+
+// TestWaitForHealthy_CrashLoopPrintsLogTail verifies that when the app enters
+// a crashed state during the wait window, the log tail is printed.
+func TestWaitForHealthy_CrashLoopPrintsLogTail(t *testing.T) {
+	sseBody := "data: Traceback (most recent call last):\n\n" +
+		"data: ImportError: No module named 'shiny'\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/apps/crash-app" && r.URL.RawQuery == "":
+			_, _ = w.Write([]byte(`{"app":{"status":"crashed"}}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/crash-app/logs":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(sseBody))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := waitForHealthyWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "crash-app", 30*time.Second, &stderrBuf)
+
+	if err == nil {
+		t.Fatal("waitForHealthyWithOutput: expected error on crashed status, got nil")
+	}
+	if !strings.Contains(err.Error(), "crash-app") {
+		t.Errorf("error should mention slug, got %q", err.Error())
+	}
+
+	stderr := stderrBuf.String()
+	if !strings.Contains(stderr, "ImportError") {
+		t.Errorf("stderr should contain log line, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "shinyhub apps logs crash-app") {
+		t.Errorf("stderr should contain hint, got %q", stderr)
+	}
+}
+
+// TestWaitForHealthy_StoppedIsNotTerminal verifies that "stopped" does not
+// trigger an immediate failure, because a deliberate stop followed by a
+// redeploy can briefly surface "stopped" as a transient state.
+func TestWaitForHealthy_StoppedIsNotTerminal(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo" && r.URL.RawQuery == "":
+			callCount++
+			if callCount == 1 {
+				_, _ = w.Write([]byte(`{"app":{"status":"stopped"}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := waitForHealthyWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", 10*time.Second, &stderrBuf)
+	if err != nil {
+		t.Fatalf("waitForHealthyWithOutput: unexpected error for stopped→running transition: %v", err)
+	}
+	if stderrBuf.Len() > 0 {
+		t.Errorf("stderr should be empty on success, got %q", stderrBuf.String())
+	}
+}
+
+// TestPrintLogTail_WarnsOnLogsEndpointFailure verifies that printLogTail
+// writes a warning line when the logs endpoint returns a non-2xx status,
+// so the user sees actionable output instead of silence.
+func TestPrintLogTail_WarnsOnLogsEndpointFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	printLogTail(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", &buf)
+
+	out := buf.String()
+	if !strings.Contains(out, "warning: could not fetch logs") {
+		t.Errorf("printLogTail should write a warning on 500, got %q", out)
+	}
+	if !strings.Contains(out, "500") {
+		t.Errorf("printLogTail warning should mention the status, got %q", out)
+	}
+}
+
+// TestWaitForHealthy_SuccessEmitsNoLogTail verifies that on success, no log
+// lines are printed to stderr.
+func TestWaitForHealthy_SuccessEmitsNoLogTail(t *testing.T) {
+	logRequested := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/apps/demo" && r.URL.RawQuery == "":
+			_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+		case r.URL.Path == "/api/apps/demo/logs":
+			logRequested = true
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: some log line\n\n"))
+		}
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := waitForHealthyWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", 30*time.Second, &stderrBuf)
+	if err != nil {
+		t.Fatalf("waitForHealthyWithOutput: unexpected error %v", err)
+	}
+	if logRequested {
+		t.Error("log endpoint should not be called on success")
+	}
+	if stderrBuf.Len() > 0 {
+		t.Errorf("stderr should be empty on success, got %q", stderrBuf.String())
 	}
 }
 
