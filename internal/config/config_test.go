@@ -227,6 +227,85 @@ func TestRuntimeConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultsAppVisibility_Default(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Defaults.AppVisibility != "private" {
+		t.Errorf("default AppVisibility: got %q, want %q", cfg.Defaults.AppVisibility, "private")
+	}
+}
+
+func TestDefaultsAppVisibility_FromYAML(t *testing.T) {
+	for _, vis := range []string{"private", "shared", "public"} {
+		t.Run(vis, func(t *testing.T) {
+			path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+defaults:
+  app_visibility: `+vis+`
+`)
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Defaults.AppVisibility != vis {
+				t.Errorf("got %q, want %q", cfg.Defaults.AppVisibility, vis)
+			}
+		})
+	}
+}
+
+func TestDefaultsAppVisibility_FromEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_DEFAULTS_APP_VISIBILITY", "public")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Defaults.AppVisibility != "public" {
+		t.Errorf("got %q, want %q", cfg.Defaults.AppVisibility, "public")
+	}
+}
+
+func TestDefaultsAppVisibility_EnvOverridesYAML(t *testing.T) {
+	t.Setenv("SHINYHUB_DEFAULTS_APP_VISIBILITY", "shared")
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+defaults:
+  app_visibility: public
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Defaults.AppVisibility != "shared" {
+		t.Errorf("env should override YAML: got %q, want %q", cfg.Defaults.AppVisibility, "shared")
+	}
+}
+
+func TestDefaultsAppVisibility_InvalidValue(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+defaults:
+  app_visibility: secret
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid app_visibility, got nil")
+	}
+	if !strings.Contains(err.Error(), "defaults.app_visibility") {
+		t.Errorf("error should mention defaults.app_visibility: %v", err)
+	}
+	if !strings.Contains(err.Error(), "private") || !strings.Contains(err.Error(), "shared") || !strings.Contains(err.Error(), "public") {
+		t.Errorf("error should mention valid values: %v", err)
+	}
+}
+
 func TestRuntimeConfigImageEnvOverrides(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON", "my-registry/uv:custom")

@@ -224,7 +224,7 @@ func TestEnsureApp_SurfacesServerErrorBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "full")
+	err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "full", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -394,7 +394,7 @@ func TestEnsureApp_FallsBackToRawBodyWhenNotJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "proxy")
+	err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "proxy", "")
 	if err == nil || !strings.Contains(err.Error(), "upstream timeout") {
 		t.Errorf("expected raw body in error, got %v", err)
 	}
@@ -608,11 +608,121 @@ func TestWaitForHealthy_SuccessEmitsNoLogTail(t *testing.T) {
 	}
 }
 
+// TestEnsureApp_ExistingAppWithVisibility_Warns verifies that when the app
+// already exists and --visibility is set, a warning is written to stderr and
+// the call succeeds without making a create request.
+func TestEnsureApp_ExistingAppWithVisibility_Warns(t *testing.T) {
+	createCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/demo":
+			// App already exists.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running"}}`))
+		case "/api/apps":
+			createCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"slug":"demo"}`))
+		default:
+			t.Errorf("unexpected request to %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := ensureAppWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", "public", &stderrBuf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if createCalled {
+		t.Error("create endpoint should not be called when app already exists")
+	}
+
+	out := stderrBuf.String()
+	if !strings.Contains(out, "warning:") {
+		t.Errorf("expected a warning on stderr, got: %q", out)
+	}
+	if !strings.Contains(out, "--visibility") {
+		t.Errorf("warning should mention --visibility, got: %q", out)
+	}
+	if !strings.Contains(out, "shinyhub apps access set demo public") {
+		t.Errorf("warning should include the corrective command, got: %q", out)
+	}
+}
+
+// TestEnsureApp_ExistingAppWithoutVisibility_NoWarn verifies that when the app
+// exists and visibility is empty, no warning is emitted.
+func TestEnsureApp_ExistingAppWithoutVisibility_NoWarn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"app":{"slug":"demo"}}`))
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := ensureAppWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", "", &stderrBuf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderrBuf.Len() > 0 {
+		t.Errorf("expected no stderr output when visibility is empty, got: %q", stderrBuf.String())
+	}
+}
+
 func mustRun(t *testing.T, dir, cmd string, args ...string) {
 	t.Helper()
 	c := exec.Command(cmd, args...)
 	c.Dir = dir
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("%s: %v\n%s", cmd, err, out)
+	}
+}
+
+// TestEnsureApp_ForwardsVisibility verifies that a non-empty visibility is
+// forwarded in the JSON create body and an empty visibility is omitted.
+func TestEnsureApp_ForwardsVisibility(t *testing.T) {
+	cases := []struct {
+		name       string
+		visibility string
+		wantAccess string // "" means the field should be absent in the body
+	}{
+		{"empty omits field", "", ""},
+		{"public is forwarded", "public", "public"},
+		{"shared is forwarded", "shared", "shared"},
+		{"private is forwarded", "private", "private"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedBody string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/apps/demo":
+					w.WriteHeader(http.StatusNotFound)
+				case "/api/apps":
+					b := new(bytes.Buffer)
+					b.ReadFrom(r.Body)
+					capturedBody = b.String()
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"slug":"demo"}`))
+				default:
+					t.Errorf("unexpected request to %s", r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+
+			if err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", tc.visibility); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tc.wantAccess == "" {
+				if strings.Contains(capturedBody, `"access"`) {
+					t.Errorf("access field should not be present when visibility is empty, got body: %s", capturedBody)
+				}
+			} else {
+				if !strings.Contains(capturedBody, `"access":"`+tc.wantAccess+`"`) {
+					t.Errorf("want access=%q in body, got: %s", tc.wantAccess, capturedBody)
+				}
+			}
+		})
 	}
 }

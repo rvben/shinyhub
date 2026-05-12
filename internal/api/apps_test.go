@@ -1436,6 +1436,149 @@ func TestDeployApp_OrphanCleanupOnExtractFailure(t *testing.T) {
 	}
 }
 
+// newTestServerWithDefaultVisibility creates a test server with a specific default app visibility.
+func newTestServerWithDefaultVisibility(t *testing.T, visibility string) (*api.Server, *db.Store) {
+	t.Helper()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:     config.AuthConfig{Secret: "test-secret"},
+		Storage:  config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+		Defaults: config.DefaultsConfig{AppVisibility: visibility},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
+
+// TestCreateApp_DefaultVisibilityPrivate verifies that when no config default is set,
+// newly created apps get access=private.
+func TestCreateApp_DefaultVisibilityPrivate(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"slug": "vis-test", "name": "Vis Test"})
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, err := store.GetAppBySlug("vis-test")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Access != "private" {
+		t.Errorf("want access=private (default), got %q", app.Access)
+	}
+}
+
+// TestCreateApp_ConfigDefaultVisibilityPublic verifies that defaults.app_visibility=public
+// is applied to newly created apps when no per-request access is specified.
+func TestCreateApp_ConfigDefaultVisibilityPublic(t *testing.T) {
+	srv, store := newTestServerWithDefaultVisibility(t, "public")
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"slug": "pub-app", "name": "Public App"})
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, err := store.GetAppBySlug("pub-app")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Access != "public" {
+		t.Errorf("want access=public (from config default), got %q", app.Access)
+	}
+}
+
+// TestCreateApp_ExplicitAccessOverridesConfigDefault verifies that an explicit
+// access value in the request body overrides the config default.
+func TestCreateApp_ExplicitAccessOverridesConfigDefault(t *testing.T) {
+	srv, store := newTestServerWithDefaultVisibility(t, "public")
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"slug": "priv-app", "name": "Private App", "access": "private"})
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, err := store.GetAppBySlug("priv-app")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Access != "private" {
+		t.Errorf("want access=private (explicit override), got %q", app.Access)
+	}
+}
+
+// TestCreateApp_InvalidAccessRejected verifies that an invalid access value in
+// the request body is rejected with 400.
+func TestCreateApp_InvalidAccessRejected(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"slug": "bad-app", "name": "Bad App", "access": "secret"})
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreateApp_ConfigDefaultVisibilityShared verifies that defaults.app_visibility=shared
+// is applied to newly created apps.
+func TestCreateApp_ConfigDefaultVisibilityShared(t *testing.T) {
+	srv, store := newTestServerWithDefaultVisibility(t, "shared")
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"slug": "shared-app", "name": "Shared App"})
+	req := authedRequest(t, "POST", "/api/apps", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, err := store.GetAppBySlug("shared-app")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Access != "shared" {
+		t.Errorf("want access=shared (from config default), got %q", app.Access)
+	}
+}
+
 // TestDeleteApp_RemovesBothDirs verifies that deleting an app removes both the
 // apps dir (code) and the app-data dir (persistent data) from disk.
 func TestDeleteApp_RemovesBothDirs(t *testing.T) {

@@ -5,10 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 )
 
 var ErrNotFound = errors.New("not found")
+
+// ValidAppVisibilities is the canonical set of accepted app access values.
+// All callers that validate or interpolate visibility strings must reference
+// this slice so a future extension to the set automatically propagates.
+var ValidAppVisibilities = []string{"private", "shared", "public"}
+
+// IsValidAppVisibility reports whether s is a recognised app visibility value.
+func IsValidAppVisibility(s string) bool {
+	return slices.Contains(ValidAppVisibilities, s)
+}
 
 // --- Users ---
 
@@ -276,13 +287,17 @@ type CreateAppParams struct {
 	Name        string
 	ProjectSlug string
 	OwnerID     int64
+	// Access must be one of ValidAppVisibilities; validated by callers before
+	// calling CreateApp. The SQL column DEFAULT 'private' acts as a last-resort
+	// safety net only when the column is omitted from the INSERT entirely.
+	Access string
 }
 
 func (s *Store) CreateApp(p CreateAppParams) error {
 	if p.ProjectSlug == "" {
 		_, err := s.db.Exec(
-			`INSERT INTO apps (slug, name, owner_id) VALUES (?, ?, ?)`,
-			p.Slug, p.Name, p.OwnerID,
+			`INSERT INTO apps (slug, name, owner_id, access) VALUES (?, ?, ?, ?)`,
+			p.Slug, p.Name, p.OwnerID, p.Access,
 		)
 		if err != nil {
 			return fmt.Errorf("create app: %w", err)
@@ -290,8 +305,8 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 		return nil
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO apps (slug, name, project_slug, owner_id) VALUES (?, ?, ?, ?)`,
-		p.Slug, p.Name, p.ProjectSlug, p.OwnerID,
+		`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
+		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
 	)
 	if err != nil {
 		return fmt.Errorf("create app: %w", err)

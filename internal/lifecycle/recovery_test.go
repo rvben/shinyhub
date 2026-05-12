@@ -38,7 +38,7 @@ func mustCreateApp(t *testing.T, store *db.Store, slug string) *db.App {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID}); err != nil {
+	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, err := store.GetAppBySlug(slug)

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // OAuthConfig holds OAuth2 provider credentials.
@@ -67,6 +69,14 @@ type rawGoogleOAuthConfig struct {
 	CallbackURL  string `yaml:"callback_url"`
 }
 
+// DefaultsConfig holds default values applied to new resources at creation time.
+type DefaultsConfig struct {
+	// AppVisibility is the access level assigned to newly created apps when
+	// no explicit access is provided in the request. Allowed: "private" (default),
+	// "shared", "public".
+	AppVisibility string
+}
+
 // Config holds all parsed, ready-to-use configuration for ShinyHub.
 type Config struct {
 	Database         DatabaseConfig
@@ -75,6 +85,7 @@ type Config struct {
 	Storage          StorageConfig
 	Lifecycle        LifecycleConfig
 	Runtime          RuntimeConfig
+	Defaults         DefaultsConfig
 	OAuth            OAuthConfig  `yaml:"-"`
 	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
 }
@@ -156,6 +167,10 @@ type DockerImages struct {
 	R      string
 }
 
+type rawDefaultsConfig struct {
+	AppVisibility string `yaml:"app_visibility"`
+}
+
 // rawConfig mirrors Config for YAML decoding, using string-typed duration fields.
 type rawConfig struct {
 	Database  DatabaseConfig     `yaml:"database"`
@@ -165,6 +180,7 @@ type rawConfig struct {
 	Lifecycle rawLifecycleConfig `yaml:"lifecycle"`
 	OAuth     rawOAuthConfig     `yaml:"oauth"`
 	Runtime   rawRuntimeConfig   `yaml:"runtime"`
+	Defaults  rawDefaultsConfig  `yaml:"defaults"`
 }
 
 type rawLifecycleConfig struct {
@@ -227,6 +243,7 @@ func Load(path string) (*Config, error) {
 		Storage:   raw.Storage,
 		Lifecycle: lc,
 		Runtime:   rc,
+		Defaults:  DefaultsConfig{AppVisibility: raw.Defaults.AppVisibility},
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
@@ -285,6 +302,13 @@ func Load(path string) (*Config, error) {
 		// allowed
 	default:
 		return nil, fmt.Errorf("auth.oauth_default_role: %q is not allowed; must be one of viewer, developer, operator", cfg.Auth.OAuthDefaultRole)
+	}
+	if cfg.Defaults.AppVisibility == "" {
+		cfg.Defaults.AppVisibility = "private"
+	}
+	if !db.IsValidAppVisibility(cfg.Defaults.AppVisibility) {
+		return nil, fmt.Errorf("defaults.app_visibility: %q is not allowed; must be one of %s",
+			cfg.Defaults.AppVisibility, strings.Join(db.ValidAppVisibilities, ", "))
 	}
 	switch cfg.Runtime.Mode {
 	case "native", "docker":
@@ -504,5 +528,8 @@ func applyEnv(cfg *Config) {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.Runtime.DefaultMaxSessionsPerReplica = n
 		}
+	}
+	if v := os.Getenv("SHINYHUB_DEFAULTS_APP_VISIBILITY"); v != "" {
+		cfg.Defaults.AppVisibility = v
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/bundle"
+	"github.com/rvben/shinyhub/internal/db"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
@@ -50,10 +51,11 @@ var deployCmd = &cobra.Command{
 var deployFlags struct {
 	slug        string
 	wait        bool
-	waitTimeout int // seconds
+	waitTimeout int    // seconds
 	git         string // git repo URL; if set, clone instead of using local dir
 	branch      string // branch/tag to check out (default: default branch)
 	subdir      string // subdirectory within the repo containing the app
+	visibility  string // app access level: private, shared, public (empty = use server default)
 }
 
 func init() {
@@ -63,6 +65,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployFlags.git, "git", "", "Git repository URL to clone and deploy")
 	deployCmd.Flags().StringVar(&deployFlags.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	deployCmd.Flags().StringVar(&deployFlags.subdir, "subdir", "", "Subdirectory within repo containing the app")
+	deployCmd.Flags().StringVar(&deployFlags.visibility, "visibility", "", "App visibility for new apps: private, shared, or public (default: server config)")
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
@@ -123,6 +126,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if deployFlags.visibility != "" && !db.IsValidAppVisibility(deployFlags.visibility) {
+		return fmt.Errorf("invalid --visibility %q: must be one of %s",
+			deployFlags.visibility, strings.Join(db.ValidAppVisibilities, ", "))
+	}
+
 	fmt.Printf("Bundling %s...\n", abs)
 	bundleBuf, summary, err := zipDir(abs)
 	if err != nil {
@@ -132,7 +140,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, summary)
 	}
 
-	if err := ensureApp(cfg, slug); err != nil {
+	if err := ensureApp(cfg, slug, deployFlags.visibility); err != nil {
 		return err
 	}
 
@@ -348,7 +356,21 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	return status == "running", status, nil
 }
 
-func ensureApp(cfg *cliConfig, slug string) error {
+// ensureApp checks whether the app exists and creates it if not. When visibility
+// is non-empty (one of "private", "shared", "public") it is forwarded in the
+// creation request body; an empty string lets the server apply its configured
+// default.
+//
+// If the app already exists and visibility is non-empty, a warning is printed to
+// stderr — the flag is ignored for existing apps and the user should use
+// `shinyhub apps access set` instead.
+func ensureApp(cfg *cliConfig, slug, visibility string) error {
+	return ensureAppWithOutput(cfg, slug, visibility, os.Stderr)
+}
+
+// ensureAppWithOutput is the testable core of ensureApp. errOut receives any
+// warnings emitted during the call.
+func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writer) error {
 	checkReq, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -360,12 +382,22 @@ func ensureApp(cfg *cliConfig, slug string) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
+		if visibility != "" {
+			fmt.Fprintf(errOut, "warning: --visibility is ignored for existing apps; use `shinyhub apps access set %s %s` instead\n", slug, visibility)
+		}
 		return nil
 	}
 
-	body := fmt.Sprintf(`{"slug":%q,"name":%q}`, slug, slug)
+	createBody := map[string]string{"slug": slug, "name": slug}
+	if visibility != "" {
+		createBody["access"] = visibility
+	}
+	bodyBytes, err := json.Marshal(createBody)
+	if err != nil {
+		return fmt.Errorf("encode create body: %w", err)
+	}
 	createReq, err := http.NewRequest("POST", cfg.Host+"/api/apps",
-		bytes.NewBufferString(body))
+		bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
