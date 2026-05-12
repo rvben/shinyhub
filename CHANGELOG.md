@@ -13,6 +13,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.3.2](https://github.com/rvben/shinyhub/compare/v0.3.1...v0.3.2) - 2026-05-12
+
+### Added
+
+- **tokens**: add --format json to tokens create and --name to tokens revoke ([10848f3](https://github.com/rvben/shinyhub/commit/10848f3b5d3ee7ab103648ed9bf769544c6bfdab))
+- **schedule**: add --if-not-exists to schedule add; return 409 on duplicate name ([0d97163](https://github.com/rvben/shinyhub/commit/0d97163e7e5f28b49351f72054398ef8b28d7723))
+- **config**: configurable default app visibility ([882059b](https://github.com/rvben/shinyhub/commit/882059bd47ed505de6ca14c770c969f6625db864))
+- **deploy**: tail app logs to stderr when --wait times out or app crashes ([4b65bcc](https://github.com/rvben/shinyhub/commit/4b65bccda6b09577e0482d2e5947961c16d8f6ff))
+
 ## [0.3.1](https://github.com/rvben/shinyhub/compare/v0.3.0...v0.3.1) - 2026-05-12
 
 ### Fixed
