@@ -63,7 +63,9 @@ func TestDataPersistsAcrossDeploysAndIsClearedOnDelete(t *testing.T) {
 		},
 	}
 	mgr := process.NewManager(cfg.Storage.AppsDir, process.NewNativeRuntime())
-	mgr.SetAppDataRoot(cfg.Storage.AppDataDir)
+	if err := mgr.SetAppDataRoot(cfg.Storage.AppDataDir); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 	ts := httptest.NewServer(srv.Router())
@@ -286,7 +288,9 @@ func TestDeployRejectsBundleWithDataDir(t *testing.T) {
 		},
 	}
 	mgr := process.NewManager(cfg.Storage.AppsDir, process.NewNativeRuntime())
-	mgr.SetAppDataRoot(cfg.Storage.AppDataDir)
+	if err := mgr.SetAppDataRoot(cfg.Storage.AppDataDir); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
 	srv := api.New(cfg, store, mgr, proxy.New())
 	ts := httptest.NewServer(srv.Router())
 	defer ts.Close()

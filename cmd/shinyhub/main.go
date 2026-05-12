@@ -196,7 +196,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		return out, nil
 	})
-	mgr.SetAppDataRoot(cfg.Storage.AppDataDir)
+	if err := mgr.SetAppDataRoot(cfg.Storage.AppDataDir); err != nil {
+		return fmt.Errorf("resolve app data dir: %w", err)
+	}
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetSecretsKey(secretsKey)

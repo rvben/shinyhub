@@ -35,7 +35,14 @@ func newFakeRuntime() *fakeRuntime {
 func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.lastEnv = p.Env
+	// Mirror the real-runtime contract: SHINYHUB_APP_DATA is injected by the
+	// Runtime from p.AppDataPath (NativeRuntime appends the host path;
+	// DockerRuntime translates to the in-container path). Tests that assert
+	// the cross-layer contract via lastEnv rely on this mirror.
+	f.lastEnv = append([]string(nil), p.Env...)
+	if p.AppDataPath != "" {
+		f.lastEnv = append(f.lastEnv, "SHINYHUB_APP_DATA="+p.AppDataPath)
+	}
 	pid := f.nextPID
 	f.nextPID++
 	f.stops[pid] = make(chan struct{})
@@ -402,7 +409,9 @@ func TestStart_NativeInjectsAppDataAndSymlink(t *testing.T) {
 	bundle := t.TempDir()
 	rt := newFakeRuntime()
 	m := process.NewManager(t.TempDir(), rt)
-	m.SetAppDataRoot(appData)
+	if err := m.SetAppDataRoot(appData); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
 
 	p := process.StartParams{
 		Slug:    "demo",
@@ -440,7 +449,9 @@ func TestStart_RefusesIfBundleHasDataEntry(t *testing.T) {
 	}
 	rt := newFakeRuntime()
 	m := process.NewManager(t.TempDir(), rt)
-	m.SetAppDataRoot(t.TempDir())
+	if err := m.SetAppDataRoot(t.TempDir()); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
 
 	_, err := m.Start(process.StartParams{
 		Slug:    "demo",
@@ -480,7 +491,9 @@ func TestStart_IdempotentWhenSymlinkAlreadyPointsToCorrectTarget(t *testing.T) {
 	// Use the native runtime so Stop can actually terminate the process and
 	// release the entry — fakeRuntime.Wait blocks forever.
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	m.SetAppDataRoot(appData)
+	if err := m.SetAppDataRoot(appData); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
 
 	p := process.StartParams{
 		Slug:    "demo",
@@ -516,7 +529,9 @@ func TestStart_RefusesIfSymlinkPointsToWrongTarget(t *testing.T) {
 	bundle := t.TempDir()
 	rt := newFakeRuntime()
 	m := process.NewManager(t.TempDir(), rt)
-	m.SetAppDataRoot(appData)
+	if err := m.SetAppDataRoot(appData); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
 
 	// Plant a symlink pointing to a different location.
 	wrongTarget := filepath.Join(t.TempDir(), "elsewhere")
@@ -537,6 +552,145 @@ func TestStart_RefusesIfSymlinkPointsToWrongTarget(t *testing.T) {
 	}
 }
 
+// TestStart_NormalizesRelativeAppDataRoot guards against a regression where a
+// relative storage.app_data_dir produced a self-referential symlink at
+// <bundle>/data: the kernel resolves a relative symlink target against the
+// symlink's parent dir, so a target string like "data/app-data/demo" placed at
+// <bundle>/data resolves back through the symlink itself ("Too many levels of
+// symbolic links"). The Manager must normalize appDataRoot to an absolute path
+// so both the symlink target and SHINYHUB_APP_DATA are unambiguous.
+func TestStart_NormalizesRelativeAppDataRoot(t *testing.T) {
+	root := t.TempDir()
+	// Chdir so we can pass a relative path and still know the absolute form.
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWD) })
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	relAppData := "./data/app-data"
+	if err := os.MkdirAll(relAppData, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	bundle := filepath.Join(root, "bundle")
+	if err := os.MkdirAll(bundle, 0o750); err != nil {
+		t.Fatalf("mkdir bundle: %v", err)
+	}
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	if err := m.SetAppDataRoot(relAppData); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
+
+	if _, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	linkPath := filepath.Join(bundle, "data")
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if !filepath.IsAbs(target) {
+		t.Errorf("symlink target = %q, want absolute path", target)
+	}
+	// The symlink must actually resolve; the regression made <bundle>/data
+	// loop into itself, so os.Stat would return ELOOP.
+	if _, err := os.Stat(linkPath); err != nil {
+		t.Errorf("stat through symlink failed (likely self-referential loop): %v", err)
+	}
+
+	envVal := lastValue(rt.lastEnv, "SHINYHUB_APP_DATA")
+	if !filepath.IsAbs(envVal) {
+		t.Errorf("SHINYHUB_APP_DATA = %q, want absolute path", envVal)
+	}
+}
+
+// TestSetAppDataRoot_NormalizesAtSetTimeNotStartTime locks in the design
+// choice that path normalization happens at SetAppDataRoot, not at Start. If
+// the server's working directory changes between configuration and the first
+// Start (e.g. a background goroutine chdirs, or a future refactor moves
+// filepath.Abs into Start), a relative path captured at set-time would
+// silently start resolving against the wrong CWD. Normalizing at set-time
+// makes that impossible.
+func TestSetAppDataRoot_NormalizesAtSetTimeNotStartTime(t *testing.T) {
+	originalCWD := t.TempDir()
+	otherCWD := t.TempDir()
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWD) })
+
+	if err := os.Chdir(originalCWD); err != nil {
+		t.Fatalf("chdir original: %v", err)
+	}
+	// Capture the canonical CWD after chdir. On macOS /var is a symlink to
+	// /private/var, so t.TempDir()'s "/var/..." differs from Getwd()'s
+	// "/private/var/..." — the latter is what filepath.Abs will produce.
+	canonicalOriginal, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd original: %v", err)
+	}
+	relAppData := "./data/app-data"
+	if err := os.MkdirAll(relAppData, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	if err := m.SetAppDataRoot(relAppData); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
+
+	// Move the CWD *after* configuration. A correct implementation captured
+	// the absolute path at set-time and is immune; a buggy one that defers
+	// resolution to Start would now resolve against otherCWD.
+	if err := os.Chdir(otherCWD); err != nil {
+		t.Fatalf("chdir other: %v", err)
+	}
+
+	bundle := filepath.Join(otherCWD, "bundle")
+	if err := os.MkdirAll(bundle, 0o750); err != nil {
+		t.Fatalf("mkdir bundle: %v", err)
+	}
+	if _, err := m.Start(process.StartParams{
+		Slug:    "demo",
+		Dir:     bundle,
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	target, err := os.Readlink(filepath.Join(bundle, "data"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	wantPrefix := filepath.Join(canonicalOriginal, "data", "app-data")
+	if !strings.HasPrefix(target, wantPrefix) {
+		t.Errorf("symlink target = %q, want path rooted at original CWD %q (normalization deferred to Start?)", target, wantPrefix)
+	}
+	if _, err := os.Stat(filepath.Join(bundle, "data")); err != nil {
+		t.Errorf("stat through symlink failed: %v", err)
+	}
+}
+
+func TestSetAppDataRoot_EmptyStringDisablesFeature(t *testing.T) {
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+	if err := m.SetAppDataRoot(""); err != nil {
+		t.Fatalf("SetAppDataRoot(\"\"): %v", err)
+	}
+}
+
 func TestStart_RefusesIfBundleHasDataDir(t *testing.T) {
 	bundle := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(bundle, "data"), 0o750); err != nil {
@@ -544,7 +698,9 @@ func TestStart_RefusesIfBundleHasDataDir(t *testing.T) {
 	}
 	rt := newFakeRuntime()
 	m := process.NewManager(t.TempDir(), rt)
-	m.SetAppDataRoot(t.TempDir())
+	if err := m.SetAppDataRoot(t.TempDir()); err != nil {
+		t.Fatalf("SetAppDataRoot: %v", err)
+	}
 
 	_, err := m.Start(process.StartParams{
 		Slug:    "demo",

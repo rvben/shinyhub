@@ -89,10 +89,24 @@ func (m *Manager) SetSharedMountResolver(r SharedMountResolver) { m.mountResolve
 
 // SetAppDataRoot sets the root directory under which per-app persistent data
 // directories live. Each Start resolves <root>/<slug>, ensures it exists,
-// injects SHINYHUB_APP_DATA, and symlinks <bundle_dir>/data to it. An empty
-// root disables the feature. Must be called before the manager begins
-// starting processes; not safe to call concurrently with Start.
-func (m *Manager) SetAppDataRoot(root string) { m.appDataRoot = root }
+// stamps it onto StartParams.AppDataPath, and symlinks <bundle_dir>/data to
+// it. Injection of SHINYHUB_APP_DATA into the child env is the Runtime's
+// responsibility (NativeRuntime uses the host path; DockerRuntime translates
+// to the in-container mount path) — the Manager only owns the dir + symlink.
+// An empty root disables the feature. Must be called before the manager
+// begins starting processes; not safe to call concurrently with Start.
+func (m *Manager) SetAppDataRoot(root string) error {
+	if root == "" {
+		m.appDataRoot = ""
+		return nil
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve app data root: %w", err)
+	}
+	m.appDataRoot = abs
+	return nil
+}
 
 // HostPreparesDeps proxies to the underlying Runtime so deploy code can ask
 // whether host-side dependency installation (uv sync, renv::restore) is
@@ -144,7 +158,6 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			return nil, fmt.Errorf("ensure app data dir: %w", err)
 		}
 		p.AppDataPath = appDataPath
-		p.Env = append(p.Env, "SHINYHUB_APP_DATA="+appDataPath)
 
 		linkPath := filepath.Join(p.Dir, "data")
 		switch info, err := os.Lstat(linkPath); {
