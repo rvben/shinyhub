@@ -39,6 +39,13 @@ storage:
 # with these names are rejected at validation time and shadowed at merge time):
 #   SHINYHUB_APP_DATA   absolute path to the app's persistent data dir
 
+defaults:
+  # Visibility assigned to newly-deployed apps. One of: private, shared, public.
+  # Set to "public" when ShinyHub sits behind an auth proxy (Caddy, oauth2-proxy,
+  # Cloudflare Access, etc.) and the perimeter already enforces access.
+  # Existing apps are not affected. The CLI flag `--visibility` overrides per deploy.
+  app_visibility: private               # SHINYHUB_DEFAULTS_APP_VISIBILITY
+
 lifecycle:
   watch_interval: 15s                 # how often the watchdog runs
   restart_max_attempts: 5             # crash-loop threshold

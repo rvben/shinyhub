@@ -54,6 +54,10 @@ type createAppRequest struct {
 	Slug        string `json:"slug"`
 	Name        string `json:"name"`
 	ProjectSlug string `json:"project_slug"`
+	// Access sets the initial visibility. When empty the server applies
+	// defaults.app_visibility from config (which defaults to "private").
+	// Allowed values: "private", "shared", "public".
+	Access string `json:"access"`
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +76,19 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Name) > 128 {
 		writeError(w, http.StatusBadRequest, "name must be 128 characters or fewer")
+		return
+	}
+
+	// Resolve effective access: explicit request body > config default > "private".
+	access := req.Access
+	if access == "" {
+		access = s.cfg.Defaults.AppVisibility
+	}
+	if access == "" {
+		access = "private"
+	}
+	if !db.IsValidAppVisibility(access) {
+		writeError(w, http.StatusBadRequest, "access must be one of "+strings.Join(db.ValidAppVisibilities, ", "))
 		return
 	}
 
@@ -99,6 +116,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		ProjectSlug: req.ProjectSlug,
 		OwnerID:     u.ID,
+		Access:      access,
 	}); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			writeError(w, http.StatusConflict, "slug already taken")
@@ -1022,8 +1040,8 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if req.Access != "public" && req.Access != "private" && req.Access != "shared" {
-		writeError(w, http.StatusBadRequest, "access must be public, private, or shared")
+	if !db.IsValidAppVisibility(req.Access) {
+		writeError(w, http.StatusBadRequest, "access must be one of "+strings.Join(db.ValidAppVisibilities, ", "))
 		return
 	}
 	if err := s.store.SetAppAccess(slug, req.Access); err != nil {

@@ -5,10 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 )
 
 var ErrNotFound = errors.New("not found")
+
+// ValidAppVisibilities is the canonical set of accepted app access values.
+// All callers that validate or interpolate visibility strings must reference
+// this slice so a future extension to the set automatically propagates.
+var ValidAppVisibilities = []string{"private", "shared", "public"}
+
+// IsValidAppVisibility reports whether s is a recognised app visibility value.
+func IsValidAppVisibility(s string) bool {
+	return slices.Contains(ValidAppVisibilities, s)
+}
 
 // --- Users ---
 
@@ -149,15 +160,26 @@ type CreateAPIKeyParams struct {
 	Name    string
 }
 
-func (s *Store) CreateAPIKey(p CreateAPIKeyParams) error {
-	_, err := s.db.Exec(
+// CreateAPIKey inserts a new API key and returns the inserted row's ID and
+// creation timestamp.
+func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
+	result, err := s.db.Exec(
 		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?)`,
 		p.UserID, p.KeyHash, p.Name,
 	)
 	if err != nil {
-		return fmt.Errorf("create api key: %w", err)
+		return 0, time.Time{}, fmt.Errorf("create api key: %w", err)
 	}
-	return nil
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("create api key last id: %w", err)
+	}
+	var createdAt time.Time
+	err = s.db.QueryRow(`SELECT created_at FROM api_keys WHERE id = ?`, id).Scan(&createdAt)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("create api key created_at: %w", err)
+	}
+	return id, createdAt, nil
 }
 
 func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
@@ -276,13 +298,17 @@ type CreateAppParams struct {
 	Name        string
 	ProjectSlug string
 	OwnerID     int64
+	// Access must be one of ValidAppVisibilities; validated by callers before
+	// calling CreateApp. The SQL column DEFAULT 'private' acts as a last-resort
+	// safety net only when the column is omitted from the INSERT entirely.
+	Access string
 }
 
 func (s *Store) CreateApp(p CreateAppParams) error {
 	if p.ProjectSlug == "" {
 		_, err := s.db.Exec(
-			`INSERT INTO apps (slug, name, owner_id) VALUES (?, ?, ?)`,
-			p.Slug, p.Name, p.OwnerID,
+			`INSERT INTO apps (slug, name, owner_id, access) VALUES (?, ?, ?, ?)`,
+			p.Slug, p.Name, p.OwnerID, p.Access,
 		)
 		if err != nil {
 			return fmt.Errorf("create app: %w", err)
@@ -290,8 +316,8 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 		return nil
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO apps (slug, name, project_slug, owner_id) VALUES (?, ?, ?, ?)`,
-		p.Slug, p.Name, p.ProjectSlug, p.OwnerID,
+		`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
+		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
 	)
 	if err != nil {
 		return fmt.Errorf("create app: %w", err)

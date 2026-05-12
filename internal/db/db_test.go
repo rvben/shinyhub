@@ -104,7 +104,7 @@ func mustCreateUser(t *testing.T, s *db.Store, name, role string) *db.User {
 
 func mustCreateApp(t *testing.T, s *db.Store, slug string, ownerID int64) *db.App {
 	t.Helper()
-	if err := s.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID}); err != nil {
+	if err := s.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID, Access: "private"}); err != nil {
 		t.Fatalf("create app %q: %v", slug, err)
 	}
 	app, err := s.GetAppBySlug(slug)

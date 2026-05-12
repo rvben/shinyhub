@@ -579,6 +579,7 @@ func TestTokensList(t *testing.T) {
 func TestTokensRevoke(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, "")
+	resetTokensRevokeFlags(t)
 
 	tokensCmd.SetArgs([]string{"revoke", "42"})
 	if err := tokensCmd.Execute(); err != nil {
@@ -591,6 +592,221 @@ func TestTokensRevoke(t *testing.T) {
 	req := (*reqs)[0]
 	if req.Method != "DELETE" || req.Path != "/api/tokens/42" {
 		t.Errorf("unexpected %s %s", req.Method, req.Path)
+	}
+}
+
+// resetTokensCreateFlags restores defaults so tests don't leak state between runs.
+func resetTokensCreateFlags(t *testing.T) {
+	t.Helper()
+	tokensCreateFlags.format = "text"
+	if f := tokensCreateCmd.Flags().Lookup("format"); f != nil {
+		f.Changed = false
+	}
+	tokenName = ""
+	if f := tokensCreateCmd.Flags().Lookup("name"); f != nil {
+		f.Changed = false
+	}
+}
+
+// resetTokensRevokeFlags restores defaults so tests don't leak state between runs.
+func resetTokensRevokeFlags(t *testing.T) {
+	t.Helper()
+	tokensRevokeFlags.name = ""
+	if f := tokensRevokeCmd.Flags().Lookup("name"); f != nil {
+		f.Changed = false
+	}
+}
+
+// TestTokensCreate_JSON verifies that --format json produces parseable JSON with
+// all required fields.
+func TestTokensCreate_JSON(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(201, `{"id":7,"name":"ci","token":"shk_abcdef1234567890","created_at":"2026-05-12T15:04:05Z"}`)
+	resetTokensCreateFlags(t)
+
+	var buf strings.Builder
+	tokensCreateCmd.SetOut(&buf)
+	t.Cleanup(func() { tokensCreateCmd.SetOut(nil) })
+	tokensCmd.SetArgs([]string{"create", "--name", "ci", "--format", "json"})
+	if err := tokensCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if (*reqs)[0].Method != "POST" || (*reqs)[0].Path != "/api/tokens" {
+		t.Errorf("unexpected %s %s", (*reqs)[0].Method, (*reqs)[0].Path)
+	}
+
+	out := strings.TrimSpace(buf.String())
+	var result struct {
+		ID        int64  `json:"id"`
+		Name      string `json:"name"`
+		Token     string `json:"token"`
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %q", err, out)
+	}
+	if result.ID != 7 {
+		t.Errorf("expected id=7, got %d", result.ID)
+	}
+	if result.Name != "ci" {
+		t.Errorf("expected name=%q, got %q", "ci", result.Name)
+	}
+	if result.Token != "shk_abcdef1234567890" {
+		t.Errorf("expected token=%q, got %q", "shk_abcdef1234567890", result.Token)
+	}
+	if result.CreatedAt != "2026-05-12T15:04:05Z" {
+		t.Errorf("expected created_at=%q, got %q", "2026-05-12T15:04:05Z", result.CreatedAt)
+	}
+}
+
+// TestTokensCreate_TextDefault verifies that omitting --format (or using
+// --format text) produces the human-readable output.
+func TestTokensCreate_TextDefault(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"id":3,"name":"mytoken","token":"shk_xyz","created_at":"2026-05-12T10:00:00Z"}`)
+	resetTokensCreateFlags(t)
+
+	var buf strings.Builder
+	tokensCreateCmd.SetOut(&buf)
+	t.Cleanup(func() { tokensCreateCmd.SetOut(nil) })
+	tokensCmd.SetArgs([]string{"create", "--name", "mytoken"})
+	if err := tokensCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "API token: shk_xyz") {
+		t.Errorf("expected human-readable 'API token:' line, got: %q", out)
+	}
+	if !strings.Contains(out, "Store this") {
+		t.Errorf("expected 'Store this' reminder line, got: %q", out)
+	}
+	// Must not be JSON.
+	if strings.HasPrefix(strings.TrimSpace(out), "{") {
+		t.Errorf("default output should not be JSON, got: %q", out)
+	}
+}
+
+// TestTokensCreate_FormatBogus verifies that an unrecognised --format value
+// returns an error before making any HTTP request.
+func TestTokensCreate_FormatBogus(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	resetTokensCreateFlags(t)
+
+	tokensCmd.SetArgs([]string{"create", "--name", "ci", "--format", "yaml"})
+	err := tokensCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --format yaml, got nil")
+	}
+	if !strings.Contains(err.Error(), "yaml") {
+		t.Errorf("error should mention the bad format value, got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests for invalid format, got %d", len(*reqs))
+	}
+}
+
+// TestTokensRevoke_ByName_OneMatch verifies that --name resolves to the correct
+// token ID and issues a single DELETE request.
+func TestTokensRevoke_ByName_OneMatch(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	// The test server returns the same body for both GET /api/tokens (list) and
+	// DELETE /api/tokens/42. The DELETE body is ignored; we care about the path.
+	setResp(200, `[{"id":42,"name":"ci","created_at":"2026-05-01T00:00:00Z"}]`)
+	resetTokensRevokeFlags(t)
+
+	tokensCmd.SetArgs([]string{"revoke", "--name", "ci"})
+	if err := tokensCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 2 {
+		t.Fatalf("expected 2 requests (list + delete), got %d", len(*reqs))
+	}
+	if (*reqs)[0].Method != "GET" || (*reqs)[0].Path != "/api/tokens" {
+		t.Errorf("expected GET /api/tokens first, got %s %s", (*reqs)[0].Method, (*reqs)[0].Path)
+	}
+	if (*reqs)[1].Method != "DELETE" || (*reqs)[1].Path != "/api/tokens/42" {
+		t.Errorf("expected DELETE /api/tokens/42, got %s %s", (*reqs)[1].Method, (*reqs)[1].Path)
+	}
+}
+
+// TestTokensRevoke_ByName_NoMatch verifies that a missing name returns a clear
+// "no token named" error without issuing a DELETE.
+func TestTokensRevoke_ByName_NoMatch(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":1,"name":"other","created_at":"2026-05-01T00:00:00Z"}]`)
+	resetTokensRevokeFlags(t)
+
+	tokensCmd.SetArgs([]string{"revoke", "--name", "missing"})
+	err := tokensCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for non-existent name, got nil")
+	}
+	if !strings.Contains(err.Error(), `no token named`) {
+		t.Errorf("error should say 'no token named', got: %v", err)
+	}
+	// Only the list request should have been made; no DELETE.
+	deleteSeen := false
+	for _, r := range *reqs {
+		if r.Method == "DELETE" {
+			deleteSeen = true
+		}
+	}
+	if deleteSeen {
+		t.Errorf("expected no DELETE request when name not found, but one was issued")
+	}
+}
+
+// TestTokensRevoke_ByName_MultipleMatches verifies that duplicate names produce
+// an error pointing users toward revoke-by-id.
+func TestTokensRevoke_ByName_MultipleMatches(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":1,"name":"ci","created_at":"2026-05-01T00:00:00Z"},{"id":2,"name":"ci","created_at":"2026-05-02T00:00:00Z"}]`)
+	resetTokensRevokeFlags(t)
+
+	tokensCmd.SetArgs([]string{"revoke", "--name", "ci"})
+	err := tokensCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for multiple matching names, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple tokens named") {
+		t.Errorf("error should say 'multiple tokens named', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "revoke by id") {
+		t.Errorf("error should suggest 'revoke by id', got: %v", err)
+	}
+	deleteSeen := false
+	for _, r := range *reqs {
+		if r.Method == "DELETE" {
+			deleteSeen = true
+		}
+	}
+	if deleteSeen {
+		t.Errorf("expected no DELETE request for ambiguous name, but one was issued")
+	}
+}
+
+// TestTokensRevoke_BothIDAndName verifies that supplying both a positional ID
+// and --name returns a mutual-exclusion error before any HTTP request.
+func TestTokensRevoke_BothIDAndName(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	resetTokensRevokeFlags(t)
+
+	tokensCmd.SetArgs([]string{"revoke", "42", "--name", "ci"})
+	err := tokensCmd.Execute()
+	if err == nil {
+		t.Fatal("expected mutual-exclusion error, got nil")
+	}
+	if !strings.Contains(err.Error(), "specify either id or --name") {
+		t.Errorf("error should say 'specify either id or --name', got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests for mutual-exclusion error, got %d", len(*reqs))
 	}
 }
 

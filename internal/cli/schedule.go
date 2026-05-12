@@ -156,14 +156,15 @@ func newScheduleLsCmd() *cobra.Command {
 
 func newScheduleAddCmd() *cobra.Command {
 	var flags struct {
-		name     string
-		cron     string
-		cmd      string
-		cmdJSON  string
-		timeout  int
-		overlap  string
-		missed   string
-		disabled bool
+		name        string
+		cron        string
+		cmd         string
+		cmdJSON     string
+		timeout     int
+		overlap     string
+		missed      string
+		disabled    bool
+		ifNotExists bool
 	}
 
 	addCmd := &cobra.Command{
@@ -179,6 +180,7 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.Flags().StringVar(&flags.overlap, "overlap", "skip", "Overlap policy: skip|queue|concurrent")
 	addCmd.Flags().StringVar(&flags.missed, "missed", "skip", "Missed-run policy: skip|run_once")
 	addCmd.Flags().BoolVar(&flags.disabled, "disabled", false, "Create the schedule in disabled state")
+	addCmd.Flags().BoolVar(&flags.ifNotExists, "if-not-exists", false, "Exit silently if a same-named schedule already exists")
 	_ = addCmd.MarkFlagRequired("name")
 	_ = addCmd.MarkFlagRequired("cron")
 
@@ -235,6 +237,9 @@ func newScheduleAddCmd() *cobra.Command {
 		}
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == 409 && flags.ifNotExists {
+			return nil
+		}
 		if resp.StatusCode >= 400 {
 			return fmt.Errorf("server returned %s: %s", resp.Status, out)
 		}

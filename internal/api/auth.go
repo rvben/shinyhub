@@ -253,7 +253,10 @@ type createTokenRequest struct {
 }
 
 type createTokenResponse struct {
-	Token string `json:"token"`
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Token     string    `json:"token"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
@@ -289,11 +292,12 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateAPIKey(db.CreateAPIKeyParams{
+	keyID, createdAt, err := s.store.CreateAPIKey(db.CreateAPIKeyParams{
 		UserID:  u.ID,
 		KeyHash: keyHash,
 		Name:    req.Name,
-	}); err != nil {
+	})
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -305,7 +309,12 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		ResourceID:   req.Name,
 		IPAddress:    s.ClientIP(r),
 	})
-	writeJSON(w, http.StatusCreated, createTokenResponse{Token: rawKey})
+	writeJSON(w, http.StatusCreated, createTokenResponse{
+		ID:        keyID,
+		Name:      req.Name,
+		Token:     rawKey,
+		CreatedAt: createdAt,
+	})
 }
 
 func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {

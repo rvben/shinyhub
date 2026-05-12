@@ -6,7 +6,15 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	sqlite "modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
 )
+
+// ErrScheduleNameExists is returned by CreateSchedule when a schedule with the
+// same name already exists for the given app. Callers that want idempotent
+// create behaviour (e.g. --if-not-exists) should check with errors.Is.
+var ErrScheduleNameExists = errors.New("schedule with that name already exists for this app")
 
 // --- app_schedules ---
 
@@ -53,6 +61,10 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
 	)
 	if err != nil {
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
+			return 0, fmt.Errorf("create schedule: %w", ErrScheduleNameExists)
+		}
 		return 0, fmt.Errorf("create schedule: %w", err)
 	}
 	return res.LastInsertId()
