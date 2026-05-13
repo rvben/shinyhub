@@ -22,6 +22,10 @@ OAuth or OIDC, and hibernate idle apps automatically.
   serving traffic. One app's data dir can be mounted read-only into another at
   `data/shared/<source-slug>/` to build fetcher → consumer dashboards. See
   [`docs/schedules.md`](docs/schedules.md).
+- **OpenTelemetry tracing:** W3C `traceparent` is propagated through the
+  proxy, every app gets the OTEL_\* env vars to export spans to your
+  collector, and a Traces tab surfaces recent slow/failed proxy spans with
+  deep-links into your backend. See [`docs/tracing.md`](docs/tracing.md).
 - **Audit log:** 27 action types recorded for admin review.
 - **Container isolation (optional):** run each app inside a Docker container
   with CPU and memory limits.

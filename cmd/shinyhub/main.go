@@ -30,6 +30,7 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/secrets"
+	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -231,12 +232,26 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if err := mgr.SetAppDataRoot(absAppDataDir); err != nil {
 		return fmt.Errorf("set app data root: %w", err)
 	}
+
+	// Tracing: shared ring buffer surfaced by the /traces handler, plus
+	// platform-default OTEL_* env vars injected into every app process so
+	// Shiny's built-in OpenTelemetry exporter reaches the configured backend
+	// without per-app configuration. Both are no-ops when cfg.Tracing.Enabled
+	// is false.
+	traceBuffer := tracing.NewBuffer(cfg.Tracing.RingBufferSize, time.Duration(cfg.Tracing.SlowRequestMS)*time.Millisecond)
+	mgr.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
+		return tracing.EnvFor(cfg.Tracing, slug, replica)
+	})
+
 	prx := proxy.New()
+	prx.SetTracing(cfg.Tracing, traceBuffer)
+
 	srv := api.New(cfg, store, mgr, prx)
 	if deployToken != nil {
 		srv.SetDeployToken(deployToken)
 	}
 	srv.SetSecretsKey(secretsKey)
+	srv.SetTraceBuffer(traceBuffer)
 
 	// Emit a structured access log for every proxied app request. Using the
 	// Server's trusted-proxy-aware ClientIP keeps the "client" field honest
