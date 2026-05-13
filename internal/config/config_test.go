@@ -706,6 +706,50 @@ runtime:
 	}
 }
 
+func TestLoad_DeployTokenFromEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_DEPLOY_TOKEN", "shk_"+strings.Repeat("b", 64))
+	t.Setenv("SHINYHUB_DEPLOY_TOKEN_ROLE", "operator")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.DeployToken != "shk_"+strings.Repeat("b", 64) {
+		t.Errorf("DeployToken = %q, want shk_...", cfg.Auth.DeployToken)
+	}
+	if cfg.Auth.DeployTokenRole != "operator" {
+		t.Errorf("DeployTokenRole = %q, want operator", cfg.Auth.DeployTokenRole)
+	}
+}
+
+func TestLoad_DeployTokenRoleDefault(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_DEPLOY_TOKEN", "shk_"+strings.Repeat("b", 64))
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth.DeployTokenRole != "developer" {
+		t.Errorf("DeployTokenRole = %q, want developer (default)", cfg.Auth.DeployTokenRole)
+	}
+}
+
+func TestLoad_DeployTokenRoleInvalid(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_DEPLOY_TOKEN", "shk_"+strings.Repeat("b", 64))
+	t.Setenv("SHINYHUB_DEPLOY_TOKEN_ROLE", "godmode")
+
+	_, err := config.Load("")
+	if err == nil {
+		t.Fatal("expected error for invalid role, got nil")
+	}
+	if !strings.Contains(err.Error(), "deploy_token_role") {
+		t.Errorf("error %q should mention deploy_token_role", err)
+	}
+}
+
 func TestLoad_MaxBundleMBNegativeNormalized(t *testing.T) {
 	path := writeYAML(t, `
 auth:

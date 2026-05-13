@@ -117,6 +117,17 @@ type AuthConfig struct {
 	// intentionally not permitted — admin must be granted explicitly, never
 	// auto-provisioned from an external IdP.
 	OAuthDefaultRole string `yaml:"oauth_default_role"`
+
+	// DeployToken is a pre-shared bearer token sourced from
+	// SHINYHUB_DEPLOY_TOKEN. When non-empty it authenticates as the synthetic
+	// system user `__deploy__` with role DeployTokenRole. Not persisted; rotation
+	// is "change the env var, restart the service."
+	DeployToken string `yaml:"-"`
+
+	// DeployTokenRole is the role granted to the synthetic system user when the
+	// env-token is active. Sourced from SHINYHUB_DEPLOY_TOKEN_ROLE; default
+	// "developer". Must be one of viewer, developer, operator, admin.
+	DeployTokenRole string `yaml:"-"`
 }
 
 type StorageConfig struct {
@@ -294,6 +305,17 @@ func Load(path string) (*Config, error) {
 	if cfg.Storage.MaxBundleMB < 0 {
 		cfg.Storage.MaxBundleMB = 128
 	}
+	if cfg.Auth.DeployToken != "" {
+		if cfg.Auth.DeployTokenRole == "" {
+			cfg.Auth.DeployTokenRole = "developer"
+		}
+		switch cfg.Auth.DeployTokenRole {
+		case "viewer", "developer", "operator", "admin":
+		default:
+			return nil, fmt.Errorf("auth.deploy_token_role: %q is not allowed; must be one of viewer, developer, operator, admin",
+				cfg.Auth.DeployTokenRole)
+		}
+	}
 	if cfg.Auth.OAuthDefaultRole == "" {
 		cfg.Auth.OAuthDefaultRole = "viewer"
 	}
@@ -425,6 +447,12 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE"); v != "" {
 		cfg.Auth.OAuthDefaultRole = v
+	}
+	if v := os.Getenv("SHINYHUB_DEPLOY_TOKEN"); v != "" {
+		cfg.Auth.DeployToken = v
+	}
+	if v := os.Getenv("SHINYHUB_DEPLOY_TOKEN_ROLE"); v != "" {
+		cfg.Auth.DeployTokenRole = v
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
