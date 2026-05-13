@@ -14,6 +14,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.3.3](https://github.com/rvben/shinyhub/compare/v0.3.2...v0.3.3) - 2026-05-13
+
+### Added
+
+- **deploy**: post-deploy hooks via shinyhub.toml ([e470f9f](https://github.com/rvben/shinyhub/commit/e470f9f68224e24a50301bcec9ee8367b74e4bda))
+- **cli**: env apply for declarative dotenv sync ([60421ea](https://github.com/rvben/shinyhub/commit/60421ea4f5fb0e31927a867a8e90ae607c1dc55d))
+- **proxy**: WS-readiness probe at /app/<slug>/.shinyhub/ready ([39eea66](https://github.com/rvben/shinyhub/commit/39eea6649a303eff3186e67e7999d446f83c28db))
+- **api,cli**: apps logs --tail and --no-follow for one-shot fetches ([29fc83c](https://github.com/rvben/shinyhub/commit/29fc83c03724a7229c634db9c35f000d7fb4b2e7))
+
+### Fixed
+
+- **jobs**: normalize app data dir to absolute path ([21031f4](https://github.com/rvben/shinyhub/commit/21031f4a32d12b97e8a964b8dbc6535470f6deec))
+
 ## [0.3.2](https://github.com/rvben/shinyhub/compare/v0.3.1...v0.3.2) - 2026-05-12
 
 ### Added

@@ -3,6 +3,7 @@ module github.com/rvben/shinyhub
 go 1.26.1
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -20,7 +21,6 @@ require (
 
 require (
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
-	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
