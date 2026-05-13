@@ -1283,6 +1283,81 @@ func (s *Store) UpdateAppMaxSessionsPerReplica(appID int64, n int) error {
 	return nil
 }
 
+// ApplyAppManifestSettingsParams carries the subset of [app] manifest fields
+// to apply. Callers set the Set* booleans to true for each field they want
+// written; absent fields are left untouched.
+type ApplyAppManifestSettingsParams struct {
+	AppID int64
+	Slug  string
+
+	SetHibernate     bool
+	HibernateMinutes *int // nil = NULL (reset to default); non-nil = explicit value
+
+	SetReplicas      bool
+	Replicas         int
+	PreviousReplicas int // for shrink: delete replicas where idx >= Replicas
+
+	SetMaxSessionsPerReplica bool
+	MaxSessionsPerReplica    int
+}
+
+// ApplyAppManifestSettings applies any subset of (hibernate, replicas,
+// max_sessions_per_replica) in a single SQLite transaction. Replica
+// shrink (DELETE FROM replicas WHERE app_id = ? AND idx >= ?) runs in
+// the same transaction so a mid-apply failure rolls back both the count
+// change and the row prune — avoids the latent bug where two separate
+// writes can drift.
+//
+// Caller contract: manager.Stop(slug) has already run; no live
+// process holds a replica index that may be deleted.
+func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if p.SetHibernate {
+		if _, err := tx.Exec(
+			`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+			p.HibernateMinutes, p.Slug,
+		); err != nil {
+			return fmt.Errorf("update hibernate: %w", err)
+		}
+	}
+
+	if p.SetReplicas {
+		if p.Replicas < p.PreviousReplicas {
+			if _, err := tx.Exec(
+				`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`,
+				p.AppID, p.Replicas,
+			); err != nil {
+				return fmt.Errorf("prune replicas: %w", err)
+			}
+		}
+		if _, err := tx.Exec(
+			`UPDATE apps SET replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.Replicas, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update replicas: %w", err)
+		}
+	}
+
+	if p.SetMaxSessionsPerReplica {
+		if _, err := tx.Exec(
+			`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.MaxSessionsPerReplica, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update max_sessions_per_replica: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
 // boolToInt converts a bool to the integer representation used in SQLite.
 func boolToInt(b bool) int {
 	if b {

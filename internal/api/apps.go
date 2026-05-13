@@ -576,6 +576,32 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
+	// Phase A: apply [app] manifest settings atomically before starting the new
+	// pool. manager.Stop has already run so no process holds a replica index
+	// that may be pruned. manifest is kept in scope so Phase B can apply
+	// [[schedule]] rows after CreateDeployment commits.
+	manifest, err := deploy.LoadManifest(bundleDir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "shinyhub.toml: "+err.Error())
+		return
+	}
+	if manifest != nil && !manifest.App.IsZero() {
+		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
+			var ve *validationError
+			if errors.As(err, &ve) {
+				writeError(w, http.StatusBadRequest, ve.Error())
+				return
+			}
+			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
+			writeError(w, http.StatusInternalServerError, "manifest apply failed")
+			return
+		}
+		// Refresh so deploy.Run sees the updated replicas / max_sessions.
+		if fresh, ferr := s.store.GetAppBySlug(slug); ferr == nil {
+			app = fresh
+		}
+	}
+
 	result, err := deploy.Run(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
@@ -649,6 +675,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy: record deployment row failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
 		writeError(w, http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit")
 		return
+	}
+
+	// Phase B: upsert [[schedule]] rows from the manifest. Runs after
+	// CreateDeployment is durable so a scheduler tick between Reload and this
+	// write cannot fire a job against the previous bundle.
+	if manifest != nil && len(manifest.Schedules) > 0 {
+		if err := s.applyManifestSchedules(r, app, manifest.Schedules); err != nil {
+			// Phase B is post-commit: bundle is live, deployment row is durable.
+			// Failure leaves schedules incomplete; the next deploy converges
+			// (idempotent upserts).
+			slog.Error("manifest [[schedule]] apply failed", "slug", slug, "err", err)
+			writeError(w, http.StatusInternalServerError, "schedule apply failed: "+err.Error())
+			return
+		}
 	}
 
 	// Prune old version directories beyond the retention limit.

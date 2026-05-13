@@ -26,6 +26,12 @@ type Store interface {
 	LastSuccessfulRun(id int64) (*db.ScheduleRun, error)
 }
 
+// ErrNotStarted is returned by Reload when the scheduler's cron has not
+// been started yet (Start has not been called or the scheduler is between
+// stop/start cycles). Callers driven by deploy hooks treat this as a
+// soft failure: the persisted row will be picked up on the next Start.
+var ErrNotStarted = errors.New("scheduler not started")
+
 // Scheduler wraps robfig/cron with a per-schedule entry registry that supports
 // hot reload (post-CRUD) and missed-run catch-up at startup.
 type Scheduler struct {
@@ -155,7 +161,7 @@ func (s *Scheduler) register(sched *db.Schedule) error {
 	c := s.cron
 	s.mu.Unlock()
 	if c == nil {
-		return errors.New("scheduler not started")
+		return ErrNotStarted
 	}
 	schedID := sched.ID
 	id, err := c.AddFunc(sched.CronExpr, func() {
