@@ -278,3 +278,104 @@ func TestSchedules_CreateDuplicate_ReturnsErrScheduleNameExists(t *testing.T) {
 
 func ptrString(s string) *string { return &s }
 func ptrBool(b bool) *bool       { return &b }
+
+func TestUpsertScheduleByName_InsertsWhenAbsent(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "alpha")
+
+	id, created, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appID, Name: "daily", CronExpr: "0 6 * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true,
+		TimeoutSeconds: 600, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Errorf("expected created=true on first insert")
+	}
+	if id == 0 {
+		t.Errorf("expected non-zero id")
+	}
+
+	sc, err := store.GetSchedule(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.CronExpr != "0 6 * * *" || sc.CommandJSON != `["echo","hi"]` ||
+		!sc.Enabled || sc.TimeoutSeconds != 600 ||
+		sc.OverlapPolicy != "skip" || sc.MissedPolicy != "skip" {
+		t.Errorf("inserted row mismatch: %+v", sc)
+	}
+}
+
+func TestUpsertScheduleByName_UpdatesWhenPresent(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "alpha")
+
+	first, createdFirst, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appID, Name: "daily", CronExpr: "0 6 * * *",
+		CommandJSON: `["echo","v1"]`, Enabled: true,
+		TimeoutSeconds: 600, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !createdFirst {
+		t.Fatal("first call should report created=true")
+	}
+
+	second, created, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appID, Name: "daily", CronExpr: "0 7 * * *",
+		CommandJSON: `["echo","v2"]`, Enabled: false,
+		TimeoutSeconds: 900, OverlapPolicy: "queue", MissedPolicy: "run_once",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Errorf("expected created=false on update")
+	}
+	if second != first {
+		t.Errorf("expected same id on upsert; got %d → %d", first, second)
+	}
+
+	sc, err := store.GetSchedule(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.CronExpr != "0 7 * * *" || sc.OverlapPolicy != "queue" ||
+		sc.MissedPolicy != "run_once" || sc.TimeoutSeconds != 900 ||
+		sc.CommandJSON != `["echo","v2"]` || sc.Enabled {
+		t.Errorf("update did not stick: %+v", sc)
+	}
+}
+
+func TestUpsertScheduleByName_ScopedPerApp(t *testing.T) {
+	store := newScheduleStore(t)
+	appA := newScheduleAppFixture(t, store, "a")
+	appB := newScheduleAppFixture(t, store, "b")
+
+	idA, _, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appA, Name: "daily", CronExpr: "0 6 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idB, createdB, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appB, Name: "daily", CronExpr: "0 7 * * *",
+		CommandJSON: `["y"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !createdB {
+		t.Errorf("same name on a different app should be a create, not collide")
+	}
+	if idA == idB {
+		t.Errorf("expected distinct ids across apps; both = %d", idA)
+	}
+}

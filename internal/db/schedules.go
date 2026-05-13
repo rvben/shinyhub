@@ -354,6 +354,77 @@ func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	return &r, nil
 }
 
+type UpsertScheduleByNameParams struct {
+	AppID          int64
+	Name           string
+	CronExpr       string
+	CommandJSON    string
+	Enabled        bool
+	TimeoutSeconds int
+	OverlapPolicy  string
+	MissedPolicy   string
+}
+
+// UpsertScheduleByName performs an atomic insert-or-update keyed on
+// (app_id, name) so a manifest-driven deploy and a concurrent API
+// CreateSchedule cannot race into a spurious ErrScheduleNameExists.
+// Returns the row id and whether a new row was created.
+//
+// SQLite serialises writers, so the SELECT inside the transaction
+// pins the existence check against any later INSERT/UPDATE in the
+// same tx.
+func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, false, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var existingID int64
+	err = tx.QueryRow(
+		`SELECT id FROM app_schedules WHERE app_id = ? AND name = ?`,
+		p.AppID, p.Name,
+	).Scan(&existingID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		res, err := tx.Exec(`
+INSERT INTO app_schedules
+  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			p.AppID, p.Name, p.CronExpr, p.CommandJSON,
+			boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+		)
+		if err != nil {
+			return 0, false, fmt.Errorf("insert schedule: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return 0, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, false, err
+		}
+		return id, true, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("lookup schedule: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+UPDATE app_schedules
+   SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
+       overlap_policy = ?, missed_policy = ?, updated_at = CURRENT_TIMESTAMP
+ WHERE id = ?`,
+		p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
+		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, existingID,
+	); err != nil {
+		return 0, false, fmt.Errorf("update schedule %d: %w", existingID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return existingID, false, nil
+}
+
 // --- app_shared_data ---
 
 type SharedDataMount struct {
