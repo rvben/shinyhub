@@ -784,6 +784,90 @@ func TestSessionHandoff_HonorsXForwardedHostFromTrustedProxy(t *testing.T) {
 	}
 }
 
+func TestDeployToken_AuthenticatesAsSyntheticUser(t *testing.T) {
+	srv, store := newTestServer(t)
+
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "shk_" + strings.Repeat("a", 64)
+	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
+		ID: syntheticUser.ID, Username: syntheticUser.Username, Role: syntheticUser.Role,
+	}))
+
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.Header.Set("Authorization", "Token "+raw)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// /api/auth/me returns sessionResponse{User: *sessionUserResponse, CanCreateApps bool}
+	var me struct {
+		User struct {
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me.User.Username != "__deploy__" || me.User.Role != "developer" {
+		t.Errorf("/me = %+v, want user.username=__deploy__ user.role=developer", me)
+	}
+}
+
+func TestDeployToken_RejectsWrongToken(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, _ := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	raw := "shk_" + strings.Repeat("a", 64)
+	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
+		ID: syntheticUser.ID, Username: syntheticUser.Username, Role: syntheticUser.Role,
+	}))
+
+	wrong := "shk_" + strings.Repeat("b", 64)
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.Header.Set("Authorization", "Token "+wrong)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestDeployToken_NotConfiguredRejectsAnyToken(t *testing.T) {
+	srv, _ := newTestServer(t) // no SetDeployToken call
+
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.Header.Set("Authorization", "Token shk_"+strings.Repeat("a", 64))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 when deploy token is unset", rec.Code)
+	}
+}
+
+func TestDeployToken_DoesNotAppearInTokensList(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, _ := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	raw := "shk_" + strings.Repeat("a", 64)
+	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
+		ID: syntheticUser.ID, Username: syntheticUser.Username, Role: syntheticUser.Role,
+	}))
+
+	req := httptest.NewRequest("GET", "/api/tokens", nil)
+	req.Header.Set("Authorization", "Token "+raw)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Errorf("tokens list = %q, want []", got)
+	}
+}
+
 // Mirror image: an attacker who can reach us directly (i.e. peer is NOT in
 // TrustedProxyNets) cannot fake X-Forwarded-Host to bypass the same-origin
 // check. The header is ignored, the comparison falls back to r.Host, and the

@@ -37,6 +37,11 @@ type Server struct {
 	scheduler     *scheduler.Scheduler
 	secretsKey    []byte
 	router        http.Handler
+
+	// deployToken, when non-nil, registers a pre-shared bearer credential that
+	// authenticates as the synthetic system user without a DB lookup. Set via
+	// SetDeployToken at startup when SHINYHUB_DEPLOY_TOKEN is configured.
+	deployToken *auth.DeployToken
 	deployRun     func(deploy.Params) (*deploy.PoolResult, error)
 
 	// deployLocksMu guards the deployLocks map. Each slug gets its own
@@ -122,8 +127,17 @@ func (s *Server) SetDeployRunForTest(fn func(deploy.Params) (*deploy.PoolResult,
 	s.deployRun = fn
 }
 
-// keyLookup satisfies auth.APIKeyLookup by delegating to the DB.
+// SetDeployToken installs a pre-shared deploy credential. Must be called before
+// the server begins handling requests; it is not safe to call concurrently with
+// ServeHTTP.
+func (s *Server) SetDeployToken(t *auth.DeployToken) { s.deployToken = t }
+
+// keyLookup satisfies auth.APIKeyLookup by first checking the pre-shared
+// deploy token (no DB hit) and falling back to the api_keys table.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
+	if s.deployToken != nil && s.deployToken.Matches(keyHash) {
+		return s.deployToken.User(), nil
+	}
 	u, err := s.store.GetUserByAPIKeyHash(keyHash)
 	if err != nil {
 		return nil, err
