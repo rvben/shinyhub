@@ -2,7 +2,7 @@
 // the requested tab. Tabs other than Overview are added in later tasks; for
 // now Overview is the only one with a renderer and other tabs show "Coming
 // soon" placeholders.
-const TAB_ROUTES = ['overview', 'logs', 'deployments', 'configuration', 'data', 'access'];
+const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
 
 function pluralize(n, one, many) {
@@ -19,6 +19,7 @@ export function mountAppDetail(ctx) {
   const panels = {
     overview:      document.getElementById('detail-overview-panel'),
     logs:          document.getElementById('detail-logs-panel'),
+    traces:        document.getElementById('detail-traces-panel'),
     deployments:   document.getElementById('detail-deployments-panel'),
     configuration: document.getElementById('detail-configuration-panel'),
     data:          document.getElementById('detail-data-panel'),
@@ -96,6 +97,9 @@ export function mountAppDetail(ctx) {
     }
     if (tab === 'logs') {
       tabCleanup = renderLogs(panels.logs, app);
+    }
+    if (tab === 'traces') {
+      tabCleanup = renderTraces(panels.traces, app, ctx);
     }
     if (tab === 'deployments') {
       await renderDeployments(panels.deployments, app, ctx);
@@ -355,4 +359,112 @@ function renderAccess(panel, app, ctx) {
   ctx.setSettingsSlug(app.slug);
   ctx.populateAccessPanel(app);
   ctx.refreshMemberList();
+}
+
+// renderTraces polls /api/apps/<slug>/traces every 5 s and renders recent
+// slow/error proxy spans. When tracing is disabled server-side the panel shows
+// a one-line empty state pointing operators at the config block; when enabled
+// but the ring buffer is empty (no slow/error requests yet) it explains how
+// admission to the buffer works so the absence of rows is not surprising.
+function renderTraces(panel, app, ctx) {
+  panel.innerHTML = `
+    <div class="traces-toolbar">
+      <button id="traces-refresh" type="button">Refresh</button>
+      <span id="traces-status" class="hibernate-status"></span>
+    </div>
+    <p id="traces-empty" class="env-empty" hidden></p>
+    <table id="traces-table" class="env-list" hidden>
+      <thead><tr>
+        <th>When</th><th>Method</th><th>Path</th><th>Status</th>
+        <th>Duration</th><th>Replica</th><th>Trace</th>
+      </tr></thead>
+      <tbody id="traces-tbody"></tbody>
+    </table>
+    <p id="traces-error" class="error" hidden></p>
+  `;
+  const tableEl   = document.getElementById('traces-table');
+  const tbodyEl   = document.getElementById('traces-tbody');
+  const emptyEl   = document.getElementById('traces-empty');
+  const errEl     = document.getElementById('traces-error');
+  const refreshEl = document.getElementById('traces-refresh');
+
+  async function load() {
+    errEl.hidden = true;
+    let r;
+    try {
+      r = await ctx.api(`/api/apps/${app.slug}/traces`);
+    } catch {
+      errEl.textContent = 'Network error — could not load traces.';
+      errEl.hidden = false;
+      return;
+    }
+    if (r.status === 401) { ctx.onUnauthorized(); return; }
+    if (!r.ok) {
+      errEl.textContent = `Failed to load traces (HTTP ${r.status}).`;
+      errEl.hidden = false;
+      return;
+    }
+    let body;
+    try { body = await r.json(); } catch {
+      errEl.textContent = 'Invalid response from server.';
+      errEl.hidden = false;
+      return;
+    }
+    const spans = Array.isArray(body.spans) ? body.spans : [];
+    if (!body.enabled) {
+      tableEl.hidden = true;
+      emptyEl.hidden = false;
+      emptyEl.innerHTML =
+        'Tracing is disabled. Set <code>tracing.enabled: true</code> and ' +
+        '<code>tracing.otlp_endpoint</code> in <code>shinyhub.yaml</code> to ' +
+        'forward Shiny’s OpenTelemetry spans to your backend.';
+      return;
+    }
+    if (spans.length === 0) {
+      tableEl.hidden = true;
+      emptyEl.hidden = false;
+      emptyEl.textContent =
+        'No slow or error requests captured yet. Traces are retained when ' +
+        'a request exceeds the slow_request_ms threshold or returns 5xx.';
+      return;
+    }
+    emptyEl.hidden = true;
+    tableEl.hidden = false;
+    tbodyEl.innerHTML = '';
+    const linkTpl = typeof body.trace_link_template === 'string' ? body.trace_link_template : '';
+    for (const s of spans) {
+      const tr = document.createElement('tr');
+      tr.className = (s.status >= 500 || s.error) ? 'replica-row replica-row-error' : 'replica-row';
+      const when = s.started_at ? new Date(s.started_at).toLocaleTimeString() : '—';
+      const traceCell = linkTpl
+        ? `<a href="${escapeAttr(linkTpl.replace('{trace_id}', s.trace_id))}" target="_blank" rel="noopener">${shortHex(s.trace_id)}</a>`
+        : `<code>${shortHex(s.trace_id)}</code>`;
+      tr.innerHTML = `
+        <td>${when}</td>
+        <td>${escapeText(s.method || '')}</td>
+        <td><code>${escapeText(s.path || '')}</code></td>
+        <td>${s.status || '—'}</td>
+        <td>${s.duration_ms} ms</td>
+        <td>${s.replica >= 0 ? '#' + s.replica : '—'}</td>
+        <td>${traceCell}</td>
+      `;
+      tbodyEl.appendChild(tr);
+    }
+  }
+
+  refreshEl.addEventListener('click', load);
+  load();
+  const interval = setInterval(load, 5000);
+  return () => { clearInterval(interval); };
+}
+
+function escapeText(s) {
+  return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+function escapeAttr(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function shortHex(s) {
+  if (!s || s.length <= 12) return s || '';
+  return s.slice(0, 8) + '…';
 }
