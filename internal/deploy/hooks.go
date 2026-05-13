@@ -128,12 +128,12 @@ func LoadManifest(bundleDir string) (*Manifest, error) {
 		}
 	}
 	if err := normalizeAndValidateApp(&m.App); err != nil {
-		return nil, fmt.Errorf("%s [app]: %s", ManifestFilename, err)
+		return nil, fmt.Errorf("%s [app]: %w", ManifestFilename, err)
 	}
 	seen := make(map[string]bool, len(m.Schedules))
 	for i := range m.Schedules {
 		if err := resolveAndValidateSchedule(&m.Schedules[i]); err != nil {
-			return nil, fmt.Errorf("%s [[schedule]] #%d: %s", ManifestFilename, i+1, err)
+			return nil, fmt.Errorf("%s [[schedule]] #%d: %w", ManifestFilename, i+1, err)
 		}
 		name := m.Schedules[i].Name
 		if seen[name] {

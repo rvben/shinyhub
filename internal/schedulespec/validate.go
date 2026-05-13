@@ -13,15 +13,15 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-// NameRE is the canonical schedule-name regex: alphanumerics, dashes,
+// nameRE is the canonical schedule-name regex: alphanumerics, dashes,
 // underscores; 1..64 chars.
-var NameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var nameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Validate checks every field of a schedule. Mirrors the rules enforced by
 // the HTTP API (POST /api/apps/{slug}/schedules) so a manifest-driven deploy
 // and a direct API call cannot produce different on-disk states.
 func Validate(name, cronExpr string, cmd []string, timeoutSec int, overlap, missed string) error {
-	if !NameRE.MatchString(name) {
+	if !nameRE.MatchString(name) {
 		return errors.New("name: must match [A-Za-z0-9_-]{1,64}")
 	}
 	if _, err := cron.ParseStandard(cronExpr); err != nil {

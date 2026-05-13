@@ -343,3 +343,54 @@ replicas = 0
 		t.Errorf("expected replicas validation error, got %v", err)
 	}
 }
+
+func TestLoadManifest_ParsesSchedules_CmdJSON(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "daily-fetch"
+cron = "0 6 * * *"
+cmd_json = '["uv","run","python","fetch.py"]'
+timeout_seconds = 600
+overlap = "skip"
+missed = "skip"
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Schedules) != 1 {
+		t.Fatalf("schedules = %d, want 1", len(m.Schedules))
+	}
+	want := []string{"uv", "run", "python", "fetch.py"}
+	if !reflect.DeepEqual(m.Schedules[0].Command, want) {
+		t.Errorf("Command = %v, want %v", m.Schedules[0].Command, want)
+	}
+}
+
+func TestLoadManifest_DefaultsWrittenBack(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "hourly"
+cron = "0 * * * *"
+cmd = "echo hi"
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Schedules) != 1 {
+		t.Fatalf("schedules = %d, want 1", len(m.Schedules))
+	}
+	s := m.Schedules[0]
+	if s.TimeoutSeconds == nil || *s.TimeoutSeconds != 3600 {
+		t.Errorf("TimeoutSeconds = %v, want 3600", s.TimeoutSeconds)
+	}
+	if s.Overlap != "skip" {
+		t.Errorf("Overlap = %q, want %q", s.Overlap, "skip")
+	}
+	if s.Missed != "skip" {
+		t.Errorf("Missed = %q, want %q", s.Missed, "skip")
+	}
+}
