@@ -81,14 +81,36 @@ oauth:
     callback_url:  ""                 # SHINYHUB_OIDC_CALLBACK_URL
     display_name:  "Sign in with SSO" # SHINYHUB_OIDC_DISPLAY_NAME
 
+# Optional: OpenTelemetry trace propagation to app processes.
+# When enabled, ShinyHub injects OTEL_* env vars into each app process so Shiny's
+# built-in OpenTelemetry support (https://shiny.posit.co/py/docs/opentelemetry.html)
+# exports traces to your chosen backend. ShinyHub also propagates W3C traceparent
+# through the reverse proxy and retains a ring buffer of slow/error proxy spans
+# visible in the UI's Traces tab. Disabled by default; everything is a no-op when
+# enabled=false.
+tracing:
+  enabled: false                       # SHINYHUB_TRACING_ENABLED
+  otlp_endpoint: ""                    # e.g. http://tempo:4318 or https://api.honeycomb.io  # SHINYHUB_TRACING_OTLP_ENDPOINT
+  otlp_protocol: http/protobuf         # "http/protobuf" (default) or "grpc"  # SHINYHUB_TRACING_OTLP_PROTOCOL
+  otlp_headers: ""                     # comma-separated key=value; e.g. "x-honeycomb-team=KEY"  # SHINYHUB_TRACING_OTLP_HEADERS
+  sample_ratio: 0.1                    # 0.0–1.0; applies to apps AND the proxy's local ring buffer  # SHINYHUB_TRACING_SAMPLE_RATIO
+  slow_request_ms: 1000                # proxy spans slower than this are always retained in the ring buffer  # SHINYHUB_TRACING_SLOW_REQUEST_MS
+  ring_buffer_size: 200                # max retained spans per app; FIFO eviction  # SHINYHUB_TRACING_RING_BUFFER_SIZE
+  # Optional deep-link template for the Traces tab. {trace_id} is substituted.
+  trace_link_template: ""              # e.g. https://grafana.example.com/explore?traceId={trace_id}  # SHINYHUB_TRACING_TRACE_LINK_TEMPLATE
+
 # --- Env-only settings (no YAML key) ---
 #
 # SHINYHUB_DEPLOY_TOKEN
 #   Pre-shared bearer token for CI deploys. When set, authenticates as the
 #   synthetic system user "__deploy__" without requiring an admin to bootstrap
 #   a token via POST /api/tokens. Not persisted; rotation = change env, restart.
-#   Format: "shk_<hex>" with at least 32 hex chars after the prefix.
-#   Generate: shk_$(openssl rand -hex 32)
+#   Format: opaque operator-chosen secret, at least 32 characters. Hex, base64,
+#   or UUID values from your secrets manager all work as-is.
+#   Generate: openssl rand -hex 32  (or any equivalent ≥32-char random value)
+#   API-minted tokens (POST /api/tokens) carry a "shk_" prefix for secret-
+#   scanner pattern matching; that prefix is not required for this env var,
+#   but you may add it if you want leaked env values to match the same scans.
 #
 # SHINYHUB_DEPLOY_TOKEN_ROLE
 #   Role assigned to the synthetic deploy user. Default: developer.

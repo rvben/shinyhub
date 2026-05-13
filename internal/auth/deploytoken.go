@@ -2,9 +2,7 @@ package auth
 
 import (
 	"crypto/subtle"
-	"encoding/hex"
 	"fmt"
-	"strings"
 )
 
 // DeployToken is a pre-shared, env-sourced bearer credential that authenticates
@@ -42,28 +40,24 @@ func (d *DeployToken) User() *ContextUser {
 	return &u
 }
 
-const (
-	deployTokenPrefix    = "shk_"
-	deployTokenMinHexLen = 32 // 16 bytes minimum entropy
-)
+// deployTokenMinLen is the minimum length for an env-supplied deploy token.
+// 32 chars is enough entropy for a random hex/base64/UUID value from any
+// reasonable secrets generator (openssl rand -hex 16, uuidgen, etc.).
+const deployTokenMinLen = 32
 
-// ValidateDeployTokenFormat enforces a minimum entropy and the shk_ prefix on
-// SHINYHUB_DEPLOY_TOKEN at startup. Operators who supply a weak value get a
-// clear refusal-to-boot instead of a silently insecure deployment.
+// ValidateDeployTokenFormat enforces a minimum-length floor on the
+// SHINYHUB_DEPLOY_TOKEN env var so a typo or placeholder value can't silently
+// become a weak credential. The token is opaque: any operator-chosen secret
+// (hex, base64, UUID, …) is accepted as long as it meets the length floor.
+// API-minted tokens (POST /api/tokens) are generated separately and continue
+// to carry the "shk_" prefix for secret-scanner pattern matching.
 func ValidateDeployTokenFormat(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("deploy token is empty")
 	}
-	if !strings.HasPrefix(raw, deployTokenPrefix) {
-		return fmt.Errorf("deploy token must start with %q", deployTokenPrefix)
-	}
-	body := strings.TrimPrefix(raw, deployTokenPrefix)
-	if len(body) < deployTokenMinHexLen {
-		return fmt.Errorf("deploy token body must be at least %d hex chars (got %d); generate one with: openssl rand -hex 32",
-			deployTokenMinHexLen, len(body))
-	}
-	if _, err := hex.DecodeString(body); err != nil {
-		return fmt.Errorf("deploy token body must be hex-encoded: %w", err)
+	if len(raw) < deployTokenMinLen {
+		return fmt.Errorf("deploy token must be at least %d characters (got %d); generate one with: openssl rand -hex 32",
+			deployTokenMinLen, len(raw))
 	}
 	return nil
 }

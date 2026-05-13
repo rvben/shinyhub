@@ -8,19 +8,25 @@ import (
 )
 
 func TestValidateDeployTokenFormat(t *testing.T) {
-	good := "shk_" + strings.Repeat("a", 64)
-	if err := auth.ValidateDeployTokenFormat(good); err != nil {
-		t.Errorf("good token rejected: %v", err)
+	accepted := map[string]string{
+		"shk-prefixed hex":  "shk_" + strings.Repeat("a", 64),
+		"plain hex":         strings.Repeat("a", 64),
+		"opaque secret":     strings.Repeat("x", 40),
+		"exact min length":  strings.Repeat("a", 32),
+		"non-hex base64ish": "MyOperatorSecret/1234567890abcdef=",
+	}
+	for name, tok := range accepted {
+		if err := auth.ValidateDeployTokenFormat(tok); err != nil {
+			t.Errorf("%s: expected accept, got error: %v", name, err)
+		}
 	}
 
-	cases := map[string]string{
-		"empty":        "",
-		"no prefix":    strings.Repeat("a", 68),
-		"too short":    "shk_" + strings.Repeat("a", 16),
-		"non-hex body": "shk_" + strings.Repeat("z", 64),
-		"wrong prefix": "tok_" + strings.Repeat("a", 64),
+	rejected := map[string]string{
+		"empty":     "",
+		"too short": strings.Repeat("a", 31),
+		"shk-prefixed but too short": "shk_" + strings.Repeat("a", 16),
 	}
-	for name, tok := range cases {
+	for name, tok := range rejected {
 		if err := auth.ValidateDeployTokenFormat(tok); err == nil {
 			t.Errorf("%s: expected error, got nil", name)
 		}
