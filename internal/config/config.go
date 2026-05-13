@@ -86,8 +86,49 @@ type Config struct {
 	Lifecycle        LifecycleConfig
 	Runtime          RuntimeConfig
 	Defaults         DefaultsConfig
+	Tracing          TracingConfig
 	OAuth            OAuthConfig  `yaml:"-"`
 	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
+}
+
+// TracingConfig controls OpenTelemetry trace propagation to app processes and
+// the in-memory ring buffer of recent proxy spans surfaced in the UI.
+//
+// When Enabled is false the entire feature is a no-op: no env vars are injected
+// into app processes, the proxy does not propagate traceparent, and the ring
+// buffer is empty. When enabled, ShinyHub injects OTEL_* defaults into each app
+// process (overridable by user env vars) and retains slow/error proxy spans
+// per-app for surfacing in the UI.
+type TracingConfig struct {
+	Enabled bool
+	// OTLPEndpoint is the OTLP receiver URL passed to apps as
+	// OTEL_EXPORTER_OTLP_ENDPOINT. Apps export their spans here directly;
+	// ShinyHub does not proxy or store them.
+	OTLPEndpoint string
+	// OTLPProtocol is the wire protocol hint, passed as
+	// OTEL_EXPORTER_OTLP_PROTOCOL. Default "http/protobuf" matches the Shiny
+	// Python docs. Allowed: "http/protobuf", "grpc".
+	OTLPProtocol string
+	// OTLPHeaders is an optional comma-separated list of "key=value" pairs
+	// passed as OTEL_EXPORTER_OTLP_HEADERS — used by backends like Honeycomb
+	// or Grafana Cloud for auth.
+	OTLPHeaders string
+	// SampleRatio is the head-based sampling probability (0.0–1.0) applied to
+	// the proxy's own spans AND propagated to apps via OTEL_TRACES_SAMPLER_ARG.
+	// 0 disables sampling (no spans recorded); 1 samples everything.
+	SampleRatio float64
+	// SlowRequestMS is the latency threshold (in milliseconds) at which a proxy
+	// span is retained in the ring buffer regardless of sampling decision. Error
+	// spans are always retained. 0 means "retain only error spans".
+	SlowRequestMS int
+	// RingBufferSize is the maximum number of recent (slow or error) spans
+	// retained in-memory per app. Older entries are evicted FIFO. 0 disables
+	// the ring buffer entirely.
+	RingBufferSize int
+	// TraceLinkTemplate is an optional URL template used to deep-link a trace_id
+	// to the operator's tracing backend. The substring "{trace_id}" is
+	// replaced. Example: "https://grafana.example.com/explore?traceId={trace_id}".
+	TraceLinkTemplate string
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -192,6 +233,18 @@ type rawConfig struct {
 	OAuth     rawOAuthConfig     `yaml:"oauth"`
 	Runtime   rawRuntimeConfig   `yaml:"runtime"`
 	Defaults  rawDefaultsConfig  `yaml:"defaults"`
+	Tracing   rawTracingConfig   `yaml:"tracing"`
+}
+
+type rawTracingConfig struct {
+	Enabled           bool    `yaml:"enabled"`
+	OTLPEndpoint      string  `yaml:"otlp_endpoint"`
+	OTLPProtocol      string  `yaml:"otlp_protocol"`
+	OTLPHeaders       string  `yaml:"otlp_headers"`
+	SampleRatio       float64 `yaml:"sample_ratio"`
+	SlowRequestMS     int     `yaml:"slow_request_ms"`
+	RingBufferSize    int     `yaml:"ring_buffer_size"`
+	TraceLinkTemplate string  `yaml:"trace_link_template"`
 }
 
 type rawLifecycleConfig struct {
@@ -255,6 +308,16 @@ func Load(path string) (*Config, error) {
 		Lifecycle: lc,
 		Runtime:   rc,
 		Defaults:  DefaultsConfig{AppVisibility: raw.Defaults.AppVisibility},
+		Tracing: TracingConfig{
+			Enabled:           raw.Tracing.Enabled,
+			OTLPEndpoint:      raw.Tracing.OTLPEndpoint,
+			OTLPProtocol:      raw.Tracing.OTLPProtocol,
+			OTLPHeaders:       raw.Tracing.OTLPHeaders,
+			SampleRatio:       raw.Tracing.SampleRatio,
+			SlowRequestMS:     raw.Tracing.SlowRequestMS,
+			RingBufferSize:    raw.Tracing.RingBufferSize,
+			TraceLinkTemplate: raw.Tracing.TraceLinkTemplate,
+		},
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
@@ -344,6 +407,9 @@ func Load(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("runtime.docker.network_mode: %q is not supported; must be one of bridge, host", cfg.Runtime.Docker.NetworkMode)
 	}
+	if err := normalizeTracing(&cfg.Tracing); err != nil {
+		return nil, err
+	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
 	}
@@ -354,6 +420,43 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("auth.secret must be at least 32 characters (got %d); generate one with: openssl rand -hex 32", len(cfg.Auth.Secret))
 	}
 	return cfg, nil
+}
+
+// normalizeTracing applies defaults and validates the tracing block. When
+// Enabled is false the block is left mostly untouched so disabled config still
+// round-trips through Load (callers should not read fields without checking
+// Enabled).
+func normalizeTracing(t *TracingConfig) error {
+	if !t.Enabled {
+		return nil
+	}
+	if t.OTLPProtocol == "" {
+		t.OTLPProtocol = "http/protobuf"
+	}
+	switch t.OTLPProtocol {
+	case "http/protobuf", "grpc":
+	default:
+		return fmt.Errorf("tracing.otlp_protocol: %q is not supported; must be one of http/protobuf, grpc", t.OTLPProtocol)
+	}
+	if t.SampleRatio == 0 {
+		t.SampleRatio = 0.1
+	}
+	if t.SampleRatio < 0 || t.SampleRatio > 1 {
+		return fmt.Errorf("tracing.sample_ratio: %g is out of range; must be between 0 and 1", t.SampleRatio)
+	}
+	if t.SlowRequestMS < 0 {
+		return fmt.Errorf("tracing.slow_request_ms: %d is negative", t.SlowRequestMS)
+	}
+	if t.SlowRequestMS == 0 {
+		t.SlowRequestMS = 1000
+	}
+	if t.RingBufferSize < 0 {
+		return fmt.Errorf("tracing.ring_buffer_size: %d is negative", t.RingBufferSize)
+	}
+	if t.RingBufferSize == 0 {
+		t.RingBufferSize = 200
+	}
+	return nil
 }
 
 func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
@@ -559,5 +662,35 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_DEFAULTS_APP_VISIBILITY"); v != "" {
 		cfg.Defaults.AppVisibility = v
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_ENABLED"); v != "" {
+		cfg.Tracing.Enabled = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_OTLP_ENDPOINT"); v != "" {
+		cfg.Tracing.OTLPEndpoint = v
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_OTLP_PROTOCOL"); v != "" {
+		cfg.Tracing.OTLPProtocol = v
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_OTLP_HEADERS"); v != "" {
+		cfg.Tracing.OTLPHeaders = v
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_SAMPLE_RATIO"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.Tracing.SampleRatio = f
+		}
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_SLOW_REQUEST_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Tracing.SlowRequestMS = n
+		}
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_RING_BUFFER_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Tracing.RingBufferSize = n
+		}
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_TRACE_LINK_TEMPLATE"); v != "" {
+		cfg.Tracing.TraceLinkTemplate = v
 	}
 }

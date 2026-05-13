@@ -765,3 +765,140 @@ storage:
 		t.Errorf("MaxBundleMB with negative input = %d, want 128 (default)", got)
 	}
 }
+
+func TestTracing_DisabledByDefault(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tracing.Enabled {
+		t.Errorf("Tracing.Enabled default = true, want false")
+	}
+}
+
+func TestTracing_DefaultsAppliedWhenEnabled(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+tracing:
+  enabled: true
+  otlp_endpoint: http://collector:4318
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tracing.OTLPProtocol != "http/protobuf" {
+		t.Errorf("OTLPProtocol default = %q, want http/protobuf", cfg.Tracing.OTLPProtocol)
+	}
+	if cfg.Tracing.SampleRatio != 0.1 {
+		t.Errorf("SampleRatio default = %g, want 0.1", cfg.Tracing.SampleRatio)
+	}
+	if cfg.Tracing.SlowRequestMS != 1000 {
+		t.Errorf("SlowRequestMS default = %d, want 1000", cfg.Tracing.SlowRequestMS)
+	}
+	if cfg.Tracing.RingBufferSize != 200 {
+		t.Errorf("RingBufferSize default = %d, want 200", cfg.Tracing.RingBufferSize)
+	}
+}
+
+func TestTracing_RejectsUnknownProtocol(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+tracing:
+  enabled: true
+  otlp_endpoint: http://collector:4318
+  otlp_protocol: thrift
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown otlp_protocol")
+	}
+	if !strings.Contains(err.Error(), "otlp_protocol") {
+		t.Errorf("error should mention otlp_protocol: %v", err)
+	}
+}
+
+func TestTracing_RejectsSampleRatioOutOfRange(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+tracing:
+  enabled: true
+  otlp_endpoint: http://collector:4318
+  sample_ratio: 1.5
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for sample_ratio > 1")
+	}
+	if !strings.Contains(err.Error(), "sample_ratio") {
+		t.Errorf("error should mention sample_ratio: %v", err)
+	}
+}
+
+func TestTracing_EnvOverrides(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_TRACING_ENABLED", "true")
+	t.Setenv("SHINYHUB_TRACING_OTLP_ENDPOINT", "http://env-collector:4318")
+	t.Setenv("SHINYHUB_TRACING_OTLP_PROTOCOL", "grpc")
+	t.Setenv("SHINYHUB_TRACING_OTLP_HEADERS", "x-token=secret")
+	t.Setenv("SHINYHUB_TRACING_SAMPLE_RATIO", "0.5")
+	t.Setenv("SHINYHUB_TRACING_SLOW_REQUEST_MS", "250")
+	t.Setenv("SHINYHUB_TRACING_RING_BUFFER_SIZE", "50")
+	t.Setenv("SHINYHUB_TRACING_TRACE_LINK_TEMPLATE", "https://tempo.example/{trace_id}")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Tracing.Enabled {
+		t.Errorf("env-driven Enabled not applied")
+	}
+	if cfg.Tracing.OTLPEndpoint != "http://env-collector:4318" {
+		t.Errorf("OTLPEndpoint = %q", cfg.Tracing.OTLPEndpoint)
+	}
+	if cfg.Tracing.OTLPProtocol != "grpc" {
+		t.Errorf("OTLPProtocol = %q", cfg.Tracing.OTLPProtocol)
+	}
+	if cfg.Tracing.OTLPHeaders != "x-token=secret" {
+		t.Errorf("OTLPHeaders = %q", cfg.Tracing.OTLPHeaders)
+	}
+	if cfg.Tracing.SampleRatio != 0.5 {
+		t.Errorf("SampleRatio = %g", cfg.Tracing.SampleRatio)
+	}
+	if cfg.Tracing.SlowRequestMS != 250 {
+		t.Errorf("SlowRequestMS = %d", cfg.Tracing.SlowRequestMS)
+	}
+	if cfg.Tracing.RingBufferSize != 50 {
+		t.Errorf("RingBufferSize = %d", cfg.Tracing.RingBufferSize)
+	}
+	if cfg.Tracing.TraceLinkTemplate != "https://tempo.example/{trace_id}" {
+		t.Errorf("TraceLinkTemplate = %q", cfg.Tracing.TraceLinkTemplate)
+	}
+}
+
+func TestTracing_EnvOverridesYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+tracing:
+  enabled: true
+  otlp_endpoint: http://yaml-collector:4318
+  sample_ratio: 0.2
+`)
+	t.Setenv("SHINYHUB_TRACING_SAMPLE_RATIO", "0.8")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tracing.SampleRatio != 0.8 {
+		t.Errorf("env should override YAML: got %g, want 0.8", cfg.Tracing.SampleRatio)
+	}
+	// Untouched YAML fields stay set.
+	if cfg.Tracing.OTLPEndpoint != "http://yaml-collector:4318" {
+		t.Errorf("YAML endpoint lost: got %q", cfg.Tracing.OTLPEndpoint)
+	}
+}
