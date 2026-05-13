@@ -602,7 +602,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := deploy.Run(deploy.Params{
+	result, err := s.deployRun(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
 		Replicas:              app.Replicas,
