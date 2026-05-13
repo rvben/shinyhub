@@ -15,6 +15,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.0](https://github.com/rvben/shinyhub/compare/v0.3.3...v0.4.0) - 2026-05-13
+
+### Added
+
+- **cmd**: wire SHINYHUB_DEPLOY_TOKEN into the API server at startup ([c11e04a](https://github.com/rvben/shinyhub/commit/c11e04a97d5ff2a9bd1946c0c7385e79e51ee7f2))
+- **api**: refuse role/password/delete on system users (e.g. __deploy__) ([a2783e8](https://github.com/rvben/shinyhub/commit/a2783e84aa688ddb446342fb427aeeb789886bd3))
+- **api**: refuse persistent token creation and DB-key auth for system users ([137dab8](https://github.com/rvben/shinyhub/commit/137dab8b9a90118bcff1a5a6c16dc6c3ca37c960))
+- **api**: pre-shared deploy token shadows api_keys in keyLookup ([74d52df](https://github.com/rvben/shinyhub/commit/74d52df744f899ce02af4e067fd26c0b4f2aa545))
+- **db**: UpsertSystemUser and IsSystemUser for synthetic accounts ([11b5945](https://github.com/rvben/shinyhub/commit/11b59455c9d7c73347eabc50af89975d5f0885cc))
+- **auth**: DeployToken type for env-sourced pre-shared credentials ([4f78412](https://github.com/rvben/shinyhub/commit/4f78412ad80df5c5ead9715900bdf5f5be656681))
+- **config**: SHINYHUB_DEPLOY_TOKEN and SHINYHUB_DEPLOY_TOKEN_ROLE env vars ([60db7a0](https://github.com/rvben/shinyhub/commit/60db7a06665b42670e3d155dc6d11b71cca38e72))
+
+### Fixed
+
+- **api**: refresh session cookie on /me only when auth came from the cookie ([e0bea4f](https://github.com/rvben/shinyhub/commit/e0bea4f953939195f7d687ee66c9737ae0d69ef7))
+
 ## [0.3.3](https://github.com/rvben/shinyhub/compare/v0.3.2...v0.3.3) - 2026-05-13
 
 ### Added
