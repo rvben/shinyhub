@@ -34,6 +34,27 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) (*auth.ContextUser, bo
 	return u, true
 }
 
+// refuseSystemUser writes a response and returns true when the caller should
+// abort: either the target is a server-managed system user (403) or the DB
+// lookup failed unexpectedly (500). ErrNotFound is allowed through so the
+// downstream handler emits its own 404. Fails closed — never silently lets a
+// mutation proceed when the target identity cannot be confirmed.
+func (s *Server) refuseSystemUser(w http.ResponseWriter, id int64) bool {
+	u, err := s.store.GetUserByID(id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return true
+	}
+	if db.IsSystemUser(u.Username) {
+		writeError(w, http.StatusForbidden, "cannot modify system user")
+		return true
+	}
+	return false
+}
+
 // userResponse is the safe public view of a user (no password hash).
 type userResponse struct {
 	ID        int64  `json:"id"`
@@ -144,6 +165,9 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
+	if s.refuseSystemUser(w, id) {
+		return
+	}
 
 	var req patchUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -199,6 +223,9 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
+	if s.refuseSystemUser(w, id) {
+		return
+	}
 
 	var req patchUserPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -244,6 +271,9 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	if s.refuseSystemUser(w, id) {
 		return
 	}
 

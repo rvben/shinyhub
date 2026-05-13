@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -273,5 +274,60 @@ func TestGetUserByUsername_PathParam(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp)
 	if resp["username"] != "alice" {
 		t.Errorf("expected username=alice, got %v", resp["username"])
+	}
+}
+
+func TestPatchUser_RejectsSystemUser(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken, _ := seedUserAndJWT(t, store, "admin1", "admin")
+
+	body := strings.NewReader(`{"role":"admin"}`)
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/users/%d", syntheticUser.ID), body)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestDeleteUser_RejectsSystemUser(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken, _ := seedUserAndJWT(t, store, "admin1", "admin")
+
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/users/%d", syntheticUser.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestPatchUserPassword_RejectsSystemUser(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken, _ := seedUserAndJWT(t, store, "admin1", "admin")
+
+	body := strings.NewReader(`{"password":"longenoughpw"}`)
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/users/%d/password", syntheticUser.ID), body)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
 	}
 }
