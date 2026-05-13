@@ -6,18 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/robfig/cron/v3"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
-
-var scheduleNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type scheduleDTO struct {
 	ID             int64    `json:"id"`
@@ -90,7 +86,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if err := validateSchedule(req.Name, req.CronExpr, req.Command, req.TimeoutSeconds, req.OverlapPolicy, req.MissedPolicy); err != nil {
+	if err := schedulespec.Validate(req.Name, req.CronExpr, req.Command, req.TimeoutSeconds, req.OverlapPolicy, req.MissedPolicy); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -179,7 +175,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	if req.MissedPolicy != nil {
 		missed = *req.MissedPolicy
 	}
-	if err := validateSchedule(name, cronExpr, cmd, timeout, overlap, missed); err != nil {
+	if err := schedulespec.Validate(name, cronExpr, cmd, timeout, overlap, missed); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -413,33 +409,6 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	streamLogFile(w, r, run.LogPath, run.Status == "running")
-}
-
-// validateSchedule applies all field-level validation.
-func validateSchedule(name, cronExpr string, cmd []string, timeout int, overlap, missed string) error {
-	if !scheduleNameRe.MatchString(name) {
-		return errors.New("name: must match [A-Za-z0-9_-]{1,64}")
-	}
-	if _, err := cron.ParseStandard(cronExpr); err != nil {
-		return fmt.Errorf("cron_expr: %w", err)
-	}
-	if len(cmd) == 0 || strings.TrimSpace(cmd[0]) == "" {
-		return errors.New("command: must not be empty")
-	}
-	if timeout < 1 || timeout > 86400 {
-		return errors.New("timeout_seconds: must be 1..86400")
-	}
-	switch overlap {
-	case "skip", "queue", "concurrent":
-	default:
-		return errors.New("overlap_policy: must be skip|queue|concurrent")
-	}
-	switch missed {
-	case "skip", "run_once":
-	default:
-		return errors.New("missed_policy: must be skip|run_once")
-	}
-	return nil
 }
 
 // paginationParams reads limit + offset query params, applying defaults + caps.

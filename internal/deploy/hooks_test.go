@@ -182,3 +182,164 @@ func TestRunHookExec_Roundtrip(t *testing.T) {
 		t.Errorf("stdout mismatch: %q", buf.String())
 	}
 }
+
+func TestLoadManifest_ParsesAppSettings(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+hibernate_timeout_minutes = 0
+replicas = 2
+max_sessions_per_replica = 10
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.App.HibernateTimeoutMinutes == nil || *m.App.HibernateTimeoutMinutes != 0 {
+		t.Errorf("hibernate = %v, want 0", m.App.HibernateTimeoutMinutes)
+	}
+	if m.App.Replicas == nil || *m.App.Replicas != 2 {
+		t.Errorf("replicas = %v, want 2", m.App.Replicas)
+	}
+	if m.App.MaxSessionsPerReplica == nil || *m.App.MaxSessionsPerReplica != 10 {
+		t.Errorf("max_sessions_per_replica = %v, want 10", m.App.MaxSessionsPerReplica)
+	}
+}
+
+func TestLoadManifest_HibernateMinusOneResetsToDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+hibernate_timeout_minutes = -1
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.App.HibernateResetToDefault {
+		t.Errorf("expected HibernateResetToDefault=true when -1 specified")
+	}
+	if m.App.HibernateTimeoutMinutes != nil {
+		t.Errorf("HibernateTimeoutMinutes should be nil when reset sentinel is used")
+	}
+}
+
+func TestLoadManifest_RejectsUnknownAppField(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+slug = "new-name"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Errorf("expected unknown-field error, got %v", err)
+	}
+}
+
+func TestLoadManifest_ParsesSchedules(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "daily-fetch"
+cron = "0 6 * * *"
+cmd = "uv run python fetch.py"
+timeout_seconds = 600
+overlap = "skip"
+missed = "skip"
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Schedules) != 1 {
+		t.Fatalf("schedules = %d, want 1", len(m.Schedules))
+	}
+	s := m.Schedules[0]
+	if s.Name != "daily-fetch" || s.Cron != "0 6 * * *" || s.Cmd != "uv run python fetch.py" {
+		t.Errorf("schedule = %+v", s)
+	}
+	if len(s.Command) != 4 || s.Command[0] != "uv" {
+		t.Errorf("Command = %v, want [uv run python fetch.py]", s.Command)
+	}
+}
+
+func TestLoadManifest_RejectsBadCron(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "x"
+cron = "not-a-cron"
+cmd = "echo hi"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "cron_expr") {
+		t.Errorf("expected cron parse error, got %v", err)
+	}
+}
+
+func TestLoadManifest_RejectsBadName(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "spaces are bad"
+cron = "0 * * * *"
+cmd = "echo hi"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "name") {
+		t.Errorf("expected name validation error, got %v", err)
+	}
+}
+
+func TestLoadManifest_RejectsEmptyCmdJSON(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "x"
+cron = "0 * * * *"
+cmd_json = "[]"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "command") {
+		t.Errorf("expected empty-command error, got %v", err)
+	}
+}
+
+func TestLoadManifest_RejectsCmdAndCmdJSONBoth(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "x"
+cron = "0 * * * *"
+cmd = "echo a"
+cmd_json = '["echo","b"]'
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("expected cmd/cmd_json mutex error, got %v", err)
+	}
+}
+
+func TestLoadManifest_RejectsDuplicateScheduleNames(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "x"
+cron = "0 6 * * *"
+cmd = "echo a"
+
+[[schedule]]
+name = "x"
+cron = "0 7 * * *"
+cmd = "echo b"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "duplicate name") {
+		t.Errorf("expected duplicate-name error, got %v", err)
+	}
+}
+
+func TestLoadManifest_AppValidation_RejectsTooLowReplicas(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+replicas = 0
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "replicas") {
+		t.Errorf("expected replicas validation error, got %v", err)
+	}
+}
