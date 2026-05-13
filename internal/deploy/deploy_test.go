@@ -328,6 +328,137 @@ func TestRunReplica_SingleBoot(t *testing.T) {
 	}
 }
 
+// TestRun_RunsPostDeployHooksBeforeReplicaBoot verifies the hook fires
+// between dependency installation and replica start: the order matters
+// because hooks typically need the venv that `uv sync` just populated, and
+// they must complete before the app process binds the port.
+func TestRun_RunsPostDeployHooksBeforeReplicaBoot(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(`
+[[hook]]
+on = "post-deploy"
+command = ["python", "-m", "scripts.migrate"]
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		mu       sync.Mutex
+		events   []string
+		hookSeen bool
+	)
+	restore := deploy.SetHookRunnerForTest(func(ctx context.Context, dir string, argv []string, env []string, w io.Writer) error {
+		mu.Lock()
+		defer mu.Unlock()
+		hookSeen = true
+		events = append(events, "hook:"+argv[len(argv)-1])
+		return nil
+	})
+	defer restore()
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("hook-app")
+	prx := proxy.New()
+
+	_, err := deploy.Run(deploy.Params{
+		Slug: "hook-app", BundleDir: bundle, Replicas: 1,
+		Manager: mgr, Proxy: prx,
+		Command: []string{"sleep", "30"},
+		HealthCheck: func(port int, _ time.Duration) error {
+			mu.Lock()
+			defer mu.Unlock()
+			events = append(events, "boot")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+
+	if !hookSeen {
+		t.Fatal("post-deploy hook was not invoked")
+	}
+	// Order: hook(s) must fire before any replica boot/health check.
+	if len(events) < 2 || events[0] != "hook:scripts.migrate" {
+		t.Errorf("event order = %v; want hook before boot", events)
+	}
+}
+
+// TestRun_HookFailureAbortsDeploy proves a broken hook short-circuits the
+// deploy and propagates the error — silently starting the app when setup
+// failed is the dangerous outcome this guards against.
+func TestRun_HookFailureAbortsDeploy(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(`
+[[hook]]
+on = "post-deploy"
+command = ["broken"]
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := deploy.SetHookRunnerForTest(func(ctx context.Context, dir string, argv []string, env []string, w io.Writer) error {
+		return errors.New("migration crashed")
+	})
+	defer restore()
+
+	prx := proxy.New()
+	_, err := deploy.Run(deploy.Params{
+		Slug: "broken-hook", BundleDir: bundle, Replicas: 1,
+		Manager: process.NewManager(t.TempDir(), process.NewNativeRuntime()),
+		Proxy:   prx,
+		Command: []string{"sleep", "30"},
+		HealthCheck: func(int, time.Duration) error {
+			t.Error("replica boot should not be reached when post-deploy hook fails")
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "migration crashed") {
+		t.Errorf("expected hook error to propagate, got %v", err)
+	}
+	if prx.HasLiveReplica("broken-hook") {
+		t.Error("proxy must not register replicas after hook failure")
+	}
+}
+
+// TestRun_HookSkippedUnderContainerRuntime: hooks expect host-side venv
+// state, which doesn't exist when the container runtime prepares deps
+// inside the image. The hook must be skipped (not failed) so users can
+// adopt docker mode without removing their hooks from shinyhub.toml.
+func TestRun_HookSkippedUnderContainerRuntime(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(`
+[[hook]]
+on = "post-deploy"
+command = ["should-not-run"]
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var called atomic.Bool
+	restore := deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
+		called.Store(true)
+		return nil
+	})
+	defer restore()
+
+	_, err := deploy.Run(deploy.Params{
+		Slug: "docker-hook", BundleDir: bundle, Replicas: 1,
+		Manager: process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
+		Proxy:   proxy.New(),
+		HealthCheck: func(int, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if called.Load() {
+		t.Error("post-deploy hook ran under container runtime; should have been skipped")
+	}
+}
+
 // TestRun_DockerSkipsHostDepInstall proves the fix for a long-standing footgun:
 // when the runtime is Docker, deploy.Run must not attempt to install bundle
 // dependencies on the host (no `uv sync`, no `Rscript renv::restore`). Those

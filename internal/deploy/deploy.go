@@ -200,6 +200,10 @@ func Run(p Params) (*PoolResult, error) {
 		return nil, err
 	}
 
+	if err := runManifestPostDeployHooks(p); err != nil {
+		return nil, err
+	}
+
 	type bootResult struct {
 		idx int
 		res Result
@@ -237,6 +241,49 @@ func Run(p Params) (*PoolResult, error) {
 		slog.Warn("replica boot failed", "slug", p.Slug, "err", e)
 	}
 	return &PoolResult{Replicas: ok}, nil
+}
+
+// runManifestPostDeployHooks loads shinyhub.toml from the bundle and runs any
+// post-deploy hooks before the replicas start. Hooks run only when the
+// runtime prepares dependencies on the host: in docker mode, dependency
+// installation happens inside the container and the host has no view of the
+// app's venv, so running hooks here would observe the wrong environment.
+// Docker-runtime users should bake setup steps into their image entrypoint
+// instead.
+//
+// Hook output is written to a per-app deploy log under the bundle dir
+// (./deploy-hooks.log) so operators can inspect what ran without needing
+// the parent process's stdout. A best-effort tail is also slog-emitted on
+// failure to make the cause obvious in the server log.
+func runManifestPostDeployHooks(p Params) error {
+	manifest, err := LoadManifest(p.BundleDir)
+	if err != nil {
+		return err
+	}
+	hooks := manifest.PostDeploy()
+	if len(hooks) == 0 {
+		return nil
+	}
+	if p.Manager != nil && !p.Manager.HostPreparesDeps() {
+		slog.Warn("skipping post-deploy hooks under non-host runtime; bake them into the image entrypoint instead",
+			"slug", p.Slug, "hooks", len(hooks))
+		return nil
+	}
+
+	logPath := filepath.Join(p.BundleDir, "deploy-hooks.log")
+	logFile, ferr := os.Create(logPath)
+	if ferr != nil {
+		return fmt.Errorf("create %s: %w", logPath, ferr)
+	}
+	defer logFile.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := RunPostDeployHooks(ctx, p.BundleDir, hooks, p.Env, logFile); err != nil {
+		slog.Warn("post-deploy hook failed", "slug", p.Slug, "log", logPath, "err", err)
+		return err
+	}
+	return nil
 }
 
 // bootReplica starts a single replica: allocates a port, starts the process,
