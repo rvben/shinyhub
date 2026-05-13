@@ -232,15 +232,20 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	// Slide the session window: only refresh when the request arrived via the
-	// session cookie (Bearer-token callers do not need a cookie response).
-	if _, err := r.Cookie(auth.SessionCookieName); err == nil {
-		freshToken, err := auth.IssueJWT(u.ID, u.Username, u.Role, s.cfg.Auth.Secret)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
+	// Slide the session window: only refresh when the request authenticated
+	// via the session cookie. Authorization-header callers (Bearer JWT or
+	// Token API key) take that branch first in AuthenticateRequest, so when
+	// no header is present the user must have come from the cookie — which is
+	// the only case where we should re-issue one.
+	if r.Header.Get("Authorization") == "" {
+		if _, err := r.Cookie(auth.SessionCookieName); err == nil {
+			freshToken, err := auth.IssueJWT(u.ID, u.Username, u.Role, s.cfg.Auth.Secret)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal server error")
+				return
+			}
+			auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
 		}
-		auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role},

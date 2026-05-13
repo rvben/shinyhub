@@ -948,6 +948,65 @@ func TestKeyLookup_RejectsDBKeysOwnedBySystemUser(t *testing.T) {
 	}
 }
 
+func TestMe_DoesNotRefreshCookieForTokenAuth(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, err := auth.HashPassword("pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "alice", PasswordHash: hash, Role: "developer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("alice")
+	raw := "shk_" + strings.Repeat("f", 64)
+	if _, _, err := store.CreateAPIKey(db.CreateAPIKeyParams{
+		UserID: u.ID, KeyHash: auth.HashAPIKey(raw), Name: "ci",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Some stale session cookie unrelated to alice — Token auth must win and
+	// the response must NOT mint a new session cookie for alice.
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.Header.Set("Authorization", "Token "+raw)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "stale-junk"})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == auth.SessionCookieName {
+			t.Errorf("Token auth must not set session cookie; got %s=%s", c.Name, c.Value)
+		}
+	}
+}
+
+func TestMe_RefreshesCookieForCookieAuth(t *testing.T) {
+	srv, store := newTestServer(t)
+	jwt, _ := seedUserAndJWT(t, store, "bob", "developer")
+
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: jwt})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	found := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == auth.SessionCookieName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("cookie auth should slide the session window via Set-Cookie")
+	}
+}
+
 // Mirror image: an attacker who can reach us directly (i.e. peer is NOT in
 // TrustedProxyNets) cannot fake X-Forwarded-Host to bypass the same-origin
 // check. The header is ignored, the comparison falls back to r.Host, and the
