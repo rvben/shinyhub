@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -678,6 +679,48 @@ func mustRun(t *testing.T, dir, cmd string, args ...string) {
 	}
 }
 
+func writeFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	full := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func zipNames(t *testing.T, buf *bytes.Buffer) []string {
+	t.Helper()
+	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(r.File))
+	for _, f := range r.File {
+		names = append(names, f.Name)
+	}
+	return names
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPrefix(ss []string, prefix string) bool {
+	for _, x := range ss {
+		if strings.HasPrefix(x, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestEnsureApp_ForwardsVisibility verifies that a non-empty visibility is
 // forwarded in the JSON create body and an empty visibility is omitted.
 func TestEnsureApp_ForwardsVisibility(t *testing.T) {
@@ -724,5 +767,176 @@ func TestEnsureApp_ForwardsVisibility(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestZipDir_HonorsShinyhubIgnore(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	writeFile(t, dir, "cached_data/large.bin", "x")
+	writeFile(t, dir, ".shinyhubignore", "cached_data/\n")
+
+	buf, _, err := zipDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := zipNames(t, buf)
+	if !contains(names, "app.py") {
+		t.Errorf("app.py missing: %v", names)
+	}
+	if containsPrefix(names, "cached_data/") {
+		t.Errorf("cached_data should be excluded: %v", names)
+	}
+}
+
+func TestZipDir_FallsBackToGitignore(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	writeFile(t, dir, "scratch/x.txt", "x")
+	writeFile(t, dir, ".gitignore", "scratch/\n")
+
+	buf, _, err := zipDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := zipNames(t, buf)
+	if containsPrefix(names, "scratch/") {
+		t.Errorf("scratch should be excluded via .gitignore fallback: %v", names)
+	}
+	if !contains(names, "app.py") {
+		t.Errorf("app.py missing: %v", names)
+	}
+}
+
+func TestZipDir_ShinyhubIgnoreShadowsGitignore(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	writeFile(t, dir, "wanted/keep.txt", "k")
+	writeFile(t, dir, ".gitignore", "wanted/\n")
+	writeFile(t, dir, ".shinyhubignore", "# nothing to ignore\n")
+
+	buf, _, err := zipDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := zipNames(t, buf)
+	if !contains(names, "wanted/keep.txt") {
+		t.Errorf("wanted/keep.txt should ship when .shinyhubignore overrides .gitignore: %v", names)
+	}
+}
+
+func TestZipDir_NoIgnoreFilesPreservesCurrentBehavior(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	writeFile(t, dir, "extra.py", "")
+
+	buf, _, err := zipDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := zipNames(t, buf)
+	if !contains(names, "app.py") || !contains(names, "extra.py") {
+		t.Errorf("expected both files to ship without an ignore file: %v", names)
+	}
+}
+
+func TestZipDir_IgnoreFileNegation(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "")
+	writeFile(t, dir, "scratch/keep.txt", "k")
+	writeFile(t, dir, "scratch/skip.txt", "s")
+	writeFile(t, dir, ".shinyhubignore", "scratch/*\n!scratch/keep.txt\n")
+
+	buf, _, err := zipDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := zipNames(t, buf)
+	if !contains(names, "scratch/keep.txt") {
+		t.Errorf("keep.txt should be included via !-negation: %v", names)
+	}
+	if contains(names, "scratch/skip.txt") {
+		t.Errorf("skip.txt should be excluded: %v", names)
+	}
+}
+
+func TestZipDir_IgnoreFileDoesNotShipItself(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "")
+	writeFile(t, dir, ".shinyhubignore", "*.log\n")
+
+	buf, _, err := zipDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := zipNames(t, buf)
+	if !contains(names, ".shinyhubignore") {
+		t.Errorf(".shinyhubignore should ship by default; users can self-exclude: %v", names)
+	}
+}
+
+// TestZipDir_IgnoreFileSelfExcludes confirms operators can omit the ignore
+// file from the bundle by listing it in its own patterns.
+func TestZipDir_IgnoreFileSelfExcludes(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "")
+	writeFile(t, dir, ".shinyhubignore", ".shinyhubignore\n")
+
+	buf, _, err := zipDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := zipNames(t, buf)
+	if contains(names, ".shinyhubignore") {
+		t.Errorf(".shinyhubignore should be excluded when self-listed: %v", names)
+	}
+	if !contains(names, "app.py") {
+		t.Errorf("app.py missing: %v", names)
+	}
+}
+
+// TestZipDir_PrunesIgnoredDirectory verifies the walker stops descending into
+// an ignored directory (not just skip-each-file). We plant a file with mode
+// 0000 inside the ignored dir; if the walker tried to Open it, zipDir would
+// return a permission error. A passing test means filepath.SkipDir fired.
+func TestZipDir_PrunesIgnoredDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "")
+	writeFile(t, dir, "cached_data/secret.bin", "x")
+	writeFile(t, dir, ".shinyhubignore", "cached_data/\n")
+
+	if err := os.Chmod(filepath.Join(dir, "cached_data", "secret.bin"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "cached_data", "secret.bin"), 0o644) })
+
+	if _, _, err := zipDir(dir); err != nil {
+		t.Fatalf("zipDir should have pruned cached_data/ before opening secret.bin: %v", err)
+	}
+}
+
+// TestZipDir_StatErrorOnIgnoreFile surfaces non-ENOENT stat failures rather
+// than silently falling through. Make .shinyhubignore unreadable via parent
+// dir chmod so stat itself fails with EACCES rather than ENOENT. Skip on
+// Windows where chmod semantics differ.
+func TestZipDir_StatErrorOnIgnoreFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission semantics required")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "")
+	if err := os.MkdirAll(filepath.Join(dir, "subroot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "subroot", ".shinyhubignore"), []byte("foo\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "subroot"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "subroot"), 0o755) })
+
+	if _, err := loadIgnoreMatcher(filepath.Join(dir, "subroot")); err == nil {
+		t.Errorf("expected error from stat-on-unreadable parent, got nil")
 	}
 }

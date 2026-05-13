@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	gitignore "github.com/sabhiram/go-gitignore"
+
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
@@ -464,6 +466,11 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 	rules := bundle.DefaultRules()
 	rejected := map[bundle.FilterDecision][]string{}
 
+	matcher, matcherErr := loadIgnoreMatcher(dir)
+	if matcherErr != nil {
+		return nil, "", fmt.Errorf("load ignore file: %w", matcherErr)
+	}
+
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -476,6 +483,35 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
+
+		// Per-tree ignore filter runs before bundle.Rules so that ignore-file
+		// rejections never show up in summarizeRejections (intentional excludes
+		// are silent; only platform-policy rejections surface to the operator).
+		//
+		// Matching strategy for directories:
+		//   1. Query the path WITHOUT a trailing slash. If it matches we SkipDir
+		//      — the pattern explicitly targets this directory by name.
+		//   2. Query the path WITH a trailing slash. If it matches (e.g. a
+		//      "cached_data/" pattern) we return nil to skip the directory entry
+		//      but do NOT SkipDir, so the walker descends and evaluates each
+		//      child file individually. This lets negation rules like
+		//      "!scratch/keep.txt" still fire inside glob-patterned directories.
+		//      Files inside a directory-only-patterned dir are caught below because
+		//      go-gitignore propagates the match to their full paths.
+		if matcher != nil {
+			if matcher.MatchesPath(relSlash) {
+				// Plain-path match: prune directories entirely, drop files.
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if info.IsDir() && matcher.MatchesPath(relSlash+"/") {
+				// Trailing-slash match (directory-only pattern). Skip the dir entry
+				// but let the walker descend so per-file negation patterns still work.
+				return nil
+			}
+		}
 
 		size := int64(0)
 		if !info.IsDir() {
@@ -528,6 +564,22 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 		return nil, "", err
 	}
 	return &buf, summarizeRejections(rejected), nil
+}
+
+// loadIgnoreMatcher returns a gitignore-style matcher built from the first
+// of .shinyhubignore or .gitignore found in dir. Returns (nil, nil) when
+// neither file exists. Non-ENOENT stat errors are surfaced rather than
+// silently swallowed.
+func loadIgnoreMatcher(dir string) (*gitignore.GitIgnore, error) {
+	for _, name := range []string{".shinyhubignore", ".gitignore"} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return gitignore.CompileIgnoreFile(p)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("stat %s: %w", name, err)
+		}
+	}
+	return nil, nil
 }
 
 func summarizeRejections(r map[bundle.FilterDecision][]string) string {
