@@ -27,7 +27,6 @@ func newServerWithOwnedAppAndMaxReplicas(t *testing.T, slug string, max int) (*S
 
 type manifestServerCfg struct {
 	MaxReplicas int
-	NoScheduler bool
 }
 
 func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) (*Server, *db.Store, int64) {
@@ -70,12 +69,10 @@ func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) 
 
 	srv := New(serverCfg, store, nil, nil)
 
-	if !cfg.NoScheduler {
-		// Wire a scheduler that is instantiated but not started, so Reload
-		// returns ErrNotStarted (soft failure path).
-		sc := scheduler.New(nil, store)
-		srv.SetJobs(nil, sc)
-	}
+	// Wire a scheduler that is instantiated but not started, so Reload
+	// returns ErrNotStarted (soft failure path).
+	sc := scheduler.New(nil, store)
+	srv.SetJobs(nil, sc)
 
 	return srv, store, owner.ID
 }
