@@ -466,7 +466,7 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 	rules := bundle.DefaultRules()
 	rejected := map[bundle.FilterDecision][]string{}
 
-	matcher, matcherErr := loadIgnoreMatcher(dir)
+	matcher, ignoreHasNegation, matcherErr := loadIgnoreMatcher(dir)
 	if matcherErr != nil {
 		return nil, "", fmt.Errorf("load ignore file: %w", matcherErr)
 	}
@@ -487,28 +487,21 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 		// Per-tree ignore filter runs before bundle.Rules so that ignore-file
 		// rejections never show up in summarizeRejections (intentional excludes
 		// are silent; only platform-policy rejections surface to the operator).
-		//
-		// Matching strategy for directories:
-		//   1. Query the path WITHOUT a trailing slash. If it matches we SkipDir
-		//      — the pattern explicitly targets this directory by name.
-		//   2. Query the path WITH a trailing slash. If it matches (e.g. a
-		//      "cached_data/" pattern) we return nil to skip the directory entry
-		//      but do NOT SkipDir, so the walker descends and evaluates each
-		//      child file individually. This lets negation rules like
-		//      "!scratch/keep.txt" still fire inside glob-patterned directories.
-		//      Files inside a directory-only-patterned dir are caught below because
-		//      go-gitignore propagates the match to their full paths.
 		if matcher != nil {
-			if matcher.MatchesPath(relSlash) {
-				// Plain-path match: prune directories entirely, drop files.
-				if info.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
+			query := relSlash
+			if info.IsDir() {
+				query = relSlash + "/"
 			}
-			if info.IsDir() && matcher.MatchesPath(relSlash+"/") {
-				// Trailing-slash match (directory-only pattern). Skip the dir entry
-				// but let the walker descend so per-file negation patterns still work.
+			if matcher.MatchesPath(query) {
+				if info.IsDir() {
+					// Only prune the subtree when no negation pattern could
+					// re-include a descendant; otherwise descend and let
+					// file-level matching handle each child.
+					if !ignoreHasNegation {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				return nil
 			}
 		}
@@ -567,19 +560,43 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 }
 
 // loadIgnoreMatcher returns a gitignore-style matcher built from the first
-// of .shinyhubignore or .gitignore found in dir. Returns (nil, nil) when
-// neither file exists. Non-ENOENT stat errors are surfaced rather than
-// silently swallowed.
-func loadIgnoreMatcher(dir string) (*gitignore.GitIgnore, error) {
+// of .shinyhubignore or .gitignore found in dir. Returns (nil, false, nil)
+// when neither file exists. The ignoreHasNegation bool reports whether the
+// source file contains any negation patterns (`!`-prefixed lines), which
+// determines whether directory matches can safely `filepath.SkipDir`-prune
+// their subtree. Non-ENOENT read errors are surfaced rather than silently
+// swallowed.
+func loadIgnoreMatcher(dir string) (*gitignore.GitIgnore, bool, error) {
 	for _, name := range []string{".shinyhubignore", ".gitignore"} {
 		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err == nil {
-			return gitignore.CompileIgnoreFile(p)
+		raw, err := os.ReadFile(p)
+		if err == nil {
+			matcher := gitignore.CompileIgnoreLines(strings.Split(string(raw), "\n")...)
+			return matcher, ignoreFileHasNegation(raw), nil
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("stat %s: %w", name, err)
+			return nil, false, fmt.Errorf("read %s: %w", name, err)
 		}
 	}
-	return nil, nil
+	return nil, false, nil
+}
+
+// ignoreFileHasNegation reports whether the gitignore-format content has any
+// negation line (a non-comment, non-blank line whose first non-space rune is
+// `!`). Used to decide if directory pruning is safe: when no negation patterns
+// exist, a directory match means no descendant can be re-included, so
+// filepath.SkipDir is correct. When negation patterns are present, the walker
+// must descend and apply per-file matching instead.
+func ignoreFileHasNegation(raw []byte) bool {
+	for _, line := range strings.Split(string(raw), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if strings.HasPrefix(t, "!") {
+			return true
+		}
+	}
+	return false
 }
 
 func summarizeRejections(r map[bundle.FilterDecision][]string) string {

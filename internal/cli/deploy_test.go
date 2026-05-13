@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -895,29 +896,68 @@ func TestZipDir_IgnoreFileSelfExcludes(t *testing.T) {
 	}
 }
 
-// TestZipDir_PrunesIgnoredDirectory verifies the walker stops descending into
-// an ignored directory (not just skip-each-file). We plant a file with mode
-// 0000 inside the ignored dir; if the walker tried to Open it, zipDir would
-// return a permission error. A passing test means filepath.SkipDir fired.
+// TestZipDir_PrunesIgnoredDirectory verifies that files inside a directory
+// matched by a trailing-slash pattern (e.g. `cached_data/`) do not appear in
+// the bundle. The absence of `!`-negation lines in the ignore file means the
+// walker can safely prune the subtree via filepath.SkipDir rather than
+// descending and filtering each child individually.
 func TestZipDir_PrunesIgnoredDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "app.py", "")
-	writeFile(t, dir, "cached_data/secret.bin", "x")
+	for i := 0; i < 5; i++ {
+		writeFile(t, dir, fmt.Sprintf("cached_data/file_%d.bin", i), "x")
+	}
 	writeFile(t, dir, ".shinyhubignore", "cached_data/\n")
 
-	if err := os.Chmod(filepath.Join(dir, "cached_data", "secret.bin"), 0o000); err != nil {
+	buf, _, err := zipDir(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "cached_data", "secret.bin"), 0o644) })
-
-	if _, _, err := zipDir(dir); err != nil {
-		t.Fatalf("zipDir should have pruned cached_data/ before opening secret.bin: %v", err)
+	names := zipNames(t, buf)
+	for _, n := range names {
+		if strings.HasPrefix(n, "cached_data/") {
+			t.Errorf("cached_data file should not appear in bundle: %s", n)
+		}
 	}
 }
 
-// TestZipDir_StatErrorOnIgnoreFile surfaces non-ENOENT stat failures rather
+// TestLoadIgnoreMatcher_DetectsNegation verifies that ignoreFileHasNegation
+// correctly identifies files containing `!`-prefixed patterns. This pins the
+// pruning decision: when hasNegation is false, the walker may safely
+// filepath.SkipDir on a matched directory; when true, it must descend.
+func TestLoadIgnoreMatcher_DetectsNegation(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		wantNeg bool
+	}{
+		{"no patterns", "", false},
+		{"plain pattern", "foo\nbar/\n", false},
+		{"comment with bang", "# !this is just a comment\nfoo\n", false},
+		{"negation present", "foo/*\n!foo/keep.txt\n", true},
+		{"leading whitespace bang", "  !indented\n", true},
+		{"blank lines", "\n\nfoo\n\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".shinyhubignore"), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, hasNeg, err := loadIgnoreMatcher(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hasNeg != tc.wantNeg {
+				t.Errorf("hasNegation = %v, want %v", hasNeg, tc.wantNeg)
+			}
+		})
+	}
+}
+
+// TestZipDir_StatErrorOnIgnoreFile surfaces non-ENOENT read failures rather
 // than silently falling through. Make .shinyhubignore unreadable via parent
-// dir chmod so stat itself fails with EACCES rather than ENOENT. Skip on
+// dir chmod so ReadFile itself fails with EACCES rather than ENOENT. Skip on
 // Windows where chmod semantics differ.
 func TestZipDir_StatErrorOnIgnoreFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -936,7 +976,7 @@ func TestZipDir_StatErrorOnIgnoreFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "subroot"), 0o755) })
 
-	if _, err := loadIgnoreMatcher(filepath.Join(dir, "subroot")); err == nil {
-		t.Errorf("expected error from stat-on-unreadable parent, got nil")
+	if _, _, err := loadIgnoreMatcher(filepath.Join(dir, "subroot")); err == nil {
+		t.Errorf("expected error from read-on-unreadable parent, got nil")
 	}
 }
