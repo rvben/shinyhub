@@ -933,3 +933,42 @@ func TestApp_DeploymentSummaryFields(t *testing.T) {
 		t.Errorf("ListApps never: CurrentVersion = %q, want empty", listedNever.CurrentVersion)
 	}
 }
+
+func TestUpsertSystemUser_CreatesThenUpdatesRole(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	u1, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if u1.Username != db.SystemUsernameDeploy || u1.Role != "developer" {
+		t.Errorf("got %+v", u1)
+	}
+
+	u2, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "operator")
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if u2.ID != u1.ID {
+		t.Errorf("upsert should preserve ID: got %d, want %d", u2.ID, u1.ID)
+	}
+	if u2.Role != "operator" {
+		t.Errorf("role not updated: got %q", u2.Role)
+	}
+}
+
+func TestIsSystemUser(t *testing.T) {
+	if !db.IsSystemUser(db.SystemUsernameDeploy) {
+		t.Error("__deploy__ should be a system user")
+	}
+	if db.IsSystemUser("alice") {
+		t.Error("alice should not be a system user")
+	}
+}

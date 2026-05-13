@@ -152,6 +152,65 @@ func (s *Store) DeleteUser(id int64) error {
 	return nil
 }
 
+// SystemUsernameDeploy is the username of the synthetic system user that owns
+// requests authenticated by SHINYHUB_DEPLOY_TOKEN. Treated as immutable by the
+// users API: role, password, and existence are owned by the env var and the
+// startup upsert, not by admins clicking around the UI.
+const SystemUsernameDeploy = "__deploy__"
+
+// systemUsernames is the canonical set of usernames managed exclusively by the
+// server bootstrap. Membership is constant for the lifetime of a release; no
+// runtime mutation. Add new entries here when introducing further system
+// users.
+var systemUsernames = map[string]struct{}{
+	SystemUsernameDeploy: {},
+}
+
+// IsSystemUser reports whether username names a server-managed system user.
+// The user-management handlers consult this to refuse role changes, password
+// resets, and deletions targeting these accounts.
+func IsSystemUser(username string) bool {
+	_, ok := systemUsernames[username]
+	return ok
+}
+
+// systemUserPasswordHash is a sentinel that bcrypt.CompareHashAndPassword will
+// never match (length below the bcrypt format minimum). The synthetic deploy
+// user has no password login path; storing a real bcrypt hash would imply one
+// exists, which would be a footgun.
+const systemUserPasswordHash = "!disabled"
+
+// UpsertSystemUser inserts the synthetic user named username at the given role,
+// or updates the existing row's role to match. Returns the resulting row.
+// Idempotent: safe to call on every startup.
+func (s *Store) UpsertSystemUser(username, role string) (*User, error) {
+	if !IsSystemUser(username) {
+		return nil, fmt.Errorf("upsert system user: %q is not a system username", username)
+	}
+	existing, err := s.GetUserByUsername(username)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	if existing == nil {
+		if _, err := s.db.Exec(
+			`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
+			username, systemUserPasswordHash, role,
+		); err != nil {
+			return nil, fmt.Errorf("insert system user: %w", err)
+		}
+		return s.GetUserByUsername(username)
+	}
+	if existing.Role != role {
+		if _, err := s.db.Exec(
+			`UPDATE users SET role = ? WHERE id = ?`, role, existing.ID,
+		); err != nil {
+			return nil, fmt.Errorf("update system user role: %w", err)
+		}
+		existing.Role = role
+	}
+	return existing, nil
+}
+
 // --- API Keys ---
 
 type CreateAPIKeyParams struct {
