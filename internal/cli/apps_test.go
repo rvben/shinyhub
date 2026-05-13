@@ -224,9 +224,106 @@ func TestAppsSet_RejectsInvalidNegativeHibernateTimeout(t *testing.T) {
 	}
 }
 
+// resetAppsLogsFlags restores defaults so tests don't leak state. The cobra
+// command is a package-global so Run twice without a reset reuses the last
+// invocation's --tail / --no-follow values.
+func resetAppsLogsFlags(t *testing.T) {
+	t.Helper()
+	appsLogsFlags.tail = 200
+	appsLogsFlags.noFollow = false
+	appsLogsFlags.replica = 0
+	for _, name := range []string{"tail", "no-follow", "replica"} {
+		f := appsLogsCmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("flag %q not defined on appsLogsCmd", name)
+		}
+		f.Changed = false
+	}
+}
+
+// TestAppsLogs_NoFollow_PassesFollowFalseAndPrintsBody asserts that
+// --no-follow:
+//   - sends ?follow=false on the wire (so the server returns plain text and
+//     closes the connection rather than starting an SSE stream), and
+//   - prints the server response body verbatim with no SSE re-parsing.
+func TestAppsLogs_NoFollow_PassesFollowFalseAndPrintsBody(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "alpha\nbeta\ngamma\n")
+	resetAppsLogsFlags(t)
+
+	var stdout bytes.Buffer
+	appsCmd.SetOut(&stdout)
+	appsCmd.SetArgs([]string{"logs", "demo", "--tail", "50", "--no-follow"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	req := (*reqs)[0]
+	if req.Path != "/api/apps/demo/logs" {
+		t.Errorf("path = %q, want /api/apps/demo/logs", req.Path)
+	}
+	if !strings.Contains(req.Query, "tail=50") {
+		t.Errorf("query missing tail=50: %q", req.Query)
+	}
+	if !strings.Contains(req.Query, "follow=false") {
+		t.Errorf("query missing follow=false: %q", req.Query)
+	}
+	if got := stdout.String(); got != "alpha\nbeta\ngamma\n" {
+		t.Errorf("stdout = %q, want %q", got, "alpha\nbeta\ngamma\n")
+	}
+}
+
+// TestAppsLogs_Tail_PassesTailParam asserts that --tail N alone (without
+// --no-follow) still sends the param so the SSE initial-burst is bounded.
+func TestAppsLogs_Tail_PassesTailParam(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "") // body is irrelevant; we only check the request
+	resetAppsLogsFlags(t)
+
+	// httpClient/http.DefaultClient.Do returns; with --no-follow false the CLI
+	// would normally block in scanner.Scan on a long-lived SSE. Our httptest
+	// server returns immediately after writing the (empty) body, so scanner
+	// returns nil and the call completes cleanly.
+	appsCmd.SetArgs([]string{"logs", "demo", "--tail", "10"})
+	if err := appsCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[0].Query, "tail=10") {
+		t.Errorf("query missing tail=10: %q", (*reqs)[0].Query)
+	}
+}
+
+// TestAppsLogs_TailValidation rejects out-of-range --tail values before
+// touching the network. Without this guard the server would reject the
+// request with 400; surfacing the error early gives a cleaner CLI UX.
+func TestAppsLogs_TailValidation(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	resetAppsLogsFlags(t)
+
+	for _, badTail := range []string{"0", "-5", "10001"} {
+		resetAppsLogsFlags(t)
+		appsCmd.SetArgs([]string{"logs", "demo", "--tail", badTail})
+		err := appsCmd.Execute()
+		if err == nil {
+			t.Errorf("tail=%s: expected error, got nil", badTail)
+		}
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no requests on validation failure, got %d", len(*reqs))
+	}
+}
+
 // TestAppsLogs_ServerErrorExitsNonZero asserts that a 4xx/5xx from the log
 // streaming endpoint is returned as a non-nil error (exit non-zero in the CLI).
 func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {
+	resetAppsLogsFlags(t)
 	// runAppsLogs uses http.DefaultClient (no timeout) for SSE; point it at a
 	// real httptest server accessible over the loopback interface.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

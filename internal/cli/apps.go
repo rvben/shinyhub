@@ -192,26 +192,69 @@ func runAppsShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var appsLogsFlags struct {
+	tail     int
+	noFollow bool
+	replica  int
+}
+
 var appsLogsCmd = &cobra.Command{
 	Use:   "logs <slug>",
-	Short: "Connect to the SSE log stream for an app",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppsLogs,
+	Short: "Stream or fetch logs for an app",
+	Long: "Stream or fetch logs for an app.\n" +
+		"\n" +
+		"By default this opens a Server-Sent Events stream that emits the last 200\n" +
+		"lines then follows new output until interrupted. Pass --no-follow to get a\n" +
+		"one-shot plain-text response (kubectl/docker-style) that prints the tail and\n" +
+		"exits — suitable for CI and grep pipelines.",
+	Args: cobra.ExactArgs(1),
+	RunE: runAppsLogs,
+}
+
+func init() {
+	appsLogsCmd.Flags().IntVar(&appsLogsFlags.tail, "tail", 200,
+		"Number of initial lines to emit (1..10000)")
+	appsLogsCmd.Flags().BoolVar(&appsLogsFlags.noFollow, "no-follow", false,
+		"Print the tail and exit instead of streaming new output")
+	appsLogsCmd.Flags().IntVar(&appsLogsFlags.replica, "replica", 0,
+		"Replica index (default 0)")
 }
 
 func runAppsLogs(cmd *cobra.Command, args []string) error {
+	if appsLogsFlags.tail <= 0 || appsLogsFlags.tail > 10000 {
+		return fmt.Errorf("--tail must be between 1 and 10000")
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+args[0]+"/logs", nil)
+
+	url := fmt.Sprintf("%s/api/apps/%s/logs?tail=%d&replica=%d",
+		cfg.Host, args[0], appsLogsFlags.tail, appsLogsFlags.replica)
+	if appsLogsFlags.noFollow {
+		url += "&follow=false"
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Accept", "text/event-stream")
-	// Use http.DefaultClient for SSE streaming — no timeout, connection is indefinite.
-	resp, err := http.DefaultClient.Do(req)
+
+	// One-shot fetch (--no-follow) uses the bounded-timeout client so a
+	// stalled server doesn't pin the CLI forever. The streaming path uses
+	// the default client (no timeout) since SSE connections are long-lived
+	// by design.
+	client := http.DefaultClient
+	if appsLogsFlags.noFollow {
+		req.Header.Set("Accept", "text/plain")
+		client = httpClient
+	} else {
+		req.Header.Set("Accept", "text/event-stream")
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -220,9 +263,15 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 		out, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
 	}
+
+	w := cmd.OutOrStdout()
+	if appsLogsFlags.noFollow {
+		_, err := io.Copy(w, resp.Body)
+		return err
+	}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		fmt.Println(scanner.Text())
+		fmt.Fprintln(w, scanner.Text())
 	}
 	return scanner.Err()
 }

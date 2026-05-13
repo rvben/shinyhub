@@ -11,24 +11,66 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 )
 
-// handleLogs streams log lines for the given app as Server-Sent Events.
-// It sends the last 200 lines as an initial burst, then follows new output.
+// defaultLogTail is the initial-burst line count when no ?tail= is given.
+const defaultLogTail = 200
+
+// maxLogTail caps user-requested ?tail= values to keep handler memory bounded.
+// A LogReader.Tail call allocates a ring of up to N strings, so an unbounded
+// query param would let an authenticated caller force the server to retain
+// the entire (up to 5 MB rotated) log in memory per request.
+const maxLogTail = 10000
+
+// handleLogs returns log lines for the given app.
+//
+// The optional query params are:
+//   - ?replica=N    (default 0) — which replica's log to read.
+//   - ?tail=N       (default 200, 1..10000) — initial-burst line count.
+//   - ?follow=BOOL  (default true) — when true emits SSE and follows new
+//     output; when false returns a single plain-text response containing
+//     the tailed lines and closes the connection. The plain-text shape is
+//     the kubectl/docker `--no-follow` style, suitable for one-shot
+//     scripted fetches without an SSE parser.
+//
 // Access is restricted to app managers (owners, admins, operators).
-// The optional query param ?replica=N (default 0) selects which replica's log to stream.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	if _, ok := s.requireManageApp(w, r, slug); !ok {
 		return
 	}
 
+	q := r.URL.Query()
+
 	idx := 0
-	if raw := r.URL.Query().Get("replica"); raw != "" {
+	if raw := q.Get("replica"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 0 || n > 255 {
 			writeError(w, http.StatusBadRequest, "replica index out of range")
 			return
 		}
 		idx = n
+	}
+
+	tail := defaultLogTail
+	if raw := q.Get("tail"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 || n > maxLogTail {
+			writeError(w, http.StatusBadRequest, "tail must be between 1 and "+strconv.Itoa(maxLogTail))
+			return
+		}
+		tail = n
+	}
+
+	follow := true
+	if raw := q.Get("follow"); raw != "" {
+		switch raw {
+		case "true", "1":
+			follow = true
+		case "false", "0":
+			follow = false
+		default:
+			writeError(w, http.StatusBadRequest, "follow must be true or false")
+			return
+		}
 	}
 
 	if s.manager == nil {
@@ -41,19 +83,40 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamLogReader(w, r, lr, true)
+	if !follow {
+		writeLogsPlain(w, lr, tail)
+		return
+	}
+	streamLogReader(w, r, lr, tail, true)
+}
+
+// writeLogsPlain emits a one-shot, plain-text response: the last `tail` lines
+// of the log, one per line, with a trailing newline. Suitable for scripted
+// callers that pipe the output to tail/grep without parsing SSE frames.
+func writeLogsPlain(w http.ResponseWriter, lr *process.LogReader, tail int) {
+	lines, err := lr.Tail(tail)
+	if err != nil {
+		slog.Warn("logs tail", "err", err)
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	for _, line := range lines {
+		fmt.Fprintln(w, line)
+	}
 }
 
 // streamLogFile is a path-based wrapper used by per-run schedule log streaming.
 func streamLogFile(w http.ResponseWriter, r *http.Request, path string, follow bool) {
-	streamLogReader(w, r, process.NewLogReader(path), follow)
+	streamLogReader(w, r, process.NewLogReader(path), defaultLogTail, follow)
 }
 
-// streamLogReader writes the SSE response: initial Tail(200), then optionally
+// streamLogReader writes the SSE response: initial Tail(tail), then optionally
 // Follow until the client disconnects, with periodic heartbeats.
 // When follow is false, the tail is flushed and the connection is closed
 // immediately — suitable for completed schedule runs whose log files are static.
-func streamLogReader(w http.ResponseWriter, r *http.Request, lr *process.LogReader, follow bool) {
+func streamLogReader(w http.ResponseWriter, r *http.Request, lr *process.LogReader, tail int, follow bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
@@ -65,8 +128,8 @@ func streamLogReader(w http.ResponseWriter, r *http.Request, lr *process.LogRead
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Initial burst: last 200 lines.
-	lines, err := lr.Tail(200)
+	// Initial burst: last `tail` lines.
+	lines, err := lr.Tail(tail)
 	if err != nil {
 		slog.Warn("logs tail", "err", err)
 	}
