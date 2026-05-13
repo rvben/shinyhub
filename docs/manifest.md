@@ -105,7 +105,7 @@ mirrors the CLI fields.
 | `name` | yes | Unique key within the app. Used to identify the schedule across re-deploys (upsert by name). |
 | `cron` | yes | Standard 5-field cron expression. |
 | `cmd` | one of | Shell-quoted command. Parsed with shell-words. |
-| `cmd_json` | one of | JSON array of argv. Use this when shell quoting is awkward. |
+| `cmd_json` | one of | TOML string containing a JSON array of argv. Use this when shell quoting is awkward. |
 | `timeout_seconds` | no | Wall-clock cap before SIGTERM. Defaults to 3600. |
 | `overlap` | no | `skip` (default), `queue`, or `concurrent`. |
 | `missed` | no | `skip` (default) or `run_once`. |
@@ -118,7 +118,7 @@ a parse error.
 [[schedule]]
 name = "build-cache"
 cron = "*/15 * * * *"
-cmd_json = ["python", "-m", "myapp.refresh", "--quiet"]
+cmd_json = '["python", "-m", "myapp.refresh", "--quiet"]'
 timeout_seconds = 120
 overlap = "skip"
 ```
