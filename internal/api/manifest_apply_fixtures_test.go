@@ -25,11 +25,6 @@ func newServerWithOwnedAppAndMaxReplicas(t *testing.T, slug string, max int) (*S
 	return newServerWithOwnedAppCfg(t, slug, manifestServerCfg{MaxReplicas: max})
 }
 
-func newServerWithOwnedApp_NoScheduler(t *testing.T, slug string) (*Server, *db.Store, int64) {
-	t.Helper()
-	return newServerWithOwnedAppCfg(t, slug, manifestServerCfg{NoScheduler: true})
-}
-
 type manifestServerCfg struct {
 	MaxReplicas int
 	NoScheduler bool

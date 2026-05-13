@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -119,6 +120,13 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 	}
 	first, _ := store.ListSchedulesByApp(app.ID)
 
+	// First apply must record a schedule_create audit event.
+	events, _ := store.ListAuditEvents(10, 0)
+	scheduleID := fmt.Sprintf("%d", first[0].ID)
+	if !auditEventsContain(events, "schedule_create", scheduleID) {
+		t.Errorf("expected schedule_create audit event for schedule %s", scheduleID)
+	}
+
 	specs[0].Cron = "0 1 * * *"
 	if err := srv.applyManifestSchedules(r, app, specs); err != nil {
 		t.Fatal(err)
@@ -132,6 +140,12 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 	}
 	if second[0].CronExpr != "0 1 * * *" {
 		t.Errorf("cron not updated: %q", second[0].CronExpr)
+	}
+
+	// Second apply (cron changed) must record a schedule_update audit event.
+	events, _ = store.ListAuditEvents(10, 0)
+	if !auditEventsContain(events, "schedule_update", scheduleID) {
+		t.Errorf("expected schedule_update audit event for schedule %s", scheduleID)
 	}
 }
 
@@ -170,7 +184,11 @@ func TestApplyManifestSchedules_LeavesOrphansAlone(t *testing.T) {
 }
 
 func TestApplyManifestSchedules_SchedulerNotStartedIsWarn(t *testing.T) {
-	srv, store, ownerID := newServerWithOwnedApp_NoScheduler(t, "alpha")
+	// newServerWithOwnedApp wires a non-nil scheduler that has NOT been
+	// started, so scheduler.Reload → register returns scheduler.ErrNotStarted.
+	// applyManifestSchedules must soft-fail (log a warning, not return an error)
+	// and still persist the schedule row so it activates on the next Start.
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
 	app, _ := store.GetAppBySlug("alpha")
 	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
 
@@ -184,5 +202,14 @@ func TestApplyManifestSchedules_SchedulerNotStartedIsWarn(t *testing.T) {
 	}}
 	if err := srv.applyManifestSchedules(r, app, specs); err != nil {
 		t.Errorf("scheduler-not-started must not fail apply: %v", err)
+	}
+
+	// The row must still have been written — it will activate when Start is called.
+	rows, err := store.ListSchedulesByApp(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Name != "nightly" {
+		t.Errorf("expected schedule row to be persisted; got %d rows", len(rows))
 	}
 }
