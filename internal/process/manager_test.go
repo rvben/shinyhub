@@ -278,6 +278,68 @@ func TestManager_DuplicateIndex(t *testing.T) {
 	}
 }
 
+// TestStart_PlatformDefaultsLoseToUserEnv asserts the ordering contract for
+// the OTEL_* injection path: platform defaults from the resolver are prepended
+// BEFORE user env, so any user-supplied OTEL_* (or other override) wins under
+// last-occurrence-wins semantics.
+func TestStart_PlatformDefaultsLoseToUserEnv(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	m.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
+		return []string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT=http://platform:4318",
+			"OTEL_SERVICE_NAME=" + slug,
+		}
+	})
+	m.SetEnvResolver(func(slug string) ([]string, error) {
+		// User wants a different OTLP endpoint for this app.
+		return []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://user-collector:4318"}, nil
+	})
+
+	p := process.StartParams{
+		Slug:    "demo",
+		Dir:     t.TempDir(),
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+	}
+	if _, err := m.Start(p); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := lastValue(rt.lastEnv, "OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://user-collector:4318" {
+		t.Errorf("user env should win over platform default: got %q", got)
+	}
+	// Platform-only keys still flow through when not overridden.
+	if got := lastValue(rt.lastEnv, "OTEL_SERVICE_NAME"); got != "demo" {
+		t.Errorf("platform-only OTEL_SERVICE_NAME = %q, want demo", got)
+	}
+}
+
+// TestStart_PlatformDefaultsReceiveSlugAndReplica verifies the resolver is
+// called with the actual slug and replica index from StartParams.
+func TestStart_PlatformDefaultsReceiveSlugAndReplica(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	var gotSlug string
+	var gotReplica int
+	m.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
+		gotSlug = slug
+		gotReplica = replica
+		return nil
+	})
+	if _, err := m.Start(process.StartParams{
+		Slug:    "myapp",
+		Index:   3,
+		Dir:     t.TempDir(),
+		Command: []string{"sleep", "1"},
+		Port:    9999,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if gotSlug != "myapp" || gotReplica != 3 {
+		t.Errorf("resolver received (%q, %d), want (myapp, 3)", gotSlug, gotReplica)
+	}
+}
+
 func TestStart_PlatformEnvWinsOverUserEnv(t *testing.T) {
 	rt := newFakeRuntime()
 	m := process.NewManager(t.TempDir(), rt)

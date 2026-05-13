@@ -17,6 +17,13 @@ import (
 // process before launch.
 type EnvResolver func(slug string) ([]string, error)
 
+// PlatformDefaultEnvResolver returns "KEY=VALUE" platform defaults that should
+// be set BEFORE the user's per-app env, so user values win on duplicate keys.
+// This is the slot for OTEL_* env vars that the operator configures
+// platform-wide but each app may still override per-app via the env-var UI.
+// Returning nil disables the hook.
+type PlatformDefaultEnvResolver func(slug string, replica int) []string
+
 // SharedMountResolver returns the shared mounts for a slug. Empty slice means
 // no mounts. Called once per Start; failures abort the start.
 type SharedMountResolver func(slug string) ([]SharedMount, error)
@@ -73,6 +80,7 @@ type Manager struct {
 	appsDir         string
 	runtime         Runtime
 	envResolver     EnvResolver
+	platformEnv     PlatformDefaultEnvResolver
 	mountResolver   SharedMountResolver
 	appDataRoot     string
 }
@@ -81,6 +89,14 @@ type Manager struct {
 // during Start. Must be called before the manager begins starting processes; it
 // is not safe to call concurrently with Start.
 func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
+
+// SetPlatformDefaultEnvResolver sets the function that supplies platform-wide
+// default env vars (currently OTEL_* tracing config). The returned values are
+// prepended to the env so user-supplied per-app env wins on duplicate keys.
+// Must be called before Start; not safe to call concurrently with Start.
+func (m *Manager) SetPlatformDefaultEnvResolver(r PlatformDefaultEnvResolver) {
+	m.platformEnv = r
+}
 
 // SetSharedMountResolver sets the function used to resolve shared mounts during
 // Start. Must be called before the manager begins starting processes; not safe
@@ -189,6 +205,15 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		// Build user env first, then append platform env so platform values win
 		// on duplicate keys (os/exec uses last-occurrence-wins).
 		p.Env = append(userEnv, p.Env...)
+	}
+	if m.platformEnv != nil {
+		// Platform defaults (e.g. OTEL_*) go BEFORE the user env above so the
+		// user's per-app override wins on duplicate keys. We rebuild p.Env in
+		// the order: [defaults, user env, deploy-supplied p.Env] — last write
+		// wins, so deploy env beats user env beats defaults.
+		if defaults := m.platformEnv(p.Slug, p.Index); len(defaults) > 0 {
+			p.Env = append(defaults, p.Env...)
+		}
 	}
 
 	if m.mountResolver != nil {
