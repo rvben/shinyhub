@@ -16,6 +16,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.1](https://github.com/rvben/shinyhub/compare/v0.4.0...v0.4.1) - 2026-05-13
+
+### Added
+
+- **shinyhub**: wire tracing into startup and document it ([72480c5](https://github.com/rvben/shinyhub/commit/72480c5ea1e47514a6bbd72e2d471f52fbc3f4f2))
+- **ui**: add Traces tab to app detail ([6eafe21](https://github.com/rvben/shinyhub/commit/6eafe21f56a1c98af62aa650caad783f000b175b))
+- **api**: expose GET /api/apps/:slug/traces ([3b4f84f](https://github.com/rvben/shinyhub/commit/3b4f84fae5f3083daa539163d60b6975b887cdf1))
+- **proxy**: propagate W3C traceparent and record spans ([b1d9b32](https://github.com/rvben/shinyhub/commit/b1d9b32a23cf822777018f3179af48fbd252f340))
+- **process**: inject platform default env per replica ([0e36b9f](https://github.com/rvben/shinyhub/commit/0e36b9fd0fb96300f119643e626dfa4bd73733e0))
+- **tracing**: add W3C propagation, ring buffer, and OTEL env helper ([271d944](https://github.com/rvben/shinyhub/commit/271d944cf495f160232f34fca5e619def37ad046))
+- **config**: add tracing block ([3ff9fca](https://github.com/rvben/shinyhub/commit/3ff9fcaebcaa9539362f4bf251045d813458e03e))
+- **auth**: accept opaque SHINYHUB_DEPLOY_TOKEN values ([997721f](https://github.com/rvben/shinyhub/commit/997721f2ee4ffaf22ca5b901d0ba980da2059f4b))
+
 ## [0.4.0](https://github.com/rvben/shinyhub/compare/v0.3.3...v0.4.0) - 2026-05-13
 
 ### Added
