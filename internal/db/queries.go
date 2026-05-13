@@ -183,32 +183,26 @@ const systemUserPasswordHash = "!disabled"
 // UpsertSystemUser inserts the synthetic user named username at the given role,
 // or updates the existing row's role to match. Returns the resulting row.
 // Idempotent: safe to call on every startup.
+//
+// Atomic at the SQLite level: INSERT OR IGNORE plus UPDATE means concurrent
+// callers cannot race between SELECT and INSERT.
 func (s *Store) UpsertSystemUser(username, role string) (*User, error) {
 	if !IsSystemUser(username) {
 		return nil, fmt.Errorf("upsert system user: %q is not a system username", username)
 	}
-	existing, err := s.GetUserByUsername(username)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
+	if _, err := s.db.Exec(
+		`INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
+		username, systemUserPasswordHash, role,
+	); err != nil {
+		return nil, fmt.Errorf("insert system user: %w", err)
 	}
-	if existing == nil {
-		if _, err := s.db.Exec(
-			`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
-			username, systemUserPasswordHash, role,
-		); err != nil {
-			return nil, fmt.Errorf("insert system user: %w", err)
-		}
-		return s.GetUserByUsername(username)
+	if _, err := s.db.Exec(
+		`UPDATE users SET role = ? WHERE username = ?`,
+		role, username,
+	); err != nil {
+		return nil, fmt.Errorf("update system user role: %w", err)
 	}
-	if existing.Role != role {
-		if _, err := s.db.Exec(
-			`UPDATE users SET role = ? WHERE id = ?`, role, existing.ID,
-		); err != nil {
-			return nil, fmt.Errorf("update system user role: %w", err)
-		}
-		existing.Role = role
-	}
-	return existing, nil
+	return s.GetUserByUsername(username)
 }
 
 // --- API Keys ---

@@ -972,3 +972,46 @@ func TestIsSystemUser(t *testing.T) {
 		t.Error("alice should not be a system user")
 	}
 }
+
+func TestUpsertSystemUser_RejectsNonSystemUsername(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.UpsertSystemUser("alice", "developer")
+	if err == nil {
+		t.Fatal("expected error upserting a non-system username, got nil")
+	}
+	// And nothing got inserted.
+	if _, getErr := store.GetUserByUsername("alice"); getErr == nil {
+		t.Error("non-system user must not be created")
+	}
+}
+
+func TestUpsertSystemUser_SameRoleIsIdempotent(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	u1, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u2.ID != u1.ID || u2.Role != "developer" {
+		t.Errorf("idempotent upsert: got %+v, want same ID and role developer", u2)
+	}
+}
