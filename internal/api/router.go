@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
@@ -136,7 +137,11 @@ func (s *Server) SetDeployToken(t *auth.DeployToken) { s.deployToken = t }
 // deploy token (no DB hit) and falling back to the api_keys table.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	if s.deployToken != nil && s.deployToken.Matches(keyHash) {
-		return s.deployToken.User(), nil
+		u := s.deployToken.User()
+		if u == nil {
+			return nil, fmt.Errorf("deploy token has no associated user")
+		}
+		return u, nil
 	}
 	u, err := s.store.GetUserByAPIKeyHash(keyHash)
 	if err != nil {

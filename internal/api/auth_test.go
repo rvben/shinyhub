@@ -820,7 +820,10 @@ func TestDeployToken_AuthenticatesAsSyntheticUser(t *testing.T) {
 
 func TestDeployToken_RejectsWrongToken(t *testing.T) {
 	srv, store := newTestServer(t)
-	syntheticUser, _ := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
 	raw := "shk_" + strings.Repeat("a", 64)
 	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
 		ID: syntheticUser.ID, Username: syntheticUser.Username, Role: syntheticUser.Role,
@@ -850,7 +853,10 @@ func TestDeployToken_NotConfiguredRejectsAnyToken(t *testing.T) {
 
 func TestDeployToken_DoesNotAppearInTokensList(t *testing.T) {
 	srv, store := newTestServer(t)
-	syntheticUser, _ := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
 	raw := "shk_" + strings.Repeat("a", 64)
 	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
 		ID: syntheticUser.ID, Username: syntheticUser.Username, Role: syntheticUser.Role,
