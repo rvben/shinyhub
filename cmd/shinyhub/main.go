@@ -146,6 +146,25 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
+	var deployToken *auth.DeployToken
+	if cfg.Auth.DeployToken != "" {
+		if err := auth.ValidateDeployTokenFormat(cfg.Auth.DeployToken); err != nil {
+			return fmt.Errorf("SHINYHUB_DEPLOY_TOKEN: %w", err)
+		}
+		sysUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, cfg.Auth.DeployTokenRole)
+		if err != nil {
+			return fmt.Errorf("upsert deploy system user: %w", err)
+		}
+		deployToken = auth.NewDeployToken(cfg.Auth.DeployToken, &auth.ContextUser{
+			ID:       sysUser.ID,
+			Username: sysUser.Username,
+			Role:     sysUser.Role,
+		})
+		slog.Info("deploy token registered",
+			"username", sysUser.Username,
+			"role", sysUser.Role)
+	}
+
 	var rt process.Runtime
 	switch cfg.Runtime.Mode {
 	case "docker":
@@ -214,6 +233,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
+	if deployToken != nil {
+		srv.SetDeployToken(deployToken)
+	}
 	srv.SetSecretsKey(secretsKey)
 
 	// Emit a structured access log for every proxied app request. Using the
