@@ -309,6 +309,25 @@ func TestUpsertAppEnv_RejectsReservedPrefix(t *testing.T) {
 	}
 }
 
+// TestUpsertAppEnv_AcceptsOTELPrefix documents the carve-out for OTEL_* keys:
+// only SHINYHUB_ is reserved, so users can override platform-injected
+// OpenTelemetry defaults (endpoint, headers, sampler) per app.
+func TestUpsertAppEnv_AcceptsOTELPrefix(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := putEnv(t, f, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://user-collector:4318", false)
+	if rec.Code != http.StatusOK {
+		t.Errorf("OTEL_* should be allowed, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec2 := putEnv(t, f, "OTEL_SERVICE_NAME", "user-override", false)
+	if rec2.Code != http.StatusOK {
+		t.Errorf("OTEL_SERVICE_NAME should be allowed, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+}
+
 func TestUpsertAppEnv_RejectsInvalidKey(t *testing.T) {
 	f, err := setupEnvApp(t)
 	if err != nil {

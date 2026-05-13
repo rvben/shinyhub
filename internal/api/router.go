@@ -18,6 +18,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/tracing"
 )
 
 // Server holds the dependencies shared by all API handlers.
@@ -37,6 +38,7 @@ type Server struct {
 	jobs          *jobs.Manager
 	scheduler     *scheduler.Scheduler
 	secretsKey    []byte
+	traceBuffer   *tracing.Buffer
 	router        http.Handler
 
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
@@ -133,6 +135,12 @@ func (s *Server) SetDeployRunForTest(fn func(deploy.Params) (*deploy.PoolResult,
 // ServeHTTP.
 func (s *Server) SetDeployToken(t *auth.DeployToken) { s.deployToken = t }
 
+// SetTraceBuffer wires the proxy's ring buffer of recent slow/error spans into
+// the API server so the /api/apps/{slug}/traces handler can surface them. May
+// be nil when tracing is disabled — the handler then returns an empty list.
+// Must be called before the server begins handling requests.
+func (s *Server) SetTraceBuffer(b *tracing.Buffer) { s.traceBuffer = b }
+
 // keyLookup satisfies auth.APIKeyLookup by first checking the pre-shared
 // deploy token (no DB hit) and falling back to the api_keys table. DB-backed
 // keys owned by system users are refused: those accounts authenticate only
@@ -227,6 +235,7 @@ func (s *Server) buildRouter() http.Handler {
 		r.Post("/api/apps/{slug}/stop", s.handleStopApp)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
 		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
+		r.Get("/api/apps/{slug}/traces", s.handleTraces)
 		r.Get("/api/apps/{slug}/members", s.handleGetMembers)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)
 		r.Post("/api/apps/{slug}/members", s.handleGrantAppAccess)
