@@ -209,7 +209,7 @@ func newEnvCmd() *cobra.Command {
 		return nil
 	}
 
-	envCmd.AddCommand(envSetCmd, envLsCmd, envRmCmd)
+	envCmd.AddCommand(envSetCmd, envLsCmd, envRmCmd, newEnvApplyCmd())
 	return envCmd
 }
 
