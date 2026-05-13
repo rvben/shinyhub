@@ -1273,3 +1273,161 @@ func TestProxy_PoolCap_ReadsBack(t *testing.T) {
 		t.Errorf("expected cap=0 after reset, got %d", got)
 	}
 }
+
+// TestProxy_ReadyProbe_BeforeWSUpgrade asserts that the readiness endpoint
+// reports 503 before any WebSocket handshake has been observed for the slug,
+// even when a backend is registered. "Process started" is not the same as
+// "actually accepting WS connections" — this distinction is the whole point
+// of the endpoint.
+func TestProxy_ReadyProbe_BeforeWSUpgrade(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("demo", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 before any WS upgrade", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+	if got := rec.Body.String(); got != `{"ready":false}` {
+		t.Errorf("body = %q, want {\"ready\":false}", got)
+	}
+}
+
+// TestProxy_ReadyProbe_AfterWSUpgrade asserts that once MarkWSReady is
+// invoked for a slug, the readiness endpoint reports 200. The wire-up
+// from the reverse-proxy 101 status to MarkWSReady is covered by
+// TestStatusRecorderOnUpgradeFiresOn101 in recorder_test.go.
+func TestProxy_ReadyProbe_AfterWSUpgrade(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+
+	p.MarkWSReady("demo")
+
+	probe := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, probe)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after MarkWSReady", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"ready":true}` {
+		t.Errorf("body = %q, want {\"ready\":true}", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+// TestProxy_ReadyProbe_ClearedByLifecycleEvents ensures readiness is dropped
+// when a slug is deregistered, hibernated, or has a replica re-registered
+// (hot redeploy). Stale "true" is the dangerous failure mode — it would let
+// a CI script claim success after a deploy that hasn't actually accepted
+// any WS traffic yet — so every lifecycle event resets the flag.
+func TestProxy_ReadyProbe_ClearedByLifecycleEvents(t *testing.T) {
+	cases := []struct {
+		name  string
+		reset func(p *proxy.Proxy)
+	}{
+		{"Deregister", func(p *proxy.Proxy) { p.Deregister("demo") }},
+		{"DeregisterReplica", func(p *proxy.Proxy) { p.DeregisterReplica("demo", 0) }},
+		{"BeginHibernate", func(p *proxy.Proxy) {
+			// Pass a future time so the lastSeen check passes
+			// (no requests have been recorded for this slug).
+			if !p.BeginHibernate("demo", time.Now().Add(time.Hour)) {
+				t.Fatal("BeginHibernate returned false")
+			}
+		}},
+		{"RegisterReplica swap", func(p *proxy.Proxy) {
+			// Hot redeploy: re-register replica 0 in-place.
+			if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := proxy.New()
+			if err := p.Register("demo", "http://127.0.0.1:1"); err != nil {
+				t.Fatal(err)
+			}
+			p.MarkWSReady("demo")
+			if !p.IsWSReady("demo") {
+				t.Fatalf("precondition: IsWSReady should be true after MarkWSReady")
+			}
+
+			tc.reset(p)
+
+			if p.IsWSReady("demo") {
+				t.Errorf("readiness should be cleared by %s", tc.name)
+			}
+		})
+	}
+}
+
+// TestProxy_ReadyProbe_MethodNotAllowed rejects writes to the probe so a
+// misconfigured client fails loudly rather than appearing to succeed.
+func TestProxy_ReadyProbe_MethodNotAllowed(t *testing.T) {
+	p := proxy.New()
+	req := httptest.NewRequest(http.MethodPost, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want GET, HEAD", got)
+	}
+}
+
+// TestProxy_ReadyProbe_HEADHasNoBody ensures HEAD callers get the right
+// status code without a body — required for any HTTP health checker that
+// uses HEAD to minimise bandwidth.
+func TestProxy_ReadyProbe_HEADHasNoBody(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+
+	req := httptest.NewRequest(http.MethodHead, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD body should be empty, got %d bytes", rec.Body.Len())
+	}
+}
+
+// TestProxy_ReadyProbe_DoesNotRecordActivity guards against the readiness
+// endpoint inadvertently keeping the app alive — health-probe traffic must
+// not defeat hibernation.
+func TestProxy_ReadyProbe_DoesNotRecordActivity(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+
+	before := p.LastSeen("demo")
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	p.ServeHTTP(httptest.NewRecorder(), req)
+	after := p.LastSeen("demo")
+
+	if !before.Equal(after) {
+		t.Errorf("ready probe must not update LastSeen: before=%v after=%v", before, after)
+	}
+}

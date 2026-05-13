@@ -42,6 +42,58 @@ func TestStatusRecorderExplicitStatus(t *testing.T) {
 	}
 }
 
+// TestStatusRecorderOnUpgradeFiresOn101 verifies the onUpgrade hook fires
+// exactly when WriteHeader(101) is called. This is the wire-up from a
+// reverse-proxy WS handshake to Proxy.MarkWSReady: ReverseProxy writes 101
+// before Hijack, so the hook must fire synchronously before the hijacked
+// goroutine ever starts.
+func TestStatusRecorderOnUpgradeFiresOn101(t *testing.T) {
+	calls := 0
+	rec := newStatusRecorder(httptest.NewRecorder())
+	rec.onUpgrade = func() { calls++ }
+
+	rec.WriteHeader(http.StatusSwitchingProtocols)
+
+	if calls != 1 {
+		t.Errorf("onUpgrade calls = %d, want 1", calls)
+	}
+}
+
+// TestStatusRecorderOnUpgradeIgnoresNon101 ensures the hook only fires for
+// 101 Switching Protocols — any other status (200, 500, etc.) must not be
+// mistaken for a successful WS handshake.
+func TestStatusRecorderOnUpgradeIgnoresNon101(t *testing.T) {
+	for _, code := range []int{200, 204, 302, 400, 500, 502} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			called := false
+			rec := newStatusRecorder(httptest.NewRecorder())
+			rec.onUpgrade = func() { called = true }
+
+			rec.WriteHeader(code)
+
+			if called {
+				t.Errorf("onUpgrade fired on status %d; should only fire on 101", code)
+			}
+		})
+	}
+}
+
+// TestStatusRecorderOnUpgradeFiresOnce ensures the hook is not re-invoked
+// on duplicate WriteHeader calls — net/http only honours the first
+// WriteHeader, so the recorder must mirror that.
+func TestStatusRecorderOnUpgradeFiresOnce(t *testing.T) {
+	calls := 0
+	rec := newStatusRecorder(httptest.NewRecorder())
+	rec.onUpgrade = func() { calls++ }
+
+	rec.WriteHeader(http.StatusSwitchingProtocols)
+	rec.WriteHeader(http.StatusSwitchingProtocols) // duplicate — protocol error in real code
+
+	if calls != 1 {
+		t.Errorf("onUpgrade calls = %d, want 1", calls)
+	}
+}
+
 func TestStatusRecorderFirstStatusWins(t *testing.T) {
 	rec := newStatusRecorder(httptest.NewRecorder())
 	rec.WriteHeader(http.StatusBadGateway)

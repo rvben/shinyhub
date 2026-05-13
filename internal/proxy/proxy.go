@@ -90,6 +90,11 @@ const loadingPage = `<!DOCTYPE html>
 // The full cookie name is cookiePrefix + slug (e.g. "shinyhub_rep_myapp").
 const cookiePrefix = "shinyhub_rep_"
 
+// readySuffix is the per-slug WS-readiness probe path. The full path is
+// /app/<slug>/.shinyhub/ready. The ".shinyhub" segment is namespaced under
+// a leading dot so it cannot collide with a legitimate app route.
+const readySuffix = "/.shinyhub/ready"
+
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
 	index       int
@@ -153,12 +158,19 @@ type Proxy struct {
 
 	seenMu   sync.RWMutex
 	lastSeen map[string]time.Time
+	// wsReady tracks slugs for which at least one upstream has completed a
+	// WebSocket handshake (HTTP 101) since the last deregister/hibernate.
+	// Surfaced via GET /app/<slug>/.shinyhub/ready so deploy scripts can
+	// distinguish "process started" from "actually accepting WS connections"
+	// — the latter is what end users care about for Shiny/Streamlit apps.
+	wsReady map[string]struct{}
 }
 
 func New() *Proxy {
 	return &Proxy{
 		pools:    make(map[string]*backendPool),
 		lastSeen: make(map[string]time.Time),
+		wsReady:  make(map[string]struct{}),
 	}
 }
 
@@ -225,6 +237,39 @@ func (p *Proxy) LastSeen(slug string) time.Time {
 	p.seenMu.RLock()
 	defer p.seenMu.RUnlock()
 	return p.lastSeen[slug]
+}
+
+// MarkWSReady records that slug has completed at least one WebSocket
+// handshake since the last lifecycle reset. Idempotent. Normally called
+// by the statusRecorder's onUpgrade hook when the reverse proxy emits
+// 101 Switching Protocols, but exported so adapters that route WS traffic
+// outside the standard reverse-proxy path can still feed the probe.
+func (p *Proxy) MarkWSReady(slug string) {
+	p.seenMu.Lock()
+	p.wsReady[slug] = struct{}{}
+	p.seenMu.Unlock()
+}
+
+// IsWSReady reports whether slug has observed a 101 Switching Protocols
+// response since the last deregister/hibernate.
+func (p *Proxy) IsWSReady(slug string) bool {
+	p.seenMu.RLock()
+	defer p.seenMu.RUnlock()
+	_, ok := p.wsReady[slug]
+	return ok
+}
+
+// clearWSReadyLocked drops any cached readiness for slug. Caller must hold
+// p.seenMu for writing.
+func (p *Proxy) clearWSReadyLocked(slug string) {
+	delete(p.wsReady, slug)
+}
+
+// clearWSReady drops any cached readiness for slug.
+func (p *Proxy) clearWSReady(slug string) {
+	p.seenMu.Lock()
+	p.clearWSReadyLocked(slug)
+	p.seenMu.Unlock()
 }
 
 // SetPoolSize initialises or resizes the replica pool for slug.
@@ -342,6 +387,10 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 		req.Host = target.Host
 	}
 	pool.replicas[index] = &replicaBackend{index: index, rp: rp}
+	// A freshly registered backend has not yet proven it accepts WS upgrades.
+	// Clearing here also covers the hot-redeploy path where a caller swaps
+	// replicas without an intermediate Deregister.
+	p.clearWSReady(slug)
 	return nil
 }
 
@@ -355,6 +404,7 @@ func (p *Proxy) DeregisterReplica(slug string, index int) {
 		return
 	}
 	pool.replicas[index] = nil
+	p.clearWSReady(slug)
 }
 
 // Deregister removes the entire pool for slug from the routing table.
@@ -362,6 +412,7 @@ func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
 	delete(p.pools, slug)
 	p.mu.Unlock()
+	p.clearWSReady(slug)
 }
 
 // BeginHibernate atomically removes slug from the routing table iff no
@@ -394,6 +445,7 @@ func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
 		delete(p.pools, slug)
 	}
 	delete(p.lastSeen, slug)
+	p.clearWSReadyLocked(slug)
 	return true
 }
 
@@ -469,10 +521,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Readiness probe is special-cased before any backend lookup so it works
+	// even when the pool is missing (e.g. between Deregister and the next
+	// RegisterReplica). The handler never touches the upstream, never sets
+	// a sticky cookie, and never records activity — it must not influence
+	// hibernation or load-balancing decisions.
+	if r.URL.Path == "/app/"+slug+readySuffix {
+		p.serveReadyProbe(w, r, slug)
+		return
+	}
+
 	// Wrap the writer so we can capture status + bytes for the access log.
 	// The recorder delegates Flush/Hijack/ReadFrom so streaming responses,
 	// WebSocket upgrades, and the sendfile fast path keep working.
 	rec := newStatusRecorder(w)
+	// Mark this slug ready the instant the reverse proxy writes 101.
+	// httputil.ReverseProxy emits WriteHeader(101) before calling Hijack,
+	// so the hook fires synchronously before the hijacked goroutine
+	// (which lives for the duration of the WS) ever starts.
+	rec.onUpgrade = func() { p.MarkWSReady(slug) }
 	start := time.Now()
 	replicaIndex := -1
 	sticky := false
@@ -564,6 +631,36 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	p.RecordActivity(slug)
 	picked.rp.ServeHTTP(rec, r)
+}
+
+// serveReadyProbe answers GET /app/<slug>/.shinyhub/ready. It returns 200
+// with {"ready":true} once at least one upstream replica has completed a
+// WebSocket handshake, and 503 with {"ready":false} otherwise. A
+// Retry-After: 1 hint lets polling deploy scripts back off politely.
+// The endpoint accepts GET and HEAD; other methods are rejected with 405
+// so a misconfigured client (e.g. an unintended POST) fails loudly rather
+// than appearing to succeed.
+func (p *Proxy) serveReadyProbe(w http.ResponseWriter, r *http.Request, slug string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ready := p.IsWSReady(slug)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if !ready {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if r.Method == http.MethodGet {
+			w.Write([]byte(`{"ready":false}`)) //nolint:errcheck
+		}
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		w.Write([]byte(`{"ready":true}`)) //nolint:errcheck
+	}
 }
 
 // resolveClientIP returns the trusted-proxy-aware client IP when a resolver is
