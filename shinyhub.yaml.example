@@ -80,3 +80,16 @@ oauth:
     client_secret: ""                 # SHINYHUB_OIDC_CLIENT_SECRET
     callback_url:  ""                 # SHINYHUB_OIDC_CALLBACK_URL
     display_name:  "Sign in with SSO" # SHINYHUB_OIDC_DISPLAY_NAME
+
+# --- Env-only settings (no YAML key) ---
+#
+# SHINYHUB_DEPLOY_TOKEN
+#   Pre-shared bearer token for CI deploys. When set, authenticates as the
+#   synthetic system user "__deploy__" without requiring an admin to bootstrap
+#   a token via POST /api/tokens. Not persisted; rotation = change env, restart.
+#   Format: "shk_<hex>" with at least 32 hex chars after the prefix.
+#   Generate: shk_$(openssl rand -hex 32)
+#
+# SHINYHUB_DEPLOY_TOKEN_ROLE
+#   Role assigned to the synthetic deploy user. Default: developer.
+#   Must be one of: viewer, developer, operator, admin.
