@@ -1613,3 +1613,75 @@ func TestDeleteApp_RemovesBothDirs(t *testing.T) {
 		t.Errorf("data dir still present: %v", err)
 	}
 }
+
+// TestDeployToken_AppOwnershipAndAdminBypass verifies two properties of the
+// deploy-token identity (__deploy__):
+//
+//  1. POST /api/apps authenticated via the deploy token stores the __deploy__
+//     user's ID as the app's owner_id.
+//  2. An admin user who does not own the app can still GET and PATCH it — the
+//     admin-bypass in canManageApp (isPrivilegedAppOperator) grants access even
+//     when owner_id != admin.ID.
+func TestDeployToken_AppOwnershipAndAdminBypass(t *testing.T) {
+	srv, store := newTestServer(t)
+
+	// --- deploy-token identity ---
+	deployUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatalf("upsert system user: %v", err)
+	}
+	rawToken := "shk_" + strings.Repeat("d", 64)
+	srv.SetDeployToken(auth.NewDeployToken(rawToken, &auth.ContextUser{
+		ID:       deployUser.ID,
+		Username: deployUser.Username,
+		Role:     deployUser.Role,
+	}))
+
+	// --- create app via deploy token ---
+	createBody, _ := json.Marshal(map[string]string{"slug": "deploy-owned", "name": "Deploy Owned"})
+	createReq := httptest.NewRequest("POST", "/api/apps", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Token "+rawToken)
+	createRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/apps = %d, want 201: %s", createRec.Code, createRec.Body.String())
+	}
+
+	// Verify the app is stored with owner_id == __deploy__ user's ID.
+	app, err := store.GetAppBySlug("deploy-owned")
+	if err != nil {
+		t.Fatalf("GetAppBySlug: %v", err)
+	}
+	if app.OwnerID != deployUser.ID {
+		t.Errorf("app.OwnerID = %d, want %d (__deploy__ ID)", app.OwnerID, deployUser.ID)
+	}
+
+	// --- admin user: does not own the app but must be able to manage it ---
+	hash, _ := auth.HashPassword("adminpass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "sysadmin", PasswordHash: hash, Role: "admin"}); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	adminUser, _ := store.GetUserByUsername("sysadmin")
+	adminToken, err := auth.IssueJWT(adminUser.ID, adminUser.Username, adminUser.Role, "test-secret")
+	if err != nil {
+		t.Fatalf("issue admin JWT: %v", err)
+	}
+
+	// GET /api/apps/{slug} — admin must receive 200.
+	getReq := authedRequest(t, "GET", "/api/apps/deploy-owned", nil, adminToken)
+	getRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Errorf("admin GET /api/apps/deploy-owned = %d, want 200: %s", getRec.Code, getRec.Body.String())
+	}
+
+	// PATCH /api/apps/{slug} — admin must receive 2xx even though owner_id != admin.ID.
+	patchBody, _ := json.Marshal(map[string]string{"name": "Deploy Owned (updated)"})
+	patchReq := authedRequest(t, "PATCH", "/api/apps/deploy-owned", patchBody, adminToken)
+	patchRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(patchRec, patchReq)
+	if patchRec.Code/100 != 2 {
+		t.Errorf("admin PATCH /api/apps/deploy-owned = %d, want 2xx: %s", patchRec.Code, patchRec.Body.String())
+	}
+}
