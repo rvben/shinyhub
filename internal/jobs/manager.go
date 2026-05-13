@@ -82,7 +82,21 @@ type Manager struct {
 }
 
 // NewManager constructs a Manager. secretsKey may be nil if no env vars are encrypted.
-func NewManager(rt process.Runtime, st Store, secretsKey []byte, appsDir, appDataDir string) *Manager {
+//
+// appDataDir is normalized to an absolute path so that scheduled runs always
+// hand the runtime an absolute SHINYHUB_APP_DATA value. Without this, a
+// relative value (e.g. "./data/app-data" from shinyhub.yaml) would resolve
+// through the bundle-dir-side `data` symlink at run time and produce a
+// doubly-nested path inside the persistent data dir. process.Manager applies
+// the same normalization in SetAppDataRoot — the two must agree.
+func NewManager(rt process.Runtime, st Store, secretsKey []byte, appsDir, appDataDir string) (*Manager, error) {
+	if appDataDir != "" {
+		abs, err := filepath.Abs(appDataDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve app data dir: %w", err)
+		}
+		appDataDir = abs
+	}
 	return &Manager{
 		rt:         rt,
 		store:      st,
@@ -92,7 +106,7 @@ func NewManager(rt process.Runtime, st Store, secretsKey []byte, appsDir, appDat
 		locks:      make(map[int64]*schedLock),
 		queues:     make(map[int64]chan struct{}),
 		active:     make(map[int64]context.CancelFunc),
-	}
+	}, nil
 }
 
 // lockFor returns the per-schedule lock for the given schedule ID, creating

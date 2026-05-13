@@ -211,7 +211,45 @@ func makeApp() *db.App {
 func newTestManager(t *testing.T, rt *fakeRuntime, st *fakeStore) *jobs.Manager {
 	t.Helper()
 	dir := t.TempDir()
-	return jobs.NewManager(rt, st, nil, dir, dir)
+	m, err := jobs.NewManager(rt, st, nil, dir, dir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return m
+}
+
+// TestManager_NormalizesRelativeAppDataDir guards the contract that
+// jobs.Manager normalizes appDataDir to an absolute path at construction
+// time. When a relative value flows through from shinyhub.yaml, scheduled
+// runs would otherwise receive a relative SHINYHUB_APP_DATA value that
+// resolves through the bundle-dir-side `data` symlink and lands in a
+// doubly-nested path inside the persistent data dir.
+//
+// process.Manager already normalizes via SetAppDataRoot; the two managers
+// must agree on this contract.
+func TestManager_NormalizesRelativeAppDataDir(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+
+	// Use a relative path that is guaranteed to round-trip through filepath.Abs.
+	relative := "./relative-data-dir"
+	m, err := jobs.NewManager(rt, st, nil, t.TempDir(), relative)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+
+	rt.mu.Lock()
+	got := rt.lastParams.AppDataPath
+	rt.mu.Unlock()
+
+	if !filepath.IsAbs(got) {
+		t.Errorf("StartParams.AppDataPath = %q, want absolute path", got)
+	}
 }
 
 // TestManager_Run_PassesAppDataPathToRuntime guards the contract between
@@ -226,7 +264,10 @@ func TestManager_Run_PassesAppDataPathToRuntime(t *testing.T) {
 	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
 	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
 	dir := t.TempDir()
-	m := jobs.NewManager(rt, st, nil, dir, dir)
+	m, err := jobs.NewManager(rt, st, nil, dir, dir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
 
 	if _, err := m.Run(1, "manual", nil); err != nil {
 		t.Fatalf("Run: %v", err)

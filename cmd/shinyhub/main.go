@@ -87,7 +87,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("create app-data dir: %w", err)
 	}
 
-	sweepOrphanTempfiles(cfg.Storage.AppDataDir)
+	// Normalize the configured app-data dir to an absolute path once, here at
+	// the call site, and pass the absolute value to every consumer (the
+	// SharedMounts resolver, process.Manager.SetAppDataRoot, jobs.NewManager).
+	// This guarantees that long-running apps and scheduled jobs agree on the
+	// same on-disk location regardless of where the server's CWD ends up,
+	// closing the bug where a relative storage.app_data_dir caused schedules
+	// to write into <bundle>/data/<rel-path>/<slug>/ rather than the
+	// persistent data dir.
+	absAppDataDir, err := filepath.Abs(cfg.Storage.AppDataDir)
+	if err != nil {
+		return fmt.Errorf("resolve app data dir: %w", err)
+	}
+
+	sweepOrphanTempfiles(absAppDataDir)
 
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
@@ -191,13 +204,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		for _, m := range rows {
 			out = append(out, process.SharedMount{
 				SourceSlug: m.SourceSlug,
-				HostPath:   filepath.Join(cfg.Storage.AppDataDir, m.SourceSlug),
+				HostPath:   filepath.Join(absAppDataDir, m.SourceSlug),
 			})
 		}
 		return out, nil
 	})
-	if err := mgr.SetAppDataRoot(cfg.Storage.AppDataDir); err != nil {
-		return fmt.Errorf("resolve app data dir: %w", err)
+	if err := mgr.SetAppDataRoot(absAppDataDir); err != nil {
+		return fmt.Errorf("set app data root: %w", err)
 	}
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
@@ -307,7 +320,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		close(watcherDone)
 	}()
 
-	jobsMgr := jobs.NewManager(rt, store, secretsKey, cfg.Storage.AppsDir, cfg.Storage.AppDataDir)
+	jobsMgr, err := jobs.NewManager(rt, store, secretsKey, cfg.Storage.AppsDir, absAppDataDir)
+	if err != nil {
+		return fmt.Errorf("init jobs manager: %w", err)
+	}
 	sched := scheduler.New(jobsMgr, store)
 
 	schedCtx, cancelSched := context.WithCancel(context.Background())
