@@ -370,6 +370,10 @@ type UpsertScheduleByNameParams struct {
 // CreateSchedule cannot race into a spurious ErrScheduleNameExists.
 // Returns the row id and whether a new row was created.
 //
+// SQLite has no built-in way to tell INSERT from UPDATE in a single
+// UPSERT (no equivalent to Postgres's xmax check), and callers need
+// that signal to emit schedule_create vs schedule_update audit events.
+//
 // SQLite serialises writers, so the SELECT inside the transaction
 // pins the existence check against any later INSERT/UPDATE in the
 // same tx.
@@ -399,10 +403,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		}
 		id, err := res.LastInsertId()
 		if err != nil {
-			return 0, false, err
+			return 0, false, fmt.Errorf("last insert id: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
-			return 0, false, err
+			return 0, false, fmt.Errorf("commit insert: %w", err)
 		}
 		return id, true, nil
 	case err != nil:
@@ -420,7 +424,7 @@ UPDATE app_schedules
 		return 0, false, fmt.Errorf("update schedule %d: %w", existingID, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, false, err
+		return 0, false, fmt.Errorf("commit update: %w", err)
 	}
 	return existingID, false, nil
 }
