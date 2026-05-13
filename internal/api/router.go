@@ -134,7 +134,10 @@ func (s *Server) SetDeployRunForTest(fn func(deploy.Params) (*deploy.PoolResult,
 func (s *Server) SetDeployToken(t *auth.DeployToken) { s.deployToken = t }
 
 // keyLookup satisfies auth.APIKeyLookup by first checking the pre-shared
-// deploy token (no DB hit) and falling back to the api_keys table.
+// deploy token (no DB hit) and falling back to the api_keys table. DB-backed
+// keys owned by system users are refused: those accounts authenticate only
+// through their bootstrap-provisioned mechanism (the env token), never through
+// a persisted api_keys row.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	if s.deployToken != nil && s.deployToken.Matches(keyHash) {
 		u := s.deployToken.User()
@@ -146,6 +149,9 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	u, err := s.store.GetUserByAPIKeyHash(keyHash)
 	if err != nil {
 		return nil, err
+	}
+	if db.IsSystemUser(u.Username) {
+		return nil, fmt.Errorf("api key owned by system user is not honored")
 	}
 	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
 }

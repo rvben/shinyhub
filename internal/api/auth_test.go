@@ -874,6 +874,60 @@ func TestDeployToken_DoesNotAppearInTokensList(t *testing.T) {
 	}
 }
 
+func TestDeployToken_CannotCreateDBToken(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "shk_" + strings.Repeat("a", 64)
+	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
+		ID: syntheticUser.ID, Username: syntheticUser.Username, Role: syntheticUser.Role,
+	}))
+
+	body := strings.NewReader(`{"name":"ci-persist"}`)
+	req := httptest.NewRequest("POST", "/api/tokens", body)
+	req.Header.Set("Authorization", "Token "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+	keys, _ := store.ListAPIKeys(syntheticUser.ID)
+	if len(keys) != 0 {
+		t.Errorf("system user owns %d API keys, want 0", len(keys))
+	}
+}
+
+func TestKeyLookup_RejectsDBKeysOwnedBySystemUser(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Smuggle a DB-backed key directly past the handler guard, simulating a
+	// pre-existing row from before this protection landed.
+	raw := "shk_" + strings.Repeat("e", 64)
+	if _, _, err := store.CreateAPIKey(db.CreateAPIKeyParams{
+		UserID:  syntheticUser.ID,
+		KeyHash: auth.HashAPIKey(raw),
+		Name:    "leftover",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No SetDeployToken — env token is unset, so only DB-keys would authenticate.
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.Header.Set("Authorization", "Token "+raw)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 for system-user-owned DB key", rec.Code)
+	}
+}
+
 // Mirror image: an attacker who can reach us directly (i.e. peer is NOT in
 // TrustedProxyNets) cannot fake X-Forwarded-Host to bypass the same-origin
 // check. The header is ignored, the comparison falls back to r.Host, and the

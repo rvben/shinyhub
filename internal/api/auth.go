@@ -276,6 +276,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if db.IsSystemUser(u.Username) {
+		writeError(w, http.StatusForbidden, "system users cannot create persistent tokens")
+		return
+	}
+
 	exists, err := s.store.APIKeyNameExists(u.ID, req.Name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
