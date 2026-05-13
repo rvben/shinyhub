@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/tracing"
 )
 
 // loadingPage is returned when a request arrives for a slug with no registered
@@ -156,6 +160,13 @@ type Proxy struct {
 	accessLog atomic.Pointer[accessLogFn]
 	clientIP  atomic.Pointer[clientIPFn]
 
+	// tracing holds the active tracing config + ring buffer. When traceBuffer
+	// is nil the proxy is a no-op for trace propagation: no traceparent header
+	// is set, no spans are recorded. The config is read-only after SetTracing
+	// and copied by value here so we don't need a lock on the hot path.
+	traceCfg    config.TracingConfig
+	traceBuffer *tracing.Buffer
+
 	seenMu   sync.RWMutex
 	lastSeen map[string]time.Time
 	// wsReady tracks slugs for which at least one upstream has completed a
@@ -200,6 +211,18 @@ func (p *Proxy) SetClientIPResolver(fn func(*http.Request) string) {
 	}
 	f := clientIPFn(fn)
 	p.clientIP.Store(&f)
+}
+
+// SetTracing wires the tracing configuration and shared ring buffer into the
+// proxy. Must be called once at startup before traffic arrives. Passing a nil
+// buffer disables span recording but still propagates traceparent when
+// cfg.Enabled — useful for testing or for deployments that want apps to trace
+// without surfacing anything in the UI.
+func (p *Proxy) SetTracing(cfg config.TracingConfig, buf *tracing.Buffer) {
+	p.mu.Lock()
+	p.traceCfg = cfg
+	p.traceBuffer = buf
+	p.mu.Unlock()
 }
 
 // SetOnMiss registers a callback invoked (in a goroutine) when a request
@@ -543,7 +566,47 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	replicaIndex := -1
 	sticky := false
+
+	// Trace context derivation: if tracing is enabled, parse the incoming
+	// traceparent (or start a new trace), generate a fresh span ID for this
+	// proxy hop, and overwrite the header so the upstream Shiny process sees
+	// ShinyHub's span as its parent. The captured span info is recorded in the
+	// ring buffer after the response completes (in the defer below).
+	var (
+		traceEnabled = p.traceCfg.Enabled
+		traceCtx     tracing.TraceContext
+		traceParent  string
+		traceSampled bool
+	)
+	if traceEnabled {
+		traceCtx, traceParent, traceSampled = tracing.StartProxySpan(r.Header.Get("traceparent"), p.traceCfg)
+		r.Header.Set("traceparent", traceCtx.TraceparentHeader())
+	}
+
 	defer func() {
+		if traceEnabled && p.traceBuffer != nil {
+			path := r.URL.Path
+			prefix := "/app/" + slug
+			if trimmed := strings.TrimPrefix(path, prefix); trimmed != path {
+				if trimmed == "" {
+					trimmed = "/"
+				}
+				path = trimmed
+			}
+			p.traceBuffer.Record(tracing.Span{
+				TraceID:    traceCtx.TraceIDHex(),
+				SpanID:     hex.EncodeToString(traceCtx.SpanID[:]),
+				ParentID:   traceParent,
+				AppSlug:    slug,
+				Replica:    replicaIndex,
+				Method:     r.Method,
+				Path:       path,
+				Status:     rec.status,
+				DurationMS: time.Since(start).Milliseconds(),
+				StartedAt:  start,
+				Sampled:    traceSampled,
+			})
+		}
 		logPtr := p.accessLog.Load()
 		if logPtr == nil {
 			return

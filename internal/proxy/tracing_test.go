@@ -1,0 +1,107 @@
+package proxy_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/tracing"
+)
+
+// TestProxy_InjectsTraceparent verifies that an upstream Shiny process
+// receives ShinyHub's span as its parent (continuing the incoming trace ID).
+func TestProxy_InjectsTraceparent(t *testing.T) {
+	var gotTraceparent string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	incoming := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.Header.Set("traceparent", incoming)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if gotTraceparent == "" {
+		t.Fatalf("backend received no traceparent")
+	}
+	if gotTraceparent == incoming {
+		t.Errorf("expected fresh span id, but backend got identical traceparent")
+	}
+	// Trace ID portion (chars 3..35) must be continued.
+	if len(gotTraceparent) < 55 || gotTraceparent[3:35] != "0af7651916cd43dd8448eb211c80319c" {
+		t.Errorf("trace id not continued: got %q", gotTraceparent)
+	}
+}
+
+// TestProxy_DisabledTracingLeavesHeaderAlone verifies the hot path is a no-op
+// when tracing is off.
+func TestProxy_DisabledTracingLeavesHeaderAlone(t *testing.T) {
+	var got string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("traceparent")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	// SetTracing not called: traceCfg.Enabled is false.
+
+	incoming := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.Header.Set("traceparent", incoming)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if got != incoming {
+		t.Errorf("disabled tracing should pass through unchanged: got %q, want %q", got, incoming)
+	}
+}
+
+// TestProxy_RecordsErrorToBuffer verifies that a 5xx response is admitted to
+// the ring buffer with method, path, status, and replica information.
+func TestProxy_RecordsErrorToBuffer(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Hour) // slow threshold huge so only error path admits
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/page", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	spans := buf.Snapshot("app")
+	if len(spans) != 1 {
+		t.Fatalf("expected one buffered span, got %d", len(spans))
+	}
+	s := spans[0]
+	if s.Status != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", s.Status)
+	}
+	if s.Method != "GET" {
+		t.Errorf("method = %q", s.Method)
+	}
+	if s.Path != "/page" {
+		t.Errorf("path = %q, want /page (stripped /app/<slug> prefix)", s.Path)
+	}
+}
