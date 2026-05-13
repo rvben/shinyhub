@@ -366,17 +366,17 @@ type UpsertScheduleByNameParams struct {
 }
 
 // UpsertScheduleByName performs an atomic insert-or-update keyed on
-// (app_id, name) so a manifest-driven deploy and a concurrent API
-// CreateSchedule cannot race into a spurious ErrScheduleNameExists.
-// Returns the row id and whether a new row was created.
+// (app_id, name). Returns the row id and whether a new row was created.
 //
 // SQLite has no built-in way to tell INSERT from UPDATE in a single
 // UPSERT (no equivalent to Postgres's xmax check), and callers need
 // that signal to emit schedule_create vs schedule_update audit events.
-//
-// SQLite serialises writers, so the SELECT inside the transaction
-// pins the existence check against any later INSERT/UPDATE in the
-// same tx.
+// The implementation issues `INSERT ... ON CONFLICT DO NOTHING` first:
+// SQLite acquires the database write lock at that point and resolves
+// the unique-constraint check inside the engine, so a concurrent caller
+// cannot observe the same gap and race into a duplicate insert. The
+// follow-up UPDATE...RETURNING runs in the same transaction under the
+// same write lock.
 func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -384,23 +384,22 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	var existingID int64
-	err = tx.QueryRow(
-		`SELECT id FROM app_schedules WHERE app_id = ? AND name = ?`,
-		p.AppID, p.Name,
-	).Scan(&existingID)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		res, err := tx.Exec(`
+	res, err := tx.Exec(`
 INSERT INTO app_schedules
   (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			p.AppID, p.Name, p.CronExpr, p.CommandJSON,
-			boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
-		)
-		if err != nil {
-			return 0, false, fmt.Errorf("insert schedule: %w", err)
-		}
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(app_id, name) DO NOTHING`,
+		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
+		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+	)
+	if err != nil {
+		return 0, false, fmt.Errorf("insert schedule: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 1 {
 		id, err := res.LastInsertId()
 		if err != nil {
 			return 0, false, fmt.Errorf("last insert id: %w", err)
@@ -409,24 +408,26 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			return 0, false, fmt.Errorf("commit insert: %w", err)
 		}
 		return id, true, nil
-	case err != nil:
-		return 0, false, fmt.Errorf("lookup schedule: %w", err)
 	}
 
-	if _, err := tx.Exec(`
+	var id int64
+	err = tx.QueryRow(`
 UPDATE app_schedules
    SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
        overlap_policy = ?, missed_policy = ?, updated_at = CURRENT_TIMESTAMP
- WHERE id = ?`,
+ WHERE app_id = ? AND name = ?
+RETURNING id`,
 		p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
-		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, existingID,
-	); err != nil {
-		return 0, false, fmt.Errorf("update schedule %d: %w", existingID, err)
+		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+		p.AppID, p.Name,
+	).Scan(&id)
+	if err != nil {
+		return 0, false, fmt.Errorf("update schedule (app=%d, name=%q): %w", p.AppID, p.Name, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, false, fmt.Errorf("commit update: %w", err)
 	}
-	return existingID, false, nil
+	return id, false, nil
 }
 
 // --- app_shared_data ---
