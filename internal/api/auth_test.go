@@ -900,6 +900,26 @@ func TestDeployToken_CannotCreateDBToken(t *testing.T) {
 	}
 }
 
+func TestDeployToken_CannotCreateDBToken_EmptyBody(t *testing.T) {
+	srv, store := newTestServer(t)
+	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "shk_" + strings.Repeat("a", 64)
+	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
+		ID: syntheticUser.ID, Username: syntheticUser.Username, Role: syntheticUser.Role,
+	}))
+
+	req := httptest.NewRequest("POST", "/api/tokens", nil)
+	req.Header.Set("Authorization", "Token "+raw)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (identity check must precede body parse)", rec.Code)
+	}
+}
+
 func TestKeyLookup_RejectsDBKeysOwnedBySystemUser(t *testing.T) {
 	srv, store := newTestServer(t)
 	syntheticUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")

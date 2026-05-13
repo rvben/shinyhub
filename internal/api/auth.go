@@ -260,16 +260,6 @@ type createTokenResponse struct {
 }
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
-	var req createTokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad request")
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -278,6 +268,16 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 
 	if db.IsSystemUser(u.Username) {
 		writeError(w, http.StatusForbidden, "system users cannot create persistent tokens")
+		return
+	}
+
+	var req createTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
 
