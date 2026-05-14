@@ -17,6 +17,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.0](https://github.com/rvben/shinyhub/compare/v0.4.1...v0.5.0) - 2026-05-14
+
+### Added
+
+- **ui**: show manifest summary in deploy modal ([b9ab11a](https://github.com/rvben/shinyhub/commit/b9ab11acde83ecbfba64ae94da9bb3bd4fcbd308))
+- **deploy**: surface manifest-apply summary in response and CLI output ([9492cde](https://github.com/rvben/shinyhub/commit/9492cdeab463139a50c0852d458e29bd9b3e7f54))
+- **api**: apply manifest [app] and [[schedule]] in two phases during deploy ([cf1fd33](https://github.com/rvben/shinyhub/commit/cf1fd332651e7ad454afc5d76a6193ccc501cc22))
+- **db**: add atomic UpsertScheduleByName for declarative schedules ([f3a7902](https://github.com/rvben/shinyhub/commit/f3a7902429dd9534d41cb721a609575da5f63456))
+- **deploy**: parse and validate [app] + [[schedule]] in shinyhub.toml ([dae1287](https://github.com/rvben/shinyhub/commit/dae12873cc4899c2a8864147d66ef9d0c3339f7f))
+- **cli**: honor .shinyhubignore (or .gitignore fallback) when bundling ([94db539](https://github.com/rvben/shinyhub/commit/94db539d3c2da9d30fb143890f27878b1251ada1))
+
+### Fixed
+
+- **api**: pre-validate manifest before tearing down running pool ([deb224b](https://github.com/rvben/shinyhub/commit/deb224bf1821e35ee686a1d3b9cb43fe0230d332))
+- **db**: make UpsertScheduleByName race-free via INSERT ON CONFLICT ([bc7ef6c](https://github.com/rvben/shinyhub/commit/bc7ef6c88d845e9fa466b2f60ca79f1e5b20495f))
+- **cli**: prune ignored directories when no negation patterns present ([a593ebc](https://github.com/rvben/shinyhub/commit/a593ebc91ad293a4758cc39244b936e4d431bc0c))
+
 ## [0.4.1](https://github.com/rvben/shinyhub/compare/v0.4.0...v0.4.1) - 2026-05-13
 
 ### Added
