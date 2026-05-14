@@ -191,6 +191,40 @@ actions:
 Hook executions are logged into the deploy log but do not emit per-hook
 audit events. The overall deploy is recorded as `app_deploy`.
 
+## Deploy response
+
+When a manifest was applied, the JSON response from `POST /api/apps/:slug/deploy`
+includes a `manifest` field summarising what landed. The CLI uses this to
+print confirmation lines after `Deployed ...`:
+
+```
+Deployed myapp (deployment #4)
+URL: https://hub.example.com/app/myapp/
+Applied [app] settings: max_sessions_per_replica=10; replicas=2
+Schedules: 1 created, 0 updated
+```
+
+The wire shape:
+
+```json
+{
+  "slug": "myapp",
+  "deploy_count": 4,
+  ...other app fields...,
+  "manifest": {
+    "app": { "replicas": 2, "max_sessions_per_replica": 10 },
+    "schedules": [
+      { "name": "nightly", "action": "created" }
+    ]
+  }
+}
+```
+
+`manifest.app` is omitted when no `[app]` field changed; `manifest.schedules`
+is omitted when no `[[schedule]]` was upserted; the entire `manifest` key is
+omitted when the bundle has no `shinyhub.toml`. Top-level app fields stay in
+place so scripts that read `deploy_count` keep working.
+
 ## Worked example
 
 A small app that runs a nightly fetch, has tight scaling, and applies a

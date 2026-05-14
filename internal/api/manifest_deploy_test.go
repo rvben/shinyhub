@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -322,6 +323,133 @@ func TestDeploy_ManifestBadAppSettingFails400(t *testing.T) {
 	appAfter, _ := store.GetAppBySlug("badapp")
 	if appAfter.Replicas != replicasBefore {
 		t.Errorf("replicas mutated: %d → %d (want no change on 400)", replicasBefore, appAfter.Replicas)
+	}
+}
+
+// TestDeploy_ResponseIncludesManifestSummary asserts the deploy response
+// embeds a "manifest" object describing what [app] settings and schedules
+// were applied. This is the wire shape the CLI's formatManifestSummary
+// parses; changing either side without updating the other regresses the
+// "Applied [app] settings: ..." line.
+func TestDeploy_ResponseIncludesManifestSummary(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "summary", Name: "Summary App", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := `
+[app]
+replicas = 2
+max_sessions_per_replica = 8
+
+[[schedule]]
+name = "nightly"
+cron = "0 0 * * *"
+cmd  = "echo n"
+`
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/summary/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v: %s", err, rec.Body.String())
+	}
+
+	// Top-level app fields must still be present (CLI deploy.go reads
+	// deploy_count from the top level).
+	if _, ok := resp["deploy_count"]; !ok {
+		t.Errorf("top-level deploy_count missing; CLI summary would lose deployment number")
+	}
+
+	manifestSummary, ok := resp["manifest"].(map[string]any)
+	if !ok {
+		t.Fatalf(`response missing "manifest" object: %s`, rec.Body.String())
+	}
+	app, ok := manifestSummary["app"].(map[string]any)
+	if !ok {
+		t.Fatalf(`manifest.app missing: %v`, manifestSummary)
+	}
+	if v, _ := app["replicas"].(float64); int(v) != 2 {
+		t.Errorf("manifest.app.replicas = %v, want 2", app["replicas"])
+	}
+	if v, _ := app["max_sessions_per_replica"].(float64); int(v) != 8 {
+		t.Errorf("manifest.app.max_sessions_per_replica = %v, want 8", app["max_sessions_per_replica"])
+	}
+
+	schedules, ok := manifestSummary["schedules"].([]any)
+	if !ok || len(schedules) != 1 {
+		t.Fatalf("manifest.schedules = %v, want one entry", manifestSummary["schedules"])
+	}
+	first, _ := schedules[0].(map[string]any)
+	if first["name"] != "nightly" || first["action"] != "created" {
+		t.Errorf("schedule entry = %v, want {name:nightly action:created}", first)
+	}
+
+	// Second deploy of the same schedule must report action=updated.
+	body2, ctype2 := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
+	})
+	req2 := httptest.NewRequest("POST", "/api/apps/summary/deploy", body2)
+	req2.Header.Set("Content-Type", ctype2)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second deploy: expected 200, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	schedules2 := resp2["manifest"].(map[string]any)["schedules"].([]any)
+	first2, _ := schedules2[0].(map[string]any)
+	if first2["action"] != "updated" {
+		t.Errorf("second deploy action = %v, want updated", first2["action"])
+	}
+}
+
+// TestDeploy_ResponseOmitsManifestWhenAbsent asserts that a bundle without
+// a shinyhub.toml produces a deploy response with NO "manifest" key, so the
+// CLI prints no spurious summary line.
+func TestDeploy_ResponseOmitsManifestWhenAbsent(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "plain", Name: "Plain App", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py": "from shiny import App\n",
+	})
+	req := httptest.NewRequest("POST", "/api/apps/plain/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if _, ok := resp["manifest"]; ok {
+		t.Errorf("expected no manifest key when bundle has no shinyhub.toml; got %v", resp["manifest"])
 	}
 }
 

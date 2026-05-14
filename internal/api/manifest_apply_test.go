@@ -123,8 +123,12 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 		Overlap:        "skip",
 		Missed:         "skip",
 	}}
-	if err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	results, err := srv.applyManifestSchedules(r, app, specs)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Name != "nightly" || results[0].Action != "created" {
+		t.Errorf("first apply results = %+v, want one {nightly created}", results)
 	}
 	first, _ := store.ListSchedulesByApp(app.ID)
 
@@ -136,8 +140,12 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 	}
 
 	specs[0].Cron = "0 1 * * *"
-	if err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	results, err = srv.applyManifestSchedules(r, app, specs)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Action != "updated" {
+		t.Errorf("second apply results = %+v, want one {nightly updated}", results)
 	}
 	second, _ := store.ListSchedulesByApp(app.ID)
 	if len(second) != 1 {
@@ -182,7 +190,7 @@ func TestApplyManifestSchedules_LeavesOrphansAlone(t *testing.T) {
 		Overlap:        "skip",
 		Missed:         "skip",
 	}}
-	if err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
 		t.Fatal(err)
 	}
 	all, _ := store.ListSchedulesByApp(app.ID)
@@ -208,7 +216,7 @@ func TestApplyManifestSchedules_SchedulerNotStartedIsWarn(t *testing.T) {
 		Overlap:        "skip",
 		Missed:         "skip",
 	}}
-	if err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
 		t.Errorf("scheduler-not-started must not fail apply: %v", err)
 	}
 

@@ -597,6 +597,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// that may be pruned. Validation already passed above; any error here is a
 	// storage failure that leaves the app in an inconsistent state — mark it
 	// degraded so the operator notices.
+	var manifestSummary ManifestApplied
 	if manifest != nil && !manifest.App.IsZero() {
 		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
@@ -606,6 +607,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
 		}
+		manifestSummary.App = manifestAppliedSummary(manifest.App)
 		// Refresh so deploy.Run sees the updated replicas / max_sessions.
 		if fresh, ferr := s.store.GetAppBySlug(slug); ferr == nil {
 			app = fresh
@@ -691,7 +693,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// CreateDeployment is durable so a scheduler tick between Reload and this
 	// write cannot fire a job against the previous bundle.
 	if manifest != nil && len(manifest.Schedules) > 0 {
-		if err := s.applyManifestSchedules(r, app, manifest.Schedules); err != nil {
+		scheduleResults, err := s.applyManifestSchedules(r, app, manifest.Schedules)
+		if err != nil {
 			// Phase B is post-commit: bundle is live, deployment row is durable.
 			// Failure leaves schedules incomplete; the next deploy converges
 			// (idempotent upserts).
@@ -699,6 +702,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "schedule apply failed: "+err.Error())
 			return
 		}
+		manifestSummary.Schedules = scheduleResults
 	}
 
 	// Prune old version directories beyond the retention limit.
@@ -723,7 +727,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
-	writeJSON(w, http.StatusOK, updatedApp)
+
+	// Top-level keys remain the *db.App fields (compat: CLI / scripts that
+	// read deploy_count still work) and a new "manifest" key is added when
+	// any [app] field or [[schedule]] was applied. omitempty keeps the wire
+	// shape clean for bundles without a shinyhub.toml.
+	resp := struct {
+		*db.App
+		Manifest *ManifestApplied `json:"manifest,omitempty"`
+	}{App: updatedApp}
+	if !manifestSummary.IsEmpty() {
+		resp.Manifest = &manifestSummary
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {

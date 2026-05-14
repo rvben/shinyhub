@@ -77,6 +77,13 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 	return nil
 }
 
+// ManifestScheduleResult records the outcome of one [[schedule]] upsert so
+// callers can surface a per-schedule action in their response.
+type ManifestScheduleResult struct {
+	Name   string `json:"name"`
+	Action string `json:"action"` // "created" or "updated"
+}
+
 // applyManifestSchedules (Phase B) upserts each [[schedule]] from the
 // manifest. Must be called after CreateDeployment succeeds — a scheduler
 // tick between Reload and CreateDeployment could otherwise fire a job
@@ -84,11 +91,15 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 //
 // scheduler.ErrNotStarted is logged but does not fail the apply: the
 // persisted row activates on the next Start.
-func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []deploy.ScheduleSpec) error {
+//
+// Returns one result entry per spec in input order. On error the slice
+// contains the results processed so far.
+func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []deploy.ScheduleSpec) ([]ManifestScheduleResult, error) {
+	results := make([]ManifestScheduleResult, 0, len(specs))
 	for _, spec := range specs {
 		cmdJSON, err := json.Marshal(spec.Command)
 		if err != nil {
-			return fmt.Errorf("schedule %q: marshal command: %w", spec.Name, err)
+			return results, fmt.Errorf("schedule %q: marshal command: %w", spec.Name, err)
 		}
 		timeout := 3600
 		if spec.TimeoutSeconds != nil {
@@ -105,7 +116,7 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			MissedPolicy:   spec.Missed,
 		})
 		if err != nil {
-			return fmt.Errorf("schedule %q: %w", spec.Name, err)
+			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)
 		}
 		if s.scheduler != nil {
 			if err := s.scheduler.Reload(id); err != nil {
@@ -113,18 +124,21 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 					slog.Warn("manifest: scheduler not started; row persisted, will activate on scheduler start",
 						"slug", app.Slug, "schedule", spec.Name)
 				} else {
-					return fmt.Errorf("scheduler reload (%s): %w", spec.Name, err)
+					return results, fmt.Errorf("scheduler reload (%s): %w", spec.Name, err)
 				}
 			}
 		}
-		action := "schedule_update"
+		auditAction := "schedule_update"
+		resultAction := "updated"
 		if created {
-			action = "schedule_create"
+			auditAction = "schedule_create"
+			resultAction = "created"
 		}
-		s.audit(r, action, "schedule", fmt.Sprintf("%d", id),
+		s.audit(r, auditAction, "schedule", fmt.Sprintf("%d", id),
 			fmt.Sprintf(`{"app":%q,"name":%q}`, app.Slug, spec.Name))
+		results = append(results, ManifestScheduleResult{Name: spec.Name, Action: resultAction})
 	}
-	return nil
+	return results, nil
 }
 
 func derefOrZero(p *int) int {
@@ -132,6 +146,42 @@ func derefOrZero(p *int) int {
 		return 0
 	}
 	return *p
+}
+
+// ManifestApplied summarises what the manifest changed during this deploy.
+// Returned alongside the app in the deploy response so CLI / UI can show
+// the operator a concrete record of what landed.
+type ManifestApplied struct {
+	App       map[string]any           `json:"app,omitempty"`
+	Schedules []ManifestScheduleResult `json:"schedules,omitempty"`
+}
+
+// IsEmpty reports whether nothing was applied. The handler omits the field
+// from the response in that case so the wire shape stays clean.
+func (m *ManifestApplied) IsEmpty() bool {
+	return m == nil || (len(m.App) == 0 && len(m.Schedules) == 0)
+}
+
+// manifestAppliedSummary computes the per-field record of [app] changes. It
+// mirrors manifestAppDetail (the audit-event detail blob) but returns a
+// structured map suitable for JSON serialisation.
+func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
+	if m.IsZero() {
+		return nil
+	}
+	d := map[string]any{}
+	if m.HibernateResetToDefault {
+		d["hibernate_timeout_minutes"] = nil
+	} else if m.HibernateTimeoutMinutes != nil {
+		d["hibernate_timeout_minutes"] = *m.HibernateTimeoutMinutes
+	}
+	if m.Replicas != nil {
+		d["replicas"] = *m.Replicas
+	}
+	if m.MaxSessionsPerReplica != nil {
+		d["max_sessions_per_replica"] = *m.MaxSessionsPerReplica
+	}
+	return d
 }
 
 func manifestAppDetail(m deploy.AppSettings) string {

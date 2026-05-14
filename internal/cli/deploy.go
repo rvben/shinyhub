@@ -185,6 +185,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("Deployed %s\nURL: %s/app/%s/\n", slug, cfg.Host, slug)
 	}
+	for _, line := range formatManifestSummary(appResp["manifest"]) {
+		fmt.Println(line)
+	}
 
 	if deployFlags.wait {
 		if err := waitForHealthy(cfg, slug, time.Duration(deployFlags.waitTimeout)*time.Second); err != nil {
