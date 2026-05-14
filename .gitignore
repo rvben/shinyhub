@@ -10,7 +10,6 @@ CLAUDE.local.md
 
 # JS toolchain (only used for JSDOM tests of UI assets)
 node_modules/
-package-lock.json
 
 # Runtime artifacts created when running the server from a checkout
 # (default config writes the SQLite DB and per-app data under ./data).
