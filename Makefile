@@ -1,4 +1,4 @@
-.PHONY: build clean test lint run dev goreleaser-check
+.PHONY: build clean test test-go test-js lint run dev goreleaser-check
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -6,8 +6,17 @@ build:
 clean:
 	rm -rf bin tmp
 
-test:
+test: test-go test-js
+
+test-go:
 	go test ./... -count=1
+
+# test-js runs the JSDOM tests for UI assets. Requires Node 20+. Installs
+# devDependencies (jsdom) the first time it runs; afterwards it's a no-op.
+test-js:
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required for UI tests)"; exit 1; }
+	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
+	node --test 'internal/ui/jstests/*.test.js'
 
 lint:
 	go vet ./...

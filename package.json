@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'internal/ui/jstests/*.test.js'"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.0"
+  }
+}
