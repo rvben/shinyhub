@@ -198,6 +198,13 @@ func TestDeployApp_QuotaDisabled_DoesNotReject(t *testing.T) {
 	appsDir := t.TempDir()
 	srv, store := newQuotaTestServer(t, appsDir, 0) // disabled
 
+	// Replace deploy.Run with a no-op so the test asserts handler behaviour
+	// (the 413 gate, specifically) without paying for a 120 s health-check
+	// timeout on a runtime that has no uv/Rscript binary to spawn.
+	srv.SetDeployRunForTest(func(_ deploy.Params) (*deploy.PoolResult, error) {
+		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 1, Port: 1}}}, nil
+	})
+
 	hash, _ := auth.HashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
@@ -213,8 +220,7 @@ func TestDeployApp_QuotaDisabled_DoesNotReject(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
-	// With quota disabled, the handler must not short-circuit on 413. It may
-	// still fail later (no uv / health check times out), but not with 413.
+	// With quota disabled, the handler must not short-circuit on 413.
 	if rec.Code == http.StatusRequestEntityTooLarge {
 		t.Fatalf("quota disabled should not return 413: %s", rec.Body.String())
 	}
@@ -258,6 +264,11 @@ func TestDeployApp_MaxBundleDisabled_DoesNotRejectBySize(t *testing.T) {
 	appsDir := t.TempDir()
 	srv, store := newMaxBundleTestServer(t, appsDir, 0) // no cap
 
+	// Stub deploy.Run so this test does not block on a real spawn + health check.
+	srv.SetDeployRunForTest(func(_ deploy.Params) (*deploy.PoolResult, error) {
+		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 1, Port: 1}}}, nil
+	})
+
 	hash, _ := auth.HashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
@@ -274,8 +285,7 @@ func TestDeployApp_MaxBundleDisabled_DoesNotRejectBySize(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
-	// With no cap, the upload must not be rejected with 413. It may still fail
-	// for other reasons (no runtime, health-check timeout), but not size.
+	// With no cap, the upload must not be rejected with 413.
 	if rec.Code == http.StatusRequestEntityTooLarge {
 		t.Fatalf("cap disabled should not return 413: %s", rec.Body.String())
 	}
