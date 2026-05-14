@@ -26,6 +26,23 @@ func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
 		"GET /api/apps/:slug returns {app, replicas_status}; the Overview Replicas panel seeds from replicas_status")
 }
 
+// TestDeployModalReadsManifestSummary guards the deploy-response contract.
+// POST /api/apps/:slug/deploy embeds a "manifest" object summarising what
+// [app] settings and [[schedule]] blocks were applied (see
+// internal/api/apps.go handleDeployApp and internal/api/manifest_apply.go
+// ManifestApplied). The deploy modal in app.js reads body.manifest and
+// renders the summary into #deploy-result; if either side renames the key
+// the modal silently falls back to the no-manifest auto-close path and
+// the operator loses confirmation of what landed.
+func TestDeployModalReadsManifestSummary(t *testing.T) {
+	assertContains(t, "app.js", "body.manifest",
+		"deploy submit handler must read body.manifest from the deploy response to render the post-deploy summary; see internal/api/manifest_apply.go ManifestApplied")
+	assertContains(t, "app.js", "formatManifestSummary",
+		"app.js must keep formatManifestSummary so the manifest summary lines render under the progress bar")
+	assertContains(t, "index.html", `id="deploy-result"`,
+		"the deploy modal must keep #deploy-result as the slot for the post-deploy manifest summary")
+}
+
 // TestEnvListUnwrapsResponse guards the env-list consumer.
 // GET /api/apps/:slug/env returns {env: [...]} (internal/api/env.go
 // handleEnvList) and refreshEnvList in app.js reads data.env.

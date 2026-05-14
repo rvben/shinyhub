@@ -4,6 +4,7 @@ import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
+import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -136,6 +137,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const deployProgressWrap = document.getElementById('deploy-progress-wrap');
   const deployProgressBar  = document.getElementById('deploy-progress-bar');
   const deployProgressText = document.getElementById('deploy-progress-text');
+  const deployResult       = document.getElementById('deploy-result');
+  const deployResultList   = document.getElementById('deploy-result-list');
   const deployError        = document.getElementById('deploy-error');
   const deployCancel       = document.getElementById('deploy-cancel');
   const deploySubmit       = document.getElementById('deploy-submit');
@@ -1819,9 +1822,12 @@ document.addEventListener('DOMContentLoaded', () => {
     deployProgressWrap.hidden = true;
     deployProgressBar.value = 0;
     deployProgressText.textContent = '0%';
+    deployResult.hidden = true;
+    deployResultList.innerHTML = '';
     setError(deployError, '');
     deploySubmit.disabled = true;
     deploySubmit.textContent = 'Deploy';
+    deployCancel.textContent = 'Cancel';
     deployFileInput.value = '';
     deployDropzone.classList.remove('dragover');
     if (deployState && deployState.xhr) {
@@ -2149,7 +2155,10 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       xhr.addEventListener('load', () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(xhr.responseText);
+          let body = {};
+          try { body = JSON.parse(xhr.responseText) || {}; }
+          catch { /* keep empty body; callers treat as no manifest */ }
+          resolve(body);
         } else {
           let msg = 'Deploy failed';
           try {
@@ -2176,6 +2185,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   deploySubmit.addEventListener('click', async () => {
     if (!deployState || !deployState.blob) return;
+
+    // Re-entry: after a successful deploy this button becomes "View logs".
+    if (deployState.completed) {
+      const slug = deployState.slug;
+      closeDeployModal();
+      openLogs(slug);
+      return;
+    }
+
     setError(deployError, '');
     deploySubmit.disabled = true;
     deployCancel.textContent = 'Close';
@@ -2185,8 +2203,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const { slug, blob } = deployState;
 
+    let body;
     try {
-      await uploadBundle(slug, blob);
+      body = await uploadBundle(slug, blob);
     } catch (err) {
       if (err.code === 'UPLOAD_CANCELLED') {
         return; // closeDeployModal resets state
@@ -2199,8 +2218,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     deployProgressText.textContent = 'Deployed';
-    closeDeployModal();
     await loadApps();
+
+    // body.manifest is set when the bundle's shinyhub.toml applied [app]
+    // settings or [[schedule]] blocks; show it inside the modal so the
+    // operator can confirm what landed before jumping to logs. When the
+    // bundle has no manifest, fall back to the original auto-redirect
+    // behaviour so the no-config flow stays unchanged.
+    const summaryLines = formatManifestSummary(body && body.manifest);
+    if (summaryLines.length > 0) {
+      renderDeployResult(deployResult, deployResultList, summaryLines);
+      deployState.completed = true;
+      deploySubmit.disabled = false;
+      deploySubmit.textContent = 'View logs';
+      return;
+    }
+
+    closeDeployModal();
     openLogs(slug);
   });
 
