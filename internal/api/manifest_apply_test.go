@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"fmt"
 	"testing"
 
@@ -87,18 +86,27 @@ func TestApplyManifestAppSettings_AbsentFieldsLeftAlone(t *testing.T) {
 	}
 }
 
-func TestApplyManifestAppSettings_ExceedsMaxReplicas_ReturnsValidationError(t *testing.T) {
-	srv, store, ownerID := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 2)
-	app, _ := store.GetAppBySlug("alpha")
-	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+func TestValidateManifestForServer_ExceedsMaxReplicas(t *testing.T) {
+	srv, _, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 2)
 
-	err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{Replicas: ptrIntAPI(5)})
-	if err == nil {
-		t.Fatal("expected error")
+	if ve := srv.validateManifestForServer(deploy.AppSettings{Replicas: ptrIntAPI(5)}); ve == nil {
+		t.Fatal("expected validation error for replicas > MaxReplicas")
 	}
-	var ve *validationError
-	if !errors.As(err, &ve) {
-		t.Errorf("expected *validationError, got %T: %v", err, err)
+}
+
+func TestValidateManifestForServer_WithinPolicyPasses(t *testing.T) {
+	srv, _, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 4)
+
+	if ve := srv.validateManifestForServer(deploy.AppSettings{Replicas: ptrIntAPI(3)}); ve != nil {
+		t.Errorf("unexpected validation error: %v", ve)
+	}
+}
+
+func TestValidateManifestForServer_ZeroManifestIsNoop(t *testing.T) {
+	srv, _, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 1)
+
+	if ve := srv.validateManifestForServer(deploy.AppSettings{}); ve != nil {
+		t.Errorf("expected nil for zero manifest, got %v", ve)
 	}
 }
 

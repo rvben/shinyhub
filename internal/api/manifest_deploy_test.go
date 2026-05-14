@@ -91,6 +91,11 @@ func (f *manifestFakeRuntime) AppBindHost() string    { return "127.0.0.1" }
 // server, store, and an admin JWT bearer token.
 func newManifestE2EServer(t *testing.T) (*Server, *db.Store, string) {
 	t.Helper()
+	return newManifestE2EServerCfg(t, config.RuntimeConfig{})
+}
+
+func newManifestE2EServerCfg(t *testing.T, runtime config.RuntimeConfig) (*Server, *db.Store, string) {
+	t.Helper()
 	appsDir := t.TempDir()
 	store, err := db.Open(":memory:")
 	if err != nil {
@@ -113,6 +118,7 @@ func newManifestE2EServer(t *testing.T) (*Server, *db.Store, string) {
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir, VersionRetention: 5},
+		Runtime: runtime,
 	}
 
 	rt := newManifestFakeRuntime()
@@ -317,6 +323,102 @@ func TestDeploy_ManifestBadAppSettingFails400(t *testing.T) {
 	if appAfter.Replicas != replicasBefore {
 		t.Errorf("replicas mutated: %d → %d (want no change on 400)", replicasBefore, appAfter.Replicas)
 	}
+}
+
+// TestDeploy_ManifestPolicyViolation_LeavesRunningPoolIntact verifies that a
+// manifest rejected by server-policy validation (replicas > MaxReplicas)
+// returns 400 BEFORE the running pool is torn down. The PIDs from the prior
+// deploy must still be alive in the manager after the rejection.
+func TestDeploy_ManifestPolicyViolation_LeavesRunningPoolIntact(t *testing.T) {
+	srv, store, token := newManifestE2EServerCfg(t, config.RuntimeConfig{MaxReplicas: 2})
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "polapp", Name: "Policy App", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// First deploy: legal manifest, pool comes up with 2 replicas.
+	manifest1 := `
+[app]
+replicas = 2
+`
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest1,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/polapp/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	beforePIDs := pidsForSlug(srv, "polapp")
+	if len(beforePIDs) == 0 {
+		t.Fatalf("expected running replicas after first deploy, got none")
+	}
+
+	// Second deploy: replicas exceeds policy. Must return 400 and leave the
+	// running pool untouched (no Stop, no Deregister).
+	manifest2 := `
+[app]
+replicas = 5
+`
+	body2, ctype2 := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest2,
+	})
+	req2 := httptest.NewRequest("POST", "/api/apps/polapp/deploy", body2)
+	req2.Header.Set("Content-Type", ctype2)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("policy violation: expected 400, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	afterPIDs := pidsForSlug(srv, "polapp")
+	if !samePIDSet(beforePIDs, afterPIDs) {
+		t.Errorf("pool was disturbed by rejected deploy: before=%v after=%v", beforePIDs, afterPIDs)
+	}
+
+	// App status must remain "running" — Phase A never ran, nothing to mark.
+	appAfter, _ := store.GetAppBySlug("polapp")
+	if appAfter.Status == "degraded" {
+		t.Errorf("app marked degraded by policy rejection (want unchanged status)")
+	}
+	if appAfter.Replicas != 2 {
+		t.Errorf("replicas mutated by rejected deploy: %d (want 2)", appAfter.Replicas)
+	}
+}
+
+func pidsForSlug(srv *Server, slug string) []int {
+	infos := srv.manager.AllForSlug(slug)
+	pids := make([]int, 0, len(infos))
+	for _, p := range infos {
+		pids = append(pids, p.PID)
+	}
+	return pids
+}
+
+func samePIDSet(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[int]struct{}, len(a))
+	for _, p := range a {
+		set[p] = struct{}{}
+	}
+	for _, p := range b {
+		if _, ok := set[p]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // TestDeploy_ManifestUnknownAppFieldFails400 verifies that a shinyhub.toml

@@ -568,6 +568,22 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	release := s.acquireDeployLock(slug)
 	defer release()
 
+	// Load + server-policy-validate the manifest BEFORE tearing down the
+	// running pool. A manifest rejected by policy (e.g. replicas > MaxReplicas)
+	// returns 400 with the live pool undisturbed. manifest is kept in scope so
+	// Phase B can apply [[schedule]] rows after CreateDeployment commits.
+	manifest, err := deploy.LoadManifest(bundleDir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "shinyhub.toml: "+err.Error())
+		return
+	}
+	if manifest != nil {
+		if ve := s.validateManifestForServer(manifest.App); ve != nil {
+			writeError(w, http.StatusBadRequest, ve.Error())
+			return
+		}
+	}
+
 	// Stop existing instance before re-deploying; ignore the error since the
 	// app may not have been running yet.
 	_ = s.manager.Stop(slug)
@@ -578,21 +594,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	// Phase A: apply [app] manifest settings atomically before starting the new
 	// pool. manager.Stop has already run so no process holds a replica index
-	// that may be pruned. manifest is kept in scope so Phase B can apply
-	// [[schedule]] rows after CreateDeployment commits.
-	manifest, err := deploy.LoadManifest(bundleDir)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "shinyhub.toml: "+err.Error())
-		return
-	}
+	// that may be pruned. Validation already passed above; any error here is a
+	// storage failure that leaves the app in an inconsistent state — mark it
+	// degraded so the operator notices.
 	if manifest != nil && !manifest.App.IsZero() {
 		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
-			var ve *validationError
-			if errors.As(err, &ve) {
-				writeError(w, http.StatusBadRequest, ve.Error())
-				return
-			}
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
+			if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
+				slog.Error("update app status after manifest apply failure", "slug", slug, "err", uerr)
+			}
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
 		}

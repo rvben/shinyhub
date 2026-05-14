@@ -22,34 +22,36 @@ func newValidationError(format string, args ...any) *validationError {
 	return &validationError{msg: fmt.Sprintf(format, args...)}
 }
 
+// validateManifestForServer applies server-policy checks (e.g. MaxReplicas)
+// that depend on runtime config, not just on the manifest itself. Called by
+// the deploy handler BEFORE tearing down the running pool so that a manifest
+// rejected by policy returns 400 without disturbing live traffic. The basic
+// per-field bounds (Replicas >= 1, MaxSessions 0..1000) are already enforced
+// at parse time in deploy.LoadManifest.
+func (s *Server) validateManifestForServer(m deploy.AppSettings) *validationError {
+	if m.IsZero() {
+		return nil
+	}
+	if m.Replicas != nil && s.cfg.Runtime.MaxReplicas > 0 && *m.Replicas > s.cfg.Runtime.MaxReplicas {
+		return newValidationError("replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas)
+	}
+	return nil
+}
+
 // applyManifestAppSettings (Phase A) writes [app] settings to the DB in a
 // single transaction. Replica shrink (delete obsolete replica rows) is
 // part of that transaction.
 //
 // Caller contract:
 //   - requireManageApp has already authorized r.
+//   - validateManifestForServer has already returned nil.
 //   - manager.Stop(app.Slug) has already run, so no process holds a
 //     replica index that may be deleted.
 //
-// Errors:
-//   - Validation failures return *validationError (handler → 400).
-//   - Storage failures return wrapped DB errors (handler → 500).
+// Returns wrapped DB errors on storage failure (handler → 500 + degraded).
 func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy.AppSettings) error {
 	if m.IsZero() {
 		return nil
-	}
-	if m.Replicas != nil {
-		if *m.Replicas < 1 {
-			return newValidationError("replicas must be >= 1")
-		}
-		if s.cfg.Runtime.MaxReplicas > 0 && *m.Replicas > s.cfg.Runtime.MaxReplicas {
-			return newValidationError("replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas)
-		}
-	}
-	if m.MaxSessionsPerReplica != nil {
-		if *m.MaxSessionsPerReplica < 0 || *m.MaxSessionsPerReplica > 1000 {
-			return newValidationError("max_sessions_per_replica must be between 0 and 1000")
-		}
 	}
 
 	if err := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
