@@ -25,6 +25,13 @@ var errAtomicUnsupported = errors.New("openat2 unsupported")
 func openParentBeneath(dataDir, clean string) (fd int, base string, err error) {
 	rootFd, err := unix.Open(dataDir, unix.O_DIRECTORY|unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
+			// The per-app data dir was never created (e.g. no upload yet).
+			// Defer to the portable fallback, which yields ErrFileNotFound
+			// for Delete; Put cannot reach this because it pre-creates the
+			// dir before resolving paths.
+			return -1, "", errAtomicUnsupported
+		}
 		return -1, "", fmt.Errorf("open data dir: %w", err)
 	}
 	defer unix.Close(rootFd)

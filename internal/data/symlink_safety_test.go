@@ -120,3 +120,19 @@ func TestPutDelete_HappyPathStillWorks(t *testing.T) {
 		t.Fatalf("file still present after Delete: %v", err)
 	}
 }
+
+// TestDelete_MissingDataDirIsNotFound covers an app whose per-app data dir was
+// never created (no upload yet): deleting any path must report ErrFileNotFound,
+// not a generic error. The Linux openat2 path opens the data dir itself and
+// must defer to the portable fallback when that root is absent; without that,
+// the API surfaces a 500 instead of a 404 (regression caught only on Linux,
+// since darwin always takes the fallback).
+func TestDelete_MissingDataDirIsNotFound(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "never-created")
+
+	err := Delete(dataDir, "does-not-exist.txt")
+	if !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("Delete on missing data dir = %v, want ErrFileNotFound", err)
+	}
+}
