@@ -600,12 +600,19 @@ func apiTimeoutHandler(h http.Handler) http.Handler {
 }
 
 // isLongLivedAPIRoute reports whether method+path identifies an API
-// route that must bypass the per-request timeout. Three cases qualify:
+// route that must bypass the per-request timeout. Matching is exact on
+// both the HTTP method and the full /api/apps/{slug}/... shape so an
+// unrelated route that merely ends in one of these words (or uses a
+// different method) keeps the 30s timeout. Qualifying routes:
 //
-//   - GET .../logs — server-sent log stream that stays open by design.
-//   - POST .../deploy — bundle upload, body can be hundreds of MB.
-//   - .../restart, .../rollback, .../stop — pool swaps that stop and
-//     relaunch every replica under the per-slug deploy lock. These can
+//   - GET /api/apps/{slug}/logs and
+//     GET /api/apps/{slug}/schedules/{id}/runs/{run_id}/logs —
+//     server-sent log streams that stay open by design.
+//   - POST /api/apps/{slug}/deploy — bundle upload, body can be
+//     hundreds of MB.
+//   - POST /api/apps/{slug}/restart, POST|PUT /api/apps/{slug}/rollback,
+//     POST /api/apps/{slug}/stop — pool swaps that stop and relaunch
+//     every replica under the per-slug deploy lock. These can
 //     legitimately exceed 30s (dependency-heavy launches). Letting
 //     http.TimeoutHandler fire would return "request timeout" to the
 //     client while the swap keeps mutating runtime + DB state, leaving
@@ -620,23 +627,6 @@ func apiTimeoutHandler(h http.Handler) http.Handler {
 // All other API routes keep the 30s timeout so a slow handler cannot
 // pin a server goroutine indefinitely.
 func isLongLivedAPIRoute(method, path string) bool {
-	if strings.HasSuffix(path, "/logs") || strings.HasSuffix(path, "/deploy") ||
-		strings.HasSuffix(path, "/restart") || strings.HasSuffix(path, "/rollback") ||
-		strings.HasSuffix(path, "/stop") {
-		return true
-	}
-	if method == http.MethodPut && isAppDataUploadPath(path) {
-		return true
-	}
-	return false
-}
-
-// isAppDataUploadPath returns true for paths of the form
-// "/api/apps/<slug>/data/<rel>" where <slug> and <rel> are both
-// non-empty. The leading slug must contain at least one character so a
-// bare "/api/apps/data/foo" (slug == "data") cannot impersonate the
-// data-upload route.
-func isAppDataUploadPath(path string) bool {
 	const prefix = "/api/apps/"
 	if !strings.HasPrefix(path, prefix) {
 		return false
@@ -644,8 +634,33 @@ func isAppDataUploadPath(path string) bool {
 	rest := path[len(prefix):]
 	slash := strings.IndexByte(rest, '/')
 	if slash <= 0 {
-		return false
+		return false // bare /api/apps/{slug}, no sub-resource
 	}
-	afterSlug := rest[slash+1:]
-	return strings.HasPrefix(afterSlug, "data/") && len(afterSlug) > len("data/")
+	sub := rest[slash+1:] // path after "{slug}/"
+
+	switch sub {
+	case "logs":
+		return method == http.MethodGet
+	case "deploy", "restart", "stop":
+		return method == http.MethodPost
+	case "rollback":
+		return method == http.MethodPost || method == http.MethodPut
+	}
+	if method == http.MethodPut && strings.HasPrefix(sub, "data/") && len(sub) > len("data/") {
+		return true
+	}
+	if method == http.MethodGet && isScheduleRunLogsPath(sub) {
+		return true
+	}
+	return false
+}
+
+// isScheduleRunLogsPath matches the sub-resource
+// "schedules/{id}/runs/{run_id}/logs" with non-empty id and run_id.
+func isScheduleRunLogsPath(sub string) bool {
+	seg := strings.Split(sub, "/")
+	return len(seg) == 5 &&
+		seg[0] == "schedules" && seg[1] != "" &&
+		seg[2] == "runs" && seg[3] != "" &&
+		seg[4] == "logs"
 }

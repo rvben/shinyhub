@@ -64,6 +64,28 @@ func TestIsLongLivedAPIRoute(t *testing.T) {
 		// Bundle upload — large body.
 		{"deploy POST", http.MethodPost, "/api/apps/myapp/deploy", true},
 
+		// Lifecycle swaps — long-lived under the deploy lock.
+		{"restart POST", http.MethodPost, "/api/apps/myapp/restart", true},
+		{"rollback POST", http.MethodPost, "/api/apps/myapp/rollback", true},
+		{"rollback PUT", http.MethodPut, "/api/apps/myapp/rollback", true},
+		{"stop POST", http.MethodPost, "/api/apps/myapp/stop", true},
+
+		// Schedule run log stream — long-lived by design.
+		{"schedule run logs GET", http.MethodGet, "/api/apps/myapp/schedules/7/runs/42/logs", true},
+
+		// Wrong method on a lifecycle verb must NOT bypass the timeout.
+		{"restart GET", http.MethodGet, "/api/apps/myapp/restart", false},
+		{"deploy GET", http.MethodGet, "/api/apps/myapp/deploy", false},
+		{"stop DELETE", http.MethodDelete, "/api/apps/myapp/stop", false},
+		{"logs POST", http.MethodPost, "/api/apps/myapp/logs", false},
+
+		// Old broad suffix match false positives — these must stay bounded.
+		{"schedule named stop", http.MethodPost, "/api/apps/myapp/schedules/stop", false},
+		{"env key restart", http.MethodPut, "/api/apps/myapp/env/restart", false},
+		{"schedule run logs wrong method", http.MethodPost, "/api/apps/myapp/schedules/7/runs/42/logs", false},
+		{"schedule run logs missing run id", http.MethodGet, "/api/apps/myapp/schedules/7/runs//logs", false},
+		{"non-app path ending stop", http.MethodPost, "/api/cluster/stop", false},
+
 		// Per-app data PUT — streams arbitrary-size user files.
 		{"data PUT root", http.MethodPut, "/api/apps/myapp/data/file.bin", true},
 		{"data PUT nested", http.MethodPut, "/api/apps/myapp/data/sub/dir/file.bin", true},
