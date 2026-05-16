@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/mattn/go-shellwords"
+	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
@@ -287,7 +288,10 @@ func RunPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, ext
 func runHookExec(ctx context.Context, bundleDir string, argv []string, extraEnv []string, logOut io.Writer) error {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = bundleDir
-	cmd.Env = append(os.Environ(), extraEnv...)
+	// Hooks are deployer-controlled code. Base the env on the scrubbed server
+	// env (no SHINYHUB_* secrets), then layer the app's own env vars on top
+	// so the hook sees what the app will see at start, minus server secrets.
+	cmd.Env = append(process.SanitizedEnv(), extraEnv...)
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	return cmd.Run()

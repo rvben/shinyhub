@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -87,6 +88,40 @@ func TestFilteredEnvPreservesNonShinyHubVars(t *testing.T) {
 	}
 	if !keptFound {
 		t.Error("expected MY_APP_SECRET to be preserved in filtered env")
+	}
+}
+
+// TestDependencySetupCmdsScrubServerSecrets is the P0 regression for the
+// dependency-install path: uv and renv run deployer-controlled code (build
+// backends, renv profiles) and must never inherit SHINYHUB_* server secrets,
+// while still keeping PATH so the tools resolve.
+func TestDependencySetupCmdsScrubServerSecrets(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "must-not-leak")
+	t.Setenv("SHINYHUB_DEPLOY_TOKEN", "must-not-leak")
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	cmds := map[string]*exec.Cmd{
+		"uv sync":           uvSyncCmd(t.TempDir()),
+		"uv python install": uvPythonInstallCmd("3.12"),
+		"renv::restore":     renvRestoreCmd(t.TempDir()),
+	}
+	for name, cmd := range cmds {
+		if cmd.Env == nil {
+			t.Errorf("%s: cmd.Env is nil — inherits full server env including secrets", name)
+			continue
+		}
+		var hasPath bool
+		for _, e := range cmd.Env {
+			if strings.HasPrefix(e, "SHINYHUB_") {
+				t.Errorf("%s: SHINYHUB_ var leaked: %s", name, e)
+			}
+			if strings.HasPrefix(e, "PATH=") {
+				hasPath = true
+			}
+		}
+		if !hasPath {
+			t.Errorf("%s: PATH missing from scrubbed env", name)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -180,6 +181,45 @@ func TestRunHookExec_Roundtrip(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "hello-from-hook") {
 		t.Errorf("stdout mismatch: %q", buf.String())
+	}
+}
+
+// TestRunHookExec_DoesNotLeakServerSecrets is the P0 regression: post-deploy
+// hooks are deployer-controlled code and must never see SHINYHUB_* server
+// secrets, while still receiving the app's own env (extraEnv). It exercises
+// the real os/exec path.
+func TestRunHookExec_DoesNotLeakServerSecrets(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	t.Setenv("SHINYHUB_AUTH_SECRET", "TOP-SECRET-AUTH")
+	t.Setenv("SHINYHUB_DEPLOY_TOKEN", "TOP-SECRET-DEPLOY")
+	t.Setenv("SHINYHUB_GITHUB_CLIENT_SECRET", "TOP-SECRET-OAUTH")
+
+	var buf bytes.Buffer
+	extraEnv := []string{"APP_VAR=app-value", "SHINYHUB_APP_DATA=/data/demo"}
+	if err := runHookExec(context.Background(), t.TempDir(),
+		[]string{sh, "-c", "env"}, extraEnv, &buf); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	out := buf.String()
+
+	for _, leaked := range []string{"TOP-SECRET-AUTH", "TOP-SECRET-DEPLOY", "TOP-SECRET-OAUTH"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("server secret leaked into hook env: %q present in:\n%s", leaked, out)
+		}
+	}
+	if strings.Contains(out, "SHINYHUB_AUTH_SECRET=") {
+		t.Errorf("SHINYHUB_AUTH_SECRET leaked into hook env:\n%s", out)
+	}
+	// The app's own env (incl. the platform SHINYHUB_APP_DATA passed via
+	// extraEnv) must still reach the hook.
+	if !strings.Contains(out, "APP_VAR=app-value") {
+		t.Errorf("app env var missing from hook env:\n%s", out)
+	}
+	if !strings.Contains(out, "SHINYHUB_APP_DATA=/data/demo") {
+		t.Errorf("platform SHINYHUB_APP_DATA (via extraEnv) missing from hook env:\n%s", out)
 	}
 }
 

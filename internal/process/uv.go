@@ -15,6 +15,24 @@ func CheckUV() error {
 	return nil
 }
 
+// uvSyncCmd builds the `uv sync` command. uv runs the project's build
+// backend, which is deployer-controlled code, so the env is scrubbed of
+// server secrets via SanitizedEnv.
+func uvSyncCmd(dir string) *exec.Cmd {
+	cmd := exec.Command("uv", "sync")
+	cmd.Dir = dir
+	cmd.Env = SanitizedEnv()
+	return cmd
+}
+
+// uvPythonInstallCmd builds the `uv python install <version>` command with a
+// scrubbed env, for the same reason as uvSyncCmd.
+func uvPythonInstallCmd(version string) *exec.Cmd {
+	cmd := exec.Command("uv", "python", "install", version)
+	cmd.Env = SanitizedEnv()
+	return cmd
+}
+
 // Sync runs `uv sync` in dir if a pyproject.toml is present, creating/updating
 // the .venv. For requirements.txt-only projects, dependency installation is
 // handled lazily by `uv run --with-requirements` at process start.
@@ -22,9 +40,7 @@ func Sync(dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
 		return nil
 	}
-	cmd := exec.Command("uv", "sync")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	out, err := uvSyncCmd(dir).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("uv sync: %w\n%s", err, out)
 	}
@@ -36,8 +52,7 @@ func EnsurePython(version string) error {
 	if version == "" {
 		return nil
 	}
-	cmd := exec.Command("uv", "python", "install", version)
-	out, err := cmd.CombinedOutput()
+	out, err := uvPythonInstallCmd(version).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("uv python install %s: %w\n%s", version, err, out)
 	}

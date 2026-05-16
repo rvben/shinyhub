@@ -473,9 +473,13 @@ func (m *Manager) LogReader(slug string, index int) (*LogReader, bool) {
 	return NewLogReader(path), true
 }
 
-// filteredEnv returns the current process environment with all SHINYHUB_*
-// variables removed, preventing server secrets from leaking into app processes.
-func filteredEnv() []string {
+// SanitizedEnv returns the current process environment with all SHINYHUB_*
+// variables removed. It is the single source of truth for the env base of
+// every app-controlled code path: app processes, dependency installation
+// (uv/renv), and post-deploy hooks. Server secrets (SHINYHUB_AUTH_SECRET,
+// the deploy token, OAuth/OIDC client secrets) must never reach code that a
+// deployer can influence, so all such call sites build their env from here.
+func SanitizedEnv() []string {
 	raw := os.Environ()
 	filtered := make([]string, 0, len(raw))
 	for _, e := range raw {
@@ -485,3 +489,6 @@ func filteredEnv() []string {
 	}
 	return filtered
 }
+
+// filteredEnv is the package-internal alias for SanitizedEnv.
+func filteredEnv() []string { return SanitizedEnv() }
