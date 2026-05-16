@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **api**: tombstone-ordered app deletion with startup reconcile ([f61f0ab](https://github.com/rvben/shinyhub/commit/f61f0abe784e3c142ebea1452139859044236e15))
 - **process**: reap stopped Docker containers ([9f77edb](https://github.com/rvben/shinyhub/commit/9f77edb96c9710dddea203e91e91ed737dbba065))
 - **data**: symlink-safe atomic path resolution for data uploads ([e60c794](https://github.com/rvben/shinyhub/commit/e60c7946faa43ad166d34d939a9cf056a1a06015))
+- **data**: return ErrFileNotFound when app data dir is absent on Linux ([100ebb9](https://github.com/rvben/shinyhub/commit/100ebb963c963d2a30ea2824cfee72d45543bce2))
 - **recovery**: validate process identity before re-adopting native apps ([208ef04](https://github.com/rvben/shinyhub/commit/208ef0494abe4970f1a3d587e1dc9c70a788e087))
 - **security**: scrub server secrets from app-controlled code paths ([c7a015e](https://github.com/rvben/shinyhub/commit/c7a015edefddb09392e254d0a8afa95e9b1836b4))
 
