@@ -342,125 +342,42 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Apply all validated writes.
-	if setHibernateTimeout {
-		if err := s.store.UpdateHibernateTimeout(slug, hibernateTimeout); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+	// Apply all validated writes atomically. A single transaction prevents a
+	// failure partway through from leaving the row half-updated.
+	priorStatus, _, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug:               slug,
+		SetHibernate:       setHibernateTimeout,
+		HibernateMinutes:   hibernateTimeout,
+		SetName:            setName,
+		Name:               newName,
+		SetProjectSlug:     setProjectSlug,
+		ProjectSlug:        newProjectSlug,
+		SetMemoryLimitMB:   setMemoryLimitMB,
+		MemoryLimitMB:      memoryLimitMB,
+		SetCPUQuotaPercent: setCPUQuotaPercent,
+		CPUQuotaPercent:    cpuQuotaPercent,
+		SetReplicas:        setReplicas,
+		Replicas:           newReplicas,
+		SetMaxSessions:     setMaxSessions,
+		MaxSessions:        newMaxSessions,
+	})
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-	}
-	if setName {
-		if err := s.store.UpdateAppName(slug, newName); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-	}
-	if setProjectSlug {
-		if err := s.store.UpdateAppProjectSlug(slug, newProjectSlug); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-	}
-	if setMemoryLimitMB || setCPUQuotaPercent {
-		// Read current state to preserve whichever field is not being updated,
-		// since UpdateResourceLimits writes both columns in a single statement.
-		existing, err := s.store.GetApp(slug)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		newMemory := existing.MemoryLimitMB
-		if setMemoryLimitMB {
-			newMemory = memoryLimitMB
-		}
-		newCPU := existing.CPUQuotaPercent
-		if setCPUQuotaPercent {
-			newCPU = cpuQuotaPercent
-		}
-		if err := s.store.UpdateResourceLimits(db.UpdateResourceLimitsParams{
-			Slug:            slug,
-			MemoryLimitMB:   newMemory,
-			CPUQuotaPercent: newCPU,
-		}); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
 
-	if setReplicas {
-		// Load current app state to check for shrink and running status.
-		existing, err := s.store.GetApp(slug)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		// On shrink, prune obsolete replica rows before updating the count so
-		// ListReplicas stays consistent during the transition.
-		if newReplicas < existing.Replicas {
-			if err := s.store.DeleteReplicasAbove(existing.ID, newReplicas); err != nil {
-				writeError(w, http.StatusInternalServerError, "internal server error")
-				return
-			}
-		}
-		if err := s.store.UpdateAppReplicas(existing.ID, newReplicas); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		if existing.Status == "running" {
-			go s.redeployApp(slug)
-		}
+	// Post-commit side effects. These only take effect once the settings are
+	// durably persisted.
+	if setMaxSessions && s.proxy != nil {
+		s.proxy.SetPoolCap(slug,
+			deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
-
-	if setMaxSessions {
-		existing, err := s.store.GetApp(slug)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		if err := s.store.UpdateAppMaxSessionsPerReplica(existing.ID, newMaxSessions); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		if s.proxy != nil {
-			s.proxy.SetPoolCap(slug,
-				deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
-		}
+	if setReplicas && priorStatus == "running" {
+		go s.redeployApp(slug)
 	}
 
 	app, err := s.store.GetAppBySlug(slug)
@@ -690,6 +607,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
+	// Snapshot the pre-manifest [app] settings. If Phase A applies manifest
+	// changes but the new pool then fails to start, restorePreviousPool brings
+	// the OLD bundle back; the persisted settings (replicas / max_sessions /
+	// hibernate) must be reverted to match it, otherwise the running old
+	// bundle is governed by the new bundle's intended settings.
+	preManifestApp := *app
+	manifestApplied := false
+
 	// Phase A: apply [app] manifest settings atomically before starting the new
 	// pool. manager.Stop has already run so no process holds a replica index
 	// that may be pruned. Validation already passed above; any error here is a
@@ -704,6 +629,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
 		}
+		manifestApplied = true
 		manifestSummary.App = manifestAppliedSummary(manifest.App)
 		// Refresh so deploy.Run sees the updated replicas / max_sessions.
 		if fresh, ferr := s.store.GetAppBySlug(slug); ferr == nil {
@@ -724,7 +650,26 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
 		_ = s.store.FailDeployment(pendingDep.ID)
-		s.restorePreviousPool(slug, app, prevActive)
+		// Revert manifest [app] settings so the restored old pool runs under
+		// the settings it was deployed with, not the failed bundle's.
+		if manifestApplied {
+			if _, _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+				Slug:             slug,
+				SetHibernate:     true,
+				HibernateMinutes: preManifestApp.HibernateTimeoutMinutes,
+				SetReplicas:      true,
+				Replicas:         preManifestApp.Replicas,
+				SetMaxSessions:   true,
+				MaxSessions:      preManifestApp.MaxSessionsPerReplica,
+			}); rerr != nil {
+				slog.Error("deploy: revert manifest [app] settings after failed deploy", "slug", slug, "err", rerr)
+			}
+			if s.proxy != nil {
+				s.proxy.SetPoolCap(slug,
+					deploy.ResolveMaxSessionsPerReplica(preManifestApp.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
+			}
+		}
+		s.restorePreviousPool(slug, &preManifestApp, prevActive)
 		writeError(w, http.StatusInternalServerError, "deploy failed")
 		return
 	}
@@ -743,6 +688,18 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			Status: "running",
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
+		}
+	}
+	// Persist indices that failed to boot as crashed (no PID/port) so the
+	// watchdog reconciles the pool back up to the desired replica count
+	// instead of leaving the app silently under-replicated.
+	for _, idx := range result.Failed {
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:  app.ID,
+			Index:  idx,
+			Status: "crashed",
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "upsert failed replica %s[%d]: %v\n", slug, idx, err)
 		}
 	}
 	// Bookkeeping after the proxy switch. Two writes here are different

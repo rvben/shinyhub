@@ -1629,6 +1629,139 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 	return nil
 }
 
+// PatchAppSettingsParams carries the user-PATCHable app fields. Callers set
+// each Set* flag for the fields they want written; absent fields are left
+// untouched. Resource-limit and replica/max-session merges are resolved
+// inside the transaction so the read and write cannot interleave with a
+// concurrent writer.
+type PatchAppSettingsParams struct {
+	Slug string
+
+	SetHibernate     bool
+	HibernateMinutes *int // nil = NULL (reset to default)
+
+	SetName bool
+	Name    string
+
+	SetProjectSlug bool
+	ProjectSlug    string
+
+	SetMemoryLimitMB bool
+	MemoryLimitMB    *int // nil = NULL (inherit global)
+
+	SetCPUQuotaPercent bool
+	CPUQuotaPercent    *int // nil = NULL (inherit global)
+
+	SetReplicas bool
+	Replicas    int
+
+	SetMaxSessions bool
+	MaxSessions    int
+}
+
+// PatchAppSettings applies any subset of the user-editable app settings in a
+// single SQLite transaction, so a failure partway through cannot leave the
+// row half-updated. It returns the app's prior status and replica count
+// (read inside the same transaction) so the caller can decide whether a
+// running pool needs a redeploy. Returns ErrNotFound if no app has the slug.
+func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, priorReplicas int, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var appID int64
+	var curMem, curCPU sql.NullInt64
+	if err := tx.QueryRow(
+		`SELECT id, status, replicas, memory_limit_mb, cpu_quota_percent FROM apps WHERE slug = ?`,
+		p.Slug,
+	).Scan(&appID, &priorStatus, &priorReplicas, &curMem, &curCPU); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", 0, ErrNotFound
+		}
+		return "", 0, fmt.Errorf("load app: %w", err)
+	}
+
+	if p.SetHibernate {
+		if _, err := tx.Exec(
+			`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.HibernateMinutes, appID,
+		); err != nil {
+			return "", 0, fmt.Errorf("update hibernate: %w", err)
+		}
+	}
+	if p.SetName {
+		if _, err := tx.Exec(
+			`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.Name, appID,
+		); err != nil {
+			return "", 0, fmt.Errorf("update name: %w", err)
+		}
+	}
+	if p.SetProjectSlug {
+		if _, err := tx.Exec(
+			`UPDATE apps SET project_slug = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.ProjectSlug, appID,
+		); err != nil {
+			return "", 0, fmt.Errorf("update project_slug: %w", err)
+		}
+	}
+	if p.SetMemoryLimitMB || p.SetCPUQuotaPercent {
+		newMem := curMem // preserve the column not being updated
+		if p.SetMemoryLimitMB {
+			newMem = nullIntFromPtr(p.MemoryLimitMB)
+		}
+		newCPU := curCPU
+		if p.SetCPUQuotaPercent {
+			newCPU = nullIntFromPtr(p.CPUQuotaPercent)
+		}
+		if _, err := tx.Exec(
+			`UPDATE apps SET memory_limit_mb = ?, cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			newMem, newCPU, appID,
+		); err != nil {
+			return "", 0, fmt.Errorf("update resource limits: %w", err)
+		}
+	}
+	if p.SetReplicas {
+		if p.Replicas < priorReplicas {
+			if _, err := tx.Exec(
+				`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`,
+				appID, p.Replicas,
+			); err != nil {
+				return "", 0, fmt.Errorf("prune replicas: %w", err)
+			}
+		}
+		if _, err := tx.Exec(
+			`UPDATE apps SET replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.Replicas, appID,
+		); err != nil {
+			return "", 0, fmt.Errorf("update replicas: %w", err)
+		}
+	}
+	if p.SetMaxSessions {
+		if _, err := tx.Exec(
+			`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.MaxSessions, appID,
+		); err != nil {
+			return "", 0, fmt.Errorf("update max_sessions_per_replica: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", 0, fmt.Errorf("commit: %w", err)
+	}
+	return priorStatus, priorReplicas, nil
+}
+
+// nullIntFromPtr maps a *int to a sql.NullInt64 (nil ⇒ NULL).
+func nullIntFromPtr(p *int) sql.NullInt64 {
+	if p == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(*p), Valid: true}
+}
+
 // boolToInt converts a bool to the integer representation used in SQLite.
 func boolToInt(b bool) int {
 	if b {
