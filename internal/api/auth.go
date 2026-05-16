@@ -29,17 +29,37 @@ import (
 // distributed quota. Run a single instance, or front it with a shared limiter
 // (e.g. at the proxy), if a hard global cap is required.
 type keyedRateLimiter struct {
-	mu      sync.Mutex
-	windows map[string][]time.Time
-	limit   int
-	window  time.Duration
+	mu        sync.Mutex
+	windows   map[string][]time.Time
+	limit     int
+	window    time.Duration
+	lastSweep time.Time
 }
 
 func newKeyedRateLimiter(limit int, window time.Duration) *keyedRateLimiter {
 	return &keyedRateLimiter{
-		windows: make(map[string][]time.Time),
-		limit:   limit,
-		window:  window,
+		windows:   make(map[string][]time.Time),
+		limit:     limit,
+		window:    window,
+		lastSweep: time.Now(),
+	}
+}
+
+// sweep drops keys whose timestamps have all aged out. allow() only prunes
+// the key it touches, so without this a long-lived process accumulates one
+// map entry per distinct source IP / user ID forever. Caller must hold rl.mu.
+func (rl *keyedRateLimiter) sweep(cutoff time.Time) {
+	for k, ts := range rl.windows {
+		live := false
+		for _, t := range ts {
+			if t.After(cutoff) {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(rl.windows, k)
+		}
 	}
 }
 
@@ -50,6 +70,14 @@ func (rl *keyedRateLimiter) allow(key string) bool {
 
 	now := time.Now()
 	cutoff := now.Add(-rl.window)
+
+	// Periodic global cleanup so idle keys cannot grow the map without
+	// bound. Bounded to once per window: O(n) over keys, but n is already
+	// pruned to the active set each sweep.
+	if now.Sub(rl.lastSweep) >= rl.window {
+		rl.sweep(cutoff)
+		rl.lastSweep = now
+	}
 
 	reqs := rl.windows[key]
 	var recent []time.Time
