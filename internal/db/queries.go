@@ -379,6 +379,7 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 }
 
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
+	defer s.timed("GetAppBySlug")()
 	row := s.db.QueryRow(`
 		SELECT id, slug, name, project_slug, owner_id, access, status,
 		       replicas, max_sessions_per_replica, deploy_count,

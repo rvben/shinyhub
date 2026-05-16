@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/rand/v2"
 	"path"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -67,16 +69,91 @@ type Store struct {
 	db *sql.DB
 }
 
+// fileDBMaxConns caps the connection pool for file-backed databases. WAL lets
+// many readers run concurrently while SQLite serializes the single writer
+// (busy_timeout makes a contended writer wait instead of erroring), so a small
+// pool improves read concurrency without risking corruption.
+const fileDBMaxConns = 8
+
+// slowQueryThreshold is the latency above which a DB op is always logged.
+// Faster ops are sampled at slowQuerySampleRate to bound log volume.
+const (
+	slowQueryThreshold  = 200 * time.Millisecond
+	slowQuerySampleRate = 0.01
+)
+
+// isMemoryDSN reports whether the DSN names an in-memory database. Each
+// connection to ":memory:" is an independent database, so a pool would hand
+// out connections to different empty databases; memory DSNs must stay at a
+// single connection.
+func isMemoryDSN(dsn string) bool {
+	return strings.Contains(dsn, ":memory:") || strings.Contains(dsn, "mode=memory")
+}
+
+// withPragmas appends the durability/concurrency pragmas modernc applies on
+// every pooled connection. Setting them via the DSN (rather than a one-shot
+// PRAGMA Exec) guarantees every connection in the pool is configured, not just
+// the first. journal_mode=WAL is omitted for memory DBs, which do not support
+// it.
+func withPragmas(dsn string) string {
+	pragmas := []string{
+		"_pragma=busy_timeout(5000)",
+		"_pragma=foreign_keys(1)",
+		"_pragma=synchronous(NORMAL)",
+	}
+	if !isMemoryDSN(dsn) {
+		pragmas = append(pragmas, "_pragma=journal_mode(WAL)")
+	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + strings.Join(pragmas, "&")
+}
+
 func Open(dsn string) (*Store, error) {
-	db, err := sql.Open("sqlite", dsn)
+	memory := isMemoryDSN(dsn)
+	db, err := sql.Open("sqlite", withPragmas(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	if memory {
+		db.SetMaxOpenConns(1)
+	} else {
+		db.SetMaxOpenConns(fileDBMaxConns)
+		db.SetMaxIdleConns(fileDBMaxConns)
+		db.SetConnMaxIdleTime(5 * time.Minute)
+	}
+	// Verify the pragmas took effect on a real connection. A silent failure
+	// here (e.g. WAL rejected on a read-only volume) would otherwise surface
+	// much later as data-integrity or lock-contention bugs.
+	var fk int
+	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("verify foreign_keys pragma: %w", err)
+	}
+	if fk != 1 {
+		_ = db.Close()
+		return nil, fmt.Errorf("foreign_keys pragma not enabled (got %d)", fk)
 	}
 	return &Store{db: db}, nil
+}
+
+// timed records the latency of a DB op. Slow ops (over slowQueryThreshold) are
+// always logged at warn; the rest are sampled at slowQuerySampleRate and
+// logged at debug so steady-state latency is observable without flooding logs.
+// Usage: defer s.timed("GetAppBySlug")().
+func (s *Store) timed(op string) func() {
+	start := time.Now()
+	return func() {
+		d := time.Since(start)
+		switch {
+		case d >= slowQueryThreshold:
+			slog.Warn("db: slow op", "op", op, "ms", d.Milliseconds())
+		case rand.Float64() < slowQuerySampleRate:
+			slog.Debug("db: op latency", "op", op, "ms", d.Milliseconds())
+		}
+	}
 }
 
 // Migrate applies every embedded migration that has not yet been recorded in
@@ -90,6 +167,7 @@ func Open(dsn string) (*Store, error) {
 // re-executed. A genuinely fresh database has no core tables and runs every
 // migration from scratch.
 func (s *Store) Migrate() error {
+	defer s.timed("Migrate")()
 	migrations, err := loadMigrations()
 	if err != nil {
 		return err
