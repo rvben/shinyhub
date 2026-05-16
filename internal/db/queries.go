@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -1113,11 +1114,28 @@ type ProvisionOAuthUserParams struct {
 // orphan user rows accumulate. The bool return reports whether a new user
 // was created (callers use it to emit a create_user audit event).
 func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, error) {
-	tx, err := s.db.Begin()
+	ctx := context.Background()
+
+	// A dedicated connection with an explicit BEGIN IMMEDIATE takes the
+	// write lock up front, so concurrent first logins for the same identity
+	// serialize here rather than racing to the decisive linked-account read.
+	// The loser then sees the winner's committed link and returns it. The
+	// UNIQUE-conflict path below is kept as defense in depth.
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, false, fmt.Errorf("begin: %w", err)
+		return nil, false, fmt.Errorf("acquire conn: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer conn.Close() //nolint:errcheck
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, false, fmt.Errorf("begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
 
 	scanUser := func(row *sql.Row) (*User, error) {
 		var u User
@@ -1134,11 +1152,15 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`
+	const userByIDQuery = `
+		SELECT id, username, password_hash, role, created_at
+		FROM users WHERE id = ?`
 
-	if u, gerr := scanUser(tx.QueryRow(linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
-		if cerr := tx.Commit(); cerr != nil {
+	if u, gerr := scanUser(conn.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
+		if _, cerr := conn.ExecContext(ctx, "COMMIT"); cerr != nil {
 			return nil, false, fmt.Errorf("commit: %w", cerr)
 		}
+		committed = true
 		return u, false, nil
 	} else if !errors.Is(gerr, ErrNotFound) {
 		return nil, false, gerr
@@ -1146,7 +1168,7 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	var userID int64
 	for _, name := range p.UsernameCandidates {
-		res, ierr := tx.Exec(
+		res, ierr := conn.ExecContext(ctx,
 			`INSERT INTO users (username, password_hash, role) VALUES (?, '', ?)`,
 			name, p.Role,
 		)
@@ -1164,16 +1186,21 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return nil, false, fmt.Errorf("create user: all candidate usernames in use")
 	}
 
-	if _, lerr := tx.Exec(
+	if _, lerr := conn.ExecContext(ctx,
 		`INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?)`,
 		userID, p.Provider, p.ProviderID,
 	); lerr != nil {
 		var se *sqlite.Error
 		if errors.As(lerr, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
-			// Lost a concurrent first-login race: the winner committed the
-			// link. Roll back (defer) to discard the user we just created
-			// and return the winner, read on a fresh connection so the
-			// committed row is visible.
+			// Lost a concurrent first-login race (rare: BEGIN IMMEDIATE
+			// serializes contenders, so the loser normally sees the link
+			// in linkedQuery above). Roll back and release this connection
+			// BEFORE the fallback read, which needs its own pooled
+			// connection — holding this one would deadlock a pool capped
+			// at a single connection (in-memory store).
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			committed = true // suppress the deferred ROLLBACK
+			_ = conn.Close()
 			existing, eerr := s.GetUserByOAuthAccount(p.Provider, p.ProviderID)
 			if eerr != nil {
 				return nil, false, fmt.Errorf("resolve raced oauth user: %w", eerr)
@@ -1183,13 +1210,16 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return nil, false, fmt.Errorf("link oauth account: %w", lerr)
 	}
 
-	if cerr := tx.Commit(); cerr != nil {
+	// Read the created row on the same connection/transaction so no second
+	// pooled connection is needed while this one is still held.
+	created, gerr := scanUser(conn.QueryRowContext(ctx, userByIDQuery, userID))
+	if gerr != nil {
+		return nil, false, fmt.Errorf("read created user: %w", gerr)
+	}
+	if _, cerr := conn.ExecContext(ctx, "COMMIT"); cerr != nil {
 		return nil, false, fmt.Errorf("commit: %w", cerr)
 	}
-	created, gerr := s.GetUserByID(userID)
-	if gerr != nil {
-		return nil, false, gerr
-	}
+	committed = true
 	return created, true, nil
 }
 
