@@ -212,8 +212,10 @@ func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 	}
 
 	mins := 45
-	if err := store.UpdateHibernateTimeout("myapp", &mins); err != nil {
-		t.Fatalf("UpdateHibernateTimeout: %v", err)
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: "myapp", SetHibernate: true, HibernateMinutes: &mins,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings hibernate: %v", err)
 	}
 	app, err := store.GetAppBySlug("myapp")
 	if err != nil {
@@ -224,8 +226,10 @@ func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 	}
 
 	// Reset to NULL (global default).
-	if err := store.UpdateHibernateTimeout("myapp", nil); err != nil {
-		t.Fatalf("UpdateHibernateTimeout nil: %v", err)
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: "myapp", SetHibernate: true, HibernateMinutes: nil,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings hibernate nil: %v", err)
 	}
 	app, err = store.GetAppBySlug("myapp")
 	if err != nil {
@@ -567,7 +571,7 @@ func TestAuditLog(t *testing.T) {
 	}
 }
 
-func TestUpdateResourceLimits(t *testing.T) {
+func TestPatchAppSettings_ResourceLimits(t *testing.T) {
 	store := openTestStore(t)
 
 	err := store.CreateUser(db.CreateUserParams{
@@ -587,13 +591,14 @@ func TestUpdateResourceLimits(t *testing.T) {
 
 	memMB := 512
 	cpuPct := 75
-	err = store.UpdateResourceLimits(db.UpdateResourceLimitsParams{
-		Slug:            "test-app",
-		MemoryLimitMB:   &memMB,
-		CPUQuotaPercent: &cpuPct,
-	})
-	if err != nil {
-		t.Fatalf("UpdateResourceLimits: %v", err)
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug:               "test-app",
+		SetMemoryLimitMB:   true,
+		MemoryLimitMB:      &memMB,
+		SetCPUQuotaPercent: true,
+		CPUQuotaPercent:    &cpuPct,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings limits: %v", err)
 	}
 
 	app, err := store.GetApp("test-app")
@@ -607,22 +612,40 @@ func TestUpdateResourceLimits(t *testing.T) {
 		t.Errorf("expected CPUQuotaPercent=75, got %v", app.CPUQuotaPercent)
 	}
 
+	// Updating only memory must preserve the existing CPU limit.
+	memMB2 := 256
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug:             "test-app",
+		SetMemoryLimitMB: true,
+		MemoryLimitMB:    &memMB2,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings memory-only: %v", err)
+	}
+	app, _ = store.GetApp("test-app")
+	if app.MemoryLimitMB == nil || *app.MemoryLimitMB != 256 {
+		t.Errorf("expected MemoryLimitMB=256, got %v", app.MemoryLimitMB)
+	}
+	if app.CPUQuotaPercent == nil || *app.CPUQuotaPercent != 75 {
+		t.Errorf("expected CPUQuotaPercent preserved at 75, got %v", app.CPUQuotaPercent)
+	}
+
 	// Setting to nil should clear the limits.
-	err = store.UpdateResourceLimits(db.UpdateResourceLimitsParams{
-		Slug:            "test-app",
-		MemoryLimitMB:   nil,
-		CPUQuotaPercent: nil,
-	})
-	if err != nil {
-		t.Fatalf("UpdateResourceLimits (clear): %v", err)
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug:               "test-app",
+		SetMemoryLimitMB:   true,
+		MemoryLimitMB:      nil,
+		SetCPUQuotaPercent: true,
+		CPUQuotaPercent:    nil,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings (clear): %v", err)
 	}
 	app, _ = store.GetApp("test-app")
 	if app.MemoryLimitMB != nil {
 		t.Errorf("expected nil MemoryLimitMB after clear, got %v", app.MemoryLimitMB)
 	}
 
-	// UpdateResourceLimits on a non-existent slug must return ErrNotFound.
-	err = store.UpdateResourceLimits(db.UpdateResourceLimitsParams{Slug: "no-such-app"})
+	// PatchAppSettings on a non-existent slug must return ErrNotFound.
+	_, _, err = store.PatchAppSettings(db.PatchAppSettingsParams{Slug: "no-such-app"})
 	if !errors.Is(err, db.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for missing slug, got %v", err)
 	}
@@ -879,7 +902,10 @@ func TestReplicas_UpsertListDelete(t *testing.T) {
 	}
 }
 
-func TestReplicas_DeleteReplicasAbove(t *testing.T) {
+// TestPatchAppSettings_ReplicaShrinkPrune asserts that lowering the replica
+// count prunes the obsolete replica rows (idx >= new count) in the same
+// transaction, so ListReplicas stays consistent with the target count.
+func TestPatchAppSettings_ReplicaShrinkPrune(t *testing.T) {
 	store := mustOpenDB(t)
 	user := mustCreateUser(t, store, "owner", "developer")
 	app := mustCreateApp(t, store, "demo", user.ID)
@@ -891,32 +917,42 @@ func TestReplicas_DeleteReplicasAbove(t *testing.T) {
 			t.Fatalf("upsert replica %d: %v", idx, err)
 		}
 	}
+	// Record a target of 3 so the subsequent shrink is a true shrink.
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: "demo", SetReplicas: true, Replicas: 3,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings grow to 3: %v", err)
+	}
 
-	// DeleteReplicasAbove(2) removes idx >= 2, leaving [0, 1].
-	if err := store.DeleteReplicasAbove(app.ID, 2); err != nil {
-		t.Fatalf("DeleteReplicasAbove(2): %v", err)
+	// Shrink to 2 removes idx >= 2, leaving [0, 1].
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: "demo", SetReplicas: true, Replicas: 2,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings shrink to 2: %v", err)
 	}
 	reps, err := store.ListReplicas(app.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(reps) != 2 {
-		t.Fatalf("want 2 replicas after DeleteReplicasAbove(2), got %d", len(reps))
+		t.Fatalf("want 2 replicas after shrink to 2, got %d", len(reps))
 	}
 	if reps[0].Index != 0 || reps[1].Index != 1 {
 		t.Fatalf("want indices [0,1], got [%d,%d]", reps[0].Index, reps[1].Index)
 	}
 
-	// DeleteReplicasAbove(0) removes all remaining.
-	if err := store.DeleteReplicasAbove(app.ID, 0); err != nil {
-		t.Fatalf("DeleteReplicasAbove(0): %v", err)
+	// Shrink to 1 prunes idx >= 1, leaving only replica 0.
+	if _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: "demo", SetReplicas: true, Replicas: 1,
+	}); err != nil {
+		t.Fatalf("PatchAppSettings shrink to 1: %v", err)
 	}
 	reps, err = store.ListReplicas(app.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reps) != 0 {
-		t.Fatalf("want 0 replicas after DeleteReplicasAbove(0), got %d", len(reps))
+	if len(reps) != 1 || reps[0].Index != 0 {
+		t.Fatalf("want single replica index 0 after shrink to 1, got %+v", reps)
 	}
 }
 

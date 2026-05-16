@@ -571,97 +571,6 @@ func (s *Store) IncrementDeployCount(slug string) error {
 	return nil
 }
 
-// UpdateHibernateTimeout sets the per-app idle timeout in minutes.
-// Pass nil to store SQL NULL (means "use the global config default").
-// Pass 0 to disable hibernation for this app specifically.
-func (s *Store) UpdateHibernateTimeout(slug string, minutes *int) error {
-	result, err := s.db.Exec(
-		`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
-		minutes, slug,
-	)
-	if err != nil {
-		return fmt.Errorf("update hibernate timeout: %w", err)
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update hibernate timeout rows: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpdateResourceLimitsParams holds the resource limit values to set.
-// Nil means "inherit from global config" (stored as NULL in the DB).
-type UpdateResourceLimitsParams struct {
-	Slug            string
-	MemoryLimitMB   *int
-	CPUQuotaPercent *int
-}
-
-// UpdateResourceLimits sets the per-app resource limits. NULL means inherit global default.
-// Returns ErrNotFound if no app with the given slug exists.
-func (s *Store) UpdateResourceLimits(p UpdateResourceLimitsParams) error {
-	result, err := s.db.Exec(
-		`UPDATE apps SET memory_limit_mb = ?, cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE slug = ?`,
-		p.MemoryLimitMB, p.CPUQuotaPercent, p.Slug,
-	)
-	if err != nil {
-		return fmt.Errorf("update resource limits: %w", err)
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update resource limits rows: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpdateAppName sets the display name for the app identified by slug.
-// Returns ErrNotFound if no app with the given slug exists.
-func (s *Store) UpdateAppName(slug, name string) error {
-	result, err := s.db.Exec(
-		`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
-		name, slug,
-	)
-	if err != nil {
-		return fmt.Errorf("update app name: %w", err)
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update app name rows: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpdateAppProjectSlug sets the project_slug field for the app identified by
-// slug. Pass an empty string to clear the association.
-// Returns ErrNotFound if no app with the given slug exists.
-func (s *Store) UpdateAppProjectSlug(slug, projectSlug string) error {
-	result, err := s.db.Exec(
-		`UPDATE apps SET project_slug = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
-		projectSlug, slug,
-	)
-	if err != nil {
-		return fmt.Errorf("update app project_slug: %w", err)
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update app project_slug rows: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 // DeleteApp permanently removes the app and all its associated data.
 // FK cascades in the schema remove app_members and deployments automatically.
 // Returns ErrNotFound if no app with the given slug exists.
@@ -1511,16 +1420,6 @@ func (s *Store) DeleteReplica(appID int64, index int) error {
 	return nil
 }
 
-// DeleteReplicasAbove removes all replicas with idx >= keepBelow for an app.
-// Used when the operator shrinks the pool.
-func (s *Store) DeleteReplicasAbove(appID int64, keepBelow int) error {
-	_, err := s.db.Exec(`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`, appID, keepBelow)
-	if err != nil {
-		return fmt.Errorf("delete replicas above: %w", err)
-	}
-	return nil
-}
-
 // UpdateAppReplicas sets the target replica count for an app.
 func (s *Store) UpdateAppReplicas(appID int64, n int) error {
 	res, err := s.db.Exec(
@@ -1529,23 +1428,6 @@ func (s *Store) UpdateAppReplicas(appID int64, n int) error {
 	)
 	if err != nil {
 		return fmt.Errorf("update replicas: %w", err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpdateAppMaxSessionsPerReplica sets the per-replica session cap. A value of
-// 0 means "use the runtime-wide default".
-func (s *Store) UpdateAppMaxSessionsPerReplica(appID int64, n int) error {
-	res, err := s.db.Exec(
-		`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		n, appID,
-	)
-	if err != nil {
-		return fmt.Errorf("update max_sessions_per_replica: %w", err)
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
