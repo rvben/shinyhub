@@ -35,6 +35,9 @@ type Server struct {
 	deployLimiter *keyedRateLimiter
 	userLimiter   *keyedRateLimiter
 	tokenLimiter  *keyedRateLimiter
+	dataLimiter   *keyedRateLimiter // per-user: data uploads
+	actionLimiter *keyedRateLimiter // per-user: restart/rollback/manual schedule run
+	oauthLimiter  *keyedRateLimiter // per-IP: OAuth/OIDC login-start
 	jobs          *jobs.Manager
 	scheduler     *scheduler.Scheduler
 	secretsKey    []byte
@@ -78,6 +81,9 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		deployLimiter: newKeyedRateLimiter(10, time.Minute),
 		userLimiter:   newKeyedRateLimiter(5, time.Minute),
 		tokenLimiter:  newKeyedRateLimiter(20, time.Minute),
+		dataLimiter:   newKeyedRateLimiter(120, time.Minute),
+		actionLimiter: newKeyedRateLimiter(30, time.Minute),
+		oauthLimiter:  newKeyedRateLimiter(20, time.Minute),
 		deployRun:     deploy.Run,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
@@ -202,12 +208,12 @@ func (s *Server) buildRouter() http.Handler {
 	// (so there's no CSRF token cookie yet). The handler does its own Origin/Referer
 	// same-origin check; see handleSessionHandoff for the reasoning.
 	r.Post("/api/auth/handoff", s.handleSessionHandoff)
-	r.Get("/api/auth/github/login", s.handleGitHubLogin)
+	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/github/login", s.handleGitHubLogin)
 	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
-	r.Get("/api/auth/google/login", s.handleGoogleLogin)
+	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/login", s.handleGoogleLogin)
 	r.Get("/api/auth/google/callback", s.handleGoogleCallback)
 	r.Get("/api/auth/providers", s.handleGetProviders)
-	r.Get("/api/auth/oidc/login", s.handleOIDCLogin)
+	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
 	r.Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 
 	// All other endpoints require either an auth header or a valid session cookie.
@@ -228,10 +234,10 @@ func (s *Server) buildRouter() http.Handler {
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
 		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/deploy", s.handleDeployApp)
-		r.Post("/api/apps/{slug}/rollback", s.handleRollbackApp)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		// Keep PUT for backwards compatibility.
-		r.Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
-		r.Post("/api/apps/{slug}/restart", s.handleRestartApp)
+		r.With(rateLimitByUser(s.actionLimiter)).Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/restart", s.handleRestartApp)
 		r.Post("/api/apps/{slug}/stop", s.handleStopApp)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
 		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
@@ -246,14 +252,14 @@ func (s *Server) buildRouter() http.Handler {
 		r.Put("/api/apps/{slug}/env/{key}", s.handleUpsertAppEnv)
 		r.Delete("/api/apps/{slug}/env/{key}", s.handleDeleteAppEnv)
 		r.Get("/api/apps/{slug}/data", s.handleDataList)
-		r.Put("/api/apps/{slug}/data/*", s.handleDataPut)
+		r.With(rateLimitByUser(s.dataLimiter)).Put("/api/apps/{slug}/data/*", s.handleDataPut)
 		r.Delete("/api/apps/{slug}/data/*", s.handleDataDelete)
 
 		r.Get("/api/apps/{slug}/schedules", s.handleListSchedules)
 		r.Post("/api/apps/{slug}/schedules", s.handleCreateSchedule)
 		r.Patch("/api/apps/{slug}/schedules/{id}", s.handlePatchSchedule)
 		r.Delete("/api/apps/{slug}/schedules/{id}", s.handleDeleteSchedule)
-		r.Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs", s.handleListScheduleRuns)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs/{run_id}", s.handleGetScheduleRun)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs/{run_id}/logs", s.handleScheduleRunLogs)
@@ -290,6 +296,22 @@ func rateLimitByUser(rl *keyedRateLimiter) func(http.Handler) http.Handler {
 				return
 			}
 			if !rl.allow(strconv.FormatInt(u.ID, 10)) {
+				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// rateLimitByIP applies the given limiter keyed by the client IP. Used on
+// unauthenticated endpoints (OAuth/OIDC login-start) where there is no
+// authenticated user yet, to bound provider-redirect and callback-state
+// churn from a single source.
+func (s *Server) rateLimitByIP(rl *keyedRateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !rl.allow(s.ClientIP(r)) {
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return
 			}

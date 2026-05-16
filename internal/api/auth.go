@@ -20,6 +20,14 @@ import (
 
 // keyedRateLimiter is a simple sliding-window in-memory rate limiter keyed by
 // an arbitrary identifier (IP, user ID, etc.).
+//
+// State is per-process and in-memory: limits are NOT shared across a
+// multi-instance / load-balanced deployment, and they reset on restart. A
+// caller running N replicas behind a balancer can therefore make up to N x
+// limit requests per window in aggregate. This is acceptable for the abuse-
+// dampening goal here (slow brute force / runaway clients); it is not a
+// distributed quota. Run a single instance, or front it with a shared limiter
+// (e.g. at the proxy), if a hard global cap is required.
 type keyedRateLimiter struct {
 	mu      sync.Mutex
 	windows map[string][]time.Time
