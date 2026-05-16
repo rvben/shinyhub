@@ -545,6 +545,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	cancelSched()
 	sched.Stop()
+	// Cron is stopped; cancel any in-flight scheduled runs and wait for
+	// them to finalize their DB rows before we close the store.
+	jobsMgr.Stop(shutdownCtx)
 	cancelWatcher()
 	<-watcherDone
 

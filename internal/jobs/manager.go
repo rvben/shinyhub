@@ -82,11 +82,19 @@ type Manager struct {
 	// than starting a process.
 	globalSem chan struct{}
 
-	mu     sync.Mutex
-	locks  map[int64]*schedLock         // per-schedule lock for "skip"/"queue" policies
-	queues map[int64]chan struct{}      // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
-	active map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
+	mu      sync.Mutex
+	stopped bool                         // set by Stop; rejects new admissions
+	locks   map[int64]*schedLock         // per-schedule lock for "skip"/"queue" policies
+	queues  map[int64]chan struct{}      // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
+	active  map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
+
+	// wg tracks every launched run goroutine so Stop can wait for them to
+	// observe cancellation and finalize their DB rows before the process exits.
+	wg sync.WaitGroup
 }
+
+// ErrManagerStopped is returned by Run once Stop has been called.
+var ErrManagerStopped = fmt.Errorf("jobs manager stopped")
 
 // defaultMaxConcurrentRuns bounds total simultaneously executing schedule
 // runs across the manager.
@@ -175,12 +183,53 @@ func (m *Manager) Cancel(runID int64) error {
 	return nil
 }
 
+// Stop signals all in-flight runs to cancel and waits for their goroutines
+// to finalize (update the schedule_runs row) or for ctx to expire. After
+// Stop returns, Run rejects new admissions with ErrManagerStopped. ctx
+// bounds how long shutdown waits; on expiry the still-running goroutines
+// are abandoned (their next startup reconciliation marks them interrupted).
+func (m *Manager) Stop(ctx context.Context) {
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
+	m.stopped = true
+	cancels := make([]context.CancelFunc, 0, len(m.active))
+	for _, c := range m.active {
+		cancels = append(cancels, c)
+	}
+	m.mu.Unlock()
+
+	for _, c := range cancels {
+		c()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("jobs: shutdown timeout; abandoning in-flight runs")
+	}
+}
+
 // Run executes a scheduled run for the given schedule ID. It enforces the
 // schedule's overlap policy and returns the run row ID even when a run is
 // skipped. The actual command execution happens in a background goroutine;
 // Run returns as soon as the run row is inserted (or the skipped row is
 // finished).
 func (m *Manager) Run(scheduleID int64, trigger string, userID *int64) (int64, error) {
+	m.mu.Lock()
+	stopped := m.stopped
+	m.mu.Unlock()
+	if stopped {
+		return 0, ErrManagerStopped
+	}
+
 	sched, err := m.store.GetSchedule(scheduleID)
 	if err != nil {
 		return 0, fmt.Errorf("get schedule %d: %w", scheduleID, err)
@@ -223,7 +272,9 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, trigger string, u
 	ctx, cancel := m.buildRunContext()
 	m.registerActive(runID, cancel)
 
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
 		defer slot.unlock()
 		defer cancel()
 		defer m.unregisterActive(runID)
@@ -267,7 +318,9 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 		}
 		ctx, cancel := m.buildRunContext()
 		m.registerActive(runID, cancel)
+		m.wg.Add(1)
 		go func() {
+			defer m.wg.Done()
 			defer slot.unlock()
 			defer cancel()
 			defer m.unregisterActive(runID)
@@ -292,7 +345,9 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 	ctx, cancel := m.buildRunContext()
 	m.registerActive(runID, cancel)
 
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
 		defer cancel()
 		defer m.unregisterActive(runID)
 
@@ -327,7 +382,9 @@ func (m *Manager) runConcurrent(sched *db.Schedule, app *db.App, trigger string,
 	ctx, cancel := m.buildRunContext()
 	m.registerActive(runID, cancel)
 
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
 		defer cancel()
 		defer m.unregisterActive(runID)
 		m.execute(ctx, sched, app, runID, trigger, userID)
