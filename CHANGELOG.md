@@ -18,6 +18,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.1](https://github.com/rvben/shinyhub/compare/v0.5.0...v0.5.1) - 2026-05-16
+
+### Added
+
+- **backup**: add shinyhub backup and restore commands ([2f1d6d4](https://github.com/rvben/shinyhub/commit/2f1d6d4952647191294308f712607200ae3d277c))
+- **api**: broaden rate limiting coverage ([90f2884](https://github.com/rvben/shinyhub/commit/90f288402c048cfd14a37ea774225f30de3c95e8))
+- **deploy**: durable deploy state machine ([1c562a7](https://github.com/rvben/shinyhub/commit/1c562a7ff343df987664c743563cdac81fcf3019))
+- **server**: deliberate shutdown semantics for app processes ([8e68f47](https://github.com/rvben/shinyhub/commit/8e68f47a6ba54bf61e70be899ab2834b9539fad5))
+
+### Fixed
+
+- **backup**: reject self-containing output and preserve file modes ([34b2b34](https://github.com/rvben/shinyhub/commit/34b2b346c6d8a8e3129e9914f1e64f807149ed3d))
+- **install**: enforce checksum and add cosign signature verification ([e61ec4f](https://github.com/rvben/shinyhub/commit/e61ec4f0972b2a95ace0bbb0c7fe88654b852a73))
+- **docker**: add serve subcommand to Dockerfile entrypoint ([be91c3f](https://github.com/rvben/shinyhub/commit/be91c3faf5da054ad4a42a11f448ae8a1d2b896d))
+- **api**: tombstone-ordered app deletion with startup reconcile ([f61f0ab](https://github.com/rvben/shinyhub/commit/f61f0abe784e3c142ebea1452139859044236e15))
+- **process**: reap stopped Docker containers ([9f77edb](https://github.com/rvben/shinyhub/commit/9f77edb96c9710dddea203e91e91ed737dbba065))
+- **data**: symlink-safe atomic path resolution for data uploads ([e60c794](https://github.com/rvben/shinyhub/commit/e60c7946faa43ad166d34d939a9cf056a1a06015))
+- **recovery**: validate process identity before re-adopting native apps ([208ef04](https://github.com/rvben/shinyhub/commit/208ef0494abe4970f1a3d587e1dc9c70a788e087))
+- **security**: scrub server secrets from app-controlled code paths ([c7a015e](https://github.com/rvben/shinyhub/commit/c7a015edefddb09392e254d0a8afa95e9b1836b4))
+
+### Performance
+
+- **db**: WAL mode, busy_timeout, connection pool, latency logging ([2c9d10c](https://github.com/rvben/shinyhub/commit/2c9d10c5d71e1b8760704e441bc631a3ae2dc509))
+
 ## [0.5.0](https://github.com/rvben/shinyhub/compare/v0.4.1...v0.5.0) - 2026-05-14
 
 ### Added
