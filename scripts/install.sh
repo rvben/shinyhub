@@ -42,14 +42,46 @@ trap 'rm -rf "$TMP"' EXIT
 curl -fsSL "${BASE_URL}/${TARBALL}"    -o "${TMP}/${TARBALL}"
 curl -fsSL "${BASE_URL}/checksums.txt" -o "${TMP}/checksums.txt"
 
-# Verify checksum. sha256sum on Linux; shasum on macOS.
 cd "$TMP"
+
+# Trust model:
+#   1. checksums.txt binds the SHA-256 of every release artifact. The tarball
+#      hash is verified against it below. This is MANDATORY and fails closed:
+#      if no SHA-256 tool is present we abort rather than install unverified
+#      bytes.
+#   2. checksums.txt itself is (optionally) signed at release time with cosign
+#      keyless signing (Sigstore). If cosign is installed locally and the
+#      signature artifacts are published, we verify that the checksums file was
+#      produced by this repo's GitHub Actions release workflow before trusting
+#      any hash in it. cosign being absent only downgrades to plain checksum
+#      trust; it never silently skips the checksum itself.
+
+# Step 1: mandatory checksum verification (fail closed).
 if command -v sha256sum >/dev/null 2>&1; then
   grep "${TARBALL}" checksums.txt | sha256sum -c -
 elif command -v shasum >/dev/null 2>&1; then
   grep "${TARBALL}" checksums.txt | shasum -a 256 -c -
 else
-  printf 'Warning: no checksum tool found; skipping verification\n' >&2
+  printf 'Error: no SHA-256 tool (sha256sum or shasum) found; refusing to install unverified binary\n' >&2
+  exit 1
+fi
+
+# Step 2: optional signature verification of checksums.txt via cosign.
+if command -v cosign >/dev/null 2>&1; then
+  if curl -fsSL "${BASE_URL}/checksums.txt.sig" -o "${TMP}/checksums.txt.sig" 2>/dev/null \
+     && curl -fsSL "${BASE_URL}/checksums.txt.pem" -o "${TMP}/checksums.txt.pem" 2>/dev/null; then
+    printf 'Verifying checksums.txt signature with cosign...\n'
+    cosign verify-blob \
+      --certificate "${TMP}/checksums.txt.pem" \
+      --signature "${TMP}/checksums.txt.sig" \
+      --certificate-identity-regexp "^https://github.com/${REPO}/\.github/workflows/.+@refs/tags/${VERSION}$" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      "${TMP}/checksums.txt"
+  else
+    printf 'Note: cosign present but no signature published for %s; relying on checksum only\n' "$VERSION" >&2
+  fi
+else
+  printf 'Note: cosign not installed; skipping signature verification (checksum still enforced)\n' >&2
 fi
 
 tar -xzf "${TARBALL}"

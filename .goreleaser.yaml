@@ -27,6 +27,21 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# Keyless (Sigstore) signature over checksums.txt. Identity is bound to this
+# repo's release workflow + tag; install.sh verifies it when cosign is present.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+    output: true
+
 release:
   github:
     owner: rvben

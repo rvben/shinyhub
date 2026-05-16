@@ -9,6 +9,7 @@ permissions:
   contents: write
   packages: write
   checks: read
+  id-token: write   # required for cosign keyless signing of checksums.txt
 
 env:
   # Run JS-based actions (checkout, setup-go, …) on Node 24 instead of the
@@ -49,6 +50,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
