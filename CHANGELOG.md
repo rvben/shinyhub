@@ -19,6 +19,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.2](https://github.com/rvben/shinyhub/compare/v0.5.1...v0.5.2) - 2026-05-16
+
+### Fixed
+
+- **api**: apply app-settings PATCH atomically and roll back manifest on failed deploy ([9464a9f](https://github.com/rvben/shinyhub/commit/9464a9f4ca7820e99d68d5c7594963757c210775))
+- **lifecycle**: bound wake-on-miss at shutdown and reconcile crashed replica slots ([c833552](https://github.com/rvben/shinyhub/commit/c833552d27513c8cbcdea82ff2dd14b233be8670))
+- **api**: report admission outcome for manual schedule runs ([12e2dcd](https://github.com/rvben/shinyhub/commit/12e2dcd51e6c7acddc2b99e3cacda6f5f26a33fd))
+- **config**: treat runtime default_max_sessions_per_replica=0 as unlimited ([cc2c3ff](https://github.com/rvben/shinyhub/commit/cc2c3ffeccb7f26a9da5e36a98a9310cfdc34ed2))
+- **jobs**: drain in-flight scheduled runs on shutdown ([dea314c](https://github.com/rvben/shinyhub/commit/dea314cb6a6fcb1e9dfc40acbdf8236f9a964e8b))
+- **server**: scope timeout-exempt API routes to exact method and path ([2edfcf3](https://github.com/rvben/shinyhub/commit/2edfcf357d30dd1c96c03e579fbedd0c3d670ac0))
+- **api**: remove rejected deploy bundles before releasing the deploy lock ([e2f40bb](https://github.com/rvben/shinyhub/commit/e2f40bbcdb3552ce16f09df7deecd03594affd81))
+- **db**: serialize concurrent OAuth provisioning with BEGIN IMMEDIATE ([4f20687](https://github.com/rvben/shinyhub/commit/4f20687dd76de8c48e3aa19495d461f6c14e20b0))
+- **server**: exempt lifecycle mutations from the request timeout ([64f120a](https://github.com/rvben/shinyhub/commit/64f120a018922a1a5a0798728c1774d6af5f938e))
+- **api**: bound rate-limiter memory growth ([672b126](https://github.com/rvben/shinyhub/commit/672b126be489a3eaa108ab29e8e986694f6b33db))
+- **jobs**: bound scheduled-run concurrency and fail closed on undecryptable secrets ([d50988d](https://github.com/rvben/shinyhub/commit/d50988d8f4d7c330ff717887089d8d17990e9b4c))
+- **auth**: provision OAuth and OIDC users atomically ([10b511a](https://github.com/rvben/shinyhub/commit/10b511ae0e0fd6f286a9a2fe191c74bd87c3b13e))
+- **api**: harden app deploy and restart lifecycle ([4e0bbfb](https://github.com/rvben/shinyhub/commit/4e0bbfbf8424cfdb3ad783f6a299cac72c7f0949))
+
 ## [0.5.1](https://github.com/rvben/shinyhub/compare/v0.5.0...v0.5.1) - 2026-05-16
 
 ### Added
