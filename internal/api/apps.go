@@ -325,6 +325,23 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		newMaxSessions, setMaxSessions = n, true
 	}
 
+	// Fail fast: CPU/memory limits are only enforced by the Docker runtime.
+	// Under native mode they would be silently ignored, giving a false sense
+	// of containment. Reject the write rather than store an unenforceable
+	// limit. Clearing a limit (null) or setting it to 0 is always allowed.
+	if s.cfg.Runtime.Mode == "native" {
+		if setMemoryLimitMB && memoryLimitMB != nil && *memoryLimitMB > 0 {
+			writeError(w, http.StatusBadRequest,
+				"memory_limit_mb is unenforceable under runtime.mode=native; switch to docker runtime or unset the limit")
+			return
+		}
+		if setCPUQuotaPercent && cpuQuotaPercent != nil && *cpuQuotaPercent > 0 {
+			writeError(w, http.StatusBadRequest,
+				"cpu_quota_percent is unenforceable under runtime.mode=native; switch to docker runtime or unset the limit")
+			return
+		}
+	}
+
 	// Apply all validated writes.
 	if setHibernateTimeout {
 		if err := s.store.UpdateHibernateTimeout(slug, hibernateTimeout); err != nil {
@@ -596,9 +613,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce per-app disk quota: the new extracted version has already been
-	// written, so DirSize now reflects the post-deploy footprint. The defer
-	// above rolls the new files back if we reject here.
+	// Serialize the mutation phase so a concurrent restart/rollback/stop on
+	// the same slug can't tear down the pool we are about to bring up.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
+	// Enforce per-app disk quota INSIDE the lock: the new extracted version
+	// has already been written, so DirSize now reflects the post-deploy
+	// footprint. Two concurrent same-slug deploys must not both observe a
+	// pre-commit footprint and both pass; serializing the check makes the
+	// quota authoritative. The defer above rolls the new files back if we
+	// reject here.
 	if s.cfg.Storage.AppQuotaMB > 0 {
 		used, qErr := deploy.CheckAppQuota(s.cfg.Storage.AppsDir, s.cfg.Storage.AppDataDir, slug, s.cfg.Storage.AppQuotaMB)
 		if qErr != nil {
@@ -612,11 +637,6 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
-	// Serialize the mutation phase so a concurrent restart/rollback/stop on
-	// the same slug can't tear down the pool we are about to bring up.
-	release := s.acquireDeployLock(slug)
-	defer release()
 
 	// Load + server-policy-validate the manifest BEFORE tearing down the
 	// running pool. A manifest rejected by policy (e.g. replicas > MaxReplicas)
@@ -965,6 +985,13 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize against concurrent deploy/rollback/stop on the same slug.
+	// The active deployment MUST be read inside the lock: a deploy that wins
+	// the race promotes a newer row, and a read taken before the lock would
+	// boot the stale bundle while the DB records the new one as succeeded.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -975,10 +1002,6 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := deployments[0]
-
-	// Serialize against concurrent deploy/rollback/stop on the same slug.
-	release := s.acquireDeployLock(slug)
-	defer release()
 
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)

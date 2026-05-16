@@ -227,15 +227,17 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if app.Status != "running" {
 		return false, nil
 	}
+	// Serialize with any deploy/restart on the same slug. The active
+	// deployment is read inside the lock so a concurrent deploy can't make
+	// us relaunch a stale bundle after it promoted a newer one.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil || len(deployments) == 0 {
 		return false, nil
 	}
 	current := deployments[0]
-
-	// Serialize with any deploy/restart on the same slug.
-	release := s.acquireDeployLock(slug)
-	defer release()
 
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
