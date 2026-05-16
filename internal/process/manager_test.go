@@ -113,6 +113,45 @@ func TestManagerStartStop(t *testing.T) {
 	}
 }
 
+// TestManagerStopAll verifies StopAll terminates every tracked app across
+// slugs, backing the server.shutdown_apps=stop path.
+func TestManagerStopAll(t *testing.T) {
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+
+	starts := []struct {
+		slug string
+		port int
+	}{{"app-a", 19010}, {"app-b", 19011}}
+	var pids []int
+	for _, s := range starts {
+		info, err := m.Start(process.StartParams{
+			Slug:    s.slug,
+			Dir:     t.TempDir(),
+			Command: []string{"sleep", "30"},
+			Port:    s.port,
+		})
+		if err != nil {
+			t.Fatalf("start %s: %v", s.slug, err)
+		}
+		pids = append(pids, info.PID)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if err := m.StopAll(); err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
+	for i, pid := range pids {
+		if err := syscall.Kill(pid, 0); err == nil {
+			t.Errorf("%s (pid %d) still alive after StopAll", starts[i].slug, pid)
+		}
+	}
+
+	// StopAll on an empty manager must be a no-op, not an error.
+	if err := m.StopAll(); err != nil {
+		t.Errorf("StopAll on empty manager: %v", err)
+	}
+}
+
 // TestNativeRuntime_AppBindHost asserts the loopback contract for the native
 // runtime: app processes share the host network and must be reachable only via
 // the in-process proxy.

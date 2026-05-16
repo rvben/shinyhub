@@ -148,6 +148,14 @@ type ServerConfig struct {
 	Port           int      `yaml:"port"`
 	BaseURL        string   `yaml:"base_url"`
 	TrustedProxies []string `yaml:"trusted_proxies"`
+
+	// ShutdownApps controls what happens to running app subprocesses /
+	// containers when the server receives a shutdown signal:
+	//   "adopt" (default) — leave them running; on restart the server
+	//                        re-adopts them (zero-downtime upgrades).
+	//   "stop"            — gracefully stop every app before exiting
+	//                        (clean host state; apps cold-start next boot).
+	ShutdownApps string `yaml:"shutdown_apps"`
 }
 
 type AuthConfig struct {
@@ -351,6 +359,17 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("trusted_proxies: invalid CIDR %q: %w", cidr, err)
 		}
 		cfg.TrustedProxyNets = append(cfg.TrustedProxyNets, ipNet)
+	}
+
+	if cfg.Server.ShutdownApps == "" {
+		cfg.Server.ShutdownApps = "adopt"
+	}
+	switch cfg.Server.ShutdownApps {
+	case "adopt", "stop":
+		// allowed
+	default:
+		return nil, fmt.Errorf("server.shutdown_apps: %q is not allowed; must be \"adopt\" or \"stop\"",
+			cfg.Server.ShutdownApps)
 	}
 
 	if cfg.OAuth.OIDC.DisplayName == "" && cfg.OAuth.OIDC.IssuerURL != "" {
@@ -586,6 +605,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
 		cfg.Server.TrustedProxies = strings.Split(v, ",")
+	}
+	if v := os.Getenv("SHINYHUB_SHUTDOWN_APPS"); v != "" {
+		cfg.Server.ShutdownApps = v
 	}
 	if v := os.Getenv("SHINYHUB_GITHUB_CLIENT_ID"); v != "" {
 		cfg.OAuth.GitHub.ClientID = v

@@ -354,6 +354,43 @@ func (m *Manager) Stop(slug string) error {
 	return nil
 }
 
+// StopAll gracefully stops every tracked app across all slugs, concurrently.
+// Used on server shutdown when server.shutdown_apps is "stop" so the host is
+// left clean instead of with orphaned subprocesses/containers. Errors are
+// aggregated; a failure to stop one app does not block the others.
+func (m *Manager) StopAll() error {
+	m.mu.Lock()
+	slugs := make([]string, 0, len(m.entries))
+	for slug, pool := range m.entries {
+		for _, e := range pool {
+			if e != nil {
+				slugs = append(slugs, slug)
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(slugs))
+	for _, slug := range slugs {
+		wg.Add(1)
+		go func(slug string) {
+			defer wg.Done()
+			if err := m.Stop(slug); err != nil {
+				errs <- fmt.Errorf("%s: %w", slug, err)
+			}
+		}(slug)
+	}
+	wg.Wait()
+	close(errs)
+	var combined []error
+	for e := range errs {
+		combined = append(combined, e)
+	}
+	return errors.Join(combined...)
+}
+
 // Status returns the first running replica, or a synthetic stopped record.
 // Callers that need per-replica info should use AllForSlug.
 func (m *Manager) Status(slug string) (*ProcessInfo, error) {

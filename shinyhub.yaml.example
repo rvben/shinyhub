@@ -18,6 +18,10 @@ server:
     - 127.0.0.0/8                     # default: loopback only
     - ::1/128
   # SHINYHUB_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
+  shutdown_apps: adopt                # what to do with running apps on shutdown:
+                                      #   adopt (default) - leave running; re-adopt on restart (zero-downtime upgrades)
+                                      #   stop            - gracefully stop all apps before exit (clean host state)
+  # SHINYHUB_SHUTDOWN_APPS=stop
 
 auth:
   # REQUIRED. 32+ characters. Generate with: openssl rand -hex 32

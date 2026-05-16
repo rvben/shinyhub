@@ -477,6 +477,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	sched.Stop()
 	cancelWatcher()
 	<-watcherDone
+
+	switch cfg.Server.ShutdownApps {
+	case "stop":
+		slog.Info("stopping app processes (server.shutdown_apps=stop)")
+		if err := mgr.StopAll(); err != nil {
+			slog.Warn("stop app processes", "err", err)
+		}
+	default: // "adopt"
+		slog.Info("leaving app processes running for re-adoption (server.shutdown_apps=adopt)")
+	}
+
 	slog.Info("shutdown complete")
 	return nil
 }

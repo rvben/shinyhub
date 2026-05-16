@@ -39,6 +39,59 @@ func TestLifecycle_Defaults(t *testing.T) {
 	}
 }
 
+func TestServerShutdownApps(t *testing.T) {
+	t.Run("defaults to adopt", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Server.ShutdownApps != "adopt" {
+			t.Errorf("default: got %q, want adopt", cfg.Server.ShutdownApps)
+		}
+	})
+
+	t.Run("accepts stop from yaml", func(t *testing.T) {
+		path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+server:
+  shutdown_apps: stop
+`)
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Server.ShutdownApps != "stop" {
+			t.Errorf("got %q, want stop", cfg.Server.ShutdownApps)
+		}
+	})
+
+	t.Run("rejects invalid value", func(t *testing.T) {
+		path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+server:
+  shutdown_apps: nuke
+`)
+		if _, err := config.Load(path); err == nil {
+			t.Fatal("expected error for invalid shutdown_apps, got nil")
+		}
+	})
+
+	t.Run("env override wins", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		t.Setenv("SHINYHUB_SHUTDOWN_APPS", "stop")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Server.ShutdownApps != "stop" {
+			t.Errorf("env override: got %q, want stop", cfg.Server.ShutdownApps)
+		}
+	})
+}
+
 func TestLifecycle_FromYAML(t *testing.T) {
 	path := writeYAML(t, `
 auth:
