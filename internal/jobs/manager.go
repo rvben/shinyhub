@@ -75,11 +75,22 @@ type Manager struct {
 	appsDir    string
 	appDataDir string
 
+	// globalSem caps the number of schedule runs executing simultaneously
+	// across every schedule. overlap_policy "concurrent" otherwise spawns an
+	// unbounded goroutine+process per trigger; this bounds the host/container
+	// blast radius. Runs in excess of the cap wait (cheap goroutines) rather
+	// than starting a process.
+	globalSem chan struct{}
+
 	mu     sync.Mutex
 	locks  map[int64]*schedLock         // per-schedule lock for "skip"/"queue" policies
 	queues map[int64]chan struct{}      // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
 	active map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
 }
+
+// defaultMaxConcurrentRuns bounds total simultaneously executing schedule
+// runs across the manager.
+const defaultMaxConcurrentRuns = 32
 
 // NewManager constructs a Manager. secretsKey may be nil if no env vars are encrypted.
 //
@@ -103,6 +114,7 @@ func NewManager(rt process.Runtime, st Store, secretsKey []byte, appsDir, appDat
 		secretsKey: secretsKey,
 		appsDir:    appsDir,
 		appDataDir: appDataDir,
+		globalSem:  make(chan struct{}, defaultMaxConcurrentRuns),
 		locks:      make(map[int64]*schedLock),
 		queues:     make(map[int64]chan struct{}),
 		active:     make(map[int64]context.CancelFunc),
@@ -383,6 +395,18 @@ func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int6
 // guarantees a queued run gets its full configured timeout window once
 // it actually starts running.
 func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, runID int64, trigger string, userID *int64) {
+	// Global concurrency gate. Wait here (not before goroutine launch) so the
+	// per-run timeout below still starts only once the run actually runs. A
+	// Cancel() while queued for a slot finalises the run as cancelled instead
+	// of hanging.
+	select {
+	case m.globalSem <- struct{}{}:
+		defer func() { <-m.globalSem }()
+	case <-ctx.Done():
+		m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
+		return
+	}
+
 	runCtx := ctx
 	if sched.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
@@ -419,10 +443,18 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	for _, v := range envVars {
 		val := string(v.Value)
 		if v.IsSecret && len(m.secretsKey) > 0 {
-			plain, err := secrets.Decrypt(m.secretsKey, v.Value)
-			if err == nil {
-				val = string(plain)
+			plain, derr := secrets.Decrypt(m.secretsKey, v.Value)
+			if derr != nil {
+				// Fail closed: running the job with ciphertext (or a
+				// missing secret) would silently misbehave instead of
+				// surfacing a key/rotation problem. App startup fails
+				// closed for the same class of error; schedules must too.
+				fmt.Fprintf(logFile, "shinyhub: cannot decrypt secret env var %q: %v\n", v.Key, derr)
+				slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "key", v.Key, "err", derr)
+				m.finishRun(sched, runID, "failed", 0, trigger, userID)
+				return
 			}
+			val = string(plain)
 		}
 		env = append(env, v.Key+"="+val)
 	}
