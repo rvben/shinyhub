@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -108,47 +107,27 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.store.GetUserByOAuthAccount("oidc", oidcUser.Sub)
-	if errors.Is(err, db.ErrNotFound) {
-		username := deriveOIDCUsername(oidcUser)
-		jitRole := s.jitOAuthRole()
-		var createdUser bool
-		for _, candidate := range []string{username, username + "-" + oidcUser.Sub[:min(8, len(oidcUser.Sub))], username + "-oidc"} {
-			if err2 := s.store.CreateUser(db.CreateUserParams{
-				Username:     candidate,
-				PasswordHash: "",
-				Role:         jitRole,
-			}); err2 != nil {
-				fmt.Fprintf(os.Stderr, "oidc: create user %q: %v\n", candidate, err2)
-				continue
-			}
-			username = candidate
-			createdUser = true
-			break
-		}
-		if !createdUser {
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		user, err = s.store.GetUserByUsername(username)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		if err := s.store.CreateOAuthAccount(db.CreateOAuthAccountParams{
-			UserID:     user.ID,
-			Provider:   "oidc",
-			ProviderID: oidcUser.Sub,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "create oidc oauth account: %v\n", err)
-		}
+	username := deriveOIDCUsername(oidcUser)
+	user, created, err := s.store.ProvisionOAuthUser(db.ProvisionOAuthUserParams{
+		Provider:   "oidc",
+		ProviderID: oidcUser.Sub,
+		UsernameCandidates: []string{
+			username,
+			username + "-" + oidcUser.Sub[:min(8, len(oidcUser.Sub))],
+			username + "-oidc",
+		},
+		Role: s.jitOAuthRole(),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "oidc provision oauth user: %v\n", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if created {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &user.ID, Action: "create_user", ResourceType: "user",
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		})
-	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
 	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)

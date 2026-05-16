@@ -7,6 +7,9 @@ import (
 	"os"
 	"slices"
 	"time"
+
+	sqlite "modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -1090,6 +1093,104 @@ func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error
 		return nil, err
 	}
 	return &u, nil
+}
+
+type ProvisionOAuthUserParams struct {
+	Provider           string
+	ProviderID         string
+	UsernameCandidates []string
+	Role               string
+}
+
+// ProvisionOAuthUser atomically resolves the platform user for an external
+// identity. If (provider, provider_id) is already linked it returns that
+// user. Otherwise it creates a user under the first available candidate
+// username and links it, in a single transaction.
+//
+// Concurrent first logins for the same identity converge on one user: the
+// loser of the race rolls back the user it just created and returns the
+// winner's, so a session is never issued for an unlinked account and no
+// orphan user rows accumulate. The bool return reports whether a new user
+// was created (callers use it to emit a create_user audit event).
+func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	scanUser := func(row *sql.Row) (*User, error) {
+		var u User
+		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		return &u, nil
+	}
+	const linkedQuery = `
+		SELECT u.id, u.username, u.password_hash, u.role, u.created_at
+		FROM users u
+		JOIN oauth_accounts o ON o.user_id = u.id
+		WHERE o.provider = ? AND o.provider_id = ?`
+
+	if u, gerr := scanUser(tx.QueryRow(linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
+		if cerr := tx.Commit(); cerr != nil {
+			return nil, false, fmt.Errorf("commit: %w", cerr)
+		}
+		return u, false, nil
+	} else if !errors.Is(gerr, ErrNotFound) {
+		return nil, false, gerr
+	}
+
+	var userID int64
+	for _, name := range p.UsernameCandidates {
+		res, ierr := tx.Exec(
+			`INSERT INTO users (username, password_hash, role) VALUES (?, '', ?)`,
+			name, p.Role,
+		)
+		if ierr != nil {
+			var se *sqlite.Error
+			if errors.As(ierr, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
+				continue // username taken, try the next candidate
+			}
+			return nil, false, fmt.Errorf("create user: %w", ierr)
+		}
+		userID, _ = res.LastInsertId()
+		break
+	}
+	if userID == 0 {
+		return nil, false, fmt.Errorf("create user: all candidate usernames in use")
+	}
+
+	if _, lerr := tx.Exec(
+		`INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?)`,
+		userID, p.Provider, p.ProviderID,
+	); lerr != nil {
+		var se *sqlite.Error
+		if errors.As(lerr, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
+			// Lost a concurrent first-login race: the winner committed the
+			// link. Roll back (defer) to discard the user we just created
+			// and return the winner, read on a fresh connection so the
+			// committed row is visible.
+			existing, eerr := s.GetUserByOAuthAccount(p.Provider, p.ProviderID)
+			if eerr != nil {
+				return nil, false, fmt.Errorf("resolve raced oauth user: %w", eerr)
+			}
+			return existing, false, nil
+		}
+		return nil, false, fmt.Errorf("link oauth account: %w", lerr)
+	}
+
+	if cerr := tx.Commit(); cerr != nil {
+		return nil, false, fmt.Errorf("commit: %w", cerr)
+	}
+	created, gerr := s.GetUserByID(userID)
+	if gerr != nil {
+		return nil, false, gerr
+	}
+	return created, true, nil
 }
 
 // --- OAuth State (CSRF nonce) ---
