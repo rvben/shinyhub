@@ -272,6 +272,13 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 			Status: "running",
 		})
 	}
+	for _, idx := range result.Failed {
+		_ = s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:  app.ID,
+			Index:  idx,
+			Status: "crashed",
+		})
+	}
 	_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",

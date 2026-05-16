@@ -134,8 +134,12 @@ type Result struct {
 }
 
 // PoolResult contains the full set of replicas that were successfully booted.
+// Failed lists the indices whose boot failed in a partial-success deploy, so
+// the caller can persist them as crashed and let the watcher reconcile the
+// pool back up to the desired replica count.
 type PoolResult struct {
 	Replicas []Result
+	Failed   []int
 }
 
 // resolveBootParams resolves Command defaults, HealthCheck defaults, and
@@ -224,15 +228,18 @@ func Run(p Params) (*PoolResult, error) {
 	close(results)
 
 	ok := make([]Result, 0, p.Replicas)
+	var failed []int
 	var bootErrs []error
 	for br := range results {
 		if br.err != nil {
 			bootErrs = append(bootErrs, fmt.Errorf("replica %d: %w", br.idx, br.err))
+			failed = append(failed, br.idx)
 			continue
 		}
 		ok = append(ok, br.res)
 	}
 	sort.Slice(ok, func(a, b int) bool { return ok[a].Index < ok[b].Index })
+	sort.Ints(failed)
 
 	if len(ok) == 0 {
 		return nil, fmt.Errorf("all replicas failed health check: %w", errors.Join(bootErrs...))
@@ -240,7 +247,7 @@ func Run(p Params) (*PoolResult, error) {
 	for _, e := range bootErrs {
 		slog.Warn("replica boot failed", "slug", p.Slug, "err", e)
 	}
-	return &PoolResult{Replicas: ok}, nil
+	return &PoolResult{Replicas: ok, Failed: failed}, nil
 }
 
 // runManifestPostDeployHooks loads shinyhub.toml from the bundle and runs any

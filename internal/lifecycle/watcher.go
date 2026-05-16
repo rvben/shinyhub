@@ -53,6 +53,8 @@ type appStore interface {
 	UpdateAppStatus(p db.UpdateAppStatusParams) error
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
+	ListRunningApps() ([]*db.App, error)
+	ListReplicas(appID int64) ([]*db.Replica, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -70,10 +72,20 @@ type Watcher struct {
 	deploy func(slug, bundleDir string, index int) (*deploy.Result, error)
 
 	mu        sync.Mutex
+	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
 	attempts  map[replicaKey]int       // consecutive crash-restart attempts per replica
 	nextRetry map[replicaKey]time.Time // earliest time to retry a crashed replica
 	waking    map[string]bool          // true while a wake goroutine is in flight for slug
+
+	// wakeWG tracks in-flight OnMiss wake goroutines so shutdown can wait
+	// for them to persist replica/PID rows before the store is closed.
+	wakeWG sync.WaitGroup
 }
+
+// wakeDrainTimeout bounds how long Start waits for outstanding wake
+// goroutines after its context is cancelled, so a slow app launch cannot
+// hang process shutdown indefinitely.
+const wakeDrainTimeout = 15 * time.Second
 
 // New constructs a Watcher. deployFn encapsulates deploy.RunReplica with the
 // shared Manager and Proxy so wake/restart paths can persist the resulting PID
@@ -101,10 +113,31 @@ func (w *Watcher) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			w.drainWakes()
 			return
 		case <-ticker.C:
 			w.runOnce()
 		}
+	}
+}
+
+// drainWakes stops admitting new wakes and waits (bounded) for in-flight
+// ones to finish so their replica rows are persisted before shutdown
+// closes the store.
+func (w *Watcher) drainWakes() {
+	w.mu.Lock()
+	w.stopping = true
+	w.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		w.wakeWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(wakeDrainTimeout):
+		slog.Warn("watcher: shutdown timeout; abandoning in-flight wakes")
 	}
 }
 
@@ -116,15 +149,47 @@ func (w *Watcher) RunOnce() { w.runOnce() }
 // per-replica), iterating the whole pool would redundantly hibernate the same app.
 func (w *Watcher) runOnce() {
 	idleChecked := make(map[string]bool)
+	handled := make(map[replicaKey]bool)
 	for _, info := range w.mgr.All() {
 		switch info.Status {
 		case process.StatusCrashed:
+			handled[replicaKey{info.Slug, info.Index}] = true
 			w.handleCrashed(info.Slug, info.Index)
 		case process.StatusRunning:
 			if !idleChecked[info.Slug] {
 				idleChecked[info.Slug] = true
 				w.handleIdle(info.Slug)
 			}
+		}
+	}
+	w.reconcileCrashedReplicas(handled)
+}
+
+// reconcileCrashedReplicas restarts replica slots that are persisted as
+// crashed but that the process manager is not tracking — the state left by a
+// partial-success deploy, where some indices never booted (and so were never
+// registered with the manager). Without this pass such an app would run
+// permanently under-replicated until the next server restart. handled holds
+// the replicas already processed via the manager this tick so they are not
+// driven twice.
+func (w *Watcher) reconcileCrashedReplicas(handled map[replicaKey]bool) {
+	apps, err := w.store.ListRunningApps()
+	if err != nil {
+		return
+	}
+	for _, app := range apps {
+		reps, err := w.store.ListReplicas(app.ID)
+		if err != nil {
+			continue
+		}
+		for _, r := range reps {
+			if r.Status != "crashed" || r.Index >= app.Replicas {
+				continue
+			}
+			if handled[replicaKey{app.Slug, r.Index}] {
+				continue
+			}
+			w.handleCrashed(app.Slug, r.Index)
 		}
 	}
 }
@@ -272,14 +337,20 @@ func (w *Watcher) handleIdle(slug string) {
 // replicas in parallel.
 func (w *Watcher) OnMiss(slug string) {
 	w.mu.Lock()
+	if w.stopping {
+		w.mu.Unlock()
+		return // shutting down; do not start new app launches
+	}
 	if w.waking[slug] {
 		w.mu.Unlock()
 		return // already waking; concurrent requests share the same wake
 	}
 	w.waking[slug] = true
+	w.wakeWG.Add(1)
 	w.mu.Unlock()
 
 	go func() {
+		defer w.wakeWG.Done()
 		defer func() {
 			w.mu.Lock()
 			delete(w.waking, slug)

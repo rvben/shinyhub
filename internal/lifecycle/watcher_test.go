@@ -95,6 +95,7 @@ type fakeStore struct {
 	statusUpdates   []db.UpdateAppStatusParams
 	appStatus       map[string]string
 	upsertedReplicas []db.UpsertReplicaParams
+	replicas        map[int64][]*db.Replica
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -142,6 +143,22 @@ func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	f.mu.Unlock()
 	return nil
 }
+func (f *fakeStore) ListRunningApps() ([]*db.App, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*db.App
+	for _, app := range f.apps {
+		if app.Status == "running" {
+			out = append(out, app)
+		}
+	}
+	return out, nil
+}
+func (f *fakeStore) ListReplicas(appID int64) ([]*db.Replica, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.replicas[appID], nil
+}
 
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
 // call runOnce() directly without starting the background goroutine.
@@ -185,6 +202,84 @@ func TestWatchdog_RestartsOnCrash(t *testing.T) {
 	defer mu.Unlock()
 	if len(deployed) != 1 || deployed[0] != "myapp" {
 		t.Errorf("expected deployFn called once for myapp, got %v", deployed)
+	}
+}
+
+// TestWatchdog_ReconcilesCrashedReplicaSlot covers the partial-deploy gap: an
+// index that never booted is persisted as "crashed" but the process manager
+// has no entry for it (StopReplica was called on boot failure). The watchdog
+// must still drive it back up from the persisted row, not leave the app
+// permanently under-replicated.
+func TestWatchdog_ReconcilesCrashedReplicaSlot(t *testing.T) {
+	// Manager only knows about the healthy replica 0.
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "myapp", Index: 0, Status: process.StatusRunning},
+	}}
+	st := newFakeStore(
+		map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "running", Replicas: 2}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	pid0, port0 := 10, 20010
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, PID: &pid0, Port: &port0, Status: "running"},
+			{AppID: 1, Index: 1, Status: "crashed"},
+		},
+	}
+	var deployedIdx []int
+	var mu sync.Mutex
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			mu.Lock()
+			deployedIdx = append(deployedIdx, idx)
+			mu.Unlock()
+			return &deploy.Result{Index: idx, PID: 11, Port: 20011}, nil
+		})
+
+	w.runOnce()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deployedIdx) != 1 || deployedIdx[0] != 1 {
+		t.Fatalf("expected deployFn called once for crashed replica index 1, got %v", deployedIdx)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var sawRunning bool
+	for _, up := range st.upsertedReplicas {
+		if up.Index == 1 && up.Status == "running" {
+			sawRunning = true
+		}
+	}
+	if !sawRunning {
+		t.Errorf("expected replica index 1 upserted as running, got %+v", st.upsertedReplicas)
+	}
+}
+
+// TestWatchdog_IgnoresCrashedSlotAboveReplicaCount ensures a stale crashed row
+// left by a replica shrink (index >= desired Replicas) is not resurrected.
+func TestWatchdog_IgnoresCrashedSlotAboveReplicaCount(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "myapp", Index: 0, Status: process.StatusRunning},
+	}}
+	st := newFakeStore(
+		map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "running", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	st.replicas = map[int64][]*db.Replica{
+		1: {{AppID: 1, Index: 1, Status: "crashed"}}, // idx 1 >= Replicas 1
+	}
+	var calls int32
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			atomic.AddInt32(&calls, 1)
+			return &deploy.Result{Index: idx, PID: 1, Port: 1}, nil
+		})
+
+	w.runOnce()
+
+	if n := atomic.LoadInt32(&calls); n != 0 {
+		t.Errorf("expected no restart for stale crashed slot above replica count, got %d calls", n)
 	}
 }
 

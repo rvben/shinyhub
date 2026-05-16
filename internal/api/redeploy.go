@@ -137,6 +137,15 @@ func (s *Server) redeployApp(slug string) {
 			slog.Error("redeployApp: upsert replica", "slug", slug, "index", r.Index, "err", err)
 		}
 	}
+	for _, idx := range result.Failed {
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:  app.ID,
+			Index:  idx,
+			Status: "crashed",
+		}); err != nil {
+			slog.Error("redeployApp: upsert failed replica", "slug", slug, "index", idx, "err", err)
+		}
+	}
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {
 		slog.Error("redeployApp: update status", "slug", slug, "err", err)
 	}
