@@ -21,6 +21,75 @@ func TestOpenAndMigrate(t *testing.T) {
 	}
 }
 
+func TestMigrate_FreshDBPopulatesLedger(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var n int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
+		t.Fatalf("count ledger: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("schema_migrations is empty after fresh migrate")
+	}
+	// Ledger version 1 must be recorded and the core table must exist.
+	var name string
+	if err := store.DB().QueryRow(
+		`SELECT name FROM schema_migrations WHERE version=1`).Scan(&name); err != nil {
+		t.Fatalf("version 1 not recorded: %v", err)
+	}
+	if err := store.DB().QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`).Scan(&name); err != nil {
+		t.Fatalf("users table missing after migrate: %v", err)
+	}
+}
+
+// TestMigrate_BaselinesLegacyDB proves a fully-migrated database that predates
+// the ledger (the original runner left no schema_migrations table) is adopted
+// without error and without destroying data, rather than re-running 001+.
+func TestMigrate_BaselinesLegacyDB(t *testing.T) {
+	dsn := t.TempDir() + "/legacy.db"
+	store, err := db.Open(dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("initial migrate: %v", err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "legacy", PasswordHash: "h", Role: "admin",
+	}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	// Simulate a pre-ledger database.
+	if _, err := store.DB().Exec(`DROP TABLE schema_migrations`); err != nil {
+		t.Fatalf("drop ledger: %v", err)
+	}
+
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("baseline migrate: %v", err)
+	}
+	// Ledger restored.
+	var n int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
+		t.Fatalf("count ledger: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("ledger not restored after baseline")
+	}
+	// Data preserved (proves migrations were not destructively re-run).
+	u, err := store.GetUserByUsername("legacy")
+	if err != nil || u.Username != "legacy" {
+		t.Fatalf("seeded user lost across baseline: %v %+v", err, u)
+	}
+}
+
 func TestCreateAndGetUser(t *testing.T) {
 	store := mustOpenDB(t)
 	err := store.CreateUser(db.CreateUserParams{
@@ -247,8 +316,19 @@ func TestMigrate_Idempotent(t *testing.T) {
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("first Migrate: %v", err)
 	}
+	var before int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&before); err != nil {
+		t.Fatalf("count ledger: %v", err)
+	}
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("second Migrate must be idempotent: %v", err)
+	}
+	var after int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&after); err != nil {
+		t.Fatalf("count ledger: %v", err)
+	}
+	if before == 0 || before != after {
+		t.Errorf("ledger not stable across re-migrate: before=%d after=%d", before, after)
 	}
 }
 
