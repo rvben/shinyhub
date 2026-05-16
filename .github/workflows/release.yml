@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write
   packages: write
-  checks: read
   id-token: write   # required for cosign keyless signing of checksums.txt
 
 env:
@@ -30,19 +29,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify CI passed on tagged commit
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          SHA="$(git rev-parse HEAD)"
-          echo "Checking CI status for commit $SHA"
-          STATE="$(gh api "repos/${{ github.repository }}/commits/$SHA/check-runs" --jq '[.check_runs[] | select(.name=="test")] | .[0].conclusion // "missing"')"
-          echo "CI test conclusion: $STATE"
-          if [ "$STATE" != "success" ]; then
-            echo "CI test job did not succeed on $SHA (got: $STATE). Refusing to release."
-            exit 1
-          fi
+      # The release is hermetic: it re-runs the full gate against the exact
+      # tagged tree rather than trusting a separate workflow's check-run on a
+      # racing commit. Same make targets the ci workflow runs, in order.
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test-go
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
