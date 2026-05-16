@@ -59,11 +59,42 @@ func dbFilePath(dsn string) (path string, ok bool) {
 	return dsn, true
 }
 
+// pathWithin reports whether target resolves to base itself or a path beneath
+// it. Both are made absolute and cleaned first. It does not resolve symlinks
+// (target typically does not exist yet), so it is a best-effort guard.
+func pathWithin(base, target string) (bool, error) {
+	ab, err := filepath.Abs(base)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", base, err)
+	}
+	at, err := filepath.Abs(target)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", target, err)
+	}
+	ab = filepath.Clean(ab)
+	at = filepath.Clean(at)
+	return at == ab || strings.HasPrefix(at, ab+string(os.PathSeparator)), nil
+}
+
 // Create writes a consistent backup archive of all durable state to outPath.
 func Create(cfg *config.Config, version, outPath string) error {
 	dbPath, ok := dbFilePath(cfg.Database.DSN)
 	if !ok {
 		return fmt.Errorf("database %q is in-memory; nothing to back up", cfg.Database.DSN)
+	}
+
+	// The output archive must not live inside a tree we are about to walk:
+	// addTree would otherwise capture the partially written .partial file,
+	// producing a self-containing archive that can corrupt or grow until the
+	// disk fills.
+	for _, root := range []string{cfg.Storage.AppsDir, cfg.Storage.AppDataDir} {
+		within, err := pathWithin(root, outPath)
+		if err != nil {
+			return err
+		}
+		if within {
+			return fmt.Errorf("--out %q is inside backed-up dir %q; write the archive elsewhere", outPath, root)
+		}
 	}
 
 	store, err := db.Open(cfg.Database.DSN)
@@ -338,10 +369,11 @@ func addFile(tw *tar.Writer, src, name string) error {
 	}
 	defer f.Close()
 	hdr := &tar.Header{
-		Name:    name,
-		Mode:    0o600,
-		Size:    fi.Size(),
-		ModTime: fi.ModTime(),
+		Name:     name,
+		Mode:     int64(fi.Mode().Perm()),
+		Size:     fi.Size(),
+		ModTime:  fi.ModTime(),
+		Typeflag: tar.TypeReg,
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("write header %s: %w", name, err)

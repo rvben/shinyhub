@@ -164,6 +164,45 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 	}
 }
 
+// TestCreateRejectsOutputInsideBackedUpTree guards against an archive that
+// would capture its own partially written .partial file.
+func TestCreateRejectsOutputInsideBackedUpTree(t *testing.T) {
+	cfg := mkCfg(t)
+	seed(t, cfg)
+	inside := filepath.Join(cfg.Storage.AppDataDir, "snap.tar.gz")
+	err := backup.Create(cfg, "v1", inside)
+	if err == nil || !strings.Contains(err.Error(), "inside backed-up dir") {
+		t.Fatalf("want rejection for output inside app-data dir, got %v", err)
+	}
+}
+
+// TestRoundTripPreservesExecutableBit verifies file modes survive the archive
+// round trip (a helper script must stay executable after restore).
+func TestRoundTripPreservesExecutableBit(t *testing.T) {
+	src := mkCfg(t)
+	seed(t, src)
+	script := filepath.Join(src.Storage.AppsDir, "demo", "run.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(t.TempDir(), "snap.tar.gz")
+	if err := backup.Create(src, "v1", archive); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dst := mkCfg(t)
+	if _, err := backup.Restore(dst, archive); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	fi, err := os.Stat(filepath.Join(dst.Storage.AppsDir, "demo", "run.sh"))
+	if err != nil {
+		t.Fatalf("stat restored script: %v", err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("restored run.sh lost its executable bit: mode=%o", fi.Mode().Perm())
+	}
+}
+
 func TestCreateRejectsMemoryDSN(t *testing.T) {
 	cfg := mkCfg(t)
 	cfg.Database.DSN = ":memory:"
