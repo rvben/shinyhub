@@ -76,8 +76,17 @@ func Put(dataDir, rel string, body io.Reader, size int64) (FileInfo, error) {
 	if err := f.Close(); err != nil {
 		return FileInfo{}, fmt.Errorf("close: %w", err)
 	}
-	if err := os.Rename(tmpPath, dest); err != nil {
-		return FileInfo{}, fmt.Errorf("rename: %w", err)
+	// Prefer the symlink-safe atomic rename (Linux openat2); fall back to a
+	// plain rename only where openat2 is unavailable, in which case the
+	// SafeJoin guard above is the protection.
+	switch err := atomicReplace(dataDir, clean, tmpPath); {
+	case err == nil:
+	case errors.Is(err, errAtomicUnsupported):
+		if err := os.Rename(tmpPath, dest); err != nil {
+			return FileInfo{}, fmt.Errorf("rename: %w", err)
+		}
+	default:
+		return FileInfo{}, err
 	}
 	success = true
 
@@ -161,6 +170,14 @@ func Delete(dataDir, rel string) error {
 	}
 	target, err := SafeJoin(dataDir, clean)
 	if err != nil {
+		return err
+	}
+	switch err := atomicDelete(dataDir, clean); {
+	case err == nil:
+		return nil
+	case errors.Is(err, errAtomicUnsupported):
+		// Portable fallback: SafeJoin already rejected symlinked components.
+	default:
 		return err
 	}
 	fi, err := os.Lstat(target)
