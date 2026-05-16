@@ -99,9 +99,19 @@ shared edge rate limiter if you need a global ceiling.
 
 ## Backup, restore, and recovery drill
 
-`shinyhub backup --out <archive>` writes a transactionally consistent snapshot
-(SQLite `VACUUM INTO`) of the database plus the apps and app-data trees. It is
-safe to run against a live server.
+`shinyhub backup --out <archive>` writes a snapshot of the database plus the
+apps and app-data trees. The database is captured point-in-time consistent via
+SQLite `VACUUM INTO`. The apps and app-data trees are then walked while the
+server may still be running, so those trees are a best-effort, *not* a
+point-in-time-consistent, copy: a deploy, prune, upload, or app-written file
+that lands during the walk may be partially or inconsistently captured
+relative to the database snapshot.
+
+This is acceptable for routine periodic backups (a deploy mid-backup is rare
+and the next backup converges). For a strictly consistent cross-tree snapshot,
+either stop the server for the duration of the backup, or take the backup from
+a filesystem-level snapshot (LVM/ZFS/cloud volume snapshot) so the database and
+trees are captured at the same instant.
 
 - **RPO (recovery point objective):** the snapshot is point-in-time, so your
   worst-case data loss is the interval between scheduled backups. Run it from
