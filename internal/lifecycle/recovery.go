@@ -3,14 +3,70 @@ package lifecycle
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
+
+	gops "github.com/shirou/gopsutil/v4/process"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
+
+// validateNativeProcess confirms a recorded PID is still this app's replica
+// and is serving on the recorded port before the proxy is wired to it.
+//
+// A bare "is the PID alive" check is not enough: after a host reboot or a
+// crash the PID may have been reused by an unrelated process, and the
+// recorded port row may be stale. Either case would make the proxy forward
+// /app/<slug>/ to whatever now answers there.
+//
+// On Linux (the production target) the process working directory is read
+// from /proc/<pid>/cwd and must equal the app's active bundle dir — an
+// unrelated reused PID will not be running there. If the working directory
+// cannot be read on this platform the check degrades to the port-liveness
+// probe alone, which still rejects stale port rows.
+func validateNativeProcess(pid, port int, bundleDir string) error {
+	p, err := gops.NewProcess(int32(pid))
+	if err != nil {
+		return fmt.Errorf("pid %d not found: %w", pid, err)
+	}
+	if bundleDir != "" {
+		switch cwd, cwdErr := p.Cwd(); {
+		case cwdErr != nil:
+			slog.Warn("recovery: cannot read process cwd; skipping identity check",
+				"pid", pid, "err", cwdErr)
+		default:
+			want, _ := filepath.Abs(bundleDir)
+			got, _ := filepath.Abs(cwd)
+			if want != got {
+				return fmt.Errorf("pid %d cwd %q does not match bundle %q (pid reuse?)", pid, got, want)
+			}
+		}
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	conn, err := net.DialTimeout("tcp", addr, 750*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("port %d not accepting connections: %w", port, err)
+	}
+	_ = conn.Close()
+	return nil
+}
+
+// activeBundleDir returns the bundle directory of the app's most recent
+// deployment, or "" if it cannot be resolved (validation then falls back to
+// the port probe only).
+func activeBundleDir(store *db.Store, appID int64) string {
+	deps, err := store.ListDeployments(appID)
+	if err != nil || len(deps) == 0 {
+		return ""
+	}
+	return deps[0].BundleDir
+}
 
 // ContainerLister is implemented by DockerRuntime to support recovery.
 // NativeRuntime does not implement it; pass nil for native mode.
@@ -47,6 +103,7 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 		}
 		prx.SetPoolSize(app.Slug, app.Replicas)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
+		bundleDir := activeBundleDir(store, app.ID)
 		anyAlive := false
 		for _, r := range reps {
 			if r.PID == nil {
@@ -62,6 +119,14 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 				continue
 			}
 			if err := syscall.Kill(*r.PID, 0); err != nil {
+				_ = store.UpsertReplica(db.UpsertReplicaParams{
+					AppID: app.ID, Index: r.Index, Status: "crashed",
+				})
+				continue
+			}
+			if err := validateNativeProcess(*r.PID, *r.Port, bundleDir); err != nil {
+				slog.Warn("recovery: rejected stale/mismatched process; will restart",
+					"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "port", *r.Port, "err", err)
 				_ = store.UpsertReplica(db.UpsertReplicaParams{
 					AppID: app.ID, Index: r.Index, Status: "crashed",
 				})

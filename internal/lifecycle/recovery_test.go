@@ -2,6 +2,7 @@ package lifecycle_test
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"testing"
 
@@ -10,6 +11,20 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
+
+// liveListener opens a real loopback listener and returns its port. Native
+// recovery now validates that the recorded port is actually serving before
+// adopting a replica, so tests that exercise the "alive replica" path must
+// have something listening — a bare PID is no longer sufficient.
+func liveListener(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
 
 // fakeContainerLister implements lifecycle.ContainerLister for tests.
 type fakeContainerLister struct {
@@ -114,7 +129,7 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 	store := mustOpenStore(t)
 	app := mustCreateApp(t, store, "myapp")
 
-	port, pid := 20002, os.Getpid() // current test process is guaranteed alive
+	port, pid := liveListener(t), os.Getpid() // alive PID + a real listener
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
 	}); err != nil {
@@ -153,8 +168,8 @@ func TestRecovery_PartialPool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Replica 0: alive (use current process PID).
-	pidAlive, port0 := os.Getpid(), 20011
+	// Replica 0: alive (current process PID) with a real listener.
+	pidAlive, port0 := os.Getpid(), liveListener(t)
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: 0, PID: &pidAlive, Port: &port0, Status: "running",
 	}); err != nil {
