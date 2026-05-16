@@ -640,20 +640,30 @@ type Deployment struct {
 	CreatedAt time.Time
 }
 
+// Deployment status lifecycle. A deploy records DeploymentPending before any
+// pool swap, then either DeploymentSucceeded once the new pool is serving or
+// DeploymentFailed if the attempt aborts. The authoritative "live bundle"
+// pointer is the newest row that is neither pending nor failed.
+const (
+	DeploymentPending   = "pending"
+	DeploymentSucceeded = "succeeded"
+	DeploymentFailed    = "failed"
+)
+
 type CreateDeploymentParams struct {
 	AppID     int64
 	Version   string
 	BundleDir string
-	// Status records the terminal outcome of the deploy attempt. Callers pass
-	// "succeeded" or "failed". Empty defaults to "pending" — only appropriate
-	// for callers that intend to UpdateDeploymentStatus afterwards.
+	// Status records the outcome of the deploy attempt. Empty defaults to
+	// "succeeded" (a row created via this helper represents an already-live
+	// bundle). The pending->succeeded/failed flow uses BeginDeployment.
 	Status string
 }
 
 func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) {
 	status := p.Status
 	if status == "" {
-		status = "pending"
+		status = DeploymentSucceeded
 	}
 	res, err := s.db.Exec(
 		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
@@ -675,6 +685,82 @@ func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
 		return fmt.Errorf("update deployment status: %w", err)
 	}
 	return nil
+}
+
+// BeginDeployment durably records the intent to deploy bundleDir BEFORE the
+// running pool is touched. The row is 'pending' and is deliberately invisible
+// to the authoritative "live bundle" reads (ListDeployments) until
+// PromoteDeployment confirms the new pool is serving. If the server dies
+// mid-deploy the row stays 'pending'; startup reconciliation fails it so it is
+// never mistaken for a good deployment.
+func (s *Store) BeginDeployment(appID int64, version, bundleDir string) (*Deployment, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+		appID, version, bundleDir, DeploymentPending,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("begin deployment: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("begin deployment: last insert id: %w", err)
+	}
+	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending}, nil
+}
+
+// PromoteDeployment marks a pending deployment as the live one. It only acts
+// on a row still in 'pending' so a late call cannot resurrect a deployment
+// that startup reconciliation already failed.
+func (s *Store) PromoteDeployment(id int64) error {
+	res, err := s.db.Exec(
+		`UPDATE deployments SET status = ? WHERE id = ? AND status = ?`,
+		DeploymentSucceeded, id, DeploymentPending)
+	if err != nil {
+		return fmt.Errorf("promote deployment %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("promote deployment %d: rows affected: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("promote deployment %d: not pending", id)
+	}
+	return nil
+}
+
+// FailDeployment marks an aborted pending deployment as failed so it is never
+// adopted as the live bundle. It is a no-op on a row that is not pending.
+func (s *Store) FailDeployment(id int64) error {
+	_, err := s.db.Exec(
+		`UPDATE deployments SET status = ? WHERE id = ? AND status = ?`,
+		DeploymentFailed, id, DeploymentPending)
+	if err != nil {
+		return fmt.Errorf("fail deployment %d: %w", id, err)
+	}
+	return nil
+}
+
+// ListInflightDeployments returns every deployment still in 'pending'. A
+// pending row on startup means a deploy was interrupted before the new pool
+// was confirmed; the server fails these so recovery falls back to the last
+// good deployment.
+func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
+	rows, err := s.db.Query(
+		`SELECT id, app_id, version, bundle_dir, status, created_at
+		FROM deployments WHERE status = ? ORDER BY id`, DeploymentPending)
+	if err != nil {
+		return nil, fmt.Errorf("list inflight deployments: %w", err)
+	}
+	defer rows.Close()
+	var ds []*Deployment
+	for rows.Next() {
+		var d Deployment
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		ds = append(ds, &d)
+	}
+	return ds, rows.Err()
 }
 
 // ListDeploymentsBySlug returns deployments for the app identified by slug,
@@ -709,10 +795,17 @@ type DeploymentSummary struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// ListDeployments returns an app's deployments newest-first, excluding
+// in-flight ('pending') and aborted ('failed') rows. Callers treat the result
+// as the authoritative live-bundle history: index 0 is the current bundle,
+// index 1 the rollback target. An interrupted deploy therefore never shifts
+// this pointer until PromoteDeployment confirms the new pool.
 func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, version, bundle_dir, status, created_at
-		FROM deployments WHERE app_id = ? ORDER BY id DESC`, appID)
+		FROM deployments
+		WHERE app_id = ? AND status NOT IN ('pending', 'failed')
+		ORDER BY id DESC`, appID)
 	if err != nil {
 		return nil, err
 	}

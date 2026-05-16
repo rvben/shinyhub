@@ -408,3 +408,35 @@ func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 		t.Errorf("expected stopped, got %s", a.Status)
 	}
 }
+
+// TestReconcileInflightDeployments verifies a deploy interrupted before
+// promotion is failed at startup so the previous good deployment remains the
+// authoritative live bundle.
+func TestReconcileInflightDeployments(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "app")
+
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v1", BundleDir: "/b/v1",
+	}); err != nil {
+		t.Fatalf("seed v1: %v", err)
+	}
+	// Simulate a server crash mid-deploy: a pending row was written but never
+	// promoted.
+	if _, err := store.BeginDeployment(app.ID, "v2", "/b/v2"); err != nil {
+		t.Fatalf("BeginDeployment: %v", err)
+	}
+
+	lifecycle.ReconcileInflightDeployments(store)
+
+	if in, err := store.ListInflightDeployments(); err != nil || len(in) != 0 {
+		t.Fatalf("after reconcile, inflight = %+v err=%v, want none", in, err)
+	}
+	live, err := store.ListDeployments(app.ID)
+	if err != nil {
+		t.Fatalf("ListDeployments: %v", err)
+	}
+	if len(live) != 1 || live[0].Version != "v1" {
+		t.Fatalf("after reconcile, live = %+v, want only v1", live)
+	}
+}

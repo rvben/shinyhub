@@ -17,6 +17,26 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 )
 
+// ReconcileInflightDeployments fails any deployment still in 'pending' at
+// startup. A pending row means a deploy or rollback was interrupted before
+// the new pool was confirmed; failing it ensures process recovery falls back
+// to the last good deployment instead of adopting a half-applied one. Must
+// run before RecoverProcesses.
+func ReconcileInflightDeployments(store *db.Store) {
+	inflight, err := store.ListInflightDeployments()
+	if err != nil {
+		slog.Error("deploy reconcile: list inflight deployments", "err", err)
+		return
+	}
+	for _, d := range inflight {
+		if err := store.FailDeployment(d.ID); err != nil {
+			slog.Error("deploy reconcile: fail interrupted deployment", "id", d.ID, "app_id", d.AppID, "err", err)
+			continue
+		}
+		slog.Warn("deploy reconcile: failed interrupted deployment", "id", d.ID, "app_id", d.AppID, "version", d.Version)
+	}
+}
+
 // validateNativeProcess confirms a recorded PID is still this app's replica
 // and is serving on the recorded port before the proxy is wired to it.
 //

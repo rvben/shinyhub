@@ -342,6 +342,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
+	// Fail any deploy interrupted mid-flight before recovery so adoption falls
+	// back to the last good deployment.
+	lifecycle.ReconcileInflightDeployments(store)
+
 	// Re-adopt any processes that survived a server restart.
 	var lister lifecycle.ContainerLister
 	if dockerRT, ok := rt.(lifecycle.ContainerLister); ok {

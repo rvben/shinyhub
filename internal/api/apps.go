@@ -464,6 +464,56 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
+// restorePreviousPool brings the previous live bundle back up after a failed
+// deploy/rollback that already tore down the running pool. prev is the
+// deployment that was authoritative before the attempt (nil if the app had
+// never been deployed). Best-effort: a restore failure marks the app degraded
+// rather than masking the original error.
+func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployment) {
+	if prev == nil {
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
+			slog.Error("restore: mark stopped (no previous deployment)", "slug", slug, "err", err)
+		}
+		return
+	}
+	if info, err := os.Stat(prev.BundleDir); err != nil || !info.IsDir() {
+		slog.Error("restore: previous bundle missing; cannot recover pool", "slug", slug, "bundle", prev.BundleDir)
+		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
+			slog.Error("restore: mark degraded", "slug", slug, "err", uerr)
+		}
+		return
+	}
+	result, err := s.deployRun(deploy.Params{
+		Slug:                  slug,
+		BundleDir:             prev.BundleDir,
+		Replicas:              app.Replicas,
+		Manager:               s.manager,
+		Proxy:                 s.proxy,
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+	})
+	if err != nil {
+		slog.Error("restore: previous pool failed to start; app is down", "slug", slug, "err", err)
+		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
+			slog.Error("restore: mark degraded", "slug", slug, "err", uerr)
+		}
+		return
+	}
+	for _, rep := range result.Replicas {
+		pid, port := rep.PID, rep.Port
+		if uerr := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: rep.Index, PID: &pid, Port: &port, Status: "running",
+		}); uerr != nil {
+			slog.Error("restore: upsert replica", "slug", slug, "idx", rep.Index, "err", uerr)
+		}
+	}
+	if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); uerr != nil {
+		slog.Error("restore: persist running status", "slug", slug, "err", uerr)
+	}
+	slog.Info("restore: rolled back to previous deployment after failed attempt", "slug", slug, "version", prev.Version)
+}
+
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
@@ -584,6 +634,22 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Capture the current live deployment so a failed deploy can restore the
+	// previous pool, then durably record the new deployment as 'pending'
+	// BEFORE the running pool is touched. ListDeployments excludes pending
+	// rows, so recovery/watcher/scheduler/rollback keep pointing at the
+	// previous bundle until PromoteDeployment confirms the new pool is live.
+	var prevActive *db.Deployment
+	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
+		prevActive = existing[0]
+	}
+	pendingDep, err := s.store.BeginDeployment(app.ID, version, bundleDir)
+	if err != nil {
+		slog.Error("deploy: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
 	// Stop existing instance before re-deploying; ignore the error since the
 	// app may not have been running yet.
 	_ = s.manager.Stop(slug)
@@ -601,9 +667,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if manifest != nil && !manifest.App.IsZero() {
 		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
-			if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
-				slog.Error("update app status after manifest apply failure", "slug", slug, "err", uerr)
-			}
+			_ = s.store.FailDeployment(pendingDep.ID)
+			s.restorePreviousPool(slug, app, prevActive)
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
 		}
@@ -626,9 +691,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
-		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); err != nil {
-			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
-		}
+		_ = s.store.FailDeployment(pendingDep.ID)
+		s.restorePreviousPool(slug, app, prevActive)
 		writeError(w, http.StatusInternalServerError, "deploy failed")
 		return
 	}
@@ -658,15 +722,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	//     not deploy_count. Log+continue is safe — neither failure traps
 	//     the user out of an app whose pool is already live.
 	//
-	//  2. CreateDeployment is authoritative: it is the pointer the
-	//     scheduler, watcher wake, restart, and rollback all consult to
-	//     find the live bundle. If we let this failure pass silently, the
-	//     next restart/wake/schedule run reads the previous deployment
-	//     row and silently reverts the running pool to the OLD bundle.
-	//     We therefore fail closed (500). The bundle stays on disk
-	//     (keepFiles=true) so a follow-up deploy succeeds without
-	//     re-uploading; PruneOldVersions sweeps any duplicate after the
-	//     retry succeeds.
+	//  2. PromoteDeployment is authoritative: it flips the pre-recorded
+	//     pending row to 'succeeded', which is the pointer the scheduler,
+	//     watcher wake, restart, and rollback all consult to find the live
+	//     bundle. If we let this failure pass silently, the next
+	//     restart/wake/schedule run reads the previous deployment row and
+	//     silently reverts the running pool to the OLD bundle. We therefore
+	//     fail closed (500). The bundle stays on disk (keepFiles=true) so a
+	//     follow-up deploy succeeds without re-uploading; PruneOldVersions
+	//     sweeps any duplicate after the retry succeeds.
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
@@ -678,13 +742,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy: increment deploy_count failed; pool is live", "slug", slug, "err", err)
 	}
 
-	if _, err := s.store.CreateDeployment(db.CreateDeploymentParams{
-		AppID:     app.ID,
-		Version:   version,
-		BundleDir: bundleDir,
-		Status:    "succeeded",
-	}); err != nil {
-		slog.Error("deploy: record deployment row failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
+	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
+		slog.Error("deploy: promote deployment failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
 		writeError(w, http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit")
 		return
 	}
@@ -805,6 +864,20 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture the current live deployment for restore-on-failure, then record
+	// the rollback target as a pending deployment BEFORE tearing down the pool
+	// (same durability contract as a forward deploy).
+	var prevActive *db.Deployment
+	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
+		prevActive = existing[0]
+	}
+	pendingDep, err := s.store.BeginDeployment(app.ID, prev.Version, prev.BundleDir)
+	if err != nil {
+		slog.Error("rollback: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
@@ -823,9 +896,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
-		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
-			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
-		}
+		_ = s.store.FailDeployment(pendingDep.ID)
+		s.restorePreviousPool(slug, app, prevActive)
 		writeError(w, http.StatusInternalServerError, "rollback failed")
 		return
 	}
@@ -842,12 +914,12 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
 	}
-	// UpdateAppStatus is soft state — the watchdog reconciles. CreateDeployment
+	// UpdateAppStatus is soft state — the watchdog reconciles. PromoteDeployment
 	// is authoritative: it is the pointer restart/wake/schedule consult to
-	// find the live bundle. If we let CreateDeployment fail silently here, a
-	// later restart would read the previous deployment row (the bundle we
-	// just rolled back FROM) and silently un-roll-back the app. Fail closed
-	// (500) on that one; the bundle on disk is unchanged so a retry is safe.
+	// find the live bundle. If we let it fail silently here, a later restart
+	// would read the previous deployment row (the bundle we just rolled back
+	// FROM) and silently un-roll-back the app. Fail closed (500) on that one;
+	// the bundle on disk is unchanged so a retry is safe.
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
 		Status: "running",
@@ -855,13 +927,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("rollback: persist running status failed; pool is live", "slug", slug, "err", err)
 	}
 
-	if _, err := s.store.CreateDeployment(db.CreateDeploymentParams{
-		AppID:     app.ID,
-		Version:   prev.Version,
-		BundleDir: prev.BundleDir,
-		Status:    "succeeded",
-	}); err != nil {
-		slog.Error("rollback: record deployment row failed; pool is live but next restart/wake/schedule would silently un-roll-back to the previous bundle — failing the request so the caller retries", "slug", slug, "version", prev.Version, "err", err)
+	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
+		slog.Error("rollback: promote deployment failed; pool is live but next restart/wake/schedule would silently un-roll-back to the previous bundle — failing the request so the caller retries", "slug", slug, "version", prev.Version, "err", err)
 		writeError(w, http.StatusInternalServerError, "rollback succeeded but recording it failed; retry to commit")
 		return
 	}
