@@ -23,4 +23,8 @@ ENV SHINYHUB_CONFIG=/etc/shinyhub/shinyhub.yaml
 EXPOSE 8080
 
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/shinyhub"]
+# `serve` is a subcommand (rootCmd has no default action), so it must be in
+# the entrypoint or the container exits printing help instead of serving.
+# Kept identical to Dockerfile.goreleaser so dev and release images behave the
+# same.
+ENTRYPOINT ["/usr/local/bin/shinyhub", "serve"]
