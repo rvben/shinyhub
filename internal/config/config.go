@@ -264,9 +264,11 @@ type rawLifecycleConfig struct {
 type rawRuntimeConfig struct {
 	Mode                         string                 `yaml:"mode"`
 	Docker                       rawDockerRuntimeConfig `yaml:"docker"`
-	DefaultReplicas              int                    `yaml:"default_replicas"`
-	MaxReplicas                  int                    `yaml:"max_replicas"`
-	DefaultMaxSessionsPerReplica int                    `yaml:"default_max_sessions_per_replica"`
+	DefaultReplicas int `yaml:"default_replicas"`
+	MaxReplicas     int `yaml:"max_replicas"`
+	// Pointer so an explicit 0 (documented as "unlimited") is
+	// distinguishable from the key being absent (apply the safe default).
+	DefaultMaxSessionsPerReplica *int `yaml:"default_max_sessions_per_replica"`
 }
 
 type rawDockerRuntimeConfig struct {
@@ -543,9 +545,6 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	if r.MaxReplicas > 0 {
 		rc.MaxReplicas = r.MaxReplicas
 	}
-	if r.DefaultMaxSessionsPerReplica >= 0 {
-		rc.DefaultMaxSessionsPerReplica = r.DefaultMaxSessionsPerReplica
-	}
 	if rc.DefaultReplicas <= 0 {
 		rc.DefaultReplicas = 1
 	}
@@ -554,11 +553,16 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	}
 	// Profiling spike showed single-event-loop p99 stays healthy to c=10 and
 	// degrades sharply beyond that, with some apps erroring at c=30. 10 is
-	// conservative and safe as a platform-wide default; operators can opt out
-	// per-app by setting max_sessions_per_replica=0 explicitly (which falls
-	// back to this default) or bump it when their app tolerates more.
-	if rc.DefaultMaxSessionsPerReplica == 0 {
+	// conservative and safe as a platform-wide default applied only when the
+	// operator does not set the key at all. An explicit 0 means "unlimited"
+	// as documented; a negative value is treated the same as 0.
+	switch {
+	case r.DefaultMaxSessionsPerReplica == nil:
 		rc.DefaultMaxSessionsPerReplica = 10
+	case *r.DefaultMaxSessionsPerReplica < 0:
+		rc.DefaultMaxSessionsPerReplica = 0
+	default:
+		rc.DefaultMaxSessionsPerReplica = *r.DefaultMaxSessionsPerReplica
 	}
 	return rc
 }
