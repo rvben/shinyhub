@@ -618,6 +618,18 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	release := s.acquireDeployLock(slug)
 	defer release()
 
+	// Registered AFTER the lock defer so LIFO order removes uncommitted
+	// files before the lock is released. The broad defer above only covers
+	// pre-lock failures; without this one a quota-rejected deploy's files
+	// would still be on disk, counted by DirSize against a concurrent
+	// same-slug deploy that takes the lock the instant we release it.
+	defer func() {
+		if !keepFiles {
+			_ = os.RemoveAll(bundleDir)
+			_ = os.Remove(bundleZip)
+		}
+	}()
+
 	// Enforce per-app disk quota INSIDE the lock: the new extracted version
 	// has already been written, so DirSize now reflects the post-deploy
 	// footprint. Two concurrent same-slug deploys must not both observe a
