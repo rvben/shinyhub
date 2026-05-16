@@ -1614,6 +1614,43 @@ func TestDeleteApp_RemovesBothDirs(t *testing.T) {
 	}
 }
 
+// TestDeleteApp_CleanupFailureRetainsTombstone verifies the delete ordering
+// contract: if on-disk cleanup fails, the row is NOT removed but left in the
+// 'deleting' tombstone state so startup reconciliation can finish it, rather
+// than dropping the row and orphaning bytes with no owning quota.
+func TestDeleteApp_CleanupFailureRetainsTombstone(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	createApp(t, srv, token, "demo")
+
+	cfg := srv.Config()
+	appsPath := filepath.Join(cfg.Storage.AppsDir, "demo")
+	if err := os.MkdirAll(appsPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Make the parent read-only so removing demo/ inside it fails (EACCES).
+	if err := os.Chmod(cfg.Storage.AppsDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg.Storage.AppsDir, 0o750) })
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, authedRequest(t, "DELETE", "/api/apps/demo", nil, token))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("row was removed despite failed cleanup (bytes orphaned): %v", err)
+	}
+	if app.Status != "deleting" {
+		t.Errorf("status = %q, want deleting (tombstone retained for reconcile)", app.Status)
+	}
+}
+
 // TestDeployToken_AppOwnershipAndAdminBypass verifies two properties of the
 // deploy-token identity (__deploy__):
 //

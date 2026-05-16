@@ -44,6 +44,38 @@ func OnAppDelete(cfg *config.Config, slug string) error {
 	return errors.Join(errs...)
 }
 
+// SweepOrphanDirs returns slug directories under AppsDir/AppDataDir that have
+// no owning row in known. It deliberately does NOT delete anything: a
+// directory with no DB row may also be operator-managed state or the result
+// of a bug, and auto-deleting user bytes on boot is unacceptable. Callers log
+// the result so an operator can investigate and reclaim space deliberately.
+// The platform-owned upload-temp dir name is treated as part of an app's data
+// dir, not a top-level slug, so it is never reported.
+func SweepOrphanDirs(cfg *config.Config, known map[string]bool) ([]string, error) {
+	var orphans []string
+	var errs []error
+	for _, base := range []string{cfg.Storage.AppsDir, cfg.Storage.AppDataDir} {
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("read %s: %w", base, err))
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			if known[e.Name()] {
+				continue
+			}
+			orphans = append(orphans, filepath.Join(base, e.Name()))
+		}
+	}
+	return orphans, errors.Join(errs...)
+}
+
 func slugPaths(cfg *config.Config, slug string) []string {
 	return []string{
 		filepath.Join(cfg.Storage.AppsDir, slug),

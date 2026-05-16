@@ -458,6 +458,52 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListDeletingApps returns all apps left in the 'deleting' tombstone state.
+// handleDeleteApp marks an app 'deleting' before doing disk cleanup; a crash
+// (or a cleanup failure) between the tombstone and the row delete leaves such
+// rows behind for startup reconciliation to finish.
+func (s *Store) ListDeletingApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT id, slug, name, project_slug, owner_id, access, status,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
+		       created_at, updated_at,`+deploymentSummarySQL+`
+		FROM apps WHERE status = 'deleting'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// AllSlugs returns every app slug regardless of status. Used by the startup
+// orphan-directory sweep to decide which on-disk slug dirs have no owning row.
+func (s *Store) AllSlugs() ([]string, error) {
+	rows, err := s.db.Query(`SELECT slug FROM apps`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var slugs []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err != nil {
+			return nil, err
+		}
+		slugs = append(slugs, slug)
+	}
+	return slugs, rows.Err()
+}
+
 func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, error) {
 	if limit <= 0 {
 		limit = -1 // SQLite treats -1 as no limit

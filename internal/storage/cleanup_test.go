@@ -71,3 +71,47 @@ func TestOnAppDelete_TolerantOfMissingDirs(t *testing.T) {
 		t.Fatalf("expected nil for missing dirs, got %v", err)
 	}
 }
+
+func TestSweepOrphanDirs_ReportsUnownedDirsOnly(t *testing.T) {
+	cfg := mkCfg(t)
+	mk := func(base, name string) {
+		if err := os.MkdirAll(filepath.Join(base, name), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// "known" has rows; "ghost" / "stray" do not.
+	mk(cfg.Storage.AppsDir, "known")
+	mk(cfg.Storage.AppsDir, "ghost")
+	mk(cfg.Storage.AppDataDir, "known")
+	mk(cfg.Storage.AppDataDir, "stray")
+
+	orphans, err := SweepOrphanDirs(cfg, map[string]bool{"known": true})
+	if err != nil {
+		t.Fatalf("SweepOrphanDirs: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range orphans {
+		got[filepath.Base(p)] = true
+	}
+	if got["known"] {
+		t.Error("reported a dir that has an owning row")
+	}
+	if !got["ghost"] || !got["stray"] {
+		t.Fatalf("orphans = %v, want both ghost and stray", orphans)
+	}
+	// Nothing must have been deleted.
+	if _, err := os.Stat(filepath.Join(cfg.Storage.AppsDir, "ghost")); err != nil {
+		t.Errorf("sweep deleted an orphan dir (must only report): %v", err)
+	}
+}
+
+func TestSweepOrphanDirs_MissingRootsOK(t *testing.T) {
+	cfg := mkCfg(t) // neither root created yet
+	orphans, err := SweepOrphanDirs(cfg, nil)
+	if err != nil {
+		t.Fatalf("expected nil for missing roots, got %v", err)
+	}
+	if len(orphans) != 0 {
+		t.Fatalf("orphans = %v, want none", orphans)
+	}
+}

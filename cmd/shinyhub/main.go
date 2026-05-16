@@ -346,6 +346,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// back to the last good deployment.
 	lifecycle.ReconcileInflightDeployments(store)
 
+	// Finish any app deletion interrupted between the 'deleting' tombstone and
+	// the row removal, then report (do not delete) slug dirs with no owning
+	// row. Reconcile first so freshly-cleaned slugs are not flagged as orphans.
+	lifecycle.ReconcileDeletingApps(store, cfg)
+	lifecycle.LogOrphanAppDirs(store, cfg)
+
 	// Re-adopt any processes that survived a server restart.
 	var lister lifecycle.ContainerLister
 	if dockerRT, ok := rt.(lifecycle.ContainerLister); ok {

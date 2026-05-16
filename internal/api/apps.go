@@ -1067,7 +1067,12 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
-	if err := s.store.DeleteApp(slug); err != nil {
+	// Tombstone first: mark the row 'deleting' BEFORE touching disk so a crash
+	// (or a cleanup failure) mid-teardown is recoverable. ListRunningApps
+	// excludes it, so recovery will not re-adopt a half-deleted app; startup
+	// reconciliation (ReconcileDeletingApps) finishes any tombstone left
+	// behind. Only after disk cleanup fully succeeds is the row removed.
+	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "deleting"}); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
@@ -1076,13 +1081,19 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up on-disk state after the DB row is gone. Errors are non-fatal
-	// (the record is already deleted) but are captured in the audit detail so
-	// operators can investigate orphaned bytes.
 	detail := ""
 	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
-		detail = cleanupErr.Error()
-		slog.Error("app delete cleanup failed", "slug", slug, "err", cleanupErr)
+		// Disk cleanup failed: keep the 'deleting' tombstone so startup
+		// reconciliation retries and the row is not lost with bytes still on
+		// disk (which would orphan them with no owning row or quota). The app
+		// is logically gone from the caller's perspective.
+		detail = "deferred cleanup: " + cleanupErr.Error()
+		slog.Error("app delete cleanup failed; tombstone retained for reconcile", "slug", slug, "err", cleanupErr)
+	} else if err := s.store.DeleteApp(slug); err != nil && !errors.Is(err, db.ErrNotFound) {
+		// Bytes are gone; only the tombstone row remains. Reconcile will drop
+		// it on next startup, so this is not a client-visible failure.
+		detail = "row delete deferred: " + err.Error()
+		slog.Error("app delete: row removal failed after cleanup; tombstone retained", "slug", slug, "err", err)
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
