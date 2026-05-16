@@ -604,6 +604,12 @@ func apiTimeoutHandler(h http.Handler) http.Handler {
 //
 //   - GET .../logs — server-sent log stream that stays open by design.
 //   - POST .../deploy — bundle upload, body can be hundreds of MB.
+//   - .../restart, .../rollback, .../stop — pool swaps that stop and
+//     relaunch every replica under the per-slug deploy lock. These can
+//     legitimately exceed 30s (dependency-heavy launches). Letting
+//     http.TimeoutHandler fire would return "request timeout" to the
+//     client while the swap keeps mutating runtime + DB state, leaving
+//     the two divergent and the operator misinformed.
 //   - PUT /api/apps/{slug}/data/<rel> — per-app data upload, also
 //     arbitrary-size. Without this exemption http.TimeoutHandler swaps
 //     the response writer mid-stream at 30s; the handler keeps writing
@@ -614,7 +620,9 @@ func apiTimeoutHandler(h http.Handler) http.Handler {
 // All other API routes keep the 30s timeout so a slow handler cannot
 // pin a server goroutine indefinitely.
 func isLongLivedAPIRoute(method, path string) bool {
-	if strings.HasSuffix(path, "/logs") || strings.HasSuffix(path, "/deploy") {
+	if strings.HasSuffix(path, "/logs") || strings.HasSuffix(path, "/deploy") ||
+		strings.HasSuffix(path, "/restart") || strings.HasSuffix(path, "/rollback") ||
+		strings.HasSuffix(path, "/stop") {
 		return true
 	}
 	if method == http.MethodPut && isAppDataUploadPath(path) {
