@@ -268,6 +268,56 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 	}
 }
 
+// ContainerSweeper is implemented by DockerRuntime so the startup sweep can
+// enumerate and delete ShinyHub-managed containers. Native runtime does not
+// implement it; callers pass nil and the sweep is skipped.
+type ContainerSweeper interface {
+	ListByLabel(labelFilter string) ([]process.ContainerInfo, error)
+	RemoveHandle(process.RunHandle) error
+}
+
+// SweepOrphanContainers removes ShinyHub-managed containers that no live
+// replica owns. It must run AFTER RecoverProcesses, so containers the Manager
+// re-adopted are protected; everything else labeled shinyhub.managed (a
+// deleted app, a scaled-down replica index, a container left by a hard crash
+// that recovery rejected) is force-removed so stopped containers do not
+// accumulate across restarts. A nil sweeper (native runtime) is a no-op.
+func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
+	if sweeper == nil {
+		return
+	}
+	containers, err := sweeper.ListByLabel(`{"label":["shinyhub.managed=true"]}`)
+	if err != nil {
+		slog.Error("container sweep: list", "err", err)
+		return
+	}
+	live := mgr.RunningContainerIDs()
+	removed := 0
+	for _, c := range containers {
+		if live[c.ID] {
+			continue
+		}
+		// Only long-running app replicas are swept. One-shot schedule-run
+		// containers (RunOnce) carry shinyhub.managed but no replica_index and
+		// run with AutoRemove; an in-flight scheduled run at startup must not
+		// be killed by the sweep.
+		if _, isReplica := c.Labels["shinyhub.replica_index"]; !isReplica {
+			continue
+		}
+		if err := sweeper.RemoveHandle(process.RunHandle{ContainerID: c.ID}); err != nil {
+			slog.Warn("container sweep: remove orphan",
+				"container", c.ID, "slug", c.Labels["shinyhub.slug"], "err", err)
+			continue
+		}
+		removed++
+		slog.Info("container sweep: removed orphan",
+			"container", c.ID, "slug", c.Labels["shinyhub.slug"])
+	}
+	if removed > 0 {
+		slog.Info("container sweep: complete", "removed", removed)
+	}
+}
+
 func markRecoveryStopped(store *db.Store, slug string) {
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
 		slog.Error("process recovery: mark stopped", "slug", slug, "err", err)

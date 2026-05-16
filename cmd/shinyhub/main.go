@@ -353,6 +353,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	lifecycle.RecoverProcesses(store, mgr, prx, lister, cfg.Runtime.DefaultMaxSessionsPerReplica)
 
+	// Remove ShinyHub-managed app containers no live replica re-adopted, so
+	// stopped containers from prior runs do not accumulate.
+	if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
+		lifecycle.SweepOrphanContainers(mgr, sweeper)
+	}
+
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
 	defer cancelWatcher()
 	watcherDone := make(chan struct{})

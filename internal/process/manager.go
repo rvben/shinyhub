@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -312,7 +313,25 @@ func (m *Manager) StopReplica(slug string, index int) error {
 		m.entries[slug] = pool
 	}
 	m.mu.Unlock()
+
+	// Container runtimes keep the stopped container around (no AutoRemove on
+	// long-running apps) so recovery can inspect a crash. Now that the Manager
+	// has confirmed this replica exited on an intentional stop/replace, drop
+	// it so stopped containers do not accumulate. Native runtime does not
+	// implement this capability; the assertion simply fails and is skipped.
+	if cr, ok := m.runtime.(containerRemover); ok {
+		if err := cr.RemoveHandle(handle); err != nil {
+			slog.Warn("manager: remove container after stop", "slug", slug, "idx", index, "err", err)
+		}
+	}
 	return nil
+}
+
+// containerRemover is the optional capability a container Runtime implements
+// to delete the backing container once a replica has stopped. NativeRuntime
+// does not implement it.
+type containerRemover interface {
+	RemoveHandle(RunHandle) error
 }
 
 // Stop signals all replicas for a slug to stop in parallel and waits for all to exit.
@@ -403,6 +422,24 @@ func (m *Manager) Status(slug string) (*ProcessInfo, error) {
 		}
 	}
 	return &ProcessInfo{Slug: slug, Status: StatusStopped}, nil
+}
+
+// RunningContainerIDs returns the set of container IDs the Manager currently
+// has adopted across all slugs. Empty for native runtime (handles carry a PID,
+// not a container ID). Used by the startup orphan-container sweep to decide
+// which ShinyHub-labeled containers have no live owner.
+func (m *Manager) RunningContainerIDs() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make(map[string]bool)
+	for _, pool := range m.entries {
+		for _, e := range pool {
+			if e != nil && e.handle.ContainerID != "" {
+				ids[e.handle.ContainerID] = true
+			}
+		}
+	}
+	return ids
 }
 
 // All returns a snapshot of all tracked ProcessInfo entries across all slugs.

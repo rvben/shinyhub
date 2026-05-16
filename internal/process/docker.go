@@ -171,6 +171,20 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	return RunHandle{ContainerID: id}, nil
 }
 
+// RemoveHandle force-removes the container behind handle. Long-running app
+// containers are created without AutoRemove (so a crash leaves the container
+// inspectable for recovery), so they must be explicitly removed once the
+// Manager has confirmed the process exited on stop/replace; otherwise stopped
+// containers accumulate. Satisfies the optional containerRemover capability
+// the Manager type-asserts for. A nil/empty ID or an already-gone container
+// is treated as success.
+func (r *DockerRuntime) RemoveHandle(handle RunHandle) error {
+	if handle.ContainerID == "" {
+		return nil
+	}
+	return r.client.removeContainer(handle.ContainerID)
+}
+
 func (r *DockerRuntime) Signal(handle RunHandle, sig syscall.Signal) error {
 	sigStr := sigName(sig)
 	if err := r.client.killContainer(handle.ContainerID, sigStr); err != nil {
