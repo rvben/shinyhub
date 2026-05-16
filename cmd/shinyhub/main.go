@@ -17,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/backup"
 	"github.com/rvben/shinyhub/internal/cli"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/data"
@@ -58,9 +59,66 @@ var serveCmd = &cobra.Command{
 	},
 }
 
+var backupOut string
+
+var backupCmd = &cobra.Command{
+	Use:   "backup",
+	Short: "Write a consistent snapshot of all durable state to an archive",
+	Long: "Creates a .tar.gz containing a transactionally consistent SQLite\n" +
+		"snapshot plus the apps and app-data dirs. Safe to run on a live server.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if backupOut == "" {
+			return fmt.Errorf("--out is required")
+		}
+		cfg, err := config.Load(serverConfigPath())
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if err := backup.Create(cfg, version, backupOut); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "backup written to %s\n", backupOut)
+		return nil
+	},
+}
+
+var restoreCmd = &cobra.Command{
+	Use:   "restore <archive>",
+	Short: "Restore durable state from a backup archive (server must be stopped)",
+	Long: "Restores the database, apps, and app-data from a backup archive.\n" +
+		"Stop the server first. Existing state is moved aside with a\n" +
+		"'.pre-restore-<timestamp>' suffix (never deleted) so you can roll back.",
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load(serverConfigPath())
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		moved, err := backup.Restore(cfg, args[0])
+		for _, p := range moved {
+			fmt.Fprintf(os.Stdout, "previous state preserved at %s\n", p)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, "restore complete; start the server to apply any pending migrations")
+		return nil
+	},
+}
+
+// serverConfigPath resolves the server config file the same way `serve` does:
+// the SHINYHUB_CONFIG env var, falling back to ./shinyhub.yaml.
+func serverConfigPath() string {
+	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
+		return v
+	}
+	return "shinyhub.yaml"
+}
+
 func init() {
 	cli.SetVersion(version)
-	rootCmd.AddCommand(serveCmd)
+	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
+	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd)
 	cli.AddCommandsTo(rootCmd)
 }
 
@@ -71,11 +129,7 @@ func main() {
 }
 
 func runServe(ctx context.Context, logger *slog.Logger) error {
-	cfgPath := "shinyhub.yaml"
-	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
-		cfgPath = v
-	}
-	cfg, err := config.Load(cfgPath)
+	cfg, err := config.Load(serverConfigPath())
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}

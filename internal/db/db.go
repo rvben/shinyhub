@@ -283,6 +283,53 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// SchemaVersion returns the highest migration version recorded in the
+// schema_migrations ledger, or 0 if the database has no ledger yet.
+func (s *Store) SchemaVersion() (int, error) {
+	var v sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&v)
+	switch {
+	case err == nil && v.Valid:
+		return int(v.Int64), nil
+	case err == nil:
+		return 0, nil
+	case strings.Contains(err.Error(), "no such table"):
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+}
+
+// LatestSchemaVersion returns the highest migration version embedded in this
+// binary. A backup whose recorded schema version exceeds this value was taken
+// by a newer build and cannot be safely restored by this one.
+func LatestSchemaVersion() (int, error) {
+	ms, err := loadMigrations()
+	if err != nil {
+		return 0, err
+	}
+	max := 0
+	for _, m := range ms {
+		if m.version > max {
+			max = m.version
+		}
+	}
+	return max, nil
+}
+
+// BackupTo writes a transactionally consistent copy of the database to dest
+// using SQLite's "VACUUM INTO". It is safe to call while the server is running:
+// the snapshot reflects a single point-in-time and is itself a defragmented,
+// single-file database with no WAL/SHM sidecars.
+func (s *Store) BackupTo(dest string) error {
+	defer s.timed("BackupTo")()
+	quoted := "'" + strings.ReplaceAll(dest, "'", "''") + "'"
+	if _, err := s.db.Exec("VACUUM INTO " + quoted); err != nil {
+		return fmt.Errorf("vacuum into %s: %w", dest, err)
+	}
+	return nil
+}
+
 // PingContext verifies DB connectivity.
 func (s *Store) PingContext(ctx context.Context) error {
 	return s.db.PingContext(ctx)
