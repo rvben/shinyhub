@@ -253,16 +253,20 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 		u := user.ID
 		uid = &u
 	}
-	// Run asynchronously so the response doesn't block on the run finishing.
-	if s.jobs != nil {
-		go func() {
-			if _, err := s.jobs.Run(id, "manual", uid); err != nil {
-				// Run already logs the audit event; nothing to do here.
-			}
-		}()
+	if s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "scheduler unavailable")
+		return
+	}
+	// Run admits the run synchronously (insert row + overlap policy) and
+	// executes the command in its own goroutine, so this does not block on
+	// the run finishing but does surface admission failures to the caller.
+	runID, err := s.jobs.Run(id, "manual", uid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start run: "+err.Error())
+		return
 	}
 	s.audit(r, "schedule_run_manual", "schedule", fmt.Sprintf("%d", id), "")
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started"})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "started", "run_id": runID})
 }
 
 // GET /api/apps/{slug}/schedules/{id}/runs
