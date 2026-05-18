@@ -61,6 +61,12 @@
             <option value="deploy">Most recent deploy</option>
             <option value="status">Status</option>
           </select>
+          <label for="apps-segment" class="sr-only">Filter by fleet management</label>
+          <select id="apps-segment" class="apps-sort" aria-label="Filter apps by fleet management">
+            <option value="all">All apps</option>
+            <option value="fleet">Fleet-managed</option>
+            <option value="unmanaged">Unmanaged</option>
+          </select>
           <button id="new-app-button" type="button" hidden>+ New app</button>
           <button id="refresh-button" type="button">Refresh</button>
         </div>

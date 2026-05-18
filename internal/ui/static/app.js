@@ -5,6 +5,7 @@ import { mountUsers } from '/static/views/users.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
+import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -309,6 +310,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       header.appendChild(badge);
 
+      const fleetBadge = makeFleetBadge(document, app);
+      if (fleetBadge) header.appendChild(fleetBadge);
+
       const meta = document.createElement('div');
       meta.className = 'app-meta';
 
@@ -400,6 +404,10 @@ document.addEventListener('DOMContentLoaded', () => {
         a.name.toLowerCase().includes(q) || a.slug.toLowerCase().includes(q),
       );
     }
+
+    // Filter by fleet management segment.
+    const segEl = document.getElementById('apps-segment');
+    apps = segmentApps(apps, segEl ? segEl.value : 'all');
 
     // Sort.
     const sortKey = sortEl ? sortEl.value : 'default';
@@ -1530,6 +1538,17 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch { /* storage may be blocked */ }
     appsSortEl.addEventListener('change', () => {
       try { sessionStorage.setItem('appsSort', appsSortEl.value); } catch { /* ignore */ }
+      renderApps();
+    });
+  }
+  const appsSegmentEl = document.getElementById('apps-segment');
+  if (appsSegmentEl) {
+    try {
+      const saved = sessionStorage.getItem('appsSegment');
+      if (saved) appsSegmentEl.value = saved;
+    } catch { /* storage may be blocked */ }
+    appsSegmentEl.addEventListener('change', () => {
+      try { sessionStorage.setItem('appsSegment', appsSegmentEl.value); } catch { /* ignore */ }
       renderApps();
     });
   }

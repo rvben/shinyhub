@@ -578,3 +578,35 @@ func assertContains(t *testing.T, path, needle, contract string) {
 		t.Fatalf("%s must contain %q to honor contract: %s", path, needle, contract)
 	}
 }
+
+// TestDashboardFleetSurfaceWiring pins the read-only fleet dashboard surface
+// to the static SPA. app.js is a large IIFE that cannot be imported in a unit
+// test, so - exactly like TestAppDetailUnwrapsGetAppResponse - we assert the
+// wiring by source string-search. The fleet logic itself is unit-tested in
+// internal/ui/jstests/fleet-ui.test.js.
+func TestDashboardFleetSurfaceWiring(t *testing.T) {
+	// The helper module is the single source of fleet truth and reads the
+	// two API fields. If db.App renames either, fleet-ui.js breaks here.
+	assertContains(t, "views/fleet-ui.js", "app.managed_by",
+		"fleet ownership derives from the managed_by API field")
+	assertContains(t, "views/fleet-ui.js", "content_digest",
+		"the live deployment digest derives from the content_digest API field")
+
+	// Apps grid wiring: imports the helpers, badges cards, segments the list.
+	assertContains(t, "app.js", "/static/views/fleet-ui.js",
+		"apps grid imports the fleet-ui helper module")
+	assertContains(t, "app.js", "makeFleetBadge",
+		"apps grid cards show the fleet ownership badge")
+	assertContains(t, "app.js", "segmentApps",
+		"apps grid filters by the All/Fleet-managed/Unmanaged segment")
+	assertContains(t, "index.html", "apps-segment",
+		"apps toolbar exposes the All/Fleet-managed/Unmanaged control")
+
+	// App-detail wiring: header badge + live digest slot (next task).
+	assertContains(t, "views/app-detail.js", "/static/views/fleet-ui.js",
+		"app detail imports the fleet-ui helper module")
+	assertContains(t, "views/app-detail.js", "renderFleetDigest",
+		"app detail renders the live deployment digest line")
+	assertContains(t, "index.html", "app-detail-fleet",
+		"app detail exposes the live deployment digest slot")
+}
