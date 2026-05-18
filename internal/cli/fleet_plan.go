@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
+	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/spf13/cobra"
 )
@@ -69,9 +73,150 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", len(probs))}
 	}
 
-	// Network + diff + render are added in Tasks 8-9. For now, prove pre-flight
-	// passed without performing any mutation.
-	_ = m
-	fmt.Fprintln(out, "pre-flight ok (diff rendering added in a later task)")
+	// Pre-flight step 2: server reachability + auth, one call, BEFORE any
+	// git clone (spec §9.1); an auth failure must cost zero clones.
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
+		return &ExitCodeError{Code: 3, Err: err}
+	}
+	apps, err := fetchApps(cfg)
+	if err != nil {
+		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
+		return &ExitCodeError{Code: 3, Err: err}
+	}
+	caps := fetchServerCaps(cfg) // best-effort; degraded behavior is Plan 3
+
+	// Pre-flight step 3: resolve sources + compute local digests. Failures are
+	// aggregated and reported together (spec §9.1 step 3).
+	localDigests := map[string]string{}
+	var resolveProblems []string
+	var cleanups []func()
+	defer func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}()
+	for _, app := range m.Apps {
+		ps, sp := fleet.ParseSource(app.Source, filepath.Dir(f.file))
+		if sp != nil {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %s", app.Slug, sp.Msg))
+			continue
+		}
+		dir := ps.LocalPath
+		if ps.Kind == fleet.SourceGit {
+			gd, _, _, clean, gerr := resolveGitSource(ps)
+			if gerr != nil {
+				resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, gerr))
+				continue
+			}
+			cleanups = append(cleanups, clean)
+			dir = gd
+		}
+		dg, derr := digestLocalDir(dir)
+		if derr != nil {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, derr))
+			continue
+		}
+		localDigests[app.Slug] = dg
+	}
+	if len(resolveProblems) > 0 {
+		fmt.Fprintf(errOut, "shinyhub fleet plan: resolving sources\n\n")
+		for _, p := range resolveProblems {
+			fmt.Fprintf(errOut, "  ✗ %s\n", p)
+		}
+		fmt.Fprintf(errOut, "\n%d source problem(s). Nothing was changed.\n", len(resolveProblems))
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d source problem(s)", len(resolveProblems))}
+	}
+
+	observed := make([]fleet.ObservedApp, 0, len(apps))
+	for _, a := range apps {
+		observed = append(observed, fleet.ObservedApp{
+			Slug:                    a.Slug,
+			Access:                  a.Access,
+			HibernateTimeoutMinutes: a.HibernateTimeoutMinutes,
+			Replicas:                intPtrIfPositive(a.Replicas),
+			MaxSessionsPerReplica:   intPtrIfPositive(a.MaxSessionsPerReplica),
+			ContentDigest:           a.ContentDigest,
+			ManagedBy:               a.ManagedBy,
+		})
+	}
+	diff := fleet.Diff(m, localDigests, observed)
+
+	// Temporary Task-8 output (replaced by the real renderer in Task 9).
+	_ = caps
+	for _, d := range diff {
+		fmt.Fprintf(out, "%s %s\n", d.Action, d.Slug)
+	}
 	return nil
 }
+
+// fetchApps issues the single read-only GET /api/apps the plan needs.
+func fetchApps(cfg *cliConfig) ([]db.App, error) {
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("server returned %s: %s", resp.Status, string(body))
+	}
+	var apps []db.App
+	if err := json.Unmarshal(body, &apps); err != nil {
+		return nil, fmt.Errorf("decode apps: %w", err)
+	}
+	return apps, nil
+}
+
+type serverCaps struct {
+	FleetPreconditions bool `json:"fleet_preconditions"`
+	ContentDigest      bool `json:"content_digest"`
+}
+
+// fetchServerCaps reads GET /api/server-info (unauthenticated). Best-effort:
+// an older server without the endpoint yields a zero-value caps (all false),
+// which Plan 3 uses to choose degraded behavior. Plan 2 only records it.
+func fetchServerCaps(cfg *cliConfig) serverCaps {
+	var c serverCaps
+	req, err := http.NewRequest("GET", cfg.Host+"/api/server-info", nil)
+	if err != nil {
+		return c
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return c
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return c
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var wrap struct {
+		Capabilities serverCaps `json:"capabilities"`
+	}
+	if json.Unmarshal(body, &wrap) == nil {
+		c = wrap.Capabilities
+	}
+	return c
+}
+
+// intPtrIfPositive maps a non-pointer API int to *int, treating 0 as "unset"
+// (the apps payload uses 0 for never-configured replicas/sessions, whereas
+// the diff wants nil = "server has no opinion").
+func intPtrIfPositive(v int) *int {
+	if v <= 0 {
+		return nil
+	}
+	return &v
+}
+
+// renderFleetPlanStubMarker is implemented in fleet_render.go (Task 9). This
+// temporary stub keeps Task 8 independently compilable/committable; Task 9
+// replaces it with the real renderer in a different file and deletes this stub.
+func renderFleetPlanStubMarker() {}

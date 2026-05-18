@@ -7,6 +7,53 @@ import (
 	"testing"
 )
 
+func TestFleetPlan_ComputesDiffFromServer(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	// Two server apps: one owned+unchanged, one owned+absent (delete).
+	setResp(200, `[
+	  {"slug":"alpha","access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"},
+	  {"slug":"gone","access":"private","managed_by":"fleet:eu","content_digest":"sha256:x"}
+	]`)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "apps", "alpha", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, `
+fleet_id = "eu"
+
+[[app]]
+slug = "alpha"
+source = "./apps/alpha"
+visibility = "private"
+
+[[app]]
+slug = "newone"
+source = "./apps/alpha"
+visibility = "public"
+`)
+
+	out, err := execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	// At least the apps list GET must have happened; never a mutation.
+	sawApps := false
+	for _, r := range *reqs {
+		if r.Method != "GET" {
+			t.Fatalf("plan must be read-only; saw %s %s", r.Method, r.Path)
+		}
+		if r.Path == "/api/apps" {
+			sawApps = true
+		}
+	}
+	if !sawApps {
+		t.Fatal("expected a GET /api/apps call")
+	}
+	// Rendering lands in Task 9; here we only assert it ran without mutating.
+	if !strings.Contains(out, "alpha") {
+		t.Fatalf("expected diff to mention alpha:\n%s", out)
+	}
+}
+
 func writeFleetManifest(t *testing.T, dir, content string) string {
 	t.Helper()
 	p := filepath.Join(dir, "shinyhub-fleet.toml")
