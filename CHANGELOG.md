@@ -20,6 +20,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.3](https://github.com/rvben/shinyhub/compare/v0.5.2...v0.5.3) - 2026-05-18
+
+### Added
+
+- **scheduler**: per-schedule timezone for cron jobs ([fac27ab](https://github.com/rvben/shinyhub/commit/fac27ab9ed094af36c4ac0cf94691688b8f1e45c))
+
 ## [0.5.2](https://github.com/rvben/shinyhub/compare/v0.5.1...v0.5.2) - 2026-05-16
 
 ### Fixed
