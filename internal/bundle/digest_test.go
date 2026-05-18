@@ -3,7 +3,9 @@ package bundle
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/hex"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -66,8 +68,14 @@ func TestDigestStableAcrossEntryOrder(t *testing.T) {
 func TestDigestChangesOnContent(t *testing.T) {
 	a := buildZip(t, []zipEntry{{"app.py", "print(1)", false}})
 	b := buildZip(t, []zipEntry{{"app.py", "print(2)", false}})
-	da, _ := DigestZipReader(zipReader(t, a))
-	db, _ := DigestZipReader(zipReader(t, b))
+	da, err := DigestZipReader(zipReader(t, a))
+	if err != nil {
+		t.Fatalf("digest a: %v", err)
+	}
+	db, err := DigestZipReader(zipReader(t, b))
+	if err != nil {
+		t.Fatalf("digest b: %v", err)
+	}
 	if da == db {
 		t.Fatal("digest must change when file content changes")
 	}
@@ -76,8 +84,14 @@ func TestDigestChangesOnContent(t *testing.T) {
 func TestDigestChangesOnExecBit(t *testing.T) {
 	a := buildZip(t, []zipEntry{{"run.sh", "echo hi", false}})
 	b := buildZip(t, []zipEntry{{"run.sh", "echo hi", true}})
-	da, _ := DigestZipReader(zipReader(t, a))
-	db, _ := DigestZipReader(zipReader(t, b))
+	da, err := DigestZipReader(zipReader(t, a))
+	if err != nil {
+		t.Fatalf("digest a: %v", err)
+	}
+	db, err := DigestZipReader(zipReader(t, b))
+	if err != nil {
+		t.Fatalf("digest b: %v", err)
+	}
 	if da == db {
 		t.Fatal("digest must change when the exec bit changes")
 	}
@@ -86,8 +100,14 @@ func TestDigestChangesOnExecBit(t *testing.T) {
 func TestDigestIgnoresCacheDirEntries(t *testing.T) {
 	with := buildZip(t, []zipEntry{{"app.py", "x", false}, {"__pycache__/app.pyc", "junk", false}})
 	without := buildZip(t, []zipEntry{{"app.py", "x", false}})
-	dw, _ := DigestZipReader(zipReader(t, with))
-	dwo, _ := DigestZipReader(zipReader(t, without))
+	dw, err := DigestZipReader(zipReader(t, with))
+	if err != nil {
+		t.Fatalf("digest with: %v", err)
+	}
+	dwo, err := DigestZipReader(zipReader(t, without))
+	if err != nil {
+		t.Fatalf("digest without: %v", err)
+	}
 	if dw != dwo {
 		t.Fatalf("cache-dir entries must not affect digest: %s != %s", dw, dwo)
 	}
@@ -112,5 +132,40 @@ func TestDigestRejectsDuplicateName(t *testing.T) {
 	_ = zw.Close()
 	if _, err := DigestZipReader(zipReader(t, buf.Bytes())); err == nil {
 		t.Fatal("digest must error on duplicate accepted entry name")
+	}
+}
+
+func TestDigestFormatIsStableContract(t *testing.T) {
+	z := buildZip(t, []zipEntry{{"app.py", "print(1)", false}})
+	d, err := DigestZipReader(zipReader(t, z))
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if !strings.HasPrefix(d, "sha256:") {
+		t.Fatalf("digest must be sha256:-prefixed, got %q", d)
+	}
+	// "sha256:" (7) + 64 hex chars of a 32-byte digest.
+	if len(d) != 71 {
+		t.Fatalf("digest length = %d, want 71 (sha256: + 64 hex)", len(d))
+	}
+	hexPart := strings.TrimPrefix(d, "sha256:")
+	if _, err := hex.DecodeString(hexPart); err != nil {
+		t.Fatalf("digest hex not decodable: %v", err)
+	}
+}
+
+func TestDigestChangesOnFileName(t *testing.T) {
+	a := buildZip(t, []zipEntry{{"app.py", "x", false}})
+	b := buildZip(t, []zipEntry{{"main.py", "x", false}})
+	da, err := DigestZipReader(zipReader(t, a))
+	if err != nil {
+		t.Fatalf("digest a: %v", err)
+	}
+	db, err := DigestZipReader(zipReader(t, b))
+	if err != nil {
+		t.Fatalf("digest b: %v", err)
+	}
+	if da == db {
+		t.Fatal("digest must change when a file is renamed")
 	}
 }
