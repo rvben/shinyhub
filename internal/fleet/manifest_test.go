@@ -161,3 +161,26 @@ func problemsString(ps []Problem) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+func TestValidFleetID(t *testing.T) {
+	for _, ok := range []string{"prod-eu", "a", "fleet-123", "x" + strings_Repeat63()} {
+		if !ValidFleetID(ok) {
+			t.Errorf("ValidFleetID(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "Prod", "has_underscore", "spaces here", strings_Repeat65()} {
+		if ValidFleetID(bad) {
+			t.Errorf("ValidFleetID(%q) = true, want false", bad)
+		}
+	}
+}
+
+func strings_Repeat63() string { return repeatRune('a', 63) }
+func strings_Repeat65() string { return repeatRune('a', 65) }
+func repeatRune(r byte, n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = r
+	}
+	return string(b)
+}

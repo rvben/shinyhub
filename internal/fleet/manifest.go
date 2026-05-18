@@ -7,7 +7,6 @@ package fleet
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -63,6 +62,11 @@ type Manifest struct {
 
 var fleetIDRe = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 
+// ValidFleetID reports whether id is a syntactically valid fleet ownership
+// scope: [a-z0-9-], 1-64 chars. Shared by manifest validation and
+// `fleet init` so the two cannot diverge.
+func ValidFleetID(id string) bool { return fleetIDRe.MatchString(id) }
+
 var validVisibility = map[string]bool{"private": true, "shared": true, "public": true}
 
 // knownKeys is the set of accepted manifest keys, used for "did you mean"
@@ -77,9 +81,9 @@ var knownKeys = []string{
 // never first-only). A non-empty []Problem means the manifest must not be
 // used. file is the path shown in problem locations.
 //
-// Source-form validation (ParseSource) feeds this same aggregated slice, so
-// a bad source and a typo'd key are reported together;
-// ParseManifest itself performs no filesystem or network I/O.
+// Git source URLs are validated for format; local path existence is a
+// filesystem check deferred to the pre-flight step. ParseManifest itself
+// performs no filesystem or network I/O.
 func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 	var probs []Problem
 	var m Manifest
@@ -117,7 +121,7 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 
 	if m.FleetID == "" {
 		probs = append(probs, Problem{File: file, Msg: "fleet_id is required"})
-	} else if !fleetIDRe.MatchString(m.FleetID) {
+	} else if !ValidFleetID(m.FleetID) {
 		probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
 			"fleet_id %q invalid: must match [a-z0-9-], 1-64 chars", m.FleetID)})
 	}
@@ -144,13 +148,21 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 		probs = append(probs, validateConfig(file, who, a.Config)...)
 		if a.Source == "" {
 			probs = append(probs, Problem{File: file, Msg: who + ": source is required"})
-		} else if _, sp := ParseSource(a.Source, manifestDir(file)); sp != nil {
-			probs = append(probs, Problem{File: file, Msg: who + ": " + sp.Msg})
+		} else if strings.HasPrefix(a.Source, "git+") {
+			// Validate git URL format without I/O; local path existence is
+			// verified in the pre-flight step where I/O is expected.
+			if _, sp := ParseSource(a.Source, ""); sp != nil {
+				probs = append(probs, Problem{File: file, Msg: who + ": " + sp.Msg})
+			}
 		}
 	}
 
 	if len(probs) > 0 {
-		return nil, probs
+		// Return the partially-decoded manifest alongside the problems so
+		// callers can inspect what was parsed (e.g., to run additional local
+		// checks) without re-parsing. A nil manifest is only returned for
+		// hard TOML parse failures above where no struct is available.
+		return &m, probs
 	}
 	return &m, nil
 }
@@ -207,10 +219,4 @@ func levenshtein(a, b string) int {
 		prev, cur = cur, prev
 	}
 	return prev[len(rb)]
-}
-
-// manifestDir is the directory containing the manifest file, used to resolve
-// relative local sources.
-func manifestDir(file string) string {
-	return filepath.Dir(file)
 }
