@@ -206,6 +206,28 @@ func TestFleetPlan_DetailedExitcode(t *testing.T) {
 	}
 }
 
+func TestFleetHelp_ListsPlanAndExitCodes(t *testing.T) {
+	_, _, _ = setupCLITest(t)
+
+	top, err := execCLI(t, "fleet", "--help")
+	if err != nil {
+		t.Fatalf("fleet --help error: %v", err)
+	}
+	if !strings.Contains(top, "plan") || !strings.Contains(top, "Example:") {
+		t.Fatalf("fleet --help should list `plan` and an Example block:\n%s", top)
+	}
+
+	ph, err := execCLI(t, "fleet", "plan", "--help")
+	if err != nil {
+		t.Fatalf("fleet plan --help error: %v", err)
+	}
+	for _, want := range []string{"Exit codes:", "  0 ", "  1 ", "  2 ", "  3 ", "--detailed-exitcode", "Example:"} {
+		if !strings.Contains(ph, want) {
+			t.Fatalf("fleet plan --help missing %q:\n%s", want, ph)
+		}
+	}
+}
+
 // normalizeDigests replaces sha256:<hex> with sha256:XXXX and the ephemeral
 // httptest server URL with a stable placeholder so golden output is stable.
 func normalizeDigests(s string) string {
