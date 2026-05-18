@@ -41,6 +41,9 @@ func DigestZipReader(zr *zip.Reader) (string, error) {
 		case FilterSkipCacheDir:
 			continue
 		default:
+			// Defense-in-depth: in normal server flow ExtractBundle validates
+			// DefaultRules() before digesting, so this path is not expected in
+			// practice; it guards callers that digest an unvalidated zip directly.
 			return "", fmt.Errorf("bundle digest: rejected entry %q: %s", f.Name, decision)
 		}
 		if f.FileInfo().IsDir() {

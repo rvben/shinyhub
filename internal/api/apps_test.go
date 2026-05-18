@@ -1834,3 +1834,67 @@ func TestListAppsJSONHasFleetFields(t *testing.T) {
 		t.Fatalf(`GET /api/apps must include the promoted digest value, body: %s`, body)
 	}
 }
+
+func TestSetAppAccessPreconditionMismatch409(t *testing.T) {
+	srv, store := newTestServer(t)
+	token := seedAppWithPromotedDeploy(t, store, "accprecond", "sha256:live")
+
+	body, _ := json.Marshal(map[string]string{"access": "public"})
+	req := authedRequest(t, "PATCH", "/api/apps/accprecond/access", body, token)
+	req.Header.Set("X-Shinyhub-If-Content-Digest", "sha256:stale")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 on set-access precondition mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Access must not have changed.
+	app, err := store.GetAppBySlug("accprecond")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Access != "private" {
+		t.Fatalf("access must remain private after 409, got %q", app.Access)
+	}
+}
+
+func TestPatchAppIfManagedByEmptyAssertsUnmanaged409(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, userID := seedUserAndJWT(t, store, "managed-user", "admin")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "managed-app", Name: "Managed App", OwnerID: userID, Access: "private"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	// Mark the app as managed so the precondition (empty = unmanaged) will fail.
+	val := "fleet:x"
+	if err := store.SetAppManagedBy("managed-app", &val); err != nil {
+		t.Fatalf("set managed_by: %v", err)
+	}
+	// Empty header value asserts "currently unmanaged"; the app IS managed -> 409.
+	req := authedRequest(t, "PATCH", "/api/apps/managed-app", []byte(`{"name":"updated"}`), token)
+	req.Header["X-Shinyhub-If-Managed-By"] = []string{""}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 when empty If-Managed-By sent to a managed app, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchAppIfContentDigestMismatch409(t *testing.T) {
+	srv, store := newTestServer(t)
+	token := seedAppWithPromotedDeploy(t, store, "digestprecond", "sha256:current")
+
+	req := authedRequest(t, "PATCH", "/api/apps/digestprecond", []byte(`{"name":"new-name"}`), token)
+	req.Header.Set("X-Shinyhub-If-Content-Digest", "sha256:wrong")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 on content-digest mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Name must not have changed.
+	app, err := store.GetAppBySlug("digestprecond")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Name != "digestprecond" {
+		t.Fatalf("app name must remain unchanged after 409, got %q", app.Name)
+	}
+}
