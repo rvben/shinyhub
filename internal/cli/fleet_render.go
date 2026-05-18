@@ -104,7 +104,7 @@ func pending(diff []fleet.AppDiff) bool {
 
 func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff) error {
 	out := cmd.OutOrStdout()
-	_ = caps // recorded for Plan 3; plan is read-only
+	_ = caps // threaded for fleet apply; the plan command is read-only and does not consume it
 
 	if f.jsonOutput {
 		if err := writeFleetPlanJSON(out, m, host, diff); err != nil {

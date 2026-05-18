@@ -84,7 +84,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
 		return &ExitCodeError{Code: 3, Err: err}
 	}
-	caps := fetchServerCaps(cfg) // best-effort; degraded behavior is Plan 3
+	caps := fetchServerCaps(cfg) // best-effort; a zero-value caps lets fleet apply pick degraded behavior
 
 	// Pre-flight step 3: resolve sources + compute local digests. Failures are
 	// aggregated and reported together (spec §9.1 step 3).
@@ -174,8 +174,9 @@ type serverCaps struct {
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated). Best-effort:
-// an older server without the endpoint yields a zero-value caps (all false),
-// which Plan 3 uses to choose degraded behavior. Plan 2 only records it.
+// an older server without the endpoint yields a zero-value caps (all false);
+// fleet apply uses these capabilities to choose its convergence strategy, while
+// fleet plan only records them.
 func fetchServerCaps(cfg *cliConfig) serverCaps {
 	var c serverCaps
 	req, err := http.NewRequest("GET", cfg.Host+"/api/server-info", nil)
