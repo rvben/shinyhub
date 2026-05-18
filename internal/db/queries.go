@@ -343,9 +343,9 @@ type App struct {
 }
 
 // deploymentSummarySQL is the SELECT fragment that adds last_deployed_at and
-// current_version to any apps query. Kept as a constant so all five App
-// queries (ListApps, ListAppsVisibleToUser, ListRunningApps, GetAppBySlug,
-// GetAppByID) stay in sync.
+// current_version to any apps query. Kept as a constant so all six App
+// queries (ListApps, ListAppsVisibleToUser, ListPublicApps, ListRunningApps,
+// GetAppBySlug, GetAppByID) stay in sync.
 const deploymentSummarySQL = `
 		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id) AS last_deployed_at,
 		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version`
@@ -528,6 +528,39 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		   )
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, userID, userID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// ListPublicApps returns only apps with access = 'public'. It is the ONLY
+// query used for anonymous /.shinyhub/apps.json requests: ListAppsVisibleToUser
+// also returns 'shared' apps, which are visible to authenticated users only,
+// so reusing it for anonymous callers would leak shared apps.
+func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = -1 // SQLite treats -1 as no limit
+	}
+	rows, err := s.db.Query(`
+		SELECT id, slug, name, project_slug, owner_id, access, status,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
+		       created_at, updated_at,`+deploymentSummarySQL+`
+		FROM apps
+		WHERE access = 'public'
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
