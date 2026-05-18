@@ -103,6 +103,41 @@ tracing:
   # Optional deep-link template for the Traces tab. {trace_id} is substituted.
   trace_link_template: ""              # e.g. https://grafana.example.com/explore?traceId={trace_id}  # SHINYHUB_TRACING_TRACE_LINK_TEMPLATE
 
+# Optional: white-label branding. All fields are optional; with no branding
+# block at all, / and /login serve byte-for-byte today's stock catalog/login.
+#
+# assets_dir is required only when any field references a local file.
+# logo and favicon may be a filename inside assets_dir OR an absolute http(s):// URL.
+# landing_page is a filename inside assets_dir (or an absolute path that resolves
+# inside assets_dir); it replaces the stock app catalog at /.
+# /login always serves the SPA shell regardless of landing_page.
+#
+# theme.primary_color must be a CSS hex color (#rgb or #rrggbb).
+# footer_links accept http, https, mailto, or absolute-path URLs (starting with /).
+#
+# Local assets are served at /branding/<basename>. Operator landing pages
+# should reference assets with the /branding/ prefix (e.g. src="/branding/logo.svg")
+# because relative paths in the HTML resolve against /, not /branding/.
+#
+# The landing page is served as trusted same-origin platform HTML. Only
+# trusted operators should author it - it is not sandboxed.
+#
+# Some reverse proxies block dot-prefixed paths. Ensure /.shinyhub/ passes
+# through to ShinyHub unmodified.
+branding:
+  site_title: "Example Shiny Platform"   # SHINYHUB_BRANDING_SITE_TITLE
+  assets_dir: /etc/shinyhub/assets        # SHINYHUB_BRANDING_ASSETS_DIR
+  logo: logo.svg                          # filename in assets_dir, or http(s):// URL  # SHINYHUB_BRANDING_LOGO
+  favicon: favicon.ico                    # filename in assets_dir, or http(s):// URL  # SHINYHUB_BRANDING_FAVICON
+  theme:
+    primary_color: "#0a7d8c"              # CSS hex color; injected as --brand-primary  # SHINYHUB_BRANDING_PRIMARY_COLOR
+  landing_page: landing.html              # filename in assets_dir; replaces the stock catalog at /  # SHINYHUB_BRANDING_LANDING_PAGE
+  footer_links:
+    - label: "Support"
+      url: "mailto:support@example.com"
+    - label: "Community"
+      url: "https://example.com/community"
+
 # --- Env-only settings (no YAML key) ---
 #
 # SHINYHUB_DEPLOY_TOKEN
