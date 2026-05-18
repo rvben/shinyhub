@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"fmt"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/spf13/cobra"
 )
 
@@ -124,6 +127,105 @@ func TestLoadConfig_EnvOverridesFileHost(t *testing.T) {
 	}
 	if cfg.Token != "shk_saved" {
 		t.Errorf("token should fall through from file, got %q", cfg.Token)
+	}
+}
+
+// authHeader must pick the scheme that matches the credential type.
+//
+// shk_-prefixed API keys and opaque pre-shared deploy tokens (the
+// SHINYHUB_DEPLOY_TOKEN contract: any >=32-char secret — hex, UUID, base64 —
+// with no required prefix) are validated server-side only under the Token
+// scheme. A JWT minted by POST /api/auth/login (the username/password login
+// flow) is validated only under Bearer. Sending an opaque deploy token as
+// Bearer routes it into JWT validation and 401s — the bug this asserts is
+// fixed end-to-end (the CLI half that issue #13 left undelivered).
+func TestAuthHeader_SchemeMatchesCredentialType(t *testing.T) {
+	cases := []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{"shk_ api key", "shk_abcdef1234567890", "Token shk_abcdef1234567890"},
+		{
+			"opaque deploy token (openssl rand -hex 32)",
+			"3f8a1c9b7e2d4f6a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a",
+			"Token 3f8a1c9b7e2d4f6a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a",
+		},
+		{
+			"opaque deploy token (UUID)",
+			"f47ac10b-58cc-4372-a567-0e02b2c3d479",
+			"Token f47ac10b-58cc-4372-a567-0e02b2c3d479",
+		},
+		{
+			"opaque deploy token (base64, contains dots only in payload-free secret)",
+			"ZHVtbXktc2VjcmV0LXZhbHVlLXdpdGgtMzItcGx1cy1jaGFycw==",
+			"Token ZHVtbXktc2VjcmV0LXZhbHVlLXdpdGgtMzItcGx1cy1jaGFycw==",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := authHeader(tc.token); got != tc.want {
+				t.Fatalf("authHeader(%q) = %q, want %q", tc.token, got, tc.want)
+			}
+		})
+	}
+}
+
+// A real JWT produced by the exact server code path (auth.IssueJWT, the same
+// call POST /api/auth/login makes) must be sent under the Bearer scheme so the
+// username/password login flow keeps working. This pins the JWT branch to the
+// production token shape rather than a hand-written look-alike.
+func TestAuthHeader_RealLoginJWTUsesBearer(t *testing.T) {
+	tok, err := auth.IssueJWT(42, "alice", "developer", "test-secret")
+	if err != nil {
+		t.Fatalf("IssueJWT: %v", err)
+	}
+	got := authHeader(tok)
+	if !strings.HasPrefix(got, "Bearer ") {
+		t.Fatalf("authHeader(real login JWT) = %q, want Bearer scheme", got)
+	}
+	if got != "Bearer "+tok {
+		t.Fatalf("authHeader mangled the token: got %q, want %q", got, "Bearer "+tok)
+	}
+}
+
+// End-to-end across the scheme boundary: a header built by the CLI's real
+// authHeader for an opaque (non-shk_) SHINYHUB_DEPLOY_TOKEN must be accepted
+// by the server's real auth entry point (auth.AuthenticateRequest, the exact
+// function BearerMiddleware calls) when keyLookup is backed by a real
+// auth.DeployToken. This is the assertion issue #13 should have carried but
+// did not: it verified only the server's format relaxation, never that the
+// CLI presents an opaque token under a scheme the server's keyLookup path
+// can see. Without the structural-JWT fix the CLI sends Bearer, the server
+// runs JWT validation instead of keyLookup, and this fails with 401.
+func TestAuthHeader_OpaqueDeployTokenAcceptedByServerAuth(t *testing.T) {
+	opaqueTokens := []string{
+		"3f8a1c9b7e2d4f6a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a", // openssl rand -hex 32
+		"f47ac10b-58cc-4372-a567-0e02b2c3d479",                             // uuidgen
+		"shk_legacy_prefixed_deploy_token_value_kept_for_compat",           // pre-#13 / downstream workaround
+	}
+	for _, raw := range opaqueTokens {
+		t.Run(raw, func(t *testing.T) {
+			deployUser := &auth.ContextUser{ID: -1, Username: "__deploy__", Role: "developer"}
+			dt := auth.NewDeployToken(raw, deployUser)
+			keyLookup := func(hash string) (*auth.ContextUser, error) {
+				if dt.Matches(hash) {
+					return dt.User(), nil
+				}
+				return nil, fmt.Errorf("api key not found")
+			}
+
+			req := httptest.NewRequest("GET", "/api/auth/me", nil)
+			req.Header.Set("Authorization", authHeader(raw))
+
+			user, _, err := auth.AuthenticateRequest(req, "server-secret", keyLookup, nil, nil)
+			if err != nil {
+				t.Fatalf("server rejected CLI-built header for opaque deploy token: %v", err)
+			}
+			if user == nil || user.Username != "__deploy__" {
+				t.Fatalf("got user %+v, want synthetic __deploy__ user", user)
+			}
+		})
 	}
 }
 

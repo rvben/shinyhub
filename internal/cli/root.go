@@ -107,13 +107,43 @@ func loadConfig() (*cliConfig, error) {
 	return &cfg, nil
 }
 
-// authHeader returns the correct Authorization header value for the stored token.
-// API keys (shk_ prefix) use the Token scheme; JWTs use Bearer.
+// authHeader returns the correct Authorization header value for the stored
+// token. cfg.Token is one of two things: a JWT minted by POST /api/auth/login
+// (the `shinyhub login --username/--password` flow), or an API key / pre-shared
+// deploy token (the `--token` flow, SHINYHUB_TOKEN, SHINYHUB_DEPLOY_TOKEN).
+//
+// The server validates a JWT only under the Bearer scheme and an API key /
+// deploy token only under the Token scheme, so the CLI must pick the scheme
+// that matches the credential. The scheme is decided by detecting the JWT
+// structurally rather than assuming "anything without an shk_ prefix is a
+// JWT": an opaque SHINYHUB_DEPLOY_TOKEN (e.g. `openssl rand -hex 32`, a UUID,
+// a secrets-manager value) carries no shk_ prefix yet is a Token-scheme
+// credential, not a JWT. Treating it as Bearer is the defect this guards
+// against — the server then runs JWT validation, never keyLookup, and 401s.
 func authHeader(token string) string {
-	if strings.HasPrefix(token, "shk_") {
-		return "Token " + token
+	if looksLikeJWT(token) {
+		return "Bearer " + token
 	}
-	return "Bearer " + token
+	return "Token " + token
+}
+
+// looksLikeJWT reports whether token has the structural shape of a compact
+// JWS / JWT: exactly three non-empty segments separated by ".", with a header
+// segment that begins with "eyJ". A JWT header is base64url-encoded JSON that
+// always starts with the bytes `{"`, which encode to the literal prefix "eyJ".
+// API keys (shk_…) and opaque deploy tokens (hex, UUID, base64 secrets) do not
+// have two dot separators with an "eyJ" header, so they never match.
+func looksLikeJWT(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+	}
+	return strings.HasPrefix(parts[0], "eyJ")
 }
 
 func saveConfig(cfg *cliConfig) error {
