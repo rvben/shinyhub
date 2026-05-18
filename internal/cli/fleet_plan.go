@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 
 	"github.com/rvben/shinyhub/internal/db"
-	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -48,101 +45,12 @@ func newFleetPlanCmd() *cobra.Command {
 }
 
 func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
-	errOut := cmd.ErrOrStderr()
-
-	data, err := os.ReadFile(f.file)
+	pf, err := fleetPreflight(f.file, cmd.ErrOrStderr(), "plan")
 	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(errOut, "no %s found. Run 'shinyhub fleet init' to generate one from your\n"+
-				"deployed apps, or pass -f <path> to point at an existing manifest.\n",
-				filepath.Base(f.file))
-			return &ExitCodeError{Code: 1, Err: fmt.Errorf("manifest not found: %s", f.file)}
-		}
-		return &ExitCodeError{Code: 1, Err: fmt.Errorf("read %s: %w", f.file, err)}
+		return err
 	}
-
-	// Pre-flight step 1: manifest + local, aggregated.
-	m, probs := fleet.ParseManifest(data, f.file)
-	if len(probs) > 0 {
-		fmt.Fprintf(errOut, "shinyhub fleet plan: validating %s\n\n", f.file)
-		for _, p := range probs {
-			fmt.Fprintf(errOut, "  ✗ %s\n", p.Error())
-		}
-		fmt.Fprintf(errOut, "\n%d problem(s) found. Nothing was changed. Fix these and re-run.\n", len(probs))
-		return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", len(probs))}
-	}
-
-	// Pre-flight step 2: server reachability + auth, one call, BEFORE any
-	// git clone; an auth failure must cost zero clones.
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
-		return &ExitCodeError{Code: 3, Err: err}
-	}
-	apps, err := fetchApps(cfg)
-	if err != nil {
-		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
-		return &ExitCodeError{Code: 3, Err: err}
-	}
-	caps := fetchServerCaps(cfg) // best-effort; a zero-value caps lets fleet apply pick degraded behavior
-
-	// Pre-flight step 3: resolve sources + compute local digests. Failures are
-	// aggregated and reported together.
-	localDigests := map[string]string{}
-	var resolveProblems []string
-	var cleanups []func()
-	defer func() {
-		for _, c := range cleanups {
-			c()
-		}
-	}()
-	for _, app := range m.Apps {
-		ps, sp := fleet.ParseSource(app.Source, filepath.Dir(f.file))
-		if sp != nil {
-			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %s", app.Slug, sp.Msg))
-			continue
-		}
-		dir := ps.LocalPath
-		if ps.Kind == fleet.SourceGit {
-			gd, _, _, clean, gerr := resolveGitSource(ps)
-			if gerr != nil {
-				resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, gerr))
-				continue
-			}
-			cleanups = append(cleanups, clean)
-			dir = gd
-		}
-		dg, derr := digestLocalDir(dir)
-		if derr != nil {
-			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, derr))
-			continue
-		}
-		localDigests[app.Slug] = dg
-	}
-	if len(resolveProblems) > 0 {
-		fmt.Fprintf(errOut, "shinyhub fleet plan: resolving sources\n\n")
-		for _, p := range resolveProblems {
-			fmt.Fprintf(errOut, "  ✗ %s\n", p)
-		}
-		fmt.Fprintf(errOut, "\n%d source problem(s). Nothing was changed.\n", len(resolveProblems))
-		return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d source problem(s)", len(resolveProblems))}
-	}
-
-	observed := make([]fleet.ObservedApp, 0, len(apps))
-	for _, a := range apps {
-		observed = append(observed, fleet.ObservedApp{
-			Slug:                    a.Slug,
-			Access:                  a.Access,
-			HibernateTimeoutMinutes: a.HibernateTimeoutMinutes,
-			Replicas:                intPtrIfPositive(a.Replicas),
-			MaxSessionsPerReplica:   intPtrIfPositive(a.MaxSessionsPerReplica),
-			ContentDigest:           a.ContentDigest,
-			ManagedBy:               a.ManagedBy,
-		})
-	}
-	diff := fleet.Diff(m, localDigests, observed)
-
-	return renderFleetPlan(cmd, f, m, cfg.Host, caps, diff)
+	defer pf.cleanup()
+	return renderFleetPlan(cmd, f, pf.manifest, pf.host, pf.caps, pf.diff)
 }
 
 // fetchApps issues the single read-only GET /api/apps the plan needs.
