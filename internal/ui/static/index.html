@@ -599,7 +599,9 @@
             <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
             <label for="sched-cron">Cron expression</label>
             <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off">
-            <div id="cron-preview" class="hint"></div>
+            <div id="cron-preview" class="hint">Preview (browser-local time - server uses schedule timezone)</div>
+            <label for="sched-timezone">Timezone (optional)</label>
+            <input id="sched-timezone" name="timezone" placeholder="e.g. Europe/Amsterdam — leave empty to inherit server default" autocomplete="off">
             <label for="sched-command">Command (one token per line)</label>
             <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py"></textarea>
             <label for="sched-timeout">Timeout (seconds)</label>

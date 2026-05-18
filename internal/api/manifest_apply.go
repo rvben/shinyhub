@@ -105,6 +105,11 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 		if spec.TimeoutSeconds != nil {
 			timeout = *spec.TimeoutSeconds
 		}
+		// Convert empty timezone to nil (NULL = inherit server default).
+		var tzPtr *string
+		if spec.Timezone != "" {
+			tzPtr = &spec.Timezone
+		}
 		id, created, err := s.store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 			AppID:          app.ID,
 			Name:           spec.Name,
@@ -114,6 +119,7 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			TimeoutSeconds: timeout,
 			OverlapPolicy:  spec.Overlap,
 			MissedPolicy:   spec.Missed,
+			Timezone:       tzPtr,
 		})
 		if err != nil {
 			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)
@@ -134,8 +140,9 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			auditAction = "schedule_create"
 			resultAction = "created"
 		}
+		effectiveTZ := effectiveTZLabel(tzPtr, s.cfg.Scheduler.Location)
 		s.audit(r, auditAction, "schedule", fmt.Sprintf("%d", id),
-			fmt.Sprintf(`{"app":%q,"name":%q}`, app.Slug, spec.Name))
+			fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, spec.Name, effectiveTZ))
 		results = append(results, ManifestScheduleResult{Name: spec.Name, Action: resultAction})
 	}
 	return results, nil

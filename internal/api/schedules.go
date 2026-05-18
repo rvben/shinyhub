@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -16,25 +17,41 @@ import (
 )
 
 type scheduleDTO struct {
-	ID             int64    `json:"id"`
-	AppID          int64    `json:"app_id"`
-	Name           string   `json:"name"`
-	CronExpr       string   `json:"cron_expr"`
-	Command        []string `json:"command"`
-	Enabled        bool     `json:"enabled"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	OverlapPolicy  string   `json:"overlap_policy"`
-	MissedPolicy   string   `json:"missed_policy"`
-	NextFire       *string  `json:"next_fire,omitempty"`
+	ID               int64    `json:"id"`
+	AppID            int64    `json:"app_id"`
+	Name             string   `json:"name"`
+	CronExpr         string   `json:"cron_expr"`
+	Command          []string `json:"command"`
+	Enabled          bool     `json:"enabled"`
+	TimeoutSeconds   int      `json:"timeout_seconds"`
+	OverlapPolicy    string   `json:"overlap_policy"`
+	MissedPolicy     string   `json:"missed_policy"`
+	// Timezone is the raw stored value; null/nil means "inherit server default".
+	Timezone         *string  `json:"timezone"`
+	// EffectiveTimezone is the resolved IANA zone name that will actually be
+	// used when firing this schedule (after server-default and UTC fallback).
+	EffectiveTimezone string   `json:"effective_timezone"`
+	// TimezoneInherited is true when no per-schedule timezone is stored and
+	// the effective zone comes from the server default.
+	TimezoneInherited bool     `json:"timezone_inherited"`
+	NextFire         *string  `json:"next_fire,omitempty"`
 }
 
-func toScheduleDTO(sc *db.Schedule, next *time.Time) scheduleDTO {
+func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Location) scheduleDTO {
 	var cmd []string
 	_ = json.Unmarshal([]byte(sc.CommandJSON), &cmd)
+	if serverDefaultLoc == nil {
+		serverDefaultLoc = time.UTC
+	}
+	loc := sc.EffectiveLocation(serverDefaultLoc)
+	inherited := sc.Timezone == nil || *sc.Timezone == ""
 	out := scheduleDTO{
 		ID: sc.ID, AppID: sc.AppID, Name: sc.Name, CronExpr: sc.CronExpr,
 		Command: cmd, Enabled: sc.Enabled, TimeoutSeconds: sc.TimeoutSeconds,
 		OverlapPolicy: sc.OverlapPolicy, MissedPolicy: sc.MissedPolicy,
+		Timezone:          sc.Timezone,
+		EffectiveTimezone: loc.String(),
+		TimezoneInherited: inherited,
 	}
 	if next != nil {
 		s := next.Format(time.RFC3339)
@@ -62,7 +79,7 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 				next = &t
 			}
 		}
-		out = append(out, toScheduleDTO(sc, next))
+		out = append(out, toScheduleDTO(sc, next, s.cfg.Scheduler.Location))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -81,14 +98,24 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds int      `json:"timeout_seconds"`
 		OverlapPolicy  string   `json:"overlap_policy"`
 		MissedPolicy   string   `json:"missed_policy"`
+		Timezone       *string  `json:"timezone"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if err := schedulespec.Validate(req.Name, req.CronExpr, req.Command, req.TimeoutSeconds, req.OverlapPolicy, req.MissedPolicy); err != nil {
+	tzStr := ""
+	if req.Timezone != nil {
+		tzStr = *req.Timezone
+	}
+	if err := schedulespec.Validate(req.Name, req.CronExpr, tzStr, req.Command, req.TimeoutSeconds, req.OverlapPolicy, req.MissedPolicy); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// Normalise empty string to nil (inherit server default).
+	var storedTZ *string
+	if req.Timezone != nil && *req.Timezone != "" {
+		storedTZ = req.Timezone
 	}
 	cmdJSON, _ := json.Marshal(req.Command)
 	enabled := true
@@ -99,7 +126,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		AppID: app.ID, Name: req.Name, CronExpr: req.CronExpr,
 		CommandJSON: string(cmdJSON), Enabled: enabled,
 		TimeoutSeconds: req.TimeoutSeconds, OverlapPolicy: req.OverlapPolicy,
-		MissedPolicy: req.MissedPolicy,
+		MissedPolicy: req.MissedPolicy, Timezone: storedTZ,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrScheduleNameExists) {
@@ -115,9 +142,9 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(`{"app":%q,"name":%q}`, app.Slug, req.Name))
+	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location)))
 	sc, _ := s.store.GetSchedule(id)
-	writeJSON(w, http.StatusCreated, toScheduleDTO(sc, nil))
+	writeJSON(w, http.StatusCreated, toScheduleDTO(sc, nil, s.cfg.Scheduler.Location))
 }
 
 // PATCH /api/apps/{slug}/schedules/{id}
@@ -136,6 +163,28 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+
+	// Decode the body twice: once into a raw map to detect key presence, and
+	// once into a typed struct for all other fields. This lets us implement the
+	// tri-state timezone contract:
+	//   key absent          -> unchanged (do not touch stored value)
+	//   key present, null   -> clear to inherit (SetTimezone=true, Timezone=nil)
+	//   key present, ""     -> clear to inherit (SetTimezone=true, Timezone=nil)
+	//   key present, "<tz>" -> validate and set (SetTimezone=true, Timezone=&v)
+	// All other PATCH fields use plain *T + omitempty because they have no
+	// "clear to default" semantic — absent and null both mean "unchanged".
+	bodyBytes, readErr := io.ReadAll(r.Body)
+	if readErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(bodyBytes, &rawFields); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
 	var req struct {
 		Name           *string   `json:"name,omitempty"`
 		CronExpr       *string   `json:"cron_expr,omitempty"`
@@ -145,11 +194,31 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		OverlapPolicy  *string   `json:"overlap_policy,omitempty"`
 		MissedPolicy   *string   `json:"missed_policy,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	// Validate any provided fields by composing into the existing record.
+
+	// Resolve timezone tri-state from the raw map.
+	// tzPresent is true when the key appeared in the JSON body at all.
+	// tzValue holds the new stored value (nil = clear to inherit).
+	var tzPresent bool
+	var tzValue *string // nil = clear to inherit, non-nil = the new IANA zone
+	if raw, present := rawFields["timezone"]; present {
+		tzPresent = true
+		// Unmarshal as *string so JSON null decodes to nil and a string to &v.
+		var v *string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "timezone must be a string or null")
+			return
+		}
+		if v != nil && *v != "" {
+			tzValue = v // non-empty string: validate below
+		}
+		// null or empty string -> tzValue stays nil (clear to inherit)
+	}
+
+	// Validate all provided fields by composing against the existing record.
 	name := sc.Name
 	if req.Name != nil {
 		name = *req.Name
@@ -175,21 +244,42 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	if req.MissedPolicy != nil {
 		missed = *req.MissedPolicy
 	}
-	if err := schedulespec.Validate(name, cronExpr, cmd, timeout, overlap, missed); err != nil {
+	// Compose timezone for validation: use the incoming value when the key was
+	// present (empty string = clear = validate as ""); fall back to the existing
+	// stored value when the key was absent (unchanged semantics).
+	tzForValidation := ""
+	if tzPresent {
+		if tzValue != nil {
+			tzForValidation = *tzValue
+		}
+	} else if sc.Timezone != nil {
+		tzForValidation = *sc.Timezone
+	}
+	if err := schedulespec.Validate(name, cronExpr, tzForValidation, cmd, timeout, overlap, missed); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	var cmdJSONPtr *string
 	if req.Command != nil {
 		b, _ := json.Marshal(*req.Command)
 		v := string(b)
 		cmdJSONPtr = &v
 	}
-	if err := s.store.UpdateSchedule(id, db.UpdateScheduleParams{
+
+	updateParams := db.UpdateScheduleParams{
 		Name: req.Name, CronExpr: req.CronExpr, CommandJSON: cmdJSONPtr,
 		Enabled: req.Enabled, TimeoutSeconds: req.TimeoutSeconds,
 		OverlapPolicy: req.OverlapPolicy, MissedPolicy: req.MissedPolicy,
-	}); err != nil {
+	}
+	if tzPresent {
+		// Key was in the body: update the column regardless of value.
+		// tzValue=nil -> stored NULL (inherit); tzValue=&v -> store the zone.
+		updateParams.SetTimezone = true
+		updateParams.Timezone = tzValue
+	}
+
+	if err := s.store.UpdateSchedule(id, updateParams); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -201,7 +291,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), "")
 	fresh, _ := s.store.GetSchedule(id)
-	writeJSON(w, http.StatusOK, toScheduleDTO(fresh, nil))
+	writeJSON(w, http.StatusOK, toScheduleDTO(fresh, nil, s.cfg.Scheduler.Location))
 }
 
 // DELETE /api/apps/{slug}/schedules/{id}
@@ -413,6 +503,18 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	streamLogFile(w, r, run.LogPath, run.Status == "running")
+}
+
+// effectiveTZLabel returns a human-readable label of the timezone that will
+// actually be used for a newly created schedule, for audit logging.
+func effectiveTZLabel(storedTZ *string, serverDefault *time.Location) string {
+	if storedTZ != nil && *storedTZ != "" {
+		return *storedTZ
+	}
+	if serverDefault == nil {
+		return "UTC"
+	}
+	return serverDefault.String() + " (server default)"
 }
 
 // paginationParams reads limit + offset query params, applying defaults + caps.

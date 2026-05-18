@@ -35,8 +35,9 @@ var ErrNotStarted = errors.New("scheduler not started")
 // Scheduler wraps robfig/cron with a per-schedule entry registry that supports
 // hot reload (post-CRUD) and missed-run catch-up at startup.
 type Scheduler struct {
-	jobs  Jobs
-	store Store
+	jobs       Jobs
+	store      Store
+	defaultLoc *time.Location // server-level default; never nil
 
 	mu      sync.Mutex
 	cron    *cron.Cron
@@ -44,11 +45,19 @@ type Scheduler struct {
 	started bool
 }
 
-func New(jobs Jobs, store Store) *Scheduler {
+// New creates a Scheduler. defaultLoc is the server-level timezone fallback
+// applied to any schedule whose own Timezone is nil. Pass time.UTC for the
+// standard "fire at UTC wall-clock time" behaviour. A nil defaultLoc defaults
+// to time.UTC defensively.
+func New(jobs Jobs, store Store, defaultLoc *time.Location) *Scheduler {
+	if defaultLoc == nil {
+		defaultLoc = time.UTC
+	}
 	return &Scheduler{
-		jobs:    jobs,
-		store:   store,
-		entries: map[int64]cron.EntryID{},
+		jobs:       jobs,
+		store:      store,
+		defaultLoc: defaultLoc,
+		entries:    map[int64]cron.EntryID{},
 	}
 }
 
@@ -156,6 +165,21 @@ func (s *Scheduler) entryCount() int {
 	return len(s.entries)
 }
 
+// prefixedSpec returns the CRON_TZ=<zone> prefixed cron expression for sched,
+// resolving the effective timezone via sched.EffectiveLocation(s.defaultLoc).
+// This is the single source of truth for timezone resolution; both register
+// and dispatchMissedIfDue must call it to guarantee the two paths cannot drift.
+func (s *Scheduler) prefixedSpec(sched *db.Schedule) string {
+	loc := sched.EffectiveLocation(s.defaultLoc)
+	return "CRON_TZ=" + loc.String() + " " + sched.CronExpr
+}
+
+// productionParser returns the cron parser with the same flags as used in
+// dispatchMissedIfDue. Exported for tests to drive the exact same path.
+func productionParser() cron.Parser {
+	return cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+}
+
 func (s *Scheduler) register(sched *db.Schedule) error {
 	s.mu.Lock()
 	c := s.cron
@@ -163,14 +187,15 @@ func (s *Scheduler) register(sched *db.Schedule) error {
 	if c == nil {
 		return ErrNotStarted
 	}
+	spec := s.prefixedSpec(sched)
 	schedID := sched.ID
-	id, err := c.AddFunc(sched.CronExpr, func() {
+	id, err := c.AddFunc(spec, func() {
 		if _, err := s.jobs.Run(schedID, "schedule", nil); err != nil {
 			slog.Warn("scheduled run failed", "schedule", schedID, "err", err)
 		}
 	})
 	if err != nil {
-		return fmt.Errorf("parse cron %q: %w", sched.CronExpr, err)
+		return fmt.Errorf("parse cron %q: %w", spec, err)
 	}
 	s.mu.Lock()
 	s.entries[sched.ID] = id
@@ -179,15 +204,18 @@ func (s *Scheduler) register(sched *db.Schedule) error {
 }
 
 // dispatchMissedIfDue runs the schedule once immediately if more than one cron
-// interval has passed since the last successful run.
+// interval has passed since the last successful run. The schedule's effective
+// timezone is applied via the prefixed spec so missed-run detection uses
+// local-calendar semantics (same as the registration path).
 func (s *Scheduler) dispatchMissedIfDue(sched *db.Schedule) {
 	last, err := s.store.LastSuccessfulRun(sched.ID)
 	if err != nil {
 		// Never run successfully; treat first registration as the baseline.
 		return
 	}
-	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	schedule, err := parser.Parse(sched.CronExpr)
+	spec := s.prefixedSpec(sched)
+	parser := productionParser()
+	schedule, err := parser.Parse(spec)
 	if err != nil {
 		slog.Warn("parse cron for missed-run check", "schedule", sched.ID, "err", err)
 		return

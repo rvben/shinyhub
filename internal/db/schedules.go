@@ -28,8 +28,37 @@ type Schedule struct {
 	TimeoutSeconds int
 	OverlapPolicy  string
 	MissedPolicy   string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Timezone is the optional per-schedule IANA timezone. nil means "inherit
+	// the server default". A non-nil pointer to an empty string is normalised
+	// to nil at the API layer before reaching the DB (empty = inherit).
+	Timezone  *string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// EffectiveLocation resolves the schedule's timezone with the given server
+// default. Returns the resolved *time.Location.
+//
+// Resolution order:
+//  1. s.Timezone (non-nil, non-empty) - use that IANA zone.
+//  2. Otherwise return def (the server-configured default or UTC).
+//
+// If a stored timezone fails to load (corrupted DB row), def is used as a
+// safe fallback. This is the single place the inherit/resolution logic lives;
+// all callers must go through here.
+func (s *Schedule) EffectiveLocation(def *time.Location) *time.Location {
+	if def == nil {
+		def = time.UTC
+	}
+	if s.Timezone != nil && *s.Timezone != "" {
+		loc, err := time.LoadLocation(*s.Timezone)
+		if err != nil {
+			// Stored value failed to load; fall back to server default.
+			return def
+		}
+		return loc
+	}
+	return def
 }
 
 type CreateScheduleParams struct {
@@ -41,6 +70,7 @@ type CreateScheduleParams struct {
 	TimeoutSeconds int
 	OverlapPolicy  string
 	MissedPolicy   string
+	Timezone       *string
 }
 
 type UpdateScheduleParams struct {
@@ -51,14 +81,28 @@ type UpdateScheduleParams struct {
 	TimeoutSeconds *int
 	OverlapPolicy  *string
 	MissedPolicy   *string
+	// Timezone uses a sentinel to distinguish three states:
+	//   nil       - field not provided; leave as-is.
+	//   non-nil pointer to empty string - clear to NULL (inherit).
+	//   non-nil pointer to non-empty string - set to that zone.
+	// The API layer is responsible for normalising empty-string client input
+	// to a non-nil pointer before calling UpdateSchedule.
+	Timezone *string
+	// SetTimezone must be true for the Timezone field to be included in the
+	// UPDATE, allowing nil (inherit/clear) to be distinguished from "not provided".
+	SetTimezone bool
 }
 
 func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
+	var tz sql.NullString
+	if p.Timezone != nil && *p.Timezone != "" {
+		tz = sql.NullString{String: *p.Timezone, Valid: true}
+	}
 	res, err := s.db.Exec(`
 		INSERT INTO app_schedules
-			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
 	)
 	if err != nil {
 		var sqliteErr *sqlite.Error
@@ -73,7 +117,7 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, created_at, updated_at
 		FROM app_schedules WHERE id = ?`, id)
 	return scanSchedule(row)
 }
@@ -81,7 +125,7 @@ func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? ORDER BY name`, appID)
 	if err != nil {
 		return nil, err
@@ -101,7 +145,7 @@ func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 func (s *Store) ListEnabledSchedules() ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, created_at, updated_at
 		FROM app_schedules WHERE enabled = 1`)
 	if err != nil {
 		return nil, err
@@ -148,6 +192,14 @@ func (s *Store) UpdateSchedule(id int64, p UpdateScheduleParams) error {
 	if p.MissedPolicy != nil {
 		sets = append(sets, "missed_policy = ?")
 		args = append(args, *p.MissedPolicy)
+	}
+	if p.SetTimezone {
+		sets = append(sets, "timezone = ?")
+		if p.Timezone != nil && *p.Timezone != "" {
+			args = append(args, sql.NullString{String: *p.Timezone, Valid: true})
+		} else {
+			args = append(args, sql.NullString{})
+		}
 	}
 	if len(sets) == 0 {
 		return nil
@@ -363,6 +415,7 @@ type UpsertScheduleByNameParams struct {
 	TimeoutSeconds int
 	OverlapPolicy  string
 	MissedPolicy   string
+	Timezone       *string
 }
 
 // UpsertScheduleByName performs an atomic insert-or-update keyed on
@@ -384,13 +437,18 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	var tz sql.NullString
+	if p.Timezone != nil && *p.Timezone != "" {
+		tz = sql.NullString{String: *p.Timezone, Valid: true}
+	}
+
 	res, err := tx.Exec(`
 INSERT INTO app_schedules
-  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(app_id, name) DO NOTHING`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
-		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
 	)
 	if err != nil {
 		return 0, false, fmt.Errorf("insert schedule: %w", err)
@@ -414,11 +472,11 @@ ON CONFLICT(app_id, name) DO NOTHING`,
 	err = tx.QueryRow(`
 UPDATE app_schedules
    SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
-       overlap_policy = ?, missed_policy = ?, updated_at = CURRENT_TIMESTAMP
+       overlap_policy = ?, missed_policy = ?, timezone = ?, updated_at = CURRENT_TIMESTAMP
  WHERE app_id = ? AND name = ?
 RETURNING id`,
 		p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
-		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
 		p.AppID, p.Name,
 	).Scan(&id)
 	if err != nil {
@@ -499,9 +557,10 @@ type rowScanner interface {
 func scanSchedule(s rowScanner) (*Schedule, error) {
 	var sched Schedule
 	var enabled int
+	var tz sql.NullString
 	err := s.Scan(&sched.ID, &sched.AppID, &sched.Name, &sched.CronExpr, &sched.CommandJSON,
 		&enabled, &sched.TimeoutSeconds, &sched.OverlapPolicy, &sched.MissedPolicy,
-		&sched.CreatedAt, &sched.UpdatedAt)
+		&tz, &sched.CreatedAt, &sched.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -509,6 +568,8 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 		return nil, err
 	}
 	sched.Enabled = enabled != 0
+	if tz.Valid {
+		sched.Timezone = &tz.String
+	}
 	return &sched, nil
 }
-

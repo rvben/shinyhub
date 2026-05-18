@@ -2824,12 +2824,12 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const fires = nextCronFires(expr, 5);
       if (fires.length === 0) {
-        el.textContent = 'No fires found in next year';
+        el.textContent = 'Preview (browser-local): No fires found in next year';
       } else {
-        el.textContent = 'Next: ' + fires.map(d => d.toLocaleString()).join(' · ');
+        el.textContent = 'Preview (browser-local): ' + fires.map(d => d.toLocaleString()).join(' · ');
       }
     } catch {
-      el.textContent = 'Invalid cron expression';
+      el.textContent = 'Preview (browser-local): Invalid cron expression';
     }
   }
 
@@ -2853,24 +2853,45 @@ document.addEventListener('DOMContentLoaded', () => {
       container.innerHTML = '<p class="env-empty">No schedules configured for this app.</p>';
       return;
     }
-    const rows = schedules.map(s => `
+    const rows = schedules.map(s => {
+      // Render next_fire in the schedule's effective timezone so operators see
+      // the fire time in local-schedule terms, not browser-local time.
+      let nextFireDisplay = '—';
+      if (s.next_fire && s.effective_timezone) {
+        try {
+          nextFireDisplay = new Intl.DateTimeFormat(undefined, {
+            timeZone: s.effective_timezone,
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit',
+            timeZoneName: 'short',
+          }).format(new Date(s.next_fire));
+        } catch {
+          nextFireDisplay = new Date(s.next_fire).toLocaleString();
+        }
+      }
+      const tzDisplay = s.effective_timezone
+        ? (s.timezone_inherited ? `${escapeHtml(s.effective_timezone)} (inherited)` : escapeHtml(s.effective_timezone))
+        : '—';
+      return `
       <tr>
         <td>${escapeHtml(s.name)}</td>
         <td><code>${escapeHtml(s.cron_expr)}</code></td>
         <td>${escapeHtml((s.command || []).join(' '))}</td>
         <td><span class="status-pill ${s.enabled ? 'status-on' : 'status-off'}">${s.enabled ? 'on' : 'off'}</span></td>
-        <td>${s.next_fire ? new Date(s.next_fire).toLocaleString() : '—'}</td>
+        <td>${tzDisplay}</td>
+        <td>${nextFireDisplay}</td>
         <td class="table-actions">
           <button type="button" class="env-btn-secondary" data-action="history" data-id="${s.id}">History</button>
           <button type="button" class="env-btn-secondary" data-action="run" data-id="${s.id}">Run now</button>
           <button type="button" class="env-btn-secondary" data-action="edit" data-schedule='${escapeHtml(JSON.stringify(s))}'>Edit</button>
           <button type="button" class="btn-danger-sm" data-action="delete" data-id="${s.id}" data-name="${escapeHtml(s.name)}">Delete</button>
         </td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
     container.innerHTML = `
       <table>
         <thead><tr>
-          <th>Name</th><th>Cron</th><th>Command</th><th>Status</th><th>Next fire</th><th></th>
+          <th>Name</th><th>Cron</th><th>Command</th><th>Status</th><th>Timezone</th><th>Next fire</th><th></th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -2949,6 +2970,7 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('sched-overlap').value = existing.overlap_policy || 'skip';
       document.getElementById('sched-missed').value = existing.missed_policy || 'skip';
       document.getElementById('sched-enabled').checked = existing.enabled !== false;
+      document.getElementById('sched-timezone').value = existing.timezone || '';
     }
     updateCronPreview(document.getElementById('sched-cron').value);
 
@@ -2974,7 +2996,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const newErrEl = document.getElementById('schedule-form-error');
       setError(newErrEl, '');
 
-      const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled});
+      const timezone = newForm.querySelector('#sched-timezone').value.trim();
+      const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled, timezone});
       let r;
       if (existing) {
         r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${existing.id}`, {

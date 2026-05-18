@@ -431,7 +431,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("init jobs manager: %w", err)
 	}
-	sched := scheduler.New(jobsMgr, store)
+	sched := scheduler.New(jobsMgr, store, cfg.Scheduler.Location)
 
 	schedCtx, cancelSched := context.WithCancel(context.Background())
 	defer cancelSched()

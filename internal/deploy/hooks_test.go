@@ -434,3 +434,79 @@ cmd = "echo hi"
 		t.Errorf("Missed = %q, want %q", s.Missed, "skip")
 	}
 }
+
+func TestLoadManifest_Schedule_ExplicitTimezone(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "daily-fetch"
+cron = "0 6 * * *"
+cmd = "python fetch.py"
+timezone = "Europe/Amsterdam"
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(m.Schedules) != 1 {
+		t.Fatalf("schedules = %d, want 1", len(m.Schedules))
+	}
+	if m.Schedules[0].Timezone != "Europe/Amsterdam" {
+		t.Errorf("Timezone = %q, want Europe/Amsterdam", m.Schedules[0].Timezone)
+	}
+}
+
+func TestLoadManifest_Schedule_AbsentTimezoneIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "daily-fetch"
+cron = "0 6 * * *"
+cmd = "python fetch.py"
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Schedules[0].Timezone != "" {
+		t.Errorf("absent timezone should be empty string, got %q", m.Schedules[0].Timezone)
+	}
+}
+
+func TestLoadManifest_Schedule_InvalidTimezoneRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "daily-fetch"
+cron = "0 6 * * *"
+cmd = "python fetch.py"
+timezone = "Mars/Olympus"
+`)
+	_, err := LoadManifest(dir)
+	if err == nil {
+		t.Fatal("expected error for invalid timezone, got nil")
+	}
+	if !strings.Contains(err.Error(), "shinyhub.toml [[schedule]] #1") {
+		t.Errorf("error missing schedule prefix: %v", err)
+	}
+	if !strings.Contains(err.Error(), "timezone") {
+		t.Errorf("error missing timezone context: %v", err)
+	}
+}
+
+func TestLoadManifest_Schedule_CRON_TZ_PrefixRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "daily-fetch"
+cron = "CRON_TZ=UTC 0 6 * * *"
+cmd = "python fetch.py"
+`)
+	_, err := LoadManifest(dir)
+	if err == nil {
+		t.Fatal("expected error for CRON_TZ= prefix in cron_expr, got nil")
+	}
+	if !strings.Contains(err.Error(), "cron_expr") {
+		t.Errorf("error missing cron_expr context: %v", err)
+	}
+}

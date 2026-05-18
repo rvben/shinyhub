@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
@@ -71,7 +72,7 @@ func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) 
 
 	// Wire a scheduler that is instantiated but not started, so Reload
 	// returns ErrNotStarted (soft failure path).
-	sc := scheduler.New(nil, store)
+	sc := scheduler.New(nil, store, time.UTC)
 	srv.SetJobs(nil, sc)
 
 	return srv, store, owner.ID

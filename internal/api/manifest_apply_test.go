@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -162,6 +163,88 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 	events, _ = store.ListAuditEvents(10, 0)
 	if !auditEventsContain(events, "schedule_update", scheduleID) {
 		t.Errorf("expected schedule_update audit event for schedule %s", scheduleID)
+	}
+}
+
+// TestApplyManifestSchedules_AuditDetailIncludesEffectiveTimezone asserts that
+// the audit event emitted by applyManifestSchedules includes effective_timezone
+// in its JSON detail — matching the shape emitted by the API create handler.
+func TestApplyManifestSchedules_AuditDetailIncludesEffectiveTimezone(t *testing.T) {
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	tz := "Europe/Amsterdam"
+	specs := []deploy.ScheduleSpec{{
+		Name:           "nightly",
+		Cron:           "0 0 * * *",
+		Command:        []string{"echo", "a"},
+		TimeoutSeconds: ptrIntAPI(60),
+		Overlap:        "skip",
+		Missed:         "skip",
+		Timezone:       tz,
+	}}
+	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
+		t.Fatal(err)
+	}
+
+	events, _ := store.ListAuditEvents(10, 0)
+	var found bool
+	for _, e := range events {
+		if e.Action == "schedule_create" {
+			if !strings.Contains(e.Detail, `"effective_timezone"`) {
+				t.Errorf("audit detail missing effective_timezone: %q", e.Detail)
+			}
+			if !strings.Contains(e.Detail, "Europe/Amsterdam") {
+				t.Errorf("audit detail missing timezone value: %q", e.Detail)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("no schedule_create audit event found")
+	}
+}
+
+// TestApplyManifestSchedules_AuditDetailEffectiveTimezoneInherited asserts that
+// when no per-schedule timezone is set, the audit detail effective_timezone
+// reflects the server default (UTC in test fixture).
+func TestApplyManifestSchedules_AuditDetailEffectiveTimezoneInherited(t *testing.T) {
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	// No timezone in spec — should inherit server default (UTC in fixture).
+	specs := []deploy.ScheduleSpec{{
+		Name:           "nightly",
+		Cron:           "0 0 * * *",
+		Command:        []string{"echo", "a"},
+		TimeoutSeconds: ptrIntAPI(60),
+		Overlap:        "skip",
+		Missed:         "skip",
+	}}
+	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
+		t.Fatal(err)
+	}
+
+	events, _ := store.ListAuditEvents(10, 0)
+	var found bool
+	for _, e := range events {
+		if e.Action == "schedule_create" {
+			if !strings.Contains(e.Detail, `"effective_timezone"`) {
+				t.Errorf("audit detail missing effective_timezone: %q", e.Detail)
+			}
+			// UTC is the server default in the test fixture.
+			if !strings.Contains(e.Detail, "UTC") {
+				t.Errorf("audit detail should include UTC (server default): %q", e.Detail)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("no schedule_create audit event found")
 	}
 }
 

@@ -77,6 +77,17 @@ type DefaultsConfig struct {
 	AppVisibility string
 }
 
+// SchedulerConfig holds scheduler-level settings.
+type SchedulerConfig struct {
+	// DefaultTimezone is the IANA timezone applied to schedules that do not
+	// specify their own timezone. Defaults to "UTC". Set via
+	// scheduler.timezone in YAML or SHINYHUB_SCHEDULER_TIMEZONE env var.
+	DefaultTimezone string
+	// Location is the parsed *time.Location derived from DefaultTimezone. It
+	// is populated by Load and is the authoritative value used at runtime.
+	Location *time.Location `yaml:"-"`
+}
+
 // Config holds all parsed, ready-to-use configuration for ShinyHub.
 type Config struct {
 	Database         DatabaseConfig
@@ -85,6 +96,7 @@ type Config struct {
 	Storage          StorageConfig
 	Lifecycle        LifecycleConfig
 	Runtime          RuntimeConfig
+	Scheduler        SchedulerConfig
 	Defaults         DefaultsConfig
 	Tracing          TracingConfig
 	OAuth            OAuthConfig  `yaml:"-"`
@@ -231,6 +243,10 @@ type rawDefaultsConfig struct {
 	AppVisibility string `yaml:"app_visibility"`
 }
 
+type rawSchedulerConfig struct {
+	Timezone string `yaml:"timezone"`
+}
+
 // rawConfig mirrors Config for YAML decoding, using string-typed duration fields.
 type rawConfig struct {
 	Database  DatabaseConfig     `yaml:"database"`
@@ -240,6 +256,7 @@ type rawConfig struct {
 	Lifecycle rawLifecycleConfig `yaml:"lifecycle"`
 	OAuth     rawOAuthConfig     `yaml:"oauth"`
 	Runtime   rawRuntimeConfig   `yaml:"runtime"`
+	Scheduler rawSchedulerConfig `yaml:"scheduler"`
 	Defaults  rawDefaultsConfig  `yaml:"defaults"`
 	Tracing   rawTracingConfig   `yaml:"tracing"`
 }
@@ -317,6 +334,7 @@ func Load(path string) (*Config, error) {
 		Storage:   raw.Storage,
 		Lifecycle: lc,
 		Runtime:   rc,
+		Scheduler: SchedulerConfig{DefaultTimezone: raw.Scheduler.Timezone},
 		Defaults:  DefaultsConfig{AppVisibility: raw.Defaults.AppVisibility},
 		Tracing: TracingConfig{
 			Enabled:           raw.Tracing.Enabled,
@@ -430,6 +448,18 @@ func Load(path string) (*Config, error) {
 	}
 	if err := normalizeTracing(&cfg.Tracing); err != nil {
 		return nil, err
+	}
+	// Resolve scheduler timezone. Default to UTC when unset; validate when set.
+	if cfg.Scheduler.DefaultTimezone == "" {
+		cfg.Scheduler.DefaultTimezone = "UTC"
+	}
+	{
+		loc, err := time.LoadLocation(cfg.Scheduler.DefaultTimezone)
+		if err != nil {
+			return nil, fmt.Errorf("scheduler.timezone: %q is not a valid IANA timezone: %w",
+				cfg.Scheduler.DefaultTimezone, err)
+		}
+		cfg.Scheduler.Location = loc
 	}
 	if cfg.Auth.Secret == "" {
 		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
@@ -718,5 +748,8 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_TRACE_LINK_TEMPLATE"); v != "" {
 		cfg.Tracing.TraceLinkTemplate = v
+	}
+	if v := os.Getenv("SHINYHUB_SCHEDULER_TIMEZONE"); v != "" {
+		cfg.Scheduler.DefaultTimezone = v
 	}
 }

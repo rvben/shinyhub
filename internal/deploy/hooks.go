@@ -77,6 +77,10 @@ type ScheduleSpec struct {
 	Overlap        string `toml:"overlap"`
 	Missed         string `toml:"missed"`
 	Disabled       bool   `toml:"disabled"`
+	// Timezone is an optional IANA timezone for the schedule. Empty means
+	// "inherit the server default". Validated against time.LoadLocation at
+	// manifest parse time.
+	Timezone string `toml:"timezone"`
 
 	Command []string `toml:"-"`
 }
@@ -220,7 +224,7 @@ func resolveAndValidateSchedule(s *ScheduleSpec) error {
 		missed = "skip"
 	}
 
-	if err := schedulespec.Validate(s.Name, s.Cron, s.Command, timeout, overlap, missed); err != nil {
+	if err := schedulespec.Validate(s.Name, s.Cron, s.Timezone, s.Command, timeout, overlap, missed); err != nil {
 		return err
 	}
 

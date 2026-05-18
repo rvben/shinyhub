@@ -128,7 +128,7 @@ func newManifestE2EServerCfg(t *testing.T, runtime config.RuntimeConfig) (*Serve
 	srv := New(cfg, store, mgr, prx)
 
 	// Wire scheduler (not started — ErrNotStarted is treated as a soft warning).
-	sc := scheduler.New(nil, store)
+	sc := scheduler.New(nil, store, time.UTC)
 	srv.SetJobs(nil, sc)
 
 	// Replace the deploy runner to inject a no-op health check so tests
