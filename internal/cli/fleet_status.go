@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/spf13/cobra"
 )
 
 // fleetStatusSchemaVersion is the stable --json envelope version for
@@ -120,4 +121,51 @@ func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
 			glyph, wSlug, a.Slug, wOwner, owner, shortDigest(a.ContentDigest), a.Status)
 	}
 	fmt.Fprintf(out, "\n%s\n", summary)
+}
+
+type fleetStatusFlags struct {
+	jsonOutput bool
+	quiet      bool
+}
+
+func newFleetStatusCmd() *cobra.Command {
+	f := &fleetStatusFlags{}
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Read-only fleet overview (no manifest): ownership and live digest",
+		Long: "Lists every app the server knows with its fleet ownership marker\n" +
+			"and live deployment digest. Requires no manifest; makes one GET.\n\n" +
+			"Exit codes:\n" +
+			"  0  overview printed\n" +
+			"  3  transport / auth error\n\n" +
+			"Example:\n" +
+			"  shinyhub fleet status --json",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runFleetStatus(cmd, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
+	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the one-line summary")
+	return cmd
+}
+
+func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
+	errOut := cmd.ErrOrStderr()
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
+		return &ExitCodeError{Code: 3, Err: err}
+	}
+	apps, err := fetchApps(cfg)
+	if err != nil {
+		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
+		return &ExitCodeError{Code: 3, Err: err}
+	}
+	st := buildFleetStatus(cfg.Host, apps)
+	out := cmd.OutOrStdout()
+	if f.jsonOutput {
+		return writeFleetStatusJSON(out, st)
+	}
+	renderFleetStatus(out, st, f.quiet)
+	return nil
 }

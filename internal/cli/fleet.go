@@ -3,8 +3,8 @@ package cli
 import "github.com/spf13/cobra"
 
 // newFleetCmd builds a fresh `fleet` command tree each call (no package-level
-// state), mirroring newAppsCmd. plan and apply are wired up; init and status
-// are registered as they are implemented.
+// state), mirroring newAppsCmd. plan, apply, and status are wired up; init is
+// registered when implemented.
 func newFleetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "fleet",
@@ -18,5 +18,6 @@ func newFleetCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newFleetPlanCmd())
 	cmd.AddCommand(newFleetApplyCmd())
+	cmd.AddCommand(newFleetStatusCmd())
 	return cmd
 }

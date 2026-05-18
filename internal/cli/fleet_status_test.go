@@ -129,3 +129,55 @@ func TestRenderFleetStatus_Quiet(t *testing.T) {
 		t.Fatalf("quiet output = %q", out)
 	}
 }
+
+func TestFleetStatusCmd_ListsManagedAndUnmanaged(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[
+		{"slug":"owned-app","access":"public","status":"running","content_digest":"sha256:abc123def456","managed_by":"fleet:eu"},
+		{"slug":"loose-app","access":"private","status":"stopped","managed_by":null}
+	]`)
+
+	out, err := execCLI(t, "fleet", "status")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "owned-app") || !strings.Contains(out, "fleet:eu") {
+		t.Fatalf("managed app missing:\n%s", out)
+	}
+	if !strings.Contains(out, "loose-app") || !strings.Contains(out, "unmanaged") {
+		t.Fatalf("unmanaged app missing:\n%s", out)
+	}
+	if !strings.Contains(out, "Fleet: 2 app(s), 1 fleet-managed, 1 unmanaged.") {
+		t.Fatalf("summary missing:\n%s", out)
+	}
+}
+
+func TestFleetStatusCmd_JSON(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"a","access":"public","status":"running","managed_by":"fleet:eu"}]`)
+
+	out, err := execCLI(t, "fleet", "status", "--json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
+		t.Fatalf("not JSON: %v\n%s", jerr, out)
+	}
+	if env["schema_version"].(float64) != float64(fleetStatusSchemaVersion) {
+		t.Fatalf("schema_version wrong: %v", env["schema_version"])
+	}
+}
+
+func TestFleetStatusCmd_TransportErrorExits3(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(500, `{"error":"boom"}`)
+
+	out, err := execCLI(t, "fleet", "status")
+	if err == nil {
+		t.Fatalf("expected error on server 500, got nil\n%s", out)
+	}
+	if code := exitCode(err); code != 3 {
+		t.Fatalf("exit code = %d, want 3 (transport)", code)
+	}
+}
