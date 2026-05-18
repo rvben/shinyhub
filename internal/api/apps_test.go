@@ -1722,3 +1722,19 @@ func TestDeployToken_AppOwnershipAndAdminBypass(t *testing.T) {
 		t.Errorf("admin PATCH /api/apps/deploy-owned = %d, want 2xx: %s", patchRec.Code, patchRec.Body.String())
 	}
 }
+
+func TestListAppsJSONHasFleetFields(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, userID := seedUserAndJWT(t, store, "fleet-check", "admin")
+	store.CreateApp(db.CreateAppParams{Slug: "fleet-app", Name: "Fleet App", OwnerID: userID, Access: "private"})
+
+	req := authedRequest(t, "GET", "/api/apps", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/apps = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"managed_by"`)) {
+		t.Fatal(`GET /api/apps must expose "managed_by"`)
+	}
+}

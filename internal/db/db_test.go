@@ -1153,3 +1153,69 @@ func TestUpsertSystemUser_SameRoleIsIdempotent(t *testing.T) {
 		t.Errorf("idempotent upsert: got %+v, want same ID and role developer", u2)
 	}
 }
+
+func TestListAppsExposesDigestAndManagedBy(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "owner-digest", "developer")
+	app := mustCreateApp(t, store, "exposed", owner.ID)
+
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/b")
+	if err != nil {
+		t.Fatalf("begin deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:live"); err != nil {
+		t.Fatalf("set deployment digest: %v", err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatalf("promote deployment: %v", err)
+	}
+	if _, err := store.DB().Exec(
+		`UPDATE apps SET managed_by = ? WHERE id = ?`, "fleet:prod", app.ID); err != nil {
+		t.Fatalf("set managed_by: %v", err)
+	}
+
+	apps, err := store.ListApps(0, 0)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	var found *db.App
+	for i := range apps {
+		if apps[i].Slug == "exposed" {
+			found = apps[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("app not listed")
+	}
+	if found.ContentDigest != "sha256:live" {
+		t.Fatalf("ContentDigest = %q, want sha256:live", found.ContentDigest)
+	}
+	if found.ManagedBy == nil || *found.ManagedBy != "fleet:prod" {
+		t.Fatalf("ManagedBy = %v, want fleet:prod", found.ManagedBy)
+	}
+}
+
+func TestListAppsDigestNilUntilPromoted(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "owner-pending", "developer")
+	app := mustCreateApp(t, store, "pending-only", owner.ID)
+
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/b")
+	if err != nil {
+		t.Fatalf("begin deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:notlive"); err != nil {
+		t.Fatalf("set deployment digest: %v", err)
+	}
+	// pending, not promoted
+
+	apps, err := store.ListApps(0, 0)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	for _, a := range apps {
+		if a.Slug == "pending-only" && a.ContentDigest != "" {
+			t.Fatalf("pending deployment digest must not be exposed, got %q", a.ContentDigest)
+		}
+	}
+}
