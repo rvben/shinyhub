@@ -1,0 +1,12 @@
+shinyhub fleet plan  ·  fleet_id=eu  ·  server=http://SERVER
+
+Apps (3)
+  +  create  sales-explorer  new
+  ~  update  ops-metrics     source LIVE -> 0f655f10
+  -  delete  retired         fleet-managed, absent from manifest (prune candidate)
+
+Plan: 1 to create, 1 to update, 0 to adopt, 1 to delete, 0 unchanged.
+
+Next:
+  • delete 1 app(s)           shinyhub fleet apply --prune        (irreversible: removes data dir)
+  • apply everything else    shinyhub fleet apply

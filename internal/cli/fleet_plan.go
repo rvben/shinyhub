@@ -48,7 +48,6 @@ func newFleetPlanCmd() *cobra.Command {
 }
 
 func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
-	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
 	data, err := os.ReadFile(f.file)
@@ -143,12 +142,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 	}
 	diff := fleet.Diff(m, localDigests, observed)
 
-	// Temporary Task-8 output (replaced by the real renderer in Task 9).
-	_ = caps
-	for _, d := range diff {
-		fmt.Fprintf(out, "%s %s\n", d.Action, d.Slug)
-	}
-	return nil
+	return renderFleetPlan(cmd, f, m, cfg.Host, caps, diff)
 }
 
 // fetchApps issues the single read-only GET /api/apps the plan needs.
@@ -216,7 +210,3 @@ func intPtrIfPositive(v int) *int {
 	return &v
 }
 
-// renderFleetPlanStubMarker is implemented in fleet_render.go (Task 9). This
-// temporary stub keeps Task 8 independently compilable/committable; Task 9
-// replaces it with the real renderer in a different file and deletes this stub.
-func renderFleetPlanStubMarker() {}

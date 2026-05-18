@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+var updateGolden = flag.Bool("update-golden", false, "rewrite testdata golden files")
 
 func TestFleetPlan_ComputesDiffFromServer(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
@@ -110,3 +115,103 @@ visibility = "nope"
 		}
 	}
 }
+
+func TestFleetPlan_HumanGolden(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[
+	  {"slug":"ops-metrics","access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"},
+	  {"slug":"retired","access":"private","managed_by":"fleet:eu","content_digest":"sha256:zz"}
+	]`)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, `
+fleet_id = "eu"
+
+[[app]]
+slug = "sales-explorer"
+source = "./a"
+visibility = "private"
+
+[[app]]
+slug = "ops-metrics"
+source = "./a"
+visibility = "private"
+`)
+	out, err := execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--no-color")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	norm := normalizeDigests(out)
+	golden := filepath.Join("testdata", "fleet_plan_basic.golden")
+	if *updateGolden {
+		if werr := os.WriteFile(golden, []byte(norm), 0o644); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	want, rerr := os.ReadFile(golden)
+	if rerr != nil {
+		t.Fatalf("read golden (run with -update-golden first): %v", rerr)
+	}
+	if norm != string(want) {
+		t.Fatalf("golden mismatch:\n--- got ---\n%s\n--- want ---\n%s", norm, want)
+	}
+}
+
+func TestFleetPlan_JSONEnvelope(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"ops","access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"}]`)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, "fleet_id = \"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\nvisibility=\"private\"\n")
+	out, err := execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &env); jerr != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", jerr, out)
+	}
+	if env["schema_version"].(float64) != 1 {
+		t.Fatalf("schema_version = %v, want 1", env["schema_version"])
+	}
+	if env["fleet_id"] != "eu" {
+		t.Fatalf("fleet_id = %v", env["fleet_id"])
+	}
+	if _, ok := env["apps"]; !ok {
+		t.Fatal("missing apps[]")
+	}
+}
+
+func TestFleetPlan_DetailedExitcode(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"ops","access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"}]`)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+
+	// Pending changes (a new app) => exit 2 under --detailed-exitcode.
+	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"newp\"\nsource=\"./a\"\nvisibility=\"private\"\n")
+	_, err := execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--detailed-exitcode")
+	if exitCode(err) != 2 {
+		t.Fatalf("pending changes: exit = %d, want 2", exitCode(err))
+	}
+
+	// No-op: only the already-live owned app, unchanged => exit 0.
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	dg, _ := digestLocalDir(filepath.Join(dir, "a"))
+	setResp(200, `[{"slug":"ops","access":"private","managed_by":"fleet:eu","content_digest":"`+dg+`"}]`)
+	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\nvisibility=\"private\"\n")
+	_, err = execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--detailed-exitcode")
+	if exitCode(err) != 0 {
+		t.Fatalf("no changes: exit = %d, want 0", exitCode(err))
+	}
+}
+
+// normalizeDigests replaces sha256:<hex> with sha256:XXXX and the ephemeral
+// httptest server URL with a stable placeholder so golden output is stable.
+func normalizeDigests(s string) string {
+	s = regexpMustCompile(`sha256:[0-9a-f]+`).ReplaceAllString(s, "sha256:XXXX")
+	s = regexpMustCompile(`server=http://[^\s]+`).ReplaceAllString(s, "server=http://SERVER")
+	return s
+}
+
+func regexpMustCompile(p string) *regexp.Regexp { return regexp.MustCompile(p) }
