@@ -95,6 +95,64 @@ func TestConvergeApp_UpdateConfigPatchesWithServerDigestPrecondition(t *testing.
 	}
 }
 
+func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
+	// The single most important correctness property: update(source+config)
+	// must deploy first, then patch fleet config with a precondition built
+	// from the FRESHLY promoted digest - never the stale pre-deploy one. If
+	// the ordering were swapped, the patch would carry the stale digest and
+	// 409 against the deployment this very run just performed.
+	const staleDigest = "sha256:STALE"
+	const promotedDigest = "sha256:PROMOTED"
+
+	var deployedAt, patchedAt int
+	var seq int
+	var patchDigest string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			seq++
+			deployedAt = seq
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/srccfg":
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "srccfg", "content_digest": promotedDigest}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/srccfg":
+			seq++
+			patchedAt = seq
+			patchDigest = r.Header.Get("X-Shinyhub-If-Content-Digest")
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{
+		Slug: "srccfg", Action: fleet.ActionUpdateSourceConfig, Owned: true,
+		ServerDigest: staleDigest,
+		ConfigDrift:  []fleet.ConfigDriftItem{{Key: "replicas", Server: "1", Desired: "2"}},
+	}
+	entry := fleet.AppEntry{Slug: "srccfg", Source: "./x", Visibility: "private",
+		Config: fleet.Config{Replicas: stateInt(2)}}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srccfg"}, dir,
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusUpdated {
+		t.Fatalf("status = %s (%v), want updated", r.status, r.err)
+	}
+	if deployedAt == 0 || patchedAt == 0 || deployedAt > patchedAt {
+		t.Fatalf("ordering wrong: deployedAt=%d patchedAt=%d (deploy must precede patch)", deployedAt, patchedAt)
+	}
+	if patchDigest != promotedDigest {
+		t.Fatalf("config patch precondition = %q, want post-deploy promoted digest %q (not stale %q)",
+			patchDigest, promotedDigest, staleDigest)
+	}
+}
+
 func TestConvergeApp_ConflictRecordedNotRetried(t *testing.T) {
 	var patchCalls int
 	var mu sync.Mutex
