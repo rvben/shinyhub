@@ -195,7 +195,8 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -230,6 +231,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setReplicas              bool
 		newMaxSessions           int
 		setMaxSessions           bool
+		newManagedBy             *string
+		setManagedBy             bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -327,6 +330,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		newMaxSessions, setMaxSessions = n, true
 	}
 
+	if rawVal, present := raw["managed_by"]; present {
+		var v *string
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "managed_by must be a string or null")
+			return
+		}
+		newManagedBy, setManagedBy = v, true
+	}
+
 	// Fail fast: CPU/memory limits are only enforced by the Docker runtime.
 	// Under native mode they would be silently ignored, giving a false sense
 	// of containment. Reject the write rather than store an unenforceable
@@ -342,6 +354,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				"cpu_quota_percent is unenforceable under runtime.mode=native; switch to docker runtime or unset the limit")
 			return
 		}
+	}
+
+	if checkAppPreconditions(w, r, app) {
+		return
 	}
 
 	// Apply all validated writes atomically. A single transaction prevents a
@@ -372,6 +388,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if setManagedBy {
+		if err := s.store.SetAppManagedBy(slug, newManagedBy); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
 	// Post-commit side effects. These only take effect once the settings are
 	// durably persisted.
 	if setMaxSessions && s.proxy != nil {
@@ -382,9 +409,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		go s.redeployApp(slug)
 	}
 
-	app, err := s.store.GetAppBySlug(slug)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+	var fetchErr error
+	app, fetchErr = s.store.GetAppBySlug(slug)
+	if fetchErr != nil {
+		if errors.Is(fetchErr, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
@@ -1063,7 +1091,8 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -1071,6 +1100,10 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	// race the process manager into an inconsistent state mid-teardown.
 	release := s.acquireDeployLock(slug)
 	defer release()
+
+	if checkAppPreconditions(w, r, app) {
+		return
+	}
 
 	// Stop the process if it is running; ignore the error (may not be running).
 	if s.manager != nil {
@@ -1187,7 +1220,8 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -1199,6 +1233,9 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	if !db.IsValidAppVisibility(req.Access) {
 		writeError(w, http.StatusBadRequest, "access must be one of "+strings.Join(db.ValidAppVisibilities, ", "))
+		return
+	}
+	if checkAppPreconditions(w, r, app) {
 		return
 	}
 	if err := s.store.SetAppAccess(slug, req.Access); err != nil {
