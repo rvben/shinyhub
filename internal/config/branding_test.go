@@ -87,3 +87,32 @@ branding:
 		t.Error("IsActive() must be true after loading branding block")
 	}
 }
+
+func TestBrandingEnvOverrides(t *testing.T) {
+	t.Setenv("SHINYHUB_BRANDING_SITE_TITLE", "Env Title")
+	t.Setenv("SHINYHUB_BRANDING_PRIMARY_COLOR", "#123abc")
+	t.Setenv("SHINYHUB_BRANDING_LOGO", "https://cdn.example.com/l.svg")
+	t.Setenv("SHINYHUB_BRANDING_ASSETS_DIR", "/srv/brand/assets")
+	t.Setenv("SHINYHUB_BRANDING_FAVICON", "https://cdn.example.com/fav.ico")
+	t.Setenv("SHINYHUB_BRANDING_LANDING_PAGE", "/srv/brand/landing.html")
+	cfg := &Config{}
+	applyEnv(cfg)
+	if cfg.Branding.SiteTitle != "Env Title" {
+		t.Errorf("SiteTitle = %q, want %q", cfg.Branding.SiteTitle, "Env Title")
+	}
+	if cfg.Branding.Theme.PrimaryColor != "#123abc" {
+		t.Errorf("PrimaryColor = %q, want %q", cfg.Branding.Theme.PrimaryColor, "#123abc")
+	}
+	if cfg.Branding.Logo != "https://cdn.example.com/l.svg" {
+		t.Errorf("Logo = %q, want %q", cfg.Branding.Logo, "https://cdn.example.com/l.svg")
+	}
+	if cfg.Branding.AssetsDir != "/srv/brand/assets" {
+		t.Errorf("AssetsDir = %q, want %q", cfg.Branding.AssetsDir, "/srv/brand/assets")
+	}
+	if cfg.Branding.Favicon != "https://cdn.example.com/fav.ico" {
+		t.Errorf("Favicon = %q, want %q", cfg.Branding.Favicon, "https://cdn.example.com/fav.ico")
+	}
+	if cfg.Branding.LandingPage != "/srv/brand/landing.html" {
+		t.Errorf("LandingPage = %q, want %q", cfg.Branding.LandingPage, "/srv/brand/landing.html")
+	}
+}

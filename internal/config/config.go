@@ -807,4 +807,22 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SHINYHUB_SCHEDULER_TIMEZONE"); v != "" {
 		cfg.Scheduler.DefaultTimezone = v
 	}
+	if v := os.Getenv("SHINYHUB_BRANDING_SITE_TITLE"); v != "" {
+		cfg.Branding.SiteTitle = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_ASSETS_DIR"); v != "" {
+		cfg.Branding.AssetsDir = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_LOGO"); v != "" {
+		cfg.Branding.Logo = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_FAVICON"); v != "" {
+		cfg.Branding.Favicon = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_PRIMARY_COLOR"); v != "" {
+		cfg.Branding.Theme.PrimaryColor = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_LANDING_PAGE"); v != "" {
+		cfg.Branding.LandingPage = v
+	}
 }
