@@ -556,12 +556,15 @@ func TestAppsPayloadExposesFleetFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	b2, _ := json.Marshal(db.App{ContentDigest: "sha256:x"})
-	if !bytes.Contains(b2, []byte(`"content_digest"`)) {
-		t.Fatal(`db.App must serialize "content_digest" when set`)
-	}
 	if !bytes.Contains(b, []byte(`"managed_by"`)) {
 		t.Fatal(`db.App must always serialize "managed_by"`)
+	}
+	b2, err := json.Marshal(db.App{ContentDigest: "sha256:x"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b2, []byte(`"content_digest"`)) {
+		t.Fatal(`db.App must serialize "content_digest" when set`)
 	}
 }
 
