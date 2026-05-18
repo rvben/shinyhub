@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,5 +81,111 @@ func TestEmitFleetManifest_NoSourceRootIsHonestlyIncomplete(t *testing.T) {
 func TestTomlString_EscapesQuotesAndBackslashes(t *testing.T) {
 	if got := tomlString(`a"b\c`); got != `"a\"b\\c"` {
 		t.Fatalf("tomlString = %s", got)
+	}
+}
+
+func TestFleetInitCmd_WritesManifestWithSourceRoot(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"web","access":"public","replicas":2},{"slug":"api","access":"private"}]`)
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "shinyhub-fleet.toml")
+
+	out, err := execCLI(t, "fleet", "init", "--fleet-id", "prod-eu", "--source-root", "./apps", "-f", manifest)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	data, rerr := os.ReadFile(manifest)
+	if rerr != nil {
+		t.Fatalf("manifest not written: %v", rerr)
+	}
+	m, probs := fleet.ParseManifest(data, manifest)
+	if len(probs) != 0 {
+		t.Fatalf("generated manifest must parse clean: %v\n%s", probs, data)
+	}
+	if m.FleetID != "prod-eu" || len(m.Apps) != 2 {
+		t.Fatalf("parsed manifest wrong: %+v", m)
+	}
+	if !strings.Contains(out, "fleet_id=prod-eu") || !strings.Contains(out, "2 app(s)") {
+		t.Fatalf("summary missing:\n%s", out)
+	}
+}
+
+func TestFleetInitCmd_NonTTYWithoutFleetIDFailsExit1(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[]`)
+	dir := t.TempDir()
+
+	out, err := execCLI(t, "fleet", "init", "-f", filepath.Join(dir, "shinyhub-fleet.toml"))
+	if err == nil {
+		t.Fatalf("expected error without --fleet-id in non-TTY, got nil\n%s", out)
+	}
+	if code := exitCode(err); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(err.Error(), "--fleet-id is required") {
+		t.Fatalf("error should name --fleet-id: %v", err)
+	}
+}
+
+func TestFleetInitCmd_PromptsForFleetIDWhenTTY(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"only","access":"private"}]`)
+	prev := isStdinTTY
+	isStdinTTY = func() bool { return true }
+	t.Cleanup(func() { isStdinTTY = prev })
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "shinyhub-fleet.toml")
+
+	out, err := execCLIStdin(t, strings.NewReader("staging-eu\n"),
+		"fleet", "init", "--source-root", "./apps", "-f", manifest)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	data, _ := os.ReadFile(manifest)
+	if !strings.Contains(string(data), `fleet_id = "staging-eu"`) {
+		t.Fatalf("prompted fleet_id not used:\n%s", data)
+	}
+}
+
+func TestFleetInitCmd_RejectsInvalidFleetID(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[]`)
+	dir := t.TempDir()
+
+	out, err := execCLI(t, "fleet", "init", "--fleet-id", "Prod_EU", "-f", filepath.Join(dir, "shinyhub-fleet.toml"))
+	if err == nil {
+		t.Fatalf("expected error for invalid fleet_id, got nil\n%s", out)
+	}
+	if code := exitCode(err); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+}
+
+func TestFleetInitCmd_RefusesOverwriteWithoutForce(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[]`)
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "shinyhub-fleet.toml")
+	if werr := os.WriteFile(manifest, []byte("existing"), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+
+	_, err := execCLI(t, "fleet", "init", "--fleet-id", "eu", "-f", manifest)
+	if err == nil {
+		t.Fatal("expected error overwriting existing file without --force")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if data, _ := os.ReadFile(manifest); string(data) != "existing" {
+		t.Fatalf("file must be untouched without --force, got %q", data)
+	}
+
+	out2, err2 := execCLI(t, "fleet", "init", "--fleet-id", "eu", "-f", manifest, "--force")
+	if err2 != nil {
+		t.Fatalf("--force should overwrite: %v\n%s", err2, out2)
+	}
+	if data, _ := os.ReadFile(manifest); string(data) == "existing" {
+		t.Fatal("--force did not overwrite the file")
 	}
 }

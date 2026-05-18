@@ -2,10 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // emitFleetManifest renders a shinyhub-fleet.toml from the deployed apps.
@@ -76,4 +79,92 @@ func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
 func tomlString(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(s) + `"`
+}
+
+type fleetInitFlags struct {
+	file       string
+	fleetID    string
+	sourceRoot string
+	force      bool
+}
+
+func newFleetInitCmd() *cobra.Command {
+	f := &fleetInitFlags{}
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Scaffold shinyhub-fleet.toml from the currently-deployed apps",
+		Long: "Queries the server and writes a manifest containing fleet_id and\n" +
+			"every existing app as an [[app]] block with its current visibility\n" +
+			"and config. With --source-root <dir> each app's source is set to\n" +
+			"<dir>/<slug> and the file is immediately plan-able; without it the\n" +
+			"source line is left commented so you set each path explicitly.\n\n" +
+			"Exit codes:\n" +
+			"  0  manifest written\n" +
+			"  1  usage error (missing/invalid fleet_id, file exists)\n" +
+			"  3  transport / auth error\n\n" +
+			"Example:\n" +
+			"  shinyhub fleet init --fleet-id prod-eu --source-root ./apps",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runFleetInit(cmd, f)
+		},
+	}
+	cmd.Flags().StringVarP(&f.file, "file", "f", "shinyhub-fleet.toml", "Path to write the manifest")
+	cmd.Flags().StringVar(&f.fleetID, "fleet-id", "", "Fleet ownership id ([a-z0-9-], 1-64); prompted if a TTY and omitted")
+	cmd.Flags().StringVar(&f.sourceRoot, "source-root", "", "Emit source=<dir>/<slug> for every app (immediately plan-able)")
+	cmd.Flags().BoolVar(&f.force, "force", false, "Overwrite the output file if it already exists")
+	return cmd
+}
+
+func runFleetInit(cmd *cobra.Command, f *fleetInitFlags) error {
+	errOut := cmd.ErrOrStderr()
+
+	id := strings.TrimSpace(f.fleetID)
+	if id == "" {
+		if !isStdinTTY() {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf(
+				"--fleet-id is required in a non-interactive shell (e.g. --fleet-id prod-eu)")}
+		}
+		fmt.Fprint(errOut, "fleet_id (ownership scope, [a-z0-9-], 1-64): ")
+		var entered string
+		if _, serr := fmt.Fscan(cmd.InOrStdin(), &entered); serr != nil {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("read fleet_id: %w", serr)}
+		}
+		id = strings.TrimSpace(entered)
+	}
+	if !fleet.ValidFleetID(id) {
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf(
+			"fleet_id %q invalid: must match [a-z0-9-], 1-64 chars", id)}
+	}
+
+	if _, serr := os.Stat(f.file); serr == nil && !f.force {
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf(
+			"%s already exists; pass --force to overwrite", f.file)}
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
+		return &ExitCodeError{Code: 3, Err: err}
+	}
+	apps, err := fetchApps(cfg)
+	if err != nil {
+		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
+		return &ExitCodeError{Code: 3, Err: err}
+	}
+
+	doc := emitFleetManifest(id, f.sourceRoot, apps)
+	if werr := os.WriteFile(f.file, []byte(doc), 0o644); werr != nil {
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf("write %s: %w", f.file, werr)}
+	}
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Wrote %s (fleet_id=%s, %d app(s)).\n", f.file, id, len(apps))
+	if f.sourceRoot == "" {
+		fmt.Fprintf(out, "Each app's source is commented out. Set the source path for every\n"+
+			"app and remove the leading '#', then run 'shinyhub fleet plan -f %s'.\n", f.file)
+	} else {
+		fmt.Fprintf(out, "Sources point at %s/<slug>. Review, then run:\n  shinyhub fleet plan -f %s\n",
+			strings.TrimRight(f.sourceRoot, "/"), f.file)
+	}
+	return nil
 }
