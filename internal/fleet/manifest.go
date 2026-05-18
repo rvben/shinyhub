@@ -7,6 +7,7 @@ package fleet
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -143,10 +144,9 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 		probs = append(probs, validateConfig(file, who, a.Config)...)
 		if a.Source == "" {
 			probs = append(probs, Problem{File: file, Msg: who + ": source is required"})
+		} else if _, sp := ParseSource(a.Source, manifestDir(file)); sp != nil {
+			probs = append(probs, Problem{File: file, Msg: who + ": " + sp.Msg})
 		}
-		// Note: source form + local existence is validated by the caller via
-		// ParseSource (a later task), which appends to the same aggregated slice
-		// so a bad source and a typo'd key are reported together.
 	}
 
 	if len(probs) > 0 {
@@ -207,4 +207,10 @@ func levenshtein(a, b string) int {
 		prev, cur = cur, prev
 	}
 	return prev[len(rb)]
+}
+
+// manifestDir is the directory containing the manifest file, used to resolve
+// relative local sources.
+func manifestDir(file string) string {
+	return filepath.Dir(file)
 }

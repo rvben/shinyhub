@@ -11,12 +11,12 @@ fleet_id = "prod-eu"
 
 [[app]]
 slug = "alpha"
-source = "./apps/alpha"
+source = "git+https://example.com/alpha.git"
 visibility = "public"
 
 [[app]]
 slug = "beta"
-source = "./apps/beta"
+source = "git+https://example.com/beta.git"
 
   [app.config]
   replicas = 2
@@ -122,7 +122,7 @@ fleet_id = "eu"
 
 [[app]]
 slug = "a"
-source = "./a"
+source = "git+https://example.com/a.git"
 
   [app.config]
   hibernate_timeout_minutes = -1
