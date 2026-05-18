@@ -615,6 +615,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			slog.Error("deploy: failed to record content digest (non-fatal; next deploy self-heals)",
 				"slug", slug, "version", version, "err", serr)
 		}
+	} else {
+		slog.Warn("deploy: could not re-open bundle for digest (non-fatal)",
+			"slug", slug, "version", version, "err", derr)
 	}
 
 	// Stop existing instance before re-deploying; ignore the error since the

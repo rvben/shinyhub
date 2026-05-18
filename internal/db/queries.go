@@ -737,10 +737,13 @@ func (s *Store) FailDeployment(id int64) error {
 // after BeginDeployment and before PromoteDeployment so the digest travels
 // with the pending row and only becomes authoritative on promotion.
 func (s *Store) SetDeploymentDigest(id int64, digest string) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`UPDATE deployments SET content_digest = ? WHERE id = ?`, digest, id)
 	if err != nil {
 		return fmt.Errorf("set deployment digest %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("set deployment digest %d: row not found", id)
 	}
 	return nil
 }
