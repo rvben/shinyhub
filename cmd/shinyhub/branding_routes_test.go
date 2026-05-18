@@ -231,6 +231,54 @@ func TestBrandingRoutes(t *testing.T) {
 			t.Fatalf("GET /.shinyhub/apps.json status = %d, want 200", rr.Code)
 		}
 	})
+
+	t.Run("spa_ui_routes_serve_shell", func(t *testing.T) {
+		mux, _ := buildBrandingMux(t, config.BrandingConfig{})
+
+		paths := []string{
+			"/apps/replica-smoke",
+			"/apps/replica-smoke/logs",
+			"/users",
+			"/audit-log",
+		}
+		for _, path := range paths {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
+
+			if rr.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d, want 200", path, rr.Code)
+				continue
+			}
+			if !strings.Contains(rr.Body.String(), "app.js") {
+				t.Errorf("GET %s body does not contain 'app.js': may not be serving the SPA shell", path)
+			}
+		}
+	})
+
+	t.Run("unknown_paths_404", func(t *testing.T) {
+		mux, _ := buildBrandingMux(t, config.BrandingConfig{})
+
+		// /apps (bare, no trailing slash) is excluded: Go's ServeMux issues a
+		// 301 redirect to /apps/ when the /apps/ subtree pattern is registered,
+		// so it returns 3xx, not 404. The paths below are those that truly reach
+		// the catch-all "/" handler (or the spa handler with IsUIPath false) and
+		// must return 404.
+		paths := []string{
+			"/nope",
+			"/apps/",
+			"/favicon.ico",
+		}
+		for _, path := range paths {
+			t.Run(path, func(t *testing.T) {
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
+
+				if rr.Code != http.StatusNotFound {
+					t.Errorf("GET %s status = %d, want 404", path, rr.Code)
+				}
+			})
+		}
+	})
 }
 
 // mustReadStaticIndex reads index.html directly from the embedded FS using the

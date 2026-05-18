@@ -67,6 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const a = document.createElement('a');
         a.href = link.url;
         a.textContent = link.label;
+        a.rel = 'noopener noreferrer';
         f.appendChild(a);
       }
     }

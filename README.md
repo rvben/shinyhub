@@ -283,7 +283,7 @@ platform HTML. Only trusted operators should author it - it is not sandboxed.
 | Endpoint | Auth | Description |
 |---|---|---|
 | `GET /.shinyhub/branding.json` | None (always public) | Returns the active branding object, or `{}` when branding is not configured. |
-| `GET /.shinyhub/apps.json` | Optional | Anonymous: public apps only. Admin/operator: all apps. Other authenticated users: apps visible to them (public, shared, owned, or member). Returns minimal `{slug, name, visibility}` objects. |
+| `GET /.shinyhub/apps.json` | Optional | Anonymous: public apps only. Admin/operator: all apps. Other authenticated users: apps visible to them (public, shared, owned, or member). Returns minimal `{slug, name, visibility}` objects. Identity is resolved from the browser session cookie only; callers presenting only an `Authorization` header are treated as anonymous. |
 
 Some reverse proxies block dot-prefixed paths. Ensure requests to `/.shinyhub/`
 pass through to ShinyHub unmodified.

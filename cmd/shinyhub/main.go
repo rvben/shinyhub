@@ -564,13 +564,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 //   - /                                   - landing page or SPA shell
 func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Server, store *db.Store, appUserLookup auth.UserLookup) {
 	brandingActive := cfg.Branding.IsActive()
+	resolved := cfg.Branding.ResolvedAssets()
 
 	// serveShell serves the stock SPA shell: byte-for-byte the existing
 	// ServeFileFS path when branding is inactive (preserving Last-Modified /
 	// ETag / Range / conditional-GET and SHINYHUB_DEV_STATIC live reload),
 	// or the branded render when active (re-reading index.html per request so
 	// dev live-reload still works).
-	pub := ui.PublicBranding(cfg.Branding, cfg.Branding.ResolvedAssets())
+	pub := ui.PublicBranding(cfg.Branding, resolved)
 	serveShell := func(w http.ResponseWriter, r *http.Request) {
 		if !brandingActive {
 			http.ServeFileFS(w, r, ui.Static(), "index.html")
@@ -605,8 +606,8 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	mux.Handle("/audit-log", spa)
 	mux.Handle("/login", spa) // always serves the SPA shell, even when landing_page is set
 
-	if brandingActive && len(cfg.Branding.ResolvedAssets()) > 0 {
-		mux.Handle("/branding/", ui.BrandingAssetHandler(cfg.Branding.ResolvedAssets()))
+	if brandingActive && len(resolved) > 0 {
+		mux.Handle("/branding/", ui.BrandingAssetHandler(resolved))
 	}
 
 	// /.shinyhub/* routes use optional-identity: resolve a session/bearer user

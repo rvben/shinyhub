@@ -197,8 +197,8 @@ func TestAppsJSONAuthedVisibility(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&viewerItems); err != nil {
 		t.Fatalf("viewer: decode response: %v", err)
 	}
-	if len(viewerItems) < 3 {
-		t.Fatalf("viewer: expected at least 3 apps, got %d: %v", len(viewerItems), viewerItems)
+	if len(viewerItems) != 3 {
+		t.Fatalf("viewer: expected exactly 3 apps, got %d: %v", len(viewerItems), viewerItems)
 	}
 
 	// Should see public, shared, member-app; NOT private-other.
@@ -241,8 +241,8 @@ func TestAppsJSONAuthedVisibility(t *testing.T) {
 	if err := json.NewDecoder(rr2.Body).Decode(&adminItems); err != nil {
 		t.Fatalf("admin: decode response: %v", err)
 	}
-	if len(adminItems) < 4 {
-		t.Fatalf("admin: expected at least 4 apps, got %d: %v", len(adminItems), adminItems)
+	if len(adminItems) != 4 {
+		t.Fatalf("admin: expected exactly 4 apps, got %d: %v", len(adminItems), adminItems)
 	}
 
 	adminSlugs := slugSet(adminItems)
