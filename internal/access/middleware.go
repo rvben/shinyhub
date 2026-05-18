@@ -96,9 +96,21 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 // against the live database on every request; this defeats stale-claim
 // attacks where a demoted admin's still-valid JWT would otherwise keep
 // granting bypass access until token expiry. With nil userLookup the
-// claim-derived role is used as-is — that path exists only for tests
+// claim-derived role is used as-is - that path exists only for tests
 // that pre-date the live-resolve plumbing.
 func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) *auth.ContextUser {
+	return ResolveOptionalUser(r, secret, revoked, userLookup)
+}
+
+// ResolveOptionalUser resolves the authenticated identity from the request's
+// session cookie, returning nil when the request is anonymous or the token is
+// invalid/revoked. It never writes an HTTP error response, making it suitable
+// for optional-auth routes where anonymous callers must still be served.
+//
+// The resolved user (if any) is NOT placed into the request context by this
+// function - callers are responsible for calling auth.WithUser if they want
+// to propagate the identity downstream.
+func ResolveOptionalUser(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) *auth.ContextUser {
 	user, _, err := auth.AuthenticateBrowserSession(r, secret, userLookup, revoked)
 	if err != nil {
 		return nil

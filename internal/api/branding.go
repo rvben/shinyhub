@@ -25,9 +25,9 @@ func toBriefs(apps []*db.App) []appBrief {
 	return out
 }
 
-// handleBrandingJSON is always public (no auth required). Returns an empty
+// HandleBrandingJSON is always public (no auth required). Returns an empty
 // object when branding is not configured.
-func (s *Server) handleBrandingJSON(w http.ResponseWriter, r *http.Request) {
+func (s *Server) HandleBrandingJSON(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.Branding.IsActive() {
 		writeJSON(w, http.StatusOK, struct{}{})
 		return
@@ -35,12 +35,12 @@ func (s *Server) handleBrandingJSON(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ui.PublicBranding(s.cfg.Branding, s.cfg.Branding.ResolvedAssets()))
 }
 
-// handleAppsJSON returns the minimal DTO for exactly the apps the caller may
+// HandleAppsJSON returns the minimal DTO for exactly the apps the caller may
 // see:
 //   - anonymous -> public apps only (via ListPublicApps, separate query)
 //   - admin/operator -> all apps (via ListApps)
 //   - other authenticated users -> public + shared + owned + member apps
-func (s *Server) handleAppsJSON(w http.ResponseWriter, r *http.Request) {
+func (s *Server) HandleAppsJSON(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	limit, offset := parsePagination(r)
 	var (

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -488,21 +489,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	})
 	mux.Handle("/static/", ui.Handler())
 
-	// SPA routes: /apps/<slug>..., /users, /audit-log. The SPA handler 404s
-	// anything outside its allowlist, so legitimate unknowns still return 404
-	// rather than rendering the SPA shell.
-	spa := ui.SPAHandler()
-	mux.Handle("/apps/", spa)
-	mux.Handle("/users", spa)
-	mux.Handle("/audit-log", spa)
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		http.ServeFileFS(w, r, ui.Static(), "index.html")
-	})
+	registerBrandingRoutes(mux, cfg, srv, store, appUserLookup)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpSrv := &http.Server{
@@ -563,6 +550,91 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	slog.Info("shutdown complete")
 	return nil
+}
+
+// registerBrandingRoutes wires all branding-aware frontend routes onto mux.
+// It is extracted from runServe so the integration test can call the identical
+// production registration logic without duplicating the wiring.
+//
+// Routes registered:
+//   - /apps/, /users, /audit-log, /login  - SPA shell (branded or stock)
+//   - /branding/                          - operator asset files (only when assets present)
+//   - /.shinyhub/branding.json            - public branding metadata
+//   - /.shinyhub/apps.json                - app list (optional auth)
+//   - /                                   - landing page or SPA shell
+func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Server, store *db.Store, appUserLookup auth.UserLookup) {
+	brandingActive := cfg.Branding.IsActive()
+
+	// serveShell serves the stock SPA shell: byte-for-byte the existing
+	// ServeFileFS path when branding is inactive (preserving Last-Modified /
+	// ETag / Range / conditional-GET and SHINYHUB_DEV_STATIC live reload),
+	// or the branded render when active (re-reading index.html per request so
+	// dev live-reload still works).
+	pub := ui.PublicBranding(cfg.Branding, cfg.Branding.ResolvedAssets())
+	serveShell := func(w http.ResponseWriter, r *http.Request) {
+		if !brandingActive {
+			http.ServeFileFS(w, r, ui.Static(), "index.html")
+			return
+		}
+		raw, err := fs.ReadFile(ui.Static(), "index.html")
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		out, err := ui.RenderIndex(raw, pub)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(out)
+	}
+
+	// SPA routes: /apps/<slug>..., /users, /audit-log, /login. The handler
+	// 404s anything outside the IsUIPath allowlist, so legitimate unknowns
+	// still return 404 rather than rendering the SPA shell.
+	spa := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ui.IsUIPath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		serveShell(w, r)
+	})
+	mux.Handle("/apps/", spa)
+	mux.Handle("/users", spa)
+	mux.Handle("/audit-log", spa)
+	mux.Handle("/login", spa) // always serves the SPA shell, even when landing_page is set
+
+	if brandingActive && len(cfg.Branding.ResolvedAssets()) > 0 {
+		mux.Handle("/branding/", ui.BrandingAssetHandler(cfg.Branding.ResolvedAssets()))
+	}
+
+	// /.shinyhub/* routes use optional-identity: resolve a session/bearer user
+	// if present, but do NOT 401 anonymous callers. This mirrors the /app/*
+	// userLookup wiring.
+	optionalUser := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
+				r = r.WithContext(auth.WithUser(r.Context(), u))
+			}
+			next(w, r)
+		}
+	}
+	mux.HandleFunc("/.shinyhub/branding.json", srv.HandleBrandingJSON)
+	mux.HandleFunc("/.shinyhub/apps.json", optionalUser(srv.HandleAppsJSON))
+
+	landingFile := cfg.Branding.LandingFile()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		if landingFile != "" {
+			http.ServeFile(w, r, landingFile)
+			return
+		}
+		serveShell(w, r)
+	})
 }
 
 // sweepOrphanTempfiles removes stale entries from each app's

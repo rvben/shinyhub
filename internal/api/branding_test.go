@@ -50,7 +50,7 @@ func TestBrandingJSONPublic(t *testing.T) {
 
 	r := reqWithOptionalUser("GET", "/.shinyhub/branding.json", nil)
 	rr := httptest.NewRecorder()
-	srv.handleBrandingJSON(rr, r)
+	srv.HandleBrandingJSON(rr, r)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -74,7 +74,7 @@ func TestBrandingJSONInactive(t *testing.T) {
 
 	r := reqWithOptionalUser("GET", "/.shinyhub/branding.json", nil)
 	rr := httptest.NewRecorder()
-	srv.handleBrandingJSON(rr, r)
+	srv.HandleBrandingJSON(rr, r)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -107,7 +107,7 @@ func TestAppsJSONAnonymousPublicOnly(t *testing.T) {
 
 	r := reqWithOptionalUser("GET", "/.shinyhub/apps.json", nil) // no auth
 	rr := httptest.NewRecorder()
-	srv.handleAppsJSON(rr, r)
+	srv.HandleAppsJSON(rr, r)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -187,7 +187,7 @@ func TestAppsJSONAuthedVisibility(t *testing.T) {
 	viewerCtxUser := &auth.ContextUser{ID: viewer.ID, Username: "viewer", Role: "viewer"}
 	r := reqWithOptionalUser("GET", "/.shinyhub/apps.json", viewerCtxUser)
 	rr := httptest.NewRecorder()
-	srv.handleAppsJSON(rr, r)
+	srv.HandleAppsJSON(rr, r)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("viewer: expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -231,7 +231,7 @@ func TestAppsJSONAuthedVisibility(t *testing.T) {
 	adminCtxUser := &auth.ContextUser{ID: adminUser.ID, Username: "admin", Role: "admin"}
 	r2 := reqWithOptionalUser("GET", "/.shinyhub/apps.json", adminCtxUser)
 	rr2 := httptest.NewRecorder()
-	srv.handleAppsJSON(rr2, r2)
+	srv.HandleAppsJSON(rr2, r2)
 
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("admin: expected 200, got %d: %s", rr2.Code, rr2.Body.String())
