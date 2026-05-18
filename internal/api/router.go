@@ -215,6 +215,7 @@ func (s *Server) buildRouter() http.Handler {
 	r.Get("/api/auth/providers", s.handleGetProviders)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
 	r.Get("/api/auth/oidc/callback", s.handleOIDCCallback)
+	r.Get("/api/server-info", s.handleServerInfo)
 
 	// All other endpoints require either an auth header or a valid session cookie.
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.userLookup, s.revocationChecker())
