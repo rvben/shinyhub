@@ -72,3 +72,60 @@ func TestWriteFleetStatusJSON_StableShape(t *testing.T) {
 		t.Fatalf("generated_at missing or empty: %v", got["generated_at"])
 	}
 }
+
+func TestRenderFleetStatus_HumanColumns(t *testing.T) {
+	st := buildFleetStatus("https://h.example", []db.App{
+		{Slug: "alpha", Access: "private", Status: "running", ManagedBy: nil},
+		{Slug: "beta", Access: "public", Status: "running", ContentDigest: "sha256:9f8e7d6c5b4a", ManagedBy: strptr("fleet:eu")},
+	})
+	var b strings.Builder
+	renderFleetStatus(&b, st, false)
+	out := b.String()
+
+	if !strings.Contains(out, "server=https://h.example") {
+		t.Fatalf("missing server header:\n%s", out)
+	}
+	if !strings.Contains(out, "Apps (2)") {
+		t.Fatalf("missing app count:\n%s", out)
+	}
+	if !strings.Contains(out, "alpha") || !strings.Contains(out, "unmanaged") {
+		t.Fatalf("unmanaged app not shown:\n%s", out)
+	}
+	if !strings.Contains(out, "beta") || !strings.Contains(out, "fleet:eu") {
+		t.Fatalf("managed app/owner not shown:\n%s", out)
+	}
+	if !strings.Contains(out, "9f8e7d6c") {
+		t.Fatalf("short digest not shown:\n%s", out)
+	}
+	// Exact column alignment + glyphs (the stated design contract).
+	if !strings.Contains(out, "  -  alpha  unmanaged  (none)  running") {
+		t.Fatalf("unmanaged row glyph/alignment wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "  *  beta   fleet:eu   9f8e7d6c  running") {
+		t.Fatalf("managed row glyph/alignment wrong:\n%s", out)
+	}
+	// shortDigest must strip the sha256: prefix.
+	if strings.Contains(out, "sha256:") {
+		t.Fatalf("digest prefix must be stripped:\n%s", out)
+	}
+	if !strings.Contains(out, "Fleet: 2 app(s), 1 fleet-managed, 1 unmanaged.") {
+		t.Fatalf("summary line wrong:\n%s", out)
+	}
+}
+
+func TestRenderFleetStatus_Quiet(t *testing.T) {
+	st := buildFleetStatus("https://h", []db.App{
+		{Slug: "a", ManagedBy: strptr("fleet:eu")},
+		{Slug: "b", ManagedBy: nil},
+	})
+	var b strings.Builder
+	renderFleetStatus(&b, st, true)
+	out := b.String()
+
+	if strings.Contains(out, "Apps (") {
+		t.Fatalf("quiet must omit the table:\n%s", out)
+	}
+	if strings.TrimSpace(out) != "Fleet: 2 app(s), 1 fleet-managed, 1 unmanaged." {
+		t.Fatalf("quiet output = %q", out)
+	}
+}

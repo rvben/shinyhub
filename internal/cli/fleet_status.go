@@ -88,3 +88,36 @@ func writeFleetStatusJSON(out io.Writer, st fleetStatusEnvelope) error {
 	_, err = out.Write(append(b, '\n'))
 	return err
 }
+
+// renderFleetStatus prints the overview. Glyphs are stable ASCII so the
+// output is color-free and CI/log friendly: '*' = fleet-managed, '-' =
+// unmanaged. quiet collapses to just the one-line summary.
+func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
+	summary := fmt.Sprintf("Fleet: %d app(s), %d fleet-managed, %d unmanaged.",
+		st.Summary.Total, st.Summary.FleetManaged, st.Summary.Unmanaged)
+	if quiet {
+		fmt.Fprintln(out, summary)
+		return
+	}
+	fmt.Fprintf(out, "shinyhub fleet status  ·  server=%s\n\n", st.Server)
+	fmt.Fprintf(out, "Apps (%d)\n", st.Summary.Total)
+
+	wSlug, wOwner := 0, len("unmanaged")
+	for _, a := range st.Apps {
+		if len(a.Slug) > wSlug {
+			wSlug = len(a.Slug)
+		}
+		if len(a.ManagedBy) > wOwner {
+			wOwner = len(a.ManagedBy)
+		}
+	}
+	for _, a := range st.Apps {
+		glyph, owner := "-", "unmanaged"
+		if a.FleetManaged {
+			glyph, owner = "*", a.ManagedBy
+		}
+		fmt.Fprintf(out, "  %s  %-*s  %-*s  %s  %s\n",
+			glyph, wSlug, a.Slug, wOwner, owner, shortDigest(a.ContentDigest), a.Status)
+	}
+	fmt.Fprintf(out, "\n%s\n", summary)
+}
