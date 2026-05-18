@@ -525,6 +525,9 @@ func Load(path string) (*Config, error) {
 	if len(cfg.Auth.Secret) < 32 {
 		return nil, fmt.Errorf("auth.secret must be at least 32 characters (got %d); generate one with: openssl rand -hex 32", len(cfg.Auth.Secret))
 	}
+	if err := validateBranding(&cfg.Branding); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
