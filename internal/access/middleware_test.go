@@ -100,7 +100,7 @@ func TestAccess_PrivateApp_BrowserNav_GetsStyledHTMLPage(t *testing.T) {
 	if strings.Contains(body, privateAppName) {
 		t.Errorf("body LEAKS private app name %q — anyone guessing the slug can enumerate titles. Body: %s", privateAppName, body)
 	}
-	if !strings.Contains(body, "/?next=%2Fapp%2Fsecret%2F") {
+	if !strings.Contains(body, "/login?next=%2Fapp%2Fsecret%2F") {
 		t.Errorf("body should link to login with next= param so the user can return after auth: %s", body)
 	}
 }
@@ -160,7 +160,7 @@ func TestAccess_Forbidden_BrowserNav_HandsOffViaFormPOST(t *testing.T) {
 	}
 }
 
-// 401 page (no session) keeps the simple anchor → /?next=<original> pattern
+// 401 page (no session) keeps the simple anchor to /login?next=<original>
 // because there's no session to revoke. It must NOT carry the handoff form
 // (which is a 403-only signal) and must NOT plant the now-removed
 // sessionStorage marker.
@@ -183,8 +183,8 @@ func TestAccess_Unauthorized_BrowserNav_LinksToLoginWithNext(t *testing.T) {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `href="/?next=%2Fapp%2Fsecret%2F"`) {
-		t.Errorf("401 page must link to /?next=<original> so the user lands back on the app after login. Body: %s", body)
+	if !strings.Contains(body, `href="/login?next=%2Fapp%2Fsecret%2F"`) {
+		t.Errorf("401 page must link to /login?next=<original> so the user lands back on the app after login. Body: %s", body)
 	}
 	if strings.Contains(body, "/api/auth/handoff") {
 		t.Errorf("401 page must not carry the handoff form — there's no session to revoke. Body: %s", body)

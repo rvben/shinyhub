@@ -524,6 +524,22 @@ func TestScheduleTimezoneFields(t *testing.T) {
 		"schedule form modal in index.html must have a sched-timezone input for the optional per-schedule timezone")
 }
 
+// TestFrontendConsumesBrandingObject guards the branding contract: the server
+// injects window.__SHINYHUB_BRANDING__ (see internal/ui/branding.go RenderIndex)
+// and exposes the same shape at /.shinyhub/branding.json. The SPA must read
+// site_title/logo/footer_links from it; router.js must fall back to it for the
+// document title instead of the hardcoded 'ShinyHub'.
+func TestFrontendConsumesBrandingObject(t *testing.T) {
+	assertContains(t, "app.js", "__SHINYHUB_BRANDING__",
+		"app.js must read window.__SHINYHUB_BRANDING__ to apply logo/footer; see internal/ui/branding.go RenderIndex")
+	assertContains(t, "router.js", "__SHINYHUB_BRANDING__",
+		"router.js must fall back to branding site_title for document.title instead of hardcoded 'ShinyHub'")
+	assertContains(t, "router.js", "|| 'ShinyHub'",
+		"router.js brandTitle fallback must use || 'ShinyHub' so zero-branding produces the default brand name")
+	assertContains(t, "router.js", "' · ' + brandTitle",
+		"router.js must compose document.title as current.title + ' · ' + brandTitle so page titles include the brand name")
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)

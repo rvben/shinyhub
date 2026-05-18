@@ -41,7 +41,7 @@ export async function mountAppsGrid(ctx) {
 
   function viewObject() {
     return {
-      title: 'ShinyHub',
+      title: '',
       unmount() {
         appsView.hidden = true;
         ctx.metrics.setTargets([]);

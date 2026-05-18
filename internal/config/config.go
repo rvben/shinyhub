@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"strconv"
@@ -99,6 +100,7 @@ type Config struct {
 	Scheduler        SchedulerConfig
 	Defaults         DefaultsConfig
 	Tracing          TracingConfig
+	Branding         BrandingConfig
 	OAuth            OAuthConfig  `yaml:"-"`
 	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
 }
@@ -141,6 +143,57 @@ type TracingConfig struct {
 	// to the operator's tracing backend. The substring "{trace_id}" is
 	// replaced. Example: "https://grafana.example.com/explore?traceId={trace_id}".
 	TraceLinkTemplate string
+}
+
+// BrandingConfig customises the ShinyHub front door. Every field is optional;
+// the zero value behaves as if no branding is configured.
+type BrandingConfig struct {
+	SiteTitle   string       `yaml:"site_title"`
+	AssetsDir   string       `yaml:"assets_dir"`
+	Logo        string       `yaml:"logo"`
+	Favicon     string       `yaml:"favicon"`
+	LandingPage string       `yaml:"landing_page"`
+	Theme       ThemeConfig  `yaml:"theme"`
+	FooterLinks []FooterLink `yaml:"footer_links"`
+
+	// resolvedAssets maps the public basename served at /branding/<name> to
+	// the absolute on-disk path. Populated by Load() after validation.
+	resolvedAssets map[string]string `yaml:"-"`
+	// landingFile is the absolute path to LandingPage after resolution, or
+	// "" when no landing page is configured. Populated by Load().
+	landingFile string `yaml:"-"`
+}
+
+// ThemeConfig holds theme tokens applied to the stock catalog/login.
+type ThemeConfig struct {
+	PrimaryColor string `yaml:"primary_color"`
+}
+
+// FooterLink is one operator-supplied footer link.
+type FooterLink struct {
+	Label string `yaml:"label" json:"label"`
+	URL   string `yaml:"url" json:"url"`
+}
+
+// IsActive reports whether any branding field is set. When false the server
+// keeps the existing zero-branding serve path untouched.
+func (b BrandingConfig) IsActive() bool {
+	return b.SiteTitle != "" || b.AssetsDir != "" || b.Logo != "" ||
+		b.Favicon != "" || b.LandingPage != "" || b.Theme.PrimaryColor != "" ||
+		len(b.FooterLinks) != 0
+}
+
+// LandingFile returns the resolved absolute path of the operator landing
+// page, or "" when none is configured.
+func (b BrandingConfig) LandingFile() string { return b.landingFile }
+
+// ResolvedAssets returns the basename->absolute-path allow-list used by the
+// /branding/ asset handler. The returned map is a copy; mutations do not affect
+// the config.
+func (b BrandingConfig) ResolvedAssets() map[string]string {
+	out := make(map[string]string, len(b.resolvedAssets))
+	maps.Copy(out, b.resolvedAssets)
+	return out
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -259,6 +312,7 @@ type rawConfig struct {
 	Scheduler rawSchedulerConfig `yaml:"scheduler"`
 	Defaults  rawDefaultsConfig  `yaml:"defaults"`
 	Tracing   rawTracingConfig   `yaml:"tracing"`
+	Branding  BrandingConfig     `yaml:"branding"`
 }
 
 type rawTracingConfig struct {
@@ -346,6 +400,7 @@ func Load(path string) (*Config, error) {
 			RingBufferSize:    raw.Tracing.RingBufferSize,
 			TraceLinkTemplate: raw.Tracing.TraceLinkTemplate,
 		},
+		Branding: raw.Branding,
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
@@ -469,6 +524,9 @@ func Load(path string) (*Config, error) {
 	}
 	if len(cfg.Auth.Secret) < 32 {
 		return nil, fmt.Errorf("auth.secret must be at least 32 characters (got %d); generate one with: openssl rand -hex 32", len(cfg.Auth.Secret))
+	}
+	if err := validateBranding(&cfg.Branding); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -751,5 +809,23 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("SHINYHUB_SCHEDULER_TIMEZONE"); v != "" {
 		cfg.Scheduler.DefaultTimezone = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_SITE_TITLE"); v != "" {
+		cfg.Branding.SiteTitle = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_ASSETS_DIR"); v != "" {
+		cfg.Branding.AssetsDir = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_LOGO"); v != "" {
+		cfg.Branding.Logo = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_FAVICON"); v != "" {
+		cfg.Branding.Favicon = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_PRIMARY_COLOR"); v != "" {
+		cfg.Branding.Theme.PrimaryColor = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_LANDING_PAGE"); v != "" {
+		cfg.Branding.LandingPage = v
 	}
 }

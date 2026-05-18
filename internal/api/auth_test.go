@@ -625,7 +625,7 @@ func TestSessionLoginIncludesCanCreateApps_Developer(t *testing.T) {
 }
 
 // Handoff happy path: a same-origin POST with a valid session cookie revokes
-// the JWT, clears the cookie, and 303-redirects to /?next=<safe-next>. This
+// the JWT, clears the cookie, and 303-redirects to /login?next=<safe-next>. This
 // is the path the access-denied 403 page exercises when a user signed in to
 // the wrong account clicks "Sign in as a different user". The form lives on
 // an HTML page rendered outside the SPA, so the SPA's CSRF token isn't
@@ -649,8 +649,8 @@ func TestSessionHandoff_RevokesAndRedirects(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/?next=%2Fapp%2Fsecret%2F" {
-		t.Errorf("Location = %q, want /?next=%%2Fapp%%2Fsecret%%2F", got)
+	if got := rec.Header().Get("Location"); got != "/login?next=%2Fapp%2Fsecret%2F" {
+		t.Errorf("Location = %q, want /login?next=%%2Fapp%%2Fsecret%%2F", got)
 	}
 
 	// The session cookie must be expired so the next request to /api/auth/me
@@ -752,8 +752,8 @@ func TestSessionHandoff_ScrubsUnsafeNext(t *testing.T) {
 			if rec.Code != http.StatusSeeOther {
 				t.Fatalf("expected 303, got %d", rec.Code)
 			}
-			if got := rec.Header().Get("Location"); got != "/" {
-				t.Errorf("unsafe next %q yielded Location %q, want /", tc.next, got)
+			if got := rec.Header().Get("Location"); got != "/login" {
+				t.Errorf("unsafe next %q yielded Location %q, want /login", tc.next, got)
 			}
 		})
 	}

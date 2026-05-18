@@ -119,7 +119,7 @@ export function mountAppDetail(ctx) {
     ctx.metrics.setTargets([app.slug]);
 
     return {
-      title: `${app.name} · ShinyHub`,
+      title: app.name,
       unmount() {
         if (tabCleanup) { tabCleanup(); tabCleanup = null; }
         view.hidden = true;

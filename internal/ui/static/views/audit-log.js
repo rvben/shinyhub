@@ -4,7 +4,7 @@ export function mountAuditLog(ctx) {
   ctx.loadAuditEvents(0);
   ctx.updateActiveNav(location.pathname);
   return {
-    title: 'Audit Log · ShinyHub',
+    title: 'Audit Log',
     unmount() { view.hidden = true; },
   };
 }
