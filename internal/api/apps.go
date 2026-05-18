@@ -360,8 +360,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply all validated writes atomically. A single transaction prevents a
-	// failure partway through from leaving the row half-updated.
+	// Apply core settings in a single transaction so a storage failure mid-write
+	// never leaves the row half-updated. The managed_by marker is a separate
+	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
+	// the post-patch refetch exposes the final consistent state to the caller.
 	priorStatus, _, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:               slug,
 		SetHibernate:       setHibernateTimeout,
@@ -1101,6 +1103,11 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	release := s.acquireDeployLock(slug)
 	defer release()
 
+	// app was loaded by requireManageApp before acquireDeployLock. Checking the
+	// precondition here (under the deploy lock) serializes it against in-flight
+	// deploys and restarts; the only residual race is two concurrent DELETEs on
+	// the same slug, which the deleting-tombstone and ErrNotFound guard already
+	// makes safe. The pre-lock snapshot is acceptable for this use case.
 	if checkAppPreconditions(w, r, app) {
 		return
 	}

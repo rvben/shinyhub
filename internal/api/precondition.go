@@ -16,6 +16,9 @@ const (
 // impose no condition (backward compatible). An If-Managed-By header present
 // with an empty value asserts the app is currently unmanaged (NULL).
 func checkAppPreconditions(w http.ResponseWriter, r *http.Request, app *db.App) (conflict bool) {
+	// An empty value is treated as absent: a real content digest is always
+	// non-empty, so there is no "assert empty digest" case to honor (unlike
+	// If-Managed-By, where empty means "assert currently unmanaged").
 	if want := r.Header.Get(hdrIfContentDigest); want != "" {
 		if app.ContentDigest != want {
 			writeError(w, http.StatusConflict,

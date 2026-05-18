@@ -1030,7 +1030,7 @@ func (s *Store) SetAppAccess(slug, access string) error {
 // SetAppManagedBy sets or clears (nil) the fleet ownership marker.
 func (s *Store) SetAppManagedBy(slug string, managedBy *string) error {
 	result, err := s.db.Exec(
-		`UPDATE apps SET managed_by = ? WHERE slug = ?`, managedBy, slug)
+		`UPDATE apps SET managed_by = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, managedBy, slug)
 	if err != nil {
 		return fmt.Errorf("set app managed_by: %w", err)
 	}
