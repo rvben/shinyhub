@@ -379,3 +379,211 @@ func TestUpsertScheduleByName_ScopedPerApp(t *testing.T) {
 		t.Errorf("expected distinct ids across apps; both = %d", idA)
 	}
 }
+
+func TestSchedules_Timezone_NullRoundTrip(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "tz-null")
+
+	// Create with no timezone (nil = inherit).
+	id, err := store.CreateSchedule(CreateScheduleParams{
+		AppID: appID, Name: "no-tz", CronExpr: "0 6 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+		Timezone: nil,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := store.GetSchedule(id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Timezone != nil {
+		t.Errorf("Timezone: got %v, want nil (inherit)", got.Timezone)
+	}
+}
+
+func TestSchedules_Timezone_ExplicitRoundTrip(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "tz-explicit")
+
+	tz := "Europe/Amsterdam"
+	id, err := store.CreateSchedule(CreateScheduleParams{
+		AppID: appID, Name: "with-tz", CronExpr: "0 6 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+		Timezone: &tz,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := store.GetSchedule(id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Timezone == nil || *got.Timezone != "Europe/Amsterdam" {
+		t.Errorf("Timezone: got %v, want Europe/Amsterdam", got.Timezone)
+	}
+}
+
+func TestSchedules_Timezone_UpsertRoundTrip(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "tz-upsert")
+
+	tz := "America/New_York"
+	// Insert with explicit timezone.
+	id, created, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+		Timezone: &tz,
+	})
+	if err != nil {
+		t.Fatalf("upsert insert: %v", err)
+	}
+	if !created {
+		t.Error("expected created=true on first upsert")
+	}
+	got, _ := store.GetSchedule(id)
+	if got.Timezone == nil || *got.Timezone != "America/New_York" {
+		t.Errorf("after insert: Timezone = %v, want America/New_York", got.Timezone)
+	}
+
+	// Update to a different timezone via upsert.
+	tz2 := "Asia/Tokyo"
+	id2, created2, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+		Timezone: &tz2,
+	})
+	if err != nil {
+		t.Fatalf("upsert update: %v", err)
+	}
+	if created2 {
+		t.Error("expected created=false on second upsert (update)")
+	}
+	if id2 != id {
+		t.Errorf("upsert update changed id: got %d, want %d", id2, id)
+	}
+	updated, _ := store.GetSchedule(id)
+	if updated.Timezone == nil || *updated.Timezone != "Asia/Tokyo" {
+		t.Errorf("after update: Timezone = %v, want Asia/Tokyo", updated.Timezone)
+	}
+
+	// Upsert with nil clears to NULL (inherit).
+	id3, _, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+		Timezone: nil,
+	})
+	if err != nil {
+		t.Fatalf("upsert clear: %v", err)
+	}
+	cleared, _ := store.GetSchedule(id3)
+	if cleared.Timezone != nil {
+		t.Errorf("after clear: Timezone = %v, want nil", cleared.Timezone)
+	}
+}
+
+func TestSchedules_Timezone_UpdateClearsToInherit(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "tz-update")
+
+	tz := "Pacific/Auckland"
+	id, _ := store.CreateSchedule(CreateScheduleParams{
+		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+		Timezone: &tz,
+	})
+
+	// Patch to clear timezone (empty string = set to NULL).
+	empty := ""
+	if err := store.UpdateSchedule(id, UpdateScheduleParams{
+		SetTimezone: true,
+		Timezone:    &empty,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ := store.GetSchedule(id)
+	if got.Timezone != nil {
+		t.Errorf("after clear: Timezone = %v, want nil", got.Timezone)
+	}
+}
+
+func TestSchedule_EffectiveLocation_Inherit(t *testing.T) {
+	amsterdam, _ := time.LoadLocation("Europe/Amsterdam")
+	sched := &Schedule{Timezone: nil}
+	loc := sched.EffectiveLocation(amsterdam)
+	if loc != amsterdam {
+		t.Errorf("expected Amsterdam, got %v", loc)
+	}
+}
+
+func TestSchedule_EffectiveLocation_Explicit(t *testing.T) {
+	tz := "America/New_York"
+	sched := &Schedule{Timezone: &tz}
+	loc := sched.EffectiveLocation(time.UTC)
+	if loc.String() != "America/New_York" {
+		t.Errorf("expected New_York, got %v", loc)
+	}
+}
+
+func TestSchedule_EffectiveLocation_EmptyStringInherits(t *testing.T) {
+	empty := ""
+	sched := &Schedule{Timezone: &empty}
+	loc := sched.EffectiveLocation(time.UTC)
+	if loc != time.UTC {
+		t.Errorf("empty string should inherit UTC, got %v", loc)
+	}
+}
+
+func TestSchedule_EffectiveLocation_NilDefaultFallsBackToUTC(t *testing.T) {
+	sched := &Schedule{Timezone: nil}
+	loc := sched.EffectiveLocation(nil)
+	if loc != time.UTC {
+		t.Errorf("nil default should fall back to UTC, got %v", loc)
+	}
+}
+
+// TestSchedules_Timezone_UpdateSchedule_SetTimezoneFalse_LeavesUnchanged asserts
+// that calling UpdateSchedule with SetTimezone=false on a schedule that has a
+// stored timezone leaves the stored timezone intact. Pins the "field not provided
+// in PATCH" path through the SetTimezone sentinel.
+func TestSchedules_Timezone_UpdateSchedule_SetTimezoneFalse_LeavesUnchanged(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "tz-setfalse")
+
+	tz := "Europe/Amsterdam"
+	id, err := store.CreateSchedule(CreateScheduleParams{
+		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
+		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+		Timezone: &tz,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Update only Enabled; SetTimezone=false means timezone must be untouched.
+	enabled := false
+	if err := store.UpdateSchedule(id, UpdateScheduleParams{
+		Enabled:     &enabled,
+		SetTimezone: false, // explicit: do not touch timezone column
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got, err := store.GetSchedule(id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Enabled {
+		t.Errorf("expected Enabled=false after update")
+	}
+	if got.Timezone == nil || *got.Timezone != "Europe/Amsterdam" {
+		t.Errorf("Timezone should be unchanged: got %v, want Europe/Amsterdam", got.Timezone)
+	}
+}

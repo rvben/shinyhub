@@ -33,14 +33,17 @@ func newScheduleCmd() *cobra.Command {
 
 // scheduleDTO mirrors the server's JSON representation of a schedule.
 type scheduleDTO struct {
-	ID             int64    `json:"id"`
-	Name           string   `json:"name"`
-	CronExpr       string   `json:"cron_expr"`
-	Command        []string `json:"command"`
-	Enabled        bool     `json:"enabled"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	OverlapPolicy  string   `json:"overlap_policy"`
-	MissedPolicy   string   `json:"missed_policy"`
+	ID                int64    `json:"id"`
+	Name              string   `json:"name"`
+	CronExpr          string   `json:"cron_expr"`
+	Command           []string `json:"command"`
+	Enabled           bool     `json:"enabled"`
+	TimeoutSeconds    int      `json:"timeout_seconds"`
+	OverlapPolicy     string   `json:"overlap_policy"`
+	MissedPolicy      string   `json:"missed_policy"`
+	Timezone          *string  `json:"timezone"`
+	EffectiveTimezone string   `json:"effective_timezone"`
+	TimezoneInherited bool     `json:"timezone_inherited"`
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
@@ -138,16 +141,20 @@ func newScheduleLsCmd() *cobra.Command {
 			fmt.Fprintln(cmd.OutOrStdout(), "No schedules.")
 			return nil
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%-6s  %-24s  %-20s  %-8s  %s\n",
-			"ID", "NAME", "CRON", "ENABLED", "COMMAND")
+		fmt.Fprintf(cmd.OutOrStdout(), "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
+			"ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND")
 		for _, s := range schedules {
 			cmdStr := strings.Join(s.Command, " ")
 			enabled := "true"
 			if !s.Enabled {
 				enabled = "false"
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%-6d  %-24s  %-20s  %-8s  %s\n",
-				s.ID, s.Name, s.CronExpr, enabled, cmdStr)
+			tzDisplay := s.EffectiveTimezone
+			if s.TimezoneInherited {
+				tzDisplay += " (inherited)"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%-6d  %-24s  %-20s  %-8s  %-28s  %s\n",
+				s.ID, s.Name, s.CronExpr, enabled, tzDisplay, cmdStr)
 		}
 		return nil
 	}
@@ -165,6 +172,7 @@ func newScheduleAddCmd() *cobra.Command {
 		missed      string
 		disabled    bool
 		ifNotExists bool
+		timezone    string
 	}
 
 	addCmd := &cobra.Command{
@@ -181,6 +189,7 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.Flags().StringVar(&flags.missed, "missed", "skip", "Missed-run policy: skip|run_once")
 	addCmd.Flags().BoolVar(&flags.disabled, "disabled", false, "Create the schedule in disabled state")
 	addCmd.Flags().BoolVar(&flags.ifNotExists, "if-not-exists", false, "Exit silently if a same-named schedule already exists")
+	addCmd.Flags().StringVar(&flags.timezone, "timezone", "", "IANA timezone for this schedule (e.g. Europe/Amsterdam); empty inherits server default")
 	_ = addCmd.MarkFlagRequired("name")
 	_ = addCmd.MarkFlagRequired("cron")
 
@@ -218,6 +227,7 @@ func newScheduleAddCmd() *cobra.Command {
 			"timeout_seconds": flags.timeout,
 			"overlap_policy":  flags.overlap,
 			"missed_policy":   flags.missed,
+			"timezone":        flags.timezone,
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {

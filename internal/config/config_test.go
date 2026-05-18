@@ -933,6 +933,81 @@ func TestTracing_EnvOverrides(t *testing.T) {
 	}
 }
 
+func TestScheduler_DefaultTimezoneIsUTC(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scheduler.DefaultTimezone != "UTC" {
+		t.Errorf("Scheduler.DefaultTimezone default = %q, want UTC", cfg.Scheduler.DefaultTimezone)
+	}
+	if cfg.Scheduler.Location == nil {
+		t.Fatal("Scheduler.Location is nil, want non-nil")
+	}
+	if cfg.Scheduler.Location != time.UTC {
+		t.Errorf("Scheduler.Location = %v, want UTC", cfg.Scheduler.Location)
+	}
+}
+
+func TestScheduler_TimezoneFromYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+scheduler:
+  timezone: Europe/Amsterdam
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scheduler.DefaultTimezone != "Europe/Amsterdam" {
+		t.Errorf("Scheduler.DefaultTimezone = %q, want Europe/Amsterdam", cfg.Scheduler.DefaultTimezone)
+	}
+	if cfg.Scheduler.Location == nil {
+		t.Fatal("Scheduler.Location is nil")
+	}
+	if cfg.Scheduler.Location.String() != "Europe/Amsterdam" {
+		t.Errorf("Scheduler.Location = %q, want Europe/Amsterdam", cfg.Scheduler.Location.String())
+	}
+}
+
+func TestScheduler_TimezoneEnvOverridesYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+scheduler:
+  timezone: America/New_York
+`)
+	t.Setenv("SHINYHUB_SCHEDULER_TIMEZONE", "Asia/Tokyo")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scheduler.DefaultTimezone != "Asia/Tokyo" {
+		t.Errorf("env should override YAML: got %q, want Asia/Tokyo", cfg.Scheduler.DefaultTimezone)
+	}
+	if cfg.Scheduler.Location.String() != "Asia/Tokyo" {
+		t.Errorf("Scheduler.Location = %q, want Asia/Tokyo", cfg.Scheduler.Location.String())
+	}
+}
+
+func TestScheduler_InvalidTimezoneRejected(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+scheduler:
+  timezone: Mars/Olympus
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid scheduler.timezone, got nil")
+	}
+	if !strings.Contains(err.Error(), "scheduler.timezone") {
+		t.Errorf("error should mention scheduler.timezone: %v", err)
+	}
+}
+
 func TestTracing_EnvOverridesYAML(t *testing.T) {
 	path := writeYAML(t, `
 auth:

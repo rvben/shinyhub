@@ -524,6 +524,154 @@ func TestSchedules_Create_DuplicateName_Returns409(t *testing.T) {
 	}
 }
 
+// scheduleWithTimezone creates an app + schedule that has an explicit stored
+// timezone. Returns the schedule ID and a valid manager token for the owner.
+// Used by the PATCH timezone tri-state tests below.
+func scheduleWithTimezone(t *testing.T, store *db.Store, storedTZ string) (schedID int64, token string) {
+	t.Helper()
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "tz-owner", PasswordHash: hash, Role: "developer"})
+	_ = store.CreateApp(db.CreateAppParams{Slug: "tz-app", Name: "TZ App", OwnerID: 1})
+	app, _ := store.GetAppBySlug("tz-app")
+	var tzPtr *string
+	if storedTZ != "" {
+		tzPtr = &storedTZ
+	}
+	id, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "tz-sched", CronExpr: "0 9 * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip", Timezone: tzPtr,
+	})
+	tok, _ := auth.IssueJWT(1, "tz-owner", "developer", "test-secret")
+	return id, tok
+}
+
+// TestSchedules_Patch_Timezone_Absent_LeavesUnchanged asserts that omitting
+// the timezone key from a PATCH body leaves the stored timezone intact. This
+// test meaningfully fails if absent and null are collapsed to the same branch.
+func TestSchedules_Patch_Timezone_Absent_LeavesUnchanged(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	schedID, token := scheduleWithTimezone(t, store, "Europe/Amsterdam")
+
+	// PATCH body has no "timezone" key at all.
+	body, _ := json.Marshal(map[string]any{"enabled": false})
+	req := authedRequest(t, "PATCH", fmt.Sprintf("/api/apps/tz-app/schedules/%d", schedID), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto map[string]any
+	json.NewDecoder(rec.Body).Decode(&dto)
+	// timezone must still be "Europe/Amsterdam", not null/cleared.
+	if dto["timezone"] == nil {
+		t.Errorf("timezone should be unchanged (Europe/Amsterdam), got null")
+	}
+	if got, _ := dto["timezone"].(string); got != "Europe/Amsterdam" {
+		t.Errorf("timezone = %q, want Europe/Amsterdam", got)
+	}
+	if inherited, _ := dto["timezone_inherited"].(bool); inherited {
+		t.Errorf("timezone_inherited should be false, got true")
+	}
+}
+
+// TestSchedules_Patch_Timezone_Null_ClearsToInherit asserts that sending
+// {"timezone": null} explicitly in a PATCH body clears the stored timezone
+// and switches the schedule to server-default inheritance.
+func TestSchedules_Patch_Timezone_Null_ClearsToInherit(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	schedID, token := scheduleWithTimezone(t, store, "Europe/Amsterdam")
+
+	// PATCH body sets timezone to JSON null.
+	body := []byte(fmt.Sprintf(`{"timezone":null,"enabled":true}`))
+	req := authedRequest(t, "PATCH", fmt.Sprintf("/api/apps/tz-app/schedules/%d", schedID), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto map[string]any
+	json.NewDecoder(rec.Body).Decode(&dto)
+	if dto["timezone"] != nil {
+		t.Errorf("timezone should be null (cleared), got %v", dto["timezone"])
+	}
+	if inherited, _ := dto["timezone_inherited"].(bool); !inherited {
+		t.Errorf("timezone_inherited should be true after null clear, got false")
+	}
+}
+
+// TestSchedules_Patch_Timezone_EmptyString_ClearsToInherit asserts that
+// {"timezone": ""} clears the stored timezone to inherit — identical outcome
+// to null but via empty string.
+func TestSchedules_Patch_Timezone_EmptyString_ClearsToInherit(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	schedID, token := scheduleWithTimezone(t, store, "Europe/Amsterdam")
+
+	body := []byte(fmt.Sprintf(`{"timezone":""}`))
+	req := authedRequest(t, "PATCH", fmt.Sprintf("/api/apps/tz-app/schedules/%d", schedID), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto map[string]any
+	json.NewDecoder(rec.Body).Decode(&dto)
+	if dto["timezone"] != nil {
+		t.Errorf("timezone should be null (cleared), got %v", dto["timezone"])
+	}
+	if inherited, _ := dto["timezone_inherited"].(bool); !inherited {
+		t.Errorf("timezone_inherited should be true after empty-string clear, got false")
+	}
+}
+
+// TestSchedules_Patch_Timezone_ValidZone_Sets asserts that a non-empty valid
+// IANA timezone string in a PATCH body is validated and stored; and that an
+// invalid timezone returns 400 with a clear error message.
+func TestSchedules_Patch_Timezone_ValidZone_Sets(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	schedID, token := scheduleWithTimezone(t, store, "Europe/Amsterdam")
+
+	// Valid zone: should succeed and update the stored timezone.
+	body := []byte(fmt.Sprintf(`{"timezone":"America/New_York"}`))
+	req := authedRequest(t, "PATCH", fmt.Sprintf("/api/apps/tz-app/schedules/%d", schedID), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid zone: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto map[string]any
+	json.NewDecoder(rec.Body).Decode(&dto)
+	if got, _ := dto["timezone"].(string); got != "America/New_York" {
+		t.Errorf("timezone = %q, want America/New_York", got)
+	}
+	if got, _ := dto["effective_timezone"].(string); got != "America/New_York" {
+		t.Errorf("effective_timezone = %q, want America/New_York", got)
+	}
+	if inherited, _ := dto["timezone_inherited"].(bool); inherited {
+		t.Errorf("timezone_inherited should be false for explicit zone")
+	}
+
+	// Invalid zone: should return 400 with a message that mentions the bad value.
+	badBody := []byte(fmt.Sprintf(`{"timezone":"Mars/Olympus"}`))
+	req = authedRequest(t, "PATCH", fmt.Sprintf("/api/apps/tz-app/schedules/%d", schedID), badBody, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid zone: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errBody map[string]any
+	json.NewDecoder(rec.Body).Decode(&errBody)
+	errMsg, _ := errBody["error"].(string)
+	if !strings.Contains(strings.ToLower(errMsg), "timezone") && !strings.Contains(strings.ToLower(errMsg), "zone") {
+		t.Errorf("400 error message should describe the timezone problem, got: %q", errMsg)
+	}
+}
+
 // TestSchedules_GrantSharedData_AllowedForExplicitMember asserts the happy
 // path still works: when the caller is an explicit member of the source app
 // (any role), the grant succeeds.

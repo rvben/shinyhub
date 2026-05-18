@@ -20,6 +20,7 @@ shinyhub schedule add fetch \
     --name daily-fetch \
     --cron "0 6 * * *" \
     --cmd "python helpers/fetch.py" \
+    --timezone "Europe/Amsterdam" \
     --timeout 600 \
     --overlap skip \
     --missed run_once
@@ -29,11 +30,64 @@ Fields:
 
 | Field | Meaning |
 |---|---|
-| `cron` | 5-field standard cron expression. Server timezone applies. |
+| `cron` | 5-field standard cron expression. The `timezone` field controls which timezone the expression fires in. Do not embed `TZ=` or `CRON_TZ=` prefixes directly in the expression. |
+| `timezone` | Optional IANA timezone for this schedule (e.g. `Europe/Amsterdam`, `America/New_York`). When absent or empty the schedule inherits the server default (`scheduler.timezone` config, default UTC). See "Timezone resolution" below. |
 | `cmd` | Command to run inside the bundle dir. Shell-quoted; use `--cmd-json` for exact control. |
 | `timeout` | Seconds before SIGTERM; SIGKILL after a 10-second grace. |
 | `overlap` | `skip` (default) drops new ticks while one is in flight; `queue` holds at most one extra; `concurrent` allows overlap. |
 | `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup. |
+
+**Timezone PATCH tri-state:** The `timezone` key in a PATCH request has three distinct meanings:
+
+| Value | Effect |
+|---|---|
+| key absent | timezone is left unchanged |
+| `"timezone": null` | timezone cleared; schedule inherits server default |
+| `"timezone": ""` | timezone cleared; schedule inherits server default |
+| `"timezone": "America/New_York"` | timezone set to that IANA zone (validated) |
+
+## Timezone resolution
+
+ShinyHub evaluates cron expressions in the schedule's **effective timezone**, determined by this resolution chain (first match wins):
+
+1. The schedule's own `timezone` field (non-empty IANA name).
+2. The server-level `scheduler.timezone` config key (or `SHINYHUB_SCHEDULER_TIMEZONE` env var).
+3. UTC (always the final fallback — the server never reads the host's `TZ`/`time.Local`).
+
+The effective timezone is shown in the UI and API responses as `effective_timezone`. When it comes from the server default, `timezone_inherited` is `true`.
+
+**DST behaviour** (matches robfig/cron semantics):
+
+- **Spring-forward gap** (e.g. Europe/Amsterdam 2:00 → 3:00): a cron expression that targets a non-existent local time (e.g. `30 2 * * *` on the clock-change Sunday) fires zero times that day — the non-existent local time is skipped. The next fire is the matching time the following day.
+- **Fall-back overlap** (e.g. 3:00 → 2:00): a cron expression targeting a repeated local wall-clock time fires **twice** on the fall-back day, once per UTC instant. For example, `30 2 * * *` in Europe/Amsterdam fires at 00:30 UTC (02:30 CEST, before the clock change) and again at 01:30 UTC (02:30 CET, after the clock change).
+
+Configure the server default in `shinyhub.yaml`:
+
+```yaml
+scheduler:
+  timezone: "Europe/Amsterdam"   # default UTC when absent
+```
+
+Or via environment variable:
+
+```bash
+SHINYHUB_SCHEDULER_TIMEZONE=Europe/Amsterdam
+```
+
+An invalid IANA zone in either location is a fatal configuration error at startup.
+
+In a `shinyhub.toml` manifest:
+
+```toml
+[[schedule]]
+name = "daily-fetch"
+cron = "0 6 * * *"
+timezone = "Europe/Amsterdam"
+cmd = "python helpers/fetch.py"
+timeout_seconds = 600
+overlap = "skip"
+missed = "run_once"
+```
 
 ## Triggering manually
 
@@ -78,7 +132,7 @@ either sees the old file or the new one — never a partial write.
 
 - **Single-instance only.** Running two ShinyHub processes against the same DB will double-fire schedules.
 - **No per-schedule env or resource overrides.** Schedules inherit from the app.
-- **Server timezone.** All schedules use the host timezone; document the zone in your fleet runbook.
+- **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart — running schedules are not hot-reloaded on config change.
 - **`run_once` catch-up runs at startup only.** It does not re-fire missed runs from arbitrary points in time.
 - **Native runtime read-only enforcement.** RO is a convention for native (filesystem permits writes through the symlink). Use Docker if you need OS-level enforcement.
 

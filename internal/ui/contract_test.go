@@ -500,6 +500,30 @@ func TestSPALogoutButtonRespectsServerOutcome(t *testing.T) {
 	}
 }
 
+// TestScheduleTimezoneFields guards the schedule DTO timezone contract.
+// The server now returns effective_timezone, timezone_inherited, and timezone
+// on each schedule record. The UI must read all three fields:
+//   - effective_timezone: the resolved IANA zone (always present)
+//   - timezone_inherited: bool, true when no per-schedule zone is stored
+//   - timezone: the raw stored value (null = inherit)
+//
+// The table renders next_fire in the effective_timezone via Intl.DateTimeFormat,
+// so operators see fire times in the schedule's own zone, not browser-local.
+func TestScheduleTimezoneFields(t *testing.T) {
+	assertContains(t, "app.js", "s.effective_timezone",
+		"schedule table must read s.effective_timezone from the DTO to render the zone and next_fire correctly")
+	assertContains(t, "app.js", "s.timezone_inherited",
+		"schedule table must read s.timezone_inherited to show the (inherited) hint when no per-schedule timezone is stored")
+	assertContains(t, "app.js", "s.timezone",
+		"schedule form must read s.timezone when editing an existing schedule to populate the timezone field")
+	assertContains(t, "app.js", "sched-timezone",
+		"schedule form must reference sched-timezone so the timezone input is populated and submitted")
+	assertContains(t, "app.js", "Preview (browser-local)",
+		"cron preview label must clarify it shows browser-local time so operators are not misled about the schedule's effective timezone")
+	assertContains(t, "index.html", "sched-timezone",
+		"schedule form modal in index.html must have a sched-timezone input for the optional per-schedule timezone")
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)
