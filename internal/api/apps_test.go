@@ -1727,6 +1727,20 @@ func TestListAppsJSONHasFleetFields(t *testing.T) {
 	srv, store := newTestServer(t)
 	token, userID := seedUserAndJWT(t, store, "fleet-check", "admin")
 	store.CreateApp(db.CreateAppParams{Slug: "fleet-app", Name: "Fleet App", OwnerID: userID, Access: "private"})
+	app, err := store.GetAppBySlug("fleet-app")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/fleet-bundle")
+	if err != nil {
+		t.Fatalf("begin deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:apicheck"); err != nil {
+		t.Fatalf("set deployment digest: %v", err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatalf("promote deployment: %v", err)
+	}
 
 	req := authedRequest(t, "GET", "/api/apps", nil, token)
 	rec := httptest.NewRecorder()
@@ -1734,7 +1748,14 @@ func TestListAppsJSONHasFleetFields(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/apps = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"managed_by"`)) {
+	body := rec.Body.Bytes()
+	if !bytes.Contains(body, []byte(`"managed_by"`)) {
 		t.Fatal(`GET /api/apps must expose "managed_by"`)
+	}
+	if !bytes.Contains(body, []byte(`"content_digest"`)) {
+		t.Fatal(`GET /api/apps must expose "content_digest"`)
+	}
+	if !bytes.Contains(body, []byte(`"sha256:apicheck"`)) {
+		t.Fatalf(`GET /api/apps must include the promoted digest value, body: %s`, body)
 	}
 }

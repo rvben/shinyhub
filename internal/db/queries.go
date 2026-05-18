@@ -350,9 +350,9 @@ type App struct {
 }
 
 // deploymentSummarySQL is the SELECT fragment that adds last_deployed_at and
-// current_version to any apps query. Kept as a constant so all six App
+// current_version to any apps query. Kept as a constant so all seven App
 // queries (ListApps, ListAppsVisibleToUser, ListPublicApps, ListRunningApps,
-// GetAppBySlug, GetAppByID) stay in sync.
+// ListDeletingApps, GetAppBySlug, GetAppByID) stay in sync.
 const deploymentSummarySQL = `
 		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id) AS last_deployed_at,
 		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
