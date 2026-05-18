@@ -23,7 +23,10 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !got.Capabilities.FleetPreconditions || !got.Capabilities.ContentDigest {
-		t.Fatalf("capabilities not advertised: %+v", got)
+	if !got.Capabilities.FleetPreconditions {
+		t.Errorf("fleet_preconditions not advertised")
+	}
+	if !got.Capabilities.ContentDigest {
+		t.Errorf("content_digest not advertised")
 	}
 }
