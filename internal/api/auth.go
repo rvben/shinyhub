@@ -467,9 +467,9 @@ func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 
 	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
 
-	target := "/"
+	target := "/login"
 	if next := safeNextPath(r.FormValue("next")); next != "" {
-		target = "/?next=" + url.QueryEscape(next)
+		target = "/login?" + url.Values{"next": {next}}.Encode()
 	}
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }

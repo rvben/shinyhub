@@ -181,14 +181,14 @@ func wantsHTML(r *http.Request) bool {
 // The CTA differs by status so the user reaches the login form by the right
 // path:
 //
-//   - 401 (no session): a plain anchor to /?next=<original>. The SPA renders
-//     the login form; after success consumeNextParam() hard-navigates to
-//     <original>.
+//   - 401 (no session): a plain anchor to /login?next=<original>. The SPA
+//     renders the login form; after success consumeNextParam() hard-navigates
+//     to <original>.
 //
 //   - 403 (wrong session): an HTML <form> that POSTs to /api/auth/handoff
 //     with `next=<original>` as a hidden field. The endpoint revokes the
 //     current session server-side, clears the cookie, and 303-redirects to
-//     /?next=<original>. Using a form POST instead of an `<a href>` to
+//     /login?next=<original>. Using a form POST instead of an `<a href>` to
 //     /?logout=1 means the handoff works even when the access-denied page
 //     was opened in a brand-new tab (Cmd+Click / Ctrl+Click on a link in
 //     the address bar): the previous design depended on a sessionStorage
@@ -206,9 +206,9 @@ func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
 }
 
 func renderLoginRedirectPage(headline, nextURL string) []byte {
-	loginHref := "/"
+	loginHref := "/login"
 	if nextURL != "" {
-		loginHref = "/?" + url.Values{"next": {nextURL}}.Encode()
+		loginHref = "/login?" + url.Values{"next": {nextURL}}.Encode()
 	}
 	const tpl = `<!DOCTYPE html>
 <html lang="en">
