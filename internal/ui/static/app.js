@@ -39,6 +39,39 @@ function formatStatus(status) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Branding: server injects window.__SHINYHUB_BRANDING__ (see
+  // internal/ui/branding.go RenderIndex). Absent/empty in zero-branding mode.
+  (function applyBranding() {
+    const b = window.__SHINYHUB_BRANDING__;
+    if (!b || typeof b !== 'object') return;
+    if (b.logo) {
+      const brand = document.querySelector('nav .brand');
+      if (brand) {
+        brand.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = b.logo;
+        img.alt = b.site_title || 'Home';
+        img.className = 'brand-logo';
+        brand.appendChild(img);
+      }
+    }
+    if (Array.isArray(b.footer_links) && b.footer_links.length) {
+      let f = document.querySelector('footer.brand-footer');
+      if (!f) {
+        f = document.createElement('footer');
+        f.className = 'brand-footer';
+        document.body.appendChild(f);
+      }
+      f.innerHTML = '';
+      for (const link of b.footer_links) {
+        const a = document.createElement('a');
+        a.href = link.url;
+        a.textContent = link.label;
+        f.appendChild(a);
+      }
+    }
+  })();
+
   const state = {
     user: null,
     apps: [],

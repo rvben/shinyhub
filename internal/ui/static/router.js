@@ -70,7 +70,8 @@ export function createRouter() {
       return;
     }
     current = view || {};
-    document.title = (current && current.title) || 'ShinyHub';
+    const brandTitle = (window.__SHINYHUB_BRANDING__ && window.__SHINYHUB_BRANDING__.site_title) || 'ShinyHub';
+    document.title = (current && current.title) ? current.title + ' · ' + brandTitle : brandTitle;
     const h1 = document.querySelector('main section:not([hidden]) h1');
     if (h1) {
       if (!h1.hasAttribute('tabindex')) h1.setAttribute('tabindex', '-1');

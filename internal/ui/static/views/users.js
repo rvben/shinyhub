@@ -4,7 +4,7 @@ export function mountUsers(ctx) {
   ctx.loadUsers();
   ctx.updateActiveNav(location.pathname);
   return {
-    title: 'Users · ShinyHub',
+    title: 'Users',
     unmount() { view.hidden = true; },
   };
 }
