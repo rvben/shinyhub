@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/http"
 	"path"
 	"regexp"
 	"strings"
@@ -52,6 +53,25 @@ var (
 	titleRe = regexp.MustCompile(`(?s)<title>.*?</title>`)
 	headRe  = regexp.MustCompile(`</head>`)
 )
+
+// BrandingAssetHandler serves ONLY the basenames in the allow-list. There is
+// no path arithmetic on request input: the trailing segment is looked up in
+// the map, so traversal, encoded segments and symlink tricks cannot escape.
+func BrandingAssetHandler(allow map[string]string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/branding/")
+		if name == "" || strings.Contains(name, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		abs, ok := allow[name]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, abs)
+	})
+}
 
 // RenderIndex injects branding into the stock SPA shell. Callers MUST only
 // invoke this when branding is active; the zero-branding path serves raw

@@ -1,6 +1,9 @@
 package ui_test
 
 import (
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -69,5 +72,31 @@ func TestRenderIndexInjectsHeadAndEscapesScript(t *testing.T) {
 	}
 	if strings.Contains(string(out2), "ShinyHub") {
 		t.Fatalf("$0 in SiteTitle must not expand to original match; got: %s", string(out2))
+	}
+}
+
+func TestBrandingAssetHandler(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "logo.svg")
+	if err := os.WriteFile(p, []byte("<svg/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := ui.BrandingAssetHandler(map[string]string{"logo.svg": p})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/branding/logo.svg", nil))
+	if rec.Code != 200 || rec.Body.String() != "<svg/>" {
+		t.Fatalf("served file wrong: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct == "" {
+		t.Fatal("Content-Type must be set")
+	}
+
+	for _, bad := range []string{"/branding/missing.svg", "/branding/../etc/passwd", "/branding/%2e%2e/x", "/branding/", "/branding/%2e%2e", "/branding/."} {
+		r := httptest.NewRecorder()
+		h.ServeHTTP(r, httptest.NewRequest("GET", bad, nil))
+		if r.Code != 404 {
+			t.Errorf("%s: code = %d, want 404", bad, r.Code)
+		}
 	}
 }
