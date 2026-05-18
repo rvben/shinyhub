@@ -32,3 +32,33 @@ func TestLoadMigrationsOrderedAndUnique(t *testing.T) {
 		t.Errorf("first migration version = %d, want 1", ms[0].version)
 	}
 }
+
+func TestMigrations015And016AddColumns(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var n int
+	row := store.DB().QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('deployments') WHERE name = 'content_digest'`)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("pragma deployments: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("deployments.content_digest: want 1 column, got %d", n)
+	}
+
+	row = store.DB().QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('apps') WHERE name = 'managed_by'`)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("pragma apps: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("apps.managed_by: want 1 column, got %d", n)
+	}
+}
