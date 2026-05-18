@@ -21,6 +21,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.4](https://github.com/rvben/shinyhub/compare/v0.5.3...v0.5.4) - 2026-05-18
+
+### Added
+
+- **ui**: apply injected branding to shell logo, footer, accent, and title ([ecd1450](https://github.com/rvben/shinyhub/commit/ecd14500393a8bc11293b58375348a7a6a90f88c))
+- wire branding routes, branded /login, and landing page at / ([f78c0ae](https://github.com/rvben/shinyhub/commit/f78c0aee703ef5f4d321ab1b4a75c001f922088a))
+- **api**: branding.json and apps.json handlers with anon public-only scoping ([3ea9ac9](https://github.com/rvben/shinyhub/commit/3ea9ac996766883a03d9b33475f705c05364f84e))
+- **db**: ListPublicApps query for anonymous landing pages ([8ebe622](https://github.com/rvben/shinyhub/commit/8ebe6223972ec8ea96c8fdbc3cc1bf13652ee63a))
+- **ui**: allow-list /branding asset handler ([cd9d3d4](https://github.com/rvben/shinyhub/commit/cd9d3d4f0c27129ac5ffda7ec36ac4d5b5273be8))
+- **ui**: branding public object and script-safe index renderer ([a39eff5](https://github.com/rvben/shinyhub/commit/a39eff5710aa93e0fcbd982380ddb15133cf0bcf))
+- **config**: fail-fast branding validation and asset resolution ([6ac9f78](https://github.com/rvben/shinyhub/commit/6ac9f78a4df74d1b44c99a10216e74d162031e2d))
+- **config**: scalar env overrides for branding fields ([092fe45](https://github.com/rvben/shinyhub/commit/092fe45c792a31d6ddba44f73b95f5e35511a0be))
+- **config**: add BrandingConfig types and YAML wiring ([9c1ad56](https://github.com/rvben/shinyhub/commit/9c1ad56ef671bc7415bc1715b81e93b738fbe4c6))
+
+### Fixed
+
+- **cli**: select auth scheme by JWT structure so opaque deploy tokens work ([3335fdc](https://github.com/rvben/shinyhub/commit/3335fdc30133a54e8aa76cdab5e1be1182dac857))
+- **access**: retarget login redirect to /login so custom landing pages keep the auth flow ([7f74b91](https://github.com/rvben/shinyhub/commit/7f74b91329dd69c367504188d091c0a9a08cf29a))
+
 ## [0.5.3](https://github.com/rvben/shinyhub/compare/v0.5.2...v0.5.3) - 2026-05-18
 
 ### Added
