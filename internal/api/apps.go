@@ -1,6 +1,7 @@
 package api
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
@@ -597,6 +599,22 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+
+	// Record the content digest on the pending deployment. Computed from the
+	// same accepted entries the extractor validates, so it matches the digest
+	// the CLI computes from the produced bundle. Becomes authoritative only
+	// once PromoteDeployment runs; a failed deploy never exposes it.
+	if zr, derr := zip.OpenReader(bundleZip); derr == nil {
+		digest, derr := bundle.DigestZipReader(&zr.Reader)
+		zr.Close()
+		if derr != nil {
+			slog.Warn("deploy: content digest computation rejected bundle",
+				"slug", slug, "version", version, "err", derr)
+		} else if serr := s.store.SetDeploymentDigest(pendingDep.ID, digest); serr != nil {
+			slog.Error("deploy: failed to record content digest (non-fatal; next deploy self-heals)",
+				"slug", slug, "version", version, "err", serr)
+		}
 	}
 
 	// Stop existing instance before re-deploying; ignore the error since the

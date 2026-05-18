@@ -733,6 +733,18 @@ func (s *Store) FailDeployment(id int64) error {
 	return nil
 }
 
+// SetDeploymentDigest records the content digest on a deployment row. Called
+// after BeginDeployment and before PromoteDeployment so the digest travels
+// with the pending row and only becomes authoritative on promotion.
+func (s *Store) SetDeploymentDigest(id int64, digest string) error {
+	_, err := s.db.Exec(
+		`UPDATE deployments SET content_digest = ? WHERE id = ?`, digest, id)
+	if err != nil {
+		return fmt.Errorf("set deployment digest %d: %w", id, err)
+	}
+	return nil
+}
+
 // ListInflightDeployments returns every deployment still in 'pending'. A
 // pending row on startup means a deploy was interrupted before the new pool
 // was confirmed; the server fails these so recovery falls back to the last

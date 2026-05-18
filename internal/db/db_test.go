@@ -1050,6 +1050,28 @@ func TestApp_DeploymentSummaryFields(t *testing.T) {
 	}
 }
 
+func TestSetDeploymentDigest(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "digest-owner", "developer")
+	app := mustCreateApp(t, store, "digest-app", owner.ID)
+
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/bundle")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:abc"); err != nil {
+		t.Fatalf("set digest: %v", err)
+	}
+	var got *string
+	row := store.DB().QueryRow(`SELECT content_digest FROM deployments WHERE id = ?`, dep.ID)
+	if err := row.Scan(&got); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got == nil || *got != "sha256:abc" {
+		t.Fatalf("content_digest = %v, want sha256:abc", got)
+	}
+}
+
 func TestUpsertSystemUser_CreatesThenUpdatesRole(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {
