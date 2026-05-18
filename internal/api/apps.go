@@ -1,6 +1,7 @@
 package api
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
@@ -193,7 +195,8 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -228,6 +231,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setReplicas              bool
 		newMaxSessions           int
 		setMaxSessions           bool
+		newManagedBy             *string
+		setManagedBy             bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -325,6 +330,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		newMaxSessions, setMaxSessions = n, true
 	}
 
+	if rawVal, present := raw["managed_by"]; present {
+		var v *string
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "managed_by must be a string or null")
+			return
+		}
+		newManagedBy, setManagedBy = v, true
+	}
+
 	// Fail fast: CPU/memory limits are only enforced by the Docker runtime.
 	// Under native mode they would be silently ignored, giving a false sense
 	// of containment. Reject the write rather than store an unenforceable
@@ -342,8 +356,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Apply all validated writes atomically. A single transaction prevents a
-	// failure partway through from leaving the row half-updated.
+	if checkAppPreconditions(w, r, app) {
+		return
+	}
+
+	// Apply core settings in a single transaction so a storage failure mid-write
+	// never leaves the row half-updated. The managed_by marker is a separate
+	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
+	// the post-patch refetch exposes the final consistent state to the caller.
 	priorStatus, _, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:               slug,
 		SetHibernate:       setHibernateTimeout,
@@ -370,6 +390,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if setManagedBy {
+		if err := s.store.SetAppManagedBy(slug, newManagedBy); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
 	// Post-commit side effects. These only take effect once the settings are
 	// durably persisted.
 	if setMaxSessions && s.proxy != nil {
@@ -380,9 +411,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		go s.redeployApp(slug)
 	}
 
-	app, err := s.store.GetAppBySlug(slug)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+	var fetchErr error
+	app, fetchErr = s.store.GetAppBySlug(slug)
+	if fetchErr != nil {
+		if errors.Is(fetchErr, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
@@ -597,6 +629,25 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+
+	// Record the content digest on the pending deployment. Computed from the
+	// same accepted entries the extractor validates, so it matches the digest
+	// the CLI computes from the produced bundle. Becomes authoritative only
+	// once PromoteDeployment runs; a failed deploy never exposes it.
+	if zr, derr := zip.OpenReader(bundleZip); derr == nil {
+		digest, derr := bundle.DigestZipReader(&zr.Reader)
+		zr.Close()
+		if derr != nil {
+			slog.Warn("deploy: content digest computation rejected bundle",
+				"slug", slug, "version", version, "err", derr)
+		} else if serr := s.store.SetDeploymentDigest(pendingDep.ID, digest); serr != nil {
+			slog.Error("deploy: failed to record content digest (non-fatal; next deploy self-heals)",
+				"slug", slug, "version", version, "err", serr)
+		}
+	} else {
+		slog.Warn("deploy: could not re-open bundle for digest (non-fatal)",
+			"slug", slug, "version", version, "err", derr)
 	}
 
 	// Stop existing instance before re-deploying; ignore the error since the
@@ -1042,7 +1093,8 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -1050,6 +1102,15 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	// race the process manager into an inconsistent state mid-teardown.
 	release := s.acquireDeployLock(slug)
 	defer release()
+
+	// app was loaded by requireManageApp before acquireDeployLock. Checking the
+	// precondition here (under the deploy lock) serializes it against in-flight
+	// deploys and restarts; the only residual race is two concurrent DELETEs on
+	// the same slug, which the deleting-tombstone and ErrNotFound guard already
+	// makes safe. The pre-lock snapshot is acceptable for this use case.
+	if checkAppPreconditions(w, r, app) {
+		return
+	}
 
 	// Stop the process if it is running; ignore the error (may not be running).
 	if s.manager != nil {
@@ -1166,7 +1227,8 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -1178,6 +1240,9 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	if !db.IsValidAppVisibility(req.Access) {
 		writeError(w, http.StatusBadRequest, "access must be one of "+strings.Join(db.ValidAppVisibilities, ", "))
+		return
+	}
+	if checkAppPreconditions(w, r, app) {
 		return
 	}
 	if err := s.store.SetAppAccess(slug, req.Access); err != nil {

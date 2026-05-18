@@ -1722,3 +1722,179 @@ func TestDeployToken_AppOwnershipAndAdminBypass(t *testing.T) {
 		t.Errorf("admin PATCH /api/apps/deploy-owned = %d, want 2xx: %s", patchRec.Code, patchRec.Body.String())
 	}
 }
+
+// seedAppWithPromotedDeploy creates an app and promotes a deployment with the
+// given content digest, so GetAppBySlug returns a non-empty ContentDigest.
+func seedAppWithPromotedDeploy(t *testing.T, store *db.Store, slug, digest string) (token string) {
+	t.Helper()
+	tok, userID := seedUserAndJWT(t, store, slug+"-owner", "admin")
+	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: userID, Access: "private"}); err != nil {
+		t.Fatalf("seedAppWithPromotedDeploy create app: %v", err)
+	}
+	app, err := store.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatalf("seedAppWithPromotedDeploy get app: %v", err)
+	}
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/precond-bundle")
+	if err != nil {
+		t.Fatalf("seedAppWithPromotedDeploy begin deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, digest); err != nil {
+		t.Fatalf("seedAppWithPromotedDeploy set digest: %v", err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatalf("seedAppWithPromotedDeploy promote: %v", err)
+	}
+	return tok
+}
+
+func TestPatchAppManagedByConflictOn409Header(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, userID := seedUserAndJWT(t, store, "precond-user", "admin")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "precond", Name: "Precond", OwnerID: userID, Access: "private"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	// current managed_by is NULL; precondition expects "fleet:other" -> 409
+	req := authedRequest(t, "PATCH", "/api/apps/precond", []byte(`{"managed_by":"fleet:prod"}`), token)
+	req.Header.Set("X-Shinyhub-If-Managed-By", "fleet:other")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 on managed_by precondition mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchAppManagedBySucceedsWhenPreconditionMatches(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, userID := seedUserAndJWT(t, store, "precond2-user", "admin")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "precond2", Name: "Precond2", OwnerID: userID, Access: "private"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	// no precondition header -> unconditional
+	req := authedRequest(t, "PATCH", "/api/apps/precond2", []byte(`{"managed_by":"fleet:prod"}`), token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	a, err := store.GetAppBySlug("precond2")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if a.ManagedBy == nil || *a.ManagedBy != "fleet:prod" {
+		t.Fatalf("managed_by not persisted: %v", a.ManagedBy)
+	}
+}
+
+func TestDeleteAppPreconditionMismatch409(t *testing.T) {
+	srv, store := newTestServer(t)
+	token := seedAppWithPromotedDeploy(t, store, "delprecond", "sha256:live")
+	req := authedRequest(t, "DELETE", "/api/apps/delprecond", nil, token)
+	req.Header.Set("X-Shinyhub-If-Content-Digest", "sha256:stale")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 on delete precondition mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListAppsJSONHasFleetFields(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, userID := seedUserAndJWT(t, store, "fleet-check", "admin")
+	store.CreateApp(db.CreateAppParams{Slug: "fleet-app", Name: "Fleet App", OwnerID: userID, Access: "private"})
+	app, err := store.GetAppBySlug("fleet-app")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/fleet-bundle")
+	if err != nil {
+		t.Fatalf("begin deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:apicheck"); err != nil {
+		t.Fatalf("set deployment digest: %v", err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatalf("promote deployment: %v", err)
+	}
+
+	req := authedRequest(t, "GET", "/api/apps", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/apps = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	if !bytes.Contains(body, []byte(`"managed_by"`)) {
+		t.Fatal(`GET /api/apps must expose "managed_by"`)
+	}
+	if !bytes.Contains(body, []byte(`"content_digest"`)) {
+		t.Fatal(`GET /api/apps must expose "content_digest"`)
+	}
+	if !bytes.Contains(body, []byte(`"sha256:apicheck"`)) {
+		t.Fatalf(`GET /api/apps must include the promoted digest value, body: %s`, body)
+	}
+}
+
+func TestSetAppAccessPreconditionMismatch409(t *testing.T) {
+	srv, store := newTestServer(t)
+	token := seedAppWithPromotedDeploy(t, store, "accprecond", "sha256:live")
+
+	body, _ := json.Marshal(map[string]string{"access": "public"})
+	req := authedRequest(t, "PATCH", "/api/apps/accprecond/access", body, token)
+	req.Header.Set("X-Shinyhub-If-Content-Digest", "sha256:stale")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 on set-access precondition mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Access must not have changed.
+	app, err := store.GetAppBySlug("accprecond")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Access != "private" {
+		t.Fatalf("access must remain private after 409, got %q", app.Access)
+	}
+}
+
+func TestPatchAppIfManagedByEmptyAssertsUnmanaged409(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, userID := seedUserAndJWT(t, store, "managed-user", "admin")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "managed-app", Name: "Managed App", OwnerID: userID, Access: "private"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	// Mark the app as managed so the precondition (empty = unmanaged) will fail.
+	val := "fleet:x"
+	if err := store.SetAppManagedBy("managed-app", &val); err != nil {
+		t.Fatalf("set managed_by: %v", err)
+	}
+	// Empty header value asserts "currently unmanaged"; the app IS managed -> 409.
+	req := authedRequest(t, "PATCH", "/api/apps/managed-app", []byte(`{"name":"updated"}`), token)
+	req.Header["X-Shinyhub-If-Managed-By"] = []string{""}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 when empty If-Managed-By sent to a managed app, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchAppIfContentDigestMismatch409(t *testing.T) {
+	srv, store := newTestServer(t)
+	token := seedAppWithPromotedDeploy(t, store, "digestprecond", "sha256:current")
+
+	req := authedRequest(t, "PATCH", "/api/apps/digestprecond", []byte(`{"name":"new-name"}`), token)
+	req.Header.Set("X-Shinyhub-If-Content-Digest", "sha256:wrong")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 on content-digest mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Name must not have changed.
+	app, err := store.GetAppBySlug("digestprecond")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Name != "digestprecond" {
+		t.Fatalf("app name must remain unchanged after 409, got %q", app.Name)
+	}
+}

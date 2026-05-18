@@ -1,10 +1,13 @@
 package ui_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"io/fs"
 	"strings"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/db"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/rvben/shinyhub/internal/ui"
 )
@@ -538,6 +541,31 @@ func TestFrontendConsumesBrandingObject(t *testing.T) {
 		"router.js brandTitle fallback must use || 'ShinyHub' so zero-branding produces the default brand name")
 	assertContains(t, "router.js", "' · ' + brandTitle",
 		"router.js must compose document.title as current.title + ' · ' + brandTitle so page titles include the brand name")
+}
+
+// TestAppsPayloadExposesFleetFields guards the JSON contract for the two fleet
+// fields added to db.App. The apps grid / detail JS reads body.managed_by and
+// body.content_digest; if either field is renamed the build breaks here rather
+// than silently breaking the dashboard.
+//
+// managed_by is a non-omit *string so it always serializes (null when nil).
+// content_digest is omitempty so it only serializes when set; we assert via a
+// populated value.
+func TestAppsPayloadExposesFleetFields(t *testing.T) {
+	b, err := json.Marshal(db.App{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"managed_by"`)) {
+		t.Fatal(`db.App must always serialize "managed_by"`)
+	}
+	b2, err := json.Marshal(db.App{ContentDigest: "sha256:x"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(b2, []byte(`"content_digest"`)) {
+		t.Fatal(`db.App must serialize "content_digest" when set`)
+	}
 }
 
 func assertContains(t *testing.T, path, needle, contract string) {

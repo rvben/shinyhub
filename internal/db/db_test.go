@@ -1050,6 +1050,28 @@ func TestApp_DeploymentSummaryFields(t *testing.T) {
 	}
 }
 
+func TestSetDeploymentDigest(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "digest-owner", "developer")
+	app := mustCreateApp(t, store, "digest-app", owner.ID)
+
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/bundle")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:abc"); err != nil {
+		t.Fatalf("set digest: %v", err)
+	}
+	var got *string
+	row := store.DB().QueryRow(`SELECT content_digest FROM deployments WHERE id = ?`, dep.ID)
+	if err := row.Scan(&got); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got == nil || *got != "sha256:abc" {
+		t.Fatalf("content_digest = %v, want sha256:abc", got)
+	}
+}
+
 func TestUpsertSystemUser_CreatesThenUpdatesRole(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {
@@ -1129,5 +1151,71 @@ func TestUpsertSystemUser_SameRoleIsIdempotent(t *testing.T) {
 	}
 	if u2.ID != u1.ID || u2.Role != "developer" {
 		t.Errorf("idempotent upsert: got %+v, want same ID and role developer", u2)
+	}
+}
+
+func TestListAppsExposesDigestAndManagedBy(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "owner-digest", "developer")
+	app := mustCreateApp(t, store, "exposed", owner.ID)
+
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/b")
+	if err != nil {
+		t.Fatalf("begin deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:live"); err != nil {
+		t.Fatalf("set deployment digest: %v", err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatalf("promote deployment: %v", err)
+	}
+	if _, err := store.DB().Exec(
+		`UPDATE apps SET managed_by = ? WHERE id = ?`, "fleet:prod", app.ID); err != nil {
+		t.Fatalf("set managed_by: %v", err)
+	}
+
+	apps, err := store.ListApps(0, 0)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	var found *db.App
+	for i := range apps {
+		if apps[i].Slug == "exposed" {
+			found = apps[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("app not listed")
+	}
+	if found.ContentDigest != "sha256:live" {
+		t.Fatalf("ContentDigest = %q, want sha256:live", found.ContentDigest)
+	}
+	if found.ManagedBy == nil || *found.ManagedBy != "fleet:prod" {
+		t.Fatalf("ManagedBy = %v, want fleet:prod", found.ManagedBy)
+	}
+}
+
+func TestListAppsDigestNilUntilPromoted(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "owner-pending", "developer")
+	app := mustCreateApp(t, store, "pending-only", owner.ID)
+
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/b")
+	if err != nil {
+		t.Fatalf("begin deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:notlive"); err != nil {
+		t.Fatalf("set deployment digest: %v", err)
+	}
+	// pending, not promoted
+
+	apps, err := store.ListApps(0, 0)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	for _, a := range apps {
+		if a.Slug == "pending-only" && a.ContentDigest != "" {
+			t.Fatalf("pending deployment digest must not be exposed, got %q", a.ContentDigest)
+		}
 	}
 }

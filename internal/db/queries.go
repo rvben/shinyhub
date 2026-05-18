@@ -340,15 +340,25 @@ type App struct {
 	// CurrentVersion is the version string of the most-recent deployment,
 	// or empty if the app has never been deployed.
 	CurrentVersion string `json:"current_version,omitempty"`
+	// ManagedBy is the fleet ownership marker ("fleet:<id>") or nil when the
+	// app is not fleet-managed. Plain apps.managed_by column.
+	ManagedBy *string `json:"managed_by"`
+	// ContentDigest is the content digest of the app's newest *succeeded*
+	// deployment, or "" if it has never had one. Joined via
+	// deploymentSummarySQL; pending/failed deployments are never reflected.
+	ContentDigest string `json:"content_digest,omitempty"`
 }
 
 // deploymentSummarySQL is the SELECT fragment that adds last_deployed_at and
-// current_version to any apps query. Kept as a constant so all six App
+// current_version to any apps query. Kept as a constant so all seven App
 // queries (ListApps, ListAppsVisibleToUser, ListPublicApps, ListRunningApps,
-// GetAppBySlug, GetAppByID) stay in sync.
+// ListDeletingApps, GetAppBySlug, GetAppByID) stay in sync.
 const deploymentSummarySQL = `
 		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id) AS last_deployed_at,
-		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version`
+		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
+		(SELECT content_digest FROM deployments
+		   WHERE app_id = apps.id AND status = 'succeeded'
+		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest`
 
 type CreateAppParams struct {
 	Slug        string
@@ -389,7 +399,8 @@ func (s *Store) GetAppBySlug(slug string) (*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,`+deploymentSummarySQL+`
+		       created_at, updated_at,
+		       managed_by,`+deploymentSummarySQL+`
 		FROM apps WHERE slug = ?`, slug)
 	return scanApp(row)
 }
@@ -405,7 +416,8 @@ func (s *Store) GetAppByID(id int64) (*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,`+deploymentSummarySQL+`
+		       created_at, updated_at,
+		       managed_by,`+deploymentSummarySQL+`
 		FROM apps WHERE id = ?`, id)
 	return scanApp(row)
 }
@@ -419,7 +431,8 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,`+deploymentSummarySQL+`
+		       created_at, updated_at,
+		       managed_by,`+deploymentSummarySQL+`
 		FROM apps ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -445,7 +458,8 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,`+deploymentSummarySQL+`
+		       created_at, updated_at,
+		       managed_by,`+deploymentSummarySQL+`
 		FROM apps WHERE status = 'running'`)
 	if err != nil {
 		return nil, err
@@ -472,7 +486,8 @@ func (s *Store) ListDeletingApps() ([]*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,`+deploymentSummarySQL+`
+		       created_at, updated_at,
+		       managed_by,`+deploymentSummarySQL+`
 		FROM apps WHERE status = 'deleting'`)
 	if err != nil {
 		return nil, err
@@ -517,7 +532,8 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,`+deploymentSummarySQL+`
+		       created_at, updated_at,
+		       managed_by,`+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		   OR access = 'shared'
@@ -556,7 +572,8 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,`+deploymentSummarySQL+`
+		       created_at, updated_at,
+		       managed_by,`+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		ORDER BY created_at DESC
@@ -729,6 +746,21 @@ func (s *Store) FailDeployment(id int64) error {
 		DeploymentFailed, id, DeploymentPending)
 	if err != nil {
 		return fmt.Errorf("fail deployment %d: %w", id, err)
+	}
+	return nil
+}
+
+// SetDeploymentDigest records the content digest on a deployment row. Called
+// after BeginDeployment and before PromoteDeployment so the digest travels
+// with the pending row and only becomes authoritative on promotion.
+func (s *Store) SetDeploymentDigest(id int64, digest string) error {
+	res, err := s.db.Exec(
+		`UPDATE deployments SET content_digest = ? WHERE id = ?`, digest, id)
+	if err != nil {
+		return fmt.Errorf("set deployment digest %d: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("set deployment digest %d: row not found", id)
 	}
 	return nil
 }
@@ -988,6 +1020,23 @@ func (s *Store) SetAppAccess(slug, access string) error {
 	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("set app access rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAppManagedBy sets or clears (nil) the fleet ownership marker.
+func (s *Store) SetAppManagedBy(slug string, managedBy *string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET managed_by = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, managedBy, slug)
+	if err != nil {
+		return fmt.Errorf("set app managed_by: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app managed_by rows: %w", err)
 	}
 	if n == 0 {
 		return ErrNotFound
@@ -1692,7 +1741,7 @@ type scanner interface {
 
 func scanApp(s scanner) (*App, error) {
 	var a App
-	var projectSlug, currentVersion sql.NullString
+	var projectSlug, currentVersion, contentDigest sql.NullString
 	// last_deployed_at is the result of MAX(deployments.created_at). SQLite
 	// aggregates lose the original column type, so the driver returns the
 	// value as a string. We parse it manually below.
@@ -1702,7 +1751,8 @@ func scanApp(s scanner) (*App, error) {
 		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
-		&lastDeployedAtRaw, &currentVersion,
+		&a.ManagedBy,
+		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1720,6 +1770,9 @@ func scanApp(s scanner) (*App, error) {
 	}
 	if currentVersion.Valid {
 		a.CurrentVersion = currentVersion.String
+	}
+	if contentDigest.Valid {
+		a.ContentDigest = contentDigest.String
 	}
 	return &a, nil
 }

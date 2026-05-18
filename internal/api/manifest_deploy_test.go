@@ -549,6 +549,44 @@ func samePIDSet(a, b []int) bool {
 	return true
 }
 
+// TestDeployRecordsContentDigest verifies that a successful deploy stores a
+// non-empty content_digest on the promoted deployment row.
+func TestDeployRecordsContentDigest(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "digest-e2e", Name: "Digest E2E", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py": "print(1)\n",
+	})
+	req := httptest.NewRequest("POST", "/api/apps/digest-e2e/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var digest *string
+	row := store.DB().QueryRow(`
+		SELECT content_digest FROM deployments
+		WHERE app_id = (SELECT id FROM apps WHERE slug = ?)
+		  AND status = 'succeeded'
+		ORDER BY id DESC LIMIT 1`, "digest-e2e")
+	if err := row.Scan(&digest); err != nil {
+		t.Fatalf("scan digest: %v", err)
+	}
+	if digest == nil || *digest == "" {
+		t.Fatal("promoted deployment must carry a content_digest")
+	}
+}
+
 // TestDeploy_ManifestUnknownAppFieldFails400 verifies that a shinyhub.toml
 // containing an unknown [app] key (strict-mode TOML) is rejected with 400.
 func TestDeploy_ManifestUnknownAppFieldFails400(t *testing.T) {
