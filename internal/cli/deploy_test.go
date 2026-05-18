@@ -112,15 +112,7 @@ func TestDeploy_DerivedSlugInvalid_FailsLocally(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	prevSlug, prevGit := deployFlags.slug, deployFlags.git
-	deployFlags.slug = ""
-	deployFlags.git = ""
-	t.Cleanup(func() {
-		deployFlags.slug = prevSlug
-		deployFlags.git = prevGit
-	})
-
-	err := runDeploy(deployCmd, []string{badDir})
+	err := runDeploy(&cobra.Command{}, []string{badDir}, &deployFlags{})
 	if err == nil {
 		t.Fatal("expected error from invalid derived slug, got nil — runDeploy should reject before any network call")
 	}
@@ -241,17 +233,9 @@ func TestEnsureApp_SurfacesServerErrorBody(t *testing.T) {
 // current working directory.
 func TestDeploy_RequiresExplicitDirArgument(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
-	// Reset deploy flags so a previous --git or --slug doesn't leak in.
-	deployFlags.git = ""
-	deployFlags.slug = ""
-	deployFlags.wait = false
-	deployFlags.branch = ""
-	deployFlags.subdir = ""
 
-	rootForTest := &cobra.Command{Use: "root"}
-	rootForTest.AddCommand(deployCmd)
-	rootForTest.SetArgs([]string{"deploy"})
-	err := rootForTest.Execute()
+	// A fresh command tree means no --git/--slug can leak in from a prior test.
+	_, err := execCLI(t, "deploy")
 	if err == nil {
 		t.Fatal("expected error when no directory argument is given, got nil")
 	}

@@ -62,9 +62,8 @@ func bootDeployTokenServer(t *testing.T, rawToken string) string {
 // test server, through the exact wiring the shipped binary uses. It points
 // the CLI at the test server via env (SHINYHUB_HOST/SHINYHUB_TOKEN drive
 // loadConfig; SHINYHUB_CONFIG points at a nonexistent path so the env-only
-// credential path is exercised), resets the singleton --json flag, then
-// delegates dispatch to execCLI. args are the `apps` sub-arguments (e.g.
-// "list"); the "apps" prefix is added here.
+// credential path is exercised), then delegates dispatch to execCLI. args are
+// the `apps` sub-arguments (e.g. "list"); the "apps" prefix is added here.
 func runApps(t *testing.T, host, token string, args ...string) (string, error) {
 	t.Helper()
 
@@ -72,10 +71,8 @@ func runApps(t *testing.T, host, token string, args ...string) (string, error) {
 	t.Setenv("SHINYHUB_TOKEN", token)
 	t.Setenv("SHINYHUB_CONFIG", filepath.Join(t.TempDir(), "nonexistent.json"))
 	configPathOverride = ""
-	appsListFlags.jsonOutput = false
 	t.Cleanup(func() {
 		configPathOverride = ""
-		appsListFlags.jsonOutput = false
 	})
 
 	return execCLI(t, append([]string{"apps"}, args...)...)

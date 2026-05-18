@@ -21,9 +21,6 @@ func newDataCmd() *cobra.Command {
 	return cmd
 }
 
-// dataCmd is the package-level command registered with the root command.
-var dataCmd = newDataCmd()
-
 func newDataPushCmd() *cobra.Command {
 	var flags struct {
 		dest    string

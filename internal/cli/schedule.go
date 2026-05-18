@@ -13,9 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// scheduleCmd is the package-level command registered with the root command.
-var scheduleCmd = newScheduleCmd()
-
 // newScheduleCmd builds a fresh schedule command tree each time it is called.
 func newScheduleCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "schedule", Short: "Manage scheduled jobs for an app"}

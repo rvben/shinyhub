@@ -49,7 +49,17 @@ var configPathOverride string
 func AddCommandsTo(root *cobra.Command) {
 	root.PersistentFlags().StringVar(&configPathOverride, "config", "",
 		"Path to credentials file (overrides $SHINYHUB_CONFIG and the default)")
-	root.AddCommand(loginCmd, logoutCmd, deployCmd, appsCmd, tokensCmd, envCmd, dataCmd, scheduleCmd, shareCmd)
+	root.AddCommand(
+		newLoginCmd(),
+		newLogoutCmd(),
+		newDeployCmd(),
+		newAppsCmd(),
+		newTokensCmd(),
+		newEnvCmd(),
+		newDataCmd(),
+		newScheduleCmd(),
+		newShareCmd(),
+	)
 	silenceUsageOnError(root)
 }
 

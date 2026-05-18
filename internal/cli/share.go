@@ -10,9 +10,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// shareCmd is the package-level command registered with the root command.
-var shareCmd = newShareCmd()
-
 // newShareCmd builds a fresh share command tree each time it is called.
 func newShareCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "share", Short: "Manage shared-data mounts between apps"}

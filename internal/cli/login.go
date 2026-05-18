@@ -15,29 +15,36 @@ import (
 	"golang.org/x/term"
 )
 
-var loginCmd = &cobra.Command{
-	Use:   "login",
-	Short: "Authenticate with a ShinyHub server",
-	RunE:  runLogin,
-}
-
-var loginFlags struct {
+// loginFlags holds the parsed flags for a single `login` invocation. It is
+// constructed fresh per command instance (no package-level state) so repeated
+// or shuffled test runs cannot leak flag values between each other.
+type loginFlags struct {
 	host     string
 	token    string
 	username string
 	password string
 }
 
-func init() {
-	loginCmd.Flags().StringVar(&loginFlags.host, "host", "", "ShinyHub server URL (e.g. https://shiny.example.com)")
-	loginCmd.Flags().StringVar(&loginFlags.token, "token", "", "API token (skips username/password)")
-	loginCmd.Flags().StringVar(&loginFlags.username, "username", "", "Username")
-	loginCmd.Flags().StringVar(&loginFlags.password, "password", "", "Password")
-	loginCmd.MarkFlagRequired("host")
+// newLoginCmd builds a fresh login command each time it is called, with its
+// flags bound to a per-instance loginFlags value.
+func newLoginCmd() *cobra.Command {
+	f := &loginFlags{}
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "Authenticate with a ShinyHub server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runLogin(cmd, f)
+		},
+	}
+	cmd.Flags().StringVar(&f.host, "host", "", "ShinyHub server URL (e.g. https://shiny.example.com)")
+	cmd.Flags().StringVar(&f.token, "token", "", "API token (skips username/password)")
+	cmd.Flags().StringVar(&f.username, "username", "", "Username")
+	cmd.Flags().StringVar(&f.password, "password", "", "Password")
+	_ = cmd.MarkFlagRequired("host")
+	return cmd
 }
 
-func runLogin(cmd *cobra.Command, args []string) error {
-	f := loginFlags
+func runLogin(cmd *cobra.Command, f *loginFlags) error {
 	if f.token != "" {
 		// Verify the token is accepted by the server before persisting it.
 		if err := verifyToken(f.host, f.token); err != nil {

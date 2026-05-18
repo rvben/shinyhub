@@ -2,17 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"testing"
 
 	"github.com/spf13/cobra"
 )
 
-// forceWriters points cmd and every descendant at w. The cli package's cobra
-// commands are package-level singletons shared by every test in the package;
-// sibling tests call SetOut on individual leaves, so a parent SetOut does not
-// reliably propagate (a child with its own non-nil writer ignores the parent).
-// Forcing the writer onto the whole subtree makes captured output
-// deterministic regardless of test execution order.
+// forceWriters points cmd and every descendant at w so captured output is
+// deterministic. AddCommandsTo now builds a fresh command tree per call with
+// no shared writers, so this is belt-and-suspenders: it also defeats any
+// per-leaf SetOut a test performs on a command it constructed itself.
 func forceWriters(cmd *cobra.Command, w *bytes.Buffer) {
 	cmd.SetOut(w)
 	cmd.SetErr(w)
@@ -26,22 +25,27 @@ func forceWriters(cmd *cobra.Command, w *bytes.Buffer) {
 // exact wiring the shipped binary uses: a fresh root with AddCommandsTo, then
 // root.Execute. It returns the combined stdout+stderr the commands produced.
 //
-// This is the order-independent replacement for the fragile
-// `xCmd.SetArgs(...); xCmd.Execute()` idiom. The cli package's cobra commands
-// are package singletons: AddCommandsTo re-parents them, and cobra's
-// Execute on a parented command reroutes to c.Root() using the root's args
-// (command.go:1090), so calling appsCmd.Execute() after any prior
-// AddCommandsTo runs the wrong (stale) root. A fresh root per call gives
-// correct dispatch; forceWriters defeats per-leaf writer contamination from
-// sibling tests. Flag-state resets (Changed markers, --json, --tail, …) remain
-// the caller's responsibility via the existing resetXFlags helpers, since the
-// flag vars live on the singletons.
+// AddCommandsTo constructs every command (and its flags) fresh per call, so
+// flag values and cobra Changed markers cannot leak between tests regardless
+// of execution order — no resetXFlags bookkeeping is required.
 func execCLI(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	return execCLIStdin(t, nil, args...)
+}
+
+// execCLIStdin is execCLI with an explicit stdin reader, for commands that
+// read from cmd.InOrStdin() (e.g. the `apps delete` confirmation prompt).
+// cobra propagates the root's In to every subcommand via InOrStdin, so setting
+// it on the fresh root reaches the leaf without touching a package singleton.
+func execCLIStdin(t *testing.T, stdin io.Reader, args ...string) (string, error) {
 	t.Helper()
 	root := &cobra.Command{Use: "shinyhub", SilenceErrors: true}
 	AddCommandsTo(root)
 	var buf bytes.Buffer
 	forceWriters(root, &buf)
+	if stdin != nil {
+		root.SetIn(stdin)
+	}
 	root.SetArgs(args)
 	err := root.Execute()
 	return buf.String(), err

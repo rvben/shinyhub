@@ -212,6 +212,3 @@ func newEnvCmd() *cobra.Command {
 	envCmd.AddCommand(envSetCmd, envLsCmd, envRmCmd, newEnvApplyCmd())
 	return envCmd
 }
-
-// envCmd is the package-level command registered with the root command.
-var envCmd = newEnvCmd()

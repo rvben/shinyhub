@@ -13,29 +13,55 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var appsCmd = &cobra.Command{Use: "apps", Short: "Manage apps"}
-var tokensCmd = &cobra.Command{Use: "tokens", Short: "Manage API tokens"}
-
-func init() {
-	appsCmd.AddCommand(appsListCmd, appsShowCmd, appsLogsCmd, appsRollbackCmd, appsRestartCmd, appsStartCmd, appsSetCmd, appsAccessCmd, appsDeleteCmd, appsStopCmd, appsDeploymentsCmd)
-	tokensCmd.AddCommand(tokensCreateCmd, tokensListCmd, tokensRevokeCmd)
+// newAppsCmd builds a fresh `apps` command tree each time it is called. Every
+// subcommand binds its flags to a per-instance struct (no package-level flag
+// state) so repeated or shuffled test runs cannot leak flag values or cobra
+// Changed markers between each other.
+func newAppsCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "apps", Short: "Manage apps"}
+	cmd.AddCommand(
+		newAppsListCmd(),
+		newAppsShowCmd(),
+		newAppsLogsCmd(),
+		newAppsRollbackCmd(),
+		newAppsRestartCmd(),
+		newAppsStartCmd(),
+		newAppsSetCmd(),
+		newAppsAccessCmd(),
+		newAppsDeleteCmd(),
+		newAppsStopCmd(),
+		newAppsDeploymentsCmd(),
+	)
+	return cmd
 }
 
-var appsListFlags struct {
+// newTokensCmd builds a fresh `tokens` command tree each time it is called.
+func newTokensCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "tokens", Short: "Manage API tokens"}
+	cmd.AddCommand(newTokensCreateCmd(), newTokensListCmd(), newTokensRevokeCmd())
+	return cmd
+}
+
+// ── apps list ───────────────────────────────────────────────────────────────
+
+type appsListFlags struct {
 	jsonOutput bool
 }
 
-var appsListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all apps",
-	RunE:  runAppsList,
+func newAppsListCmd() *cobra.Command {
+	f := &appsListFlags{}
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all apps",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsList(cmd, args, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	return cmd
 }
 
-func init() {
-	appsListCmd.Flags().BoolVar(&appsListFlags.jsonOutput, "json", false, "Output as JSON")
-}
-
-func runAppsList(cmd *cobra.Command, args []string) error {
+func runAppsList(cmd *cobra.Command, args []string, f *appsListFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -55,7 +81,7 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
 	}
 
-	if appsListFlags.jsonOutput {
+	if f.jsonOutput {
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
 	}
@@ -79,22 +105,25 @@ func runAppsList(cmd *cobra.Command, args []string) error {
 
 // ── apps show ───────────────────────────────────────────────────────────────
 
-var appsShowFlags struct {
+type appsShowFlags struct {
 	jsonOutput bool
 }
 
-var appsShowCmd = &cobra.Command{
-	Use:   "show <slug>",
-	Short: "Show detailed information about an app",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppsShow,
+func newAppsShowCmd() *cobra.Command {
+	f := &appsShowFlags{}
+	cmd := &cobra.Command{
+		Use:   "show <slug>",
+		Short: "Show detailed information about an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsShow(cmd, args, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	return cmd
 }
 
-func init() {
-	appsShowCmd.Flags().BoolVar(&appsShowFlags.jsonOutput, "json", false, "Output as JSON")
-}
-
-func runAppsShow(cmd *cobra.Command, args []string) error {
+func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -115,27 +144,27 @@ func runAppsShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
 	}
 
-	if appsShowFlags.jsonOutput {
+	if f.jsonOutput {
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
 	}
 
 	var resp2 struct {
 		App struct {
-			Slug                    string  `json:"slug"`
-			Name                    string  `json:"name"`
-			OwnerID                 int64   `json:"owner_id"`
-			Access                  string  `json:"access"`
-			Status                  string  `json:"status"`
-			Replicas                int     `json:"replicas"`
-			MaxSessionsPerReplica   int     `json:"max_sessions_per_replica"`
-			DeployCount             int     `json:"deploy_count"`
-			HibernateTimeoutMinutes *int    `json:"hibernate_timeout_minutes"`
-			MemoryLimitMB           *int    `json:"memory_limit_mb"`
-			CPUQuotaPercent         *int    `json:"cpu_quota_percent"`
-			ProjectSlug             string  `json:"project_slug,omitempty"`
-			CreatedAt               string  `json:"created_at"`
-			UpdatedAt               string  `json:"updated_at"`
+			Slug                  string `json:"slug"`
+			Name                  string `json:"name"`
+			OwnerID               int64  `json:"owner_id"`
+			Access                string `json:"access"`
+			Status                string `json:"status"`
+			Replicas              int    `json:"replicas"`
+			MaxSessionsPerReplica int    `json:"max_sessions_per_replica"`
+			DeployCount           int    `json:"deploy_count"`
+			HibernateTimeoutMinutes *int   `json:"hibernate_timeout_minutes"`
+			MemoryLimitMB           *int   `json:"memory_limit_mb"`
+			CPUQuotaPercent         *int   `json:"cpu_quota_percent"`
+			ProjectSlug             string `json:"project_slug,omitempty"`
+			CreatedAt               string `json:"created_at"`
+			UpdatedAt               string `json:"updated_at"`
 		} `json:"app"`
 		ReplicasStatus []struct {
 			Index  int    `json:"index"`
@@ -192,36 +221,41 @@ func runAppsShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-var appsLogsFlags struct {
+// ── apps logs ───────────────────────────────────────────────────────────────
+
+type appsLogsFlags struct {
 	tail     int
 	noFollow bool
 	replica  int
 }
 
-var appsLogsCmd = &cobra.Command{
-	Use:   "logs <slug>",
-	Short: "Stream or fetch logs for an app",
-	Long: "Stream or fetch logs for an app.\n" +
-		"\n" +
-		"By default this opens a Server-Sent Events stream that emits the last 200\n" +
-		"lines then follows new output until interrupted. Pass --no-follow to get a\n" +
-		"one-shot plain-text response (kubectl/docker-style) that prints the tail and\n" +
-		"exits — suitable for CI and grep pipelines.",
-	Args: cobra.ExactArgs(1),
-	RunE: runAppsLogs,
-}
-
-func init() {
-	appsLogsCmd.Flags().IntVar(&appsLogsFlags.tail, "tail", 200,
+func newAppsLogsCmd() *cobra.Command {
+	f := &appsLogsFlags{}
+	cmd := &cobra.Command{
+		Use:   "logs <slug>",
+		Short: "Stream or fetch logs for an app",
+		Long: "Stream or fetch logs for an app.\n" +
+			"\n" +
+			"By default this opens a Server-Sent Events stream that emits the last 200\n" +
+			"lines then follows new output until interrupted. Pass --no-follow to get a\n" +
+			"one-shot plain-text response (kubectl/docker-style) that prints the tail and\n" +
+			"exits - suitable for CI and grep pipelines.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsLogs(cmd, args, f)
+		},
+	}
+	cmd.Flags().IntVar(&f.tail, "tail", 200,
 		"Number of initial lines to emit (1..10000)")
-	appsLogsCmd.Flags().BoolVar(&appsLogsFlags.noFollow, "no-follow", false,
+	cmd.Flags().BoolVar(&f.noFollow, "no-follow", false,
 		"Print the tail and exit instead of streaming new output")
-	appsLogsCmd.Flags().IntVar(&appsLogsFlags.replica, "replica", 0,
+	cmd.Flags().IntVar(&f.replica, "replica", 0,
 		"Replica index (default 0)")
+	return cmd
 }
 
-func runAppsLogs(cmd *cobra.Command, args []string) error {
-	if appsLogsFlags.tail <= 0 || appsLogsFlags.tail > 10000 {
+func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
+	if f.tail <= 0 || f.tail > 10000 {
 		return fmt.Errorf("--tail must be between 1 and 10000")
 	}
 
@@ -231,8 +265,8 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	url := fmt.Sprintf("%s/api/apps/%s/logs?tail=%d&replica=%d",
-		cfg.Host, args[0], appsLogsFlags.tail, appsLogsFlags.replica)
-	if appsLogsFlags.noFollow {
+		cfg.Host, args[0], f.tail, f.replica)
+	if f.noFollow {
 		url += "&follow=false"
 	}
 
@@ -247,7 +281,7 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 	// the default client (no timeout) since SSE connections are long-lived
 	// by design.
 	client := http.DefaultClient
-	if appsLogsFlags.noFollow {
+	if f.noFollow {
 		req.Header.Set("Accept", "text/plain")
 		client = httpClient
 	} else {
@@ -265,7 +299,7 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	w := cmd.OutOrStdout()
-	if appsLogsFlags.noFollow {
+	if f.noFollow {
 		_, err := io.Copy(w, resp.Body)
 		return err
 	}
@@ -276,23 +310,28 @@ func runAppsLogs(cmd *cobra.Command, args []string) error {
 	return scanner.Err()
 }
 
-var rollbackFlags struct {
+// ── apps rollback ───────────────────────────────────────────────────────────
+
+type rollbackFlags struct {
 	deploymentID int64
 }
 
-var appsRollbackCmd = &cobra.Command{
-	Use:   "rollback <slug>",
-	Short: "Roll back an app to the previous or a specific historical deployment",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppsRollback,
-}
-
-func init() {
-	appsRollbackCmd.Flags().Int64Var(&rollbackFlags.deploymentID, "to", 0,
+func newAppsRollbackCmd() *cobra.Command {
+	f := &rollbackFlags{}
+	cmd := &cobra.Command{
+		Use:   "rollback <slug>",
+		Short: "Roll back an app to the previous or a specific historical deployment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsRollback(cmd, args, f)
+		},
+	}
+	cmd.Flags().Int64Var(&f.deploymentID, "to", 0,
 		"Deployment ID to roll back to (default: previous deployment)")
+	return cmd
 }
 
-func runAppsRollback(cmd *cobra.Command, args []string) error {
+func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -301,7 +340,7 @@ func runAppsRollback(cmd *cobra.Command, args []string) error {
 
 	var bodyReader io.Reader
 	if cmd.Flags().Changed("to") {
-		body, err := json.Marshal(map[string]any{"deployment_id": rollbackFlags.deploymentID})
+		body, err := json.Marshal(map[string]any{"deployment_id": f.deploymentID})
 		if err != nil {
 			return err
 		}
@@ -326,28 +365,34 @@ func runAppsRollback(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("rollback failed: %s", strings.TrimSpace(string(out)))
 	}
 	if cmd.Flags().Changed("to") {
-		fmt.Printf("%s: rolled back to deployment %d\n", slug, rollbackFlags.deploymentID)
+		fmt.Printf("%s: rolled back to deployment %d\n", slug, f.deploymentID)
 	} else {
 		fmt.Printf("%s: rolled back to previous deployment\n", slug)
 	}
 	return nil
 }
 
-var appsRestartCmd = &cobra.Command{
-	Use:   "restart <slug>",
-	Short: "Restart a running app",
-	Args:  cobra.ExactArgs(1),
-	RunE:  rollbackOrRestart("restart", "POST"),
+// ── apps restart / start ────────────────────────────────────────────────────
+
+func newAppsRestartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart <slug>",
+		Short: "Restart a running app",
+		Args:  cobra.ExactArgs(1),
+		RunE:  rollbackOrRestart("restart", "POST"),
+	}
 }
 
-// appsStartCmd is a friendlier alias for `apps restart`. The server's restart
-// endpoint redeploys the current bundle whether the app is running or
+// newAppsStartCmd is a friendlier alias for `apps restart`. The server's
+// restart endpoint redeploys the current bundle whether the app is running or
 // stopped, so it is also the right verb for "bring this stopped app back up".
-var appsStartCmd = &cobra.Command{
-	Use:   "start <slug>",
-	Short: "Start a stopped app (alias for `restart`)",
-	Args:  cobra.ExactArgs(1),
-	RunE:  callRestartAs("started"),
+func newAppsStartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "start <slug>",
+		Short: "Start a stopped app (alias for `restart`)",
+		Args:  cobra.ExactArgs(1),
+		RunE:  callRestartAs("started"),
+	}
 }
 
 // callRestartAs hits POST /api/apps/{slug}/restart but reports the action
@@ -379,19 +424,6 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 	}
 }
 
-var appsSetFlags struct {
-	hibernateTimeout      int
-	replicas              int
-	maxSessionsPerReplica int
-}
-
-var appsSetCmd = &cobra.Command{
-	Use:   "set <slug>",
-	Short: "Update app settings",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppsSet,
-}
-
 func rollbackOrRestart(action, method string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -418,36 +450,54 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 	}
 }
 
-func init() {
-	appsSetCmd.Flags().IntVar(&appsSetFlags.hibernateTimeout, "hibernate-timeout", 0,
-		"Idle timeout minutes before hibernation (-1 = reset to global default, 0 = disable, N = N minutes)")
-	appsSetCmd.Flags().IntVar(&appsSetFlags.replicas, "replicas", 0,
-		"Number of replica processes serving this app (>= 1)")
-	appsSetCmd.Flags().IntVar(&appsSetFlags.maxSessionsPerReplica, "max-sessions-per-replica", -1,
-		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
+// ── apps set ────────────────────────────────────────────────────────────────
+
+type appsSetFlags struct {
+	hibernateTimeout      int
+	replicas              int
+	maxSessionsPerReplica int
 }
 
-func runAppsSet(cmd *cobra.Command, args []string) error {
+func newAppsSetCmd() *cobra.Command {
+	f := &appsSetFlags{}
+	cmd := &cobra.Command{
+		Use:   "set <slug>",
+		Short: "Update app settings",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsSet(cmd, args, f)
+		},
+	}
+	cmd.Flags().IntVar(&f.hibernateTimeout, "hibernate-timeout", 0,
+		"Idle timeout minutes before hibernation (-1 = reset to global default, 0 = disable, N = N minutes)")
+	cmd.Flags().IntVar(&f.replicas, "replicas", 0,
+		"Number of replica processes serving this app (>= 1)")
+	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", -1,
+		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
+	return cmd
+}
+
+func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	hibernateChanged := cmd.Flags().Changed("hibernate-timeout")
 	replicasChanged := cmd.Flags().Changed("replicas")
 	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
 
 	// -1 is the flag's default sentinel; if the user explicitly passes -1 it
 	// means "I didn't really mean to set this", so treat it as not provided.
-	if capChanged && appsSetFlags.maxSessionsPerReplica == -1 {
+	if capChanged && f.maxSessionsPerReplica == -1 {
 		capChanged = false
 	}
 
 	if !hibernateChanged && !replicasChanged && !capChanged {
 		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --max-sessions-per-replica)")
 	}
-	if replicasChanged && appsSetFlags.replicas < 1 {
+	if replicasChanged && f.replicas < 1 {
 		return fmt.Errorf("--replicas must be >= 1")
 	}
-	if capChanged && (appsSetFlags.maxSessionsPerReplica < 0 || appsSetFlags.maxSessionsPerReplica > 1000) {
+	if capChanged && (f.maxSessionsPerReplica < 0 || f.maxSessionsPerReplica > 1000) {
 		return fmt.Errorf("--max-sessions-per-replica must be between 0 and 1000")
 	}
-	if hibernateChanged && appsSetFlags.hibernateTimeout < -1 {
+	if hibernateChanged && f.hibernateTimeout < -1 {
 		return fmt.Errorf("--hibernate-timeout must be -1 (reset to global default), 0 (disable), or a positive number of minutes")
 	}
 
@@ -462,17 +512,17 @@ func runAppsSet(cmd *cobra.Command, args []string) error {
 	if hibernateChanged {
 		// -1 → send null (reset to global default); 0+ → send the value.
 		var minutes *int
-		if appsSetFlags.hibernateTimeout >= 0 {
-			m := appsSetFlags.hibernateTimeout
+		if f.hibernateTimeout >= 0 {
+			m := f.hibernateTimeout
 			minutes = &m
 		}
 		payload["hibernate_timeout_minutes"] = minutes
 	}
 	if replicasChanged {
-		payload["replicas"] = appsSetFlags.replicas
+		payload["replicas"] = f.replicas
 	}
 	if capChanged {
-		payload["max_sessions_per_replica"] = appsSetFlags.maxSessionsPerReplica
+		payload["max_sessions_per_replica"] = f.maxSessionsPerReplica
 	}
 
 	body, err := json.Marshal(payload)
@@ -508,28 +558,36 @@ func runAppsSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if replicasChanged {
-		fmt.Printf("%s: replicas set to %d\n", slug, appsSetFlags.replicas)
+		fmt.Printf("%s: replicas set to %d\n", slug, f.replicas)
 	}
 	if capChanged {
-		if appsSetFlags.maxSessionsPerReplica == 0 {
+		if f.maxSessionsPerReplica == 0 {
 			fmt.Printf("%s: max-sessions-per-replica reset to runtime default\n", slug)
 		} else {
-			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, appsSetFlags.maxSessionsPerReplica)
+			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, f.maxSessionsPerReplica)
 		}
 	}
 	return nil
 }
 
-var appsAccessCmd = &cobra.Command{
-	Use:   "access",
-	Short: "Manage app access control",
+// ── apps access ─────────────────────────────────────────────────────────────
+
+func newAppsAccessCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "access",
+		Short: "Manage app access control",
+	}
+	cmd.AddCommand(newAppsAccessSetCmd())
+	return cmd
 }
 
-var appsAccessSetCmd = &cobra.Command{
-	Use:   "set <slug> <public|private|shared>",
-	Short: "Set access level for an app",
-	Args:  cobra.ExactArgs(2),
-	RunE:  runAppsAccessSet,
+func newAppsAccessSetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set <slug> <public|private|shared>",
+		Short: "Set access level for an app",
+		Args:  cobra.ExactArgs(2),
+		RunE:  runAppsAccessSet,
+	}
 }
 
 func runAppsAccessSet(cmd *cobra.Command, args []string) error {
@@ -561,26 +619,26 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func init() {
-	appsAccessCmd.AddCommand(appsAccessSetCmd)
-}
+// ── tokens create ───────────────────────────────────────────────────────────
 
-var tokenName string
-
-var tokensCreateFlags struct {
+type tokensCreateFlags struct {
+	name   string
 	format string
 }
 
-var tokensCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create a new API token",
-	RunE:  runTokensCreate,
-}
-
-func init() {
-	tokensCreateCmd.Flags().StringVar(&tokenName, "name", "", "Name for the token (required)")
-	tokensCreateCmd.MarkFlagRequired("name")
-	tokensCreateCmd.Flags().StringVar(&tokensCreateFlags.format, "format", "text", "Output format: text or json")
+func newTokensCreateCmd() *cobra.Command {
+	f := &tokensCreateFlags{}
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new API token",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runTokensCreate(cmd, args, f)
+		},
+	}
+	cmd.Flags().StringVar(&f.name, "name", "", "Name for the token (required)")
+	_ = cmd.MarkFlagRequired("name")
+	cmd.Flags().StringVar(&f.format, "format", "text", "Output format: text or json")
+	return cmd
 }
 
 // tokenCreateResult holds the fields returned by the server on token creation.
@@ -591,19 +649,19 @@ type tokenCreateResult struct {
 	CreatedAt string `json:"created_at"`
 }
 
-func runTokensCreate(cmd *cobra.Command, args []string) error {
-	switch tokensCreateFlags.format {
+func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) error {
+	switch f.format {
 	case "text", "json":
 		// valid
 	default:
-		return fmt.Errorf("--format must be %q or %q, got %q", "text", "json", tokensCreateFlags.format)
+		return fmt.Errorf("--format must be %q or %q, got %q", "text", "json", f.format)
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]string{"name": tokenName})
+	body, err := json.Marshal(map[string]string{"name": f.name})
 	if err != nil {
 		return err
 	}
@@ -625,7 +683,7 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
-	if tokensCreateFlags.format == "json" {
+	if f.format == "json" {
 		out, err := json.Marshal(result)
 		if err != nil {
 			return err
@@ -634,32 +692,35 @@ func runTokensCreate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "API token: %s\n", result.Token)
-	fmt.Fprintln(cmd.OutOrStdout(), "Store this — it will not be shown again.")
+	fmt.Fprintln(cmd.OutOrStdout(), "Store this - it will not be shown again.")
 	_ = os.Stdout.Sync()
 	return nil
 }
 
 // ── apps delete ─────────────────────────────────────────────────────────────
 
-var appsDeleteFlags struct {
+type appsDeleteFlags struct {
 	yes bool
 }
 
-var appsDeleteCmd = &cobra.Command{
-	Use:   "delete <slug>",
-	Short: "Permanently delete an app and all its data",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppsDelete,
+func newAppsDeleteCmd() *cobra.Command {
+	f := &appsDeleteFlags{}
+	cmd := &cobra.Command{
+		Use:   "delete <slug>",
+		Short: "Permanently delete an app and all its data",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsDelete(cmd, args, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.yes, "yes", false, "Skip confirmation prompt")
+	return cmd
 }
 
-func init() {
-	appsDeleteCmd.Flags().BoolVar(&appsDeleteFlags.yes, "yes", false, "Skip confirmation prompt")
-}
-
-func runAppsDelete(cmd *cobra.Command, args []string) error {
+func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error {
 	slug := args[0]
 
-	if !appsDeleteFlags.yes {
+	if !f.yes {
 		// Without --yes the destructive `apps delete` flow REQUIRES a
 		// confirmation. When stdin isn't a tty (CI, cron, `< /dev/null`,
 		// piped scripts) the previous code blocked forever on the read or
@@ -676,7 +737,7 @@ func runAppsDelete(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("read confirmation: %w", err)
 		}
 		if confirm != slug {
-			return fmt.Errorf("confirmation did not match slug %q — aborted", slug)
+			return fmt.Errorf("confirmation did not match slug %q - aborted", slug)
 		}
 	}
 
@@ -705,11 +766,13 @@ func runAppsDelete(cmd *cobra.Command, args []string) error {
 
 // ── apps stop ───────────────────────────────────────────────────────────────
 
-var appsStopCmd = &cobra.Command{
-	Use:   "stop <slug>",
-	Short: "Stop a running app",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppsStop,
+func newAppsStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop <slug>",
+		Short: "Stop a running app",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runAppsStop,
+	}
 }
 
 func runAppsStop(cmd *cobra.Command, args []string) error {
@@ -738,22 +801,25 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 
 // ── apps deployments ────────────────────────────────────────────────────────
 
-var appsDeploymentsFlags struct {
+type appsDeploymentsFlags struct {
 	jsonOutput bool
 }
 
-var appsDeploymentsCmd = &cobra.Command{
-	Use:   "deployments <slug>",
-	Short: "List deployment history for an app",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAppsDeployments,
+func newAppsDeploymentsCmd() *cobra.Command {
+	f := &appsDeploymentsFlags{}
+	cmd := &cobra.Command{
+		Use:   "deployments <slug>",
+		Short: "List deployment history for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsDeployments(cmd, args, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	return cmd
 }
 
-func init() {
-	appsDeploymentsCmd.Flags().BoolVar(&appsDeploymentsFlags.jsonOutput, "json", false, "Output as JSON")
-}
-
-func runAppsDeployments(cmd *cobra.Command, args []string) error {
+func runAppsDeployments(cmd *cobra.Command, args []string, f *appsDeploymentsFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -774,7 +840,7 @@ func runAppsDeployments(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
 	}
 
-	if appsDeploymentsFlags.jsonOutput {
+	if f.jsonOutput {
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
 	}
@@ -837,27 +903,30 @@ func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
 	return tokens, nil
 }
 
-var tokensListFlags struct {
+type tokensListFlags struct {
 	jsonOutput bool
 }
 
-var tokensListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List your API tokens",
-	RunE:  runTokensList,
+func newTokensListCmd() *cobra.Command {
+	f := &tokensListFlags{}
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List your API tokens",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runTokensList(cmd, args, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	return cmd
 }
 
-func init() {
-	tokensListCmd.Flags().BoolVar(&tokensListFlags.jsonOutput, "json", false, "Output as JSON")
-}
-
-func runTokensList(cmd *cobra.Command, args []string) error {
+func runTokensList(cmd *cobra.Command, args []string, f *tokensListFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 
-	if tokensListFlags.jsonOutput {
+	if f.jsonOutput {
 		req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
 		if err != nil {
 			return fmt.Errorf("build request: %w", err)
@@ -899,24 +968,27 @@ func runTokensList(cmd *cobra.Command, args []string) error {
 
 // ── tokens revoke ───────────────────────────────────────────────────────────
 
-var tokensRevokeFlags struct {
+type tokensRevokeFlags struct {
 	name string
 }
 
-var tokensRevokeCmd = &cobra.Command{
-	Use:   "revoke [<id>]",
-	Short: "Revoke an API token by ID or name",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runTokensRevoke,
+func newTokensRevokeCmd() *cobra.Command {
+	f := &tokensRevokeFlags{}
+	cmd := &cobra.Command{
+		Use:   "revoke [<id>]",
+		Short: "Revoke an API token by ID or name",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runTokensRevoke(cmd, args, f)
+		},
+	}
+	cmd.Flags().StringVar(&f.name, "name", "", "Revoke the token with this name")
+	return cmd
 }
 
-func init() {
-	tokensRevokeCmd.Flags().StringVar(&tokensRevokeFlags.name, "name", "", "Revoke the token with this name")
-}
-
-func runTokensRevoke(cmd *cobra.Command, args []string) error {
+func runTokensRevoke(cmd *cobra.Command, args []string, f *tokensRevokeFlags) error {
 	hasID := len(args) == 1
-	hasName := tokensRevokeFlags.name != ""
+	hasName := f.name != ""
 
 	if hasID && hasName {
 		return fmt.Errorf("specify either id or --name, not both")
@@ -940,17 +1012,17 @@ func runTokensRevoke(cmd *cobra.Command, args []string) error {
 		}
 		var matches []tokenInfo
 		for _, t := range tokens {
-			if t.Name == tokensRevokeFlags.name {
+			if t.Name == f.name {
 				matches = append(matches, t)
 			}
 		}
 		switch len(matches) {
 		case 0:
-			return fmt.Errorf("no token named %q", tokensRevokeFlags.name)
+			return fmt.Errorf("no token named %q", f.name)
 		case 1:
 			tokenID = fmt.Sprintf("%d", matches[0].ID)
 		default:
-			return fmt.Errorf("multiple tokens named %q; revoke by id instead", tokensRevokeFlags.name)
+			return fmt.Errorf("multiple tokens named %q; revoke by id instead", f.name)
 		}
 	}
 

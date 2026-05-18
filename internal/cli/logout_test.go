@@ -44,7 +44,7 @@ func TestLogout_RemovesConfigAndCallsServer(t *testing.T) {
 		t.Fatalf("config file should exist before logout: %v", err)
 	}
 
-	if err := runLogout(logoutCmd, nil); err != nil {
+	if err := runLogout(newLogoutCmd(), nil); err != nil {
 		t.Fatalf("runLogout: %v", err)
 	}
 	if atomic.LoadInt32(&calls) != 1 {
@@ -65,7 +65,7 @@ func TestLogout_IdempotentWhenNotLoggedIn(t *testing.T) {
 	t.Setenv("SHINYHUB_CONFIG", "")
 	configPathOverride = ""
 
-	if err := runLogout(logoutCmd, nil); err != nil {
+	if err := runLogout(newLogoutCmd(), nil); err != nil {
 		t.Fatalf("runLogout when not logged in should be a no-op, got %v", err)
 	}
 }
@@ -87,7 +87,7 @@ func TestLogout_RemovesConfigEvenWhenServerUnreachable(t *testing.T) {
 	}
 	path := configPath()
 
-	if err := runLogout(logoutCmd, nil); err != nil {
+	if err := runLogout(newLogoutCmd(), nil); err != nil {
 		t.Fatalf("runLogout should succeed even when server is unreachable: %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -114,14 +114,11 @@ func TestLogout_WarnsWhenEnvCredsRemain(t *testing.T) {
 	configPathOverride = ""
 
 	var stdout, stderr bytes.Buffer
-	logoutCmd.SetOut(&stdout)
-	logoutCmd.SetErr(&stderr)
-	t.Cleanup(func() {
-		logoutCmd.SetOut(nil)
-		logoutCmd.SetErr(nil)
-	})
+	cmd := newLogoutCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 
-	if err := runLogout(logoutCmd, nil); err != nil {
+	if err := runLogout(cmd, nil); err != nil {
 		t.Fatalf("runLogout: %v", err)
 	}
 
@@ -156,10 +153,10 @@ func TestLogout_WarnsWhenOnlyTokenEnvSet(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	logoutCmd.SetOut(&stdout)
-	t.Cleanup(func() { logoutCmd.SetOut(nil) })
+	cmd := newLogoutCmd()
+	cmd.SetOut(&stdout)
 
-	if err := runLogout(logoutCmd, nil); err != nil {
+	if err := runLogout(cmd, nil); err != nil {
 		t.Fatalf("runLogout: %v", err)
 	}
 
@@ -193,10 +190,10 @@ func TestLogout_NoEnvWarningWhenEnvUnset(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	logoutCmd.SetOut(&stdout)
-	t.Cleanup(func() { logoutCmd.SetOut(nil) })
+	cmd := newLogoutCmd()
+	cmd.SetOut(&stdout)
 
-	if err := runLogout(logoutCmd, nil); err != nil {
+	if err := runLogout(cmd, nil); err != nil {
 		t.Fatalf("runLogout: %v", err)
 	}
 
@@ -231,7 +228,7 @@ func TestLogout_HonorsConfigOverride(t *testing.T) {
 		t.Fatalf("custom config should exist: %v", err)
 	}
 
-	if err := runLogout(logoutCmd, nil); err != nil {
+	if err := runLogout(newLogoutCmd(), nil); err != nil {
 		t.Fatalf("runLogout: %v", err)
 	}
 	if _, err := os.Stat(custom); !os.IsNotExist(err) {

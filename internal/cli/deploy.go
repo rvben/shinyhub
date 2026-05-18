@@ -43,14 +43,10 @@ func sanitizeSlug(name string) string {
 	return s
 }
 
-var deployCmd = &cobra.Command{
-	Use:   "deploy [dir]",
-	Short: "Deploy a Shiny app to ShinyHub",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runDeploy,
-}
-
-var deployFlags struct {
+// deployFlags holds the parsed flags for a single `deploy` invocation. It is
+// constructed fresh per command instance (no package-level state) so repeated
+// or shuffled test runs cannot leak flag values between each other.
+type deployFlags struct {
 	slug        string
 	wait        bool
 	waitTimeout int    // seconds
@@ -60,21 +56,33 @@ var deployFlags struct {
 	visibility  string // app access level: private, shared, public (empty = use server default)
 }
 
-func init() {
-	deployCmd.Flags().StringVar(&deployFlags.slug, "slug", "", "App slug (defaults to directory name)")
-	deployCmd.Flags().BoolVar(&deployFlags.wait, "wait", false, "Wait until deployment is healthy")
-	deployCmd.Flags().IntVar(&deployFlags.waitTimeout, "wait-timeout", 60, "Seconds to wait for healthy status when --wait is set")
-	deployCmd.Flags().StringVar(&deployFlags.git, "git", "", "Git repository URL to clone and deploy")
-	deployCmd.Flags().StringVar(&deployFlags.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
-	deployCmd.Flags().StringVar(&deployFlags.subdir, "subdir", "", "Subdirectory within repo containing the app")
-	deployCmd.Flags().StringVar(&deployFlags.visibility, "visibility", "", "App visibility for new apps: private, shared, or public (default: server config)")
+// newDeployCmd builds a fresh deploy command each time it is called, with its
+// flags bound to a per-instance deployFlags value.
+func newDeployCmd() *cobra.Command {
+	f := &deployFlags{}
+	cmd := &cobra.Command{
+		Use:   "deploy [dir]",
+		Short: "Deploy a Shiny app to ShinyHub",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDeploy(cmd, args, f)
+		},
+	}
+	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug (defaults to directory name)")
+	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until deployment is healthy")
+	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 60, "Seconds to wait for healthy status when --wait is set")
+	cmd.Flags().StringVar(&f.git, "git", "", "Git repository URL to clone and deploy")
+	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
+	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
+	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private, shared, or public (default: server config)")
+	return cmd
 }
 
-func runDeploy(cmd *cobra.Command, args []string) error {
+func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	var dir string
 
-	if deployFlags.git != "" {
-		cloned, err := gitClone(deployFlags.git, deployFlags.branch, deployFlags.subdir)
+	if f.git != "" {
+		cloned, err := gitClone(f.git, f.branch, f.subdir)
 		if err != nil {
 			return fmt.Errorf("git clone: %w", err)
 		}
@@ -96,13 +104,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	slug := deployFlags.slug
+	slug := f.slug
 	derived := false
 	if slug == "" {
 		derived = true
-		if deployFlags.git != "" {
+		if f.git != "" {
 			// Derive slug from the repo name (last path component, strip .git suffix).
-			repoName := filepath.Base(deployFlags.git)
+			repoName := filepath.Base(f.git)
 			repoName = strings.TrimSuffix(repoName, ".git")
 			slug = sanitizeSlug(repoName)
 		} else {
@@ -128,9 +136,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if deployFlags.visibility != "" && !db.IsValidAppVisibility(deployFlags.visibility) {
+	if f.visibility != "" && !db.IsValidAppVisibility(f.visibility) {
 		return fmt.Errorf("invalid --visibility %q: must be one of %s",
-			deployFlags.visibility, strings.Join(db.ValidAppVisibilities, ", "))
+			f.visibility, strings.Join(db.ValidAppVisibilities, ", "))
 	}
 
 	fmt.Printf("Bundling %s...\n", abs)
@@ -142,7 +150,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, summary)
 	}
 
-	if err := ensureApp(cfg, slug, deployFlags.visibility); err != nil {
+	if err := ensureApp(cfg, slug, f.visibility); err != nil {
 		return err
 	}
 
@@ -189,8 +197,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Println(line)
 	}
 
-	if deployFlags.wait {
-		if err := waitForHealthy(cfg, slug, time.Duration(deployFlags.waitTimeout)*time.Second); err != nil {
+	if f.wait {
+		if err := waitForHealthy(cfg, slug, time.Duration(f.waitTimeout)*time.Second); err != nil {
 			return err
 		}
 	}

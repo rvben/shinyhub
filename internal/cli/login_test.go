@@ -92,22 +92,13 @@ func TestRunLogin_PromptsForPasswordWhenStdinIsTTY(t *testing.T) {
 	isStdinTTY = func() bool { return true }
 	readPassword = func() (string, error) { return "secret123", nil }
 
-	// Reset and configure the package-level loginFlags the way the CLI
-	// would after parsing `shinyhub login --host X --username alice`.
-	loginFlags.host = srv.URL
-	loginFlags.username = "alice"
-	loginFlags.password = ""
-	loginFlags.token = ""
-	t.Cleanup(func() {
-		loginFlags.host = ""
-		loginFlags.username = ""
-		loginFlags.password = ""
-		loginFlags.token = ""
-	})
+	// Configure flags the way the CLI would after parsing
+	// `shinyhub login --host X --username alice`.
+	f := &loginFlags{host: srv.URL, username: "alice"}
 
 	cmd := &cobra.Command{}
 	cmd.SetOut(io.Discard)
-	if err := runLogin(cmd, nil); err != nil {
+	if err := runLogin(cmd, f); err != nil {
 		t.Fatalf("runLogin: %v", err)
 	}
 	if seen.Username != "alice" {
@@ -140,20 +131,11 @@ func TestRunLogin_NoPromptWhenStdinIsPipe(t *testing.T) {
 		return "", nil
 	}
 
-	loginFlags.host = srv.URL
-	loginFlags.username = "alice"
-	loginFlags.password = ""
-	loginFlags.token = ""
-	t.Cleanup(func() {
-		loginFlags.host = ""
-		loginFlags.username = ""
-		loginFlags.password = ""
-		loginFlags.token = ""
-	})
+	f := &loginFlags{host: srv.URL, username: "alice"}
 
 	cmd := &cobra.Command{}
 	cmd.SetOut(io.Discard)
-	err := runLogin(cmd, nil)
+	err := runLogin(cmd, f)
 	if err == nil {
 		t.Fatal("expected 401 error from server, got nil")
 	}
@@ -196,16 +178,7 @@ func TestRunLogin_PromptsRouteThroughCobraStreams(t *testing.T) {
 	readPassword = func() (string, error) { return "hunter2", nil }
 
 	// Both flags empty so both prompts fire.
-	loginFlags.host = srv.URL
-	loginFlags.username = ""
-	loginFlags.password = ""
-	loginFlags.token = ""
-	t.Cleanup(func() {
-		loginFlags.host = ""
-		loginFlags.username = ""
-		loginFlags.password = ""
-		loginFlags.token = ""
-	})
+	f := &loginFlags{host: srv.URL}
 
 	var stdout, stderr bytes.Buffer
 	cmd := &cobra.Command{}
@@ -213,7 +186,7 @@ func TestRunLogin_PromptsRouteThroughCobraStreams(t *testing.T) {
 	cmd.SetErr(&stderr)
 	cmd.SetIn(strings.NewReader("alice\n"))
 
-	if err := runLogin(cmd, nil); err != nil {
+	if err := runLogin(cmd, f); err != nil {
 		t.Fatalf("runLogin: %v", err)
 	}
 

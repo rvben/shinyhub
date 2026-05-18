@@ -10,14 +10,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var logoutCmd = &cobra.Command{
-	Use:   "logout",
-	Short: "Discard saved credentials and revoke the current session",
-	Long: `Logout removes the credentials file written by ` + "`shinyhub login`" + ` and asks
-the server to revoke the current JWT (best-effort — local credentials are
+// newLogoutCmd builds a fresh logout command each time it is called.
+func newLogoutCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout",
+		Short: "Discard saved credentials and revoke the current session",
+		Long: `Logout removes the credentials file written by ` + "`shinyhub login`" + ` and asks
+the server to revoke the current JWT (best-effort - local credentials are
 removed even if the server cannot be reached). API-key callers have nothing
 to revoke server-side; the credentials file is still removed.`,
-	RunE: runLogout,
+		RunE: runLogout,
+	}
 }
 
 func runLogout(cmd *cobra.Command, args []string) error {
