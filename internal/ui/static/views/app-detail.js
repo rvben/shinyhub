@@ -2,6 +2,8 @@
 // the requested tab. Tabs other than Overview are added in later tasks; for
 // now Overview is the only one with a renderer and other tabs show "Coming
 // soon" placeholders.
+import { makeFleetBadge, renderFleetDigest } from '/static/views/fleet-ui.js';
+
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
 
@@ -83,6 +85,15 @@ export function mountAppDetail(ctx) {
     const openLink = document.getElementById('app-detail-open');
     openLink.href = `/app/${app.slug}/`;
     openLink.hidden = app.status !== 'running';
+
+    const fleetSlot = document.getElementById('app-detail-fleet-badge');
+    if (fleetSlot) {
+      fleetSlot.textContent = '';
+      const fb = makeFleetBadge(document, app);
+      if (fb) fleetSlot.appendChild(fb);
+    }
+    const fleetDigest = document.getElementById('app-detail-fleet');
+    if (fleetDigest) renderFleetDigest(fleetDigest, app);
 
     // Show the selected panel, hide the rest.
     for (const t of TAB_ROUTES) {

@@ -607,6 +607,16 @@ main {
 
 /* Fleet ownership */
 .badge-fleet    { background: var(--accent-glow); color: var(--cyan-bright); }
+.app-detail-fleet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.fleet-digest-value { font-family: ui-monospace, monospace; }
+.fleet-digest-note  { margin: 0.15rem 0 0; font-size: 0.72rem; color: var(--text-muted); }
 
 /* Audit action badges — grouped by semantic color:
    green = deploy/restart/rollback
