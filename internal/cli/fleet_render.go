@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// fleetPlanSchemaVersion is the stable --json envelope version (spec §10).
+// fleetPlanSchemaVersion is the stable --json envelope version.
 const fleetPlanSchemaVersion = 1
 
 func glyphWord(a fleet.Action) (string, string) {
@@ -92,7 +92,7 @@ func countDiff(diff []fleet.AppDiff) planCounts {
 }
 
 // pending reports whether the diff has any non-unchanged action (drives
-// --detailed-exitcode: spec §10 code 2).
+// --detailed-exitcode exit code 2).
 func pending(diff []fleet.AppDiff) bool {
 	for _, d := range diff {
 		if d.Action != fleet.ActionUnchanged {
@@ -143,7 +143,7 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 	}
 	fmt.Fprintf(out, "\n%s\n", summary)
 
-	// Actionable Next block (spec §9.3): exact command per pending category.
+	// Actionable Next block: exact command per pending category.
 	var next []string
 	if c.Adopt > 0 {
 		next = append(next, fmt.Sprintf("  • adopt %d app(s)            shinyhub fleet apply --adopt", c.Adopt))
@@ -160,8 +160,8 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 	return planExit(f, diff)
 }
 
-// planExit maps the diff to the process exit code (spec §10). Default plan
-// exit is 0 (report). With --detailed-exitcode: 0 none / 2 pending.
+// planExit maps the diff to the process exit code. Default plan exit is 0
+// (report). With --detailed-exitcode: 0 none / 2 pending.
 func planExit(f *fleetPlanFlags, diff []fleet.AppDiff) error {
 	if f.detailedExitcode && pending(diff) {
 		return &ExitCodeError{Code: 2, Err: fmt.Errorf("changes are pending")}
@@ -169,7 +169,7 @@ func planExit(f *fleetPlanFlags, diff []fleet.AppDiff) error {
 	return nil
 }
 
-// JSON envelope (spec §10).
+// JSON envelope types for the --json output.
 
 type jsonDriftItem struct {
 	Key     string `json:"key"`

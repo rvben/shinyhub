@@ -77,8 +77,8 @@ var knownKeys = []string{
 // never first-only). A non-empty []Problem means the manifest must not be
 // used. file is the path shown in problem locations.
 //
-// A later task wires source-form validation (ParseSource) into this same
-// aggregated slice so a bad source and a typo'd key are reported together;
+// Source-form validation (ParseSource) feeds this same aggregated slice, so
+// a bad source and a typo'd key are reported together;
 // ParseManifest itself performs no filesystem or network I/O.
 func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 	var probs []Problem

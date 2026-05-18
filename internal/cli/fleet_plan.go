@@ -61,7 +61,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("read %s: %w", f.file, err)}
 	}
 
-	// Pre-flight step 1: manifest + local, aggregated (spec §9.1).
+	// Pre-flight step 1: manifest + local, aggregated.
 	m, probs := fleet.ParseManifest(data, f.file)
 	if len(probs) > 0 {
 		fmt.Fprintf(errOut, "shinyhub fleet plan: validating %s\n\n", f.file)
@@ -73,7 +73,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 	}
 
 	// Pre-flight step 2: server reachability + auth, one call, BEFORE any
-	// git clone (spec §9.1); an auth failure must cost zero clones.
+	// git clone; an auth failure must cost zero clones.
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
@@ -87,7 +87,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 	caps := fetchServerCaps(cfg) // best-effort; a zero-value caps lets fleet apply pick degraded behavior
 
 	// Pre-flight step 3: resolve sources + compute local digests. Failures are
-	// aggregated and reported together (spec §9.1 step 3).
+	// aggregated and reported together.
 	localDigests := map[string]string{}
 	var resolveProblems []string
 	var cleanups []func()

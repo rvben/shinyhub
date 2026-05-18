@@ -11,10 +11,10 @@ import (
 
 // resolveGitSource clones a git source to a temp dir and returns the working
 // directory (the #subdir if any), the human ref label, the resolved commit
-// SHA, and a cleanup func the caller MUST defer (temp clones removed on exit,
-// spec §6). It reuses the existing gitClone for the common branch/tag case
-// and falls back to a full clone + checkout for refs git cannot use as
-// --branch (e.g. a bare SHA).
+// SHA, and a cleanup func the caller MUST defer (temp clones removed on exit).
+// It reuses the existing gitClone for the common branch/tag case and falls
+// back to a full clone + checkout for refs git cannot use as --branch
+// (e.g. a bare SHA).
 func resolveGitSource(s fleet.ParsedSource) (dir, ref, commit string, cleanup func(), err error) {
 	noop := func() {}
 	if s.Kind != fleet.SourceGit {

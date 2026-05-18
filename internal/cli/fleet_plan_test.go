@@ -53,7 +53,7 @@ visibility = "public"
 	if !sawApps {
 		t.Fatal("expected a GET /api/apps call")
 	}
-	// Rendering lands in Task 9; here we only assert it ran without mutating.
+	// Assert the plan ran read-only (GET-only) and produced output.
 	if !strings.Contains(out, "alpha") {
 		t.Fatalf("expected diff to mention alpha:\n%s", out)
 	}

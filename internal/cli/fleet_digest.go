@@ -10,9 +10,9 @@ import (
 
 // digestLocalDir computes the content digest of a source directory using the
 // EXACT path the server uses: the same bundler (zipDir) that `deploy`
-// uploads, then bundle.DigestZipReader — the same function the server runs
+// uploads, then bundle.DigestZipReader - the same function the server runs
 // over the received zip. Reusing both halves guarantees client/server parity
-// by construction (spec §4.2); we never re-walk or re-filter independently.
+// by construction; we never re-walk or re-filter independently.
 func digestLocalDir(dir string) (string, error) {
 	buf, _, err := zipDir(dir)
 	if err != nil {
