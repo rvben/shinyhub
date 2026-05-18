@@ -11,7 +11,6 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
-	"github.com/spf13/cobra"
 )
 
 // bootDeployTokenServer stands up the genuine production server stack — real
@@ -59,33 +58,13 @@ func bootDeployTokenServer(t *testing.T, rawToken string) string {
 	return ts.URL
 }
 
-// forceWriters points cmd and every descendant at w. The cli package's cobra
-// commands are package-level singletons shared by every test in the package;
-// sibling tests call SetOut on individual leaves, so a parent SetOut does not
-// reliably propagate (a child with its own non-nil writer ignores the parent).
-// Forcing the writer onto the whole subtree makes the captured output
-// deterministic regardless of test execution order.
-func forceWriters(cmd *cobra.Command, w *bytes.Buffer) {
-	cmd.SetOut(w)
-	cmd.SetErr(w)
-	for _, sub := range cmd.Commands() {
-		forceWriters(sub, w)
-	}
-}
-
 // runApps executes the real `apps` cobra subcommand end to end against the
-// test server, through the exact wiring the shipped binary uses
-// (AddCommandsTo + root.Execute). SHINYHUB_HOST/SHINYHUB_TOKEN drive
+// test server, through the exact wiring the shipped binary uses. It points
+// the CLI at the test server via env (SHINYHUB_HOST/SHINYHUB_TOKEN drive
 // loadConfig; SHINYHUB_CONFIG points at a nonexistent path so the env-only
-// credential path is exercised.
-//
-// The cli package's cobra commands are package-level singletons. AddCommandsTo
-// re-parents them onto the supplied root, and sibling tests SetOut on
-// individual leaves, so robust isolation requires both: a fresh root each call
-// (correct parent linkage for dispatch) AND writers forced onto every command
-// in that root's tree (a leaf with its own stale writer ignores a parent
-// SetOut). --json is reset for the same reason. args are the `apps`
-// sub-arguments (e.g. "list"); the "apps" prefix is added here.
+// credential path is exercised), resets the singleton --json flag, then
+// delegates dispatch to execCLI. args are the `apps` sub-arguments (e.g.
+// "list"); the "apps" prefix is added here.
 func runApps(t *testing.T, host, token string, args ...string) (string, error) {
 	t.Helper()
 
@@ -99,14 +78,7 @@ func runApps(t *testing.T, host, token string, args ...string) (string, error) {
 		appsListFlags.jsonOutput = false
 	})
 
-	root := &cobra.Command{Use: "shinyhub", SilenceErrors: true}
-	AddCommandsTo(root)
-
-	var out bytes.Buffer
-	forceWriters(root, &out)
-	root.SetArgs(append([]string{"apps"}, args...))
-	err := root.Execute()
-	return out.String(), err
+	return execCLI(t, append([]string{"apps"}, args...)...)
 }
 
 // An opaque (non-shk_) SHINYHUB_DEPLOY_TOKEN must authenticate real CLI

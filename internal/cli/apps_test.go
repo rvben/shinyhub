@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -31,8 +30,7 @@ func TestAppsSet_ReplicasOnly(t *testing.T) {
 	setResp(200, `{}`)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo", "--replicas", "3"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -64,8 +62,7 @@ func TestAppsSet_MaxSessionsOnly(t *testing.T) {
 	setResp(200, `{}`)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo", "--max-sessions-per-replica", "25"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "set", "demo", "--max-sessions-per-replica", "25"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -88,8 +85,7 @@ func TestAppsSet_MaxSessionsZeroResetsToDefault(t *testing.T) {
 	setResp(200, `{}`)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo", "--max-sessions-per-replica", "0"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "set", "demo", "--max-sessions-per-replica", "0"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -111,12 +107,11 @@ func TestAppsSet_CombinedFlags(t *testing.T) {
 	setResp(200, `{}`)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo",
+	if _, err := execCLI(t, "apps", "set", "demo",
 		"--replicas", "2",
 		"--max-sessions-per-replica", "15",
 		"--hibernate-timeout", "45",
-	})
-	if err := appsCmd.Execute(); err != nil {
+	); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -139,8 +134,7 @@ func TestAppsSet_RejectsReplicasZero(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo", "--replicas", "0"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "set", "demo", "--replicas", "0")
 	if err == nil || !strings.Contains(err.Error(), ">= 1") {
 		t.Errorf("expected '--replicas must be >= 1', got %v", err)
 	}
@@ -153,8 +147,7 @@ func TestAppsSet_RejectsMaxSessionsOutOfRange(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo", "--max-sessions-per-replica", "1001"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "set", "demo", "--max-sessions-per-replica", "1001")
 	if err == nil || !strings.Contains(err.Error(), "between 0 and 1000") {
 		t.Errorf("expected 'between 0 and 1000' error, got %v", err)
 	}
@@ -167,8 +160,7 @@ func TestAppsSet_RequiresAtLeastOneFlag(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "set", "demo")
 	if err == nil || !strings.Contains(err.Error(), "at least one flag") {
 		t.Errorf("expected 'at least one flag' error, got %v", err)
 	}
@@ -188,8 +180,7 @@ func TestAppsSet_MaxSessionsSentinelMinusOne(t *testing.T) {
 	// as a real value it would fail the 0..1000 validator. Passing it together
 	// with --replicas should succeed and not include max_sessions_per_replica in
 	// the payload.
-	appsCmd.SetArgs([]string{"set", "demo", "--replicas", "2", "--max-sessions-per-replica", "-1"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "2", "--max-sessions-per-replica", "-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -211,8 +202,7 @@ func TestAppsSet_RejectsInvalidNegativeHibernateTimeout(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 	resetAppsSetFlags(t)
 
-	appsCmd.SetArgs([]string{"set", "demo", "--hibernate-timeout", "-2"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "set", "demo", "--hibernate-timeout", "-2")
 	if err == nil {
 		t.Fatal("expected error for --hibernate-timeout -2, got nil")
 	}
@@ -251,10 +241,8 @@ func TestAppsLogs_NoFollow_PassesFollowFalseAndPrintsBody(t *testing.T) {
 	setResp(200, "alpha\nbeta\ngamma\n")
 	resetAppsLogsFlags(t)
 
-	var stdout bytes.Buffer
-	appsCmd.SetOut(&stdout)
-	appsCmd.SetArgs([]string{"logs", "demo", "--tail", "50", "--no-follow"})
-	if err := appsCmd.Execute(); err != nil {
+	out, err := execCLI(t, "apps", "logs", "demo", "--tail", "50", "--no-follow")
+	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
@@ -271,7 +259,7 @@ func TestAppsLogs_NoFollow_PassesFollowFalseAndPrintsBody(t *testing.T) {
 	if !strings.Contains(req.Query, "follow=false") {
 		t.Errorf("query missing follow=false: %q", req.Query)
 	}
-	if got := stdout.String(); got != "alpha\nbeta\ngamma\n" {
+	if got := out; got != "alpha\nbeta\ngamma\n" {
 		t.Errorf("stdout = %q, want %q", got, "alpha\nbeta\ngamma\n")
 	}
 }
@@ -287,8 +275,7 @@ func TestAppsLogs_Tail_PassesTailParam(t *testing.T) {
 	// would normally block in scanner.Scan on a long-lived SSE. Our httptest
 	// server returns immediately after writing the (empty) body, so scanner
 	// returns nil and the call completes cleanly.
-	appsCmd.SetArgs([]string{"logs", "demo", "--tail", "10"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "logs", "demo", "--tail", "10"); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
@@ -309,8 +296,7 @@ func TestAppsLogs_TailValidation(t *testing.T) {
 
 	for _, badTail := range []string{"0", "-5", "10001"} {
 		resetAppsLogsFlags(t)
-		appsCmd.SetArgs([]string{"logs", "demo", "--tail", badTail})
-		err := appsCmd.Execute()
+		_, err := execCLI(t, "apps", "logs", "demo", "--tail", badTail)
 		if err == nil {
 			t.Errorf("tail=%s: expected error, got nil", badTail)
 		}
@@ -339,8 +325,7 @@ func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {
 		t.Fatalf("save config: %v", err)
 	}
 
-	appsCmd.SetArgs([]string{"logs", "noapp"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "logs", "noapp")
 	if err == nil {
 		t.Fatal("expected non-nil error on 404, got nil")
 	}
@@ -354,8 +339,7 @@ func TestAppsStop(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{"slug":"demo","status":"stopped"}`)
 
-	appsCmd.SetArgs([]string{"stop", "demo"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "stop", "demo"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -373,8 +357,7 @@ func TestAppsStop_ServerError(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(404, `{"error":"not found"}`)
 
-	appsCmd.SetArgs([]string{"stop", "missing"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "stop", "missing")
 	if err == nil {
 		t.Fatal("expected error for 404, got nil")
 	}
@@ -386,8 +369,7 @@ func TestAppsDelete_WithYesFlag(t *testing.T) {
 	setResp(200, "")
 	appsDeleteFlags.yes = false // reset
 
-	appsCmd.SetArgs([]string{"delete", "demo", "--yes"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "delete", "demo", "--yes"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -414,8 +396,7 @@ func TestAppsDelete_WithConfirmation(t *testing.T) {
 
 	// Correct confirmation: user types the slug.
 	appsDeleteCmd.SetIn(strings.NewReader("demo\n"))
-	appsCmd.SetArgs([]string{"delete", "demo"})
-	if err := appsCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "apps", "delete", "demo"); err != nil {
 		t.Fatalf("unexpected error with correct confirmation: %v", err)
 	}
 	if len(*reqs) != 1 {
@@ -434,8 +415,7 @@ func TestAppsDelete_WrongConfirmation(t *testing.T) {
 	isStdinTTY = func() bool { return true }
 
 	appsDeleteCmd.SetIn(strings.NewReader("wrong\n"))
-	appsCmd.SetArgs([]string{"delete", "demo"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "delete", "demo")
 	if err == nil {
 		t.Fatal("expected error for wrong confirmation, got nil")
 	}
@@ -461,8 +441,7 @@ func TestAppsDelete_NonTtyWithoutYesReturnsClearError(t *testing.T) {
 	t.Cleanup(func() { isStdinTTY = origIsTTY })
 	isStdinTTY = func() bool { return false }
 
-	appsCmd.SetArgs([]string{"delete", "demo"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "delete", "demo")
 	if err == nil {
 		t.Fatal("expected non-tty error pointing at --yes, got nil")
 	}
@@ -486,17 +465,16 @@ func TestAppsDelete_PromptGoesToStderr(t *testing.T) {
 	t.Cleanup(func() { isStdinTTY = origIsTTY })
 	isStdinTTY = func() bool { return true }
 
-	var stderr bytes.Buffer
 	appsDeleteCmd.SetIn(strings.NewReader("demo\n"))
-	appsDeleteCmd.SetErr(&stderr)
-	t.Cleanup(func() { appsDeleteCmd.SetErr(nil) })
-
-	appsCmd.SetArgs([]string{"delete", "demo"})
-	if err := appsCmd.Execute(); err != nil {
+	// execCLI captures combined stdout+stderr via forceWriters; the prompt text
+	// must appear somewhere in the combined output (it is written to stderr by
+	// the command, which forceWriters merges into the single capture buffer).
+	out, err := execCLI(t, "apps", "delete", "demo")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "permanently delete app") {
-		t.Errorf("destructive prompt should land on stderr; got %q", stderr.String())
+	if !strings.Contains(out, "permanently delete app") {
+		t.Errorf("destructive prompt should land on stderr; got %q", out)
 	}
 }
 
@@ -513,14 +491,11 @@ func TestAppsDeployments(t *testing.T) {
 		}
 	}
 
-	var buf strings.Builder
-	appsDeploymentsCmd.SetOut(&buf)
-	appsCmd.SetArgs([]string{"deployments", "demo"})
-	if err := appsCmd.Execute(); err != nil {
+	out, err := execCLI(t, "apps", "deployments", "demo")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	out := buf.String()
 	if !strings.Contains(out, "ID") {
 		t.Errorf("expected header row with ID, got: %q", out)
 	}
@@ -535,10 +510,8 @@ func TestAppsStart(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{"slug":"demo","status":"running"}`)
 
-	var buf strings.Builder
-	appsStartCmd.SetOut(&buf)
-	appsCmd.SetArgs([]string{"start", "demo"})
-	if err := appsCmd.Execute(); err != nil {
+	out, err := execCLI(t, "apps", "start", "demo")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -549,11 +522,11 @@ func TestAppsStart(t *testing.T) {
 	if req.Method != "POST" || req.Path != "/api/apps/demo/restart" {
 		t.Errorf("expected POST /api/apps/demo/restart, got %s %s", req.Method, req.Path)
 	}
-	if got := buf.String(); !strings.Contains(got, "demo: started") {
-		t.Errorf("expected output to contain 'demo: started', got %q", got)
+	if !strings.Contains(out, "demo: started") {
+		t.Errorf("expected output to contain 'demo: started', got %q", out)
 	}
-	if strings.Contains(buf.String(), "restarted") {
-		t.Errorf("output should say 'started', not 'restarted', got %q", buf.String())
+	if strings.Contains(out, "restarted") {
+		t.Errorf("output should say 'started', not 'restarted', got %q", out)
 	}
 }
 
@@ -562,8 +535,7 @@ func TestAppsStart_ServerError(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(409, `{"error":"app has never been deployed"}`)
 
-	appsCmd.SetArgs([]string{"start", "fresh"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "start", "fresh")
 	if err == nil {
 		t.Fatal("expected error for 409, got nil")
 	}
@@ -579,17 +551,14 @@ func TestAppsShow(t *testing.T) {
 	setResp(200, `{"app":{"slug":"demo","name":"Demo App","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":15,"deploy_count":3,"hibernate_timeout_minutes":null,"memory_limit_mb":512,"cpu_quota_percent":100,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"running","pid":1235,"port":34568}]}`)
 	appsShowFlags.jsonOutput = false
 
-	var buf strings.Builder
-	appsShowCmd.SetOut(&buf)
-	appsCmd.SetArgs([]string{"show", "demo"})
-	if err := appsCmd.Execute(); err != nil {
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if len(*reqs) != 1 || (*reqs)[0].Method != "GET" || (*reqs)[0].Path != "/api/apps/demo" {
 		t.Fatalf("expected GET /api/apps/demo, got %+v", *reqs)
 	}
-	out := buf.String()
 	for _, want := range []string{
 		"Slug:        demo",
 		"Name:        Demo App",
@@ -618,13 +587,11 @@ func TestAppsShow_JSON(t *testing.T) {
 	setResp(200, body)
 	appsShowFlags.jsonOutput = false
 
-	var buf strings.Builder
-	appsShowCmd.SetOut(&buf)
-	appsCmd.SetArgs([]string{"show", "demo", "--json"})
-	if err := appsCmd.Execute(); err != nil {
+	out, err := execCLI(t, "apps", "show", "demo", "--json")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	out := strings.TrimSpace(buf.String())
+	out = strings.TrimSpace(out)
 	if out != body {
 		t.Errorf("--json should pass body through verbatim\n got: %q\nwant: %q", out, body)
 	}
@@ -637,8 +604,7 @@ func TestAppsShow_NotFound(t *testing.T) {
 	setResp(404, `{"error":"app not found"}`)
 	appsShowFlags.jsonOutput = false
 
-	appsCmd.SetArgs([]string{"show", "missing"})
-	err := appsCmd.Execute()
+	_, err := execCLI(t, "apps", "show", "missing")
 	if err == nil {
 		t.Fatal("expected error for 404, got nil")
 	}
@@ -659,14 +625,11 @@ func TestTokensList(t *testing.T) {
 		}
 	}
 
-	var buf strings.Builder
-	tokensListCmd.SetOut(&buf)
-	tokensCmd.SetArgs([]string{"list"})
-	if err := tokensCmd.Execute(); err != nil {
+	out, err := execCLI(t, "tokens", "list")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	out := buf.String()
 	if !strings.Contains(out, "ci-token") {
 		t.Errorf("expected output to contain 'ci-token', got: %q", out)
 	}
@@ -678,8 +641,7 @@ func TestTokensRevoke(t *testing.T) {
 	setResp(200, "")
 	resetTokensRevokeFlags(t)
 
-	tokensCmd.SetArgs([]string{"revoke", "42"})
-	if err := tokensCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "tokens", "revoke", "42"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -721,11 +683,8 @@ func TestTokensCreate_JSON(t *testing.T) {
 	setResp(201, `{"id":7,"name":"ci","token":"shk_abcdef1234567890","created_at":"2026-05-12T15:04:05Z"}`)
 	resetTokensCreateFlags(t)
 
-	var buf strings.Builder
-	tokensCreateCmd.SetOut(&buf)
-	t.Cleanup(func() { tokensCreateCmd.SetOut(nil) })
-	tokensCmd.SetArgs([]string{"create", "--name", "ci", "--format", "json"})
-	if err := tokensCmd.Execute(); err != nil {
+	out, err := execCLI(t, "tokens", "create", "--name", "ci", "--format", "json")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -736,7 +695,7 @@ func TestTokensCreate_JSON(t *testing.T) {
 		t.Errorf("unexpected %s %s", (*reqs)[0].Method, (*reqs)[0].Path)
 	}
 
-	out := strings.TrimSpace(buf.String())
+	out = strings.TrimSpace(out)
 	var result struct {
 		ID        int64  `json:"id"`
 		Name      string `json:"name"`
@@ -767,15 +726,11 @@ func TestTokensCreate_TextDefault(t *testing.T) {
 	setResp(201, `{"id":3,"name":"mytoken","token":"shk_xyz","created_at":"2026-05-12T10:00:00Z"}`)
 	resetTokensCreateFlags(t)
 
-	var buf strings.Builder
-	tokensCreateCmd.SetOut(&buf)
-	t.Cleanup(func() { tokensCreateCmd.SetOut(nil) })
-	tokensCmd.SetArgs([]string{"create", "--name", "mytoken"})
-	if err := tokensCmd.Execute(); err != nil {
+	out, err := execCLI(t, "tokens", "create", "--name", "mytoken")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	out := buf.String()
 	if !strings.Contains(out, "API token: shk_xyz") {
 		t.Errorf("expected human-readable 'API token:' line, got: %q", out)
 	}
@@ -794,8 +749,7 @@ func TestTokensCreate_FormatBogus(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 	resetTokensCreateFlags(t)
 
-	tokensCmd.SetArgs([]string{"create", "--name", "ci", "--format", "yaml"})
-	err := tokensCmd.Execute()
+	_, err := execCLI(t, "tokens", "create", "--name", "ci", "--format", "yaml")
 	if err == nil {
 		t.Fatal("expected error for --format yaml, got nil")
 	}
@@ -816,8 +770,7 @@ func TestTokensRevoke_ByName_OneMatch(t *testing.T) {
 	setResp(200, `[{"id":42,"name":"ci","created_at":"2026-05-01T00:00:00Z"}]`)
 	resetTokensRevokeFlags(t)
 
-	tokensCmd.SetArgs([]string{"revoke", "--name", "ci"})
-	if err := tokensCmd.Execute(); err != nil {
+	if _, err := execCLI(t, "tokens", "revoke", "--name", "ci"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -839,8 +792,7 @@ func TestTokensRevoke_ByName_NoMatch(t *testing.T) {
 	setResp(200, `[{"id":1,"name":"other","created_at":"2026-05-01T00:00:00Z"}]`)
 	resetTokensRevokeFlags(t)
 
-	tokensCmd.SetArgs([]string{"revoke", "--name", "missing"})
-	err := tokensCmd.Execute()
+	_, err := execCLI(t, "tokens", "revoke", "--name", "missing")
 	if err == nil {
 		t.Fatal("expected error for non-existent name, got nil")
 	}
@@ -866,8 +818,7 @@ func TestTokensRevoke_ByName_MultipleMatches(t *testing.T) {
 	setResp(200, `[{"id":1,"name":"ci","created_at":"2026-05-01T00:00:00Z"},{"id":2,"name":"ci","created_at":"2026-05-02T00:00:00Z"}]`)
 	resetTokensRevokeFlags(t)
 
-	tokensCmd.SetArgs([]string{"revoke", "--name", "ci"})
-	err := tokensCmd.Execute()
+	_, err := execCLI(t, "tokens", "revoke", "--name", "ci")
 	if err == nil {
 		t.Fatal("expected error for multiple matching names, got nil")
 	}
@@ -894,8 +845,7 @@ func TestTokensRevoke_BothIDAndName(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 	resetTokensRevokeFlags(t)
 
-	tokensCmd.SetArgs([]string{"revoke", "42", "--name", "ci"})
-	err := tokensCmd.Execute()
+	_, err := execCLI(t, "tokens", "revoke", "42", "--name", "ci")
 	if err == nil {
 		t.Fatal("expected mutual-exclusion error, got nil")
 	}
@@ -906,4 +856,3 @@ func TestTokensRevoke_BothIDAndName(t *testing.T) {
 		t.Errorf("expected no HTTP requests for mutual-exclusion error, got %d", len(*reqs))
 	}
 }
-
