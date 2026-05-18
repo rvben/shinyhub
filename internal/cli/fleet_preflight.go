@@ -52,13 +52,41 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string) (*preflightRe
 	}
 
 	m, probs := fleet.ParseManifest(data, file)
-	if len(probs) > 0 {
+
+	// Validate local source existence alongside manifest structure problems so
+	// operators see the full picture in one pass. (ParseManifest is pure/no-I/O
+	// by design; this cheap local check lives here.) Git sources are validated
+	// for URL format only; actual cloning happens after server auth succeeds.
+	// ParseSource is called again in the resolve loop below; the duplication is
+	// intentional - that loop also clones git sources and computes the bundle digest.
+	manifestDir := filepath.Dir(file)
+	type sourceCheck struct{ slug, msg string }
+	var srcProbs []sourceCheck
+	// m is non-nil when the TOML decoded without a hard parse error, even if
+	// there are structural problems (fleet_id missing, dup slug, etc.).
+	if m != nil {
+		for _, app := range m.Apps {
+			if app.Source == "" {
+				// Already reported as "source is required" by ParseManifest.
+				continue
+			}
+			if _, sp := fleet.ParseSource(app.Source, manifestDir); sp != nil {
+				srcProbs = append(srcProbs, sourceCheck{app.Slug, sp.Msg})
+			}
+		}
+	}
+
+	if len(probs) > 0 || len(srcProbs) > 0 {
 		fmt.Fprintf(errOut, "shinyhub fleet %s: validating %s\n\n", cmdName, file)
 		for _, p := range probs {
 			fmt.Fprintf(errOut, "  ✗ %s\n", p.Error())
 		}
-		fmt.Fprintf(errOut, "\n%d problem(s) found. Nothing was changed. Fix these and re-run.\n", len(probs))
-		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", len(probs))}
+		for _, sc := range srcProbs {
+			fmt.Fprintf(errOut, "  ✗ %s  app %q: %s\n", file, sc.slug, sc.msg)
+		}
+		total := len(probs) + len(srcProbs)
+		fmt.Fprintf(errOut, "\n%d problem(s) found. Nothing was changed. Fix these and re-run.\n", total)
+		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", total)}
 	}
 
 	cfg, err := loadConfig()
@@ -77,7 +105,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string) (*preflightRe
 	sources := map[string]string{}
 	var resolveProblems []string
 	for _, app := range m.Apps {
-		ps, sp := fleet.ParseSource(app.Source, filepath.Dir(file))
+		ps, sp := fleet.ParseSource(app.Source, manifestDir)
 		if sp != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %s", app.Slug, sp.Msg))
 			continue
