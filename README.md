@@ -32,6 +32,10 @@ OAuth or OIDC, and hibernate idle apps automatically.
 - **Per-app replicas:** set `replicas: N` and ShinyHub boots N backends for
   the app on the same host, sticky-session load-balanced and recovered
   independently on crash.
+- **Fleet reconcile:** declare a whole set of apps in one
+  `shinyhub-fleet.toml` and `shinyhub fleet plan` / `apply` converges the
+  server to match, kubectl-apply style, with ownership markers, pruning, and
+  a read-only dashboard surface. See [`docs/fleet.md`](docs/fleet.md).
 - **Single binary, SQLite, no external deps.**
 
 ## Quick start
