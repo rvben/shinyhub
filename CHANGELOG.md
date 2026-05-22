@@ -23,6 +23,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.6](https://github.com/rvben/shinyhub/compare/v0.5.5...v0.5.6) - 2026-05-22
+
+### Added
+
+- **ui**: show fleet ownership and live deployment digest on app detail ([e2699e4](https://github.com/rvben/shinyhub/commit/e2699e4e3b609cad4e531ce92a9a67b92f9e369e))
+- **ui**: fleet ownership badge and segment filter on the apps grid ([bb1abc4](https://github.com/rvben/shinyhub/commit/bb1abc40299f1c7e7eb9f6842d1890cbbd4dea37))
+- **ui**: add read-only fleet dashboard helper module ([fb60877](https://github.com/rvben/shinyhub/commit/fb6087788b0d3c9320c7ad457b9642eea686819c))
+- **cli**: wire shinyhub fleet init command ([da6d0de](https://github.com/rvben/shinyhub/commit/da6d0de58421cc2c1864dd2bd79aa51a1accc2c3))
+- **fleet**: manifest emitter and shared ValidFleetID ([fd364f0](https://github.com/rvben/shinyhub/commit/fd364f0096fd6312647652975a825c3954217589))
+- **cli**: wire shinyhub fleet status command ([9c857da](https://github.com/rvben/shinyhub/commit/9c857da97a125bebae62a944eb2061ecd6581800))
+- **cli**: fleet status human and quiet rendering ([8e214f7](https://github.com/rvben/shinyhub/commit/8e214f7e850e50366ac5ee556ea7854d63df307c))
+- **cli**: fleet status data model and JSON envelope ([5eca9ff](https://github.com/rvben/shinyhub/commit/5eca9ff6b14c0c7e23f0df0996360c05d0b6a184))
+- **cli**: shinyhub fleet apply command with confirmation and dry-run ([ffbcd20](https://github.com/rvben/shinyhub/commit/ffbcd20e2903d8b0ebcb0e48e84b5859498e9ad1))
+- **cli**: fleet convergence engine with per-action preconditions and retry ([47aee8d](https://github.com/rvben/shinyhub/commit/47aee8dd9ab3cb302d07eb8dc214a35b8c5cd63e))
+- **cli**: fleet apply result model, exit-code mapping and report ([7888e42](https://github.com/rvben/shinyhub/commit/7888e42ddc64620d7e6347b8e9b426bb2da62fba))
+- **cli**: precondition-gated fleet patch, access and delete operations ([8060989](https://github.com/rvben/shinyhub/commit/8060989c391710c0b9abb6275a115836e2275eb0))
+- **cli**: reusable single-app deploy with promoted-digest readback ([1443372](https://github.com/rvben/shinyhub/commit/1443372d2bca606c450015711253cb4ca88c585a))
+- **cli**: fleet run correlation id and precondition request headers ([13f61f7](https://github.com/rvben/shinyhub/commit/13f61f7de056f4a669af662f5868912c7f552470))
+- **cli**: fleet plan human+json rendering with exit codes and golden test ([bbaf557](https://github.com/rvben/shinyhub/commit/bbaf557c9ff32fc5f96152bb4a0c626b86773490))
+- **cli**: fleet plan fetches state and computes the diff (read-only) ([5d180c7](https://github.com/rvben/shinyhub/commit/5d180c7584d36d365cbc16f1d954713e7aa14c45))
+- **cli**: fleet command group + plan pre-flight (read-only skeleton) ([505e6a7](https://github.com/rvben/shinyhub/commit/505e6a74661fa63e5dba274301b622a9e3527801))
+- **cli**: git source resolution with resolved commit and cleanup ([c5e814b](https://github.com/rvben/shinyhub/commit/c5e814be80b2a487acf861c0e5ab5556522d5dbc))
+- **cli**: client local digest reusing the server bundler+hasher ([db32e85](https://github.com/rvben/shinyhub/commit/db32e85176a2c13eb946a0fc87e072c5656fbd78))
+- **fleet**: pure order-independent reconcile diff engine ([cb3de65](https://github.com/rvben/shinyhub/commit/cb3de653124b600d00bc3978a17027cccb532472))
+- **fleet**: source-form resolver wired into aggregated pre-flight ([4ba1eea](https://github.com/rvben/shinyhub/commit/4ba1eea18590aa208ebbf954d7ad416d5289b98e))
+- **fleet**: strict fleet-manifest parser with aggregated validation ([262d55f](https://github.com/rvben/shinyhub/commit/262d55fecb779c774b2786017750c624e5de7405))
+- **cli**: typed ExitCodeError honored by main for fleet exit codes ([c8e00ef](https://github.com/rvben/shinyhub/commit/c8e00ef0dc532a2251e4bf435b2837c72a652afc))
+- **api**: add GET /api/server-info capability marker ([c1264fd](https://github.com/rvben/shinyhub/commit/c1264fd8aa610d4f56ce9c75fb5e880d77dd72fb))
+- **api**: If-Match-style preconditions and managed_by patch on app endpoints ([d093154](https://github.com/rvben/shinyhub/commit/d093154c71f3e8d334820f2bdc765d512b36e861))
+- **api**: expose content_digest and managed_by on the apps endpoints ([e5ca7f3](https://github.com/rvben/shinyhub/commit/e5ca7f3ad4d40bb5012c7e892471088c5612dbcb))
+- **deploy**: record bundle content digest on the pending deployment ([4f3962f](https://github.com/rvben/shinyhub/commit/4f3962fe85fcab13308db856d624fcdc84b87fb6))
+- **bundle**: deterministic content digest over accepted zip entries ([e60c8a8](https://github.com/rvben/shinyhub/commit/e60c8a87f0497822bc1f9c58db42fa06889285d8))
+- **db**: add deployments.content_digest and apps.managed_by columns ([ee5be80](https://github.com/rvben/shinyhub/commit/ee5be80f635e0b1c97e3228158821be80b8391ac))
+
+### Fixed
+
+- **api**: bump updated_at on managed_by writes; clarify precondition semantics ([175b501](https://github.com/rvben/shinyhub/commit/175b50131482ec3d14683645036c76d60c885083))
+
 ## [0.5.5](https://github.com/rvben/shinyhub/compare/v0.5.4...v0.5.5) - 2026-05-18
 
 ## [0.5.4](https://github.com/rvben/shinyhub/compare/v0.5.3...v0.5.4) - 2026-05-18
