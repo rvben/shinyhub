@@ -8,19 +8,13 @@ on:
 permissions:
   contents: read
 
-env:
-  # Run JS-based actions (checkout, setup-go, …) on Node 24 instead of the
-  # deprecated Node 20 runtime. Drop this once every action ships a Node 24
-  # default release.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
