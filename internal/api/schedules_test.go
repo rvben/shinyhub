@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 )
@@ -702,5 +703,95 @@ func TestSchedules_GrantSharedData_AllowedForExplicitMember(t *testing.T) {
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201 granting shared-data with explicit member access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// grantSharedDataFixture sets up a server where "caller" (user id 2) owns two
+// apps and returns the server plus the caller's JWT. The caller owns both apps
+// so hasExplicitAccess passes for either as a mount source.
+func grantSharedDataFixture(t *testing.T) (srv *api.Server, store *db.Store, token string) {
+	t.Helper()
+	srv, store, _ = newManagerTestServer(t)
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	token, _ = auth.IssueJWT(1, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	return srv, store, token
+}
+
+// ERR-2: a self-mount (source == consumer) is a client error, not a 500.
+func TestSchedules_GrantSharedData_SelfMountReturns400(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "mine"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("self-mount: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ERR-3: granting the same mount twice is a conflict, not a 500 leaking the raw
+// SQLite UNIQUE-constraint text.
+func TestSchedules_GrantSharedData_DuplicateReturns409(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first grant: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body2, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req = authedRequest(t, "POST", "/api/apps/mine/shared-data", body2, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate grant: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// SCH-3: a grant that would close a read cycle (mine->other, then other->mine)
+// is a client error, not a 500.
+func TestSchedules_GrantSharedData_CycleReturns400(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	// mine reads other.
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("grant mine->other: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// other reads mine would close the cycle.
+	body2, _ := json.Marshal(map[string]any{"source_slug": "mine"})
+	req = authedRequest(t, "POST", "/api/apps/other/shared-data", body2, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("cycle grant: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ERR-4: revoking a mount that was never granted is a 404, not a 500.
+func TestSchedules_RevokeSharedData_NotMountedReturns404(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	req := authedRequest(t, "DELETE", "/api/apps/mine/shared-data/other", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("revoke non-mounted: expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

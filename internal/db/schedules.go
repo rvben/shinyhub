@@ -498,18 +498,65 @@ type SharedDataMount struct {
 	CreatedAt   time.Time
 }
 
+// Shared-data grant errors. These are typed so the API layer can map them to
+// precise status codes (400/409) instead of leaking a raw 500.
+var (
+	// ErrSelfMount is returned when an app tries to mount its own data dir.
+	ErrSelfMount = errors.New("cannot mount data from self")
+	// ErrDuplicateMount is returned when the same source is already mounted.
+	ErrDuplicateMount = errors.New("data already mounted from this source")
+	// ErrSharedDataCycle is returned when a grant would close a read cycle.
+	ErrSharedDataCycle = errors.New("mount would create a circular dependency")
+)
+
 func (s *Store) GrantSharedData(consumerAppID, sourceAppID int64) error {
 	if consumerAppID == sourceAppID {
-		return fmt.Errorf("cannot mount data from self")
+		return ErrSelfMount
 	}
-	_, err := s.db.Exec(`
+	// A grant means "consumer reads source". A cycle forms if the source can
+	// already (transitively) read the consumer, so adding this edge closes a
+	// loop. Reject it before the insert.
+	cyclic, err := s.sharedDataReaches(sourceAppID, consumerAppID)
+	if err != nil {
+		return fmt.Errorf("grant shared data: %w", err)
+	}
+	if cyclic {
+		return ErrSharedDataCycle
+	}
+	_, err = s.db.Exec(`
 		INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
 		consumerAppID, sourceAppID,
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateMount
+		}
 		return fmt.Errorf("grant shared data: %w", err)
 	}
 	return nil
+}
+
+// sharedDataReaches reports whether startAppID can reach targetAppID by following
+// "reads" edges (app_id -> source_app_id) transitively.
+func (s *Store) sharedDataReaches(startAppID, targetAppID int64) (bool, error) {
+	var hit int
+	err := s.db.QueryRow(`
+		WITH RECURSIVE reach(id) AS (
+			SELECT source_app_id FROM app_shared_data WHERE app_id = ?
+			UNION
+			SELECT sd.source_app_id FROM app_shared_data sd
+			JOIN reach r ON sd.app_id = r.id
+		)
+		SELECT 1 FROM reach WHERE id = ? LIMIT 1`,
+		startAppID, targetAppID,
+	).Scan(&hit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) RevokeSharedData(consumerAppID, sourceAppID int64) error {

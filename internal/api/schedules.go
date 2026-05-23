@@ -595,7 +595,14 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.GrantSharedData(app.ID, src.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, db.ErrSelfMount), errors.Is(err, db.ErrSharedDataCycle):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, db.ErrDuplicateMount):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	s.audit(r, "shared_data_grant", "app", app.Slug, fmt.Sprintf(`{"source":%q}`, src.Slug))
@@ -615,6 +622,10 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.store.RevokeSharedData(app.ID, src.ID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "data not mounted from this source")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
