@@ -3134,7 +3134,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const li = document.createElement('li');
       const started = run.started_at ? new Date(run.started_at).toLocaleString() : '—';
       const status = run.status || '—';
-      const exit = run.exit_code != null ? ` · exit ${run.exit_code}` : '';
+      // exit_code is always present (0 by default), so only show it once the
+      // run has actually finished; otherwise a running run reads "exit 0".
+      const exit = run.finished_at ? ` · exit ${run.exit_code}` : '';
       li.innerHTML = `<button type="button" class="run-history-btn">${escapeHtml(started)} · <strong>${escapeHtml(status)}</strong>${escapeHtml(exit)}</button>`;
       li.querySelector('button').addEventListener('click', () => {
         openScheduleRunLogs(slug, schedID, run.id);
