@@ -71,6 +71,34 @@ func TestProxy_DisabledTracingLeavesHeaderAlone(t *testing.T) {
 	}
 }
 
+// TRC-1: an upstream connection failure (the ReverseProxy ErrorHandler path)
+// must populate span.Error so the documented field is actually emitted and the
+// error-admission branch is reachable even when no 5xx status was produced.
+func TestProxy_RecordsUpstreamErrorMessage(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := backend.URL
+	backend.Close() // connections are now refused, forcing the ErrorHandler
+
+	p := proxy.New()
+	if err := p.Register("app", url); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Hour) // huge slow threshold: only error/5xx admit
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/page", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	spans := buf.Snapshot("app")
+	if len(spans) != 1 {
+		t.Fatalf("expected one buffered span, got %d", len(spans))
+	}
+	if spans[0].Error == "" {
+		t.Fatalf("upstream connection failure must populate span.Error (status=%d)", spans[0].Status)
+	}
+}
+
 // TestProxy_RecordsErrorToBuffer verifies that a 5xx response is admitted to
 // the ring buffer with method, path, status, and replica information.
 func TestProxy_RecordsErrorToBuffer(t *testing.T) {

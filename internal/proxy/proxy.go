@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -359,6 +360,19 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
+	// Capture upstream transport failures (connection refused, timeout, a
+	// mid-stream drop after a 200 was already sent) onto the statusRecorder so
+	// the trace span surfaces span.Error. Mirrors httputil's default handler
+	// (log + 502) and adds the capture; WriteHeader is a no-op once a status
+	// was already written, so a mid-stream failure keeps its real status while
+	// still recording the error.
+	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+		log.Printf("proxy: upstream error for %s: %v", slugCopy, err)
+		if sr, ok := w.(*statusRecorder); ok {
+			sr.proxyErr = err
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -593,6 +607,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				path = trimmed
 			}
+			var spanErr string
+			if rec.proxyErr != nil {
+				spanErr = rec.proxyErr.Error()
+			}
 			p.traceBuffer.Record(tracing.Span{
 				TraceID:    traceCtx.TraceIDHex(),
 				SpanID:     hex.EncodeToString(traceCtx.SpanID[:]),
@@ -605,6 +623,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				DurationMS: time.Since(start).Milliseconds(),
 				StartedAt:  start,
 				Sampled:    traceSampled,
+				Error:      spanErr,
 			})
 		}
 		logPtr := p.accessLog.Load()

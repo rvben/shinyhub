@@ -26,6 +26,10 @@ type statusRecorder struct {
 	status      int
 	bytes       int64
 	wroteHeader bool
+	// proxyErr holds the upstream transport error captured by the reverse
+	// proxy's ErrorHandler (connection refused, timeout, mid-stream drop) so
+	// the trace span can surface it. Nil on success.
+	proxyErr error
 	// onUpgrade, when non-nil, fires exactly once at the moment a 101
 	// Switching Protocols header is written. The reverse-proxy WS upgrade
 	// path writes 101 before calling Hijack, so this hook observes the
