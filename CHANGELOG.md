@@ -26,6 +26,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.6.0](https://github.com/rvben/shinyhub/compare/v0.5.8...v0.6.0) - 2026-05-23
+
+### Added
+
+- **tracing**: emit OTel server spans for control-plane API requests ([2968b3c](https://github.com/rvben/shinyhub/commit/2968b3c1069836032aa7254a1b4c598eb2a8a95f))
+- **metrics**: add Prometheus self-telemetry for the server process ([2635c14](https://github.com/rvben/shinyhub/commit/2635c145153db158239da082dd717618b7eb017f))
+
+### Fixed
+
+- **metrics**: observe API telemetry at the timeout-handler boundary ([3732af5](https://github.com/rvben/shinyhub/commit/3732af556fb1ae39c0c096797f9484b1c105b595))
+
 ## [0.5.8](https://github.com/rvben/shinyhub/compare/v0.5.7...v0.5.8) - 2026-05-23
 
 ### Fixed
