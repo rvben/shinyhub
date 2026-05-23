@@ -538,6 +538,54 @@ func TestAppsShow(t *testing.T) {
 	}
 }
 
+// DEP-5: when an app's per-replica cap is 0 (inherit), `apps show` must
+// annotate it with the resolved runtime default and print the admission ceiling
+// (replicas × effective cap) instead of a bare, cryptic "0".
+func TestAppsShow_InheritedCapShowsRuntimeDefaultAndCeiling(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "runtime default: 10") {
+		t.Errorf("expected the 0 cap to be annotated with the runtime default, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Admission ceiling: 2 × 10 = 20") {
+		t.Errorf("expected admission ceiling line (2 × 10 = 20), got:\n%s", out)
+	}
+}
+
+// DEP-5: an explicit per-replica cap prints the admission ceiling from that cap.
+func TestAppsShow_ExplicitCapShowsCeiling(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":3,"max_sessions_per_replica":5,"deploy_count":1},"effective_max_sessions_per_replica":5,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Admission ceiling: 3 × 5 = 15") {
+		t.Errorf("expected admission ceiling line (3 × 5 = 15), got:\n%s", out)
+	}
+}
+
+// DEP-5: when the effective cap resolves to 0, sessions are unlimited; say so
+// rather than printing "ceiling = 0".
+func TestAppsShow_UnlimitedCap(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":0,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "unlimited") {
+		t.Errorf("expected an 'unlimited' admission ceiling, got:\n%s", out)
+	}
+}
+
 // TestAppsShow_JSON passes through the raw envelope when --json is set.
 func TestAppsShow_JSON(t *testing.T) {
 	_, _, setResp := setupCLITest(t)

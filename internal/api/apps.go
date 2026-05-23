@@ -190,7 +190,15 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"app": app, "replicas_status": replicas})
+	// effective_max_sessions_per_replica resolves the app's own cap against the
+	// runtime default (0 = inherit). Clients use it to render an honest
+	// admission ceiling (replicas × effective cap) instead of a bare "0".
+	effectiveCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"app":                                app,
+		"replicas_status":                    replicas,
+		"effective_max_sessions_per_replica": effectiveCap,
+	})
 }
 
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {

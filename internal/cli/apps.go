@@ -166,7 +166,8 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			CreatedAt               string `json:"created_at"`
 			UpdatedAt               string `json:"updated_at"`
 		} `json:"app"`
-		ReplicasStatus []struct {
+		EffectiveMaxSessionsPerReplica int `json:"effective_max_sessions_per_replica"`
+		ReplicasStatus                 []struct {
 			Index  int    `json:"index"`
 			Status string `json:"status"`
 			PID    *int   `json:"pid"`
@@ -188,7 +189,20 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	}
 	fmt.Fprintf(w, "Deploys:     %d\n", a.DeployCount)
 	fmt.Fprintf(w, "Replicas:    %d\n", a.Replicas)
-	fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
+	// effective cap resolves the per-app value against the runtime default (0 =
+	// inherit). Annotate a 0 with the resolved default and print the admission
+	// ceiling (replicas × effective cap) so the bare "0" is not cryptic.
+	eff := resp2.EffectiveMaxSessionsPerReplica
+	if a.MaxSessionsPerReplica == 0 {
+		fmt.Fprintf(w, "Max sess/r:  0 (runtime default: %d)\n", eff)
+	} else {
+		fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
+	}
+	if eff == 0 {
+		fmt.Fprintf(w, "Admission ceiling: unlimited (no session cap)\n")
+	} else {
+		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
+	}
 	if a.HibernateTimeoutMinutes != nil {
 		fmt.Fprintf(w, "Hibernate:   %d min\n", *a.HibernateTimeoutMinutes)
 	} else {
