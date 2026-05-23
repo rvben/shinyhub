@@ -60,6 +60,7 @@ func AddCommandsTo(root *cobra.Command) {
 		newScheduleCmd(),
 		newShareCmd(),
 		newFleetCmd(),
+		newManifestCmd(),
 	)
 	silenceUsageOnError(root)
 }
