@@ -812,3 +812,39 @@ func TestStart_RefusesIfBundleHasDataDir(t *testing.T) {
 		t.Fatalf("expected data-conflict error for pre-existing dir, got %v", err)
 	}
 }
+
+func TestManagerDispatchesByTier(t *testing.T) {
+	def := newFakeRuntime()
+	burst := newFakeRuntime()
+	burst.nextPID = 50000 // distinct PID range proves which runtime started it
+
+	m := process.NewManager(t.TempDir(), def)
+	m.RegisterRuntime("burst", burst)
+
+	// Default tier (empty Tier => "local") uses def.
+	localInfo, err := m.Start(process.StartParams{
+		Slug: "a", Index: 0, Command: []string{"x"}, Port: 1,
+	})
+	if err != nil {
+		t.Fatalf("start local: %v", err)
+	}
+	if localInfo.PID < 10000 || localInfo.PID >= 50000 {
+		t.Fatalf("local replica got PID %d; expected default-runtime range", localInfo.PID)
+	}
+
+	// Explicit burst tier uses burst.
+	burstInfo, err := m.Start(process.StartParams{
+		Slug: "b", Index: 0, Command: []string{"x"}, Port: 2, Tier: "burst",
+	})
+	if err != nil {
+		t.Fatalf("start burst: %v", err)
+	}
+	if burstInfo.PID < 50000 {
+		t.Fatalf("burst replica got PID %d; expected burst-runtime range", burstInfo.PID)
+	}
+
+	// Stop dispatches to the owning runtime without panicking.
+	if err := m.StopReplica("b", 0); err != nil {
+		t.Fatalf("stop burst: %v", err)
+	}
+}
