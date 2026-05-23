@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/deploy"
@@ -32,6 +33,17 @@ With no [dir] argument, the current directory is used.`,
 			dir := "."
 			if len(args) == 1 {
 				dir = args[0]
+			}
+
+			// A missing shinyhub.toml is a valid (empty) manifest, but a
+			// misspelled or nonexistent bundle path is a misuse: validating it
+			// must fail rather than silently report "nothing to validate".
+			info, err := os.Stat(dir)
+			if err != nil {
+				return fmt.Errorf("validate %s: %w", dir, err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("validate %s: not a directory", dir)
 			}
 
 			m, err := deploy.LoadManifest(dir)

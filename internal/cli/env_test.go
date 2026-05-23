@@ -20,12 +20,50 @@ type capturedReq struct {
 	Auth   string
 }
 
+// writeTestCLIConfig points the CLI at host by writing a config.json into a
+// fresh HOME, so execCLI/execCLISplit pick it up exactly as the shipped binary
+// would.
+func writeTestCLIConfig(t *testing.T, host string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgDir := filepath.Join(home, ".config", "shinyhub")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := cliConfig{Host: host, Token: "shk_test"}
+	f, err := os.Create(filepath.Join(cfgDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(f).Encode(cfg); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+}
+
 func setupCLITest(t *testing.T) (*httptest.Server, *[]capturedReq, func(int, string)) {
 	t.Helper()
-	var reqs []capturedReq
 	respStatus := 200
 	respBody := `{}`
+	srv, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(respStatus)
+		_, _ = w.Write([]byte(respBody))
+	})
+	setResp := func(status int, body string) {
+		respStatus = status
+		respBody = body
+	}
+	return srv, reqs, setResp
+}
 
+// setupCLITestHandler is the lower-level harness used by tests that need to
+// vary the response per request (e.g. polling loops that must observe a state
+// transition across successive GETs). It still captures every request for
+// assertions. The handler is invoked after the request has been recorded.
+func setupCLITestHandler(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *[]capturedReq) {
+	t.Helper()
+	var reqs []capturedReq
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		reqs = append(reqs, capturedReq{
@@ -35,32 +73,11 @@ func setupCLITest(t *testing.T) (*httptest.Server, *[]capturedReq, func(int, str
 			Body:   body,
 			Auth:   r.Header.Get("Authorization"),
 		})
-		w.WriteHeader(respStatus)
-		_, _ = w.Write([]byte(respBody))
+		handler(w, r)
 	}))
 	t.Cleanup(srv.Close)
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cfgDir := filepath.Join(home, ".config", "shinyhub")
-	if err := os.MkdirAll(cfgDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := cliConfig{Host: srv.URL, Token: "shk_test"}
-	f, err := os.Create(filepath.Join(cfgDir, "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.NewEncoder(f).Encode(cfg); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-
-	setResp := func(status int, body string) {
-		respStatus = status
-		respBody = body
-	}
-	return srv, &reqs, setResp
+	writeTestCLIConfig(t, srv.URL)
+	return srv, &reqs
 }
 
 func TestEnvSet_NonSecret(t *testing.T) {

@@ -96,6 +96,48 @@ func TestManifestValidate_NoManifest(t *testing.T) {
 	}
 }
 
+// CR2-2: validating a misspelled or nonexistent directory must fail, not exit 0
+// with "no shinyhub.toml found". A silent success defeats the purpose of a local
+// pre-deploy check (the operator thinks the bundle is fine when the path is wrong).
+func TestManifestValidate_NonexistentDirErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+	var out bytes.Buffer
+	cmd := newManifestCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"validate", missing})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected an error for a nonexistent directory, got nil\n%s", out.String())
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "does-not-exist") &&
+		!strings.Contains(strings.ToLower(err.Error()), "no such") &&
+		!strings.Contains(strings.ToLower(err.Error()), "not a directory") &&
+		!strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+		t.Errorf("error should explain the path problem, got: %v", err)
+	}
+}
+
+// CR2-2: a path that exists but is a regular file (not a directory) is also a
+// misuse and must error rather than silently passing.
+func TestManifestValidate_FilePathErrors(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "shinyhub.toml")
+	if err := os.WriteFile(file, []byte("[app]\nreplicas = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cmd := newManifestCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"validate", file})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected an error when the path is a file, not a directory\n%s", out.String())
+	}
+}
+
 // DEP-1: validate defaults to the current directory when no path is given.
 func TestManifestValidate_DefaultsToCwd(t *testing.T) {
 	dir := writeManifest(t, `

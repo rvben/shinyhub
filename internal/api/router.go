@@ -48,14 +48,14 @@ type Server struct {
 	// authenticates as the synthetic system user without a DB lookup. Set via
 	// SetDeployToken at startup when SHINYHUB_DEPLOY_TOKEN is configured.
 	deployToken *auth.DeployToken
-	deployRun     func(deploy.Params) (*deploy.PoolResult, error)
+	deployRun   func(deploy.Params) (*deploy.PoolResult, error)
 
 	// deployLocksMu guards the deployLocks map. Each slug gets its own
 	// sync.Mutex which serializes deploy/restart/rollback/stop/delete
 	// operations for that app: a deploy in flight blocks a concurrent
-	// restart on the same slug. Different slugs are independent. The
-	// async redeployApp goroutine uses TryLock so it coalesces (skips)
-	// when an HTTP-driven deploy is already running.
+	// restart on the same slug. Different slugs are independent. The async
+	// redeployApp goroutine waits for this lock so a replica change is always
+	// applied even when an HTTP-driven deploy is already running.
 	deployLocksMu sync.Mutex
 	deployLocks   map[string]*sync.Mutex
 
@@ -66,6 +66,52 @@ type Server struct {
 	// deployLocks so a slow upload does not block deploys/restarts.
 	dataLocksMu sync.Mutex
 	dataLocks   map[string]*sync.Mutex
+
+	// redeployMu guards redeployInFlight, a per-slug reference count of pending
+	// pool cycles. The PATCH handler increments synchronously before launching
+	// each async redeployApp goroutine, so the first GET after the PATCH always
+	// observes the redeploy in flight even though the app row still reads
+	// "running". Every launched goroutine decrements exactly once on return,
+	// whether it performed the restart or skipped because another operation held
+	// the deploy lock. Reference counting keeps the marker set while the active
+	// pool-cycler is still running (a coalesced skip only drops its own
+	// reference) yet guarantees the marker is released even when the lock holder
+	// is an unrelated operation that never cycles the pool. handleGetApp surfaces
+	// a positive count as redeploy_in_flight so a --wait client polls until the
+	// new pool is up.
+	redeployMu       sync.Mutex
+	redeployInFlight map[string]int
+}
+
+// markRedeployInFlight adds one reference for slug's pending pool cycle. Each
+// mark is balanced by exactly one clearRedeployInFlight in the launched
+// redeployApp goroutine.
+func (s *Server) markRedeployInFlight(slug string) {
+	s.redeployMu.Lock()
+	defer s.redeployMu.Unlock()
+	if s.redeployInFlight == nil {
+		s.redeployInFlight = make(map[string]int)
+	}
+	s.redeployInFlight[slug]++
+}
+
+// clearRedeployInFlight drops one reference for slug, removing the entry when
+// the count reaches zero. Never decrements below zero.
+func (s *Server) clearRedeployInFlight(slug string) {
+	s.redeployMu.Lock()
+	defer s.redeployMu.Unlock()
+	if s.redeployInFlight[slug] <= 1 {
+		delete(s.redeployInFlight, slug)
+		return
+	}
+	s.redeployInFlight[slug]--
+}
+
+// isRedeployInFlight reports whether slug's pool is currently being cycled.
+func (s *Server) isRedeployInFlight(slug string) bool {
+	s.redeployMu.Lock()
+	defer s.redeployMu.Unlock()
+	return s.redeployInFlight[slug] > 0
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil

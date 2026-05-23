@@ -319,7 +319,7 @@ Timezone is tri-state:
 		slug, name := args[0], args[1]
 
 		changed := cmd.Flags().Changed
-		if flags.cmd != "" && flags.cmdJSON != "" {
+		if changed("cmd") && changed("cmd-json") {
 			return fmt.Errorf("specify at most one of --cmd or --cmd-json")
 		}
 		if changed("timezone") && flags.clearTZ {
@@ -532,10 +532,6 @@ func newScheduleRunCmd() *cobra.Command {
 			return err
 		}
 		id := sched.ID
-		if !sched.Enabled {
-			fmt.Fprintf(cmd.ErrOrStderr(),
-				"note: schedule %q is disabled; manual trigger proceeded anyway\n", name)
-		}
 
 		url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/run", cfg.Host, slug, id)
 		req, err := http.NewRequest("POST", url, nil)
@@ -553,6 +549,13 @@ func newScheduleRunCmd() *cobra.Command {
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
 			return httpError(cfg.Token, "run schedule", resp, out)
+		}
+
+		// Only report the disabled-schedule override after the server accepted
+		// the run, so a failed trigger never reads as if it proceeded.
+		if !sched.Enabled {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"note: schedule %q is disabled; manual trigger proceeded anyway\n", name)
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q started\n", slug, name)

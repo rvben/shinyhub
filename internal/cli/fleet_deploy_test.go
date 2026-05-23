@@ -203,6 +203,45 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	}
 }
 
+// The single-app `deploy` surfaces a hooks-skipped warning when the server
+// reports post-deploy hooks were skipped under the container runtime. The
+// fleet deploy path must do the same so a `fleet apply` operator is not left
+// silently unaware that their setup hooks never ran.
+func TestDeployAppBundle_EmitsHooksSkippedWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/deploy":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok","hooks_skipped":2}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"app": map[string]any{"status": "running"},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"slug": "demo", "content_digest": "sha256:X"},
+			})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+
+	var buf bytes.Buffer
+	if _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "post-deploy") || !strings.Contains(out, "skipped") {
+		t.Fatalf("fleet deploy must surface the hooks-skipped warning, got:\n%s", out)
+	}
+}
+
 func TestDeployAppBundle_ClientRejectionIsNotCommitted(t *testing.T) {
 	// A 4xx is a clean validation rejection: the server refused the request
 	// before promoting anything, so committed=false (caller may roll back).

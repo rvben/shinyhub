@@ -103,6 +103,37 @@ func TestProxy_PropagatesTracestate(t *testing.T) {
 	}
 }
 
+// TRC-4: tracestate is a W3C list header that a client or edge proxy MAY split
+// across multiple header field-values. A receiver must combine them; reading
+// only the first (Header.Get) silently drops every vendor entry after the first
+// split. ShinyHub must join all inbound Tracestate values before propagating.
+func TestProxy_CombinesSplitTracestate(t *testing.T) {
+	var gotState string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotState = r.Header.Get("tracestate")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	req.Header.Add("tracestate", "dd=s:1;o:rum")
+	req.Header.Add("tracestate", "congo=t61rcWkgMzE")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	want := "dd=s:1;o:rum,congo=t61rcWkgMzE"
+	if gotState != want {
+		t.Errorf("split tracestate not combined downstream: got %q, want %q", gotState, want)
+	}
+}
+
 // TRC-4: when no valid upstream traceparent is present a fresh trace is started,
 // so any inbound tracestate references a different (or no) trace and MUST NOT be
 // forwarded — that would attach stale vendor context to a brand-new trace.
