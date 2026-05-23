@@ -321,7 +321,7 @@ func putEnv(cfg *cliConfig, slug, key, value string, secret, restart bool) error
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return httpError(cfg.Token, "set env", resp, out)
 	}
 	return nil
 }
@@ -345,7 +345,7 @@ func deleteEnv(cfg *cliConfig, slug, key string, restart bool) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return httpError(cfg.Token, "remove env", resp, out)
 	}
 	return nil
 }
@@ -364,7 +364,7 @@ func fetchCurrentEnv(cfg *cliConfig, slug string) ([]envServerVar, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, body)
+		return nil, httpError(cfg.Token, "list env", resp, body)
 	}
 	var parsed struct {
 		Env []envServerVar `json:"env"`

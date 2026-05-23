@@ -50,7 +50,7 @@ func newShareLsCmd() *cobra.Command {
 
 			if resp.StatusCode >= 400 {
 				out, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("server returned %s: %s", resp.Status, out)
+				return httpError(cfg.Token, "list shared-data", resp, out)
 			}
 
 			var mounts []sharedDataDTO
@@ -111,7 +111,7 @@ func newShareAddCmd() *cobra.Command {
 
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "add shared-data", resp, out)
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: mounted data from %q\n", slug, from)
@@ -148,7 +148,7 @@ func newShareRmCmd() *cobra.Command {
 
 			if resp.StatusCode >= 400 {
 				out, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("server returned %s: %s", resp.Status, out)
+				return httpError(cfg.Token, "remove shared-data", resp, out)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: removed shared-data mount %q\n", slug, sourceSlug)

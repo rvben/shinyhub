@@ -67,7 +67,7 @@ func fetchApps(cfg *cliConfig) ([]db.App, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, string(body))
+		return nil, httpError(cfg.Token, "list apps", resp, body)
 	}
 	var apps []db.App
 	if err := json.Unmarshal(body, &apps); err != nil {

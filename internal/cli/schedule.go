@@ -85,7 +85,7 @@ func listSchedulesRaw(cfg *cliConfig, slug string) ([]byte, error) {
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, body)
+		return nil, httpError(cfg.Token, "get schedules", resp, body)
 	}
 	return body, nil
 }
@@ -106,7 +106,7 @@ func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return nil, httpError(cfg.Token, "list schedules", resp, out)
 	}
 
 	var schedules []scheduleDTO
@@ -259,7 +259,7 @@ func newScheduleAddCmd() *cobra.Command {
 			return nil
 		}
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "create schedule", resp, out)
 		}
 
 		var created scheduleDTO
@@ -393,7 +393,7 @@ Timezone is tri-state:
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, string(out)))
+			return httpError(cfg.Token, "update schedule", resp, out)
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: updated schedule %q\n", slug, name)
@@ -435,7 +435,7 @@ func newScheduleRmCmd() *cobra.Command {
 
 			if resp.StatusCode >= 400 {
 				out, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("server returned %s: %s", resp.Status, out)
+				return httpError(cfg.Token, "remove schedule", resp, out)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: removed schedule %q\n", slug, name)
@@ -493,7 +493,7 @@ func patchScheduleEnabled(enabled bool) func(*cobra.Command, []string) error {
 
 		if resp.StatusCode >= 400 {
 			out, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "update schedule state", resp, out)
 		}
 
 		state := "enabled"
@@ -548,7 +548,7 @@ func newScheduleRunCmd() *cobra.Command {
 
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "run schedule", resp, out)
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q started\n", slug, name)
@@ -672,7 +672,7 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return httpError(cfg.Token, "stream schedule logs", resp, out)
 	}
 
 	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
@@ -722,7 +722,7 @@ func runFinalExitError(cfg *cliConfig, slug string, schedID, runID int64) error 
 
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return httpError(cfg.Token, "fetch run status", resp, out)
 	}
 
 	var run scheduleRunResult
