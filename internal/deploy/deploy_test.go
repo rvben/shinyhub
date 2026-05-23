@@ -459,6 +459,88 @@ command = ["should-not-run"]
 	}
 }
 
+// TestRun_HookSkippedSurfacedInResult: skipping post-deploy hooks under a
+// container runtime is invisible to the developer when it lives only in the
+// server log. Run must report how many hooks it skipped so the API can relay
+// it and the CLI can warn the developer their hooks did not execute.
+func TestRun_HookSkippedSurfacedInResult(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(`
+[[hook]]
+on = "post-deploy"
+command = ["should-not-run"]
+
+[[hook]]
+on = "post-deploy"
+command = ["also-skipped"]
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
+		return nil
+	})
+	defer restore()
+
+	res, err := deploy.Run(deploy.Params{
+		Slug: "docker-hook-count", BundleDir: bundle, Replicas: 1,
+		Manager:     process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
+		Proxy:       proxy.New(),
+		HealthCheck: func(int, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if res.HooksSkipped != 2 {
+		t.Errorf("HooksSkipped = %d, want 2", res.HooksSkipped)
+	}
+}
+
+// TestRun_NativeRuntimeReportsNoSkippedHooks: when the host prepares deps the
+// hooks run, so nothing is reported as skipped.
+func TestRun_NativeRuntimeReportsNoSkippedHooks(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(`
+[[hook]]
+on = "post-deploy"
+command = ["echo", "ok"]
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var called atomic.Bool
+	restore := deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
+		called.Store(true)
+		return nil
+	})
+	defer restore()
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	res, err := deploy.Run(deploy.Params{
+		Slug: "native-hook", BundleDir: bundle, Replicas: 1,
+		Manager:     mgr,
+		Proxy:       proxy.New(),
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(int, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	defer mgr.Stop("native-hook")
+	if !called.Load() {
+		t.Error("post-deploy hook should run under native runtime")
+	}
+	if res.HooksSkipped != 0 {
+		t.Errorf("HooksSkipped = %d, want 0", res.HooksSkipped)
+	}
+}
+
 // TestRun_DockerSkipsHostDepInstall proves the fix for a long-standing footgun:
 // when the runtime is Docker, deploy.Run must not attempt to install bundle
 // dependencies on the host (no `uv sync`, no `Rscript renv::restore`). Those

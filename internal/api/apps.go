@@ -842,7 +842,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	resp := struct {
 		*db.App
 		Manifest *ManifestApplied `json:"manifest,omitempty"`
-	}{App: updatedApp}
+		// HooksSkipped is non-zero when the runtime prepared deps inside a
+		// container and post-deploy hooks were therefore not run. omitempty
+		// keeps the wire shape clean for the common case.
+		HooksSkipped int `json:"hooks_skipped,omitempty"`
+	}{App: updatedApp, HooksSkipped: result.HooksSkipped}
 	if !manifestSummary.IsEmpty() {
 		resp.Manifest = &manifestSummary
 	}

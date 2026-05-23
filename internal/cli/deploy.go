@@ -210,6 +210,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	for _, line := range formatManifestSummary(appResp["manifest"]) {
 		fmt.Println(line)
 	}
+	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
+	}
 
 	if f.wait {
 		if err := waitForHealthy(cfg, slug, time.Duration(f.waitTimeout)*time.Second); err != nil {
