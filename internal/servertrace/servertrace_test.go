@@ -170,6 +170,107 @@ func TestHTTPTracesEndpoint_AppendsSignalPath(t *testing.T) {
 	}
 }
 
+// TestGRPCEndpoint_DerivesHostAndSecurity proves the gRPC endpoint reducer
+// strips an endpoint URL down to the host:port the gRPC exporter wants and
+// reports TLS intent from the scheme: only https stays secure, every other
+// form (http, a non-http scheme, a bare host, a host:port the URL parser
+// rejects) is treated as insecure and returned verbatim. Getting this wrong
+// would either dial plaintext against a TLS collector or vice versa.
+func TestGRPCEndpoint_DerivesHostAndSecurity(t *testing.T) {
+	cases := []struct {
+		raw          string
+		wantEndpoint string
+		wantInsecure bool
+	}{
+		{"https://otel-collector:4317", "otel-collector:4317", false},
+		{"http://127.0.0.1:4317", "127.0.0.1:4317", true},
+		{"grpc://collector:4317", "collector:4317", true},
+		// No scheme and no authority: parsed Host is empty, so the raw value is
+		// passed through and treated as insecure.
+		{"localhost", "localhost", true},
+		// host:port with no scheme is the common shorthand; whether the URL
+		// parser errors or yields an empty host, the contract is the same.
+		{"127.0.0.1:4317", "127.0.0.1:4317", true},
+	}
+	for _, tc := range cases {
+		gotEndpoint, gotInsecure := grpcEndpoint(tc.raw)
+		if gotEndpoint != tc.wantEndpoint || gotInsecure != tc.wantInsecure {
+			t.Errorf("grpcEndpoint(%q) = (%q, %v), want (%q, %v)",
+				tc.raw, gotEndpoint, gotInsecure, tc.wantEndpoint, tc.wantInsecure)
+		}
+	}
+}
+
+// TestParseHeaders parses the OTEL_EXPORTER_OTLP_HEADERS "k=v,k2=v2" form,
+// trimming whitespace around keys and values, splitting only on the first '='
+// so values may contain '=', and skipping empty or '='-less fragments rather
+// than emitting junk keys. A misparse here would silently send the collector
+// the wrong (or no) auth header.
+func TestParseHeaders(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want map[string]string
+	}{
+		{"single", "x-honeycomb-team=KEY", map[string]string{"x-honeycomb-team": "KEY"}},
+		{"multiple", "a=1,b=2", map[string]string{"a": "1", "b": "2"}},
+		{"whitespace trimmed", " a = 1 , b = 2 ", map[string]string{"a": "1", "b": "2"}},
+		{"value keeps inner equals", "token=a=b", map[string]string{"token": "a=b"}},
+		{"empty string", "", map[string]string{}},
+		{"malformed pairs skipped", "good=1,novalue,also=2", map[string]string{"good": "1", "also": "2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseHeaders(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("parseHeaders(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			for k, want := range tc.want {
+				if got[k] != want {
+					t.Errorf("parseHeaders(%q)[%q] = %q, want %q", tc.in, k, got[k], want)
+				}
+			}
+		})
+	}
+}
+
+// TestNewExporter_AppliesHeaders proves both the HTTP and gRPC exporter builders
+// thread configured OTLP headers through to the exporter (the WithHeaders
+// branch) and return a usable exporter without dialing the collector. The
+// exporter type carries no public accessor for its headers, so this guards the
+// construction path against a regression that drops auth headers.
+func TestNewExporter_AppliesHeaders(t *testing.T) {
+	for _, proto := range []string{"http/protobuf", "grpc"} {
+		t.Run(proto, func(t *testing.T) {
+			exp, err := newExporter(context.Background(), config.TracingConfig{
+				OTLPEndpoint: "http://127.0.0.1:4318",
+				OTLPProtocol: proto,
+				OTLPHeaders:  "x-honeycomb-team=KEY,x-tenant=acme",
+			})
+			if err != nil {
+				t.Fatalf("newExporter(%s): %v", proto, err)
+			}
+			if exp == nil {
+				t.Fatalf("newExporter(%s) returned nil exporter", proto)
+			}
+			if err := exp.Shutdown(context.Background()); err != nil {
+				t.Errorf("exporter Shutdown(%s): %v", proto, err)
+			}
+		})
+	}
+}
+
+// TestHTTPTracesEndpoint_MalformedPassThrough proves an endpoint the URL parser
+// rejects is returned unchanged rather than being silently rewritten, so the
+// exporter surfaces the original misconfiguration instead of posting to a
+// mangled URL.
+func TestHTTPTracesEndpoint_MalformedPassThrough(t *testing.T) {
+	const bad = "%zz" // invalid percent-escape: url.Parse rejects it
+	if got := httpTracesEndpoint(bad); got != bad {
+		t.Errorf("httpTracesEndpoint(%q) = %q, want it returned unchanged", bad, got)
+	}
+}
+
 // TestSetup_BuildsExporterPerProtocol proves Setup constructs a working Tracer
 // for both supported OTLP protocols without dialing the collector (exporters
 // connect lazily), and that Shutdown is clean.
