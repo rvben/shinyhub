@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -470,6 +471,9 @@ type appsSetFlags struct {
 	hibernateTimeout      int
 	replicas              int
 	maxSessionsPerReplica int
+	yes                   bool
+	wait                  bool
+	waitTimeout           time.Duration
 }
 
 func newAppsSetCmd() *cobra.Command {
@@ -488,6 +492,12 @@ func newAppsSetCmd() *cobra.Command {
 		"Number of replica processes serving this app (>= 1)")
 	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", 0,
 		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
+	cmd.Flags().BoolVar(&f.yes, "yes", false,
+		"Skip the confirmation prompt for a replica change (which restarts the app)")
+	cmd.Flags().BoolVar(&f.wait, "wait", false,
+		"After applying, wait until the app is healthy again (useful after a replica change)")
+	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", 300*time.Second,
+		"How long to wait for the app to become healthy when --wait is set")
 	return cmd
 }
 
@@ -514,6 +524,26 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		return err
 	}
 	slug := args[0]
+
+	// A replica change restarts the app and drops active sessions, so an
+	// interactive caller must confirm first (mirrors the dashboard's guard).
+	// The prompt is tty-gated: a non-interactive caller (CI, cron, piped
+	// script) proceeds without prompting so automation that scales via the CLI
+	// keeps working. --yes skips the prompt explicitly.
+	if replicasChanged && !f.yes && isStdinTTY() {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Changing replicas restarts %q and drops active sessions. Continue? [y/N]: ", slug)
+		var confirm string
+		if _, err := fmt.Fscan(cmd.InOrStdin(), &confirm); err != nil {
+			return fmt.Errorf("read confirmation: %w", err)
+		}
+		switch strings.ToLower(confirm) {
+		case "y", "yes":
+			// proceed
+		default:
+			return fmt.Errorf("aborted - replicas unchanged")
+		}
+	}
 
 	payload := map[string]any{}
 
@@ -574,6 +604,10 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		} else {
 			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, f.maxSessionsPerReplica)
 		}
+	}
+
+	if f.wait {
+		return waitForHealthyWithOutput(cfg, slug, f.waitTimeout, cmd.ErrOrStderr())
 	}
 	return nil
 }

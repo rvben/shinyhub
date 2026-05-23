@@ -823,3 +823,124 @@ func TestTokensRevoke_BothIDAndName(t *testing.T) {
 		t.Errorf("expected no HTTP requests for mutual-exclusion error, got %d", len(*reqs))
 	}
 }
+
+// ── apps set: replica-change confirm guard + --wait (DEP-2) ──────────────────
+
+// Changing replicas restarts the app and drops active sessions, so an
+// interactive caller must confirm. Declining must abort before any PATCH.
+func TestAppsSet_ReplicaChange_TTYAbortsOnNo(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	_, err := execCLIStdin(t, strings.NewReader("n\n"), "apps", "set", "demo", "--replicas", "3")
+	if err == nil {
+		t.Fatal("expected abort error when user declines, got nil")
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("error should mention 'aborted', got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when replica change is declined, got %d", len(*reqs))
+	}
+}
+
+// Confirming the prompt with "y" must proceed with the PATCH.
+func TestAppsSet_ReplicaChange_TTYProceedsOnYes(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	if _, err := execCLIStdin(t, strings.NewReader("y\n"), "apps", "set", "demo", "--replicas", "3"); err != nil {
+		t.Fatalf("unexpected error after confirming: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH after confirmation, got %#v", *reqs)
+	}
+}
+
+// --yes bypasses the prompt even on a TTY.
+func TestAppsSet_ReplicaChange_YesFlagSkipsPrompt(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3", "--yes"); err != nil {
+		t.Fatalf("unexpected error with --yes: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH with --yes, got %#v", *reqs)
+	}
+}
+
+// The confirm is TTY-gated: a non-interactive caller (CI, cron, piped script)
+// must proceed without prompting so automation that scales via the CLI keeps
+// working.
+func TestAppsSet_ReplicaChange_NonTTYProceedsWithoutPrompt(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return false }
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3"); err != nil {
+		t.Fatalf("unexpected error in non-tty mode: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH in non-tty mode, got %#v", *reqs)
+	}
+}
+
+// A hot setting (hibernate-timeout, cap) does not restart the app, so it must
+// never trigger the replica confirm even on an interactive terminal.
+func TestAppsSet_HibernateChange_NoPromptOnTTY(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	// Empty stdin: if the command tried to prompt it would fail on read.
+	if _, err := execCLIStdin(t, strings.NewReader(""), "apps", "set", "demo", "--hibernate-timeout", "10"); err != nil {
+		t.Fatalf("unexpected error for hot setting change: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH for hibernate change, got %#v", *reqs)
+	}
+}
+
+// --wait makes the command poll GET /api/apps/{slug} until the app is running
+// again after the replica change.
+func TestAppsSet_Wait_PollsUntilRunning(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"status":"running"}}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3", "--yes", "--wait"); err != nil {
+		t.Fatalf("unexpected error with --wait: %v", err)
+	}
+	sawPatch, sawGet := false, false
+	for _, r := range *reqs {
+		switch r.Method {
+		case "PATCH":
+			sawPatch = true
+		case "GET":
+			if r.Path == "/api/apps/demo" {
+				sawGet = true
+			}
+		}
+	}
+	if !sawPatch || !sawGet {
+		t.Errorf("expected both PATCH and a GET poll of /api/apps/demo, got %#v", *reqs)
+	}
+}
