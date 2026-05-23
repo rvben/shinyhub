@@ -541,6 +541,18 @@ func TestScheduleDSTAdvisoryWired(t *testing.T) {
 		"schedule-ui helper must read dst_advisory from the schedule DTO computed by the server")
 }
 
+// TestSharedDataReadOnlyHelpIsHonest guards the shared-data help text. Under the
+// native runtime the read-only mount is a convention only (the source data dir
+// is symlinked and writes through it are not blocked); the Docker runtime
+// enforces it at the OS level. The Settings -> Data help must say so, otherwise
+// operators trust an enforcement guarantee that native does not provide.
+func TestSharedDataReadOnlyHelpIsHonest(t *testing.T) {
+	assertContains(t, "index.html", "convention",
+		"shared-data help must state read-only is a convention under the native runtime, not OS-enforced")
+	assertContains(t, "index.html", "Docker runtime",
+		"shared-data help must point at the Docker runtime for OS-level read-only enforcement")
+}
+
 // TestScheduleRunHistoryReadsSnakeCase guards the JSON contract for schedule
 // runs. db.ScheduleRun serializes with snake_case json tags (id, status,
 // exit_code, started_at; see internal/db/schedules.go), so the run-history

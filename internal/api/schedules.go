@@ -613,7 +613,17 @@ func paginationParams(r *http.Request, defLimit, max int) (limit, offset int) {
 type sharedDataDTO struct {
 	SourceSlug string `json:"source_slug"`
 	SourceID   int64  `json:"source_id"`
+	// Warning is set on grant under the native runtime, where the read-only
+	// mount is a convention only (the source data dir is symlinked and the
+	// filesystem still permits writes through it). Empty under the Docker
+	// runtime, which enforces read-only at the OS level.
+	Warning string `json:"warning,omitempty"`
 }
+
+// sharedDataNativeWarning explains that the read-only shared-data mount is not
+// OS-enforced under the native runtime. Surfaced on grant so operators can
+// choose the Docker runtime when they need real enforcement.
+const sharedDataNativeWarning = "Read-only is a convention under the native runtime: the source data dir is symlinked and writes through it are not blocked. Switch to the Docker runtime for OS-level read-only enforcement."
 
 // GET /api/apps/{slug}/shared-data
 func (s *Server) handleListSharedData(w http.ResponseWriter, r *http.Request) {
@@ -678,7 +688,11 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "shared_data_grant", "app", app.Slug, fmt.Sprintf(`{"source":%q}`, src.Slug))
-	writeJSON(w, http.StatusCreated, sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID})
+	dto := sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID}
+	if s.cfg.Runtime.Mode != "docker" {
+		dto.Warning = sharedDataNativeWarning
+	}
+	writeJSON(w, http.StatusCreated, dto)
 }
 
 // DELETE /api/apps/{slug}/shared-data/{source_slug}

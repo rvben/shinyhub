@@ -316,7 +316,7 @@
           </section>
 
           <section id="settings-shared-data-panel">
-            <p class="settings-help">Mount another app's persistent data dir read-only — it appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app.</p>
+            <p class="settings-help">Mount another app's persistent data dir read-only. It appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app. Read-only is enforced by the Docker runtime; under the native runtime it is a convention only (writes through the symlink are not blocked).</p>
             <div id="shared-data-list" class="shared-data-table"></div>
             <button type="button" class="btn-primary" id="shared-data-add-btn">+ Mount data from another app</button>
           </section>

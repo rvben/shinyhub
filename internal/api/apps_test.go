@@ -1156,6 +1156,28 @@ func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Se
 	return srv, store
 }
 
+// newManagerTestServerWithRuntimeMode builds a server whose runtime mode is set
+// explicitly, so tests can exercise behavior that branches on native vs docker.
+func newManagerTestServerWithRuntimeMode(t *testing.T, mode string) (*api.Server, *db.Store) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir},
+		Runtime: config.RuntimeConfig{Mode: mode},
+	}
+	srv := api.New(cfg, store, process.NewManager(appsDir, process.NewNativeRuntime()), nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
+
 // newTestServerWithDefaultReplicas creates a test server with a specific DefaultReplicas value.
 func newTestServerWithDefaultReplicas(t *testing.T, defaultReplicas int) (*api.Server, *db.Store) {
 	t.Helper()

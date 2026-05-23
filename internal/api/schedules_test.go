@@ -936,6 +936,74 @@ func grantSharedDataFixture(t *testing.T) (srv *api.Server, store *db.Store, tok
 	return srv, store, token
 }
 
+// DOC-2: under the native runtime the read-only mount is a convention only -
+// the source data dir is symlinked and the filesystem still permits writes
+// through it. The grant response must carry a warning so operators learn the
+// RO contract is not OS-enforced unless they switch to the Docker runtime.
+func TestSchedules_GrantSharedData_NativeRuntimeWarnsReadOnlyConvention(t *testing.T) {
+	srv, store := newManagerTestServerWithRuntimeMode(t, "native")
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	warning, _ := resp["warning"].(string)
+	if warning == "" {
+		t.Fatalf("expected a read-only-convention warning under native runtime, got none: %s", rec.Body.String())
+	}
+	if !strings.Contains(warning, "Docker") {
+		t.Errorf("warning should point at the Docker runtime for enforcement, got %q", warning)
+	}
+}
+
+// DOC-2: under the Docker runtime the mount is OS-enforced read-only, so the
+// grant response must NOT carry the convention warning.
+func TestSchedules_GrantSharedData_DockerRuntimeOmitsWarning(t *testing.T) {
+	srv, store := newManagerTestServerWithRuntimeMode(t, "docker")
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := resp["warning"]; ok {
+		t.Errorf("docker runtime enforces RO; warning key must be absent, got %s", rec.Body.String())
+	}
+}
+
 // ERR-2: a self-mount (source == consumer) is a client error, not a 500.
 func TestSchedules_GrantSharedData_SelfMountReturns400(t *testing.T) {
 	srv, _, token := grantSharedDataFixture(t)
