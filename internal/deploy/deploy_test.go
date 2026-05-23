@@ -219,7 +219,7 @@ func TestDeploy_CommandOnly(t *testing.T) {
 		Command:   []string{"sleep", "30"},
 		Manager:   mgr,
 		Proxy:     prx,
-		HealthCheck: func(port int, timeout time.Duration) error {
+		HealthCheck: func(_ string, _ time.Duration) error {
 			return nil // no HTTP server in this test
 		},
 	}
@@ -250,7 +250,7 @@ func TestRun_PoolBootsAllReplicas(t *testing.T) {
 		Slug: "pool-all", BundleDir: bundle, Replicas: 3,
 		Manager: mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(int, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -274,7 +274,7 @@ func TestRun_PartialHealthStillSucceeds(t *testing.T) {
 		Slug: "pool-partial", BundleDir: bundle, Replicas: 2,
 		Manager: mgr, Proxy: prx,
 		Command: []string{"sleep", "30"},
-		HealthCheck: func(port int, _ time.Duration) error {
+		HealthCheck: func(_ string, _ time.Duration) error {
 			if failOnce.CompareAndSwap(false, true) {
 				return fmt.Errorf("simulated")
 			}
@@ -298,7 +298,7 @@ func TestRun_AllFailHealthErrors(t *testing.T) {
 		Slug: "pool-allfail", BundleDir: bundle, Replicas: 2,
 		Manager: mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(int, time.Duration) error { return fmt.Errorf("boom") },
+		HealthCheck: func(string, time.Duration) error { return fmt.Errorf("boom") },
 	})
 	if err == nil {
 		t.Fatal("expected error when all replicas fail health")
@@ -319,7 +319,7 @@ func TestRunReplica_SingleBoot(t *testing.T) {
 		Slug: "one-rep", BundleDir: bundle, Replicas: 3,
 		Manager: mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(int, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration) error { return nil },
 	}, 2)
 	if err != nil {
 		t.Fatalf("run replica: %v", err)
@@ -365,7 +365,7 @@ command = ["python", "-m", "scripts.migrate"]
 		Slug: "hook-app", BundleDir: bundle, Replicas: 1,
 		Manager: mgr, Proxy: prx,
 		Command: []string{"sleep", "30"},
-		HealthCheck: func(port int, _ time.Duration) error {
+		HealthCheck: func(_ string, _ time.Duration) error {
 			mu.Lock()
 			defer mu.Unlock()
 			events = append(events, "boot")
@@ -409,7 +409,7 @@ command = ["broken"]
 		Manager: process.NewManager(t.TempDir(), process.NewNativeRuntime()),
 		Proxy:   prx,
 		Command: []string{"sleep", "30"},
-		HealthCheck: func(int, time.Duration) error {
+		HealthCheck: func(string, time.Duration) error {
 			t.Error("replica boot should not be reached when post-deploy hook fails")
 			return nil
 		},
@@ -450,7 +450,7 @@ command = ["should-not-run"]
 		Slug: "docker-hook", BundleDir: bundle, Replicas: 1,
 		Manager: process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
 		Proxy:   proxy.New(),
-		HealthCheck: func(int, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -490,7 +490,7 @@ command = ["also-skipped"]
 		Slug: "docker-hook-count", BundleDir: bundle, Replicas: 1,
 		Manager:     process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
 		Proxy:       proxy.New(),
-		HealthCheck: func(int, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -528,7 +528,7 @@ command = ["echo", "ok"]
 		Manager:     mgr,
 		Proxy:       proxy.New(),
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(int, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -573,7 +573,7 @@ func TestRun_DockerSkipsHostDepInstall(t *testing.T) {
 	_, err := deploy.Run(deploy.Params{
 		Slug: "docker-app", BundleDir: bundle, Replicas: 1,
 		Manager: mgr, Proxy: proxy.New(),
-		HealthCheck: func(int, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -619,7 +619,7 @@ func TestRun_NativeStillRunsHostDepInstall(t *testing.T) {
 	_, err := deploy.Run(deploy.Params{
 		Slug: "native-app", BundleDir: bundle, Replicas: 1,
 		Manager: mgr, Proxy: proxy.New(),
-		HealthCheck: func(int, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration) error { return nil },
 		Command:     nil,
 	})
 	if err != nil {
@@ -840,7 +840,7 @@ func TestRunPublishesBundle(t *testing.T) {
 		Manager:       mgr,
 		Proxy:         proxy.New(),
 		Command:       []string{"sleep", "30"},
-		HealthCheck:   func(int, time.Duration) error { return nil },
+		HealthCheck:   func(string, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -875,5 +875,40 @@ func TestResolveResourceLimits(t *testing.T) {
 				t.Errorf("ResolveCPUQuotaPercent: got %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBootRegistersRuntimeEndpoint verifies that the runtime-returned endpoint
+// URL is passed to both the health-check and the proxy, and that Result carries
+// the full endpoint metadata (EndpointURL, Tier, Provider) from the runtime.
+func TestBootRegistersRuntimeEndpoint(t *testing.T) {
+	var gotURL string
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("ep-app")
+	prx := proxy.New()
+
+	p := deploy.Params{
+		Slug:      "ep-app",
+		BundleDir: t.TempDir(),
+		Command:   []string{"sleep", "30"},
+		Manager:   mgr,
+		Proxy:     prx,
+		HealthCheck: func(endpointURL string, _ time.Duration) error {
+			gotURL = endpointURL
+			return nil
+		},
+	}
+	res, err := deploy.Run(p)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(res.Replicas) != 1 {
+		t.Fatalf("got %d replicas; want 1", len(res.Replicas))
+	}
+	if res.Replicas[0].EndpointURL == "" || gotURL != res.Replicas[0].EndpointURL {
+		t.Fatalf("health-checked %q but Result.EndpointURL=%q", gotURL, res.Replicas[0].EndpointURL)
+	}
+	if res.Replicas[0].Provider != "native" || res.Replicas[0].Tier != "local" {
+		t.Fatalf("missing tier/provider on Result: %+v", res.Replicas[0])
 	}
 }

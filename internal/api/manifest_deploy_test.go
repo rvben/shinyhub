@@ -142,7 +142,7 @@ func newManifestE2EServerCfg(t *testing.T, runtime config.RuntimeConfig) (*Serve
 	// are already bypassed because manifestFakeRuntime.HostPreparesDeps()
 	// returns false (container-mode semantics: no host-side dep installation).
 	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
-		p.HealthCheck = func(int, time.Duration) error { return nil }
+		p.HealthCheck = func(string, time.Duration) error { return nil }
 		return deploy.Run(p)
 	})
 
