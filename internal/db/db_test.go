@@ -1232,6 +1232,32 @@ func TestReplicaMetadataRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUpsertReplicaDefaultsDesiredStateToRunning(t *testing.T) {
+	store := openTestStore(t)
+	owner := mustCreateUser(t, store, "default-owner", "developer")
+	app := mustCreateApp(t, store, "default-desired-app", owner.ID)
+
+	// Caller omits DesiredState entirely (the live path for all current call sites).
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:  app.ID,
+		Index:  0,
+		Status: "stopped",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(reps) != 1 {
+		t.Fatalf("got %d replicas; want 1", len(reps))
+	}
+	if reps[0].DesiredState != "running" {
+		t.Fatalf("DesiredState = %q; want %q (empty input must default to running)", reps[0].DesiredState, "running")
+	}
+}
+
 func TestListAppsDigestNilUntilPromoted(t *testing.T) {
 	store := mustOpenDB(t)
 	owner := mustCreateUser(t, store, "owner-pending", "developer")
