@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,47 @@ func TestDeploy_WaitTimeoutDefaultIsGenerous(t *testing.T) {
 // "starting" state, the message must make clear the deploy was committed and the
 // app is still booting (not failed), and point to logs - rather than reading as
 // a hard deploy failure.
+// CR2-3: if --wait reads one healthy-but-not-running status and then can no
+// longer reach the API (transient 5xx/transport errors) until the timeout, the
+// last observations failed, so the actionable diagnostic is the poll error, not
+// a reassuring "still starting / has not failed" message.
+func TestWaitForHealthy_TimeoutAfterStaleStatusSurfacesPollError(t *testing.T) {
+	prev := healthPollInterval
+	healthPollInterval = 3 * time.Millisecond
+	t.Cleanup(func() { healthPollInterval = prev })
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo" && r.URL.RawQuery == "":
+			// First poll succeeds (starting); every later poll fails with 5xx.
+			if atomic.AddInt32(&calls, 1) == 1 {
+				_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
+				return
+			}
+			w.WriteHeader(http.StatusBadGateway)
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo/logs":
+			w.Header().Set("Content-Type", "text/event-stream")
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := waitForHealthyWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", 60*time.Millisecond, &stderrBuf)
+	if err == nil {
+		t.Fatal("expected an error when the last polls failed")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "still starting") || strings.Contains(msg, "has not failed") {
+		t.Errorf("must not reassure when the latest polls could not reach the API, got: %q", msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "last error") {
+		t.Errorf("should surface the last poll error, got: %q", msg)
+	}
+}
+
 func TestWaitForHealthy_TimeoutWhileStartingReadsAsStillBooting(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

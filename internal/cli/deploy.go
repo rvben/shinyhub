@@ -222,6 +222,10 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	return nil
 }
 
+// healthPollInterval is the delay between health polls. It is a package var so
+// tests can shorten it; production keeps the 2-second cadence.
+var healthPollInterval = 2 * time.Second
+
 // waitForHealthy polls GET /api/apps/{slug} until status is "running" or
 // the deadline expires. It writes progress dots to stdout and any failure
 // log tail to os.Stderr.
@@ -239,19 +243,16 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 // are treated as transient and keep the loop going.
 func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
 	deadline := time.Now().Add(timeout)
-	interval := 2 * time.Second
 	fmt.Printf("Waiting for %s to be healthy", slug)
 	var lastErr error
-	var lastStatus string
+	var lastPollOK bool
 	for time.Now().Before(deadline) {
 		ready, status, err := pollAppStatus(cfg, slug)
 		if err == nil && ready {
 			fmt.Println(" ready.")
 			return nil
 		}
-		if err == nil {
-			lastStatus = status
-		}
+		lastPollOK = err == nil
 		if err != nil {
 			lastErr = err
 			var he *httpStatusError
@@ -266,12 +267,15 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 			return fmt.Errorf("%s %s during startup - check logs above or run: shinyhub apps logs %s", slug, status, slug)
 		}
 		fmt.Print(".")
-		time.Sleep(interval)
+		time.Sleep(healthPollInterval)
 	}
 	fmt.Println()
 	printLogTail(cfg, slug, errOut)
-	// If we never reached the app at all, surface the transport/HTTP error.
-	if lastErr != nil && lastStatus == "" {
+	// If the most recent poll could not reach the app, surface that error: we
+	// have no fresh evidence the app is merely still booting, and a persistent
+	// transport/5xx failure is the actionable diagnostic. This also covers the
+	// case where we never reached the app at all (lastStatus still empty).
+	if !lastPollOK && lastErr != nil {
 		return fmt.Errorf("timed out after %s waiting for %s to be healthy (last error: %v)", timeout, slug, lastErr)
 	}
 	// The app was reachable and still in a non-terminal startup state: the
