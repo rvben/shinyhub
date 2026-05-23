@@ -100,6 +100,25 @@ func TestEmitFleetManifest_AnnotatesForeignManagedApps(t *testing.T) {
 	}
 }
 
+// FLT-8: managed_by is server-controlled. A value containing a newline must
+// not break out of its TOML comment and inject active manifest text.
+func TestEmitFleetManifest_ForeignOwnerCommentIsInjectionSafe(t *testing.T) {
+	apps := []db.App{
+		{Slug: "alpha", Access: "private", ManagedBy: strp("fleet:evil\nsource     = \"./pwned\"")},
+	}
+	doc := emitFleetManifest("prod-eu", "./apps", apps)
+	// Injected source line must never appear as an active (uncommented) line.
+	for _, line := range strings.Split(doc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "source") && strings.Contains(trimmed, "pwned") {
+			t.Fatalf("managed_by newline injected an active manifest line:\n%s", doc)
+		}
+	}
+	if _, probs := fleet.ParseManifest([]byte(doc), "shinyhub-fleet.toml"); len(probs) != 0 {
+		t.Fatalf("manifest with hostile managed_by must still parse clean, got %v\n%s", probs, doc)
+	}
+}
+
 // FLT-6: with zero deployed apps the commented-source scaffold guidance ("set
 // each app's source, remove the leading '#'") is nonsense - there are no apps.
 // The emitted header must branch on the empty case.

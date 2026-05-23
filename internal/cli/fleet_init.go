@@ -49,7 +49,7 @@ func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
 		b.WriteString("[[app]]\n")
 		fmt.Fprintf(&b, "slug       = %s\n", tomlString(a.Slug))
 		if a.ManagedBy != nil && *a.ManagedBy != "" && *a.ManagedBy != marker {
-			fmt.Fprintf(&b, "# currently managed by %s; adopt will transfer it to this fleet\n", *a.ManagedBy)
+			fmt.Fprintf(&b, "# currently managed by %s; adopt will transfer it to this fleet\n", commentSafe(*a.ManagedBy))
 		}
 		if root != "" {
 			fmt.Fprintf(&b, "source     = %s\n", tomlString(root+"/"+a.Slug))
@@ -82,6 +82,18 @@ func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// commentSafe collapses any control characters (newlines, carriage returns,
+// tabs) in server-controlled text to a single space so it cannot break out of
+// the single-line TOML comment it is embedded in.
+func commentSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || (r >= 0 && r < 0x20) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // tomlString returns a TOML basic-string literal for s. Manifest values here
