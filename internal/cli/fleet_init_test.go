@@ -119,6 +119,21 @@ func TestEmitFleetManifest_ForeignOwnerCommentIsInjectionSafe(t *testing.T) {
 	}
 }
 
+// FLT-8: TOML rejects DEL (0x7f) as a control character even inside a comment,
+// so the sanitizer must strip it too, not just the sub-0x20 range.
+func TestEmitFleetManifest_ForeignOwnerCommentStripsDEL(t *testing.T) {
+	apps := []db.App{
+		{Slug: "alpha", Access: "private", ManagedBy: strp("fleet:weird\x7fend")},
+	}
+	doc := emitFleetManifest("prod-eu", "./apps", apps)
+	if strings.ContainsRune(doc, '\x7f') {
+		t.Fatalf("DEL must be stripped from the comment:\n%q", doc)
+	}
+	if _, probs := fleet.ParseManifest([]byte(doc), "shinyhub-fleet.toml"); len(probs) != 0 {
+		t.Fatalf("manifest with DEL in managed_by must still parse clean, got %v\n%s", probs, doc)
+	}
+}
+
 // FLT-6: with zero deployed apps the commented-source scaffold guidance ("set
 // each app's source, remove the leading '#'") is nonsense - there are no apps.
 // The emitted header must branch on the empty case.

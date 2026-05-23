@@ -84,12 +84,13 @@ func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
 	return b.String()
 }
 
-// commentSafe collapses any control characters (newlines, carriage returns,
-// tabs) in server-controlled text to a single space so it cannot break out of
-// the single-line TOML comment it is embedded in.
+// commentSafe collapses any control character in server-controlled text to a
+// single space so it cannot break out of the single-line TOML comment it is
+// embedded in. This covers the C0 range (newlines, carriage returns, tabs) and
+// DEL (0x7f), all of which TOML forbids in comments.
 func commentSafe(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' || (r >= 0 && r < 0x20) {
+		if r < 0x20 || r == 0x7f {
 			return ' '
 		}
 		return r
