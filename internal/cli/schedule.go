@@ -19,6 +19,7 @@ func newScheduleCmd() *cobra.Command {
 	cmd.AddCommand(
 		newScheduleLsCmd(),
 		newScheduleAddCmd(),
+		newScheduleUpdateCmd(),
 		newScheduleRmCmd(),
 		newScheduleEnableCmd(),
 		newScheduleDisableCmd(),
@@ -270,6 +271,135 @@ func newScheduleAddCmd() *cobra.Command {
 		return nil
 	}
 	return addCmd
+}
+
+func newScheduleUpdateCmd() *cobra.Command {
+	var flags struct {
+		cron     string
+		cmd      string
+		cmdJSON  string
+		timeout  int
+		overlap  string
+		missed   string
+		enabled  bool
+		timezone string
+		clearTZ  bool
+	}
+
+	updateCmd := &cobra.Command{
+		Use:   "update <slug> <name>",
+		Short: "Update an existing scheduled job in place (preserves run history)",
+		Long: `Update a scheduled job without deleting and recreating it.
+
+Only the flags you supply are changed; every other field keeps its stored
+value. This preserves the schedule's run history, which a delete+recreate would
+discard via ON DELETE CASCADE.
+
+Timezone is tri-state:
+  (flag omitted)        leave the per-schedule timezone unchanged
+  --timezone <zone>     set an explicit IANA zone (e.g. Europe/Amsterdam)
+  --clear-timezone      clear it so the schedule inherits the server default`,
+		Args: cobra.ExactArgs(2),
+	}
+	updateCmd.Flags().StringVar(&flags.cron, "cron", "", "Cron expression, e.g. '0 * * * *'")
+	updateCmd.Flags().StringVar(&flags.cmd, "cmd", "", "Command as a shell string, e.g. 'python run.py --flag x'")
+	updateCmd.Flags().StringVar(&flags.cmdJSON, "cmd-json", "", `Command as a JSON array, e.g. '["python","run.py"]'`)
+	updateCmd.Flags().IntVar(&flags.timeout, "timeout", 0, "Timeout in seconds (1..86400)")
+	updateCmd.Flags().StringVar(&flags.overlap, "overlap", "", "Overlap policy: skip|queue|concurrent")
+	updateCmd.Flags().StringVar(&flags.missed, "missed", "", "Missed-run policy: skip|run_once")
+	updateCmd.Flags().BoolVar(&flags.enabled, "enabled", true, "Enabled state (use --enabled=false to disable)")
+	updateCmd.Flags().StringVar(&flags.timezone, "timezone", "", "Set the per-schedule IANA timezone")
+	updateCmd.Flags().BoolVar(&flags.clearTZ, "clear-timezone", false, "Clear the per-schedule timezone (inherit server default)")
+
+	updateCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		slug, name := args[0], args[1]
+
+		changed := cmd.Flags().Changed
+		if flags.cmd != "" && flags.cmdJSON != "" {
+			return fmt.Errorf("specify at most one of --cmd or --cmd-json")
+		}
+		if changed("timezone") && flags.clearTZ {
+			return fmt.Errorf("specify at most one of --timezone or --clear-timezone")
+		}
+
+		payload := map[string]any{}
+		if changed("cron") {
+			payload["cron_expr"] = flags.cron
+		}
+		switch {
+		case changed("cmd"):
+			command, err := shellwords.Parse(flags.cmd)
+			if err != nil {
+				return fmt.Errorf("parse --cmd: %w", err)
+			}
+			payload["command"] = command
+		case changed("cmd-json"):
+			var command []string
+			if err := json.Unmarshal([]byte(flags.cmdJSON), &command); err != nil {
+				return fmt.Errorf("parse --cmd-json: %w", err)
+			}
+			payload["command"] = command
+		}
+		if changed("timeout") {
+			payload["timeout_seconds"] = flags.timeout
+		}
+		if changed("overlap") {
+			payload["overlap_policy"] = flags.overlap
+		}
+		if changed("missed") {
+			payload["missed_policy"] = flags.missed
+		}
+		if changed("enabled") {
+			payload["enabled"] = flags.enabled
+		}
+		switch {
+		case flags.clearTZ:
+			payload["timezone"] = nil
+		case changed("timezone"):
+			payload["timezone"] = flags.timezone
+		}
+
+		if len(payload) == 0 {
+			return fmt.Errorf("nothing to update: supply at least one field flag (see --help)")
+		}
+
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		id, err := lookupScheduleID(cfg, slug, name)
+		if err != nil {
+			return err
+		}
+
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal request: %w", err)
+		}
+
+		url := fmt.Sprintf("%s/api/apps/%s/schedules/%d", cfg.Host, slug, id)
+		req, err := http.NewRequest("PATCH", url, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, string(out)))
+		}
+
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: updated schedule %q\n", slug, name)
+		return nil
+	}
+	return updateCmd
 }
 
 func newScheduleRmCmd() *cobra.Command {

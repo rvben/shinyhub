@@ -425,6 +425,155 @@ func TestScheduleRun_EnabledScheduleNoNote(t *testing.T) {
 	}
 }
 
+// SCH-1: `schedule update` changes a schedule in place (preserving run history)
+// by PATCHing only the fields the operator actually supplied. A lone --cron must
+// not clobber the command, timeout, or any other stored field.
+func TestSchedule_Update_SendsOnlyChangedFields(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","cron_expr":"0 * * * *","command":["python","x.py"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--cron", "30 2 * * *"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 2 {
+		t.Fatalf("expected 2 requests (list + patch), got %d", len(*reqs))
+	}
+	patch := (*reqs)[1]
+	if patch.Method != "PATCH" {
+		t.Errorf("expected PATCH, got %s", patch.Method)
+	}
+	if patch.Path != "/api/apps/demo/schedules/7" {
+		t.Errorf("unexpected patch path: %s", patch.Path)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(patch.Body, &body); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	if body["cron_expr"] != "30 2 * * *" {
+		t.Errorf("expected cron_expr in body, got %v", body["cron_expr"])
+	}
+	for _, k := range []string{"name", "command", "timeout_seconds", "overlap_policy", "missed_policy", "enabled", "timezone"} {
+		if _, ok := body[k]; ok {
+			t.Errorf("unsupplied field %q must be absent from PATCH body, got %v", k, body[k])
+		}
+	}
+}
+
+// SCH-1 timezone tri-state: --clear-timezone must send an explicit JSON null so
+// the server clears the per-schedule zone back to inherit-server-default.
+func TestSchedule_Update_ClearTimezoneSendsNull(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","cron_expr":"0 * * * *","command":["python","x.py"],"enabled":true,"timezone":"Europe/Amsterdam"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--clear-timezone"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	patch := (*reqs)[1]
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(patch.Body, &raw); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	tz, ok := raw["timezone"]
+	if !ok {
+		t.Fatal("expected timezone key present in PATCH body for --clear-timezone")
+	}
+	if string(tz) != "null" {
+		t.Errorf("expected timezone null, got %s", tz)
+	}
+}
+
+// SCH-1 timezone tri-state: --timezone <zone> sets the per-schedule zone.
+func TestSchedule_Update_SetTimezone(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","cron_expr":"0 * * * *","command":["python","x.py"],"enabled":true}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--timezone", "Europe/Amsterdam"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	if body["timezone"] != "Europe/Amsterdam" {
+		t.Errorf("expected timezone Europe/Amsterdam, got %v", body["timezone"])
+	}
+}
+
+// SCH-1: --timezone and --clear-timezone are mutually exclusive.
+func TestSchedule_Update_TimezoneAndClearConflict(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--timezone", "UTC", "--clear-timezone"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error for --timezone with --clear-timezone")
+	}
+	for _, r := range *reqs {
+		if r.Method == "PATCH" {
+			t.Errorf("no PATCH should be issued on conflicting timezone flags")
+		}
+	}
+}
+
+// SCH-1: update with no field flags is a no-op mistake; error without touching
+// the server (beyond resolving the name) rather than sending an empty PATCH.
+func TestSchedule_Update_NoFieldsErrors(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error when no update flags are supplied")
+	}
+	for _, r := range *reqs {
+		if r.Method == "PATCH" {
+			t.Errorf("no PATCH should be issued when nothing changed")
+		}
+	}
+}
+
+// SCH-1: --cmd parses a shell string into the command array.
+func TestSchedule_Update_CmdShellwords(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","command":["old"]}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--cmd", "python new.py --flag x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	cmdSlice, ok := body["command"].([]any)
+	if !ok {
+		t.Fatalf("expected command array in body, got %T", body["command"])
+	}
+	want := []string{"python", "new.py", "--flag", "x"}
+	if len(cmdSlice) != len(want) {
+		t.Fatalf("command len = %d, want %d: %v", len(cmdSlice), len(want), cmdSlice)
+	}
+	for i, w := range want {
+		if cmdSlice[i] != w {
+			t.Errorf("command[%d] = %q, want %q", i, cmdSlice[i], w)
+		}
+	}
+}
+
 // TestShareCmd_RegisteredWithRoot verifies share is registered with the root command.
 func TestShareCmd_RegisteredWithRoot(t *testing.T) {
 	root := &cobra.Command{Use: "root"}
