@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -15,9 +16,11 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
+	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
 
@@ -42,6 +45,8 @@ type Server struct {
 	scheduler     *scheduler.Scheduler
 	secretsKey    []byte
 	traceBuffer   *tracing.Buffer
+	metrics       *metrics.Registry   // nil when metrics are disabled
+	tracer        *servertrace.Tracer // nil when server tracing is disabled
 	router        http.Handler
 
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
@@ -193,6 +198,19 @@ func (s *Server) SetDeployToken(t *auth.DeployToken) { s.deployToken = t }
 // Must be called before the server begins handling requests.
 func (s *Server) SetTraceBuffer(b *tracing.Buffer) { s.traceBuffer = b }
 
+// SetMetrics wires the Prometheus registry whose middleware records per-request
+// counters and latencies for the API router. May be nil (the default) to leave
+// metrics disabled. Must be called before the server begins handling requests;
+// it is not safe to call concurrently with ServeHTTP.
+func (s *Server) SetMetrics(m *metrics.Registry) { s.metrics = m }
+
+// SetTracer wires the OpenTelemetry tracer whose middleware records one server
+// span per API request, exported to the configured OTLP endpoint. May be nil
+// (the default) to leave server tracing disabled. Must be called before the
+// server begins handling requests; it is not safe to call concurrently with
+// ServeHTTP.
+func (s *Server) SetTracer(t *servertrace.Tracer) { s.tracer = t }
+
 // keyLookup satisfies auth.APIKeyLookup by first checking the pre-shared
 // deploy token (no DB hit) and falling back to the api_keys table. DB-backed
 // keys owned by system users are refused: those accounts authenticate only
@@ -330,6 +348,54 @@ func (s *Server) buildRouter() http.Handler {
 	})
 
 	return r
+}
+
+// Observe wraps the API handler chain (timeout handler included) with server
+// tracing and Prometheus instrumentation so both record the status and latency
+// the client actually observes - covering recovered panics (the inner chi
+// Recoverer writes the 500 before observation reads it) and timeout responses
+// (http.TimeoutHandler writes the 503 below observation). It seeds a chi route
+// context so the matched route PATTERN is available for low-cardinality labels
+// even though observation runs outside the chi router; the inner router
+// populates that same context during routing. Both layers are no-ops when their
+// dependency (tracer / metrics registry) is nil, so observation is opt-in.
+//
+// Must be wired before the server begins handling requests.
+func (s *Server) Observe(next http.Handler) http.Handler {
+	observed := s.trace(s.instrument(next))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if chi.RouteContext(r.Context()) == nil {
+			rctx := chi.NewRouteContext()
+			r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+		}
+		observed.ServeHTTP(w, r)
+	})
+}
+
+// trace records one OpenTelemetry server span per request when a tracer is
+// wired in. When server tracing is disabled (s.tracer == nil) it is a
+// pass-through, so tracing is strictly opt-in.
+func (s *Server) trace(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.tracer == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.tracer.Middleware(next).ServeHTTP(w, r)
+	})
+}
+
+// instrument records Prometheus request metrics for the API router when a
+// registry is wired in. When metrics are disabled (s.metrics == nil) it is a
+// pass-through, so the instrumentation is strictly opt-in.
+func (s *Server) instrument(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.metrics == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.metrics.Middleware(next).ServeHTTP(w, r)
+	})
 }
 
 // rateLimitByUser applies the given limiter, keyed by the authenticated user

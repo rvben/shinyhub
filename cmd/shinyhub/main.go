@@ -28,10 +28,12 @@ import (
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/logging"
+	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/secrets"
+	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/spf13/cobra"
@@ -138,6 +140,28 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitCode(err))
 	}
+}
+
+// startMetricsListener binds addr and serves the Prometheus scrape endpoint at
+// /metrics on its own listener, separate from the main application listener so
+// server internals are never exposed on the public port. The returned server is
+// already serving in a background goroutine; the caller is responsible for
+// Shutdown. The listener is returned so callers can log the resolved address
+// (useful when addr requests an ephemeral :0 port).
+func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("metrics listen %s: %w", addr, err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", reg.Handler())
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server", "err", err)
+		}
+	}()
+	return srv, ln, nil
 }
 
 func runServe(ctx context.Context, logger *slog.Logger) error {
@@ -319,6 +343,34 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
 
+	// Server self-telemetry: when enabled, instrument the API router and serve
+	// the Prometheus scrape endpoint on its own loopback-by-default listener.
+	var metricsSrv *http.Server
+	if cfg.Metrics.Enabled {
+		reg := metrics.New(version)
+		srv.SetMetrics(reg)
+		var mln net.Listener
+		metricsSrv, mln, err = startMetricsListener(cfg.Metrics.Addr, reg)
+		if err != nil {
+			return err
+		}
+		slog.Info("metrics listening", "addr", mln.Addr().String())
+	}
+
+	// Server tracing: when the existing tracing config is enabled, emit OTel
+	// spans for control-plane API request handling to the same OTLP endpoint the
+	// managed apps export to. The exporter connects lazily, so Setup never blocks
+	// on the collector being reachable.
+	var tracer *servertrace.Tracer
+	if cfg.Tracing.Enabled {
+		tracer, err = servertrace.Setup(ctx, cfg.Tracing, version)
+		if err != nil {
+			return fmt.Errorf("server tracing setup: %w", err)
+		}
+		srv.SetTracer(tracer)
+		slog.Info("server tracing enabled", "endpoint", cfg.Tracing.OTLPEndpoint, "protocol", cfg.Tracing.OTLPProtocol)
+	}
+
 	// Emit a structured access log for every proxied app request. Using the
 	// Server's trusted-proxy-aware ClientIP keeps the "client" field honest
 	// when shinyhub itself sits behind an edge proxy; this is independent of
@@ -455,7 +507,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	srv.SetJobs(jobsMgr, sched)
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", apiTimeoutHandler(srv.Router()))
+	// Observe wraps the timeout handler (not the inner router) so server metrics
+	// and traces record the status/latency the client actually sees, including
+	// timeout 503s and recovered-panic 500s. It is a no-op unless metrics or
+	// tracing are enabled.
+	mux.Handle("/api/", srv.Observe(apiTimeoutHandler(srv.Router())))
 	// Re-resolve JWT-claimed users against the live DB on every /app/* hit
 	// so role demotions and account deletions take effect immediately.
 	// Without this an admin's still-valid JWT keeps the admin-bypass path
@@ -540,6 +596,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	defer cancelShutdown()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http shutdown", "err", err)
+	}
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("metrics shutdown", "err", err)
+		}
+	}
+	if tracer != nil {
+		if err := tracer.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("tracer shutdown", "err", err)
+		}
 	}
 	cancelSched()
 	sched.Stop()
