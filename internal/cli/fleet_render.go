@@ -15,6 +15,15 @@ import (
 // fleetPlanSchemaVersion is the stable --json envelope version.
 const fleetPlanSchemaVersion = 1
 
+// defaultFleetManifest is the manifest path assumed when -f is omitted. The
+// "Next:" suggestion only echoes -f when the active manifest differs from it,
+// so a copy-paste reconciles the same file the operator is looking at.
+const defaultFleetManifest = "shinyhub-fleet.toml"
+
+// planLegend is the one-line glyph key printed under the plan's app list so the
+// column glyphs are self-describing.
+const planLegend = "+ create  ~ update  > adopt  - delete  = unchanged"
+
 func glyphWord(a fleet.Action) (string, string) {
 	switch a {
 	case fleet.ActionCreate:
@@ -103,7 +112,73 @@ func pending(diff []fleet.AppDiff) bool {
 	return false
 }
 
-func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff) error {
+// shellQuote returns s safe to paste as a single POSIX-shell argv word. A
+// string built only from unreserved characters (alphanumerics and the path
+// punctuation a manifest path normally uses) is returned bare; anything else is
+// wrapped in single quotes with embedded single quotes escaped as '\'' so a
+// path with spaces or shell metacharacters survives a copy-paste intact.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("-_./=:", r):
+		default:
+			safe = false
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// plural renders "1 app" / "3 apps" - a small singular/plural helper for the
+// human-readable Next block.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// applySuggestion builds the SINGLE combined `fleet apply` command that
+// converges every pending action, plus a human description of what it does.
+// One command, not a sequence: --adopt already applies create/update on the
+// same run, and --prune folds in deletes, so emitting separate per-category
+// applies would mislead an operator into running apply several times. -f is
+// echoed only for a non-default manifest so a copy-paste targets the same file.
+func applySuggestion(file string, c planCounts) (cmd, desc string) {
+	parts := []string{"shinyhub fleet apply"}
+	var actions []string
+	if c.Adopt > 0 {
+		parts = append(parts, "--adopt")
+		actions = append(actions, "adopt "+plural(c.Adopt, "app"))
+	}
+	if c.Create > 0 || c.Update > 0 {
+		var cu []string
+		if c.Create > 0 {
+			cu = append(cu, fmt.Sprintf("%d create", c.Create))
+		}
+		if c.Update > 0 {
+			cu = append(cu, fmt.Sprintf("%d update", c.Update))
+		}
+		actions = append(actions, "apply "+strings.Join(cu, " + "))
+	}
+	if c.Delete > 0 {
+		parts = append(parts, "--prune", "--yes")
+		actions = append(actions, "delete "+plural(c.Delete, "app")+" (irreversible: removes data dir)")
+	}
+	if file != "" && file != defaultFleetManifest {
+		parts = append(parts, "-f", shellQuote(file))
+	}
+	return strings.Join(parts, " "), strings.Join(actions, ", ")
+}
+
+func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff) error {
 	out := cmd.OutOrStdout()
 	_ = caps // threaded for fleet apply; the plan command is read-only and does not consume it
 
@@ -125,8 +200,8 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 		return planExit(f, diff)
 	}
 
-	fmt.Fprintf(out, "shinyhub fleet plan  ·  fleet_id=%s  ·  server=%s\n\n", m.FleetID, host)
-	fmt.Fprintf(out, "Apps (%d)\n", len(diff))
+	fmt.Fprintf(out, "%s  ·  fleet_id=%s  ·  server=%s\n\n", cmdLabel, m.FleetID, host)
+	fmt.Fprintf(out, "Apps (%d)   legend: %s\n", len(diff), planLegend)
 
 	// Aligned columns: glyph word slug reason.
 	wWord, wSlug := 0, 0
@@ -145,19 +220,11 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 	}
 	fmt.Fprintf(out, "\n%s\n", summary)
 
-	// Actionable Next block: exact command per pending category.
-	var next []string
-	if c.Adopt > 0 {
-		next = append(next, fmt.Sprintf("  • adopt %d app(s)            shinyhub fleet apply --adopt", c.Adopt))
-	}
-	if c.Delete > 0 {
-		next = append(next, fmt.Sprintf("  • delete %d app(s)           shinyhub fleet apply --prune        (irreversible: removes data dir)", c.Delete))
-	}
-	if c.Create+c.Update > 0 {
-		next = append(next, "  • apply everything else    shinyhub fleet apply")
-	}
-	if len(next) > 0 {
-		fmt.Fprintf(out, "\nNext:\n%s\n", strings.Join(next, "\n"))
+	// Actionable Next block: ONE combined apply command covering every pending
+	// action, with the human description of what it will do.
+	if c.Create+c.Update+c.Adopt+c.Delete > 0 {
+		applyCmd, desc := applySuggestion(f.file, c)
+		fmt.Fprintf(out, "\nNext:\n  %s\n      (%s)\n", applyCmd, desc)
 	}
 	return planExit(f, diff)
 }

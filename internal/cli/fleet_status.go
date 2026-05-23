@@ -101,7 +101,7 @@ func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
 		return
 	}
 	fmt.Fprintf(out, "shinyhub fleet status  ·  server=%s\n\n", st.Server)
-	fmt.Fprintf(out, "Apps (%d)\n", st.Summary.Total)
+	fmt.Fprintf(out, "Apps (%d)   legend: * fleet-managed  - unmanaged\n", st.Summary.Total)
 
 	wSlug, wOwner := 0, len("unmanaged")
 	for _, a := range st.Apps {

@@ -263,6 +263,9 @@ func TestFleetHelp_ListsPlanAndExitCodes(t *testing.T) {
 func normalizeDigests(s string) string {
 	s = regexpMustCompile(`sha256:[0-9a-f]+`).ReplaceAllString(s, "sha256:XXXX")
 	s = regexpMustCompile(`server=http://[^\s]+`).ReplaceAllString(s, "server=http://SERVER")
+	// The Next-block echoes the (absolute, t.TempDir) manifest path after -f;
+	// collapse it to a stable placeholder so the golden is deterministic.
+	s = regexpMustCompile(`-f \S+`).ReplaceAllString(s, "-f FLEET.toml")
 	return s
 }
 

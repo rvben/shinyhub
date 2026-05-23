@@ -43,7 +43,7 @@ func newFleetApplyCmd() *cobra.Command {
 			return runFleetApply(cmd, f)
 		},
 	}
-	cmd.Flags().StringVarP(&f.file, "file", "f", "shinyhub-fleet.toml", "Path to the fleet manifest")
+	cmd.Flags().StringVarP(&f.file, "file", "f", defaultFleetManifest, "Path to the fleet manifest")
 	cmd.Flags().BoolVar(&f.prune, "prune", false, "Delete fleet-owned apps absent from the manifest (removes data dir)")
 	cmd.Flags().BoolVar(&f.adopt, "adopt", false, "Take ownership of in-scope apps not yet fleet-managed")
 	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, "Show the plan and make no changes (identical to 'fleet plan')")
@@ -74,7 +74,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 			quiet:      f.quiet,
 			jsonOutput: f.jsonOutput,
 		}
-		return renderFleetPlan(cmd, synthetic, pf.manifest, pf.host, pf.caps, pf.diff)
+		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff)
 	}
 
 	degraded := !pf.caps.FleetPreconditions
@@ -96,8 +96,8 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		willPrune := !degraded || f.allowUnsafeDegradedPrune
 		if len(candidates) > 0 && willPrune && !f.yes {
 			invocation := "shinyhub fleet apply --prune --yes"
-			if f.file != "shinyhub-fleet.toml" {
-				invocation = "shinyhub fleet apply --prune --yes -f " + f.file
+			if f.file != defaultFleetManifest {
+				invocation = "shinyhub fleet apply --prune --yes -f " + shellQuote(f.file)
 			}
 			if !isStdinTTY() {
 				fmt.Fprintf(errOut, "--prune needs interactive confirmation; re-run non-interactively with: %s\n", invocation)
