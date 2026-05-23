@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // sampleValue gathers the named metric from the registry and returns the value
@@ -117,6 +117,25 @@ func TestMiddleware_RecordsStatusAndDuration(t *testing.T) {
 	}
 	if v, ok := sampleValue(t, reg, "shinyhub_http_request_duration_seconds", map[string]string{"route": "/boom"}); !ok || v != 1 {
 		t.Fatalf("duration histogram sample count for /boom = %v (ok=%v), want 1", v, ok)
+	}
+}
+
+// TestMiddleware_DefaultsEmptyResponseToOK proves a handler that returns without
+// writing a header or body (an implicit empty 200) is recorded as status 200,
+// not the wrapper's uninitialized 0, so successful no-content responses land in
+// the expected series rather than a phantom status="0".
+func TestMiddleware_DefaultsEmptyResponseToOK(t *testing.T) {
+	reg := New("v1")
+	r := chi.NewRouter()
+	r.Use(reg.Middleware)
+	r.Get("/ping", func(http.ResponseWriter, *http.Request) {})
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/ping", nil))
+
+	if v := testutil.ToFloat64(reg.httpRequests.WithLabelValues("GET", "/ping", "200")); v != 1 {
+		t.Fatalf("requests_total{route=/ping,status=200} = %v, want 1", v)
+	}
+	if v := testutil.ToFloat64(reg.httpRequests.WithLabelValues("GET", "/ping", "0")); v != 0 {
+		t.Fatalf("an empty response recorded a phantom status=0 series (%v)", v)
 	}
 }
 
