@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -258,10 +259,8 @@ func (s *Server) revocationChecker() auth.RevocationChecker {
 
 func (s *Server) buildRouter() http.Handler {
 	r := chi.NewRouter()
-	r.Use(s.trace)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(s.instrument)
 
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
@@ -351,11 +350,31 @@ func (s *Server) buildRouter() http.Handler {
 	return r
 }
 
+// Observe wraps the API handler chain (timeout handler included) with server
+// tracing and Prometheus instrumentation so both record the status and latency
+// the client actually observes - covering recovered panics (the inner chi
+// Recoverer writes the 500 before observation reads it) and timeout responses
+// (http.TimeoutHandler writes the 503 below observation). It seeds a chi route
+// context so the matched route PATTERN is available for low-cardinality labels
+// even though observation runs outside the chi router; the inner router
+// populates that same context during routing. Both layers are no-ops when their
+// dependency (tracer / metrics registry) is nil, so observation is opt-in.
+//
+// Must be wired before the server begins handling requests.
+func (s *Server) Observe(next http.Handler) http.Handler {
+	observed := s.trace(s.instrument(next))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if chi.RouteContext(r.Context()) == nil {
+			rctx := chi.NewRouteContext()
+			r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+		}
+		observed.ServeHTTP(w, r)
+	})
+}
+
 // trace records one OpenTelemetry server span per request when a tracer is
 // wired in. When server tracing is disabled (s.tracer == nil) it is a
-// pass-through, so tracing is strictly opt-in. Installed outermost so the span
-// covers the Logger, Recoverer, and instrument middleware as well as the
-// handler.
+// pass-through, so tracing is strictly opt-in.
 func (s *Server) trace(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.tracer == nil {

@@ -507,7 +507,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	srv.SetJobs(jobsMgr, sched)
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", apiTimeoutHandler(srv.Router()))
+	// Observe wraps the timeout handler (not the inner router) so server metrics
+	// and traces record the status/latency the client actually sees, including
+	// timeout 503s and recovered-panic 500s. It is a no-op unless metrics or
+	// tracing are enabled.
+	mux.Handle("/api/", srv.Observe(apiTimeoutHandler(srv.Router())))
 	// Re-resolve JWT-claimed users against the live DB on every /app/* hit
 	// so role demotions and account deletions take effect immediately.
 	// Without this an admin's still-valid JWT keeps the admin-bypass path
