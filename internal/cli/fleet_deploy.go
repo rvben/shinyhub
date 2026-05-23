@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -87,6 +88,16 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return "", false, fmt.Errorf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb))
+	}
+
+	// Surface the same post-deploy-hooks-skipped warning the single-app deploy
+	// prints, so a fleet operator is not left unaware that setup hooks did not
+	// run under the container runtime.
+	var deployResp map[string]any
+	if err := json.Unmarshal(rb, &deployResp); err == nil {
+		if warn := formatHooksSkippedWarning(deployResp["hooks_skipped"]); warn != "" {
+			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
+		}
 	}
 
 	// Bundle accepted: from here on the deploy is committed even if a
