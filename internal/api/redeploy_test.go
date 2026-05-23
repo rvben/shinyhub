@@ -159,6 +159,55 @@ func TestHandleGetApp_AdvertisesRedeployInFlight(t *testing.T) {
 	}
 }
 
+// TestRedeployApp_ClearsMarkerWhenLockHeldByNonRedeploy proves that a redeploy
+// launched while an UNRELATED operation (upload deploy, restart, rollback,
+// stop, delete) holds the per-slug deploy lock does not leave
+// redeploy_in_flight stuck true. The skipped goroutine must release the marker
+// it can't act on; otherwise a concurrent `apps set --replicas --wait` would
+// block until timeout and GET would advertise a redeploy for that slug forever,
+// because the lock holder is not a redeploy and never clears the marker.
+func TestRedeployApp_ClearsMarkerWhenLockHeldByNonRedeploy(t *testing.T) {
+	s := &Server{cfg: &config.Config{}}
+	const slug = "busy-app"
+
+	// An unrelated operation holds the deploy lock for this slug.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
+	// The PATCH handler marks in flight, then launches the redeploy. Run it
+	// synchronously here: it must hit the skip branch (lock held) AND clear.
+	s.markRedeployInFlight(slug)
+	s.redeployApp(slug)
+
+	if s.isRedeployInFlight(slug) {
+		t.Fatal("redeployApp skipped because the lock was held by an unrelated op, " +
+			"but left redeploy_in_flight stuck true; a --wait client would hang")
+	}
+}
+
+// TestRedeployInFlight_RefcountedAcrossCoalescedMarks proves the in-flight
+// marker is reference counted: a coalesced second PATCH marks again, and its
+// goroutine then skips and clears one reference, but the marker must stay set
+// while the FIRST redeploy is still cycling the pool. Only the last clear
+// (the active pool-cycler completing) reports the pool idle. Without refcounting
+// the coalesced skip would prematurely advertise the pool ready and a --wait
+// client would return against the old pool.
+func TestRedeployInFlight_RefcountedAcrossCoalescedMarks(t *testing.T) {
+	s := &Server{cfg: &config.Config{}}
+	const slug = "demo"
+	s.markRedeployInFlight(slug)  // first PATCH
+	s.markRedeployInFlight(slug)  // second (coalesced) PATCH
+	s.clearRedeployInFlight(slug) // coalesced goroutine skips and clears one ref
+	if !s.isRedeployInFlight(slug) {
+		t.Fatal("first redeploy still cycling the pool; marker must remain set " +
+			"until its goroutine clears the last reference")
+	}
+	s.clearRedeployInFlight(slug) // first redeploy completes
+	if s.isRedeployInFlight(slug) {
+		t.Fatal("after the last clear the pool is idle and must report not in flight")
+	}
+}
+
 // TestRedeployApp_CoalescesConcurrent keeps the historical guarantee that the
 // async redeployApp goroutine skips when another deploy is already in flight,
 // so a flurry of /apps/:slug PATCHes doesn't pile up redeploys.

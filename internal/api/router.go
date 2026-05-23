@@ -67,40 +67,51 @@ type Server struct {
 	dataLocksMu sync.Mutex
 	dataLocks   map[string]*sync.Mutex
 
-	// redeployMu guards redeployInFlight. The set holds the slugs whose pool
-	// is currently being cycled by the async redeployApp goroutine. The PATCH
-	// handler adds a slug synchronously before launching the goroutine, so the
-	// first GET after the PATCH always observes the redeploy in flight even
-	// though the app row still reads "running"; the goroutine that performs the
-	// restart removes it when done. handleGetApp surfaces membership as
-	// redeploy_in_flight so a --wait client polls until the new pool is up.
+	// redeployMu guards redeployInFlight, a per-slug reference count of pending
+	// pool cycles. The PATCH handler increments synchronously before launching
+	// each async redeployApp goroutine, so the first GET after the PATCH always
+	// observes the redeploy in flight even though the app row still reads
+	// "running". Every launched goroutine decrements exactly once on return,
+	// whether it performed the restart or skipped because another operation held
+	// the deploy lock. Reference counting keeps the marker set while the active
+	// pool-cycler is still running (a coalesced skip only drops its own
+	// reference) yet guarantees the marker is released even when the lock holder
+	// is an unrelated operation that never cycles the pool. handleGetApp surfaces
+	// a positive count as redeploy_in_flight so a --wait client polls until the
+	// new pool is up.
 	redeployMu       sync.Mutex
-	redeployInFlight map[string]struct{}
+	redeployInFlight map[string]int
 }
 
-// markRedeployInFlight records that slug's pool is being cycled. Idempotent.
+// markRedeployInFlight adds one reference for slug's pending pool cycle. Each
+// mark is balanced by exactly one clearRedeployInFlight in the launched
+// redeployApp goroutine.
 func (s *Server) markRedeployInFlight(slug string) {
 	s.redeployMu.Lock()
 	defer s.redeployMu.Unlock()
 	if s.redeployInFlight == nil {
-		s.redeployInFlight = make(map[string]struct{})
+		s.redeployInFlight = make(map[string]int)
 	}
-	s.redeployInFlight[slug] = struct{}{}
+	s.redeployInFlight[slug]++
 }
 
-// clearRedeployInFlight removes slug from the in-flight set. Idempotent.
+// clearRedeployInFlight drops one reference for slug, removing the entry when
+// the count reaches zero. Never decrements below zero.
 func (s *Server) clearRedeployInFlight(slug string) {
 	s.redeployMu.Lock()
 	defer s.redeployMu.Unlock()
-	delete(s.redeployInFlight, slug)
+	if s.redeployInFlight[slug] <= 1 {
+		delete(s.redeployInFlight, slug)
+		return
+	}
+	s.redeployInFlight[slug]--
 }
 
 // isRedeployInFlight reports whether slug's pool is currently being cycled.
 func (s *Server) isRedeployInFlight(slug string) bool {
 	s.redeployMu.Lock()
 	defer s.redeployMu.Unlock()
-	_, ok := s.redeployInFlight[slug]
-	return ok
+	return s.redeployInFlight[slug] > 0
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil

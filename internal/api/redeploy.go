@@ -80,16 +80,20 @@ func (s *Server) tryAcquireDeployLock(slug string) (release func()) {
 // It is called asynchronously (go s.redeployApp(slug)) when the replica count changes while
 // the app is running. On failure the app status is set to "degraded".
 func (s *Server) redeployApp(slug string) {
+	// Drop the reference the PATCH handler added before launching this
+	// goroutine, on every return path. When this goroutine performs the
+	// restart it releases the marker when done; when it skips (the deploy lock
+	// is held by another operation) it must still release its own reference, or
+	// a non-redeploy lock holder would never clear the marker and a --wait
+	// client would poll forever. The active pool-cycler's reference keeps the
+	// marker set across a coalesced skip.
+	defer s.clearRedeployInFlight(slug)
 	release := s.tryAcquireDeployLock(slug)
 	if release == nil {
-		// Another redeploy holds the lock and will clear the in-flight marker
-		// when it finishes; leaving it set keeps a --wait client polling until
-		// the active redeploy completes rather than returning prematurely.
 		slog.Info("redeploy already in flight, skipping", "slug", slug)
 		return
 	}
 	defer release()
-	defer s.clearRedeployInFlight(slug)
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
