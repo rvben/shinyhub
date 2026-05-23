@@ -144,6 +144,11 @@ const cookiePrefix = "shinyhub_rep_"
 // a leading dot so it cannot collide with a legitimate app route.
 const readySuffix = "/.shinyhub/ready"
 
+// MsgPoolSaturated is the plain-text body returned with a 503 when every
+// replica is at its session cap and the request carries no sticky cookie.
+// Exported so docs/scaling.md can be guarded against drift from this string.
+const MsgPoolSaturated = "Service temporarily at capacity, please retry."
+
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
 	index       int
@@ -748,7 +753,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// short enough that the client doesn't perceive a complete outage.
 		p.mu.RUnlock()
 		rec.Header().Set("Retry-After", "5")
-		http.Error(rec, "Service temporarily at capacity, please retry.", http.StatusServiceUnavailable)
+		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 		return
 	}
 	replicaIndex = picked.index
