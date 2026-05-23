@@ -63,41 +63,40 @@ func (s *Server) acquireDataLock(slug string) (release func()) {
 	return m.Unlock
 }
 
-// tryAcquireDeployLock is the non-blocking variant. It returns nil if the
-// lock is currently held by another goroutine, or the release func when
-// acquired. Use this from coalescing code paths (e.g. the async redeploy
-// goroutine) where "another deploy is already running, skip this one" is the
-// correct behavior.
-func (s *Server) tryAcquireDeployLock(slug string) (release func()) {
-	m := s.deployLockFor(slug)
-	if !m.TryLock() {
-		return nil
-	}
-	return m.Unlock
-}
-
 // redeployApp stops the current pool and restarts it at the replica count stored in the DB.
 // It is called asynchronously (go s.redeployApp(slug)) when the replica count changes while
 // the app is running. On failure the app status is set to "degraded".
 func (s *Server) redeployApp(slug string) {
 	// Drop the reference the PATCH handler added before launching this
-	// goroutine, on every return path. When this goroutine performs the
-	// restart it releases the marker when done; when it skips (the deploy lock
-	// is held by another operation) it must still release its own reference, or
-	// a non-redeploy lock holder would never clear the marker and a --wait
-	// client would poll forever. The active pool-cycler's reference keeps the
-	// marker set across a coalesced skip.
+	// goroutine, on every return path. Each launched goroutine holds exactly
+	// one reference, so the marker stays set until the last redeploy for this
+	// slug finishes - never wedged, never cleared early.
 	defer s.clearRedeployInFlight(slug)
-	release := s.tryAcquireDeployLock(slug)
-	if release == nil {
-		slog.Info("redeploy already in flight, skipping", "slug", slug)
-		return
-	}
+
+	// Block for the per-slug deploy lock instead of skipping when it is held.
+	// A replica change MUST be applied even when an unrelated operation (upload
+	// deploy, restart, rollback, stop, delete) is holding the lock: skipping
+	// would drop the change while the DB and the readiness signal both claim it
+	// is done, leaving the pool stuck at the old replica count. Waiting also
+	// keeps the in-flight marker honest - it stays set until the redeploy
+	// actually runs, so `apps set --replicas --wait` polls until the new pool
+	// is up rather than returning against the old one.
+	release := s.acquireDeployLock(slug)
 	defer release()
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		slog.Error("redeployApp: get app", "slug", slug, "err", err)
+		return
+	}
+
+	// A concurrent stop, hibernate, or delete may have changed the app's intent
+	// while this goroutine waited for the lock. Only cycle the pool for an app
+	// that is still running (or degraded, where a previous redeploy failed and a
+	// retry is wanted); honour a terminal state instead of resurrecting a pool
+	// the operator just tore down.
+	if app.Status != "running" && app.Status != "degraded" {
+		slog.Info("redeployApp: app no longer running, skipping pool cycle", "slug", slug, "status", app.Status)
 		return
 	}
 

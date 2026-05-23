@@ -53,9 +53,9 @@ type Server struct {
 	// deployLocksMu guards the deployLocks map. Each slug gets its own
 	// sync.Mutex which serializes deploy/restart/rollback/stop/delete
 	// operations for that app: a deploy in flight blocks a concurrent
-	// restart on the same slug. Different slugs are independent. The
-	// async redeployApp goroutine uses TryLock so it coalesces (skips)
-	// when an HTTP-driven deploy is already running.
+	// restart on the same slug. Different slugs are independent. The async
+	// redeployApp goroutine waits for this lock so a replica change is always
+	// applied even when an HTTP-driven deploy is already running.
 	deployLocksMu sync.Mutex
 	deployLocks   map[string]*sync.Mutex
 
