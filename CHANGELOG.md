@@ -25,6 +25,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.8](https://github.com/rvben/shinyhub/compare/v0.5.7...v0.5.8) - 2026-05-23
+
+### Fixed
+
+- **api**: wait for the deploy lock on redeploy so a replica change is never dropped ([fedb44f](https://github.com/rvben/shinyhub/commit/fedb44f913643d14d9d0e37ad377315be2e3590c))
+- **api**: refcount redeploy-in-flight so an unrelated lock holder cannot wedge it ([9f872f0](https://github.com/rvben/shinyhub/commit/9f872f0e737d63417ca01b576982adb7178c6d01))
+- **cli**: surface hooks-skipped warning on the fleet deploy path ([9e21c79](https://github.com/rvben/shinyhub/commit/9e21c795e5fd2d58c59e40fa9f9f2262899e2463))
+- **api**: advertise redeploy-in-flight so apps set --wait polls the new pool ([d962207](https://github.com/rvben/shinyhub/commit/d9622075b8fb3a895b35640154b8ef023b0b1f5c))
+- **cli**: fall back to app cap when server omits effective max sessions ([b4e923a](https://github.com/rvben/shinyhub/commit/b4e923a57e28ac8c2db6cbaabe52988f5359f71a))
+- **cli**: surface the last poll error when deploy --wait loses contact after a stale status ([d83a88b](https://github.com/rvben/shinyhub/commit/d83a88b3c87829f83ca84f31f7cdf5a0f6b84fdc))
+- **cli**: reject nonexistent or non-directory paths in manifest validate ([946433b](https://github.com/rvben/shinyhub/commit/946433be73d5ac1fd18ea6b65e9e5a4e785bc364))
+- **cli**: only note disabled-schedule override after the run is accepted; detect cmd/cmd-json conflict by presence ([2fb9ee1](https://github.com/rvben/shinyhub/commit/2fb9ee1c60f05320bf0e094b73a4578b5f3a8eb3))
+- **tracing**: combine split tracestate header values at the proxy hop ([2bbce73](https://github.com/rvben/shinyhub/commit/2bbce73a6f5482c6a7d0736e1b04856f0980128e))
+- **schedules**: detect interleaved DST double-fires and treat full-hour ranges as hourly ([cf495bb](https://github.com/rvben/shinyhub/commit/cf495bbaade353b4cf27c7c65b17580f2c7a7a4f))
+
 ## [0.5.7](https://github.com/rvben/shinyhub/compare/v0.5.6...v0.5.7) - 2026-05-23
 
 ### Added
