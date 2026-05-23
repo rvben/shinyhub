@@ -316,14 +316,17 @@ type rawConfig struct {
 }
 
 type rawTracingConfig struct {
-	Enabled           bool    `yaml:"enabled"`
-	OTLPEndpoint      string  `yaml:"otlp_endpoint"`
-	OTLPProtocol      string  `yaml:"otlp_protocol"`
-	OTLPHeaders       string  `yaml:"otlp_headers"`
-	SampleRatio       float64 `yaml:"sample_ratio"`
-	SlowRequestMS     int     `yaml:"slow_request_ms"`
-	RingBufferSize    int     `yaml:"ring_buffer_size"`
-	TraceLinkTemplate string  `yaml:"trace_link_template"`
+	Enabled      bool   `yaml:"enabled"`
+	OTLPEndpoint string `yaml:"otlp_endpoint"`
+	OTLPProtocol string `yaml:"otlp_protocol"`
+	OTLPHeaders  string `yaml:"otlp_headers"`
+	// Pointers so an explicit 0 (a documented, meaningful value: 0 disables
+	// sampling / disables the ring buffer / retains only error spans) is
+	// distinguishable from the key being absent (apply the safe default).
+	SampleRatio       *float64 `yaml:"sample_ratio"`
+	SlowRequestMS     *int     `yaml:"slow_request_ms"`
+	RingBufferSize    *int     `yaml:"ring_buffer_size"`
+	TraceLinkTemplate string   `yaml:"trace_link_template"`
 }
 
 type rawLifecycleConfig struct {
@@ -391,13 +394,15 @@ func Load(path string) (*Config, error) {
 		Scheduler: SchedulerConfig{DefaultTimezone: raw.Scheduler.Timezone},
 		Defaults:  DefaultsConfig{AppVisibility: raw.Defaults.AppVisibility},
 		Tracing: TracingConfig{
-			Enabled:           raw.Tracing.Enabled,
-			OTLPEndpoint:      raw.Tracing.OTLPEndpoint,
-			OTLPProtocol:      raw.Tracing.OTLPProtocol,
-			OTLPHeaders:       raw.Tracing.OTLPHeaders,
-			SampleRatio:       raw.Tracing.SampleRatio,
-			SlowRequestMS:     raw.Tracing.SlowRequestMS,
-			RingBufferSize:    raw.Tracing.RingBufferSize,
+			Enabled:      raw.Tracing.Enabled,
+			OTLPEndpoint: raw.Tracing.OTLPEndpoint,
+			OTLPProtocol: raw.Tracing.OTLPProtocol,
+			OTLPHeaders:  raw.Tracing.OTLPHeaders,
+			// Defaults applied here (not in normalizeTracing) so an explicit 0
+			// from YAML survives; an env override is layered on top afterwards.
+			SampleRatio:       derefOr(raw.Tracing.SampleRatio, 0.1),
+			SlowRequestMS:     derefOr(raw.Tracing.SlowRequestMS, 1000),
+			RingBufferSize:    derefOr(raw.Tracing.RingBufferSize, 200),
 			TraceLinkTemplate: raw.Tracing.TraceLinkTemplate,
 		},
 		Branding: raw.Branding,
@@ -421,7 +426,9 @@ func Load(path string) (*Config, error) {
 			},
 		},
 	}
-	applyEnv(cfg)
+	if err := applyEnv(cfg); err != nil {
+		return nil, err
+	}
 
 	// Parse trusted proxy CIDRs. Default to loopback-only when none are configured,
 	// so XFF is trusted only from local reverse proxies by default.
@@ -539,6 +546,12 @@ func normalizeTracing(t *TracingConfig) error {
 	if !t.Enabled {
 		return nil
 	}
+	// Enabling tracing without a collector endpoint is a broken half-mode: the
+	// proxy would propagate traceparent but apps would receive no
+	// OTEL_EXPORTER_OTLP_ENDPOINT and export nothing. Reject it loudly.
+	if t.OTLPEndpoint == "" {
+		return fmt.Errorf("tracing.otlp_endpoint must be set when tracing is enabled (SHINYHUB_TRACING_OTLP_ENDPOINT)")
+	}
 	if t.OTLPProtocol == "" {
 		t.OTLPProtocol = "http/protobuf"
 	}
@@ -547,25 +560,46 @@ func normalizeTracing(t *TracingConfig) error {
 	default:
 		return fmt.Errorf("tracing.otlp_protocol: %q is not supported; must be one of http/protobuf, grpc", t.OTLPProtocol)
 	}
-	if t.SampleRatio == 0 {
-		t.SampleRatio = 0.1
-	}
+	// Defaults for SampleRatio/SlowRequestMS/RingBufferSize are resolved at decode
+	// time (see Load), so an explicit 0 reaches here intact and carries its
+	// documented meaning (0 disables sampling / retains only error spans /
+	// disables the ring buffer). Here we only validate ranges.
 	if t.SampleRatio < 0 || t.SampleRatio > 1 {
 		return fmt.Errorf("tracing.sample_ratio: %g is out of range; must be between 0 and 1", t.SampleRatio)
 	}
 	if t.SlowRequestMS < 0 {
 		return fmt.Errorf("tracing.slow_request_ms: %d is negative", t.SlowRequestMS)
 	}
-	if t.SlowRequestMS == 0 {
-		t.SlowRequestMS = 1000
-	}
 	if t.RingBufferSize < 0 {
 		return fmt.Errorf("tracing.ring_buffer_size: %d is negative", t.RingBufferSize)
 	}
-	if t.RingBufferSize == 0 {
-		t.RingBufferSize = 200
+	if t.TraceLinkTemplate != "" && !strings.Contains(t.TraceLinkTemplate, "{trace_id}") {
+		return fmt.Errorf("tracing.trace_link_template: %q is missing the {trace_id} placeholder; links would be broken", t.TraceLinkTemplate)
 	}
 	return nil
+}
+
+// derefOr returns *p when p is non-nil, otherwise def. It lets an explicitly
+// configured zero survive while an absent key falls back to a default.
+func derefOr[T any](p *T, def T) T {
+	if p != nil {
+		return *p
+	}
+	return def
+}
+
+// parseBoolEnv parses a boolean-ish environment variable, accepting the common
+// truthy/falsy spellings operators reach for. An unrecognized value is an error
+// rather than a silent false, so a typo surfaces at startup.
+func parseBoolEnv(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on", "y":
+		return true, nil
+	case "0", "false", "no", "off", "n":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%q is not a boolean (use true/false, yes/no, on/off, 1/0)", v)
+	}
 }
 
 func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
@@ -655,7 +689,7 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	return rc
 }
 
-func applyEnv(cfg *Config) {
+func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_AUTH_SECRET"); v != "" {
 		cfg.Auth.Secret = v
 	}
@@ -778,7 +812,11 @@ func applyEnv(cfg *Config) {
 		cfg.Defaults.AppVisibility = v
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_ENABLED"); v != "" {
-		cfg.Tracing.Enabled = v == "1" || strings.EqualFold(v, "true")
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_TRACING_ENABLED: %w", err)
+		}
+		cfg.Tracing.Enabled = b
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_OTLP_ENDPOINT"); v != "" {
 		cfg.Tracing.OTLPEndpoint = v
@@ -790,19 +828,25 @@ func applyEnv(cfg *Config) {
 		cfg.Tracing.OTLPHeaders = v
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_SAMPLE_RATIO"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			cfg.Tracing.SampleRatio = f
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_TRACING_SAMPLE_RATIO: %q is not a number: %w", v, err)
 		}
+		cfg.Tracing.SampleRatio = f
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_SLOW_REQUEST_MS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Tracing.SlowRequestMS = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_TRACING_SLOW_REQUEST_MS: %q is not an integer: %w", v, err)
 		}
+		cfg.Tracing.SlowRequestMS = n
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_RING_BUFFER_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Tracing.RingBufferSize = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_TRACING_RING_BUFFER_SIZE: %q is not an integer: %w", v, err)
 		}
+		cfg.Tracing.RingBufferSize = n
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_TRACE_LINK_TEMPLATE"); v != "" {
 		cfg.Tracing.TraceLinkTemplate = v
@@ -828,4 +872,5 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("SHINYHUB_BRANDING_LANDING_PAGE"); v != "" {
 		cfg.Branding.LandingPage = v
 	}
+	return nil
 }
