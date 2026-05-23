@@ -315,6 +315,24 @@ func TestAppsStop_ServerError(t *testing.T) {
 	}
 }
 
+// TestAppsStop_ServerErrorUnwrapped asserts the {"error":...} envelope is
+// unwrapped into a clean message rather than dumped as raw JSON.
+func TestAppsStop_ServerErrorUnwrapped(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(409, `{"error":"app is hibernating"}`)
+
+	_, err := execCLI(t, "apps", "stop", "demo")
+	if err == nil {
+		t.Fatal("expected error for 409, got nil")
+	}
+	if !strings.Contains(err.Error(), "app is hibernating") {
+		t.Errorf("error should surface the server message, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), `{"error"`) {
+		t.Errorf("error should not contain the raw JSON envelope, got %q", err.Error())
+	}
+}
+
 // TestAppsDelete_WithYesFlag tests deletion bypassing the confirmation prompt.
 func TestAppsDelete_WithYesFlag(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)

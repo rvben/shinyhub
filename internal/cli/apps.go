@@ -78,7 +78,7 @@ func runAppsList(cmd *cobra.Command, args []string, f *appsListFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 
 	if f.jsonOutput {
@@ -141,7 +141,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 
 	if f.jsonOutput {
@@ -295,7 +295,7 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 
 	w := cmd.OutOrStdout()
@@ -362,7 +362,7 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("rollback failed: %s", strings.TrimSpace(string(out)))
+		return fmt.Errorf("rollback failed: %s", unwrapServerError(out, "no error body"))
 	}
 	if cmd.Flags().Changed("to") {
 		fmt.Printf("%s: rolled back to deployment %d\n", slug, f.deploymentID)
@@ -417,7 +417,7 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("start failed: %s", strings.TrimSpace(string(out)))
+			return fmt.Errorf("start failed: %s", unwrapServerError(out, "no error body"))
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", slug, pastTense)
 		return nil
@@ -443,7 +443,7 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("%s failed: %s", action, strings.TrimSpace(string(out)))
+			return fmt.Errorf("%s failed: %s", action, unwrapServerError(out, "no error body"))
 		}
 		fmt.Printf("%s: %s\n", slug, action+"ed")
 		return nil
@@ -543,7 +543,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("set failed (%s): %s", resp.Status, out)
+		return fmt.Errorf("set failed (%s): %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 
 	if hibernateChanged {
@@ -613,7 +613,7 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("set access failed: %s", out)
+		return fmt.Errorf("set access failed: %s", unwrapServerError(out, "no error body"))
 	}
 	fmt.Printf("%s: access set to %s\n", slug, accessLevel)
 	return nil
@@ -758,7 +758,7 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("delete failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+		return fmt.Errorf("delete failed (%s): %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 	fmt.Printf("%s: deleted\n", slug)
 	return nil
@@ -793,7 +793,7 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("stop failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+		return fmt.Errorf("stop failed (%s): %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 	fmt.Printf("%s: stopped\n", slug)
 	return nil
@@ -837,7 +837,7 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *appsDeploymentsFla
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 
 	if f.jsonOutput {
@@ -894,7 +894,7 @@ func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 	var tokens []tokenInfo
 	if err := json.Unmarshal(out, &tokens); err != nil {
@@ -939,7 +939,7 @@ func runTokensList(cmd *cobra.Command, args []string, f *tokensListFlags) error 
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+			return fmt.Errorf("server returned %s: %s", resp.Status, unwrapServerError(out, "no error body"))
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
@@ -1038,7 +1038,7 @@ func runTokensRevoke(cmd *cobra.Command, args []string, f *tokensRevokeFlags) er
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("revoke failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+		return fmt.Errorf("revoke failed (%s): %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "token %s: revoked\n", tokenID)
 	return nil

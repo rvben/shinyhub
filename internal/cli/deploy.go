@@ -177,7 +177,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("deploy failed (%s): %s", resp.Status, out)
+		return fmt.Errorf("deploy failed (%s): %s", resp.Status, unwrapServerError(out, "no error body"))
 	}
 
 	// Extract deployment number from the response so we can print a clean summary.
@@ -423,18 +423,10 @@ func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writ
 	defer cr.Body.Close()
 	if cr.StatusCode != 201 {
 		raw, _ := io.ReadAll(cr.Body)
-		// Try to surface the server's `{"error": "..."}` envelope, falling
-		// back to the raw body so the user gets enough context to diagnose
-		// quota / permission / validation failures.
-		msg := strings.TrimSpace(string(raw))
-		var env struct{ Error string `json:"error"` }
-		if err := json.Unmarshal(raw, &env); err == nil && env.Error != "" {
-			msg = env.Error
-		}
-		if msg == "" {
-			msg = cr.Status
-		}
-		return fmt.Errorf("could not create app %s: %s", slug, msg)
+		// Surface the server's `{"error": "..."}` envelope, falling back to the
+		// raw body (then the status line) so the user gets enough context to
+		// diagnose quota / permission / validation failures.
+		return fmt.Errorf("could not create app %s: %s", slug, unwrapServerError(raw, cr.Status))
 	}
 	return nil
 }
