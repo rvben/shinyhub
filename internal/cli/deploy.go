@@ -448,7 +448,7 @@ func gitClone(repoURL, branch, subdir string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(dir)
-		return "", fmt.Errorf("git clone: %w\n%s", err, out)
+		return "", gitCmdError("git clone", err, out)
 	}
 
 	if subdir != "" {

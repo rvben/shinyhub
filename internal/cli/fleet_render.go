@@ -248,7 +248,9 @@ func planExitInfo(f *fleetPlanFlags, diff []fleet.AppDiff) (int, string) {
 func planExit(f *fleetPlanFlags, diff []fleet.AppDiff) error {
 	code, reason := planExitInfo(f, diff)
 	if code != 0 {
-		return &ExitCodeError{Code: code, Err: errors.New(reason)}
+		// Detailed-exitcode is a status signal (the plan was already printed),
+		// not an error to surface; flag Reported so the wrapper stays silent.
+		return &ExitCodeError{Code: code, Err: errors.New(reason), Reported: true}
 	}
 	return nil
 }

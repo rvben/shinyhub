@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,27 @@ import (
 
 	"github.com/rvben/shinyhub/internal/fleet"
 )
+
+// ERR-5: git command failures must not leak a trailing blank line. With no
+// command output, the formatted error is just the prefix + cause; with output,
+// the (trimmed) text follows on its own line. The cause stays unwrappable.
+func TestGitCmdError_TrimsOutput(t *testing.T) {
+	cause := errors.New("exit status 128")
+
+	noOut := gitCmdError("git clone", cause, []byte("   \n\n"))
+	if got := noOut.Error(); got != "git clone: exit status 128" {
+		t.Fatalf("empty-output error = %q, want no trailing whitespace/newline", got)
+	}
+
+	withOut := gitCmdError("git clone", cause, []byte("fatal: repository not found\n"))
+	want := "git clone: exit status 128\nfatal: repository not found"
+	if got := withOut.Error(); got != want {
+		t.Fatalf("with-output error = %q, want %q", got, want)
+	}
+	if !errors.Is(withOut, cause) {
+		t.Fatal("gitCmdError must wrap the underlying cause")
+	}
+}
 
 // makeLocalGitRepo creates a real local git repo (origin) so the test does no
 // network I/O; gitClone clones a file:// URL.

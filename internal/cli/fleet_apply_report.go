@@ -83,11 +83,14 @@ func applyExitCode(res []applyResult) (int, string) {
 	}
 }
 
+// applyExitErr is returned after the apply report (or its JSON envelope) has
+// already been written, so the reason is flagged Reported: the RunE wrapper
+// must not re-print it as an "error:" line.
 func applyExitErr(code int, reason string) error {
 	if code == 0 {
 		return nil
 	}
-	return &ExitCodeError{Code: code, Err: fmt.Errorf("%s", reason)}
+	return &ExitCodeError{Code: code, Err: fmt.Errorf("%s", reason), Reported: true}
 }
 
 func statusGlyph(r applyResult) string {

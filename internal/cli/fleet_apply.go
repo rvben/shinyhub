@@ -101,7 +101,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 			}
 			if !isStdinTTY() {
 				fmt.Fprintf(errOut, "--prune needs interactive confirmation; re-run non-interactively with: %s\n", invocation)
-				return &ExitCodeError{Code: 1, Err: fmt.Errorf("--prune in non-interactive shell requires --yes")}
+				return &ExitCodeError{Code: 1, Err: fmt.Errorf("--prune in non-interactive shell requires --yes"), Reported: true}
 			}
 			fmt.Fprintf(errOut,
 				"This will PERMANENTLY delete %d fleet-owned app(s) and their persistent\n"+

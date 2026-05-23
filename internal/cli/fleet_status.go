@@ -154,12 +154,12 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
-		return &ExitCodeError{Code: 3, Err: err}
+		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	apps, err := fetchApps(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
-		return &ExitCodeError{Code: 3, Err: err}
+		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	st := buildFleetStatus(cfg.Host, apps)
 	out := cmd.OutOrStdout()
