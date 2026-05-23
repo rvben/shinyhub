@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,7 +10,110 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// stepClock returns a now() that advances by step on each call, so a wait loop
+// that calls now() once per iteration sees deterministic elapsed time without
+// real sleeping.
+func stepClock(step time.Duration) func() time.Time {
+	base := time.Unix(0, 0)
+	var n int64
+	return func() time.Time {
+		t := base.Add(time.Duration(n) * step)
+		n++
+		return t
+	}
+}
+
+// FLT-7: a long health wait must emit periodic progress lines (naming the app
+// and elapsed/timeout) rather than appearing hung, and must still time out.
+func TestFleetHealthLoop_ProgressLinesWhileWaiting(t *testing.T) {
+	var buf bytes.Buffer
+	poll := func() (bool, string, error) { return false, "starting", nil }
+	err := waitForFleetHealthLoop("demo", 120*time.Second, 2*time.Second, 30*time.Second,
+		poll, stepClock(2*time.Second), func(time.Duration) {}, &buf)
+	if err == nil {
+		t.Fatal("an app that never becomes healthy must time out")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timeout error = %v, want it to say 'timed out'", err)
+	}
+	out := buf.String()
+	if n := strings.Count(out, "demo"); n < 2 {
+		t.Fatalf("want repeated progress lines naming the app, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "/2m0s") {
+		t.Fatalf("progress line must show elapsed/timeout, got:\n%s", out)
+	}
+}
+
+// FLT-7: the loop returns as soon as the app reports ready and stops polling.
+func TestFleetHealthLoop_ReturnsReadyAndStops(t *testing.T) {
+	var buf bytes.Buffer
+	var calls int
+	poll := func() (bool, string, error) {
+		calls++
+		return calls >= 3, "starting", nil
+	}
+	err := waitForFleetHealthLoop("demo", 120*time.Second, time.Second, 30*time.Second,
+		poll, stepClock(time.Second), func(time.Duration) {}, &buf)
+	if err != nil {
+		t.Fatalf("ready app must return nil, got %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("loop must stop on first ready poll, got %d calls", calls)
+	}
+	if !strings.Contains(buf.String(), "healthy") {
+		t.Fatalf("ready line must confirm health, got:\n%s", buf.String())
+	}
+}
+
+// FLT-7: a terminal startup failure (crashed) fails fast without burning the
+// full timeout.
+func TestFleetHealthLoop_TerminalStatusFailsFast(t *testing.T) {
+	var buf bytes.Buffer
+	var calls int
+	poll := func() (bool, string, error) {
+		calls++
+		return false, "crashed", nil
+	}
+	err := waitForFleetHealthLoop("demo", 120*time.Second, time.Second, 30*time.Second,
+		poll, stepClock(time.Second), func(time.Duration) {}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "crashed") {
+		t.Fatalf("crashed app must fail with a crashed error, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("terminal status must fail on the first poll, got %d calls", calls)
+	}
+}
+
+// FLT-7: --health-timeout seconds convert to a duration; a non-positive value
+// falls back to the generous fleet default so the flag can't disable the wait.
+func TestHealthTimeoutDuration(t *testing.T) {
+	if got := healthTimeoutDuration(240); got != 240*time.Second {
+		t.Fatalf("healthTimeoutDuration(240) = %v, want 4m0s", got)
+	}
+	if got := healthTimeoutDuration(0); got != fleetHealthTimeout {
+		t.Fatalf("healthTimeoutDuration(0) = %v, want fleet default %v", got, fleetHealthTimeout)
+	}
+	if got := healthTimeoutDuration(-5); got != fleetHealthTimeout {
+		t.Fatalf("healthTimeoutDuration(-5) = %v, want fleet default %v", got, fleetHealthTimeout)
+	}
+}
+
+// FLT-7: fleet apply exposes a --health-timeout flag so an operator can bound
+// or extend the per-app health wait.
+func TestFleetApplyCmd_HasHealthTimeoutFlag(t *testing.T) {
+	cmd := newFleetApplyCmd()
+	f := cmd.Flags().Lookup("health-timeout")
+	if f == nil {
+		t.Fatal("fleet apply must expose a --health-timeout flag")
+	}
+	if f.DefValue != "120" {
+		t.Fatalf("--health-timeout default = %q, want 120", f.DefValue)
+	}
+}
 
 func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	var deployHits, listHits int32
@@ -51,7 +155,7 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
-	dg, committed, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1")
+	dg, committed, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1", 5*time.Second)
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -90,7 +194,7 @@ func TestDeployAppBundle_ClientRejectionIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r")
+	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}
@@ -123,7 +227,7 @@ func TestDeployAppBundle_ServerErrorIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r")
+	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}

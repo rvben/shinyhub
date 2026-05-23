@@ -16,6 +16,7 @@ type convergeOpts struct {
 	allowDegradedPrune bool
 	preconditions      bool // server supports If-Match-style headers
 	retries            int  // attempts AFTER the first for deploy-bearing actions
+	healthTimeout      time.Duration
 	fleetID            string
 	runID              string
 }
@@ -57,7 +58,7 @@ func deployWithRetry(cfg *cliConfig, slug, dir, visibility string, opt convergeO
 	total := 1 + opt.retries
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
-		promoted, c, err = deployAppBundle(cfg, slug, dir, visibility, out, opt.runID)
+		promoted, c, err = deployAppBundle(cfg, slug, dir, visibility, out, opt.runID, opt.healthTimeout)
 		committed = committed || c
 		if err == nil {
 			return promoted, attempts, committed, nil

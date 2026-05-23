@@ -18,6 +18,7 @@ type fleetApplyFlags struct {
 	quiet                    bool
 	jsonOutput               bool
 	retries                  int
+	healthTimeout            int
 }
 
 func newFleetApplyCmd() *cobra.Command {
@@ -54,6 +55,7 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the summary + result line")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploy-bearing actions")
+	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
 	return cmd
 }
 
@@ -132,6 +134,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		allowDegradedPrune: f.allowUnsafeDegradedPrune,
 		preconditions:      pf.caps.FleetPreconditions,
 		retries:            f.retries,
+		healthTimeout:      healthTimeoutDuration(f.healthTimeout),
 		fleetID:            pf.manifest.FleetID,
 		runID:              newRunID(),
 	}
