@@ -384,6 +384,15 @@ func ensureApp(cfg *cliConfig, slug, visibility string) error {
 // ensureAppWithOutput is the testable core of ensureApp. errOut receives any
 // warnings emitted during the call.
 func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writer) error {
+	return ensureAppCore(cfg, slug, visibility, errOut, true)
+}
+
+// ensureAppCore is the shared implementation. warnExisting controls whether a
+// non-empty visibility on an already-existing app produces the corrective
+// warning. The interactive `deploy` path sets it; the fleet path clears it,
+// because fleet reconciles visibility through its own config-drift mechanism
+// and the deploy-layer warning would otherwise leak once per retry.
+func ensureAppCore(cfg *cliConfig, slug, visibility string, errOut io.Writer, warnExisting bool) error {
 	checkReq, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -395,7 +404,7 @@ func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writ
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
-		if visibility != "" {
+		if visibility != "" && warnExisting {
 			fmt.Fprintf(errOut, "warning: --visibility is ignored for existing apps; use `shinyhub apps access set %s %s` instead\n", slug, visibility)
 		}
 		return nil

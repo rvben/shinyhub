@@ -118,7 +118,7 @@ func readPromotedDigest(cfg *cliConfig, slug string) (string, error) {
 // GET /api/apps/{slug} then POST /api/apps with {"slug","name","access"} when
 // absent; visibility is forwarded as the access value.
 func ensureFleetApp(cfg *cliConfig, slug, visibility string, out io.Writer) error {
-	return ensureAppWithOutput(cfg, slug, visibility, out)
+	return ensureAppCore(cfg, slug, visibility, out, false)
 }
 
 // waitForFleetHealthy blocks until the app reports running or a terminal

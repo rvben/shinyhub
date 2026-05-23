@@ -115,6 +115,36 @@ func TestFleetApplyCmd_HasHealthTimeoutFlag(t *testing.T) {
 	}
 }
 
+// FLT-11: fleet reconciles visibility through its own config-drift path, so
+// the deploy-layer "--visibility ignored for existing apps" warning is noise
+// in the fleet context (and leaked once per retry). ensureFleetApp must not
+// emit it for an app that already exists.
+func TestEnsureFleetApp_NoVisibilityWarningForExistingApp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// GET = app exists; nothing else should be hit.
+		if r.Method == "GET" && r.URL.Path == "/api/apps/demo" {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running"}}`))
+			return
+		}
+		if r.Method == "POST" && r.URL.Path == "/api/apps" {
+			t.Error("create must not be called for an existing app")
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	if err := ensureFleetApp(cfg, "demo", "private", &buf); err != nil {
+		t.Fatalf("ensureFleetApp: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("fleet ensure must not warn for existing apps, got: %q", buf.String())
+	}
+}
+
 func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	var deployHits, listHits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
