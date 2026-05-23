@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestAppsSet_ReplicasOnly(t *testing.T) {
@@ -981,5 +983,39 @@ func TestAppsSet_Wait_PollsUntilRunning(t *testing.T) {
 	}
 	if !sawPatch || !sawGet {
 		t.Errorf("expected both PATCH and a GET poll of /api/apps/demo, got %#v", *reqs)
+	}
+}
+
+// A replica change kicks off an async server-side redeploy while the app row
+// still reports "running", so the first poll observing status:"running" is not
+// proof the new pool is up. The server advertises redeploy_in_flight while the
+// pool is cycling; --wait must keep polling until it clears rather than
+// returning on the stale "running".
+func TestAppsSet_Wait_RedeployInFlightBlocksReady(t *testing.T) {
+	var getCount int32
+	_, _ = setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/apps/demo" {
+			if atomic.AddInt32(&getCount, 1) == 1 {
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"app":{"status":"running"},"redeploy_in_flight":true}`))
+				return
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"app":{"status":"running"},"redeploy_in_flight":false}`))
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	orig := healthPollInterval
+	t.Cleanup(func() { healthPollInterval = orig })
+	healthPollInterval = time.Millisecond
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3", "--yes", "--wait"); err != nil {
+		t.Fatalf("unexpected error with --wait: %v", err)
+	}
+	if got := atomic.LoadInt32(&getCount); got < 2 {
+		t.Fatalf("wait returned on the first redeploying poll: got %d GET polls, want >= 2", got)
 	}
 }

@@ -82,10 +82,14 @@ func (s *Server) tryAcquireDeployLock(slug string) (release func()) {
 func (s *Server) redeployApp(slug string) {
 	release := s.tryAcquireDeployLock(slug)
 	if release == nil {
+		// Another redeploy holds the lock and will clear the in-flight marker
+		// when it finishes; leaving it set keeps a --wait client polling until
+		// the active redeploy completes rather than returning prematurely.
 		slog.Info("redeploy already in flight, skipping", "slug", slug)
 		return
 	}
 	defer release()
+	defer s.clearRedeployInFlight(slug)
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {

@@ -392,12 +392,17 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 		App struct {
 			Status string `json:"status"`
 		} `json:"app"`
+		// RedeployInFlight is set by the server while an async replica redeploy
+		// is cycling the pool. The app row still reports "running" throughout,
+		// so this flag is the only honest signal that the new pool is not yet
+		// up. Treat the app as not-ready until it clears.
+		RedeployInFlight bool `json:"redeploy_in_flight"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return false, "", err
 	}
 	status := result.App.Status
-	return status == "running", status, nil
+	return status == "running" && !result.RedeployInFlight, status, nil
 }
 
 // ensureApp checks whether the app exists and creates it if not. When visibility

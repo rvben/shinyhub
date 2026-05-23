@@ -198,6 +198,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		"app":                                app,
 		"replicas_status":                    replicas,
 		"effective_max_sessions_per_replica": effectiveCap,
+		"redeploy_in_flight":                 s.isRedeployInFlight(slug),
 	})
 }
 
@@ -416,6 +417,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
 	if setReplicas && priorStatus == "running" {
+		// Mark in-flight synchronously before launching the goroutine so the
+		// first GET after this PATCH returns observes the redeploy even though
+		// the app row still reads "running". The redeploy goroutine clears it.
+		s.markRedeployInFlight(slug)
 		go s.redeployApp(slug)
 	}
 

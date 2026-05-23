@@ -48,7 +48,7 @@ type Server struct {
 	// authenticates as the synthetic system user without a DB lookup. Set via
 	// SetDeployToken at startup when SHINYHUB_DEPLOY_TOKEN is configured.
 	deployToken *auth.DeployToken
-	deployRun     func(deploy.Params) (*deploy.PoolResult, error)
+	deployRun   func(deploy.Params) (*deploy.PoolResult, error)
 
 	// deployLocksMu guards the deployLocks map. Each slug gets its own
 	// sync.Mutex which serializes deploy/restart/rollback/stop/delete
@@ -66,6 +66,41 @@ type Server struct {
 	// deployLocks so a slow upload does not block deploys/restarts.
 	dataLocksMu sync.Mutex
 	dataLocks   map[string]*sync.Mutex
+
+	// redeployMu guards redeployInFlight. The set holds the slugs whose pool
+	// is currently being cycled by the async redeployApp goroutine. The PATCH
+	// handler adds a slug synchronously before launching the goroutine, so the
+	// first GET after the PATCH always observes the redeploy in flight even
+	// though the app row still reads "running"; the goroutine that performs the
+	// restart removes it when done. handleGetApp surfaces membership as
+	// redeploy_in_flight so a --wait client polls until the new pool is up.
+	redeployMu       sync.Mutex
+	redeployInFlight map[string]struct{}
+}
+
+// markRedeployInFlight records that slug's pool is being cycled. Idempotent.
+func (s *Server) markRedeployInFlight(slug string) {
+	s.redeployMu.Lock()
+	defer s.redeployMu.Unlock()
+	if s.redeployInFlight == nil {
+		s.redeployInFlight = make(map[string]struct{})
+	}
+	s.redeployInFlight[slug] = struct{}{}
+}
+
+// clearRedeployInFlight removes slug from the in-flight set. Idempotent.
+func (s *Server) clearRedeployInFlight(slug string) {
+	s.redeployMu.Lock()
+	defer s.redeployMu.Unlock()
+	delete(s.redeployInFlight, slug)
+}
+
+// isRedeployInFlight reports whether slug's pool is currently being cycled.
+func (s *Server) isRedeployInFlight(slug string) bool {
+	s.redeployMu.Lock()
+	defer s.redeployMu.Unlock()
+	_, ok := s.redeployInFlight[slug]
+	return ok
 }
 
 // New constructs a Server and wires up all routes. manager and prx may be nil
