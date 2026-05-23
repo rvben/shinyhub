@@ -328,6 +328,32 @@ func TestScheduleRun_FollowExitsNonZeroOnFailure(t *testing.T) {
 	}
 }
 
+// SCH-2: `schedule run --follow` must follow the exact run it just triggered,
+// using the run_id returned by POST /run rather than re-querying the latest
+// run (which races a concurrent cron tick). The server here exposes no
+// runs?limit=1 route, so any fallback to that endpoint fails the test.
+func TestScheduleRun_FollowUsesReturnedRunID(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"started","run_id":42}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/42/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: ok\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/42": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	if _, err := execCLI(t, "schedule", "run", "demo", "job", "--follow"); err != nil {
+		t.Fatalf("expected clean exit using the returned run_id, got: %v", err)
+	}
+}
+
 // A run that finishes successfully must exit 0.
 func TestScheduleRun_FollowExitsZeroOnSuccess(t *testing.T) {
 	scheduleTestServer(t, map[string]http.HandlerFunc{

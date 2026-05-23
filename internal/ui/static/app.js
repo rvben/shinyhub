@@ -3132,12 +3132,12 @@ document.addEventListener('DOMContentLoaded', () => {
     ul.className = 'run-history-list';
     runs.forEach(run => {
       const li = document.createElement('li');
-      const started = run.StartedAt ? new Date(run.StartedAt).toLocaleString() : '—';
-      const status = run.Status || '—';
-      const exit = run.ExitCode != null ? ` · exit ${run.ExitCode}` : '';
+      const started = run.started_at ? new Date(run.started_at).toLocaleString() : '—';
+      const status = run.status || '—';
+      const exit = run.exit_code != null ? ` · exit ${run.exit_code}` : '';
       li.innerHTML = `<button type="button" class="run-history-btn">${escapeHtml(started)} · <strong>${escapeHtml(status)}</strong>${escapeHtml(exit)}</button>`;
       li.querySelector('button').addEventListener('click', () => {
-        openScheduleRunLogs(slug, schedID, run.ID);
+        openScheduleRunLogs(slug, schedID, run.id);
       });
       ul.appendChild(li);
     });

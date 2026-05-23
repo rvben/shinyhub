@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -524,7 +525,49 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		writeLogFilePlain(w, run.LogPath, defaultLogTail)
 		return
 	}
-	streamLogFile(w, r, run.LogPath, run.Status == "running")
+	if run.Status == "running" {
+		// Live run: follow the log but stop when the run reaches a terminal
+		// state, so the stream is finite and clients can read the final exit
+		// code afterwards.
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		go s.cancelWhenRunDone(ctx, cancel, runID)
+		streamLogFile(w, r.WithContext(ctx), run.LogPath, true)
+		return
+	}
+	// Finished run: a one-shot SSE dump of the static log, then close.
+	streamLogFile(w, r, run.LogPath, false)
+}
+
+// terminalRunPollInterval is how often a live run-log stream polls the run's
+// status to detect completion.
+const terminalRunPollInterval = 500 * time.Millisecond
+
+// finalLineDrainGrace gives the log follower a brief window to deliver the
+// last lines a process flushed just before exiting, before the stream closes.
+const finalLineDrainGrace = 300 * time.Millisecond
+
+// cancelWhenRunDone polls the run's status and cancels ctx once the run leaves
+// the "running" state, ending a live log-follow stream.
+func (s *Server) cancelWhenRunDone(ctx context.Context, cancel context.CancelFunc, runID int64) {
+	ticker := time.NewTicker(terminalRunPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run, err := s.store.GetScheduleRun(runID)
+			if err != nil {
+				continue
+			}
+			if run.Status != "running" {
+				time.Sleep(finalLineDrainGrace)
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 // effectiveTZLabel returns a human-readable label of the timezone that will

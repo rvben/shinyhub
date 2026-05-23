@@ -412,35 +412,24 @@ func newScheduleRunCmd() *cobra.Command {
 			return nil
 		}
 
-		// Tail the latest run's logs by fetching the run list then streaming.
-		runsURL := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs?limit=1", cfg.Host, slug, id)
-		runsReq, err := http.NewRequest("GET", runsURL, nil)
-		if err != nil {
-			return fmt.Errorf("build runs request: %w", err)
+		// Follow the exact run that was just admitted, using the run_id from
+		// the trigger response. Re-querying the latest run would race a
+		// concurrent cron tick and could attach to (and report the exit code
+		// of) a different run.
+		var started struct {
+			RunID int64 `json:"run_id"`
 		}
-		runsReq.Header.Set("Authorization", authHeader(cfg.Token))
-
-		runsResp, err := httpClient.Do(runsReq)
-		if err != nil {
-			return fmt.Errorf("fetch runs: %w", err)
+		if err := json.Unmarshal(out, &started); err != nil {
+			return fmt.Errorf("decode run response: %w", err)
 		}
-		defer runsResp.Body.Close()
-
-		var runs []struct {
-			ID int64 `json:"id"`
-		}
-		if err := json.NewDecoder(runsResp.Body).Decode(&runs); err != nil {
-			return fmt.Errorf("decode runs: %w", err)
-		}
-		if len(runs) == 0 {
-			return fmt.Errorf("no runs found")
+		if started.RunID == 0 {
+			return fmt.Errorf("server did not return a run_id to follow")
 		}
 
-		runID := runs[0].ID
-		if err := streamRunLogs(cfg, slug, id, runID, true, cmd); err != nil {
+		if err := streamRunLogs(cfg, slug, id, started.RunID, true, cmd); err != nil {
 			return err
 		}
-		return runFinalExitError(cfg, slug, id, runID)
+		return runFinalExitError(cfg, slug, id, started.RunID)
 	}
 	return runCmd
 }

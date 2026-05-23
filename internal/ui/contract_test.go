@@ -527,6 +527,29 @@ func TestScheduleTimezoneFields(t *testing.T) {
 		"schedule form modal in index.html must have a sched-timezone input for the optional per-schedule timezone")
 }
 
+// TestScheduleRunHistoryReadsSnakeCase guards the JSON contract for schedule
+// runs. db.ScheduleRun serializes with snake_case json tags (id, status,
+// exit_code, started_at; see internal/db/schedules.go), so the run-history
+// list in app.js must read those keys. If the frontend reverts to the old
+// PascalCase reads (run.Status, run.ExitCode, ...) the history rows render
+// blank and the per-run log buttons call the endpoint with an undefined id.
+func TestScheduleRunHistoryReadsSnakeCase(t *testing.T) {
+	for _, needle := range []string{"run.started_at", "run.status", "run.exit_code", "run.id"} {
+		assertContains(t, "app.js", needle,
+			"run-history list must read snake_case ScheduleRun fields; see internal/db/schedules.go json tags")
+	}
+	// The PascalCase reads must be gone so the regression cannot creep back.
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	for _, gone := range []string{"run.StartedAt", "run.Status", "run.ExitCode", "run.ID"} {
+		if strings.Contains(string(b), gone) {
+			t.Errorf("app.js must not read PascalCase %q; ScheduleRun is snake_case now", gone)
+		}
+	}
+}
+
 // TestFrontendConsumesBrandingObject guards the branding contract: the server
 // injects window.__SHINYHUB_BRANDING__ (see internal/ui/branding.go RenderIndex)
 // and exposes the same shape at /.shinyhub/branding.json. The SPA must read

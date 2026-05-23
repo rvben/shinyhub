@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -459,6 +460,72 @@ func TestSchedules_RunLogs_PlainTextWhenNotFollowing(t *testing.T) {
 	}
 	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Errorf("follow=true Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
+// TestSchedules_RunLogs_FollowStopsWhenRunFinishes asserts that a follow=true
+// stream attached to a still-running run closes once the run reaches a
+// terminal state. A finite scheduled command's log stream must end when the
+// run ends; otherwise `schedule run --follow` would hang forever and could
+// never report the run's exit code.
+func TestSchedules_RunLogs_FollowStopsWhenRunFinishes(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, _ := store.GetAppBySlug("fetch")
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	logPath := filepath.Join(t.TempDir(), "run.log")
+	if err := os.WriteFile(logPath, []byte("starting\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	runID, _ := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "manual",
+		StartedAt: time.Now().UTC(), LogPath: logPath,
+	})
+
+	ts := httptest.NewServer(srv.Router())
+	defer ts.Close()
+
+	url := fmt.Sprintf("%s/api/apps/fetch/schedules/%d/runs/%d/logs?follow=true", ts.URL, schedID, runID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET logs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+
+	// Mark the run finished shortly after the stream attaches.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = store.FinishScheduleRun(db.FinishScheduleRunParams{
+			RunID: runID, Status: "failed", ExitCode: 1, FinishedAt: time.Now().UTC(),
+		})
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, rerr := io.ReadAll(resp.Body)
+		done <- rerr
+	}()
+
+	select {
+	case <-done:
+		// Stream closed after the run finished: correct.
+	case <-time.After(5 * time.Second):
+		t.Fatal("follow stream did not close after the run reached a terminal state")
 	}
 }
 
