@@ -99,6 +99,50 @@ func TestProxy_RecordsUpstreamErrorMessage(t *testing.T) {
 	}
 }
 
+// TRC-1: an upstream that drops the connection mid-stream (after a 200 header
+// was already sent) does NOT trigger the ReverseProxy ErrorHandler; the error
+// surfaces only on the body copy. The span must still record Error, which is
+// the only thing that admits it to the buffer when the status is 200 and the
+// request was not slow. This exercises the otherwise-dead Error-only branch.
+func TestProxy_RecordsMidStreamErrorMessage(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000") // promise more than we send
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Hijack and slam the connection so the proxy's body read sees an
+		// unexpected EOF before Content-Length bytes arrive.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Hour) // huge slow threshold: only error admits
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/page", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	spans := buf.Snapshot("app")
+	if len(spans) != 1 {
+		t.Fatalf("a mid-stream upstream drop must be buffered via Error, got %d spans", len(spans))
+	}
+	if spans[0].Error == "" {
+		t.Fatalf("mid-stream drop must populate span.Error (status=%d)", spans[0].Status)
+	}
+}
+
 // TestProxy_RecordsErrorToBuffer verifies that a 5xx response is admitted to
 // the ring buffer with method, path, status, and replica information.
 func TestProxy_RecordsErrorToBuffer(t *testing.T) {

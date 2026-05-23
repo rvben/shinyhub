@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +19,41 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
+
+// recorderCtxKey carries the request's *statusRecorder through the transport so
+// a mid-stream upstream read error (which ReverseProxy reports only on the body
+// copy, never via ErrorHandler) can be captured onto the span.
+type recorderCtxKey struct{}
+
+// errCapturingTransport wraps a RoundTripper so the upstream response body's
+// read errors are recorded onto the request's statusRecorder. Pre-response
+// failures still flow through ErrorHandler; this covers the post-header case.
+type errCapturingTransport struct{ base http.RoundTripper }
+
+func (t *errCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	if rec, ok := req.Context().Value(recorderCtxKey{}).(*statusRecorder); ok {
+		resp.Body = &errCapturingBody{ReadCloser: resp.Body, rec: rec}
+	}
+	return resp, nil
+}
+
+// errCapturingBody records the first non-EOF read error onto rec.proxyErr.
+type errCapturingBody struct {
+	io.ReadCloser
+	rec *statusRecorder
+}
+
+func (b *errCapturingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF && b.rec.proxyErr == nil {
+		b.rec.proxyErr = err
+	}
+	return n, err
+}
 
 // loadingPage is returned when a request arrives for a slug with no registered
 // backend. Client-side JS reloads the page every 3 s up to loadingPageMaxRetries
@@ -360,12 +397,9 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
-	// Capture upstream transport failures (connection refused, timeout, a
-	// mid-stream drop after a 200 was already sent) onto the statusRecorder so
-	// the trace span surfaces span.Error. Mirrors httputil's default handler
-	// (log + 502) and adds the capture; WriteHeader is a no-op once a status
-	// was already written, so a mid-stream failure keeps its real status while
-	// still recording the error.
+	// Capture pre-response upstream failures (connection refused, timeout)
+	// onto the statusRecorder so the trace span surfaces span.Error. Mirrors
+	// httputil's default handler (log + 502) and adds the capture.
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		log.Printf("proxy: upstream error for %s: %v", slugCopy, err)
 		if sr, ok := w.(*statusRecorder); ok {
@@ -373,6 +407,11 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 		}
 		w.WriteHeader(http.StatusBadGateway)
 	}
+	// ErrorHandler does not fire for failures after the response header was
+	// sent: ReverseProxy reports those only on the body copy. Wrap the
+	// transport so a mid-stream upstream read error is captured too, which is
+	// the only signal that admits an otherwise-200, not-slow span to the buffer.
+	rp.Transport = &errCapturingTransport{base: http.DefaultTransport}
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -712,6 +751,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer picked.activeConns.Add(-1)
 
 	p.RecordActivity(slug)
+	// Thread the recorder through the request context only while tracing is on
+	// so the transport's body wrapper can attribute a mid-stream read error to
+	// this span. When tracing is off the value is absent and the body is never
+	// wrapped, keeping the hot path allocation-free.
+	if traceEnabled {
+		r = r.WithContext(context.WithValue(r.Context(), recorderCtxKey{}, rec))
+	}
 	picked.rp.ServeHTTP(rec, r)
 }
 
