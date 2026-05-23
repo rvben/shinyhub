@@ -1,7 +1,3 @@
-// Package storage defines the immutable-bundle and mutable-data abstractions
-// that let app bundles and per-app data live on a local disk (single node) or a
-// shared/object backend (distributed). Single-node uses the Local* types, which
-// are behavior-identical to the pre-abstraction inline file handling.
 package storage
 
 // BundleRef identifies a published immutable bundle version.
