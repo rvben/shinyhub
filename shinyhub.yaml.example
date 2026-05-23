@@ -90,8 +90,10 @@ oauth:
 # built-in OpenTelemetry support (https://shiny.posit.co/py/docs/opentelemetry.html)
 # exports traces to your chosen backend. ShinyHub also propagates W3C traceparent
 # through the reverse proxy and retains a ring buffer of slow/error proxy spans
-# visible in the UI's Traces tab. Disabled by default; everything is a no-op when
-# enabled=false.
+# visible in the UI's Traces tab. In addition, the ShinyHub server emits its own
+# OTel spans for control-plane API request handling to the same otlp_endpoint, so
+# an inbound traceparent links a client/edge trace through ShinyHub to the app it
+# proxies. Disabled by default; everything is a no-op when enabled=false.
 tracing:
   enabled: false                       # SHINYHUB_TRACING_ENABLED
   otlp_endpoint: ""                    # e.g. http://tempo:4318 or https://api.honeycomb.io  # SHINYHUB_TRACING_OTLP_ENDPOINT
@@ -102,6 +104,16 @@ tracing:
   ring_buffer_size: 200                # max retained spans per app; FIFO eviction  # SHINYHUB_TRACING_RING_BUFFER_SIZE
   # Optional deep-link template for the Traces tab. {trace_id} is substituted.
   trace_link_template: ""              # e.g. https://grafana.example.com/explore?traceId={trace_id}  # SHINYHUB_TRACING_TRACE_LINK_TEMPLATE
+
+# Optional: Prometheus metrics for the ShinyHub server process itself - HTTP
+# request rate/latency for the control-plane API, the Go runtime and process
+# collectors, build info, and uptime. This is distinct from the per-app CPU/RAM
+# sampling shown on each app card. Served on a dedicated listener, loopback-only
+# by default, so server internals are never exposed on the public app port.
+# Scrape http://<addr>/metrics. Disabled by default.
+metrics:
+  enabled: false                       # SHINYHUB_METRICS_ENABLED
+  addr: 127.0.0.1:9090                 # host:port for the /metrics scrape listener  # SHINYHUB_METRICS_ADDR
 
 # Optional: white-label branding. All fields are optional; with no branding
 # block at all, / and /login serve byte-for-byte today's stock catalog/login.
