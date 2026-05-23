@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // TestServerConfigPath_FlagWins asserts the --config flag value takes
 // precedence over the SHINYHUB_CONFIG env var and the default.
@@ -46,5 +51,50 @@ func TestServerConfigPath_DefaultWhenNothingSet(t *testing.T) {
 func TestServeCmd_HasConfigFlag(t *testing.T) {
 	if serveCmd.Flags().Lookup("config") == nil {
 		t.Fatal("serve command must expose a --config flag")
+	}
+}
+
+// TestServeCmd_ConfigFlagPositionIndependent guards against the latent
+// footgun of two `--config` flags sharing a name: the root persistent client
+// credentials flag (from cli.AddCommandsTo) and serve's own local server-config
+// flag. The local flag must win for `serve` in BOTH `serve --config X` and
+// `shinyhub --config X serve`, so the flag's position can never silently start
+// the server against the wrong config. The test drives the real command tree
+// end to end and asserts the exact file is loaded by giving it a sentinel
+// runtime.mode that config validation rejects by name.
+func TestServeCmd_ConfigFlagPositionIndependent(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "server.yaml")
+	const sentinel = "SENTINEL_MODE_FROM_FLAG_FILE"
+	content := "auth:\n  secret: " + strings.Repeat("a", 32) + "\nruntime:\n  mode: " + sentinel + "\n"
+	if err := os.WriteFile(cfgFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A missing/unspecified config must NOT resolve to this file, so the
+	// sentinel error proves the flag value (not a default) was loaded.
+	t.Setenv("SHINYHUB_CONFIG", "")
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"flag after subcommand", []string{"serve", "--config", cfgFile}},
+		{"flag before subcommand", []string{"--config", cfgFile, "serve"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := configPath
+			configPath = ""
+			t.Cleanup(func() {
+				configPath = prev
+				rootCmd.SetArgs(nil)
+			})
+			rootCmd.SetArgs(tc.args)
+			err := rootCmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), sentinel) {
+				t.Fatalf("[%s] expected the flag's config file to be loaded "+
+					"(error naming %q), got: %v", tc.name, sentinel, err)
+			}
+		})
 	}
 }
