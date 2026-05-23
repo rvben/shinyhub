@@ -167,7 +167,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			CreatedAt               string `json:"created_at"`
 			UpdatedAt               string `json:"updated_at"`
 		} `json:"app"`
-		EffectiveMaxSessionsPerReplica int `json:"effective_max_sessions_per_replica"`
+		EffectiveMaxSessionsPerReplica *int `json:"effective_max_sessions_per_replica"`
 		ReplicasStatus                 []struct {
 			Index  int    `json:"index"`
 			Status string `json:"status"`
@@ -192,16 +192,33 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	fmt.Fprintf(w, "Replicas:    %d\n", a.Replicas)
 	// effective cap resolves the per-app value against the runtime default (0 =
 	// inherit). Annotate a 0 with the resolved default and print the admission
-	// ceiling (replicas × effective cap) so the bare "0" is not cryptic.
-	eff := resp2.EffectiveMaxSessionsPerReplica
+	// ceiling (replicas × effective cap) so the bare "0" is not cryptic. An
+	// older server may omit effective_max_sessions_per_replica entirely; treat
+	// the absent field distinctly from a reported 0 so we never invent an
+	// "unlimited" ceiling for an app that has an explicit cap.
+	effKnown := resp2.EffectiveMaxSessionsPerReplica != nil
 	if a.MaxSessionsPerReplica == 0 {
-		fmt.Fprintf(w, "Max sess/r:  0 (runtime default: %d)\n", eff)
+		if effKnown {
+			fmt.Fprintf(w, "Max sess/r:  0 (runtime default: %d)\n", *resp2.EffectiveMaxSessionsPerReplica)
+		} else {
+			fmt.Fprintf(w, "Max sess/r:  0 (runtime default)\n")
+		}
 	} else {
 		fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
 	}
-	if eff == 0 {
-		fmt.Fprintf(w, "Admission ceiling: unlimited (no session cap)\n")
-	} else {
+	// Prefer the server-resolved effective cap; when it is absent fall back to
+	// the explicit app cap. If neither is known (absent effective + inherited
+	// cap), the ceiling is unresolvable client-side, so omit it rather than
+	// claim unlimited.
+	switch {
+	case effKnown:
+		if eff := *resp2.EffectiveMaxSessionsPerReplica; eff == 0 {
+			fmt.Fprintf(w, "Admission ceiling: unlimited (no session cap)\n")
+		} else {
+			fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
+		}
+	case a.MaxSessionsPerReplica > 0:
+		eff := a.MaxSessionsPerReplica
 		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
 	}
 	if a.HibernateTimeoutMinutes != nil {

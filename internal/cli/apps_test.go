@@ -586,6 +586,45 @@ func TestAppsShow_UnlimitedCap(t *testing.T) {
 	}
 }
 
+// CR2-4: an older server may not return effective_max_sessions_per_replica.
+// With an explicit nonzero per-app cap, the CLI must not decode the absent
+// field as 0 and report "unlimited"; it falls back to the app cap for the
+// ceiling.
+func TestAppsShow_MissingEffectiveCapFallsBackToAppCap(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":7,"deploy_count":1},"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(strings.ToLower(out), "unlimited") {
+		t.Errorf("explicit cap 7 must not read as unlimited when the server omits the effective cap, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Admission ceiling: 2 × 7 = 14") {
+		t.Errorf("expected the ceiling to fall back to the app cap (2 × 7 = 14), got:\n%s", out)
+	}
+}
+
+// CR2-4: when the server omits the effective cap AND the app inherits (cap 0),
+// the ceiling cannot be resolved client-side; the CLI must not guess
+// "unlimited". It omits the ceiling line rather than printing a false one.
+func TestAppsShow_MissingEffectiveCapInheritedOmitsCeiling(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(strings.ToLower(out), "unlimited") {
+		t.Errorf("must not claim unlimited when the effective cap is unknown, got:\n%s", out)
+	}
+	if strings.Contains(out, "Admission ceiling:") {
+		t.Errorf("ceiling is unresolvable here and should be omitted, got:\n%s", out)
+	}
+}
+
 // TestAppsShow_JSON passes through the raw envelope when --json is set.
 func TestAppsShow_JSON(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
