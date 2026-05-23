@@ -644,8 +644,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		traceSampled bool
 	)
 	if traceEnabled {
+		// tracestate is a W3C list header that MAY be split across multiple
+		// header field-values; combine them so vendor entries past the first
+		// split are not dropped (Header.Get would read only the first).
+		incomingState := strings.Join(r.Header.Values("tracestate"), ",")
 		traceCtx, traceParent, traceSampled = tracing.StartProxySpan(
-			r.Header.Get("traceparent"), r.Header.Get("tracestate"), p.traceCfg)
+			r.Header.Get("traceparent"), incomingState, p.traceCfg)
 		r.Header.Set("traceparent", traceCtx.TraceparentHeader())
 		// Propagate vendor tracestate only when continuing a trace; on a fresh
 		// trace TraceState is empty and any stray inbound header is dropped so
