@@ -152,6 +152,7 @@ const MsgPoolSaturated = "Service temporarily at capacity, please retry."
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
 	index       int
+	targetURL   string // the URL passed to RegisterReplica; used for introspection
 	rp          *httputil.ReverseProxy
 	activeConns atomic.Int64
 }
@@ -474,7 +475,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 		}
 		req.Host = target.Host
 	}
-	pool.replicas[index] = &replicaBackend{index: index, rp: rp}
+	pool.replicas[index] = &replicaBackend{index: index, targetURL: targetURL, rp: rp}
 	// A freshly registered backend has not yet proven it accepts WS upgrades.
 	// Clearing here also covers the hot-redeploy path where a caller swaps
 	// replicas without an intermediate Deregister.
@@ -493,6 +494,22 @@ func (p *Proxy) DeregisterReplica(slug string, index int) {
 	}
 	pool.replicas[index] = nil
 	p.clearWSReady(slug)
+}
+
+// ReplicaTargetURL returns the target URL registered for slug at index, or an
+// empty string if the slot is unset or the pool does not exist. Useful for
+// observability and test assertions.
+func (p *Proxy) ReplicaTargetURL(slug string, index int) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return ""
+	}
+	if pool.replicas[index] == nil {
+		return ""
+	}
+	return pool.replicas[index].targetURL
 }
 
 // Deregister removes the entire pool for slug from the routing table.

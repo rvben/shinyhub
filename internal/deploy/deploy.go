@@ -443,11 +443,15 @@ func buildCommand(bundleDir string, port, workers int, bindHost string) []string
 // status or the deadline is exceeded. Each HTTP attempt is capped at 5 seconds.
 func waitHealthy(endpointURL string, timeout time.Duration) error {
 	client := &http.Client{Timeout: 5 * time.Second}
-	healthURL := strings.TrimRight(endpointURL, "/") + "/"
+	healthURL := strings.TrimSuffix(endpointURL, "/") + "/"
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("build request for %s: %w", healthURL, err)
+		}
 		resp, err := client.Do(req)
 		cancel()
 		if err == nil {

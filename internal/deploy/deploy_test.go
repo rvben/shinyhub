@@ -879,10 +879,10 @@ func TestResolveResourceLimits(t *testing.T) {
 }
 
 // TestBootRegistersRuntimeEndpoint verifies that the runtime-returned endpoint
-// URL is passed to both the health-check and the proxy, and that Result carries
-// the full endpoint metadata (EndpointURL, Tier, Provider) from the runtime.
+// URL is passed to the health-check, registered with the proxy, and carried on
+// Result (EndpointURL, Tier, Provider, WorkerID).
 func TestBootRegistersRuntimeEndpoint(t *testing.T) {
-	var gotURL string
+	var gotHealthURL string
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	defer mgr.Stop("ep-app")
 	prx := proxy.New()
@@ -894,7 +894,7 @@ func TestBootRegistersRuntimeEndpoint(t *testing.T) {
 		Manager:   mgr,
 		Proxy:     prx,
 		HealthCheck: func(endpointURL string, _ time.Duration) error {
-			gotURL = endpointURL
+			gotHealthURL = endpointURL
 			return nil
 		},
 	}
@@ -905,10 +905,27 @@ func TestBootRegistersRuntimeEndpoint(t *testing.T) {
 	if len(res.Replicas) != 1 {
 		t.Fatalf("got %d replicas; want 1", len(res.Replicas))
 	}
-	if res.Replicas[0].EndpointURL == "" || gotURL != res.Replicas[0].EndpointURL {
-		t.Fatalf("health-checked %q but Result.EndpointURL=%q", gotURL, res.Replicas[0].EndpointURL)
+	r := res.Replicas[0]
+
+	// Health-check and Result must both carry the runtime endpoint URL.
+	if r.EndpointURL == "" || gotHealthURL != r.EndpointURL {
+		t.Fatalf("health-checked %q but Result.EndpointURL=%q", gotHealthURL, r.EndpointURL)
 	}
-	if res.Replicas[0].Provider != "native" || res.Replicas[0].Tier != "local" {
-		t.Fatalf("missing tier/provider on Result: %+v", res.Replicas[0])
+
+	// Proxy must have been registered with the same URL (not a re-derived one).
+	registeredURL := prx.ReplicaTargetURL("ep-app", r.Index)
+	if registeredURL != r.EndpointURL {
+		t.Fatalf("proxy registered %q but Result.EndpointURL=%q", registeredURL, r.EndpointURL)
+	}
+
+	// All four new Result fields must be populated.
+	if r.Provider != "native" {
+		t.Fatalf("want Provider=native, got %q", r.Provider)
+	}
+	if r.Tier != "local" {
+		t.Fatalf("want Tier=local, got %q", r.Tier)
+	}
+	if r.WorkerID == "" {
+		t.Fatal("WorkerID must be non-empty (native runtime stamps it with the PID)")
 	}
 }
