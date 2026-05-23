@@ -845,7 +845,7 @@ func TestRunPublishesBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !bs.called || bs.putVersion != "v9" || bs.putDir != bundle {
+	if !bs.called || bs.putSlug != "pub-app" || bs.putVersion != "v9" || bs.putDir != bundle {
 		t.Fatalf("BundleStore.Put not called as expected: %+v", bs)
 	}
 }

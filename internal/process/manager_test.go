@@ -843,6 +843,13 @@ func TestManagerProvisionsDataDirViaVolume(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(bundle, "data")); err != nil {
 		t.Fatalf("expected data symlink in bundle: %v", err)
 	}
+	target, err := os.Readlink(filepath.Join(bundle, "data"))
+	if err != nil {
+		t.Fatalf("readlink data symlink: %v", err)
+	}
+	if want := filepath.Join(root, "v"); target != want {
+		t.Errorf("symlink target = %q, want %q", target, want)
+	}
 }
 
 func TestManagerDispatchesByTier(t *testing.T) {
