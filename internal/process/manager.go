@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/storage"
 )
 
 // EnvResolver returns a slice of "KEY=VALUE" strings for the given app slug.
@@ -199,10 +201,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 
 	var appDataPath string
 	if m.appDataRoot != "" {
-		appDataPath = filepath.Join(m.appDataRoot, p.Slug)
-		if err := os.MkdirAll(appDataPath, 0o750); err != nil {
-			return nil, fmt.Errorf("ensure app data dir: %w", err)
+		ref, err := storage.LocalVolume{Root: m.appDataRoot}.Provision(p.Slug)
+		if err != nil {
+			return nil, fmt.Errorf("provision app data: %w", err)
 		}
+		appDataPath = ref.Path
 		p.AppDataPath = appDataPath
 
 		linkPath := filepath.Join(p.Dir, "data")

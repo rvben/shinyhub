@@ -825,6 +825,26 @@ func TestStart_RefusesIfBundleHasDataDir(t *testing.T) {
 	}
 }
 
+func TestManagerProvisionsDataDirViaVolume(t *testing.T) {
+	root := t.TempDir()
+	bundle := t.TempDir()
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+	if err := m.SetAppDataRoot(root); err != nil {
+		t.Fatalf("set root: %v", err)
+	}
+	if _, err := m.Start(process.StartParams{
+		Slug: "v", Index: 0, Dir: bundle, Command: []string{"x"}, Port: 1,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if fi, err := os.Stat(filepath.Join(root, "v")); err != nil || !fi.IsDir() {
+		t.Fatalf("expected data dir %s: err=%v", filepath.Join(root, "v"), err)
+	}
+	if _, err := os.Lstat(filepath.Join(bundle, "data")); err != nil {
+		t.Fatalf("expected data symlink in bundle: %v", err)
+	}
+}
+
 func TestManagerDispatchesByTier(t *testing.T) {
 	def := newFakeRuntime()
 	burst := newFakeRuntime()
