@@ -430,6 +430,11 @@ function renderTraces(panel, app, ctx) {
       errEl.hidden = false;
       return;
     }
+    // A successful poll refreshes the status line even when tracing is
+    // disabled or the buffer is empty - those are the common steady states, and
+    // the operator still wants to see polling is alive.
+    lastLoaded = new Date();
+    paintStatus();
     const spans = Array.isArray(body.spans) ? body.spans : [];
     if (!body.enabled) {
       tableEl.hidden = true;
@@ -452,12 +457,9 @@ function renderTraces(panel, app, ctx) {
     tableEl.hidden = false;
     tbodyEl.innerHTML = '';
     const linkTpl = typeof body.trace_link_template === 'string' ? body.trace_link_template : '';
-    const now = new Date();
     for (const s of spans) {
-      tbodyEl.appendChild(makeTraceRow(document, s, linkTpl, now));
+      tbodyEl.appendChild(makeTraceRow(document, s, linkTpl, lastLoaded));
     }
-    lastLoaded = now;
-    paintStatus();
   }
 
   refreshEl.addEventListener('click', load);
