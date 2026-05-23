@@ -85,6 +85,30 @@ func TestDiff_AllActions(t *testing.T) {
 	}
 }
 
+// FLT-5: adopting an app owned by a DIFFERENT fleet is an ownership transfer,
+// not a first-time adoption. The diff must surface the current foreign owner
+// (AdoptFrom) so plan/apply can warn; a genuinely unmanaged app has no prior
+// owner and leaves AdoptFrom empty.
+func TestDiff_AdoptFromForeignFleet(t *testing.T) {
+	m := mani("eu",
+		AppEntry{Slug: "adopt-null", Source: "./e", Visibility: "private"},
+		AppEntry{Slug: "adopt-other", Source: "./f", Visibility: "private"},
+	)
+	local := map[string]string{"adopt-null": "sha256:z", "adopt-other": "sha256:z"}
+	observed := []ObservedApp{
+		{Slug: "adopt-null", ManagedBy: nil, ContentDigest: "sha256:z"},
+		{Slug: "adopt-other", ManagedBy: sp("fleet:us"), ContentDigest: "sha256:z"},
+	}
+	got := byslug(Diff(m, local, observed))
+
+	if got["adopt-null"].AdoptFrom != "" {
+		t.Errorf("unmanaged adopt-null.AdoptFrom = %q, want empty", got["adopt-null"].AdoptFrom)
+	}
+	if got["adopt-other"].AdoptFrom != "fleet:us" {
+		t.Errorf("foreign-owned adopt-other.AdoptFrom = %q, want %q", got["adopt-other"].AdoptFrom, "fleet:us")
+	}
+}
+
 func TestDiff_OrderIndependence(t *testing.T) {
 	a := AppEntry{Slug: "a", Source: "./a", Visibility: "private"}
 	b := AppEntry{Slug: "b", Source: "./b", Visibility: "private"}

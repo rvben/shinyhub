@@ -416,7 +416,7 @@ func TestUpsertAppEnv_WritesAuditEvent(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	events, err := f.store.ListAuditEvents(10, 0)
+	events, err := f.store.ListAuditEvents("", 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditEvents: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestDeleteAppEnv_AuditLogged(t *testing.T) {
 		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	events, err := f.store.ListAuditEvents(10, 0)
+	events, err := f.store.ListAuditEvents("", 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditEvents: %v", err)
 	}

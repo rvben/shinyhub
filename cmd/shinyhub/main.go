@@ -107,9 +107,16 @@ var restoreCmd = &cobra.Command{
 	},
 }
 
-// serverConfigPath resolves the server config file the same way `serve` does:
-// the SHINYHUB_CONFIG env var, falling back to ./shinyhub.yaml.
+// configPath holds the value of the --config flag (empty when unset). Bound on
+// serve, backup, and restore so a config file can be selected without an env var.
+var configPath string
+
+// serverConfigPath resolves the server config file. Precedence: the --config
+// flag, then the SHINYHUB_CONFIG env var, then ./shinyhub.yaml.
 func serverConfigPath() string {
+	if configPath != "" {
+		return configPath
+	}
 	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
 		return v
 	}
@@ -119,6 +126,10 @@ func serverConfigPath() string {
 func init() {
 	cli.SetVersion(version)
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
+	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
+	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd} {
+		c.Flags().StringVar(&configPath, "config", "", configUsage)
+	}
 	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd)
 	cli.AddCommandsTo(rootCmd)
 }

@@ -36,7 +36,7 @@ func newFleetPlanCmd() *cobra.Command {
 			return runFleetPlan(cmd, f)
 		},
 	}
-	cmd.Flags().StringVarP(&f.file, "file", "f", "shinyhub-fleet.toml", "Path to the fleet manifest")
+	cmd.Flags().StringVarP(&f.file, "file", "f", defaultFleetManifest, "Path to the fleet manifest")
 	cmd.Flags().BoolVar(&f.detailedExitcode, "detailed-exitcode", false, "Exit 2 when changes are pending, 0 when none")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit machine-readable JSON")
 	cmd.Flags().BoolVar(&f.noColor, "no-color", false, "Disable ANSI color (glyphs/words remain)")
@@ -50,7 +50,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 		return err
 	}
 	defer pf.cleanup()
-	return renderFleetPlan(cmd, f, pf.manifest, pf.host, pf.caps, pf.diff)
+	return renderFleetPlan(cmd, f, "shinyhub fleet plan", pf.manifest, pf.host, pf.caps, pf.diff)
 }
 
 // fetchApps issues the single read-only GET /api/apps the plan needs.
@@ -67,7 +67,7 @@ func fetchApps(cfg *cliConfig) ([]db.App, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, string(body))
+		return nil, httpError(cfg.Token, "list apps", resp, body)
 	}
 	var apps []db.App
 	if err := json.Unmarshal(body, &apps); err != nil {

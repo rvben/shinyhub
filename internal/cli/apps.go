@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -78,7 +79,7 @@ func runAppsList(cmd *cobra.Command, args []string, f *appsListFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "list apps", resp, out)
 	}
 
 	if f.jsonOutput {
@@ -141,7 +142,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "show app", resp, out)
 	}
 
 	if f.jsonOutput {
@@ -166,7 +167,8 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			CreatedAt               string `json:"created_at"`
 			UpdatedAt               string `json:"updated_at"`
 		} `json:"app"`
-		ReplicasStatus []struct {
+		EffectiveMaxSessionsPerReplica int `json:"effective_max_sessions_per_replica"`
+		ReplicasStatus                 []struct {
 			Index  int    `json:"index"`
 			Status string `json:"status"`
 			PID    *int   `json:"pid"`
@@ -188,7 +190,20 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	}
 	fmt.Fprintf(w, "Deploys:     %d\n", a.DeployCount)
 	fmt.Fprintf(w, "Replicas:    %d\n", a.Replicas)
-	fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
+	// effective cap resolves the per-app value against the runtime default (0 =
+	// inherit). Annotate a 0 with the resolved default and print the admission
+	// ceiling (replicas × effective cap) so the bare "0" is not cryptic.
+	eff := resp2.EffectiveMaxSessionsPerReplica
+	if a.MaxSessionsPerReplica == 0 {
+		fmt.Fprintf(w, "Max sess/r:  0 (runtime default: %d)\n", eff)
+	} else {
+		fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
+	}
+	if eff == 0 {
+		fmt.Fprintf(w, "Admission ceiling: unlimited (no session cap)\n")
+	} else {
+		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
+	}
 	if a.HibernateTimeoutMinutes != nil {
 		fmt.Fprintf(w, "Hibernate:   %d min\n", *a.HibernateTimeoutMinutes)
 	} else {
@@ -295,7 +310,7 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "stream logs", resp, out)
 	}
 
 	w := cmd.OutOrStdout()
@@ -362,7 +377,7 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("rollback failed: %s", strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "rollback", resp, out)
 	}
 	if cmd.Flags().Changed("to") {
 		fmt.Printf("%s: rolled back to deployment %d\n", slug, f.deploymentID)
@@ -417,7 +432,7 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("start failed: %s", strings.TrimSpace(string(out)))
+			return httpError(cfg.Token, "start app", resp, out)
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", slug, pastTense)
 		return nil
@@ -443,7 +458,7 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("%s failed: %s", action, strings.TrimSpace(string(out)))
+			return httpError(cfg.Token, action, resp, out)
 		}
 		fmt.Printf("%s: %s\n", slug, action+"ed")
 		return nil
@@ -456,6 +471,9 @@ type appsSetFlags struct {
 	hibernateTimeout      int
 	replicas              int
 	maxSessionsPerReplica int
+	yes                   bool
+	wait                  bool
+	waitTimeout           time.Duration
 }
 
 func newAppsSetCmd() *cobra.Command {
@@ -472,8 +490,14 @@ func newAppsSetCmd() *cobra.Command {
 		"Idle timeout minutes before hibernation (-1 = reset to global default, 0 = disable, N = N minutes)")
 	cmd.Flags().IntVar(&f.replicas, "replicas", 0,
 		"Number of replica processes serving this app (>= 1)")
-	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", -1,
+	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", 0,
 		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
+	cmd.Flags().BoolVar(&f.yes, "yes", false,
+		"Skip the confirmation prompt for a replica change (which restarts the app)")
+	cmd.Flags().BoolVar(&f.wait, "wait", false,
+		"After applying, wait until the app is healthy again (useful after a replica change)")
+	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", 300*time.Second,
+		"How long to wait for the app to become healthy when --wait is set")
 	return cmd
 }
 
@@ -481,12 +505,6 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	hibernateChanged := cmd.Flags().Changed("hibernate-timeout")
 	replicasChanged := cmd.Flags().Changed("replicas")
 	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
-
-	// -1 is the flag's default sentinel; if the user explicitly passes -1 it
-	// means "I didn't really mean to set this", so treat it as not provided.
-	if capChanged && f.maxSessionsPerReplica == -1 {
-		capChanged = false
-	}
 
 	if !hibernateChanged && !replicasChanged && !capChanged {
 		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --max-sessions-per-replica)")
@@ -506,6 +524,26 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		return err
 	}
 	slug := args[0]
+
+	// A replica change restarts the app and drops active sessions, so an
+	// interactive caller must confirm first (mirrors the dashboard's guard).
+	// The prompt is tty-gated: a non-interactive caller (CI, cron, piped
+	// script) proceeds without prompting so automation that scales via the CLI
+	// keeps working. --yes skips the prompt explicitly.
+	if replicasChanged && !f.yes && isStdinTTY() {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Changing replicas restarts %q and drops active sessions. Continue? [y/N]: ", slug)
+		var confirm string
+		if _, err := fmt.Fscan(cmd.InOrStdin(), &confirm); err != nil {
+			return fmt.Errorf("read confirmation: %w", err)
+		}
+		switch strings.ToLower(confirm) {
+		case "y", "yes":
+			// proceed
+		default:
+			return fmt.Errorf("aborted - replicas unchanged")
+		}
+	}
 
 	payload := map[string]any{}
 
@@ -543,7 +581,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("set failed (%s): %s", resp.Status, out)
+		return httpError(cfg.Token, "update app", resp, out)
 	}
 
 	if hibernateChanged {
@@ -566,6 +604,10 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		} else {
 			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, f.maxSessionsPerReplica)
 		}
+	}
+
+	if f.wait {
+		return waitForHealthyWithOutput(cfg, slug, f.waitTimeout, cmd.ErrOrStderr())
 	}
 	return nil
 }
@@ -613,7 +655,7 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("set access failed: %s", out)
+		return httpError(cfg.Token, "set access", resp, out)
 	}
 	fmt.Printf("%s: access set to %s\n", slug, accessLevel)
 	return nil
@@ -677,7 +719,8 @@ func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %d", resp.StatusCode)
+		out, _ := io.ReadAll(resp.Body)
+		return httpError(cfg.Token, "create token", resp, out)
 	}
 	var result tokenCreateResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -758,7 +801,7 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("delete failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "delete app", resp, out)
 	}
 	fmt.Printf("%s: deleted\n", slug)
 	return nil
@@ -793,7 +836,7 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("stop failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "stop app", resp, out)
 	}
 	fmt.Printf("%s: stopped\n", slug)
 	return nil
@@ -837,7 +880,7 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *appsDeploymentsFla
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "list deployments", resp, out)
 	}
 
 	if f.jsonOutput {
@@ -894,7 +937,7 @@ func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+		return nil, httpError(cfg.Token, "list tokens", resp, out)
 	}
 	var tokens []tokenInfo
 	if err := json.Unmarshal(out, &tokens); err != nil {
@@ -939,7 +982,7 @@ func runTokensList(cmd *cobra.Command, args []string, f *tokensListFlags) error 
 		defer resp.Body.Close()
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, strings.TrimSpace(string(out)))
+			return httpError(cfg.Token, "list tokens", resp, out)
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
@@ -1038,7 +1081,7 @@ func runTokensRevoke(cmd *cobra.Command, args []string, f *tokensRevokeFlags) er
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("revoke failed (%s): %s", resp.Status, strings.TrimSpace(string(out)))
+		return httpError(cfg.Token, "revoke token", resp, out)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "token %s: revoked\n", tokenID)
 	return nil

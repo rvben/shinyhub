@@ -140,6 +140,12 @@ type Result struct {
 type PoolResult struct {
 	Replicas []Result
 	Failed   []int
+	// HooksSkipped counts post-deploy hooks declared in the manifest that were
+	// not run because the runtime prepares dependencies inside a container
+	// (the host has no view of the app's environment). 0 when hooks ran or none
+	// were declared. The API relays this so the developer learns their hooks
+	// did not execute instead of finding out only from the server log.
+	HooksSkipped int
 }
 
 // resolveBootParams resolves Command defaults, HealthCheck defaults, and
@@ -204,7 +210,8 @@ func Run(p Params) (*PoolResult, error) {
 		return nil, err
 	}
 
-	if err := runManifestPostDeployHooks(p); err != nil {
+	hooksSkipped, err := runManifestPostDeployHooks(p)
+	if err != nil {
 		return nil, err
 	}
 
@@ -247,7 +254,7 @@ func Run(p Params) (*PoolResult, error) {
 	for _, e := range bootErrs {
 		slog.Warn("replica boot failed", "slug", p.Slug, "err", e)
 	}
-	return &PoolResult{Replicas: ok, Failed: failed}, nil
+	return &PoolResult{Replicas: ok, Failed: failed, HooksSkipped: hooksSkipped}, nil
 }
 
 // runManifestPostDeployHooks loads shinyhub.toml from the bundle and runs any
@@ -262,25 +269,28 @@ func Run(p Params) (*PoolResult, error) {
 // (./deploy-hooks.log) so operators can inspect what ran without needing
 // the parent process's stdout. A best-effort tail is also slog-emitted on
 // failure to make the cause obvious in the server log.
-func runManifestPostDeployHooks(p Params) error {
+// runManifestPostDeployHooks returns the number of declared hooks it skipped
+// (non-zero only under a container runtime) so the caller can surface it to the
+// developer; a returned error means an executed hook failed.
+func runManifestPostDeployHooks(p Params) (int, error) {
 	manifest, err := LoadManifest(p.BundleDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	hooks := manifest.PostDeploy()
 	if len(hooks) == 0 {
-		return nil
+		return 0, nil
 	}
 	if p.Manager != nil && !p.Manager.HostPreparesDeps() {
 		slog.Warn("skipping post-deploy hooks under non-host runtime; bake them into the image entrypoint instead",
 			"slug", p.Slug, "hooks", len(hooks))
-		return nil
+		return len(hooks), nil
 	}
 
 	logPath := filepath.Join(p.BundleDir, "deploy-hooks.log")
 	logFile, ferr := os.Create(logPath)
 	if ferr != nil {
-		return fmt.Errorf("create %s: %w", logPath, ferr)
+		return 0, fmt.Errorf("create %s: %w", logPath, ferr)
 	}
 	defer logFile.Close()
 
@@ -288,9 +298,9 @@ func runManifestPostDeployHooks(p Params) error {
 	defer cancel()
 	if err := RunPostDeployHooks(ctx, p.BundleDir, hooks, p.Env, logFile); err != nil {
 		slog.Warn("post-deploy hook failed", "slug", p.Slug, "log", logPath, "err", err)
-		return err
+		return 0, err
 	}
-	return nil
+	return 0, nil
 }
 
 // bootReplica starts a single replica: allocates a port, starts the process,

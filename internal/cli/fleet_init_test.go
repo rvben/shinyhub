@@ -78,6 +78,78 @@ func TestEmitFleetManifest_NoSourceRootIsHonestlyIncomplete(t *testing.T) {
 	}
 }
 
+// FLT-8: init must annotate apps currently owned by ANOTHER fleet so the
+// operator knows a later adopt transfers them. Apps owned by this fleet, or
+// unmanaged, get no such comment.
+func TestEmitFleetManifest_AnnotatesForeignManagedApps(t *testing.T) {
+	apps := []db.App{
+		{Slug: "alpha", Access: "private", ManagedBy: strp("fleet:other")},
+		{Slug: "beta", Access: "private", ManagedBy: strp("fleet:prod-eu")},
+		{Slug: "gamma", Access: "private"},
+	}
+	doc := emitFleetManifest("prod-eu", "./apps", apps)
+	if !strings.Contains(doc, "fleet:other") {
+		t.Fatalf("foreign-managed app must be annotated with its current owner:\n%s", doc)
+	}
+	if strings.Contains(doc, "fleet:prod-eu") {
+		t.Fatalf("an app owned by THIS fleet must not be annotated as foreign:\n%s", doc)
+	}
+	// The annotation must be a TOML comment so the manifest still parses clean.
+	if _, probs := fleet.ParseManifest([]byte(doc), "shinyhub-fleet.toml"); len(probs) != 0 {
+		t.Fatalf("annotated manifest must parse clean, got %v\n%s", probs, doc)
+	}
+}
+
+// FLT-8: managed_by is server-controlled. A value containing a newline must
+// not break out of its TOML comment and inject active manifest text.
+func TestEmitFleetManifest_ForeignOwnerCommentIsInjectionSafe(t *testing.T) {
+	apps := []db.App{
+		{Slug: "alpha", Access: "private", ManagedBy: strp("fleet:evil\nsource     = \"./pwned\"")},
+	}
+	doc := emitFleetManifest("prod-eu", "./apps", apps)
+	// Injected source line must never appear as an active (uncommented) line.
+	for _, line := range strings.Split(doc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "source") && strings.Contains(trimmed, "pwned") {
+			t.Fatalf("managed_by newline injected an active manifest line:\n%s", doc)
+		}
+	}
+	if _, probs := fleet.ParseManifest([]byte(doc), "shinyhub-fleet.toml"); len(probs) != 0 {
+		t.Fatalf("manifest with hostile managed_by must still parse clean, got %v\n%s", probs, doc)
+	}
+}
+
+// FLT-8: TOML rejects DEL (0x7f) as a control character even inside a comment,
+// so the sanitizer must strip it too, not just the sub-0x20 range.
+func TestEmitFleetManifest_ForeignOwnerCommentStripsDEL(t *testing.T) {
+	apps := []db.App{
+		{Slug: "alpha", Access: "private", ManagedBy: strp("fleet:weird\x7fend")},
+	}
+	doc := emitFleetManifest("prod-eu", "./apps", apps)
+	if strings.ContainsRune(doc, '\x7f') {
+		t.Fatalf("DEL must be stripped from the comment:\n%q", doc)
+	}
+	if _, probs := fleet.ParseManifest([]byte(doc), "shinyhub-fleet.toml"); len(probs) != 0 {
+		t.Fatalf("manifest with DEL in managed_by must still parse clean, got %v\n%s", probs, doc)
+	}
+}
+
+// FLT-6: with zero deployed apps the commented-source scaffold guidance ("set
+// each app's source, remove the leading '#'") is nonsense - there are no apps.
+// The emitted header must branch on the empty case.
+func TestEmitFleetManifest_EmptyAppListGuidance(t *testing.T) {
+	doc := emitFleetManifest("prod-eu", "", nil)
+	if strings.Contains(doc, "remove the leading '#'") {
+		t.Fatalf("empty manifest must not tell the operator to uncomment per-app sources:\n%s", doc)
+	}
+	if !strings.Contains(doc, "No apps") {
+		t.Fatalf("empty manifest should state that no apps are deployed:\n%s", doc)
+	}
+	if !strings.Contains(doc, `fleet_id = "prod-eu"`) {
+		t.Fatalf("fleet_id must still be written:\n%s", doc)
+	}
+}
+
 func TestTomlString_EscapesQuotesAndBackslashes(t *testing.T) {
 	if got := tomlString(`a"b\c`); got != `"a\"b\\c"` {
 		t.Fatalf("tomlString = %s", got)
@@ -107,6 +179,27 @@ func TestFleetInitCmd_WritesManifestWithSourceRoot(t *testing.T) {
 	}
 	if !strings.Contains(out, "fleet_id=prod-eu") || !strings.Contains(out, "2 app(s)") {
 		t.Fatalf("summary missing:\n%s", out)
+	}
+}
+
+// FLT-6: the command's post-write guidance must also branch on the empty case
+// instead of telling the operator to set per-app sources that do not exist.
+func TestFleetInitCmd_EmptyAppListGuidance(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[]`)
+	dir := t.TempDir()
+	out, err := execCLI(t, "fleet", "init", "--fleet-id", "prod-eu", "-f", filepath.Join(dir, "shinyhub-fleet.toml"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "source path for every") || strings.Contains(out, "remove the leading '#'") {
+		t.Fatalf("0-app init must not reference per-app sources:\n%s", out)
+	}
+	if !strings.Contains(out, "0 app(s)") {
+		t.Fatalf("summary should report 0 app(s):\n%s", out)
+	}
+	if !strings.Contains(out, "[[app]]") {
+		t.Fatalf("0-app guidance should point at adding [[app]] blocks:\n%s", out)
 	}
 }
 

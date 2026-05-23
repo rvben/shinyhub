@@ -3,6 +3,11 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -52,6 +57,44 @@ func TestSchedule_Add_ShellwordsCmd(t *testing.T) {
 		if cmdSlice[i] != w {
 			t.Errorf("command[%d]: expected %q, got %q", i, w, cmdSlice[i])
 		}
+	}
+}
+
+// TestSchedule_Add_PrintsDSTAdvisory verifies that when the server returns a
+// dst_advisory on the created schedule, the CLI surfaces it to stderr so the
+// developer learns their fixed-hour job will fire twice on the fall-back day.
+func TestSchedule_Add_PrintsDSTAdvisory(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"id":7,"name":"nightly","cron_expr":"30 2 * * *","command":["echo","hi"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip","effective_timezone":"Europe/Amsterdam","dst_advisory":"Schedule fires twice on 2025-10-26: Europe/Amsterdam observes daylight saving time and this wall-clock time recurs when clocks fall back. Use UTC or a time outside the transition hour to fire once."}`)
+
+	cmd := newScheduleCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"add", "demo", "--name", "nightly", "--cron", "30 2 * * *", "--cmd", "echo hi", "--timezone", "Europe/Amsterdam"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "fires twice on 2025-10-26") {
+		t.Errorf("expected DST advisory on stderr, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+// TestSchedule_Add_NoDSTAdvisoryWhenAbsent verifies the CLI prints no advisory
+// when the server omits dst_advisory.
+func TestSchedule_Add_NoDSTAdvisoryWhenAbsent(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"id":8,"name":"safe","cron_expr":"30 14 * * *","command":["echo","hi"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip","effective_timezone":"Europe/Amsterdam"}`)
+
+	cmd := newScheduleCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"add", "demo", "--name", "safe", "--cron", "30 14 * * *", "--cmd", "echo hi", "--timezone", "Europe/Amsterdam"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stderr.String(), "fires twice") {
+		t.Errorf("did not expect a DST advisory, got stderr=%q", stderr.String())
 	}
 }
 
@@ -229,6 +272,343 @@ func TestSchedule_Logs_HasFollowFlag(t *testing.T) {
 	}
 	if logs.Flags().Lookup("run") == nil {
 		t.Error("expected logs subcommand to expose --run flag")
+	}
+}
+
+// scheduleTestServer wires a minimal multi-route server for the schedule
+// follow/exit-code flows and writes a CLI config pointing at it. routes maps
+// "METHOD /path" (path only, no query) to a handler.
+func scheduleTestServer(t *testing.T, routes map[string]http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		if h, ok := routes[key]; ok {
+			h(w, r)
+			return
+		}
+		t.Errorf("unexpected request: %s", key)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgDir := filepath.Join(home, ".config", "shinyhub")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+// EXIT-3: `schedule logs --follow` consumes an SSE stream; the CLI must strip
+// the "data: " framing and drop heartbeat/blank lines so the user sees the raw
+// log content, not event-stream syntax.
+func TestScheduleLogs_FollowStripsSSEFraming(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/3/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: hello\n\n: heartbeat\n\ndata: world\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/3": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	out, err := execCLI(t, "schedule", "logs", "demo", "job", "--follow", "--run", "3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "data:") {
+		t.Errorf("output must not contain SSE framing:\n%s", out)
+	}
+	if strings.Contains(out, "heartbeat") {
+		t.Errorf("output must not contain heartbeat comments:\n%s", out)
+	}
+	if !strings.Contains(out, "hello") || !strings.Contains(out, "world") {
+		t.Errorf("output missing log content:\n%s", out)
+	}
+}
+
+// EXIT-2: `schedule run --follow` must exit non-zero when the run finishes in a
+// failure state. The exit code mirrors the scheduled command's own exit code.
+func TestScheduleRun_FollowExitsNonZeroOnFailure(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":9}]`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/9/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: boom\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/9": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"failed","exit_code":2}`)
+		},
+	})
+
+	_, err := execCLI(t, "schedule", "run", "demo", "job", "--follow")
+	if err == nil {
+		t.Fatal("expected non-nil error for a failed run")
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("exit code = %d, want 2 (the run's own exit code)", exitCode(err))
+	}
+}
+
+// SCH-2: `schedule run --follow` must follow the exact run it just triggered,
+// using the run_id returned by POST /run rather than re-querying the latest
+// run (which races a concurrent cron tick). The server here exposes no
+// runs?limit=1 route, so any fallback to that endpoint fails the test.
+func TestScheduleRun_FollowUsesReturnedRunID(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"started","run_id":42}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/42/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: ok\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/42": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	if _, err := execCLI(t, "schedule", "run", "demo", "job", "--follow"); err != nil {
+		t.Fatalf("expected clean exit using the returned run_id, got: %v", err)
+	}
+}
+
+// A run that finishes successfully must exit 0.
+func TestScheduleRun_FollowExitsZeroOnSuccess(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":9}]`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/9/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: ok\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/9": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	if _, err := execCLI(t, "schedule", "run", "demo", "job", "--follow"); err != nil {
+		t.Fatalf("expected clean exit for a succeeded run, got: %v", err)
+	}
+}
+
+// SCH-5: triggering a DISABLED schedule still runs it (a deliberate manual
+// override), but the CLI must say so on stderr - otherwise an operator who
+// disabled the schedule sees a plain success line and assumes it was enabled.
+func TestScheduleRun_DisabledSchedulePrintsNote(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":false}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+	})
+
+	stdout, stderr, err := execCLISplit(t, "schedule", "run", "demo", "job")
+	if err != nil {
+		t.Fatalf("manual trigger of a disabled schedule should still succeed, got: %v", err)
+	}
+	if !strings.Contains(stderr, "disabled") {
+		t.Errorf("expected a disabled-schedule note on stderr, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "started") {
+		t.Errorf("expected the normal started line on stdout, got %q", stdout)
+	}
+}
+
+// An enabled schedule must NOT print the disabled note.
+func TestScheduleRun_EnabledScheduleNoNote(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":true}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+	})
+
+	_, stderr, err := execCLISplit(t, "schedule", "run", "demo", "job")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stderr, "disabled") {
+		t.Errorf("enabled schedule must not print a disabled note, got stderr=%q", stderr)
+	}
+}
+
+// SCH-1: `schedule update` changes a schedule in place (preserving run history)
+// by PATCHing only the fields the operator actually supplied. A lone --cron must
+// not clobber the command, timeout, or any other stored field.
+func TestSchedule_Update_SendsOnlyChangedFields(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","cron_expr":"0 * * * *","command":["python","x.py"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--cron", "30 2 * * *"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 2 {
+		t.Fatalf("expected 2 requests (list + patch), got %d", len(*reqs))
+	}
+	patch := (*reqs)[1]
+	if patch.Method != "PATCH" {
+		t.Errorf("expected PATCH, got %s", patch.Method)
+	}
+	if patch.Path != "/api/apps/demo/schedules/7" {
+		t.Errorf("unexpected patch path: %s", patch.Path)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(patch.Body, &body); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	if body["cron_expr"] != "30 2 * * *" {
+		t.Errorf("expected cron_expr in body, got %v", body["cron_expr"])
+	}
+	for _, k := range []string{"name", "command", "timeout_seconds", "overlap_policy", "missed_policy", "enabled", "timezone"} {
+		if _, ok := body[k]; ok {
+			t.Errorf("unsupplied field %q must be absent from PATCH body, got %v", k, body[k])
+		}
+	}
+}
+
+// SCH-1 timezone tri-state: --clear-timezone must send an explicit JSON null so
+// the server clears the per-schedule zone back to inherit-server-default.
+func TestSchedule_Update_ClearTimezoneSendsNull(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","cron_expr":"0 * * * *","command":["python","x.py"],"enabled":true,"timezone":"Europe/Amsterdam"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--clear-timezone"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	patch := (*reqs)[1]
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(patch.Body, &raw); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	tz, ok := raw["timezone"]
+	if !ok {
+		t.Fatal("expected timezone key present in PATCH body for --clear-timezone")
+	}
+	if string(tz) != "null" {
+		t.Errorf("expected timezone null, got %s", tz)
+	}
+}
+
+// SCH-1 timezone tri-state: --timezone <zone> sets the per-schedule zone.
+func TestSchedule_Update_SetTimezone(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","cron_expr":"0 * * * *","command":["python","x.py"],"enabled":true}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--timezone", "Europe/Amsterdam"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	if body["timezone"] != "Europe/Amsterdam" {
+		t.Errorf("expected timezone Europe/Amsterdam, got %v", body["timezone"])
+	}
+}
+
+// SCH-1: --timezone and --clear-timezone are mutually exclusive.
+func TestSchedule_Update_TimezoneAndClearConflict(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--timezone", "UTC", "--clear-timezone"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error for --timezone with --clear-timezone")
+	}
+	for _, r := range *reqs {
+		if r.Method == "PATCH" {
+			t.Errorf("no PATCH should be issued on conflicting timezone flags")
+		}
+	}
+}
+
+// SCH-1: update with no field flags is a no-op mistake; error without touching
+// the server (beyond resolving the name) rather than sending an empty PATCH.
+func TestSchedule_Update_NoFieldsErrors(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error when no update flags are supplied")
+	}
+	for _, r := range *reqs {
+		if r.Method == "PATCH" {
+			t.Errorf("no PATCH should be issued when nothing changed")
+		}
+	}
+}
+
+// SCH-1: --cmd parses a shell string into the command array.
+func TestSchedule_Update_CmdShellwords(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","command":["old"]}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--cmd", "python new.py --flag x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	cmdSlice, ok := body["command"].([]any)
+	if !ok {
+		t.Fatalf("expected command array in body, got %T", body["command"])
+	}
+	want := []string{"python", "new.py", "--flag", "x"}
+	if len(cmdSlice) != len(want) {
+		t.Fatalf("command len = %d, want %d: %v", len(cmdSlice), len(want), cmdSlice)
+	}
+	for i, w := range want {
+		if cmdSlice[i] != w {
+			t.Errorf("command[%d] = %q, want %q", i, cmdSlice[i], w)
+		}
 	}
 }
 

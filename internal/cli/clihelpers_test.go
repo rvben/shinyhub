@@ -33,6 +33,34 @@ func execCLI(t *testing.T, args ...string) (string, error) {
 	return execCLIStdin(t, nil, args...)
 }
 
+// execCLISplit runs the real CLI command tree with stdout and stderr captured
+// separately, so a test can assert that a --json command emits ONLY the
+// machine-readable envelope on stdout and routes human progress to stderr.
+func execCLISplit(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	root := &cobra.Command{Use: "shinyhub", SilenceErrors: true}
+	AddCommandsTo(root)
+	var outBuf, errBuf bytes.Buffer
+	root.SetOut(&outBuf)
+	root.SetErr(&errBuf)
+	for _, sub := range allSubcommands(root) {
+		sub.SetOut(&outBuf)
+		sub.SetErr(&errBuf)
+	}
+	root.SetArgs(args)
+	err = root.Execute()
+	return outBuf.String(), errBuf.String(), err
+}
+
+func allSubcommands(cmd *cobra.Command) []*cobra.Command {
+	var all []*cobra.Command
+	for _, sub := range cmd.Commands() {
+		all = append(all, sub)
+		all = append(all, allSubcommands(sub)...)
+	}
+	return all
+}
+
 // execCLIStdin is execCLI with an explicit stdin reader, for commands that
 // read from cmd.InOrStdin() (e.g. the `apps delete` confirmation prompt).
 // cobra propagates the root's In to every subcommand via InOrStdin, so setting

@@ -34,7 +34,7 @@ func TestApplyManifestAppSettings_UpdatesAllThreeFieldsAtomically(t *testing.T) 
 		t.Errorf("max_sessions = %d, want 20", got.MaxSessionsPerReplica)
 	}
 
-	events, _ := store.ListAuditEvents(10, 0)
+	events, _ := store.ListAuditEvents("", 10, 0)
 	if !auditEventsContain(events, "update_app", "alpha") {
 		t.Errorf("expected update_app audit event for alpha")
 	}
@@ -134,7 +134,7 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 	first, _ := store.ListSchedulesByApp(app.ID)
 
 	// First apply must record a schedule_create audit event.
-	events, _ := store.ListAuditEvents(10, 0)
+	events, _ := store.ListAuditEvents("", 10, 0)
 	scheduleID := fmt.Sprintf("%d", first[0].ID)
 	if !auditEventsContain(events, "schedule_create", scheduleID) {
 		t.Errorf("expected schedule_create audit event for schedule %s", scheduleID)
@@ -160,7 +160,7 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 	}
 
 	// Second apply (cron changed) must record a schedule_update audit event.
-	events, _ = store.ListAuditEvents(10, 0)
+	events, _ = store.ListAuditEvents("", 10, 0)
 	if !auditEventsContain(events, "schedule_update", scheduleID) {
 		t.Errorf("expected schedule_update audit event for schedule %s", scheduleID)
 	}
@@ -188,7 +188,7 @@ func TestApplyManifestSchedules_AuditDetailIncludesEffectiveTimezone(t *testing.
 		t.Fatal(err)
 	}
 
-	events, _ := store.ListAuditEvents(10, 0)
+	events, _ := store.ListAuditEvents("", 10, 0)
 	var found bool
 	for _, e := range events {
 		if e.Action == "schedule_create" {
@@ -228,7 +228,7 @@ func TestApplyManifestSchedules_AuditDetailEffectiveTimezoneInherited(t *testing
 		t.Fatal(err)
 	}
 
-	events, _ := store.ListAuditEvents(10, 0)
+	events, _ := store.ListAuditEvents("", 10, 0)
 	var found bool
 	for _, e := range events {
 		if e.Action == "schedule_create" {

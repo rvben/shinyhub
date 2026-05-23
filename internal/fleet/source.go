@@ -50,6 +50,18 @@ func ParseSource(raw, manifestDir string) (ParsedSource, *Problem) {
 	return ParsedSource{Raw: raw, Kind: SourceLocal, LocalPath: abs}, nil
 }
 
+// hasGitURLScheme reports whether body begins with a git-clonable URL scheme.
+// SCP-style "git@host:path" and bare "host/repo" have no scheme and are
+// rejected: they only fail later as an opaque clone "exit status 128".
+func hasGitURLScheme(body string) bool {
+	for _, scheme := range []string{"https://", "http://", "ssh://", "git://"} {
+		if strings.HasPrefix(body, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseGitSource decomposes git+<url>[@ref][#subdir]. The "git+" prefix is
 // stripped; the optional "#subdir" is split first (so a ref cannot contain
 // '#'), then the optional "@ref" (rightmost '@' after the scheme so URLs
@@ -65,6 +77,11 @@ func parseGitSource(raw string) (ParsedSource, *Problem) {
 	if i := strings.IndexByte(body, '#'); i >= 0 {
 		subdir = body[i+1:]
 		body = body[:i]
+	}
+	if !hasGitURLScheme(body) {
+		return ParsedSource{}, &Problem{Msg: fmt.Sprintf(
+			"invalid git source %q: missing URL scheme "+
+				"(use git+https://, git+ssh://, git+http://, or git+git://)", raw)}
 	}
 	var ref string
 	// Find a '@' that is part of "@ref", not the userinfo of an ssh URL.

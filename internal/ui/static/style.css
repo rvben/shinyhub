@@ -618,6 +618,20 @@ main {
 .fleet-digest-value { font-family: ui-monospace, monospace; }
 .fleet-digest-note  { margin: 0.15rem 0 0; font-size: 0.72rem; color: var(--text-muted); }
 
+/* Schedule DST fall-back double-fire advisory (inline in the cron cell) */
+.dst-advisory {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--yellow-bg);
+  color: var(--yellow);
+  cursor: help;
+}
+
 /* Audit action badges — grouped by semantic color:
    green = deploy/restart/rollback
    blue  = config changes (app, user, env, data, schedule)
@@ -2496,6 +2510,17 @@ main {
   color: var(--green, #4ade80);
   margin-left: 0.6rem;
   align-self: center;
+}
+
+/* Traces — an unsampled span was never exported to the backend, so its id is
+   shown muted with no deep link (a link would resolve to "trace not found"). */
+.trace-unsampled {
+  color: var(--text-muted, #6B7AA3);
+}
+.trace-unsampled-tag {
+  color: var(--text-muted, #6B7AA3);
+  font-size: 0.75rem;
+  font-style: italic;
 }
 
 /* General tab — scaling options */

@@ -121,6 +121,21 @@ func TestAppsSet_RejectsReplicasZero(t *testing.T) {
 	}
 }
 
+// Passing -1 explicitly must be rejected with the documented range error, not
+// silently swallowed as "not provided" (which previously produced a confusing
+// "at least one flag is required" no-op).
+func TestAppsSet_RejectsMaxSessionsNegativeOne(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "apps", "set", "demo", "--max-sessions-per-replica", "-1")
+	if err == nil || !strings.Contains(err.Error(), "between 0 and 1000") {
+		t.Errorf("expected 'between 0 and 1000' error for -1, got %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
+	}
+}
+
 func TestAppsSet_RejectsMaxSessionsOutOfRange(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 
@@ -145,29 +160,19 @@ func TestAppsSet_RequiresAtLeastOneFlag(t *testing.T) {
 	}
 }
 
-// TestAppsSet_MaxSessionsSentinelMinusOne verifies that explicitly passing -1
-// (the flag's own default) is treated as "not provided" and does not trigger
-// the range validator.
-func TestAppsSet_MaxSessionsSentinelMinusOne(t *testing.T) {
+// TestAppsSet_MaxSessionsNegativeOneWithOtherFlags asserts -1 is rejected even
+// when combined with a valid flag: the cap is determined by Flags().Changed,
+// so an explicit out-of-range value is a real error rather than a swallowed
+// sentinel.
+func TestAppsSet_MaxSessionsNegativeOneWithOtherFlags(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 
-	// -1 is the cobra default for max-sessions-per-replica; if it were treated
-	// as a real value it would fail the 0..1000 validator. Passing it together
-	// with --replicas should succeed and not include max_sessions_per_replica in
-	// the payload.
-	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "2", "--max-sessions-per-replica", "-1"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := execCLI(t, "apps", "set", "demo", "--replicas", "2", "--max-sessions-per-replica", "-1")
+	if err == nil || !strings.Contains(err.Error(), "between 0 and 1000") {
+		t.Errorf("expected 'between 0 and 1000' error for -1, got %v", err)
 	}
-
-	if len(*reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(*reqs))
-	}
-	var body map[string]any
-	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if _, present := body["max_sessions_per_replica"]; present {
-		t.Errorf("max_sessions_per_replica should be absent when -1 sentinel is passed, got %v", body["max_sessions_per_replica"])
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
 	}
 }
 
@@ -312,6 +317,24 @@ func TestAppsStop_ServerError(t *testing.T) {
 	_, err := execCLI(t, "apps", "stop", "missing")
 	if err == nil {
 		t.Fatal("expected error for 404, got nil")
+	}
+}
+
+// TestAppsStop_ServerErrorUnwrapped asserts the {"error":...} envelope is
+// unwrapped into a clean message rather than dumped as raw JSON.
+func TestAppsStop_ServerErrorUnwrapped(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(409, `{"error":"app is hibernating"}`)
+
+	_, err := execCLI(t, "apps", "stop", "demo")
+	if err == nil {
+		t.Fatal("expected error for 409, got nil")
+	}
+	if !strings.Contains(err.Error(), "app is hibernating") {
+		t.Errorf("error should surface the server message, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), `{"error"`) {
+		t.Errorf("error should not contain the raw JSON envelope, got %q", err.Error())
 	}
 }
 
@@ -512,6 +535,54 @@ func TestAppsShow(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected output to contain %q\nfull output:\n%s", want, out)
 		}
+	}
+}
+
+// DEP-5: when an app's per-replica cap is 0 (inherit), `apps show` must
+// annotate it with the resolved runtime default and print the admission ceiling
+// (replicas × effective cap) instead of a bare, cryptic "0".
+func TestAppsShow_InheritedCapShowsRuntimeDefaultAndCeiling(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "runtime default: 10") {
+		t.Errorf("expected the 0 cap to be annotated with the runtime default, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Admission ceiling: 2 × 10 = 20") {
+		t.Errorf("expected admission ceiling line (2 × 10 = 20), got:\n%s", out)
+	}
+}
+
+// DEP-5: an explicit per-replica cap prints the admission ceiling from that cap.
+func TestAppsShow_ExplicitCapShowsCeiling(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":3,"max_sessions_per_replica":5,"deploy_count":1},"effective_max_sessions_per_replica":5,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Admission ceiling: 3 × 5 = 15") {
+		t.Errorf("expected admission ceiling line (3 × 5 = 15), got:\n%s", out)
+	}
+}
+
+// DEP-5: when the effective cap resolves to 0, sessions are unlimited; say so
+// rather than printing "ceiling = 0".
+func TestAppsShow_UnlimitedCap(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":0,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "unlimited") {
+		t.Errorf("expected an 'unlimited' admission ceiling, got:\n%s", out)
 	}
 }
 
@@ -750,5 +821,126 @@ func TestTokensRevoke_BothIDAndName(t *testing.T) {
 	}
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests for mutual-exclusion error, got %d", len(*reqs))
+	}
+}
+
+// ── apps set: replica-change confirm guard + --wait (DEP-2) ──────────────────
+
+// Changing replicas restarts the app and drops active sessions, so an
+// interactive caller must confirm. Declining must abort before any PATCH.
+func TestAppsSet_ReplicaChange_TTYAbortsOnNo(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	_, err := execCLIStdin(t, strings.NewReader("n\n"), "apps", "set", "demo", "--replicas", "3")
+	if err == nil {
+		t.Fatal("expected abort error when user declines, got nil")
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("error should mention 'aborted', got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when replica change is declined, got %d", len(*reqs))
+	}
+}
+
+// Confirming the prompt with "y" must proceed with the PATCH.
+func TestAppsSet_ReplicaChange_TTYProceedsOnYes(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	if _, err := execCLIStdin(t, strings.NewReader("y\n"), "apps", "set", "demo", "--replicas", "3"); err != nil {
+		t.Fatalf("unexpected error after confirming: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH after confirmation, got %#v", *reqs)
+	}
+}
+
+// --yes bypasses the prompt even on a TTY.
+func TestAppsSet_ReplicaChange_YesFlagSkipsPrompt(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3", "--yes"); err != nil {
+		t.Fatalf("unexpected error with --yes: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH with --yes, got %#v", *reqs)
+	}
+}
+
+// The confirm is TTY-gated: a non-interactive caller (CI, cron, piped script)
+// must proceed without prompting so automation that scales via the CLI keeps
+// working.
+func TestAppsSet_ReplicaChange_NonTTYProceedsWithoutPrompt(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return false }
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3"); err != nil {
+		t.Fatalf("unexpected error in non-tty mode: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH in non-tty mode, got %#v", *reqs)
+	}
+}
+
+// A hot setting (hibernate-timeout, cap) does not restart the app, so it must
+// never trigger the replica confirm even on an interactive terminal.
+func TestAppsSet_HibernateChange_NoPromptOnTTY(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	origIsTTY := isStdinTTY
+	t.Cleanup(func() { isStdinTTY = origIsTTY })
+	isStdinTTY = func() bool { return true }
+
+	// Empty stdin: if the command tried to prompt it would fail on read.
+	if _, err := execCLIStdin(t, strings.NewReader(""), "apps", "set", "demo", "--hibernate-timeout", "10"); err != nil {
+		t.Fatalf("unexpected error for hot setting change: %v", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
+		t.Fatalf("expected one PATCH for hibernate change, got %#v", *reqs)
+	}
+}
+
+// --wait makes the command poll GET /api/apps/{slug} until the app is running
+// again after the replica change.
+func TestAppsSet_Wait_PollsUntilRunning(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"status":"running"}}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3", "--yes", "--wait"); err != nil {
+		t.Fatalf("unexpected error with --wait: %v", err)
+	}
+	sawPatch, sawGet := false, false
+	for _, r := range *reqs {
+		switch r.Method {
+		case "PATCH":
+			sawPatch = true
+		case "GET":
+			if r.Path == "/api/apps/demo" {
+				sawGet = true
+			}
+		}
+	}
+	if !sawPatch || !sawGet {
+		t.Errorf("expected both PATCH and a GET poll of /api/apps/demo, got %#v", *reqs)
 	}
 }

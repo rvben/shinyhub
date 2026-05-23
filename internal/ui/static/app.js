@@ -6,6 +6,7 @@ import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
+import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -2928,7 +2929,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return `
       <tr>
         <td>${escapeHtml(s.name)}</td>
-        <td><code>${escapeHtml(s.cron_expr)}</code></td>
+        <td><code>${escapeHtml(s.cron_expr)}</code>${dstAdvisoryMarkup(s)}</td>
         <td>${escapeHtml((s.command || []).join(' '))}</td>
         <td><span class="status-pill ${s.enabled ? 'status-on' : 'status-off'}">${s.enabled ? 'on' : 'off'}</span></td>
         <td>${tzDisplay}</td>
@@ -3132,12 +3133,14 @@ document.addEventListener('DOMContentLoaded', () => {
     ul.className = 'run-history-list';
     runs.forEach(run => {
       const li = document.createElement('li');
-      const started = run.StartedAt ? new Date(run.StartedAt).toLocaleString() : '—';
-      const status = run.Status || '—';
-      const exit = run.ExitCode != null ? ` · exit ${run.ExitCode}` : '';
+      const started = run.started_at ? new Date(run.started_at).toLocaleString() : '—';
+      const status = run.status || '—';
+      // exit_code is always present (0 by default), so only show it once the
+      // run has actually finished; otherwise a running run reads "exit 0".
+      const exit = run.finished_at ? ` · exit ${run.exit_code}` : '';
       li.innerHTML = `<button type="button" class="run-history-btn">${escapeHtml(started)} · <strong>${escapeHtml(status)}</strong>${escapeHtml(exit)}</button>`;
       li.querySelector('button').addEventListener('click', () => {
-        openScheduleRunLogs(slug, schedID, run.ID);
+        openScheduleRunLogs(slug, schedID, run.id);
       });
       ul.appendChild(li);
     });

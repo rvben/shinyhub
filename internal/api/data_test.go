@@ -343,7 +343,7 @@ func TestDataPut_AuditRecorded(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	events, err := store.ListAuditEvents(10, 0)
+	events, err := store.ListAuditEvents("", 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditEvents: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestDataDelete_AuditRecorded(t *testing.T) {
 		t.Fatalf("expected 204, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	events, err := store.ListAuditEvents(10, 0)
+	events, err := store.ListAuditEvents("", 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditEvents: %v", err)
 	}

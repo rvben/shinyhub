@@ -44,6 +44,23 @@ func formatManifestSummary(raw any) []string {
 	return lines
 }
 
+// formatHooksSkippedWarning turns the "hooks_skipped" field of a deploy
+// response into a developer-facing warning line, or "" when no hooks were
+// skipped. Under a container runtime the host has no view of the app's
+// environment, so post-deploy hooks do not run; this tells the developer
+// instead of leaving the fact only in the server log.
+func formatHooksSkippedWarning(raw any) string {
+	n, ok := raw.(float64)
+	if !ok || n <= 0 {
+		return ""
+	}
+	noun := "hook"
+	if int(n) != 1 {
+		noun = "hooks"
+	}
+	return fmt.Sprintf("Warning: %d post-deploy %s skipped under the container runtime; bake setup into the image instead.", int(n), noun)
+}
+
 // formatAppFields renders the [app] summary map as `key=value; key=value` in
 // a deterministic order so the line is stable across deploys.
 func formatAppFields(app map[string]any) string {

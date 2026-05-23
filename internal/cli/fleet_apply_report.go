@@ -83,11 +83,14 @@ func applyExitCode(res []applyResult) (int, string) {
 	}
 }
 
+// applyExitErr is returned after the apply report (or its JSON envelope) has
+// already been written, so the reason is flagged Reported: the RunE wrapper
+// must not re-print it as an "error:" line.
 func applyExitErr(code int, reason string) error {
 	if code == 0 {
 		return nil
 	}
-	return &ExitCodeError{Code: code, Err: fmt.Errorf("%s", reason)}
+	return &ExitCodeError{Code: code, Err: fmt.Errorf("%s", reason), Reported: true}
 }
 
 func statusGlyph(r applyResult) string {
@@ -140,7 +143,7 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 	for _, r := range res {
 		switch r.status {
 		case statusFailed:
-			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub logs %s --tail 200\n", r.slug, r.err, r.slug)
+			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub apps logs %s --tail 200\n", r.slug, r.err, r.slug)
 		case statusConflict:
 			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub fleet plan   (re-review before re-applying)\n", r.slug, r.err)
 		}
@@ -165,6 +168,7 @@ type applyJSONApp struct {
 	Digest        jsonDigest      `json:"digest"`
 	ConfigDrift   []jsonDriftItem `json:"config_drift"`
 	AdoptRequired bool            `json:"adopt_required"`
+	AdoptFrom     string          `json:"adopt_from,omitempty"`
 	PruneEligible bool            `json:"prune_eligible"`
 	Result        *jsonResult     `json:"result,omitempty"`
 }
@@ -196,7 +200,7 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 			Slug: d.Slug, Action: string(d.Action), Owned: d.Owned,
 			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:   drift,
-			AdoptRequired: d.AdoptRequired, PruneEligible: d.PruneEligible,
+			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		}
 		if r, ok := bySlug[d.Slug]; ok {
 			jr := &jsonResult{

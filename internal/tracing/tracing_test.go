@@ -217,7 +217,7 @@ func TestEnvFor_OmitsHeadersWhenEmpty(t *testing.T) {
 
 func TestStartProxySpan_ContinuesUpstreamTrace(t *testing.T) {
 	incoming := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-	ctx, parent, sampled := StartProxySpan(incoming, config.TracingConfig{SampleRatio: 0})
+	ctx, parent, sampled := StartProxySpan(incoming, "", config.TracingConfig{SampleRatio: 0})
 	if got := ctx.TraceIDHex(); got != "0af7651916cd43dd8448eb211c80319c" {
 		t.Errorf("expected trace id continuity, got %q", got)
 	}
@@ -234,7 +234,7 @@ func TestStartProxySpan_ContinuesUpstreamTrace(t *testing.T) {
 }
 
 func TestStartProxySpan_StartsFreshWhenAbsent(t *testing.T) {
-	ctx, parent, _ := StartProxySpan("", config.TracingConfig{SampleRatio: 1})
+	ctx, parent, _ := StartProxySpan("", "", config.TracingConfig{SampleRatio: 1})
 	if parent != "" {
 		t.Errorf("no upstream: expected empty parent, got %q", parent)
 	}
@@ -243,6 +243,23 @@ func TestStartProxySpan_StartsFreshWhenAbsent(t *testing.T) {
 	}
 	if !ctx.Sampled() {
 		t.Errorf("ratio=1: expected sampled=true")
+	}
+}
+
+// TRC-4: tracestate is carried through when the upstream traceparent is valid.
+func TestStartProxySpan_CarriesTracestateOnContinuation(t *testing.T) {
+	incoming := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	ctx, _, _ := StartProxySpan(incoming, " dd=s:1;o:rum ", config.TracingConfig{SampleRatio: 0})
+	if ctx.TraceState != "dd=s:1;o:rum" {
+		t.Errorf("expected trimmed tracestate carried through, got %q", ctx.TraceState)
+	}
+}
+
+// TRC-4: a fresh trace drops any inbound tracestate (it refers to another trace).
+func TestStartProxySpan_DropsTracestateOnFreshTrace(t *testing.T) {
+	ctx, _, _ := StartProxySpan("", "dd=s:1;o:rum", config.TracingConfig{SampleRatio: 1})
+	if ctx.TraceState != "" {
+		t.Errorf("fresh trace must not inherit upstream tracestate, got %q", ctx.TraceState)
 	}
 }
 

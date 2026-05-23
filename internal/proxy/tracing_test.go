@@ -1,8 +1,12 @@
 package proxy_test
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +72,218 @@ func TestProxy_DisabledTracingLeavesHeaderAlone(t *testing.T) {
 
 	if got != incoming {
 		t.Errorf("disabled tracing should pass through unchanged: got %q, want %q", got, incoming)
+	}
+}
+
+// TRC-4: the W3C tracestate header carries vendor context (Datadog, Honeycomb,
+// etc.). When ShinyHub continues an incoming trace it must propagate tracestate
+// downstream unchanged, otherwise the vendor span graph breaks at the proxy hop.
+func TestProxy_PropagatesTracestate(t *testing.T) {
+	var gotState string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotState = r.Header.Get("tracestate")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	req.Header.Set("tracestate", "dd=s:1;o:rum,congo=t61rcWkgMzE")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if gotState != "dd=s:1;o:rum,congo=t61rcWkgMzE" {
+		t.Errorf("tracestate not propagated downstream: got %q", gotState)
+	}
+}
+
+// TRC-4: when no valid upstream traceparent is present a fresh trace is started,
+// so any inbound tracestate references a different (or no) trace and MUST NOT be
+// forwarded — that would attach stale vendor context to a brand-new trace.
+func TestProxy_DropsTracestateOnNewTrace(t *testing.T) {
+	var gotState string
+	var sawHeader bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotState = r.Header.Get("tracestate")
+		_, sawHeader = r.Header["Tracestate"]
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	// No traceparent: a new trace is started. The stray tracestate must be dropped.
+	req.Header.Set("tracestate", "dd=s:1;o:rum")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if sawHeader || gotState != "" {
+		t.Errorf("stale tracestate must be dropped on a new trace, got %q (present=%v)", gotState, sawHeader)
+	}
+}
+
+// TRC-1: an upstream connection failure (the ReverseProxy ErrorHandler path)
+// must populate span.Error so the documented field is actually emitted and the
+// error-admission branch is reachable even when no 5xx status was produced.
+func TestProxy_RecordsUpstreamErrorMessage(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := backend.URL
+	backend.Close() // connections are now refused, forcing the ErrorHandler
+
+	p := proxy.New()
+	if err := p.Register("app", url); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Hour) // huge slow threshold: only error/5xx admit
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/page", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	spans := buf.Snapshot("app")
+	if len(spans) != 1 {
+		t.Fatalf("expected one buffered span, got %d", len(spans))
+	}
+	if spans[0].Error == "" {
+		t.Fatalf("upstream connection failure must populate span.Error (status=%d)", spans[0].Status)
+	}
+}
+
+// TRC-1: an upstream that drops the connection mid-stream (after a 200 header
+// was already sent) does NOT trigger the ReverseProxy ErrorHandler; the error
+// surfaces only on the body copy. The span must still record Error, which is
+// the only thing that admits it to the buffer when the status is 200 and the
+// request was not slow. This exercises the otherwise-dead Error-only branch.
+func TestProxy_RecordsMidStreamErrorMessage(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000") // promise more than we send
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Hijack and slam the connection so the proxy's body read sees an
+		// unexpected EOF before Content-Length bytes arrive.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Hour) // huge slow threshold: only error admits
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/page", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	spans := buf.Snapshot("app")
+	if len(spans) != 1 {
+		t.Fatalf("a mid-stream upstream drop must be buffered via Error, got %d spans", len(spans))
+	}
+	if spans[0].Error == "" {
+		t.Fatalf("mid-stream drop must populate span.Error (status=%d)", spans[0].Status)
+	}
+}
+
+// TRC-1: with tracing enabled the transport wraps upstream response bodies to
+// capture mid-stream read errors. It must NOT wrap a 101 Switching Protocols
+// body: Go's httputil.ReverseProxy requires that body to implement
+// io.ReadWriteCloser before it can tunnel the WebSocket. A wrapper that exposes
+// only io.ReadCloser makes the upgrade fail (502 via ErrorHandler), breaking
+// Shiny/Streamlit apps whenever tracing is on. This drives a raw WS-style
+// upgrade through the proxy and asserts the handshake and byte tunnel succeed.
+func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "expected websocket upgrade", http.StatusBadRequest)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "no hijack", http.StatusInternalServerError)
+			return
+		}
+		conn, brw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = brw.Flush()
+		// Echo one client line back so the test confirms the tunnel is live.
+		line, err := brw.ReadString('\n')
+		if err != nil {
+			return
+		}
+		_, _ = brw.WriteString("echo:" + line)
+		_ = brw.Flush()
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
+	if err != nil {
+		t.Fatalf("dial frontend: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	fmt.Fprintf(conn, "GET /app/app/ws HTTP/1.1\r\nHost: example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+	r := bufio.NewReader(conn)
+	statusLine, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("traced WebSocket upgrade failed: status line = %q (want 101)", strings.TrimSpace(statusLine))
+	}
+	// Drain the rest of the response headers.
+	for {
+		l, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		if strings.TrimSpace(l) == "" {
+			break
+		}
+	}
+	// Confirm the byte tunnel actually carries traffic both ways.
+	fmt.Fprintf(conn, "hello\n")
+	echo, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if strings.TrimSpace(echo) != "echo:hello" {
+		t.Fatalf("tunnel echo = %q, want %q", strings.TrimSpace(echo), "echo:hello")
 	}
 }
 

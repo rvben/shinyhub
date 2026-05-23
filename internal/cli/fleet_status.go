@@ -101,7 +101,7 @@ func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
 		return
 	}
 	fmt.Fprintf(out, "shinyhub fleet status  ·  server=%s\n\n", st.Server)
-	fmt.Fprintf(out, "Apps (%d)\n", st.Summary.Total)
+	fmt.Fprintf(out, "Apps (%d)   legend: * fleet-managed  - unmanaged\n", st.Summary.Total)
 
 	wSlug, wOwner := 0, len("unmanaged")
 	for _, a := range st.Apps {
@@ -154,12 +154,12 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
-		return &ExitCodeError{Code: 3, Err: err}
+		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	apps, err := fetchApps(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
-		return &ExitCodeError{Code: 3, Err: err}
+		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	st := buildFleetStatus(cfg.Host, apps)
 	out := cmd.OutOrStdout()

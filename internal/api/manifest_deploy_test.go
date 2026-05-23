@@ -421,6 +421,87 @@ cmd  = "echo n"
 	}
 }
 
+// TestDeploy_ResponseSurfacesHooksSkipped asserts that when the runtime
+// prepares deps inside a container (HostPreparesDeps == false), declared
+// post-deploy hooks are reported in the deploy response as hooks_skipped so
+// the developer learns their hooks did not run. The fake runtime used here is
+// container-mode, so a bundle with two [[hook]] blocks must report 2.
+func TestDeploy_ResponseSurfacesHooksSkipped(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "hooked", Name: "Hooked App", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := `
+[[hook]]
+on = "post-deploy"
+command = ["echo", "one"]
+
+[[hook]]
+on = "post-deploy"
+command = ["echo", "two"]
+`
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/hooked/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v: %s", err, rec.Body.String())
+	}
+	v, ok := resp["hooks_skipped"].(float64)
+	if !ok {
+		t.Fatalf("response missing hooks_skipped: %s", rec.Body.String())
+	}
+	if int(v) != 2 {
+		t.Errorf("hooks_skipped = %v, want 2", resp["hooks_skipped"])
+	}
+}
+
+// TestDeploy_ResponseOmitsHooksSkippedWhenNone asserts hooks_skipped is absent
+// from the response when no hooks were skipped, keeping the wire shape clean.
+func TestDeploy_ResponseOmitsHooksSkippedWhenNone(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "nohooks", Name: "No Hooks", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py": "from shiny import App\n",
+	})
+	req := httptest.NewRequest("POST", "/api/apps/nohooks/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if _, ok := resp["hooks_skipped"]; ok {
+		t.Errorf("expected no hooks_skipped key when none skipped; got %v", resp["hooks_skipped"])
+	}
+}
+
 // TestDeploy_ResponseOmitsManifestWhenAbsent asserts that a bundle without
 // a shinyhub.toml produces a deploy response with NO "manifest" key, so the
 // CLI prints no spurious summary line.

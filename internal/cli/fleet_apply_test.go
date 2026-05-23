@@ -34,6 +34,14 @@ func TestFleetApply_DryRunIsPlan(t *testing.T) {
 	if !strings.Contains(out, "Plan:") {
 		t.Fatalf("dry-run must print the plan summary: %q", out)
 	}
+	// FLT-10: the dry-run header must name the originating command, not
+	// masquerade as `shinyhub fleet plan`.
+	if !strings.Contains(out, "shinyhub fleet apply --dry-run  ·") {
+		t.Fatalf("dry-run header must say `fleet apply --dry-run`: %q", out)
+	}
+	if strings.Contains(out, "shinyhub fleet plan  ·") {
+		t.Fatalf("dry-run must not print the `fleet plan` header: %q", out)
+	}
 }
 
 func TestFleetApply_PruneNonTTYWithoutYesFailsWithExactCommand(t *testing.T) {

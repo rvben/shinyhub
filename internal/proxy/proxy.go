@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -16,6 +19,48 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
+
+// recorderCtxKey carries the request's *statusRecorder through the transport so
+// a mid-stream upstream read error (which ReverseProxy reports only on the body
+// copy, never via ErrorHandler) can be captured onto the span.
+type recorderCtxKey struct{}
+
+// errCapturingTransport wraps a RoundTripper so the upstream response body's
+// read errors are recorded onto the request's statusRecorder. Pre-response
+// failures still flow through ErrorHandler; this covers the post-header case.
+type errCapturingTransport struct{ base http.RoundTripper }
+
+func (t *errCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	// A 101 Switching Protocols body must keep its io.ReadWriteCloser so
+	// httputil.ReverseProxy can tunnel the upgraded connection (WebSockets for
+	// Shiny/Streamlit). Wrapping it in an io.ReadCloser-only type would make the
+	// upgrade fail, so leave protocol-switch responses untouched.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return resp, nil
+	}
+	if rec, ok := req.Context().Value(recorderCtxKey{}).(*statusRecorder); ok {
+		resp.Body = &errCapturingBody{ReadCloser: resp.Body, rec: rec}
+	}
+	return resp, nil
+}
+
+// errCapturingBody records the first non-EOF read error onto rec.proxyErr.
+type errCapturingBody struct {
+	io.ReadCloser
+	rec *statusRecorder
+}
+
+func (b *errCapturingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF && b.rec.proxyErr == nil {
+		b.rec.proxyErr = err
+	}
+	return n, err
+}
 
 // loadingPage is returned when a request arrives for a slug with no registered
 // backend. Client-side JS reloads the page every 3 s up to loadingPageMaxRetries
@@ -98,6 +143,11 @@ const cookiePrefix = "shinyhub_rep_"
 // /app/<slug>/.shinyhub/ready. The ".shinyhub" segment is namespaced under
 // a leading dot so it cannot collide with a legitimate app route.
 const readySuffix = "/.shinyhub/ready"
+
+// MsgPoolSaturated is the plain-text body returned with a 503 when every
+// replica is at its session cap and the request carries no sticky cookie.
+// Exported so docs/scaling.md can be guarded against drift from this string.
+const MsgPoolSaturated = "Service temporarily at capacity, please retry."
 
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
@@ -359,6 +409,21 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
+	// Capture pre-response upstream failures (connection refused, timeout)
+	// onto the statusRecorder so the trace span surfaces span.Error. Mirrors
+	// httputil's default handler (log + 502) and adds the capture.
+	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+		log.Printf("proxy: upstream error for %s: %v", slugCopy, err)
+		if sr, ok := w.(*statusRecorder); ok {
+			sr.proxyErr = err
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}
+	// ErrorHandler does not fire for failures after the response header was
+	// sent: ReverseProxy reports those only on the body copy. Wrap the
+	// transport so a mid-stream upstream read error is captured too, which is
+	// the only signal that admits an otherwise-200, not-slow span to the buffer.
+	rp.Transport = &errCapturingTransport{base: http.DefaultTransport}
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -579,8 +644,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		traceSampled bool
 	)
 	if traceEnabled {
-		traceCtx, traceParent, traceSampled = tracing.StartProxySpan(r.Header.Get("traceparent"), p.traceCfg)
+		traceCtx, traceParent, traceSampled = tracing.StartProxySpan(
+			r.Header.Get("traceparent"), r.Header.Get("tracestate"), p.traceCfg)
 		r.Header.Set("traceparent", traceCtx.TraceparentHeader())
+		// Propagate vendor tracestate only when continuing a trace; on a fresh
+		// trace TraceState is empty and any stray inbound header is dropped so
+		// it can't attach stale vendor context to the new trace.
+		if traceCtx.TraceState != "" {
+			r.Header.Set("tracestate", traceCtx.TraceState)
+		} else {
+			r.Header.Del("tracestate")
+		}
 	}
 
 	defer func() {
@@ -592,6 +666,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					trimmed = "/"
 				}
 				path = trimmed
+			}
+			var spanErr string
+			if rec.proxyErr != nil {
+				spanErr = rec.proxyErr.Error()
 			}
 			p.traceBuffer.Record(tracing.Span{
 				TraceID:    traceCtx.TraceIDHex(),
@@ -605,6 +683,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				DurationMS: time.Since(start).Milliseconds(),
 				StartedAt:  start,
 				Sampled:    traceSampled,
+				Error:      spanErr,
 			})
 		}
 		logPtr := p.accessLog.Load()
@@ -674,7 +753,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// short enough that the client doesn't perceive a complete outage.
 		p.mu.RUnlock()
 		rec.Header().Set("Retry-After", "5")
-		http.Error(rec, "Service temporarily at capacity, please retry.", http.StatusServiceUnavailable)
+		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 		return
 	}
 	replicaIndex = picked.index
@@ -693,6 +772,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer picked.activeConns.Add(-1)
 
 	p.RecordActivity(slug)
+	// Thread the recorder through the request context only while tracing is on
+	// so the transport's body wrapper can attribute a mid-stream read error to
+	// this span. When tracing is off the value is absent and the body is never
+	// wrapped, keeping the hot path allocation-free.
+	if traceEnabled {
+		r = r.WithContext(context.WithValue(r.Context(), recorderCtxKey{}, rec))
+	}
 	picked.rp.ServeHTTP(rec, r)
 }
 

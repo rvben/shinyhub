@@ -1156,6 +1156,28 @@ func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Se
 	return srv, store
 }
 
+// newManagerTestServerWithRuntimeMode builds a server whose runtime mode is set
+// explicitly, so tests can exercise behavior that branches on native vs docker.
+func newManagerTestServerWithRuntimeMode(t *testing.T, mode string) (*api.Server, *db.Store) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir},
+		Runtime: config.RuntimeConfig{Mode: mode},
+	}
+	srv := api.New(cfg, store, process.NewManager(appsDir, process.NewNativeRuntime()), nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
+
 // newTestServerWithDefaultReplicas creates a test server with a specific DefaultReplicas value.
 func newTestServerWithDefaultReplicas(t *testing.T, defaultReplicas int) (*api.Server, *db.Store) {
 	t.Helper()
@@ -1175,6 +1197,61 @@ func newTestServerWithDefaultReplicas(t *testing.T, defaultReplicas int) (*api.S
 	srv := api.New(cfg, store, nil, nil)
 	t.Cleanup(func() { store.Close() })
 	return srv, store
+}
+
+// newTestServerWithDefaultMaxSessions creates a test server with a specific
+// runtime DefaultMaxSessionsPerReplica.
+func newTestServerWithDefaultMaxSessions(t *testing.T, def int) (*api.Server, *db.Store) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir},
+		Runtime: config.RuntimeConfig{MaxReplicas: 32, DefaultMaxSessionsPerReplica: def},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
+
+// DEP-5: GET /api/apps/{slug} must expose the effective per-replica session cap
+// (the resolved value, falling back to the runtime default when the app's own
+// value is 0) so clients can render an honest admission ceiling instead of a
+// bare "0".
+func TestAppsAPI_GetApp_ExposesEffectiveMaxSessions(t *testing.T) {
+	srv, store := newTestServerWithDefaultMaxSessions(t, 10)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	// App's own cap stays 0 (inherit the runtime default).
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	req := authedRequest(t, "GET", "/api/apps/demo", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	eff, ok := body["effective_max_sessions_per_replica"]
+	if !ok {
+		t.Fatal("response missing effective_max_sessions_per_replica")
+	}
+	if int(eff.(float64)) != 10 {
+		t.Errorf("effective_max_sessions_per_replica = %v, want 10 (runtime default)", eff)
+	}
 }
 
 // TestAppsAPI_PatchReplicasUpdatesCount verifies that PATCH with {"replicas": N}

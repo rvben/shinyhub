@@ -64,3 +64,23 @@ func TestParseSource_Invalid(t *testing.T) {
 	}
 }
 
+// ERR-5: a git+ source without an explicit URL scheme (bare host/repo, or
+// SCP-style git@host:path) must be rejected at parse time with a message that
+// names the accepted schemes, not silently accepted and surfaced as a clone
+// `exit status 128` minutes later.
+func TestParseSource_GitRequiresScheme(t *testing.T) {
+	for _, in := range []string{
+		"git+github.com/acme/app",     // bare host/repo, no scheme
+		"git+git@github.com:acme/app", // SCP-style, no "://"
+		"git+./local/path",            // relative, no scheme
+	} {
+		_, prob := ParseSource(in, t.TempDir())
+		if prob == nil {
+			t.Fatalf("%q: expected a scheme problem", in)
+		}
+		if !strings.Contains(prob.Error(), "scheme") {
+			t.Fatalf("%q: problem %q should mention the missing scheme", in, prob.Error())
+		}
+	}
+}
+

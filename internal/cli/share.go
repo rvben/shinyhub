@@ -21,6 +21,10 @@ func newShareCmd() *cobra.Command {
 type sharedDataDTO struct {
 	SourceSlug string `json:"source_slug"`
 	SourceID   int64  `json:"source_id"`
+	// Warning is set by the server on grant under the native runtime, where the
+	// read-only mount is a convention only (writes through the symlink are not
+	// blocked). Empty under the Docker runtime.
+	Warning string `json:"warning,omitempty"`
 }
 
 func newShareLsCmd() *cobra.Command {
@@ -50,7 +54,7 @@ func newShareLsCmd() *cobra.Command {
 
 			if resp.StatusCode >= 400 {
 				out, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("server returned %s: %s", resp.Status, out)
+				return httpError(cfg.Token, "list shared-data", resp, out)
 			}
 
 			var mounts []sharedDataDTO
@@ -111,10 +115,15 @@ func newShareAddCmd() *cobra.Command {
 
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "add shared-data", resp, out)
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: mounted data from %q\n", slug, from)
+
+		var dto sharedDataDTO
+		if err := json.Unmarshal(out, &dto); err == nil && dto.Warning != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+dto.Warning)
+		}
 		return nil
 	}
 	return addCmd
@@ -148,7 +157,7 @@ func newShareRmCmd() *cobra.Command {
 
 			if resp.StatusCode >= 400 {
 				out, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("server returned %s: %s", resp.Status, out)
+				return httpError(cfg.Token, "remove shared-data", resp, out)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: removed shared-data mount %q\n", slug, sourceSlug)

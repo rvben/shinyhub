@@ -63,14 +63,28 @@ func newDeployCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "deploy [dir]",
 		Short: "Deploy a Shiny app to ShinyHub",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Deploy a Shiny app bundle to ShinyHub.
+
+Bundle: the given directory is zipped and uploaded. Pass '.' to deploy the
+current directory, or a path like './app'. Data and cache directories are
+excluded automatically; add a .shinyhubignore (or .gitignore) to exclude more.
+Validate the bundle's optional manifest first with 'shinyhub manifest validate'.
+
+Manifest: if the bundle contains a shinyhub.toml at its root, ShinyHub applies
+it on deploy - [app] scaling/hibernate overrides, [[hook]] post-deploy commands,
+and [[schedule]] cron jobs. The manifest is optional.
+
+Slug and URL: the app is served at <host>/app/<slug>/. The slug defaults to the
+directory name (sanitized); override it with --slug. Slug rule: lowercase
+letters, digits, and single hyphens; it must not start or end with a hyphen.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDeploy(cmd, args, f)
 		},
 	}
-	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug (defaults to directory name)")
+	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug; serves at /app/<slug>/ (lowercase letters, digits, single hyphens; no leading/trailing hyphen). Defaults to the directory name")
 	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until deployment is healthy")
-	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 60, "Seconds to wait for healthy status when --wait is set")
+	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 300, "Seconds to wait for healthy status when --wait is set (first-run dependency installs can take minutes)")
 	cmd.Flags().StringVar(&f.git, "git", "", "Git repository URL to clone and deploy")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
@@ -177,7 +191,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("deploy failed (%s): %s", resp.Status, out)
+		return httpError(cfg.Token, "deploy", resp, out)
 	}
 
 	// Extract deployment number from the response so we can print a clean summary.
@@ -195,6 +209,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 	for _, line := range formatManifestSummary(appResp["manifest"]) {
 		fmt.Println(line)
+	}
+	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
 	}
 
 	if f.wait {
@@ -225,11 +242,15 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 	interval := 2 * time.Second
 	fmt.Printf("Waiting for %s to be healthy", slug)
 	var lastErr error
+	var lastStatus string
 	for time.Now().Before(deadline) {
 		ready, status, err := pollAppStatus(cfg, slug)
 		if err == nil && ready {
 			fmt.Println(" ready.")
 			return nil
+		}
+		if err == nil {
+			lastStatus = status
 		}
 		if err != nil {
 			lastErr = err
@@ -242,17 +263,23 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 		if isTerminalStatus(status) {
 			fmt.Println()
 			printLogTail(cfg, slug, errOut)
-			return fmt.Errorf("%s %s during startup — check logs above or run: shinyhub apps logs %s", slug, status, slug)
+			return fmt.Errorf("%s %s during startup - check logs above or run: shinyhub apps logs %s", slug, status, slug)
 		}
 		fmt.Print(".")
 		time.Sleep(interval)
 	}
 	fmt.Println()
 	printLogTail(cfg, slug, errOut)
-	if lastErr != nil {
+	// If we never reached the app at all, surface the transport/HTTP error.
+	if lastErr != nil && lastStatus == "" {
 		return fmt.Errorf("timed out after %s waiting for %s to be healthy (last error: %v)", timeout, slug, lastErr)
 	}
-	return fmt.Errorf("timed out after %s waiting for %s to be healthy", timeout, slug)
+	// The app was reachable and still in a non-terminal startup state: the
+	// deploy was committed and the app is still booting (first-run dependency
+	// installs can outlast the wait window). Make clear this is not a failure.
+	return fmt.Errorf("deploy committed, but %s is still starting after %s (timed out). "+
+		"First-run dependency installs can take longer than this; the app has not failed. "+
+		"Check progress with `shinyhub apps logs %s`, or re-run with a larger --wait-timeout", slug, timeout, slug)
 }
 
 // isTerminalStatus reports whether an app status indicates a non-recoverable
@@ -384,6 +411,15 @@ func ensureApp(cfg *cliConfig, slug, visibility string) error {
 // ensureAppWithOutput is the testable core of ensureApp. errOut receives any
 // warnings emitted during the call.
 func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writer) error {
+	return ensureAppCore(cfg, slug, visibility, errOut, true)
+}
+
+// ensureAppCore is the shared implementation. warnExisting controls whether a
+// non-empty visibility on an already-existing app produces the corrective
+// warning. The interactive `deploy` path sets it; the fleet path clears it,
+// because fleet reconciles visibility through its own config-drift mechanism
+// and the deploy-layer warning would otherwise leak once per retry.
+func ensureAppCore(cfg *cliConfig, slug, visibility string, errOut io.Writer, warnExisting bool) error {
 	checkReq, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -395,7 +431,7 @@ func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writ
 	}
 	resp.Body.Close()
 	if resp.StatusCode == 200 {
-		if visibility != "" {
+		if visibility != "" && warnExisting {
 			fmt.Fprintf(errOut, "warning: --visibility is ignored for existing apps; use `shinyhub apps access set %s %s` instead\n", slug, visibility)
 		}
 		return nil
@@ -423,18 +459,10 @@ func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writ
 	defer cr.Body.Close()
 	if cr.StatusCode != 201 {
 		raw, _ := io.ReadAll(cr.Body)
-		// Try to surface the server's `{"error": "..."}` envelope, falling
-		// back to the raw body so the user gets enough context to diagnose
-		// quota / permission / validation failures.
-		msg := strings.TrimSpace(string(raw))
-		var env struct{ Error string `json:"error"` }
-		if err := json.Unmarshal(raw, &env); err == nil && env.Error != "" {
-			msg = env.Error
-		}
-		if msg == "" {
-			msg = cr.Status
-		}
-		return fmt.Errorf("could not create app %s: %s", slug, msg)
+		// Surface the server's `{"error": "..."}` envelope so the user gets
+		// enough context to diagnose quota / permission / validation failures;
+		// a lapsed session is reported as a re-login hint instead.
+		return httpError(cfg.Token, "create app "+slug, cr, raw)
 	}
 	return nil
 }
@@ -456,7 +484,7 @@ func gitClone(repoURL, branch, subdir string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(dir)
-		return "", fmt.Errorf("git clone: %w\n%s", err, out)
+		return "", gitCmdError("git clone", err, out)
 	}
 
 	if subdir != "" {

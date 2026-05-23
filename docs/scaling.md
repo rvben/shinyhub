@@ -173,9 +173,9 @@ The proxy sheds with:
 ```
 HTTP/1.1 503 Service Unavailable
 Retry-After: 5
-Content-Type: text/plain
+Content-Type: text/plain; charset=utf-8
 
-service saturated; try again shortly
+Service temporarily at capacity, please retry.
 ```
 
 Browsers that respect `Retry-After` (Chromium, Firefox) will back

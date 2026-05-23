@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +14,15 @@ import (
 
 // fleetPlanSchemaVersion is the stable --json envelope version.
 const fleetPlanSchemaVersion = 1
+
+// defaultFleetManifest is the manifest path assumed when -f is omitted. The
+// "Next:" suggestion only echoes -f when the active manifest differs from it,
+// so a copy-paste reconciles the same file the operator is looking at.
+const defaultFleetManifest = "shinyhub-fleet.toml"
+
+// planLegend is the one-line glyph key printed under the plan's app list so the
+// column glyphs are self-describing.
+const planLegend = "+ create  ~ update  > adopt  - delete  = unchanged"
 
 func glyphWord(a fleet.Action) (string, string) {
 	switch a {
@@ -30,12 +40,37 @@ func glyphWord(a fleet.Action) (string, string) {
 	return "?", string(a)
 }
 
+// foreignAdoptWarning returns a multi-line warning naming every app that
+// --adopt would TRANSFER away from another fleet, or "" when adopt is off or
+// no adopt target is foreign-owned. Adopting an unmanaged app is silent (it
+// has no prior owner); transferring one another fleet believes it owns is the
+// surprising, destructive-to-the-other-fleet case worth flagging.
+func foreignAdoptWarning(diff []fleet.AppDiff, adopt bool) string {
+	if !adopt {
+		return ""
+	}
+	var lines []string
+	for _, d := range diff {
+		if d.Action == fleet.ActionAdopt && d.AdoptFrom != "" {
+			lines = append(lines, fmt.Sprintf("    %s (currently %s)", d.Slug, d.AdoptFrom))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("warning: --adopt will TRANSFER %s from another fleet to this one:\n%s",
+		plural(len(lines), "app"), strings.Join(lines, "\n"))
+}
+
 func reasonText(d fleet.AppDiff) string {
 	switch d.Action {
 	case fleet.ActionCreate:
 		return "new"
 	case fleet.ActionAdopt:
-		return "present, not owned by this fleet (needs --adopt)"
+		if d.AdoptFrom != "" {
+			return fmt.Sprintf("owned by %s; --adopt will TRANSFER ownership to this fleet", d.AdoptFrom)
+		}
+		return "unmanaged, not owned by this fleet (needs --adopt)"
 	case fleet.ActionUnchanged:
 		return "unchanged"
 	case fleet.ActionDelete:
@@ -102,12 +137,79 @@ func pending(diff []fleet.AppDiff) bool {
 	return false
 }
 
-func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff) error {
+// shellQuote returns s safe to paste as a single POSIX-shell argv word. A
+// string built only from unreserved characters (alphanumerics and the path
+// punctuation a manifest path normally uses) is returned bare; anything else is
+// wrapped in single quotes with embedded single quotes escaped as '\'' so a
+// path with spaces or shell metacharacters survives a copy-paste intact.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("-_./=:", r):
+		default:
+			safe = false
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// plural renders "1 app" / "3 apps" - a small singular/plural helper for the
+// human-readable Next block.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// applySuggestion builds the SINGLE combined `fleet apply` command that
+// converges every pending action, plus a human description of what it does.
+// One command, not a sequence: --adopt already applies create/update on the
+// same run, and --prune folds in deletes, so emitting separate per-category
+// applies would mislead an operator into running apply several times. -f is
+// echoed only for a non-default manifest so a copy-paste targets the same file.
+func applySuggestion(file string, c planCounts) (cmd, desc string) {
+	parts := []string{"shinyhub fleet apply"}
+	var actions []string
+	if c.Adopt > 0 {
+		parts = append(parts, "--adopt")
+		actions = append(actions, "adopt "+plural(c.Adopt, "app"))
+	}
+	if c.Create > 0 || c.Update > 0 {
+		var cu []string
+		if c.Create > 0 {
+			cu = append(cu, fmt.Sprintf("%d create", c.Create))
+		}
+		if c.Update > 0 {
+			cu = append(cu, fmt.Sprintf("%d update", c.Update))
+		}
+		actions = append(actions, "apply "+strings.Join(cu, " + "))
+	}
+	if c.Delete > 0 {
+		parts = append(parts, "--prune", "--yes")
+		actions = append(actions, "delete "+plural(c.Delete, "app")+" (irreversible: removes data dir)")
+	}
+	if file != "" && file != defaultFleetManifest {
+		parts = append(parts, "-f", shellQuote(file))
+	}
+	return strings.Join(parts, " "), strings.Join(actions, ", ")
+}
+
+func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff) error {
 	out := cmd.OutOrStdout()
 	_ = caps // threaded for fleet apply; the plan command is read-only and does not consume it
 
 	if f.jsonOutput {
-		if err := writeFleetPlanJSON(out, m, host, diff); err != nil {
+		code, reason := planExitInfo(f, diff)
+		if err := writeFleetPlanJSON(out, m, host, diff, code, reason); err != nil {
 			return &ExitCodeError{Code: 1, Err: err}
 		}
 		return planExit(f, diff)
@@ -123,8 +225,8 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 		return planExit(f, diff)
 	}
 
-	fmt.Fprintf(out, "shinyhub fleet plan  ·  fleet_id=%s  ·  server=%s\n\n", m.FleetID, host)
-	fmt.Fprintf(out, "Apps (%d)\n", len(diff))
+	fmt.Fprintf(out, "%s  ·  fleet_id=%s  ·  server=%s\n\n", cmdLabel, m.FleetID, host)
+	fmt.Fprintf(out, "Apps (%d)   legend: %s\n", len(diff), planLegend)
 
 	// Aligned columns: glyph word slug reason.
 	wWord, wSlug := 0, 0
@@ -143,28 +245,37 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 	}
 	fmt.Fprintf(out, "\n%s\n", summary)
 
-	// Actionable Next block: exact command per pending category.
-	var next []string
-	if c.Adopt > 0 {
-		next = append(next, fmt.Sprintf("  • adopt %d app(s)            shinyhub fleet apply --adopt", c.Adopt))
-	}
-	if c.Delete > 0 {
-		next = append(next, fmt.Sprintf("  • delete %d app(s)           shinyhub fleet apply --prune        (irreversible: removes data dir)", c.Delete))
-	}
-	if c.Create+c.Update > 0 {
-		next = append(next, "  • apply everything else    shinyhub fleet apply")
-	}
-	if len(next) > 0 {
-		fmt.Fprintf(out, "\nNext:\n%s\n", strings.Join(next, "\n"))
+	// Actionable Next block: ONE combined apply command covering every pending
+	// action, with the human description of what it will do.
+	if c.Create+c.Update+c.Adopt+c.Delete > 0 {
+		applyCmd, desc := applySuggestion(f.file, c)
+		fmt.Fprintf(out, "\nNext:\n  %s\n      (%s)\n", applyCmd, desc)
 	}
 	return planExit(f, diff)
 }
 
-// planExit maps the diff to the process exit code. Default plan exit is 0
-// (report). With --detailed-exitcode: 0 none / 2 pending.
+// planExitInfo computes the process exit code and a human reason for a plan
+// run. Default plan exit is 0 ("report only"). With --detailed-exitcode it is
+// 2 ("changes are pending") when the diff has pending actions, else 0 ("no
+// changes"). The JSON summary and planExit both derive from this so the
+// reported exit_code always matches the process exit code.
+func planExitInfo(f *fleetPlanFlags, diff []fleet.AppDiff) (int, string) {
+	if f.detailedExitcode {
+		if pending(diff) {
+			return 2, "changes are pending"
+		}
+		return 0, "no changes"
+	}
+	return 0, "report only"
+}
+
+// planExit maps the diff to the process exit code.
 func planExit(f *fleetPlanFlags, diff []fleet.AppDiff) error {
-	if f.detailedExitcode && pending(diff) {
-		return &ExitCodeError{Code: 2, Err: fmt.Errorf("changes are pending")}
+	code, reason := planExitInfo(f, diff)
+	if code != 0 {
+		// Detailed-exitcode is a status signal (the plan was already printed),
+		// not an error to surface; flag Reported so the wrapper stays silent.
+		return &ExitCodeError{Code: code, Err: errors.New(reason), Reported: true}
 	}
 	return nil
 }
@@ -189,6 +300,7 @@ type jsonApp struct {
 	Digest        jsonDigest      `json:"digest"`
 	ConfigDrift   []jsonDriftItem `json:"config_drift"`
 	AdoptRequired bool            `json:"adopt_required"`
+	AdoptFrom     string          `json:"adopt_from,omitempty"`
 	PruneEligible bool            `json:"prune_eligible"`
 }
 
@@ -207,7 +319,7 @@ type jsonEnvelope struct {
 	Summary       jsonSummary `json:"summary"`
 }
 
-func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host string, diff []fleet.AppDiff) error {
+func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host string, diff []fleet.AppDiff, exitCode int, exitReason string) error {
 	apps := make([]jsonApp, 0, len(diff))
 	// Stable ordering for machine consumers: by slug.
 	sorted := append([]fleet.AppDiff(nil), diff...)
@@ -221,11 +333,10 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 			Slug: d.Slug, Action: string(d.Action), Owned: d.Owned,
 			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:   drift,
-			AdoptRequired: d.AdoptRequired, PruneEligible: d.PruneEligible,
+			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		})
 	}
 	c := countDiff(diff)
-	exitReason := "report only"
 	env := jsonEnvelope{
 		SchemaVersion: fleetPlanSchemaVersion,
 		FleetID:       m.FleetID,
@@ -237,7 +348,7 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 				"create": c.Create, "update": c.Update, "adopt": c.Adopt,
 				"delete": c.Delete, "unchanged": c.Unchanged,
 			},
-			ExitCode:   0,
+			ExitCode:   exitCode,
 			ExitReason: exitReason,
 		},
 	}

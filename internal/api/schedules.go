@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
@@ -35,6 +37,9 @@ type scheduleDTO struct {
 	// the effective zone comes from the server default.
 	TimezoneInherited bool     `json:"timezone_inherited"`
 	NextFire         *string  `json:"next_fire,omitempty"`
+	// DSTAdvisory warns when a fixed-hour schedule in a DST-observing zone will
+	// fire twice on the fall-back day. Omitted when the schedule is safe.
+	DSTAdvisory *string `json:"dst_advisory,omitempty"`
 }
 
 func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Location) scheduleDTO {
@@ -56,6 +61,9 @@ func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Loca
 	if next != nil {
 		s := next.Format(time.RFC3339)
 		out.NextFire = &s
+	}
+	if advisory := scheduler.DSTAdvisory(sc.CronExpr, loc, time.Now()); advisory != "" {
+		out.DSTAdvisory = &advisory
 	}
 	return out
 }
@@ -502,7 +510,71 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "log file not found")
 		return
 	}
-	streamLogFile(w, r, run.LogPath, run.Status == "running")
+
+	// follow selects the response shape, mirroring GET /api/apps/{slug}/logs:
+	// follow=false returns a one-shot plain-text body (no SSE framing) for
+	// scripted callers; follow=true (the default) returns an event stream.
+	// Live following only happens while the run is still running; a finished
+	// run's static log is flushed once and the stream closes.
+	follow := true
+	if raw := r.URL.Query().Get("follow"); raw != "" {
+		switch raw {
+		case "true", "1":
+			follow = true
+		case "false", "0":
+			follow = false
+		default:
+			writeError(w, http.StatusBadRequest, "follow must be true or false")
+			return
+		}
+	}
+	if !follow {
+		writeLogFilePlain(w, run.LogPath, defaultLogTail)
+		return
+	}
+	if run.Status == "running" {
+		// Live run: follow the log but stop when the run reaches a terminal
+		// state, so the stream is finite and clients can read the final exit
+		// code afterwards.
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		go s.cancelWhenRunDone(ctx, cancel, runID)
+		streamLogFile(w, r.WithContext(ctx), run.LogPath, true)
+		return
+	}
+	// Finished run: a one-shot SSE dump of the static log, then close.
+	streamLogFile(w, r, run.LogPath, false)
+}
+
+// terminalRunPollInterval is how often a live run-log stream polls the run's
+// status to detect completion.
+const terminalRunPollInterval = 500 * time.Millisecond
+
+// finalLineDrainGrace gives the log follower a brief window to deliver the
+// last lines a process flushed just before exiting, before the stream closes.
+const finalLineDrainGrace = 300 * time.Millisecond
+
+// cancelWhenRunDone polls the run's status and cancels ctx once the run leaves
+// the "running" state, ending a live log-follow stream.
+func (s *Server) cancelWhenRunDone(ctx context.Context, cancel context.CancelFunc, runID int64) {
+	ticker := time.NewTicker(terminalRunPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run, err := s.store.GetScheduleRun(runID)
+			if err != nil {
+				continue
+			}
+			if run.Status != "running" {
+				time.Sleep(finalLineDrainGrace)
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 // effectiveTZLabel returns a human-readable label of the timezone that will
@@ -541,7 +613,17 @@ func paginationParams(r *http.Request, defLimit, max int) (limit, offset int) {
 type sharedDataDTO struct {
 	SourceSlug string `json:"source_slug"`
 	SourceID   int64  `json:"source_id"`
+	// Warning is set on grant under the native runtime, where the read-only
+	// mount is a convention only (the source data dir is symlinked and the
+	// filesystem still permits writes through it). Empty under the Docker
+	// runtime, which enforces read-only at the OS level.
+	Warning string `json:"warning,omitempty"`
 }
+
+// sharedDataNativeWarning explains that the read-only shared-data mount is not
+// OS-enforced under the native runtime. Surfaced on grant so operators can
+// choose the Docker runtime when they need real enforcement.
+const sharedDataNativeWarning = "Read-only is a convention under the native runtime: the source data dir is symlinked and writes through it are not blocked. Switch to the Docker runtime for OS-level read-only enforcement."
 
 // GET /api/apps/{slug}/shared-data
 func (s *Server) handleListSharedData(w http.ResponseWriter, r *http.Request) {
@@ -595,11 +677,22 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.GrantSharedData(app.ID, src.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, db.ErrSelfMount), errors.Is(err, db.ErrSharedDataCycle):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, db.ErrDuplicateMount):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	s.audit(r, "shared_data_grant", "app", app.Slug, fmt.Sprintf(`{"source":%q}`, src.Slug))
-	writeJSON(w, http.StatusCreated, sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID})
+	dto := sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID}
+	if s.cfg.Runtime.Mode != "docker" {
+		dto.Warning = sharedDataNativeWarning
+	}
+	writeJSON(w, http.StatusCreated, dto)
 }
 
 // DELETE /api/apps/{slug}/shared-data/{source_slug}
@@ -615,6 +708,10 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.store.RevokeSharedData(app.ID, src.ID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "data not mounted from this source")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

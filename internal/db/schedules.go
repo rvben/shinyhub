@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -233,15 +234,18 @@ func (s *Store) DeleteSchedule(id int64) error {
 // --- schedule_runs ---
 
 type ScheduleRun struct {
-	ID                int64
-	ScheduleID        int64
-	Status            string
-	Trigger           string
-	TriggeredByUserID *int64
-	StartedAt         time.Time
-	FinishedAt        *time.Time
-	ExitCode          int
-	LogPath           string
+	ID                int64      `json:"id"`
+	ScheduleID        int64      `json:"schedule_id"`
+	Status            string     `json:"status"`
+	Trigger           string     `json:"trigger"`
+	TriggeredByUserID *int64     `json:"triggered_by_user_id"`
+	StartedAt         time.Time  `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at"`
+	ExitCode          int        `json:"exit_code"`
+	// LogPath is the server-side filesystem path of the run's log file. It
+	// is an internal detail consumed only by the log-streaming handler and
+	// must never be serialized to API clients.
+	LogPath string `json:"-"`
 }
 
 type InsertScheduleRunParams struct {
@@ -498,18 +502,99 @@ type SharedDataMount struct {
 	CreatedAt   time.Time
 }
 
+// Shared-data grant errors. These are typed so the API layer can map them to
+// precise status codes (400/409) instead of leaking a raw 500.
+var (
+	// ErrSelfMount is returned when an app tries to mount its own data dir.
+	ErrSelfMount = errors.New("cannot mount data from self")
+	// ErrDuplicateMount is returned when the same source is already mounted.
+	ErrDuplicateMount = errors.New("data already mounted from this source")
+	// ErrSharedDataCycle is returned when a grant would close a read cycle.
+	ErrSharedDataCycle = errors.New("mount would create a circular dependency")
+)
+
 func (s *Store) GrantSharedData(consumerAppID, sourceAppID int64) error {
 	if consumerAppID == sourceAppID {
-		return fmt.Errorf("cannot mount data from self")
+		return ErrSelfMount
 	}
-	_, err := s.db.Exec(`
-		INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
-		consumerAppID, sourceAppID,
-	)
+	ctx := context.Background()
+
+	// A grant means "consumer reads source". A cycle forms if the source can
+	// already (transitively) read the consumer, so adding this edge closes a
+	// loop. The cycle check and the insert must be atomic: a dedicated
+	// connection with BEGIN IMMEDIATE takes the write lock up front so two
+	// opposing grants (a->b and b->a) serialize here instead of both passing
+	// the check before either inserts.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("grant shared data: acquire conn: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("grant shared data: begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	cyclic, err := sharedDataReaches(ctx, conn, sourceAppID, consumerAppID)
 	if err != nil {
 		return fmt.Errorf("grant shared data: %w", err)
 	}
+	if cyclic {
+		return ErrSharedDataCycle
+	}
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
+		consumerAppID, sourceAppID,
+	); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateMount
+		}
+		return fmt.Errorf("grant shared data: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("grant shared data: commit: %w", err)
+	}
+	committed = true
 	return nil
+}
+
+// rowQueryer is satisfied by *sql.DB, *sql.Conn, and *sql.Tx, letting the
+// reachability probe run either standalone or inside a grant transaction.
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// sharedDataReaches reports whether startAppID can reach targetAppID by following
+// "reads" edges (app_id -> source_app_id) transitively.
+func (s *Store) sharedDataReaches(startAppID, targetAppID int64) (bool, error) {
+	return sharedDataReaches(context.Background(), s.db, startAppID, targetAppID)
+}
+
+func sharedDataReaches(ctx context.Context, q rowQueryer, startAppID, targetAppID int64) (bool, error) {
+	var hit int
+	err := q.QueryRowContext(ctx, `
+		WITH RECURSIVE reach(id) AS (
+			SELECT source_app_id FROM app_shared_data WHERE app_id = ?
+			UNION
+			SELECT sd.source_app_id FROM app_shared_data sd
+			JOIN reach r ON sd.app_id = r.id
+		)
+		SELECT 1 FROM reach WHERE id = ? LIMIT 1`,
+		startAppID, targetAppID,
+	).Scan(&hit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) RevokeSharedData(consumerAppID, sourceAppID int64) error {

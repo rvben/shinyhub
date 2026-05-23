@@ -59,3 +59,48 @@ func TestFormatManifestSummary_FromServerShape(t *testing.T) {
 		})
 	}
 }
+
+// TestFormatHooksSkippedWarning_FromServerShape asserts the CLI surfaces the
+// server's hooks_skipped count as a developer-facing warning, and stays silent
+// when no hooks were skipped. The fixture is the literal deploy-response shape.
+func TestFormatHooksSkippedWarning_FromServerShape(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "no hooks_skipped key",
+			body: `{"slug":"demo","deploy_count":1}`,
+			want: "",
+		},
+		{
+			name: "zero is silent",
+			body: `{"hooks_skipped":0}`,
+			want: "",
+		},
+		{
+			name: "single hook",
+			body: `{"hooks_skipped":1}`,
+			want: "Warning: 1 post-deploy hook skipped under the container runtime; bake setup into the image instead.",
+		},
+		{
+			name: "multiple hooks pluralize",
+			body: `{"hooks_skipped":3}`,
+			want: "Warning: 3 post-deploy hooks skipped under the container runtime; bake setup into the image instead.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resp map[string]any
+			if err := json.Unmarshal([]byte(tt.body), &resp); err != nil {
+				t.Fatal(err)
+			}
+			got := formatHooksSkippedWarning(resp["hooks_skipped"])
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -46,7 +46,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string) (*preflightRe
 			fmt.Fprintf(errOut, "no %s found. Run 'shinyhub fleet init' to generate one from your\n"+
 				"deployed apps, or pass -f <path> to point at an existing manifest.\n",
 				filepath.Base(file))
-			return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("manifest not found: %s", file)}
+			return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("manifest not found: %s", file), Reported: true}
 		}
 		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("read %s: %w", file, err)}
 	}
@@ -86,18 +86,18 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string) (*preflightRe
 		}
 		total := len(probs) + len(srcProbs)
 		fmt.Fprintf(errOut, "\n%d problem(s) found. Nothing was changed. Fix these and re-run.\n", total)
-		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", total)}
+		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", total), Reported: true}
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
-		return nil, &ExitCodeError{Code: 3, Err: err}
+		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	apps, err := fetchApps(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
-		return nil, &ExitCodeError{Code: 3, Err: err}
+		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	caps := fetchServerCaps(cfg)
 
@@ -135,7 +135,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string) (*preflightRe
 		}
 		fmt.Fprintf(errOut, "\n%d source problem(s). Nothing was changed.\n", len(resolveProblems))
 		runCleanups()
-		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d source problem(s)", len(resolveProblems))}
+		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d source problem(s)", len(resolveProblems)), Reported: true}
 	}
 
 	observed := make([]fleet.ObservedApp, 0, len(apps))

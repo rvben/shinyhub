@@ -73,10 +73,16 @@ starts.
 | `replicas` | int ≥ 1 | Number of identical replica processes serving this app. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int 0..1000 | Per-replica admission cap for new cookieless sessions. `0` means "use the runtime default". |
 
-All three fields are optional. Omitted fields are left untouched — the
+All three fields are optional. Omitted fields are left untouched: the
 manifest does not assert a complete state, so existing values set via the
 UI or CLI survive across deploys unless the manifest explicitly overrides
 them.
+
+This bundle `shinyhub.toml` is the per-deploy layer. A [fleet
+manifest](fleet.md) sits above it: when an app is fleet-managed, a key
+declared in the fleet manifest's `[app.config]` is reconciled on every apply
+and wins over the value set here. The full order is fleet manifest > bundle
+`shinyhub.toml` > server default; see [Config precedence](fleet.md#config-precedence).
 
 Settings are applied in a single SQLite transaction. Shrinking `replicas`
 removes the now-out-of-range rows from the `replicas` table in the same

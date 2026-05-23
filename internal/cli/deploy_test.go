@@ -47,6 +47,75 @@ func TestDeploy_SlugValidation_DelegatesToSharedPackage(t *testing.T) {
 	}
 }
 
+// DEP-4: `deploy --help` must explain the things a first-time deployer needs:
+// the shinyhub.toml manifest, the slug→URL mapping, the slug rules, and that
+// the bundle excludes data/cache dirs. The --slug flag usage must state the rule.
+func TestDeploy_HelpDocumentsKeyConcepts(t *testing.T) {
+	cmd := newDeployCmd()
+	long := cmd.Long
+	for _, want := range []string{"shinyhub.toml", "/app/", "slug", "exclud"} {
+		if !strings.Contains(strings.ToLower(long), strings.ToLower(want)) {
+			t.Errorf("deploy --help Long should mention %q, got:\n%s", want, long)
+		}
+	}
+	slugFlag := cmd.Flags().Lookup("slug")
+	if slugFlag == nil {
+		t.Fatal("expected --slug flag")
+	}
+	if !strings.Contains(strings.ToLower(slugFlag.Usage), "lowercase") {
+		t.Errorf("--slug usage should describe the slug rule, got: %q", slugFlag.Usage)
+	}
+}
+
+// DEP-3: the default --wait-timeout must be generous enough to cover a
+// first-run dependency install (uv/renv can take minutes); a 60s default makes
+// a perfectly good deploy time out and read as a failure.
+func TestDeploy_WaitTimeoutDefaultIsGenerous(t *testing.T) {
+	cmd := newDeployCmd()
+	f := cmd.Flags().Lookup("wait-timeout")
+	if f == nil {
+		t.Fatal("expected --wait-timeout flag")
+	}
+	if f.DefValue != "300" {
+		t.Errorf("expected a generous default wait-timeout (300s), got %s", f.DefValue)
+	}
+}
+
+// DEP-3: when --wait times out while the app is still in a non-terminal
+// "starting" state, the message must make clear the deploy was committed and the
+// app is still booting (not failed), and point to logs - rather than reading as
+// a hard deploy failure.
+func TestWaitForHealthy_TimeoutWhileStartingReadsAsStillBooting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo" && r.URL.RawQuery == "":
+			_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo/logs":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: installing dependencies...\n\n"))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var stderrBuf bytes.Buffer
+	err := waitForHealthyWithOutput(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", 50*time.Millisecond, &stderrBuf)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "still starting") {
+		t.Errorf("timeout message should say the app is still starting, got: %q", msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "deploy") {
+		t.Errorf("timeout message should clarify the deploy was committed, got: %q", msg)
+	}
+	if !strings.Contains(msg, "--wait-timeout") {
+		t.Errorf("timeout message should suggest raising --wait-timeout, got: %q", msg)
+	}
+}
+
 func TestSanitizeSlug(t *testing.T) {
 	cases := []struct {
 		in   string

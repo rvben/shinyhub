@@ -15,6 +15,12 @@ import (
 type ExitCodeError struct {
 	Code int
 	Err  error
+	// Reported is set when the command already wrote a contextual, user-facing
+	// message for this error (e.g. a "✗ ..." preflight box or a full apply
+	// report). The fleet RunE wrapper then stays silent so the message is not
+	// duplicated; cobra's generic "Error:" line is suppressed independently via
+	// SilenceErrors on the fleet subcommand tree.
+	Reported bool
 }
 
 func (e *ExitCodeError) Error() string {

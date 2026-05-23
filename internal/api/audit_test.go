@@ -104,6 +104,48 @@ func TestAuditListAnonymousEventHasNoUsername(t *testing.T) {
 	}
 }
 
+// SCH-4: docs/schedules.md advertises GET /api/audit?action=<value>. The filter
+// must restrict results to the named action (and the total/has_more envelope
+// must reflect the filtered count, not the table total).
+func TestListAuditEvents_ActionFilter(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("admin")
+	token, _ := auth.IssueJWT(u.ID, "admin", "admin", "test-secret")
+
+	store.LogAuditEvent(db.AuditEventParams{UserID: &u.ID, Action: "deploy", ResourceType: "app", ResourceID: "a"})
+	store.LogAuditEvent(db.AuditEventParams{UserID: &u.ID, Action: "schedule_run_failed", ResourceType: "schedule", ResourceID: "b"})
+	store.LogAuditEvent(db.AuditEventParams{UserID: &u.ID, Action: "deploy", ResourceType: "app", ResourceID: "c"})
+
+	req := authedRequest(t, "GET", "/api/audit?action=schedule_run_failed", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Events  []map[string]any `json:"events"`
+		Total   int64            `json:"total"`
+		HasMore bool             `json:"has_more"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if len(resp.Events) != 1 {
+		t.Fatalf("expected 1 filtered event, got %d", len(resp.Events))
+	}
+	if resp.Events[0]["action"] != "schedule_run_failed" {
+		t.Errorf("expected action=schedule_run_failed, got %v", resp.Events[0]["action"])
+	}
+	if resp.Total != 1 {
+		t.Errorf("filtered total must count only matching rows, got %d", resp.Total)
+	}
+	if resp.HasMore {
+		t.Errorf("has_more must be false when the filtered set fits in one page")
+	}
+}
+
 func TestListAuditEvents_AdminOnly(t *testing.T) {
 	srv, store := newTestServer(t)
 	token, _ := seedUserAndJWT(t, store, "dev", "developer")

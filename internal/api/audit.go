@@ -18,12 +18,13 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := parsePagination(r)
-	events, err := s.store.ListAuditEvents(limit, offset)
+	action := r.URL.Query().Get("action")
+	events, err := s.store.ListAuditEvents(action, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	total, err := s.store.CountAuditEvents()
+	total, err := s.store.CountAuditEvents(action)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

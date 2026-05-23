@@ -18,6 +18,7 @@ type fleetApplyFlags struct {
 	quiet                    bool
 	jsonOutput               bool
 	retries                  int
+	healthTimeout            int
 }
 
 func newFleetApplyCmd() *cobra.Command {
@@ -43,7 +44,7 @@ func newFleetApplyCmd() *cobra.Command {
 			return runFleetApply(cmd, f)
 		},
 	}
-	cmd.Flags().StringVarP(&f.file, "file", "f", "shinyhub-fleet.toml", "Path to the fleet manifest")
+	cmd.Flags().StringVarP(&f.file, "file", "f", defaultFleetManifest, "Path to the fleet manifest")
 	cmd.Flags().BoolVar(&f.prune, "prune", false, "Delete fleet-owned apps absent from the manifest (removes data dir)")
 	cmd.Flags().BoolVar(&f.adopt, "adopt", false, "Take ownership of in-scope apps not yet fleet-managed")
 	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, "Show the plan and make no changes (identical to 'fleet plan')")
@@ -54,6 +55,7 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the summary + result line")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploy-bearing actions")
+	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
 	return cmd
 }
 
@@ -74,7 +76,11 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 			quiet:      f.quiet,
 			jsonOutput: f.jsonOutput,
 		}
-		return renderFleetPlan(cmd, synthetic, pf.manifest, pf.host, pf.caps, pf.diff)
+		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff)
+	}
+
+	if w := foreignAdoptWarning(pf.diff, f.adopt); w != "" {
+		fmt.Fprintln(errOut, w)
 	}
 
 	degraded := !pf.caps.FleetPreconditions
@@ -96,12 +102,12 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		willPrune := !degraded || f.allowUnsafeDegradedPrune
 		if len(candidates) > 0 && willPrune && !f.yes {
 			invocation := "shinyhub fleet apply --prune --yes"
-			if f.file != "shinyhub-fleet.toml" {
-				invocation = "shinyhub fleet apply --prune --yes -f " + f.file
+			if f.file != defaultFleetManifest {
+				invocation = "shinyhub fleet apply --prune --yes -f " + shellQuote(f.file)
 			}
 			if !isStdinTTY() {
 				fmt.Fprintf(errOut, "--prune needs interactive confirmation; re-run non-interactively with: %s\n", invocation)
-				return &ExitCodeError{Code: 1, Err: fmt.Errorf("--prune in non-interactive shell requires --yes")}
+				return &ExitCodeError{Code: 1, Err: fmt.Errorf("--prune in non-interactive shell requires --yes"), Reported: true}
 			}
 			fmt.Fprintf(errOut,
 				"This will PERMANENTLY delete %d fleet-owned app(s) and their persistent\n"+
@@ -128,10 +134,18 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		allowDegradedPrune: f.allowUnsafeDegradedPrune,
 		preconditions:      pf.caps.FleetPreconditions,
 		retries:            f.retries,
+		healthTimeout:      healthTimeoutDuration(f.healthTimeout),
 		fleetID:            pf.manifest.FleetID,
 		runID:              newRunID(),
 	}
-	results := convergeFleet(cfg, pf, opt, out)
+	// Per-app deploy progress (zip summary, health-wait lines) is diagnostic,
+	// not the report. In --json mode it must not pollute stdout, which has to
+	// stay a single parseable envelope, so it is routed to stderr.
+	progressOut := out
+	if f.jsonOutput {
+		progressOut = errOut
+	}
+	results := convergeFleet(cfg, pf, opt, progressOut)
 
 	if f.jsonOutput {
 		code, reason := applyExitCode(results)

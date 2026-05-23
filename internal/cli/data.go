@@ -188,7 +188,7 @@ func runDataPush(host, token, slug, localFile, dest string, restart bool) error 
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s: %s", resp.Status, body)
+		return httpError(token, "push data", resp, body)
 	}
 
 	return nil
@@ -210,7 +210,7 @@ func runDataLsRaw(host, token, slug string) ([]byte, error) {
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, body)
+		return nil, httpError(token, "list data", resp, body)
 	}
 	return body, nil
 }
@@ -231,7 +231,7 @@ func runDataLs(host, token, slug string) (string, error) {
 
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return "", httpError(token, "list data", resp, out)
 	}
 
 	var result struct {
@@ -285,7 +285,7 @@ func runDataRm(host, token, slug, dest string) error {
 
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return httpError(token, "remove data", resp, out)
 	}
 
 	return nil

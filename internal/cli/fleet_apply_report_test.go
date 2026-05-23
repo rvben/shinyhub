@@ -54,8 +54,11 @@ func TestRenderApplyReport_TableSummaryAndNextCommand(t *testing.T) {
 	if !strings.Contains(s, "Applied:") || !strings.Contains(s, "Result:") {
 		t.Fatalf("missing summary/result lines:\n%s", s)
 	}
-	if !strings.Contains(s, "shinyhub logs weekly --tail 200") {
-		t.Fatalf("failure must end with the logs next-command:\n%s", s)
+	if !strings.Contains(s, "shinyhub apps logs weekly --tail 200") {
+		t.Fatalf("failure must end with the apps-logs next-command:\n%s", s)
+	}
+	if strings.Contains(s, "shinyhub logs weekly") {
+		t.Fatalf("must not point at the non-existent top-level 'shinyhub logs':\n%s", s)
 	}
 }
 

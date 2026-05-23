@@ -9,6 +9,18 @@ import (
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
+// gitCmdError formats a failed git invocation as "<prefix>: <cause>", appending
+// the command's (trimmed) output on its own line when non-empty. Trimming
+// avoids the trailing blank line a raw "%w\n%s" leaves when git emits nothing;
+// the cause stays wrapped so errors.Is/As still work.
+func gitCmdError(prefix string, err error, out []byte) error {
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	return fmt.Errorf("%s: %w\n%s", prefix, err, msg)
+}
+
 // resolveGitSource clones a git source to a temp dir and returns the working
 // directory (the #subdir if any), the human ref label, the resolved commit
 // SHA, and a cleanup func the caller MUST defer (temp clones removed on exit).
@@ -64,13 +76,13 @@ func gitCloneCheckout(url, ref, subdir string) (string, error) {
 	}
 	if out, e := exec.Command("git", "clone", url, root).CombinedOutput(); e != nil {
 		_ = os.RemoveAll(root)
-		return "", fmt.Errorf("git clone: %w\n%s", e, out)
+		return "", gitCmdError("git clone", e, out)
 	}
 	co := exec.Command("git", "checkout", ref)
 	co.Dir = root
 	if out, e := co.CombinedOutput(); e != nil {
 		_ = os.RemoveAll(root)
-		return "", fmt.Errorf("git checkout %s: %w\n%s", ref, e, out)
+		return "", gitCmdError(fmt.Sprintf("git checkout %s", ref), e, out)
 	}
 	if subdir != "" {
 		sub := root + "/" + subdir
@@ -88,7 +100,7 @@ func gitRevParseHEAD(dir string) (string, error) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("git rev-parse: %w\n%s", err, out)
+		return "", gitCmdError("git rev-parse", err, out)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

@@ -527,6 +527,60 @@ func TestScheduleTimezoneFields(t *testing.T) {
 		"schedule form modal in index.html must have a sched-timezone input for the optional per-schedule timezone")
 }
 
+// TestScheduleDSTAdvisoryWired guards the DST fall-back double-fire surface.
+// The server computes the advisory and returns it on the schedule DTO as
+// dst_advisory; the schedule table must render it inline in the cron cell via
+// the dstAdvisoryMarkup helper. If the import or the call site is dropped the
+// double-fire footgun goes silent in the UI again.
+func TestScheduleDSTAdvisoryWired(t *testing.T) {
+	assertContains(t, "app.js", "import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js'",
+		"app.js must import dstAdvisoryMarkup so the schedule table can surface the DST fall-back advisory")
+	assertContains(t, "app.js", "dstAdvisoryMarkup(s)",
+		"schedule table cron cell must call dstAdvisoryMarkup(s) to render the dst_advisory from the DTO")
+	assertContains(t, "views/schedule-ui.js", "schedule.dst_advisory",
+		"schedule-ui helper must read dst_advisory from the schedule DTO computed by the server")
+}
+
+// TestSharedDataReadOnlyHelpIsHonest guards the shared-data help text. Under the
+// native runtime the read-only mount is a convention only (the source data dir
+// is symlinked and writes through it are not blocked); the Docker runtime
+// enforces it at the OS level. The Settings -> Data help must say so, otherwise
+// operators trust an enforcement guarantee that native does not provide.
+func TestSharedDataReadOnlyHelpIsHonest(t *testing.T) {
+	assertContains(t, "index.html", "convention",
+		"shared-data help must state read-only is a convention under the native runtime, not OS-enforced")
+	assertContains(t, "index.html", "Docker runtime",
+		"shared-data help must point at the Docker runtime for OS-level read-only enforcement")
+}
+
+// TestScheduleRunHistoryReadsSnakeCase guards the JSON contract for schedule
+// runs. db.ScheduleRun serializes with snake_case json tags (id, status,
+// exit_code, started_at; see internal/db/schedules.go), so the run-history
+// list in app.js must read those keys. If the frontend reverts to the old
+// PascalCase reads (run.Status, run.ExitCode, ...) the history rows render
+// blank and the per-run log buttons call the endpoint with an undefined id.
+func TestScheduleRunHistoryReadsSnakeCase(t *testing.T) {
+	for _, needle := range []string{"run.started_at", "run.status", "run.exit_code", "run.id"} {
+		assertContains(t, "app.js", needle,
+			"run-history list must read snake_case ScheduleRun fields; see internal/db/schedules.go json tags")
+	}
+	// exit_code is always serialized (int, COALESCE'd to 0), so the UI must
+	// gate the exit-code display on finished_at to avoid showing "exit 0" for
+	// a still-running run.
+	assertContains(t, "app.js", "run.finished_at",
+		"run-history must gate the exit-code display on run.finished_at; a running run has exit_code 0 but is not finished")
+	// The PascalCase reads must be gone so the regression cannot creep back.
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	for _, gone := range []string{"run.StartedAt", "run.Status", "run.ExitCode", "run.ID"} {
+		if strings.Contains(string(b), gone) {
+			t.Errorf("app.js must not read PascalCase %q; ScheduleRun is snake_case now", gone)
+		}
+	}
+}
+
 // TestFrontendConsumesBrandingObject guards the branding contract: the server
 // injects window.__SHINYHUB_BRANDING__ (see internal/ui/branding.go RenderIndex)
 // and exposes the same shape at /.shinyhub/branding.json. The SPA must read
@@ -609,4 +663,26 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 		"app detail renders the live deployment digest line")
 	assertContains(t, "index.html", "app-detail-fleet",
 		"app detail exposes the live deployment digest slot")
+}
+
+// TestTracesSurfaceWiring pins the traces panel to its testable helper module.
+// app-detail.js cannot be imported under jsdom, so the rendering logic lives in
+// views/traces-ui.js (unit-tested in jstests/traces-ui.test.js) and the panel
+// must consume it rather than re-implementing row building inline. Guards
+// TRC-2 (unsampled spans render no dead deep link), TRC-3 (date in the When
+// column), and TRC-5 (the traces-status element reports poll freshness).
+func TestTracesSurfaceWiring(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "/static/views/traces-ui.js",
+		"the traces panel imports the traces-ui helper module")
+	assertContains(t, "views/app-detail.js", "makeTraceRow",
+		"the traces panel builds rows via makeTraceRow so unsampled/date logic is shared and tested")
+	assertContains(t, "views/app-detail.js", "formatPollStatus",
+		"the traces-status element is updated with poll freshness via formatPollStatus")
+
+	// The helper module reads the sampled flag (TRC-2) and started_at (TRC-3)
+	// from the span JSON. If tracing.Span renames either, this breaks here.
+	assertContains(t, "views/traces-ui.js", "sampled",
+		"unsampled spans must be detected from the span.sampled API field")
+	assertContains(t, "views/traces-ui.js", "started_at",
+		"the When column derives from the span.started_at API field")
 }

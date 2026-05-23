@@ -88,7 +88,7 @@ func newEnvCmd() *cobra.Command {
 
 		if resp.StatusCode >= 400 {
 			out, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "set env", resp, out)
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: set %s\n", slug, key)
@@ -127,7 +127,7 @@ func newEnvCmd() *cobra.Command {
 
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "list env", resp, out)
 		}
 
 		if lsFlags.jsonOutput {
@@ -202,7 +202,7 @@ func newEnvCmd() *cobra.Command {
 
 		if resp.StatusCode >= 400 {
 			out, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("server returned %s: %s", resp.Status, out)
+			return httpError(cfg.Token, "remove env", resp, out)
 		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "%s: removed %s\n", slug, key)

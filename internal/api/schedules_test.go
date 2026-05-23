@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 )
@@ -85,6 +87,73 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 	}
 	if list[0]["name"] != "daily-job" {
 		t.Errorf("expected name=daily-job in list, got %v", list[0]["name"])
+	}
+}
+
+// TestSchedules_Create_SurfacesDSTAdvisory verifies the create response carries
+// a dst_advisory when a fixed-hour schedule will fire twice on a DST fall-back
+// day, and omits it for a UTC schedule that never overlaps a transition.
+func TestSchedules_Create_SurfacesDSTAdvisory(t *testing.T) {
+	if _, err := time.LoadLocation("Europe/Amsterdam"); err != nil {
+		t.Skipf("tz database missing: %v", err)
+	}
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "my-app", Name: "My App", OwnerID: 1}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	// 02:30 Europe/Amsterdam lands in the fall-back repeated hour.
+	body, _ := json.Marshal(map[string]any{
+		"name":            "nightly",
+		"cron_expr":       "30 2 * * *",
+		"command":         []string{"echo", "hi"},
+		"enabled":         true,
+		"timeout_seconds": 60,
+		"overlap_policy":  "skip",
+		"missed_policy":   "skip",
+		"timezone":        "Europe/Amsterdam",
+	})
+	req := authedRequest(t, "POST", "/api/apps/my-app/schedules", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	advisory, ok := created["dst_advisory"].(string)
+	if !ok || advisory == "" {
+		t.Fatalf("expected dst_advisory in response, got %v", created["dst_advisory"])
+	}
+	if !strings.Contains(advisory, "twice") {
+		t.Errorf("advisory should explain the double-fire, got %q", advisory)
+	}
+
+	// A UTC schedule must not carry an advisory.
+	body2, _ := json.Marshal(map[string]any{
+		"name":            "utc-job",
+		"cron_expr":       "30 2 * * *",
+		"command":         []string{"echo", "hi"},
+		"enabled":         true,
+		"timeout_seconds": 60,
+		"overlap_policy":  "skip",
+		"missed_policy":   "skip",
+		"timezone":        "UTC",
+	})
+	req2 := authedRequest(t, "POST", "/api/apps/my-app/schedules", body2, token)
+	rec2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var created2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &created2)
+	if _, ok := created2["dst_advisory"]; ok {
+		t.Errorf("UTC schedule must not carry dst_advisory, got %v", created2["dst_advisory"])
 	}
 }
 
@@ -235,8 +304,26 @@ func TestSchedules_RunDetail_ReturnsRow(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got["Status"] != "succeeded" {
-		t.Errorf("expected Status=succeeded, got %v", got["Status"])
+	// SCH-6: the run JSON must use snake_case keys (consistent with every
+	// other DTO the API emits) and must not leak the PascalCase field names.
+	if got["status"] != "succeeded" {
+		t.Errorf("expected status=succeeded, got %v (full: %v)", got["status"], got)
+	}
+	if _, ok := got["Status"]; ok {
+		t.Errorf("response leaks PascalCase key %q; want snake_case only", "Status")
+	}
+	for _, key := range []string{"id", "schedule_id", "trigger", "started_at", "exit_code"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("response missing snake_case key %q (full: %v)", key, got)
+		}
+	}
+	// The server-side log file path is an internal detail with no client
+	// consumer; it must not be serialized to API clients.
+	if _, ok := got["LogPath"]; ok {
+		t.Errorf("response leaks server log path under %q", "LogPath")
+	}
+	if _, ok := got["log_path"]; ok {
+		t.Errorf("response leaks server log path under %q", "log_path")
 	}
 }
 
@@ -380,6 +467,132 @@ func TestSchedules_RunLogs_RejectsCrossAppRun(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for cross-app run logs, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSchedules_RunLogs_PlainTextWhenNotFollowing asserts that a one-shot
+// (follow=false) request for a finished run's logs returns a plain-text body
+// with no SSE "data: " framing, mirroring GET /api/apps/{slug}/logs. This
+// keeps scripted callers (and `shinyhub schedule logs` without --follow) from
+// having to strip event-stream prefixes. follow=true keeps the SSE shape.
+func TestSchedules_RunLogs_PlainTextWhenNotFollowing(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, _ := store.GetAppBySlug("fetch")
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+
+	logPath := filepath.Join(t.TempDir(), "run.log")
+	if err := os.WriteFile(logPath, []byte("line-one\nline-two\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	runID, _ := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "succeeded", Trigger: "manual",
+		StartedAt: time.Now().UTC(), LogPath: logPath,
+	})
+
+	// follow=false: plain text, no "data:" framing.
+	req := authedRequest(t, "GET", fmt.Sprintf("/api/apps/fetch/schedules/%d/runs/%d/logs?follow=false", schedID, runID), nil, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("follow=false Content-Type = %q, want text/plain", ct)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "data: ") {
+		t.Errorf("follow=false body must not contain SSE framing:\n%s", body)
+	}
+	if !strings.Contains(body, "line-one") || !strings.Contains(body, "line-two") {
+		t.Errorf("follow=false body missing log lines:\n%s", body)
+	}
+
+	// follow=true: keep the SSE event-stream shape for live streaming clients.
+	req = authedRequest(t, "GET", fmt.Sprintf("/api/apps/fetch/schedules/%d/runs/%d/logs?follow=true", schedID, runID), nil, token)
+	rr = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("follow=true status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("follow=true Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
+// TestSchedules_RunLogs_FollowStopsWhenRunFinishes asserts that a follow=true
+// stream attached to a still-running run closes once the run reaches a
+// terminal state. A finite scheduled command's log stream must end when the
+// run ends; otherwise `schedule run --follow` would hang forever and could
+// never report the run's exit code.
+func TestSchedules_RunLogs_FollowStopsWhenRunFinishes(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, _ := store.GetAppBySlug("fetch")
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	logPath := filepath.Join(t.TempDir(), "run.log")
+	if err := os.WriteFile(logPath, []byte("starting\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	runID, _ := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "manual",
+		StartedAt: time.Now().UTC(), LogPath: logPath,
+	})
+
+	ts := httptest.NewServer(srv.Router())
+	defer ts.Close()
+
+	url := fmt.Sprintf("%s/api/apps/fetch/schedules/%d/runs/%d/logs?follow=true", ts.URL, schedID, runID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET logs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+
+	// Mark the run finished shortly after the stream attaches.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = store.FinishScheduleRun(db.FinishScheduleRunParams{
+			RunID: runID, Status: "failed", ExitCode: 1, FinishedAt: time.Now().UTC(),
+		})
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, rerr := io.ReadAll(resp.Body)
+		done <- rerr
+	}()
+
+	select {
+	case <-done:
+		// Stream closed after the run finished: correct.
+	case <-time.After(5 * time.Second):
+		t.Fatal("follow stream did not close after the run reached a terminal state")
 	}
 }
 
@@ -702,5 +915,163 @@ func TestSchedules_GrantSharedData_AllowedForExplicitMember(t *testing.T) {
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201 granting shared-data with explicit member access, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// grantSharedDataFixture sets up a server where "caller" (user id 2) owns two
+// apps and returns the server plus the caller's JWT. The caller owns both apps
+// so hasExplicitAccess passes for either as a mount source.
+func grantSharedDataFixture(t *testing.T) (srv *api.Server, store *db.Store, token string) {
+	t.Helper()
+	srv, store, _ = newManagerTestServer(t)
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	token, _ = auth.IssueJWT(1, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	return srv, store, token
+}
+
+// DOC-2: under the native runtime the read-only mount is a convention only -
+// the source data dir is symlinked and the filesystem still permits writes
+// through it. The grant response must carry a warning so operators learn the
+// RO contract is not OS-enforced unless they switch to the Docker runtime.
+func TestSchedules_GrantSharedData_NativeRuntimeWarnsReadOnlyConvention(t *testing.T) {
+	srv, store := newManagerTestServerWithRuntimeMode(t, "native")
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	warning, _ := resp["warning"].(string)
+	if warning == "" {
+		t.Fatalf("expected a read-only-convention warning under native runtime, got none: %s", rec.Body.String())
+	}
+	if !strings.Contains(warning, "Docker") {
+		t.Errorf("warning should point at the Docker runtime for enforcement, got %q", warning)
+	}
+}
+
+// DOC-2: under the Docker runtime the mount is OS-enforced read-only, so the
+// grant response must NOT carry the convention warning.
+func TestSchedules_GrantSharedData_DockerRuntimeOmitsWarning(t *testing.T) {
+	srv, store := newManagerTestServerWithRuntimeMode(t, "docker")
+	hashCaller, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := resp["warning"]; ok {
+		t.Errorf("docker runtime enforces RO; warning key must be absent, got %s", rec.Body.String())
+	}
+}
+
+// ERR-2: a self-mount (source == consumer) is a client error, not a 500.
+func TestSchedules_GrantSharedData_SelfMountReturns400(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "mine"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("self-mount: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ERR-3: granting the same mount twice is a conflict, not a 500 leaking the raw
+// SQLite UNIQUE-constraint text.
+func TestSchedules_GrantSharedData_DuplicateReturns409(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first grant: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body2, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req = authedRequest(t, "POST", "/api/apps/mine/shared-data", body2, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate grant: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// SCH-3: a grant that would close a read cycle (mine->other, then other->mine)
+// is a client error, not a 500.
+func TestSchedules_GrantSharedData_CycleReturns400(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	// mine reads other.
+	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
+	req := authedRequest(t, "POST", "/api/apps/mine/shared-data", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("grant mine->other: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// other reads mine would close the cycle.
+	body2, _ := json.Marshal(map[string]any{"source_slug": "mine"})
+	req = authedRequest(t, "POST", "/api/apps/other/shared-data", body2, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("cycle grant: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ERR-4: revoking a mount that was never granted is a 404, not a 500.
+func TestSchedules_RevokeSharedData_NotMountedReturns404(t *testing.T) {
+	srv, _, token := grantSharedDataFixture(t)
+
+	req := authedRequest(t, "DELETE", "/api/apps/mine/shared-data/other", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("revoke non-mounted: expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

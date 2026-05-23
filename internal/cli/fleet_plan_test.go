@@ -182,6 +182,36 @@ func TestFleetPlan_JSONEnvelope(t *testing.T) {
 	}
 }
 
+// EXIT-1: under --json --detailed-exitcode the JSON summary must report the
+// same exit code the process returns, not a hardcoded 0/"report only".
+func TestFleetPlan_JSONExitCodeMirrorsDetailedExitcode(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"ops","access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"}]`)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	// A new app => pending changes.
+	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"newp\"\nsource=\"./a\"\nvisibility=\"private\"\n")
+
+	out, err := execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--json", "--detailed-exitcode")
+	if exitCode(err) != 2 {
+		t.Fatalf("pending changes: process exit = %d, want 2", exitCode(err))
+	}
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &env); jerr != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", jerr, out)
+	}
+	summary, ok := env["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing summary object: %s", out)
+	}
+	if got := summary["exit_code"].(float64); got != 2 {
+		t.Errorf("summary.exit_code = %v, want 2 (must mirror the process exit code)", got)
+	}
+	if reason, _ := summary["exit_reason"].(string); !strings.Contains(reason, "pending") {
+		t.Errorf("summary.exit_reason = %q, want it to mention pending changes", reason)
+	}
+}
+
 func TestFleetPlan_DetailedExitcode(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `[{"slug":"ops","access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"}]`)
@@ -233,6 +263,9 @@ func TestFleetHelp_ListsPlanAndExitCodes(t *testing.T) {
 func normalizeDigests(s string) string {
 	s = regexpMustCompile(`sha256:[0-9a-f]+`).ReplaceAllString(s, "sha256:XXXX")
 	s = regexpMustCompile(`server=http://[^\s]+`).ReplaceAllString(s, "server=http://SERVER")
+	// The Next-block echoes the (absolute, t.TempDir) manifest path after -f;
+	// collapse it to a stable placeholder so the golden is deterministic.
+	s = regexpMustCompile(`-f \S+`).ReplaceAllString(s, "-f FLEET.toml")
 	return s
 }
 

@@ -70,6 +70,49 @@ func TestShare_Add_PostsSourceSlug(t *testing.T) {
 	}
 }
 
+// TestShare_Add_PrintsReadOnlyWarning verifies that when the server returns a
+// read-only-convention warning (native runtime), share add surfaces it on
+// stderr while the success line stays on stdout.
+func TestShare_Add_PrintsReadOnlyWarning(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"source_slug":"fetcher","source_id":7,"warning":"Read-only is a convention under the native runtime. Switch to the Docker runtime for OS-level read-only enforcement."}`)
+
+	cmd := newShareCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"add", "demo", "--from", "fetcher"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "mounted data from") {
+		t.Errorf("expected success line on stdout, got: %s", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "Read-only is a convention") {
+		t.Errorf("expected read-only warning on stderr, got: %s", errBuf.String())
+	}
+}
+
+// TestShare_Add_NoWarningWhenAbsent verifies stderr stays clean when the server
+// returns no warning (Docker runtime).
+func TestShare_Add_NoWarningWhenAbsent(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"source_slug":"fetcher","source_id":7}`)
+
+	cmd := newShareCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"add", "demo", "--from", "fetcher"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(errBuf.String()) != "" {
+		t.Errorf("expected clean stderr without a warning, got: %s", errBuf.String())
+	}
+}
+
 // TestShare_Add_RequiresFromFlag verifies cobra rejects add without --from.
 func TestShare_Add_RequiresFromFlag(t *testing.T) {
 	_, _, _ = setupCLITest(t)
