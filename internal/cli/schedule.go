@@ -46,16 +46,26 @@ type scheduleDTO struct {
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
 // schedules for the app and returning the ID of the first match.
 func lookupScheduleID(cfg *cliConfig, slug, name string) (int64, error) {
-	schedules, err := listSchedules(cfg, slug)
+	s, err := lookupSchedule(cfg, slug, name)
 	if err != nil {
 		return 0, err
 	}
+	return s.ID, nil
+}
+
+// lookupSchedule resolves a schedule by name to its full DTO so callers can read
+// fields beyond the ID (e.g. Enabled, to note a manual trigger of a disabled job).
+func lookupSchedule(cfg *cliConfig, slug, name string) (scheduleDTO, error) {
+	schedules, err := listSchedules(cfg, slug)
+	if err != nil {
+		return scheduleDTO{}, err
+	}
 	for _, s := range schedules {
 		if s.Name == name {
-			return s.ID, nil
+			return s, nil
 		}
 	}
-	return 0, fmt.Errorf("schedule %q not found for app %q", name, slug)
+	return scheduleDTO{}, fmt.Errorf("schedule %q not found for app %q", name, slug)
 }
 
 // listSchedulesRaw returns the raw JSON response body for an app's schedules.
@@ -383,9 +393,14 @@ func newScheduleRunCmd() *cobra.Command {
 			return err
 		}
 
-		id, err := lookupScheduleID(cfg, slug, name)
+		sched, err := lookupSchedule(cfg, slug, name)
 		if err != nil {
 			return err
+		}
+		id := sched.ID
+		if !sched.Enabled {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"note: schedule %q is disabled; manual trigger proceeded anyway\n", name)
 		}
 
 		url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/run", cfg.Host, slug, id)

@@ -380,6 +380,51 @@ func TestScheduleRun_FollowExitsZeroOnSuccess(t *testing.T) {
 	}
 }
 
+// SCH-5: triggering a DISABLED schedule still runs it (a deliberate manual
+// override), but the CLI must say so on stderr - otherwise an operator who
+// disabled the schedule sees a plain success line and assumes it was enabled.
+func TestScheduleRun_DisabledSchedulePrintsNote(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":false}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+	})
+
+	stdout, stderr, err := execCLISplit(t, "schedule", "run", "demo", "job")
+	if err != nil {
+		t.Fatalf("manual trigger of a disabled schedule should still succeed, got: %v", err)
+	}
+	if !strings.Contains(stderr, "disabled") {
+		t.Errorf("expected a disabled-schedule note on stderr, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "started") {
+		t.Errorf("expected the normal started line on stdout, got %q", stdout)
+	}
+}
+
+// An enabled schedule must NOT print the disabled note.
+func TestScheduleRun_EnabledScheduleNoNote(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":true}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+	})
+
+	_, stderr, err := execCLISplit(t, "schedule", "run", "demo", "job")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stderr, "disabled") {
+		t.Errorf("enabled schedule must not print a disabled note, got stderr=%q", stderr)
+	}
+}
+
 // TestShareCmd_RegisteredWithRoot verifies share is registered with the root command.
 func TestShareCmd_RegisteredWithRoot(t *testing.T) {
 	root := &cobra.Command{Use: "root"}
