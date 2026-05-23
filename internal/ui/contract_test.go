@@ -638,3 +638,25 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 	assertContains(t, "index.html", "app-detail-fleet",
 		"app detail exposes the live deployment digest slot")
 }
+
+// TestTracesSurfaceWiring pins the traces panel to its testable helper module.
+// app-detail.js cannot be imported under jsdom, so the rendering logic lives in
+// views/traces-ui.js (unit-tested in jstests/traces-ui.test.js) and the panel
+// must consume it rather than re-implementing row building inline. Guards
+// TRC-2 (unsampled spans render no dead deep link), TRC-3 (date in the When
+// column), and TRC-5 (the traces-status element reports poll freshness).
+func TestTracesSurfaceWiring(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "/static/views/traces-ui.js",
+		"the traces panel imports the traces-ui helper module")
+	assertContains(t, "views/app-detail.js", "makeTraceRow",
+		"the traces panel builds rows via makeTraceRow so unsampled/date logic is shared and tested")
+	assertContains(t, "views/app-detail.js", "formatPollStatus",
+		"the traces-status element is updated with poll freshness via formatPollStatus")
+
+	// The helper module reads the sampled flag (TRC-2) and started_at (TRC-3)
+	// from the span JSON. If tracing.Span renames either, this breaks here.
+	assertContains(t, "views/traces-ui.js", "sampled",
+		"unsampled spans must be detected from the span.sampled API field")
+	assertContains(t, "views/traces-ui.js", "started_at",
+		"the When column derives from the span.started_at API field")
+}

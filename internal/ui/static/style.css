@@ -2498,6 +2498,17 @@ main {
   align-self: center;
 }
 
+/* Traces — an unsampled span was never exported to the backend, so its id is
+   shown muted with no deep link (a link would resolve to "trace not found"). */
+.trace-unsampled {
+  color: var(--text-muted, #6B7AA3);
+}
+.trace-unsampled-tag {
+  color: var(--text-muted, #6B7AA3);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
 /* General tab — scaling options */
 .scaling-options {
   margin-top: 1.5rem;

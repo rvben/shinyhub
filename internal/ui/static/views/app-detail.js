@@ -3,6 +3,7 @@
 // now Overview is the only one with a renderer and other tabs show "Coming
 // soon" placeholders.
 import { makeFleetBadge, renderFleetDigest } from '/static/views/fleet-ui.js';
+import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
 
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
@@ -398,6 +399,14 @@ function renderTraces(panel, app, ctx) {
   const emptyEl   = document.getElementById('traces-empty');
   const errEl     = document.getElementById('traces-error');
   const refreshEl = document.getElementById('traces-refresh');
+  const statusEl  = document.getElementById('traces-status');
+
+  // Track the last successful poll so the status line can report freshness
+  // ("updated Xs ago"), ticked once a second between the 5 s reloads.
+  let lastLoaded = null;
+  function paintStatus() {
+    if (statusEl) statusEl.textContent = formatPollStatus(lastLoaded);
+  }
 
   async function load() {
     errEl.hidden = true;
@@ -443,39 +452,17 @@ function renderTraces(panel, app, ctx) {
     tableEl.hidden = false;
     tbodyEl.innerHTML = '';
     const linkTpl = typeof body.trace_link_template === 'string' ? body.trace_link_template : '';
+    const now = new Date();
     for (const s of spans) {
-      const tr = document.createElement('tr');
-      tr.className = (s.status >= 500 || s.error) ? 'replica-row replica-row-error' : 'replica-row';
-      const when = s.started_at ? new Date(s.started_at).toLocaleTimeString() : '—';
-      const traceCell = linkTpl
-        ? `<a href="${escapeAttr(linkTpl.replace('{trace_id}', s.trace_id))}" target="_blank" rel="noopener">${shortHex(s.trace_id)}</a>`
-        : `<code>${shortHex(s.trace_id)}</code>`;
-      tr.innerHTML = `
-        <td>${when}</td>
-        <td>${escapeText(s.method || '')}</td>
-        <td><code>${escapeText(s.path || '')}</code></td>
-        <td>${s.status || '—'}</td>
-        <td>${s.duration_ms} ms</td>
-        <td>${s.replica >= 0 ? '#' + s.replica : '—'}</td>
-        <td>${traceCell}</td>
-      `;
-      tbodyEl.appendChild(tr);
+      tbodyEl.appendChild(makeTraceRow(document, s, linkTpl, now));
     }
+    lastLoaded = now;
+    paintStatus();
   }
 
   refreshEl.addEventListener('click', load);
   load();
   const interval = setInterval(load, 5000);
-  return () => { clearInterval(interval); };
-}
-
-function escapeText(s) {
-  return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-}
-function escapeAttr(s) {
-  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-function shortHex(s) {
-  if (!s || s.length <= 12) return s || '';
-  return s.slice(0, 8) + '…';
+  const statusTick = setInterval(paintStatus, 1000);
+  return () => { clearInterval(interval); clearInterval(statusTick); };
 }
