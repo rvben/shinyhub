@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -39,13 +40,18 @@ func newManifestFakeRuntime() *manifestFakeRuntime {
 	}
 }
 
-func (f *manifestFakeRuntime) Start(_ context.Context, _ process.StartParams, _ io.Writer) (process.RunHandle, error) {
+func (f *manifestFakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pid := f.nextPID
 	f.nextPID++
 	f.stops[pid] = make(chan struct{})
-	return process.RunHandle{PID: pid}, nil
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: fmt.Sprintf("%d", pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
 }
 
 func (f *manifestFakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {

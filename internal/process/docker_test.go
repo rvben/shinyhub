@@ -104,7 +104,7 @@ func TestDockerRuntimeStart(t *testing.T) {
 	})
 
 	rt := newDockerRuntimeWithServer(t, mux)
-	handle, err := rt.Start(context.Background(), StartParams{
+	ep, err := rt.Start(context.Background(), StartParams{
 		Slug:    "my-app",
 		Dir:     t.TempDir(),
 		Command: []string{"uv", "run", "shiny", "run", "app.py"},
@@ -113,8 +113,8 @@ func TestDockerRuntimeStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if handle.ContainerID != "cont1" {
-		t.Errorf("expected cont1, got %s", handle.ContainerID)
+	if ep.Handle.ContainerID != "cont1" {
+		t.Errorf("expected cont1, got %s", ep.Handle.ContainerID)
 	}
 }
 

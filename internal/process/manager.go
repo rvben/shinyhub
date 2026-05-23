@@ -43,12 +43,15 @@ const (
 const DefaultTier = "local"
 
 type ProcessInfo struct {
-	Slug   string
-	Index  int
-	PID    int
-	Port   int
-	Status Status
-	Tier   string
+	Slug        string
+	Index       int
+	PID         int
+	Port        int
+	Status      Status
+	Tier        string
+	Provider    string
+	EndpointURL string
+	WorkerID    string
 }
 
 type StartParams struct {
@@ -264,20 +267,24 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	}
 	rt := m.runtimeFor(tier)
 
-	handle, err := rt.Start(context.Background(), p, lf)
+	ep, err := rt.Start(context.Background(), p, lf)
 	if err != nil {
 		lf.Close()
 		delete(m.logFiles, key)
 		return nil, fmt.Errorf("start process: %w", err)
 	}
+	handle := ep.Handle
 
 	info := &ProcessInfo{
-		Slug:   p.Slug,
-		Index:  p.Index,
-		PID:    handle.PID,
-		Port:   p.Port,
-		Status: StatusRunning,
-		Tier:   tier,
+		Slug:        p.Slug,
+		Index:       p.Index,
+		PID:         handle.PID,
+		Port:        p.Port,
+		Status:      StatusRunning,
+		Tier:        tier,
+		Provider:    ep.Provider,
+		EndpointURL: ep.URL,
+		WorkerID:    ep.WorkerID,
 	}
 	done := make(chan struct{})
 	pool[p.Index] = &entry{info: info, handle: handle, tier: tier, done: done}

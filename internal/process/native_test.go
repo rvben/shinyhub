@@ -3,7 +3,9 @@ package process_test
 import (
 	"bytes"
 	"context"
+	"io"
 	"os/exec"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -42,7 +44,7 @@ func TestNativeRuntimeStartStop(t *testing.T) {
 	rt := process.NewNativeRuntime()
 	var buf bytes.Buffer
 
-	handle, err := rt.Start(context.Background(), process.StartParams{
+	ep, err := rt.Start(context.Background(), process.StartParams{
 		Slug:    "test",
 		Dir:     t.TempDir(),
 		Command: []string{"sleep", "10"},
@@ -51,6 +53,7 @@ func TestNativeRuntimeStartStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	handle := ep.Handle
 	if handle.PID <= 0 {
 		t.Fatalf("expected valid PID, got %d", handle.PID)
 	}
@@ -82,7 +85,7 @@ func TestNativeRuntimeStart_InjectsAppDataEnv(t *testing.T) {
 	appData := t.TempDir()
 	var buf safeBuffer
 
-	handle, err := rt.Start(context.Background(), process.StartParams{
+	ep, err := rt.Start(context.Background(), process.StartParams{
 		Slug: "envprobe", Dir: t.TempDir(),
 		// Print env to stdout, then exec a long sleep so the test controls
 		// teardown via Signal+Wait.
@@ -92,6 +95,7 @@ func TestNativeRuntimeStart_InjectsAppDataEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	handle := ep.Handle
 	t.Cleanup(func() {
 		_ = rt.Signal(handle, syscall.SIGTERM)
 		_ = rt.Wait(context.Background(), handle)
@@ -118,7 +122,7 @@ func TestNativeRuntimeStart_PlatformOverridesUserAppDataEnv(t *testing.T) {
 	appData := t.TempDir()
 	var buf safeBuffer
 
-	handle, err := rt.Start(context.Background(), process.StartParams{
+	ep, err := rt.Start(context.Background(), process.StartParams{
 		Slug: "envprobe2", Dir: t.TempDir(),
 		Command:     []string{"sh", "-c", "printf %s \"$SHINYHUB_APP_DATA\"; exec sleep 30"},
 		Env:         []string{"SHINYHUB_APP_DATA=/evil"},
@@ -127,6 +131,7 @@ func TestNativeRuntimeStart_PlatformOverridesUserAppDataEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	handle := ep.Handle
 	t.Cleanup(func() {
 		_ = rt.Signal(handle, syscall.SIGTERM)
 		_ = rt.Wait(context.Background(), handle)
@@ -230,5 +235,27 @@ func TestNativeRuntimeWaitRespectsContextForAdoptedPID(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait did not honour ctx cancellation for adopted PID")
+	}
+}
+
+func TestNativeStartReturnsLoopbackEndpoint(t *testing.T) {
+	rt := process.NewNativeRuntime()
+	ep, err := rt.Start(context.Background(), process.StartParams{
+		Command: []string{"sleep", "30"},
+		Port:    44321,
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer rt.Signal(ep.Handle, syscall.SIGKILL)
+
+	if ep.URL != "http://127.0.0.1:44321" {
+		t.Errorf("URL = %q; want http://127.0.0.1:44321", ep.URL)
+	}
+	if ep.Provider != "native" {
+		t.Errorf("Provider = %q; want native", ep.Provider)
+	}
+	if ep.WorkerID == "" || ep.WorkerID != strconv.Itoa(ep.Handle.PID) {
+		t.Errorf("WorkerID = %q; want stringified PID %d", ep.WorkerID, ep.Handle.PID)
 	}
 }

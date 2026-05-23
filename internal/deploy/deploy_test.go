@@ -792,8 +792,14 @@ type fakeContainerRuntime struct{}
 
 func (f *fakeContainerRuntime) HostPreparesDeps() bool { return false }
 func (f *fakeContainerRuntime) AppBindHost() string    { return "0.0.0.0" }
-func (f *fakeContainerRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
-	return process.RunHandle{ContainerID: fmt.Sprintf("fake-%s-%d", p.Slug, p.Index)}, nil
+func (f *fakeContainerRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	id := fmt.Sprintf("fake-%s-%d", p.Slug, p.Index)
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "docker",
+		WorkerID: id,
+		Handle:   process.RunHandle{ContainerID: id},
+	}, nil
 }
 func (f *fakeContainerRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
 func (f *fakeContainerRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }

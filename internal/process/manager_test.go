@@ -2,9 +2,11 @@ package process_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,7 +34,7 @@ func newFakeRuntime() *fakeRuntime {
 	}
 }
 
-func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// Mirror the real-runtime contract: SHINYHUB_APP_DATA is injected by the
@@ -46,7 +48,12 @@ func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Write
 	pid := f.nextPID
 	f.nextPID++
 	f.stops[pid] = make(chan struct{})
-	return process.RunHandle{PID: pid}, nil
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: strconv.Itoa(pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
 }
 
 func (f *fakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
@@ -446,7 +453,7 @@ func newCaptureRuntime(onStart func(process.StartParams)) *captureRuntime {
 	}
 }
 
-func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	c.mu.Lock()
 	pid := c.nextPID
 	c.nextPID++
@@ -455,7 +462,12 @@ func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Wr
 	if c.onStart != nil {
 		c.onStart(p)
 	}
-	return process.RunHandle{PID: pid}, nil
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: strconv.Itoa(pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
 }
 
 func (c *captureRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {

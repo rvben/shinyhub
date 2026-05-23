@@ -6,11 +6,24 @@ import (
 	"syscall"
 )
 
+// ReplicaEndpoint is the result of starting a replica: where the proxy routes
+// to it, which provider owns it, a stable worker identity used for recovery,
+// and the operational RunHandle for Signal/Wait/Stats/removal. A remote runtime
+// returns a non-loopback URL here; local runtimes return http://127.0.0.1:<port>.
+type ReplicaEndpoint struct {
+	URL      string    // route URL, e.g. "http://127.0.0.1:34521"
+	Provider string    // "native" | "docker" (future: "remote_docker" | "fargate")
+	WorkerID string    // stable identity: PID (stringified), container ID, task ARN
+	Handle   RunHandle // operational handle
+}
+
 // Runtime abstracts how app processes are started and managed.
 // NativeRuntime uses exec.Command; DockerRuntime uses the Docker Engine API.
 type Runtime interface {
 	// Start spawns a new process. logWriter receives combined stdout+stderr.
-	Start(ctx context.Context, p StartParams, logWriter io.Writer) (RunHandle, error)
+	// The returned ReplicaEndpoint carries the route URL the proxy must use,
+	// the provider name, a durable worker identity, and the operational handle.
+	Start(ctx context.Context, p StartParams, logWriter io.Writer) (ReplicaEndpoint, error)
 	// Signal sends sig to the process or container identified by handle.
 	Signal(handle RunHandle, sig syscall.Signal) error
 	// Wait blocks until the process or container identified by handle exits.

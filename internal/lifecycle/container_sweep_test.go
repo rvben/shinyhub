@@ -15,8 +15,8 @@ import (
 // duration of the test instead of immediately transitioning to crashed.
 type blockingRuntime struct{ done chan struct{} }
 
-func (b *blockingRuntime) Start(context.Context, process.StartParams, io.Writer) (process.RunHandle, error) {
-	return process.RunHandle{}, nil
+func (b *blockingRuntime) Start(_ context.Context, _ process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{Provider: "docker", WorkerID: "", Handle: process.RunHandle{}}, nil
 }
 func (b *blockingRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
 func (b *blockingRuntime) Wait(ctx context.Context, _ process.RunHandle) error {
