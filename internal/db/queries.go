@@ -1290,9 +1290,17 @@ func (s *Store) LogAuditEvent(p AuditEventParams) {
 // CountAuditEvents returns the total number of rows in audit_events. Used by
 // the API handler to compute has_more for pagination — without a total the UI
 // can only guess and ends up disabling Next/Prev when more rows exist.
-func (s *Store) CountAuditEvents() (int64, error) {
+// A non-empty action filters the count to that action so has_more matches the
+// filtered listing.
+func (s *Store) CountAuditEvents(action string) (int64, error) {
 	var n int64
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&n); err != nil {
+	query := `SELECT COUNT(*) FROM audit_events`
+	args := []any{}
+	if action != "" {
+		query += ` WHERE action = ?`
+		args = append(args, action)
+	}
+	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count audit events: %w", err)
 	}
 	return n, nil
@@ -1301,18 +1309,25 @@ func (s *Store) CountAuditEvents() (int64, error) {
 // ListAuditEvents returns audit events ordered newest-first with pagination.
 // Each event includes the username of the acting user via a LEFT JOIN on users,
 // so anonymous events (no user_id) are still returned with a nil Username.
-func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, error) {
+// A non-empty action restricts the listing to that action.
+func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`
+	query := `
 		SELECT ae.id, ae.user_id, u.username,
 		       ae.action, ae.resource_type, ae.resource_id,
 		       ae.detail, ae.ip_address, ae.created_at
 		FROM audit_events ae
-		LEFT JOIN users u ON u.id = ae.user_id
-		ORDER BY ae.created_at DESC, ae.id DESC
-		LIMIT ? OFFSET ?`, limit, offset)
+		LEFT JOIN users u ON u.id = ae.user_id`
+	args := []any{}
+	if action != "" {
+		query += ` WHERE ae.action = ?`
+		args = append(args, action)
+	}
+	query += ` ORDER BY ae.created_at DESC, ae.id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

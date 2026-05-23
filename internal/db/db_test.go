@@ -546,7 +546,7 @@ func TestAuditLog(t *testing.T) {
 		IPAddress:    "5.6.7.8",
 	})
 
-	events, err := store.ListAuditEvents(10, 0)
+	events, err := store.ListAuditEvents("", 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditEvents: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestListAuditEvents_UsernameJoin(t *testing.T) {
 	store.LogAuditEvent(db.AuditEventParams{
 		UserID: &u.ID, Action: "deploy", ResourceType: "app", ResourceID: "myapp",
 	})
-	events, err := store.ListAuditEvents(10, 0)
+	events, err := store.ListAuditEvents("", 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditEvents: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestListAuditEvents_NilUserHasNilUsername(t *testing.T) {
 	store.LogAuditEvent(db.AuditEventParams{
 		Action: "login_failed", ResourceType: "user", ResourceID: "unknown",
 	})
-	events, err := store.ListAuditEvents(10, 0)
+	events, err := store.ListAuditEvents("", 10, 0)
 	if err != nil {
 		t.Fatalf("ListAuditEvents: %v", err)
 	}
