@@ -2,6 +2,8 @@ package db
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -60,5 +62,61 @@ func TestSharedData_TransitiveCycleReturnsSentinel(t *testing.T) {
 	err := store.GrantSharedData(c, a)
 	if !errors.Is(err, ErrSharedDataCycle) {
 		t.Fatalf("expected ErrSharedDataCycle for c->a, got %v", err)
+	}
+}
+
+// SCH-3: the cycle check and the insert must be atomic. Two opposing grants
+// (a->b and b->a) submitted concurrently must never both succeed; otherwise a
+// cycle slips past the check-then-insert window. Many independent app pairs are
+// raced to make the interleaving likely to surface a non-atomic implementation.
+func TestSharedData_ConcurrentOpposingGrantsNeverCycle(t *testing.T) {
+	store := newScheduleStore(t)
+	const pairs = 60
+
+	type pair struct{ a, b int64 }
+	ps := make([]pair, pairs)
+	for i := range ps {
+		ps[i] = pair{
+			a: newScheduleAppFixture(t, store, fmt.Sprintf("a%d", i)),
+			b: newScheduleAppFixture(t, store, fmt.Sprintf("b%d", i)),
+		}
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make([]struct{ ab, ba error }, pairs)
+	for i, p := range ps {
+		wg.Add(2)
+		go func(i int, p pair) {
+			defer wg.Done()
+			<-start
+			results[i].ab = store.GrantSharedData(p.a, p.b)
+		}(i, p)
+		go func(i int, p pair) {
+			defer wg.Done()
+			<-start
+			results[i].ba = store.GrantSharedData(p.b, p.a)
+		}(i, p)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, p := range ps {
+		bothSucceeded := results[i].ab == nil && results[i].ba == nil
+		if bothSucceeded {
+			t.Errorf("pair %d: both a->b and b->a succeeded, forming a cycle", i)
+		}
+		// Ground truth: the two apps must never be mutually reachable.
+		fwd, err := store.sharedDataReaches(p.a, p.b)
+		if err != nil {
+			t.Fatalf("pair %d reaches a->b: %v", i, err)
+		}
+		rev, err := store.sharedDataReaches(p.b, p.a)
+		if err != nil {
+			t.Fatalf("pair %d reaches b->a: %v", i, err)
+		}
+		if fwd && rev {
+			t.Errorf("pair %d: apps are mutually reachable (cycle persisted)", i)
+		}
 	}
 }

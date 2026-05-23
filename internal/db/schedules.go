@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -513,34 +514,68 @@ func (s *Store) GrantSharedData(consumerAppID, sourceAppID int64) error {
 	if consumerAppID == sourceAppID {
 		return ErrSelfMount
 	}
+	ctx := context.Background()
+
 	// A grant means "consumer reads source". A cycle forms if the source can
 	// already (transitively) read the consumer, so adding this edge closes a
-	// loop. Reject it before the insert.
-	cyclic, err := s.sharedDataReaches(sourceAppID, consumerAppID)
+	// loop. The cycle check and the insert must be atomic: a dedicated
+	// connection with BEGIN IMMEDIATE takes the write lock up front so two
+	// opposing grants (a->b and b->a) serialize here instead of both passing
+	// the check before either inserts.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("grant shared data: acquire conn: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("grant shared data: begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	cyclic, err := sharedDataReaches(ctx, conn, sourceAppID, consumerAppID)
 	if err != nil {
 		return fmt.Errorf("grant shared data: %w", err)
 	}
 	if cyclic {
 		return ErrSharedDataCycle
 	}
-	_, err = s.db.Exec(`
+	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
 		consumerAppID, sourceAppID,
-	)
-	if err != nil {
+	); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrDuplicateMount
 		}
 		return fmt.Errorf("grant shared data: %w", err)
 	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("grant shared data: commit: %w", err)
+	}
+	committed = true
 	return nil
+}
+
+// rowQueryer is satisfied by *sql.DB, *sql.Conn, and *sql.Tx, letting the
+// reachability probe run either standalone or inside a grant transaction.
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // sharedDataReaches reports whether startAppID can reach targetAppID by following
 // "reads" edges (app_id -> source_app_id) transitively.
 func (s *Store) sharedDataReaches(startAppID, targetAppID int64) (bool, error) {
+	return sharedDataReaches(context.Background(), s.db, startAppID, targetAppID)
+}
+
+func sharedDataReaches(ctx context.Context, q rowQueryer, startAppID, targetAppID int64) (bool, error) {
 	var hit int
-	err := s.db.QueryRow(`
+	err := q.QueryRowContext(ctx, `
 		WITH RECURSIVE reach(id) AS (
 			SELECT source_app_id FROM app_shared_data WHERE app_id = ?
 			UNION
