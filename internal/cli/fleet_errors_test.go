@@ -64,3 +64,17 @@ func TestFleet_FlagParseErrorIsStillReported(t *testing.T) {
 		t.Fatalf("a flag-parse error must still reach the user, got:\n%q", out)
 	}
 }
+
+// ERR-6: a flag error on the (unsilenced) fleet parent itself must appear
+// exactly once. The parent prints via cobra's own line, so the FlagErrorFunc
+// must stay quiet there to avoid reintroducing the duplicate.
+func TestFleet_ParentFlagParseErrorNotDuplicated(t *testing.T) {
+	_, _, _ = setupCLITest(t)
+	out := execFleetRealRoot(t, "fleet", "--nonexistent-flag")
+	if !strings.Contains(out, "unknown flag") {
+		t.Fatalf("parent flag-parse error must reach the user, got:\n%q", out)
+	}
+	if n := strings.Count(out, "unknown flag"); n != 1 {
+		t.Fatalf("parent flag error must appear exactly once, got %d:\n%s", n, out)
+	}
+}

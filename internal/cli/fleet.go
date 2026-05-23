@@ -29,11 +29,14 @@ func newFleetCmd() *cobra.Command {
 	cmd.AddCommand(newFleetApplyCmd())
 	cmd.AddCommand(newFleetStatusCmd())
 	// Flag-parse errors happen before RunE, so the dedupe wrapper never sees
-	// them; with SilenceErrors set on the subcommands cobra would print
-	// nothing. Print them here instead. Subcommands inherit this via the
-	// parent walk in (*cobra.Command).FlagErrorFunc.
+	// them. On a silenced subcommand cobra would print nothing, so print here;
+	// on the unsilenced fleet parent cobra prints its own line, so stay quiet
+	// to avoid a duplicate. Subcommands inherit this via the parent walk in
+	// (*cobra.Command).FlagErrorFunc.
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
-		fmt.Fprintf(c.ErrOrStderr(), "error: %v\n", err)
+		if c.SilenceErrors {
+			fmt.Fprintf(c.ErrOrStderr(), "error: %v\n", err)
+		}
 		return err
 	})
 	ownFleetErrors(cmd)
