@@ -831,6 +831,9 @@ func TestManagerDispatchesByTier(t *testing.T) {
 	if localInfo.PID < 10000 || localInfo.PID >= 50000 {
 		t.Fatalf("local replica got PID %d; expected default-runtime range", localInfo.PID)
 	}
+	if localInfo.Tier != process.DefaultTier {
+		t.Errorf("local replica Tier = %q, want %q", localInfo.Tier, process.DefaultTier)
+	}
 
 	// Explicit burst tier uses burst.
 	burstInfo, err := m.Start(process.StartParams{
@@ -842,8 +845,14 @@ func TestManagerDispatchesByTier(t *testing.T) {
 	if burstInfo.PID < 50000 {
 		t.Fatalf("burst replica got PID %d; expected burst-runtime range", burstInfo.PID)
 	}
+	if burstInfo.Tier != "burst" {
+		t.Errorf("burst replica Tier = %q, want %q", burstInfo.Tier, "burst")
+	}
 
 	// Stop dispatches to the owning runtime without panicking.
+	if err := m.StopReplica("a", 0); err != nil {
+		t.Fatalf("stop local: %v", err)
+	}
 	if err := m.StopReplica("b", 0); err != nil {
 		t.Fatalf("stop burst: %v", err)
 	}
