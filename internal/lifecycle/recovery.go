@@ -241,23 +241,20 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 	touched := make(map[string]bool)
 	for _, r := range alive {
 		app := bySlug[r.slug]
+		var rep *db.Replica
 		var port int
-		for _, rep := range replicasByApp[app.ID] {
-			if rep.Index == r.idx && rep.Port != nil {
-				port = *rep.Port
+		for _, candidate := range replicasByApp[app.ID] {
+			if candidate.Index == r.idx {
+				rep = candidate
+				if candidate.Port != nil {
+					port = *candidate.Port
+				}
 				break
 			}
 		}
 		if port == 0 {
 			slog.Warn("recovery: no port row for adopted container", "slug", r.slug, "idx", r.idx)
 			continue
-		}
-		var rep *db.Replica
-		for _, candidate := range replicasByApp[app.ID] {
-			if candidate.Index == r.idx {
-				rep = candidate
-				break
-			}
 		}
 		targetURL := ""
 		if rep != nil {

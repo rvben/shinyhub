@@ -419,7 +419,7 @@ func TestRecoveryRegistersPersistedEndpointURL(t *testing.T) {
 
 	pid := os.Getpid()
 	port := liveListener(t) // real listener so validateNativeProcess passes
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+	endpoint := fmt.Sprintf("http://worker-host.internal:%d", port)
 
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID:        app.ID,
