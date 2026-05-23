@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -107,7 +108,8 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 	_ = caps // threaded for fleet apply; the plan command is read-only and does not consume it
 
 	if f.jsonOutput {
-		if err := writeFleetPlanJSON(out, m, host, diff); err != nil {
+		code, reason := planExitInfo(f, diff)
+		if err := writeFleetPlanJSON(out, m, host, diff, code, reason); err != nil {
 			return &ExitCodeError{Code: 1, Err: err}
 		}
 		return planExit(f, diff)
@@ -160,11 +162,26 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, m *fleet.Manifest, h
 	return planExit(f, diff)
 }
 
-// planExit maps the diff to the process exit code. Default plan exit is 0
-// (report). With --detailed-exitcode: 0 none / 2 pending.
+// planExitInfo computes the process exit code and a human reason for a plan
+// run. Default plan exit is 0 ("report only"). With --detailed-exitcode it is
+// 2 ("changes are pending") when the diff has pending actions, else 0 ("no
+// changes"). The JSON summary and planExit both derive from this so the
+// reported exit_code always matches the process exit code.
+func planExitInfo(f *fleetPlanFlags, diff []fleet.AppDiff) (int, string) {
+	if f.detailedExitcode {
+		if pending(diff) {
+			return 2, "changes are pending"
+		}
+		return 0, "no changes"
+	}
+	return 0, "report only"
+}
+
+// planExit maps the diff to the process exit code.
 func planExit(f *fleetPlanFlags, diff []fleet.AppDiff) error {
-	if f.detailedExitcode && pending(diff) {
-		return &ExitCodeError{Code: 2, Err: fmt.Errorf("changes are pending")}
+	code, reason := planExitInfo(f, diff)
+	if code != 0 {
+		return &ExitCodeError{Code: code, Err: errors.New(reason)}
 	}
 	return nil
 }
@@ -207,7 +224,7 @@ type jsonEnvelope struct {
 	Summary       jsonSummary `json:"summary"`
 }
 
-func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host string, diff []fleet.AppDiff) error {
+func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host string, diff []fleet.AppDiff, exitCode int, exitReason string) error {
 	apps := make([]jsonApp, 0, len(diff))
 	// Stable ordering for machine consumers: by slug.
 	sorted := append([]fleet.AppDiff(nil), diff...)
@@ -225,7 +242,6 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 		})
 	}
 	c := countDiff(diff)
-	exitReason := "report only"
 	env := jsonEnvelope{
 		SchemaVersion: fleetPlanSchemaVersion,
 		FleetID:       m.FleetID,
@@ -237,7 +253,7 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 				"create": c.Create, "update": c.Update, "adopt": c.Adopt,
 				"delete": c.Delete, "unchanged": c.Unchanged,
 			},
-			ExitCode:   0,
+			ExitCode:   exitCode,
 			ExitReason: exitReason,
 		},
 	}
