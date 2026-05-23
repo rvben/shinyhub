@@ -35,6 +35,13 @@ func (t *errCapturingTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if err != nil || resp == nil || resp.Body == nil {
 		return resp, err
 	}
+	// A 101 Switching Protocols body must keep its io.ReadWriteCloser so
+	// httputil.ReverseProxy can tunnel the upgraded connection (WebSockets for
+	// Shiny/Streamlit). Wrapping it in an io.ReadCloser-only type would make the
+	// upgrade fail, so leave protocol-switch responses untouched.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return resp, nil
+	}
 	if rec, ok := req.Context().Value(recorderCtxKey{}).(*statusRecorder); ok {
 		resp.Body = &errCapturingBody{ReadCloser: resp.Body, rec: rec}
 	}

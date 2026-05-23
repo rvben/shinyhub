@@ -1,8 +1,12 @@
 package proxy_test
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +144,88 @@ func TestProxy_RecordsMidStreamErrorMessage(t *testing.T) {
 	}
 	if spans[0].Error == "" {
 		t.Fatalf("mid-stream drop must populate span.Error (status=%d)", spans[0].Status)
+	}
+}
+
+// TRC-1: with tracing enabled the transport wraps upstream response bodies to
+// capture mid-stream read errors. It must NOT wrap a 101 Switching Protocols
+// body: Go's httputil.ReverseProxy requires that body to implement
+// io.ReadWriteCloser before it can tunnel the WebSocket. A wrapper that exposes
+// only io.ReadCloser makes the upgrade fail (502 via ErrorHandler), breaking
+// Shiny/Streamlit apps whenever tracing is on. This drives a raw WS-style
+// upgrade through the proxy and asserts the handshake and byte tunnel succeed.
+func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "expected websocket upgrade", http.StatusBadRequest)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "no hijack", http.StatusInternalServerError)
+			return
+		}
+		conn, brw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = brw.Flush()
+		// Echo one client line back so the test confirms the tunnel is live.
+		line, err := brw.ReadString('\n')
+		if err != nil {
+			return
+		}
+		_, _ = brw.WriteString("echo:" + line)
+		_ = brw.Flush()
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
+	if err != nil {
+		t.Fatalf("dial frontend: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	fmt.Fprintf(conn, "GET /app/app/ws HTTP/1.1\r\nHost: example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+	r := bufio.NewReader(conn)
+	statusLine, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("traced WebSocket upgrade failed: status line = %q (want 101)", strings.TrimSpace(statusLine))
+	}
+	// Drain the rest of the response headers.
+	for {
+		l, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		if strings.TrimSpace(l) == "" {
+			break
+		}
+	}
+	// Confirm the byte tunnel actually carries traffic both ways.
+	fmt.Fprintf(conn, "hello\n")
+	echo, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if strings.TrimSpace(echo) != "echo:hello" {
+		t.Fatalf("tunnel echo = %q, want %q", strings.TrimSpace(echo), "echo:hello")
 	}
 }
 
