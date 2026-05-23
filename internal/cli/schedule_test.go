@@ -3,6 +3,11 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -229,6 +234,123 @@ func TestSchedule_Logs_HasFollowFlag(t *testing.T) {
 	}
 	if logs.Flags().Lookup("run") == nil {
 		t.Error("expected logs subcommand to expose --run flag")
+	}
+}
+
+// scheduleTestServer wires a minimal multi-route server for the schedule
+// follow/exit-code flows and writes a CLI config pointing at it. routes maps
+// "METHOD /path" (path only, no query) to a handler.
+func scheduleTestServer(t *testing.T, routes map[string]http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		if h, ok := routes[key]; ok {
+			h(w, r)
+			return
+		}
+		t.Errorf("unexpected request: %s", key)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgDir := filepath.Join(home, ".config", "shinyhub")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+// EXIT-3: `schedule logs --follow` consumes an SSE stream; the CLI must strip
+// the "data: " framing and drop heartbeat/blank lines so the user sees the raw
+// log content, not event-stream syntax.
+func TestScheduleLogs_FollowStripsSSEFraming(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/3/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: hello\n\n: heartbeat\n\ndata: world\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/3": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	out, err := execCLI(t, "schedule", "logs", "demo", "job", "--follow", "--run", "3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "data:") {
+		t.Errorf("output must not contain SSE framing:\n%s", out)
+	}
+	if strings.Contains(out, "heartbeat") {
+		t.Errorf("output must not contain heartbeat comments:\n%s", out)
+	}
+	if !strings.Contains(out, "hello") || !strings.Contains(out, "world") {
+		t.Errorf("output missing log content:\n%s", out)
+	}
+}
+
+// EXIT-2: `schedule run --follow` must exit non-zero when the run finishes in a
+// failure state. The exit code mirrors the scheduled command's own exit code.
+func TestScheduleRun_FollowExitsNonZeroOnFailure(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":9}]`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/9/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: boom\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/9": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"failed","exit_code":2}`)
+		},
+	})
+
+	_, err := execCLI(t, "schedule", "run", "demo", "job", "--follow")
+	if err == nil {
+		t.Fatal("expected non-nil error for a failed run")
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("exit code = %d, want 2 (the run's own exit code)", exitCode(err))
+	}
+}
+
+// A run that finishes successfully must exit 0.
+func TestScheduleRun_FollowExitsZeroOnSuccess(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":9}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":9}]`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/9/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: ok\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/9": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	if _, err := execCLI(t, "schedule", "run", "demo", "job", "--follow"); err != nil {
+		t.Fatalf("expected clean exit for a succeeded run, got: %v", err)
 	}
 }
 

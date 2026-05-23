@@ -234,15 +234,18 @@ func (s *Store) DeleteSchedule(id int64) error {
 // --- schedule_runs ---
 
 type ScheduleRun struct {
-	ID                int64
-	ScheduleID        int64
-	Status            string
-	Trigger           string
-	TriggeredByUserID *int64
-	StartedAt         time.Time
-	FinishedAt        *time.Time
-	ExitCode          int
-	LogPath           string
+	ID                int64      `json:"id"`
+	ScheduleID        int64      `json:"schedule_id"`
+	Status            string     `json:"status"`
+	Trigger           string     `json:"trigger"`
+	TriggeredByUserID *int64     `json:"triggered_by_user_id"`
+	StartedAt         time.Time  `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at"`
+	ExitCode          int        `json:"exit_code"`
+	// LogPath is the server-side filesystem path of the run's log file. It
+	// is an internal detail consumed only by the log-streaming handler and
+	// must never be serialized to API clients.
+	LogPath string `json:"-"`
 }
 
 type InsertScheduleRunParams struct {

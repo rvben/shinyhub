@@ -236,8 +236,26 @@ func TestSchedules_RunDetail_ReturnsRow(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got["Status"] != "succeeded" {
-		t.Errorf("expected Status=succeeded, got %v", got["Status"])
+	// SCH-6: the run JSON must use snake_case keys (consistent with every
+	// other DTO the API emits) and must not leak the PascalCase field names.
+	if got["status"] != "succeeded" {
+		t.Errorf("expected status=succeeded, got %v (full: %v)", got["status"], got)
+	}
+	if _, ok := got["Status"]; ok {
+		t.Errorf("response leaks PascalCase key %q; want snake_case only", "Status")
+	}
+	for _, key := range []string{"id", "schedule_id", "trigger", "started_at", "exit_code"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("response missing snake_case key %q (full: %v)", key, got)
+		}
+	}
+	// The server-side log file path is an internal detail with no client
+	// consumer; it must not be serialized to API clients.
+	if _, ok := got["LogPath"]; ok {
+		t.Errorf("response leaks server log path under %q", "LogPath")
+	}
+	if _, ok := got["log_path"]; ok {
+		t.Errorf("response leaks server log path under %q", "log_path")
 	}
 }
 
@@ -381,6 +399,66 @@ func TestSchedules_RunLogs_RejectsCrossAppRun(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for cross-app run logs, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSchedules_RunLogs_PlainTextWhenNotFollowing asserts that a one-shot
+// (follow=false) request for a finished run's logs returns a plain-text body
+// with no SSE "data: " framing, mirroring GET /api/apps/{slug}/logs. This
+// keeps scripted callers (and `shinyhub schedule logs` without --follow) from
+// having to strip event-stream prefixes. follow=true keeps the SSE shape.
+func TestSchedules_RunLogs_PlainTextWhenNotFollowing(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, _ := store.GetAppBySlug("fetch")
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "x", CronExpr: "* * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 10, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+
+	logPath := filepath.Join(t.TempDir(), "run.log")
+	if err := os.WriteFile(logPath, []byte("line-one\nline-two\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	runID, _ := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "succeeded", Trigger: "manual",
+		StartedAt: time.Now().UTC(), LogPath: logPath,
+	})
+
+	// follow=false: plain text, no "data:" framing.
+	req := authedRequest(t, "GET", fmt.Sprintf("/api/apps/fetch/schedules/%d/runs/%d/logs?follow=false", schedID, runID), nil, token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("follow=false Content-Type = %q, want text/plain", ct)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "data: ") {
+		t.Errorf("follow=false body must not contain SSE framing:\n%s", body)
+	}
+	if !strings.Contains(body, "line-one") || !strings.Contains(body, "line-two") {
+		t.Errorf("follow=false body missing log lines:\n%s", body)
+	}
+
+	// follow=true: keep the SSE event-stream shape for live streaming clients.
+	req = authedRequest(t, "GET", fmt.Sprintf("/api/apps/fetch/schedules/%d/runs/%d/logs?follow=true", schedID, runID), nil, token)
+	rr = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("follow=true status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("follow=true Content-Type = %q, want text/event-stream", ct)
 	}
 }
 

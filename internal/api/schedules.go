@@ -502,6 +502,28 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "log file not found")
 		return
 	}
+
+	// follow selects the response shape, mirroring GET /api/apps/{slug}/logs:
+	// follow=false returns a one-shot plain-text body (no SSE framing) for
+	// scripted callers; follow=true (the default) returns an event stream.
+	// Live following only happens while the run is still running; a finished
+	// run's static log is flushed once and the stream closes.
+	follow := true
+	if raw := r.URL.Query().Get("follow"); raw != "" {
+		switch raw {
+		case "true", "1":
+			follow = true
+		case "false", "0":
+			follow = false
+		default:
+			writeError(w, http.StatusBadRequest, "follow must be true or false")
+			return
+		}
+	}
+	if !follow {
+		writeLogFilePlain(w, run.LogPath, defaultLogTail)
+		return
+	}
 	streamLogFile(w, r, run.LogPath, run.Status == "running")
 }
 

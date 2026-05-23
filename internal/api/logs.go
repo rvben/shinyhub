@@ -112,6 +112,12 @@ func streamLogFile(w http.ResponseWriter, r *http.Request, path string, follow b
 	streamLogReader(w, r, process.NewLogReader(path), defaultLogTail, follow)
 }
 
+// writeLogFilePlain is a path-based wrapper for a one-shot plain-text dump of a
+// log file, used by per-run schedule log fetches with follow=false.
+func writeLogFilePlain(w http.ResponseWriter, path string, tail int) {
+	writeLogsPlain(w, process.NewLogReader(path), tail)
+}
+
 // streamLogReader writes the SSE response: initial Tail(tail), then optionally
 // Follow until the client disconnects, with periodic heartbeats.
 // When follow is false, the tail is flushed and the connection is closed

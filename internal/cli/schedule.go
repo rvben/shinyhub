@@ -436,7 +436,11 @@ func newScheduleRunCmd() *cobra.Command {
 			return fmt.Errorf("no runs found")
 		}
 
-		return streamRunLogs(cfg, slug, id, runs[0].ID, true, cmd)
+		runID := runs[0].ID
+		if err := streamRunLogs(cfg, slug, id, runID, true, cmd); err != nil {
+			return err
+		}
+		return runFinalExitError(cfg, slug, id, runID)
 	}
 	return runCmd
 }
@@ -493,7 +497,15 @@ func newScheduleLogsCmd() *cobra.Command {
 			runID = runs[0].ID
 		}
 
-		return streamRunLogs(cfg, slug, schedID, runID, follow, cmd)
+		if err := streamRunLogs(cfg, slug, schedID, runID, follow, cmd); err != nil {
+			return err
+		}
+		// When following to completion, exit with the run's final status so
+		// `schedule logs --follow` is usable as a wait-and-check in scripts.
+		if follow {
+			return runFinalExitError(cfg, slug, schedID, runID)
+		}
+		return nil
 	}
 	return logsCmd
 }
@@ -501,6 +513,11 @@ func newScheduleLogsCmd() *cobra.Command {
 // streamRunLogs streams (or dumps) logs for a specific schedule run.
 // follow=true keeps the connection open until the run finishes; follow=false
 // asks the server to send the buffered log and close.
+//
+// The server returns plain text for follow=false and an SSE event stream for
+// follow=true. When the response is an event stream the CLI unwraps the
+// "data: " framing and drops heartbeat comments and blank separator lines so
+// the user only ever sees raw log content.
 func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow bool, cmd *cobra.Command) error {
 	url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs/%d/logs?follow=%t", cfg.Host, slug, schedID, runID, follow)
 	req, err := http.NewRequest("GET", url, nil)
@@ -508,7 +525,9 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Accept", "text/event-stream")
+	if follow {
+		req.Header.Set("Accept", "text/event-stream")
+	}
 
 	// Use http.DefaultClient — no timeout for streaming log connections.
 	resp, err := http.DefaultClient.Do(req)
@@ -522,9 +541,68 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 		return fmt.Errorf("server returned %s: %s", resp.Status, out)
 	}
 
+	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		fmt.Fprintln(cmd.OutOrStdout(), scanner.Text())
+		line := scanner.Text()
+		if isSSE {
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue // blank separator or heartbeat comment
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue // ignore non-data SSE fields (event:, id:, retry:)
+			}
+			line = strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), line)
 	}
 	return scanner.Err()
+}
+
+// scheduleRunResult is the subset of a schedule run's JSON used to derive an
+// honest CLI exit code after following a run to completion.
+type scheduleRunResult struct {
+	Status   string `json:"status"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// runFinalExitError fetches the run's final state and returns an ExitCodeError
+// when the run did not succeed. A run is successful when it succeeded outright
+// or was skipped by the overlap policy; any other terminal state (failed,
+// timed_out, cancelled) is surfaced as a non-zero exit so scripted callers and
+// CI can detect failures. The exit code mirrors the scheduled command's own
+// exit code when available, falling back to 1.
+func runFinalExitError(cfg *cliConfig, slug string, schedID, runID int64) error {
+	url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs/%d", cfg.Host, slug, schedID, runID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("build run-status request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch run status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		out, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+	}
+
+	var run scheduleRunResult
+	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
+		return fmt.Errorf("decode run status: %w", err)
+	}
+
+	switch run.Status {
+	case "succeeded", "skipped_overlap":
+		return nil
+	}
+	code := run.ExitCode
+	if code == 0 {
+		code = 1
+	}
+	return &ExitCodeError{Code: code, Err: fmt.Errorf("run %s", run.Status)}
 }
