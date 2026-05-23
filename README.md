@@ -102,6 +102,11 @@ See [`shinyhub.yaml.example`](shinyhub.yaml.example) — every key is documented
 inline. Environment variables (prefixed `SHINYHUB_`) override YAML; see the
 example file for the full list.
 
+The server resolves its config file in this order: the `--config` flag
+(`shinyhub serve --config /path/to/shinyhub.yaml`, also honored by `backup`
+and `restore`), then the `SHINYHUB_CONFIG` environment variable, then
+`./shinyhub.yaml`.
+
 Minimum required:
 
 - `auth.secret` — random 32+ character string. Generate with
