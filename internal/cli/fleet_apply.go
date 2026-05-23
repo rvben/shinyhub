@@ -138,7 +138,14 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		fleetID:            pf.manifest.FleetID,
 		runID:              newRunID(),
 	}
-	results := convergeFleet(cfg, pf, opt, out)
+	// Per-app deploy progress (zip summary, health-wait lines) is diagnostic,
+	// not the report. In --json mode it must not pollute stdout, which has to
+	// stay a single parseable envelope, so it is routed to stderr.
+	progressOut := out
+	if f.jsonOutput {
+		progressOut = errOut
+	}
+	results := convergeFleet(cfg, pf, opt, progressOut)
 
 	if f.jsonOutput {
 		code, reason := applyExitCode(results)

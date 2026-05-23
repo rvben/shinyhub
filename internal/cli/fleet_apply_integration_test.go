@@ -221,6 +221,33 @@ func applyManifest(t *testing.T, fake *fleetFakeServer, manifest string, args ..
 	return execCLI(t, full...)
 }
 
+// FLT-7: --json must keep stdout a single valid JSON envelope. Per-app deploy
+// progress (zip summary, health "still starting"/"healthy" lines) must go to
+// stderr so machine consumers can pipe stdout straight into a JSON parser.
+func TestFleetApply_JSONStdoutIsPureEnvelope(t *testing.T) {
+	fake := newFleetFake(true)
+	cfg := fake.httptest(t)
+	cfgFile := writeCLIConfig(t, fake)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "src", "app.py"), "print(1)\n")
+	man := "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./src\"\nvisibility=\"private\"\n"
+	mustWrite(t, filepath.Join(dir, "shinyhub-fleet.toml"), man)
+	_ = cfg
+
+	stdout, _, err := execCLISplit(t, "--config", cfgFile, "fleet", "apply",
+		"-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--json")
+	if err != nil {
+		t.Fatalf("apply --json: %v\nstdout=%s", err, stdout)
+	}
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); jerr != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\nstdout=%q", jerr, stdout)
+	}
+	if _, ok := env["apps"]; !ok {
+		t.Fatalf("JSON envelope missing apps key:\n%s", stdout)
+	}
+}
+
 func TestFleetApply_Acceptance_CreateThenIdempotent(t *testing.T) {
 	fake := newFleetFake(true)
 	_ = fake.httptest(t)
