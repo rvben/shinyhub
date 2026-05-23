@@ -639,8 +639,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		traceSampled bool
 	)
 	if traceEnabled {
-		traceCtx, traceParent, traceSampled = tracing.StartProxySpan(r.Header.Get("traceparent"), p.traceCfg)
+		traceCtx, traceParent, traceSampled = tracing.StartProxySpan(
+			r.Header.Get("traceparent"), r.Header.Get("tracestate"), p.traceCfg)
 		r.Header.Set("traceparent", traceCtx.TraceparentHeader())
+		// Propagate vendor tracestate only when continuing a trace; on a fresh
+		// trace TraceState is empty and any stray inbound header is dropped so
+		// it can't attach stale vendor context to the new trace.
+		if traceCtx.TraceState != "" {
+			r.Header.Set("tracestate", traceCtx.TraceState)
+		} else {
+			r.Header.Del("tracestate")
+		}
 	}
 
 	defer func() {

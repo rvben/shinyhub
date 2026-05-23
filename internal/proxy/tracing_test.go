@@ -75,6 +75,64 @@ func TestProxy_DisabledTracingLeavesHeaderAlone(t *testing.T) {
 	}
 }
 
+// TRC-4: the W3C tracestate header carries vendor context (Datadog, Honeycomb,
+// etc.). When ShinyHub continues an incoming trace it must propagate tracestate
+// downstream unchanged, otherwise the vendor span graph breaks at the proxy hop.
+func TestProxy_PropagatesTracestate(t *testing.T) {
+	var gotState string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotState = r.Header.Get("tracestate")
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	req.Header.Set("tracestate", "dd=s:1;o:rum,congo=t61rcWkgMzE")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if gotState != "dd=s:1;o:rum,congo=t61rcWkgMzE" {
+		t.Errorf("tracestate not propagated downstream: got %q", gotState)
+	}
+}
+
+// TRC-4: when no valid upstream traceparent is present a fresh trace is started,
+// so any inbound tracestate references a different (or no) trace and MUST NOT be
+// forwarded — that would attach stale vendor context to a brand-new trace.
+func TestProxy_DropsTracestateOnNewTrace(t *testing.T) {
+	var gotState string
+	var sawHeader bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotState = r.Header.Get("tracestate")
+		_, sawHeader = r.Header["Tracestate"]
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	if err := p.Register("app", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	buf := tracing.NewBuffer(10, time.Second)
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+
+	req := httptest.NewRequest("GET", "/app/app/", nil)
+	// No traceparent: a new trace is started. The stray tracestate must be dropped.
+	req.Header.Set("tracestate", "dd=s:1;o:rum")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if sawHeader || gotState != "" {
+		t.Errorf("stale tracestate must be dropped on a new trace, got %q (present=%v)", gotState, sawHeader)
+	}
+}
+
 // TRC-1: an upstream connection failure (the ReverseProxy ErrorHandler path)
 // must populate span.Error so the documented field is actually emitted and the
 // error-admission branch is reachable even when no 5xx status was produced.

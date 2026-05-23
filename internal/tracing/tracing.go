@@ -242,18 +242,25 @@ func (b *Buffer) Snapshot(slug string) []Span {
 // ret.TraceparentHeader() on the outbound request so downstream services
 // (Shiny, FastAPI middleware, etc.) see ShinyHub's span as their parent.
 //
+// incomingState is the upstream `tracestate` header. Per W3C it is propagated
+// downstream unchanged ONLY when the incoming traceparent is valid (the trace
+// continues); when a fresh trace is started the stray tracestate is dropped, as
+// it references a different trace context.
+//
 // Returns (context, parentSpanIDHex, sampled). parentSpanIDHex is empty when
 // no upstream context was present.
-func StartProxySpan(incoming string, cfg config.TracingConfig) (TraceContext, string, bool) {
+func StartProxySpan(incoming, incomingState string, cfg config.TracingConfig) (TraceContext, string, bool) {
 	var (
 		traceID  [16]byte
 		parentID string
 		sampled  bool
+		state    string
 	)
 	if parsed, ok := ParseTraceparent(incoming); ok {
 		traceID = parsed.TraceID
 		parentID = hex.EncodeToString(parsed.SpanID[:])
 		sampled = parsed.Sampled()
+		state = strings.TrimSpace(incomingState)
 	} else {
 		traceID = NewTraceID()
 		sampled = SampleByTraceID(traceID, cfg.SampleRatio)
@@ -263,9 +270,10 @@ func StartProxySpan(incoming string, cfg config.TracingConfig) (TraceContext, st
 		flags = 0x01
 	}
 	return TraceContext{
-		TraceID: traceID,
-		SpanID:  NewSpanID(),
-		Flags:   flags,
+		TraceID:    traceID,
+		SpanID:     NewSpanID(),
+		Flags:      flags,
+		TraceState: state,
 	}, parentID, sampled
 }
 
