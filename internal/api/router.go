@@ -19,6 +19,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
 
@@ -43,7 +44,8 @@ type Server struct {
 	scheduler     *scheduler.Scheduler
 	secretsKey    []byte
 	traceBuffer   *tracing.Buffer
-	metrics       *metrics.Registry // nil when metrics are disabled
+	metrics       *metrics.Registry   // nil when metrics are disabled
+	tracer        *servertrace.Tracer // nil when server tracing is disabled
 	router        http.Handler
 
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
@@ -201,6 +203,13 @@ func (s *Server) SetTraceBuffer(b *tracing.Buffer) { s.traceBuffer = b }
 // it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetMetrics(m *metrics.Registry) { s.metrics = m }
 
+// SetTracer wires the OpenTelemetry tracer whose middleware records one server
+// span per API request, exported to the configured OTLP endpoint. May be nil
+// (the default) to leave server tracing disabled. Must be called before the
+// server begins handling requests; it is not safe to call concurrently with
+// ServeHTTP.
+func (s *Server) SetTracer(t *servertrace.Tracer) { s.tracer = t }
+
 // keyLookup satisfies auth.APIKeyLookup by first checking the pre-shared
 // deploy token (no DB hit) and falling back to the api_keys table. DB-backed
 // keys owned by system users are refused: those accounts authenticate only
@@ -249,6 +258,7 @@ func (s *Server) revocationChecker() auth.RevocationChecker {
 
 func (s *Server) buildRouter() http.Handler {
 	r := chi.NewRouter()
+	r.Use(s.trace)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(s.instrument)
@@ -339,6 +349,21 @@ func (s *Server) buildRouter() http.Handler {
 	})
 
 	return r
+}
+
+// trace records one OpenTelemetry server span per request when a tracer is
+// wired in. When server tracing is disabled (s.tracer == nil) it is a
+// pass-through, so tracing is strictly opt-in. Installed outermost so the span
+// covers the Logger, Recoverer, and instrument middleware as well as the
+// handler.
+func (s *Server) trace(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.tracer == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.tracer.Middleware(next).ServeHTTP(w, r)
+	})
 }
 
 // instrument records Prometheus request metrics for the API router when a

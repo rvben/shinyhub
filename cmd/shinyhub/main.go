@@ -33,6 +33,7 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/secrets"
+	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/spf13/cobra"
@@ -356,6 +357,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		slog.Info("metrics listening", "addr", mln.Addr().String())
 	}
 
+	// Server tracing: when the existing tracing config is enabled, emit OTel
+	// spans for control-plane API request handling to the same OTLP endpoint the
+	// managed apps export to. The exporter connects lazily, so Setup never blocks
+	// on the collector being reachable.
+	var tracer *servertrace.Tracer
+	if cfg.Tracing.Enabled {
+		tracer, err = servertrace.Setup(ctx, cfg.Tracing, version)
+		if err != nil {
+			return fmt.Errorf("server tracing setup: %w", err)
+		}
+		srv.SetTracer(tracer)
+		slog.Info("server tracing enabled", "endpoint", cfg.Tracing.OTLPEndpoint, "protocol", cfg.Tracing.OTLPProtocol)
+	}
+
 	// Emit a structured access log for every proxied app request. Using the
 	// Server's trusted-proxy-aware ClientIP keeps the "client" field honest
 	// when shinyhub itself sits behind an edge proxy; this is independent of
@@ -581,6 +596,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if metricsSrv != nil {
 		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
 			slog.Warn("metrics shutdown", "err", err)
+		}
+	}
+	if tracer != nil {
+		if err := tracer.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("tracer shutdown", "err", err)
 		}
 	}
 	cancelSched()
