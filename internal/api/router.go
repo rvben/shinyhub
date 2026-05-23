@@ -15,6 +15,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
+	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -42,6 +43,7 @@ type Server struct {
 	scheduler     *scheduler.Scheduler
 	secretsKey    []byte
 	traceBuffer   *tracing.Buffer
+	metrics       *metrics.Registry // nil when metrics are disabled
 	router        http.Handler
 
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
@@ -193,6 +195,12 @@ func (s *Server) SetDeployToken(t *auth.DeployToken) { s.deployToken = t }
 // Must be called before the server begins handling requests.
 func (s *Server) SetTraceBuffer(b *tracing.Buffer) { s.traceBuffer = b }
 
+// SetMetrics wires the Prometheus registry whose middleware records per-request
+// counters and latencies for the API router. May be nil (the default) to leave
+// metrics disabled. Must be called before the server begins handling requests;
+// it is not safe to call concurrently with ServeHTTP.
+func (s *Server) SetMetrics(m *metrics.Registry) { s.metrics = m }
+
 // keyLookup satisfies auth.APIKeyLookup by first checking the pre-shared
 // deploy token (no DB hit) and falling back to the api_keys table. DB-backed
 // keys owned by system users are refused: those accounts authenticate only
@@ -243,6 +251,7 @@ func (s *Server) buildRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(s.instrument)
 
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
@@ -330,6 +339,19 @@ func (s *Server) buildRouter() http.Handler {
 	})
 
 	return r
+}
+
+// instrument records Prometheus request metrics for the API router when a
+// registry is wired in. When metrics are disabled (s.metrics == nil) it is a
+// pass-through, so the instrumentation is strictly opt-in.
+func (s *Server) instrument(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.metrics == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.metrics.Middleware(next).ServeHTTP(w, r)
+	})
 }
 
 // rateLimitByUser applies the given limiter, keyed by the authenticated user

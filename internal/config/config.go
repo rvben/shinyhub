@@ -100,6 +100,7 @@ type Config struct {
 	Scheduler        SchedulerConfig
 	Defaults         DefaultsConfig
 	Tracing          TracingConfig
+	Metrics          MetricsConfig
 	Branding         BrandingConfig
 	OAuth            OAuthConfig  `yaml:"-"`
 	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
@@ -143,6 +144,23 @@ type TracingConfig struct {
 	// to the operator's tracing backend. The substring "{trace_id}" is
 	// replaced. Example: "https://grafana.example.com/explore?traceId={trace_id}".
 	TraceLinkTemplate string
+}
+
+// MetricsConfig controls the Prometheus scrape endpoint for the ShinyHub server
+// process itself (HTTP request counters/latency, Go runtime + process metrics,
+// build/version, uptime). It is distinct from the per-app CPU/RAM sampling.
+//
+// When Enabled is false the feature is a no-op: no /metrics handler and no
+// scrape listener are created. When enabled the endpoint is served on its own
+// listener at Addr, defaulting to loopback so server internals are never
+// exposed on a routable interface by accident; operators who scrape from
+// another host set Addr to a private interface behind their own network
+// controls (the conventional Prometheus pattern).
+type MetricsConfig struct {
+	Enabled bool
+	// Addr is the listen address for the dedicated metrics listener in
+	// "host:port" form. Defaults to "127.0.0.1:9090" when enabled and unset.
+	Addr string
 }
 
 // BrandingConfig customises the ShinyHub front door. Every field is optional;
@@ -312,7 +330,13 @@ type rawConfig struct {
 	Scheduler rawSchedulerConfig `yaml:"scheduler"`
 	Defaults  rawDefaultsConfig  `yaml:"defaults"`
 	Tracing   rawTracingConfig   `yaml:"tracing"`
+	Metrics   rawMetricsConfig   `yaml:"metrics"`
 	Branding  BrandingConfig     `yaml:"branding"`
+}
+
+type rawMetricsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"`
 }
 
 type rawTracingConfig struct {
@@ -404,6 +428,10 @@ func Load(path string) (*Config, error) {
 			SlowRequestMS:     derefOr(raw.Tracing.SlowRequestMS, 1000),
 			RingBufferSize:    derefOr(raw.Tracing.RingBufferSize, 200),
 			TraceLinkTemplate: raw.Tracing.TraceLinkTemplate,
+		},
+		Metrics: MetricsConfig{
+			Enabled: raw.Metrics.Enabled,
+			Addr:    raw.Metrics.Addr,
 		},
 		Branding: raw.Branding,
 		OAuth: OAuthConfig{
@@ -511,6 +539,9 @@ func Load(path string) (*Config, error) {
 	if err := normalizeTracing(&cfg.Tracing); err != nil {
 		return nil, err
 	}
+	if err := normalizeMetrics(&cfg.Metrics); err != nil {
+		return nil, err
+	}
 	// Resolve scheduler timezone. Default to UTC when unset; validate when set.
 	if cfg.Scheduler.DefaultTimezone == "" {
 		cfg.Scheduler.DefaultTimezone = "UTC"
@@ -575,6 +606,22 @@ func normalizeTracing(t *TracingConfig) error {
 	}
 	if t.TraceLinkTemplate != "" && !strings.Contains(t.TraceLinkTemplate, "{trace_id}") {
 		return fmt.Errorf("tracing.trace_link_template: %q is missing the {trace_id} placeholder; links would be broken", t.TraceLinkTemplate)
+	}
+	return nil
+}
+
+// normalizeMetrics applies the loopback default and validates the listen
+// address. When Enabled is false the block is left untouched so a malformed
+// addr in a disabled block never blocks startup.
+func normalizeMetrics(m *MetricsConfig) error {
+	if !m.Enabled {
+		return nil
+	}
+	if m.Addr == "" {
+		m.Addr = "127.0.0.1:9090"
+	}
+	if _, _, err := net.SplitHostPort(m.Addr); err != nil {
+		return fmt.Errorf("metrics.addr: %q is not a valid host:port address: %w", m.Addr, err)
 	}
 	return nil
 }
@@ -817,6 +864,16 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_TRACING_ENABLED: %w", err)
 		}
 		cfg.Tracing.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_METRICS_ENABLED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_METRICS_ENABLED: %w", err)
+		}
+		cfg.Metrics.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_METRICS_ADDR"); v != "" {
+		cfg.Metrics.Addr = v
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_OTLP_ENDPOINT"); v != "" {
 		cfg.Tracing.OTLPEndpoint = v

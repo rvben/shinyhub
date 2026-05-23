@@ -28,6 +28,7 @@ import (
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/logging"
+	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -138,6 +139,28 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitCode(err))
 	}
+}
+
+// startMetricsListener binds addr and serves the Prometheus scrape endpoint at
+// /metrics on its own listener, separate from the main application listener so
+// server internals are never exposed on the public port. The returned server is
+// already serving in a background goroutine; the caller is responsible for
+// Shutdown. The listener is returned so callers can log the resolved address
+// (useful when addr requests an ephemeral :0 port).
+func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("metrics listen %s: %w", addr, err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", reg.Handler())
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server", "err", err)
+		}
+	}()
+	return srv, ln, nil
 }
 
 func runServe(ctx context.Context, logger *slog.Logger) error {
@@ -318,6 +341,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
+
+	// Server self-telemetry: when enabled, instrument the API router and serve
+	// the Prometheus scrape endpoint on its own loopback-by-default listener.
+	var metricsSrv *http.Server
+	if cfg.Metrics.Enabled {
+		reg := metrics.New(version)
+		srv.SetMetrics(reg)
+		var mln net.Listener
+		metricsSrv, mln, err = startMetricsListener(cfg.Metrics.Addr, reg)
+		if err != nil {
+			return err
+		}
+		slog.Info("metrics listening", "addr", mln.Addr().String())
+	}
 
 	// Emit a structured access log for every proxied app request. Using the
 	// Server's trusted-proxy-aware ClientIP keeps the "client" field honest
@@ -540,6 +577,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	defer cancelShutdown()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http shutdown", "err", err)
+	}
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("metrics shutdown", "err", err)
+		}
 	}
 	cancelSched()
 	sched.Stop()
