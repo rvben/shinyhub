@@ -24,8 +24,7 @@ type DataVolume interface {
 }
 
 // LocalVolume is the single-node DataVolume: <Root>/<slug> on local disk,
-// created idempotently. This mirrors the directory the Manager created inline
-// before the abstraction existed.
+// created idempotently.
 type LocalVolume struct {
 	Root string
 }
