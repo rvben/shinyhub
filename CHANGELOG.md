@@ -24,6 +24,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.7](https://github.com/rvben/shinyhub/compare/v0.5.6...v0.5.7) - 2026-05-23
+
+### Added
+
+- **serve**: add --config flag for the server config file path ([4c29aa4](https://github.com/rvben/shinyhub/commit/4c29aa42bf1635c06b7206d682dc0b8c57205211))
+- **shared-data**: warn that native-runtime read-only is convention, not enforcement ([cc8a341](https://github.com/rvben/shinyhub/commit/cc8a341c46e1f61cf7fada5ea75708a8907210e9))
+- **schedules**: surface DST fall-back double-fire advisory in API, CLI, and UI ([7446f1f](https://github.com/rvben/shinyhub/commit/7446f1f8b2ea3c1e5ac7462d9b052fc8082fe7f0))
+- **deploy**: surface post-deploy hooks skipped under container runtime ([d913cb1](https://github.com/rvben/shinyhub/commit/d913cb1c9e92132f1a8a4bfef51430f658d9d2ec))
+- **cli**: confirm guard and --wait for apps set replica changes ([485a661](https://github.com/rvben/shinyhub/commit/485a6612fcb166f08dd2d24910114ae2fe4074d9))
+- **cli**: surface session-expired hint on 401 with a JWT credential ([b9197e8](https://github.com/rvben/shinyhub/commit/b9197e8fcf8dd106cacf560bb65ecf942ac979b4))
+- **apps**: show resolved session cap and admission ceiling in apps show ([dc10048](https://github.com/rvben/shinyhub/commit/dc10048abebc5c38557843ae08f6506df7f0e671))
+- **cli**: clearer deploy help and a forgiving --wait default ([58858a4](https://github.com/rvben/shinyhub/commit/58858a4d181db3b31eae56042404f585a1e3e93f))
+- **cli**: add manifest validate to check shinyhub.toml locally ([14b7693](https://github.com/rvben/shinyhub/commit/14b7693c14a2faf7c5671394ea18694aecb10e80))
+- **cli**: add schedule update to edit a schedule in place ([1f19fc8](https://github.com/rvben/shinyhub/commit/1f19fc8e0599e39dda06e10d558a68ad18123670))
+- **cli**: note when schedule run triggers a disabled schedule ([e325802](https://github.com/rvben/shinyhub/commit/e325802101c52323cc6d30c12dd295c3a8f368e5))
+- **audit**: filter audit events by action via ?action= query param ([87542cf](https://github.com/rvben/shinyhub/commit/87542cf365a1a432ca67b6e8b7fd62bd1299f204))
+- **tracing**: propagate W3C tracestate across the proxy hop ([30f05aa](https://github.com/rvben/shinyhub/commit/30f05aa683858ba9e3c9e4b151880d819c7a5670))
+- **ui**: mark unsampled traces, date the When column, show poll freshness ([b1b0e56](https://github.com/rvben/shinyhub/commit/b1b0e56a163c7123df36631a640e0c8f612ad6af))
+- **fleet**: add --health-timeout and per-app health progress lines ([cedb432](https://github.com/rvben/shinyhub/commit/cedb4324ad8a68d7c7524bb1d5fc3859539604d8))
+- **fleet**: init annotates foreign-owned apps and handles empty fleets ([bc368da](https://github.com/rvben/shinyhub/commit/bc368dae40d0eef142b90220eea937bada98a12a))
+- **fleet**: expose adopt_from in plan/apply JSON envelopes ([729fe1f](https://github.com/rvben/shinyhub/commit/729fe1fc99de7850c4be63b8331ea30a270e9b92))
+- **fleet**: surface foreign-fleet ownership transfer on adopt ([201e0e9](https://github.com/rvben/shinyhub/commit/201e0e9a70e0ed1dca672e4a8c2583bb0aeb6d26))
+
+### Fixed
+
+- **ui**: refresh traces poll-freshness on empty and disabled polls ([a015b44](https://github.com/rvben/shinyhub/commit/a015b4484af690177c6e00b03edc002cacb318db))
+- **tracing**: preserve 101 upgrade bodies so WebSocket tunneling works under tracing ([f3efe8a](https://github.com/rvben/shinyhub/commit/f3efe8aa409bf5071097f09fa94ba93d3aec418e))
+- **tracing**: capture mid-stream upstream errors onto the span ([7fe58b0](https://github.com/rvben/shinyhub/commit/7fe58b037cdc6fc39f74b35dedd7fdfc0a053d94))
+- **tracing**: populate span.Error on upstream proxy failures ([078d5b8](https://github.com/rvben/shinyhub/commit/078d5b8c34304676cb3885a9fa0a2d636c118e5d))
+- **fleet**: suppress visibility warning for existing apps in fleet path ([3000ce8](https://github.com/rvben/shinyhub/commit/3000ce8a6956b69487e8dc2bbbd84d9f938caf89))
+- **fleet**: route deploy progress to stderr in apply --json ([41bfb41](https://github.com/rvben/shinyhub/commit/41bfb41793a86b01956c608a2c1c72fea11e3dd7))
+- **fleet**: strip DEL control char from managed_by comment ([45e22df](https://github.com/rvben/shinyhub/commit/45e22dfc37e43422695fb2abfba80bb2a9e059e7))
+- **fleet**: sanitize server-controlled managed_by in init comment ([cf985e7](https://github.com/rvben/shinyhub/commit/cf985e796895e6bc8e690d76a9aa91a9269a93e2))
+- **fleet**: do not duplicate parent flag-parse errors ([6b2e3c4](https://github.com/rvben/shinyhub/commit/6b2e3c4692db51327f6311a4d64088f417962c9a))
+- **fleet**: keep flag-parse errors visible under SilenceErrors ([44d9cac](https://github.com/rvben/shinyhub/commit/44d9cacb8bdf30d81b2e4397bb5501d5f8bbed6f))
+- **fleet**: validate git source scheme early, trim git stderr, dedupe error output ([2b79d82](https://github.com/rvben/shinyhub/commit/2b79d829be6d5b61727e22fb373c46ef1f6f6572))
+- **fleet**: single combined apply suggestion, manifest-aware -f, glyph legends, dry-run header ([6138203](https://github.com/rvben/shinyhub/commit/6138203371017e7dddf9dffe7b144ab97a1374ed))
+- **fleet**: correct apply failure hint and make adopt ownership crash-safe ([43181fd](https://github.com/rvben/shinyhub/commit/43181fd6de488e7b6b7de34f80dbceb014ad2a45))
+- **ui**: hide schedule run exit code until the run has finished ([69d1267](https://github.com/rvben/shinyhub/commit/69d1267bf66fb9b47d06d39937424939c375429b))
+- **schedule**: terminate live run-log follow at completion; honest run_id ([b33014f](https://github.com/rvben/shinyhub/commit/b33014fa457e9e5bd784c8f8d99441cfb675c735))
+- **schedule**: honest exit codes and plain-text run logs ([49c663c](https://github.com/rvben/shinyhub/commit/49c663ca18a62529d7b98b5a9e1e3309e44b4204))
+- **fleet**: mirror detailed-exitcode exit code in plan --json summary ([831a2c0](https://github.com/rvben/shinyhub/commit/831a2c070bca0b4adeabed9d8e4f49e2f881b1ca))
+- **cli**: honor explicit --max-sessions-per-replica instead of -1 sentinel ([f5f4d34](https://github.com/rvben/shinyhub/commit/f5f4d34c35bd831f929584e3f24a151774bae6b2))
+- **cli**: unwrap server {"error":...} envelope in failure messages ([7f2ac55](https://github.com/rvben/shinyhub/commit/7f2ac55372726d611d46ad5d93a24343a33c1e83))
+- **shared-data**: make cycle check and insert atomic ([9e7e834](https://github.com/rvben/shinyhub/commit/9e7e834310892613c3f685a05fe7c251cb97abd5))
+- **shared-data**: map grant/revoke errors to precise HTTP codes ([445823d](https://github.com/rvben/shinyhub/commit/445823d3b45d47735f76ffe82a5c44242a70f7b5))
+- **config**: honor explicit-zero tracing knobs and validate strictly ([d0b48c3](https://github.com/rvben/shinyhub/commit/d0b48c36c77b43cb42e47b8bc98bdb4110cf873d))
+
 ## [0.5.6](https://github.com/rvben/shinyhub/compare/v0.5.5...v0.5.6) - 2026-05-22
 
 ### Added
