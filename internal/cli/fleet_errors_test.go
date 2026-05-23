@@ -53,3 +53,14 @@ func TestFleet_UnreportedErrorPrintedOnce(t *testing.T) {
 		t.Fatalf("invalid-id message must appear exactly once, got %d:\n%s", n, out)
 	}
 }
+
+// ERR-6: silencing cobra's own error line (to kill the duplicate) must not also
+// swallow flag-parse errors. Those happen before RunE, so the dedupe wrapper
+// never sees them; the user must still be told what flag was wrong.
+func TestFleet_FlagParseErrorIsStillReported(t *testing.T) {
+	_, _, _ = setupCLITest(t)
+	out := execFleetRealRoot(t, "fleet", "plan", "--nonexistent-flag")
+	if !strings.Contains(out, "unknown flag") {
+		t.Fatalf("a flag-parse error must still reach the user, got:\n%q", out)
+	}
+}
