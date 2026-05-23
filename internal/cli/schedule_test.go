@@ -463,6 +463,29 @@ func TestScheduleRun_EnabledScheduleNoNote(t *testing.T) {
 	}
 }
 
+// CR2-1: when a disabled schedule's manual trigger FAILS, the CLI must not claim
+// the trigger "proceeded anyway" - that note may only appear once the server has
+// actually accepted the run.
+func TestScheduleRun_DisabledScheduleFailureNoProceededNote(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":false}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"boom"}`)
+		},
+	})
+
+	_, stderr, err := execCLISplit(t, "schedule", "run", "demo", "job")
+	if err == nil {
+		t.Fatal("a failed manual trigger must return an error")
+	}
+	if strings.Contains(stderr, "proceeded") {
+		t.Errorf("must not claim the trigger proceeded when it failed, got stderr=%q", stderr)
+	}
+}
+
 // SCH-1: `schedule update` changes a schedule in place (preserving run history)
 // by PATCHing only the fields the operator actually supplied. A lone --cron must
 // not clobber the command, timeout, or any other stored field.
@@ -544,6 +567,26 @@ func TestSchedule_Update_SetTimezone(t *testing.T) {
 	}
 	if body["timezone"] != "Europe/Amsterdam" {
 		t.Errorf("expected timezone Europe/Amsterdam, got %v", body["timezone"])
+	}
+}
+
+// CR2-11: the --cmd / --cmd-json mutual exclusion must be detected by flag
+// presence, not value. An explicitly-empty --cmd alongside a valid --cmd-json
+// must be rejected rather than letting the value-based check miss the conflict
+// and PATCH an empty command.
+func TestSchedule_Update_EmptyCmdWithCmdJSONConflicts(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--cmd", "", "--cmd-json", `["python","run.py"]`})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error for --cmd together with --cmd-json, even when --cmd is empty")
+	}
+	for _, r := range *reqs {
+		if r.Method == "PATCH" {
+			t.Errorf("no PATCH should be issued on conflicting command flags")
+		}
 	}
 }
 
