@@ -121,6 +121,21 @@ func TestAppsSet_RejectsReplicasZero(t *testing.T) {
 	}
 }
 
+// Passing -1 explicitly must be rejected with the documented range error, not
+// silently swallowed as "not provided" (which previously produced a confusing
+// "at least one flag is required" no-op).
+func TestAppsSet_RejectsMaxSessionsNegativeOne(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "apps", "set", "demo", "--max-sessions-per-replica", "-1")
+	if err == nil || !strings.Contains(err.Error(), "between 0 and 1000") {
+		t.Errorf("expected 'between 0 and 1000' error for -1, got %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
+	}
+}
+
 func TestAppsSet_RejectsMaxSessionsOutOfRange(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 
@@ -145,29 +160,19 @@ func TestAppsSet_RequiresAtLeastOneFlag(t *testing.T) {
 	}
 }
 
-// TestAppsSet_MaxSessionsSentinelMinusOne verifies that explicitly passing -1
-// (the flag's own default) is treated as "not provided" and does not trigger
-// the range validator.
-func TestAppsSet_MaxSessionsSentinelMinusOne(t *testing.T) {
+// TestAppsSet_MaxSessionsNegativeOneWithOtherFlags asserts -1 is rejected even
+// when combined with a valid flag: the cap is determined by Flags().Changed,
+// so an explicit out-of-range value is a real error rather than a swallowed
+// sentinel.
+func TestAppsSet_MaxSessionsNegativeOneWithOtherFlags(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 
-	// -1 is the cobra default for max-sessions-per-replica; if it were treated
-	// as a real value it would fail the 0..1000 validator. Passing it together
-	// with --replicas should succeed and not include max_sessions_per_replica in
-	// the payload.
-	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "2", "--max-sessions-per-replica", "-1"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := execCLI(t, "apps", "set", "demo", "--replicas", "2", "--max-sessions-per-replica", "-1")
+	if err == nil || !strings.Contains(err.Error(), "between 0 and 1000") {
+		t.Errorf("expected 'between 0 and 1000' error for -1, got %v", err)
 	}
-
-	if len(*reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(*reqs))
-	}
-	var body map[string]any
-	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if _, present := body["max_sessions_per_replica"]; present {
-		t.Errorf("max_sessions_per_replica should be absent when -1 sentinel is passed, got %v", body["max_sessions_per_replica"])
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
 	}
 }
 

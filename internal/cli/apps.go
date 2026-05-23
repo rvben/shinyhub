@@ -472,7 +472,7 @@ func newAppsSetCmd() *cobra.Command {
 		"Idle timeout minutes before hibernation (-1 = reset to global default, 0 = disable, N = N minutes)")
 	cmd.Flags().IntVar(&f.replicas, "replicas", 0,
 		"Number of replica processes serving this app (>= 1)")
-	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", -1,
+	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", 0,
 		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
 	return cmd
 }
@@ -481,12 +481,6 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	hibernateChanged := cmd.Flags().Changed("hibernate-timeout")
 	replicasChanged := cmd.Flags().Changed("replicas")
 	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
-
-	// -1 is the flag's default sentinel; if the user explicitly passes -1 it
-	// means "I didn't really mean to set this", so treat it as not provided.
-	if capChanged && f.maxSessionsPerReplica == -1 {
-		capChanged = false
-	}
 
 	if !hibernateChanged && !replicasChanged && !capChanged {
 		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --max-sessions-per-replica)")
