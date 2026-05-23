@@ -527,6 +527,20 @@ func TestScheduleTimezoneFields(t *testing.T) {
 		"schedule form modal in index.html must have a sched-timezone input for the optional per-schedule timezone")
 }
 
+// TestScheduleDSTAdvisoryWired guards the DST fall-back double-fire surface.
+// The server computes the advisory and returns it on the schedule DTO as
+// dst_advisory; the schedule table must render it inline in the cron cell via
+// the dstAdvisoryMarkup helper. If the import or the call site is dropped the
+// double-fire footgun goes silent in the UI again.
+func TestScheduleDSTAdvisoryWired(t *testing.T) {
+	assertContains(t, "app.js", "import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js'",
+		"app.js must import dstAdvisoryMarkup so the schedule table can surface the DST fall-back advisory")
+	assertContains(t, "app.js", "dstAdvisoryMarkup(s)",
+		"schedule table cron cell must call dstAdvisoryMarkup(s) to render the dst_advisory from the DTO")
+	assertContains(t, "views/schedule-ui.js", "schedule.dst_advisory",
+		"schedule-ui helper must read dst_advisory from the schedule DTO computed by the server")
+}
+
 // TestScheduleRunHistoryReadsSnakeCase guards the JSON contract for schedule
 // runs. db.ScheduleRun serializes with snake_case json tags (id, status,
 // exit_code, started_at; see internal/db/schedules.go), so the run-history

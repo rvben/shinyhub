@@ -90,6 +90,73 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 	}
 }
 
+// TestSchedules_Create_SurfacesDSTAdvisory verifies the create response carries
+// a dst_advisory when a fixed-hour schedule will fire twice on a DST fall-back
+// day, and omits it for a UTC schedule that never overlaps a transition.
+func TestSchedules_Create_SurfacesDSTAdvisory(t *testing.T) {
+	if _, err := time.LoadLocation("Europe/Amsterdam"); err != nil {
+		t.Skipf("tz database missing: %v", err)
+	}
+	srv, store, _ := newManagerTestServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "my-app", Name: "My App", OwnerID: 1}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	// 02:30 Europe/Amsterdam lands in the fall-back repeated hour.
+	body, _ := json.Marshal(map[string]any{
+		"name":            "nightly",
+		"cron_expr":       "30 2 * * *",
+		"command":         []string{"echo", "hi"},
+		"enabled":         true,
+		"timeout_seconds": 60,
+		"overlap_policy":  "skip",
+		"missed_policy":   "skip",
+		"timezone":        "Europe/Amsterdam",
+	})
+	req := authedRequest(t, "POST", "/api/apps/my-app/schedules", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	advisory, ok := created["dst_advisory"].(string)
+	if !ok || advisory == "" {
+		t.Fatalf("expected dst_advisory in response, got %v", created["dst_advisory"])
+	}
+	if !strings.Contains(advisory, "twice") {
+		t.Errorf("advisory should explain the double-fire, got %q", advisory)
+	}
+
+	// A UTC schedule must not carry an advisory.
+	body2, _ := json.Marshal(map[string]any{
+		"name":            "utc-job",
+		"cron_expr":       "30 2 * * *",
+		"command":         []string{"echo", "hi"},
+		"enabled":         true,
+		"timeout_seconds": 60,
+		"overlap_policy":  "skip",
+		"missed_policy":   "skip",
+		"timezone":        "UTC",
+	})
+	req2 := authedRequest(t, "POST", "/api/apps/my-app/schedules", body2, token)
+	rec2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var created2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &created2)
+	if _, ok := created2["dst_advisory"]; ok {
+		t.Errorf("UTC schedule must not carry dst_advisory, got %v", created2["dst_advisory"])
+	}
+}
+
 // TestSchedules_Create_ValidationRejected verifies that a bad cron expression
 // causes the server to return 400.
 func TestSchedules_Create_ValidationRejected(t *testing.T) {

@@ -60,6 +60,44 @@ func TestSchedule_Add_ShellwordsCmd(t *testing.T) {
 	}
 }
 
+// TestSchedule_Add_PrintsDSTAdvisory verifies that when the server returns a
+// dst_advisory on the created schedule, the CLI surfaces it to stderr so the
+// developer learns their fixed-hour job will fire twice on the fall-back day.
+func TestSchedule_Add_PrintsDSTAdvisory(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"id":7,"name":"nightly","cron_expr":"30 2 * * *","command":["echo","hi"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip","effective_timezone":"Europe/Amsterdam","dst_advisory":"Schedule fires twice on 2025-10-26: Europe/Amsterdam observes daylight saving time and this wall-clock time recurs when clocks fall back. Use UTC or a time outside the transition hour to fire once."}`)
+
+	cmd := newScheduleCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"add", "demo", "--name", "nightly", "--cron", "30 2 * * *", "--cmd", "echo hi", "--timezone", "Europe/Amsterdam"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "fires twice on 2025-10-26") {
+		t.Errorf("expected DST advisory on stderr, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+// TestSchedule_Add_NoDSTAdvisoryWhenAbsent verifies the CLI prints no advisory
+// when the server omits dst_advisory.
+func TestSchedule_Add_NoDSTAdvisoryWhenAbsent(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"id":8,"name":"safe","cron_expr":"30 14 * * *","command":["echo","hi"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip","effective_timezone":"Europe/Amsterdam"}`)
+
+	cmd := newScheduleCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"add", "demo", "--name", "safe", "--cron", "30 14 * * *", "--cmd", "echo hi", "--timezone", "Europe/Amsterdam"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stderr.String(), "fires twice") {
+		t.Errorf("did not expect a DST advisory, got stderr=%q", stderr.String())
+	}
+}
+
 // TestSchedule_Add_CmdJSON verifies that --cmd-json parses a JSON array directly.
 func TestSchedule_Add_CmdJSON(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)

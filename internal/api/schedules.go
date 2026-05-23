@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
@@ -36,6 +37,9 @@ type scheduleDTO struct {
 	// the effective zone comes from the server default.
 	TimezoneInherited bool     `json:"timezone_inherited"`
 	NextFire         *string  `json:"next_fire,omitempty"`
+	// DSTAdvisory warns when a fixed-hour schedule in a DST-observing zone will
+	// fire twice on the fall-back day. Omitted when the schedule is safe.
+	DSTAdvisory *string `json:"dst_advisory,omitempty"`
 }
 
 func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Location) scheduleDTO {
@@ -57,6 +61,9 @@ func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Loca
 	if next != nil {
 		s := next.Format(time.RFC3339)
 		out.NextFire = &s
+	}
+	if advisory := scheduler.DSTAdvisory(sc.CronExpr, loc, time.Now()); advisory != "" {
+		out.DSTAdvisory = &advisory
 	}
 	return out
 }

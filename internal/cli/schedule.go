@@ -42,6 +42,7 @@ type scheduleDTO struct {
 	Timezone          *string  `json:"timezone"`
 	EffectiveTimezone string   `json:"effective_timezone"`
 	TimezoneInherited bool     `json:"timezone_inherited"`
+	DSTAdvisory       *string  `json:"dst_advisory"`
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
@@ -265,6 +266,9 @@ func newScheduleAddCmd() *cobra.Command {
 		var created scheduleDTO
 		if err := json.Unmarshal(out, &created); err == nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "created schedule %q (id %d)\n", created.Name, created.ID)
+			if created.DSTAdvisory != nil && *created.DSTAdvisory != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+*created.DSTAdvisory)
+			}
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q created\n", slug, flags.name)
 		}

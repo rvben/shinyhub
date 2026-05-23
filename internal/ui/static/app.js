@@ -6,6 +6,7 @@ import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
+import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -2928,7 +2929,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return `
       <tr>
         <td>${escapeHtml(s.name)}</td>
-        <td><code>${escapeHtml(s.cron_expr)}</code></td>
+        <td><code>${escapeHtml(s.cron_expr)}</code>${dstAdvisoryMarkup(s)}</td>
         <td>${escapeHtml((s.command || []).join(' '))}</td>
         <td><span class="status-pill ${s.enabled ? 'status-on' : 'status-off'}">${s.enabled ? 'on' : 'off'}</span></td>
         <td>${tzDisplay}</td>
