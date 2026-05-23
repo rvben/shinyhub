@@ -258,6 +258,7 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 		Tier:         res.Tier,
 		EndpointURL:  res.EndpointURL,
 		WorkerID:     res.WorkerID,
+		AppVersion:   deployments[0].Version,
 		DesiredState: "running",
 	})
 	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
@@ -396,6 +397,7 @@ func (w *Watcher) OnMiss(slug string) {
 					Tier:         res.Tier,
 					EndpointURL:  res.EndpointURL,
 					WorkerID:     res.WorkerID,
+					AppVersion:   deployments[0].Version,
 					DesiredState: "running",
 				})
 				started.Add(1)
