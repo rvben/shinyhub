@@ -73,6 +73,11 @@ func TestServeCmd_ConfigFlagPositionIndependent(t *testing.T) {
 	// A missing/unspecified config must NOT resolve to this file, so the
 	// sentinel error proves the flag value (not a default) was loaded.
 	t.Setenv("SHINYHUB_CONFIG", "")
+	// config.Load applies SHINYHUB_RUNTIME_MODE after reading the YAML. If the
+	// host environment has it set to a valid mode, it would overwrite the
+	// sentinel and let runServe start the real server (hang). Clear it so the
+	// sentinel runtime.mode in the file is what config validation rejects.
+	t.Setenv("SHINYHUB_RUNTIME_MODE", "")
 
 	cases := []struct {
 		name string
