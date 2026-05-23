@@ -81,6 +81,49 @@ func TestDSTAdvisory_USEasternFallBackHour(t *testing.T) {
 	}
 }
 
+// TestDSTAdvisory_InterleavedDuplicateMinutes: a multi-fire-per-hour pinned
+// schedule fires at 02:00 and 02:30 on each side of the fall-back rewind, so
+// the duplicated wall-clock times are interleaved (02:00, 02:30, 02:00, 02:30)
+// rather than back-to-back. A consecutive prev/next comparison would miss the
+// repeat; the detector must spot the duplicate over the whole window.
+func TestDSTAdvisory_InterleavedDuplicateMinutes(t *testing.T) {
+	loc := mustLoad(t, "Europe/Amsterdam")
+	ref := time.Date(2025, time.September, 1, 0, 0, 0, 0, time.UTC)
+
+	got := DSTAdvisory("0,30 2 * * *", loc, ref)
+	if got == "" {
+		t.Fatal("02:00 and 02:30 both recur on the fall-back day; want an advisory")
+	}
+	if !strings.Contains(got, "2025-10-26") {
+		t.Errorf("advisory should name the fall-back date 2025-10-26, got %q", got)
+	}
+}
+
+// TestDSTAdvisory_EveryMinuteInPinnedHour: every minute of the pinned 02:00
+// hour repeats on the fall-back day. The hour field is pinned (no wildcard), so
+// this is a real double-fire footgun and must warn even though the duplicated
+// minutes are interleaved across the rewind.
+func TestDSTAdvisory_EveryMinuteInPinnedHour(t *testing.T) {
+	loc := mustLoad(t, "Europe/Amsterdam")
+	ref := time.Date(2025, time.September, 1, 0, 0, 0, 0, time.UTC)
+
+	if got := DSTAdvisory("* 2 * * *", loc, ref); got == "" {
+		t.Fatal("every minute of 02:00 recurs on the fall-back day; want an advisory")
+	}
+}
+
+// TestDSTAdvisory_FullHourRangeIsSilent: a full-hour range (0-23) means the job
+// runs every hour, which is hourly-or-finer and intentionally silent. The hour
+// field lacks a "*" but still covers all 24 hours, so a textual "*" check would
+// wrongly warn; the detector must recognize the all-hours coverage.
+func TestDSTAdvisory_FullHourRangeIsSilent(t *testing.T) {
+	loc := mustLoad(t, "Europe/Amsterdam")
+	ref := time.Date(2025, time.September, 1, 0, 0, 0, 0, time.UTC)
+	if got := DSTAdvisory("30 0-23 * * *", loc, ref); got != "" {
+		t.Errorf("0-23 covers every hour (hourly); want no advisory, got %q", got)
+	}
+}
+
 // TestDSTAdvisory_InvalidCronIsSilent: a malformed expression is handled by
 // validation elsewhere; the advisory must not panic or invent a warning.
 func TestDSTAdvisory_InvalidCronIsSilent(t *testing.T) {
