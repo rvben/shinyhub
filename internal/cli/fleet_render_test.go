@@ -74,6 +74,26 @@ func TestForeignAdoptWarning(t *testing.T) {
 	}
 }
 
+// FLT-5: the structured plan/apply envelopes must expose adopt_from so JSON
+// automation can gate on an ownership transfer, not just the human output.
+func TestPlanJSON_ExposesAdoptFrom(t *testing.T) {
+	diff := []fleet.AppDiff{
+		{Slug: "a", Action: fleet.ActionAdopt, AdoptRequired: true, AdoptFrom: "fleet:us"},
+		{Slug: "b", Action: fleet.ActionAdopt, AdoptRequired: true}, // unmanaged
+	}
+	var buf bytes.Buffer
+	if err := writeFleetPlanJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://s", diff, 0, "report only"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"adopt_from":"fleet:us"`) {
+		t.Fatalf("plan JSON must carry adopt_from for the transferred app:\n%s", buf.String())
+	}
+	// Unmanaged adopt has no prior owner; the field is omitted, never "".
+	if strings.Contains(buf.String(), `"adopt_from":""`) {
+		t.Fatalf("unmanaged adopt must omit adopt_from, not emit empty:\n%s", buf.String())
+	}
+}
+
 // FLT-4: the "Next:" block must offer ONE combined apply command, not a
 // sequence of separate applies (--adopt already applies create/update too).
 func TestApplySuggestion_CombinesAllPendingFlags(t *testing.T) {

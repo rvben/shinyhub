@@ -300,6 +300,7 @@ type jsonApp struct {
 	Digest        jsonDigest      `json:"digest"`
 	ConfigDrift   []jsonDriftItem `json:"config_drift"`
 	AdoptRequired bool            `json:"adopt_required"`
+	AdoptFrom     string          `json:"adopt_from,omitempty"`
 	PruneEligible bool            `json:"prune_eligible"`
 }
 
@@ -332,7 +333,7 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 			Slug: d.Slug, Action: string(d.Action), Owned: d.Owned,
 			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:   drift,
-			AdoptRequired: d.AdoptRequired, PruneEligible: d.PruneEligible,
+			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		})
 	}
 	c := countDiff(diff)
