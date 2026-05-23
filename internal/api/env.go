@@ -265,11 +265,17 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		_ = s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:  app.ID,
-			Index:  r.Index,
-			PID:    &pid,
-			Port:   &port,
-			Status: "running",
+			AppID:        app.ID,
+			Index:        r.Index,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     r.Provider,
+			Tier:         r.Tier,
+			EndpointURL:  r.EndpointURL,
+			WorkerID:     r.WorkerID,
+			AppVersion:   current.Version,
+			DesiredState: "running",
 		})
 	}
 	for _, idx := range result.Failed {

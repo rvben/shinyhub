@@ -249,11 +249,16 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 
 	pid, port := res.PID, res.Port
 	_ = w.store.UpsertReplica(db.UpsertReplicaParams{
-		AppID:  app.ID,
-		Index:  index,
-		PID:    &pid,
-		Port:   &port,
-		Status: "running",
+		AppID:        app.ID,
+		Index:        index,
+		PID:          &pid,
+		Port:         &port,
+		Status:       "running",
+		Provider:     res.Provider,
+		Tier:         res.Tier,
+		EndpointURL:  res.EndpointURL,
+		WorkerID:     res.WorkerID,
+		DesiredState: "running",
 	})
 	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
 
@@ -327,7 +332,7 @@ func (w *Watcher) handleIdle(slug string) {
 
 	_ = w.mgr.Stop(slug) // stops all replicas in the pool
 	for i := 0; i < app.Replicas; i++ {
-		_ = w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped"})
+		_ = w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped"})
 	}
 	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"})
 }
@@ -382,11 +387,16 @@ func (w *Watcher) OnMiss(slug string) {
 				}
 				pid, port := res.PID, res.Port
 				_ = w.store.UpsertReplica(db.UpsertReplicaParams{
-					AppID:  app.ID,
-					Index:  idx,
-					PID:    &pid,
-					Port:   &port,
-					Status: "running",
+					AppID:        app.ID,
+					Index:        idx,
+					PID:          &pid,
+					Port:         &port,
+					Status:       "running",
+					Provider:     res.Provider,
+					Tier:         res.Tier,
+					EndpointURL:  res.EndpointURL,
+					WorkerID:     res.WorkerID,
+					DesiredState: "running",
 				})
 				started.Add(1)
 			}(i)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -406,6 +407,43 @@ func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 	a, _ := store.GetAppBySlug("shrunk-docker")
 	if a.Status != "stopped" {
 		t.Errorf("expected stopped, got %s", a.Status)
+	}
+}
+
+// TestRecoveryRegistersPersistedEndpointURL verifies that when a replica row
+// carries a non-empty endpoint_url, recovery registers that exact URL with the
+// proxy rather than constructing a fresh localhost URL from the port alone.
+func TestRecoveryRegistersPersistedEndpointURL(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "rec-endpoint")
+
+	pid := os.Getpid()
+	port := liveListener(t) // real listener so validateNativeProcess passes
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:        app.ID,
+		Index:        0,
+		PID:          &pid,
+		Port:         &port,
+		Status:       "running",
+		Provider:     "native",
+		Tier:         "local",
+		EndpointURL:  endpoint,
+		WorkerID:     strconv.Itoa(pid),
+		DesiredState: "running",
+	}); err != nil {
+		t.Fatalf("seed replica: %v", err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='rec-endpoint'`)
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+
+	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
+
+	if got := prx.ReplicaTargetURL("rec-endpoint", 0); got != endpoint {
+		t.Fatalf("recovered replica registered %q; want stored endpoint %q", got, endpoint)
 	}
 }
 
