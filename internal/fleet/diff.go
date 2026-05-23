@@ -47,6 +47,10 @@ type AppDiff struct {
 	ServerDigest  string
 	ConfigDrift   []ConfigDriftItem
 	AdoptRequired bool
+	// AdoptFrom is the current owner marker ("fleet:<id>") when this adopt
+	// would transfer the app away from a DIFFERENT fleet. Empty for a
+	// genuinely unmanaged app (no prior owner) and for non-adopt actions.
+	AdoptFrom     string
 	PruneEligible bool
 }
 
@@ -81,6 +85,11 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 		if !owned {
 			d.Action = ActionAdopt
 			d.AdoptRequired = true
+			// A non-empty marker that isn't ours means another fleet owns it;
+			// adopting transfers ownership. nil/empty means unmanaged.
+			if o.ManagedBy != nil && *o.ManagedBy != "" {
+				d.AdoptFrom = *o.ManagedBy
+			}
 			out = append(out, d)
 			continue
 		}

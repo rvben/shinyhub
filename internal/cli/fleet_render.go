@@ -40,12 +40,37 @@ func glyphWord(a fleet.Action) (string, string) {
 	return "?", string(a)
 }
 
+// foreignAdoptWarning returns a multi-line warning naming every app that
+// --adopt would TRANSFER away from another fleet, or "" when adopt is off or
+// no adopt target is foreign-owned. Adopting an unmanaged app is silent (it
+// has no prior owner); transferring one another fleet believes it owns is the
+// surprising, destructive-to-the-other-fleet case worth flagging.
+func foreignAdoptWarning(diff []fleet.AppDiff, adopt bool) string {
+	if !adopt {
+		return ""
+	}
+	var lines []string
+	for _, d := range diff {
+		if d.Action == fleet.ActionAdopt && d.AdoptFrom != "" {
+			lines = append(lines, fmt.Sprintf("    %s (currently %s)", d.Slug, d.AdoptFrom))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("warning: --adopt will TRANSFER %s from another fleet to this one:\n%s",
+		plural(len(lines), "app"), strings.Join(lines, "\n"))
+}
+
 func reasonText(d fleet.AppDiff) string {
 	switch d.Action {
 	case fleet.ActionCreate:
 		return "new"
 	case fleet.ActionAdopt:
-		return "present, not owned by this fleet (needs --adopt)"
+		if d.AdoptFrom != "" {
+			return fmt.Sprintf("owned by %s; --adopt will TRANSFER ownership to this fleet", d.AdoptFrom)
+		}
+		return "unmanaged, not owned by this fleet (needs --adopt)"
 	case fleet.ActionUnchanged:
 		return "unchanged"
 	case fleet.ActionDelete:

@@ -31,6 +31,49 @@ func fullPlanDiff() []fleet.AppDiff {
 	}
 }
 
+// FLT-5: the plan reason for an adopt must distinguish a genuinely unmanaged
+// app from one currently owned by a DIFFERENT fleet (an ownership transfer).
+func TestReasonText_AdoptDistinguishesForeignFleet(t *testing.T) {
+	unmanaged := reasonText(fleet.AppDiff{Action: fleet.ActionAdopt, AdoptRequired: true})
+	if !strings.Contains(unmanaged, "unmanaged") {
+		t.Fatalf("unmanaged adopt reason = %q, want it to say 'unmanaged'", unmanaged)
+	}
+	if strings.Contains(strings.ToLower(unmanaged), "transfer") {
+		t.Fatalf("unmanaged adopt reason = %q, must not threaten an ownership transfer", unmanaged)
+	}
+	foreign := reasonText(fleet.AppDiff{Action: fleet.ActionAdopt, AdoptRequired: true, AdoptFrom: "fleet:us"})
+	if !strings.Contains(foreign, "fleet:us") {
+		t.Fatalf("foreign adopt reason = %q, want it to name the current owner fleet:us", foreign)
+	}
+	if !strings.Contains(strings.ToLower(foreign), "transfer") {
+		t.Fatalf("foreign adopt reason = %q, want it to warn of an ownership transfer", foreign)
+	}
+}
+
+// FLT-5: `fleet apply --adopt` must warn before transferring apps owned by
+// another fleet, listing each app and its current owner. Without --adopt, or
+// with no foreign-owned adopt targets, the warning is empty.
+func TestForeignAdoptWarning(t *testing.T) {
+	diff := []fleet.AppDiff{
+		{Slug: "a", Action: fleet.ActionAdopt, AdoptFrom: "fleet:us"},
+		{Slug: "b", Action: fleet.ActionAdopt}, // unmanaged, not a transfer
+		{Slug: "c", Action: fleet.ActionUpdateSource},
+	}
+	if w := foreignAdoptWarning(diff, false); w != "" {
+		t.Fatalf("without --adopt the warning must be empty, got %q", w)
+	}
+	w := foreignAdoptWarning(diff, true)
+	if !strings.Contains(w, "a") || !strings.Contains(w, "fleet:us") {
+		t.Fatalf("warning must name the app and its current owner, got %q", w)
+	}
+	if strings.Contains(w, "\"b\"") || strings.Contains(w, " b ") {
+		t.Fatalf("unmanaged app b must not be listed as a transfer, got %q", w)
+	}
+	if none := foreignAdoptWarning([]fleet.AppDiff{{Slug: "x", Action: fleet.ActionAdopt}}, true); none != "" {
+		t.Fatalf("no foreign-owned targets => empty warning, got %q", none)
+	}
+}
+
 // FLT-4: the "Next:" block must offer ONE combined apply command, not a
 // sequence of separate applies (--adopt already applies create/update too).
 func TestApplySuggestion_CombinesAllPendingFlags(t *testing.T) {

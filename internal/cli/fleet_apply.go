@@ -77,6 +77,10 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff)
 	}
 
+	if w := foreignAdoptWarning(pf.diff, f.adopt); w != "" {
+		fmt.Fprintln(errOut, w)
+	}
+
 	degraded := !pf.caps.FleetPreconditions
 	if degraded {
 		fmt.Fprintln(errOut, "warning: server does not support fleet preconditions; "+
