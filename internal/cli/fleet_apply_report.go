@@ -140,7 +140,7 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 	for _, r := range res {
 		switch r.status {
 		case statusFailed:
-			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub logs %s --tail 200\n", r.slug, r.err, r.slug)
+			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub apps logs %s --tail 200\n", r.slug, r.err, r.slug)
 		case statusConflict:
 			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub fleet plan   (re-review before re-applying)\n", r.slug, r.err)
 		}

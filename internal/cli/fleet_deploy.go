@@ -20,13 +20,23 @@ const fleetHealthTimeout = 120 * time.Second
 // and returns its freshly promoted content_digest. Returning the post-deploy
 // digest lets a same-run config PATCH carry a precondition built from the
 // deployment this run just performed (otherwise it would 409 against us).
-func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer, runID string) (string, error) {
+//
+// committed reports whether the server accepted the bundle: it is true only
+// when POST /api/apps/{slug}/deploy returned 2xx, in which case the bundle is
+// live even if a later step (health wait / digest readback) then fails. A
+// non-2xx response is reported committed=false because the deploy endpoint
+// returns 500 both BEFORE promotion (BeginDeployment, quota, deploy.Run then
+// restore) and AFTER it (PromoteDeployment record failure, manifest schedule
+// apply), so the status alone cannot tell whether the new bundle went live -
+// callers that care (adopt) resolve that authoritatively with a digest
+// readback.
+func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer, runID string) (promoted string, committed bool, err error) {
 	if err := ensureFleetApp(cfg, slug, visibility, out); err != nil {
-		return "", err
+		return "", false, err
 	}
 	buf, summary, err := zipDir(dir)
 	if err != nil {
-		return "", fmt.Errorf("bundle %s: %w", slug, err)
+		return "", false, fmt.Errorf("bundle %s: %w", slug, err)
 	}
 	if summary != "" {
 		fmt.Fprintf(out, "  %s: %s\n", slug, summary)
@@ -36,17 +46,17 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("bundle", "bundle.zip")
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if _, err := io.Copy(part, buf); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := writer.Close(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -55,18 +65,21 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	// Use http.DefaultClient (no timeout) to match the SSE logs command.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("deploy %s: %w", slug, err)
+		return "", false, fmt.Errorf("deploy %s: %w", slug, err)
 	}
 	rb, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb))
+		return "", false, fmt.Errorf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb))
 	}
 
+	// Bundle accepted: from here on the deploy is committed even if a
+	// post-deploy step fails.
 	if err := waitForFleetHealthy(cfg, slug, out); err != nil {
-		return "", err
+		return "", true, err
 	}
-	return readPromotedDigest(cfg, slug)
+	promoted, err = readPromotedDigest(cfg, slug)
+	return promoted, true, err
 }
 
 // readPromotedDigest re-GETs the app list and returns the live (succeeded)

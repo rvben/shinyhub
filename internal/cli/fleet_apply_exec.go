@@ -50,15 +50,20 @@ func precondPtrs(opt convergeOpts, digest, managedBy string) (*string, *string) 
 // deployWithRetry runs the per-app deploy up to 1+retries times and returns
 // the freshly promoted digest. Deploy carries no precondition (last-writer-
 // wins); a transient failure is retried, the attempt count is reported.
-func deployWithRetry(cfg *cliConfig, slug, dir, visibility string, opt convergeOpts, out io.Writer) (promoted string, attempts int, err error) {
+// committed is true if any attempt's bundle was accepted by the server, so
+// callers can tell a pre-commit failure (safe to roll back) from a post-commit
+// one (this fleet's source is already live).
+func deployWithRetry(cfg *cliConfig, slug, dir, visibility string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, err error) {
 	total := 1 + opt.retries
 	for attempts = 1; attempts <= total; attempts++ {
-		promoted, err = deployAppBundle(cfg, slug, dir, visibility, out, opt.runID)
+		var c bool
+		promoted, c, err = deployAppBundle(cfg, slug, dir, visibility, out, opt.runID)
+		committed = committed || c
 		if err == nil {
-			return promoted, attempts, nil
+			return promoted, attempts, committed, nil
 		}
 	}
-	return "", total, err
+	return "", total, committed, err
 }
 
 // applyConfigDrift patches exactly the drifted fleet-declared keys. A
@@ -81,6 +86,51 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 		}
 	}
 	return patchApp(cfg, slug, body, ifD, ifMB, runID)
+}
+
+// adoptBundleWentLive answers whether an adopt redeploy that returned an error
+// nonetheless durably promoted a new bundle. The deploy endpoint returns 500 on
+// both pre-promotion and post-promotion paths, so the HTTP status cannot decide
+// it; instead we read back the live content digest and report whether it
+// advanced past the pre-deploy one.
+//
+// "Durably" is deliberate. The server treats the promoted (succeeded)
+// deployment row as the single source of truth - it is the pointer the
+// scheduler, watcher wake, restart, and rollback all consult - and exposes its
+// digest on /api/apps. When PromoteDeployment fails after the pool was switched
+// the server returns 500 with that pointer NOT advanced, and documents the
+// state as "pool is live but the next restart/wake reverts to the old bundle;
+// retry to commit". In that case this reports false and the reservation is
+// released, which is correct: ownership tracks the durable deployment, and the
+// transient running pool is a server-acknowledged inconsistency that self-heals
+// on the retry the server asks for. An inconclusive readback (transport error,
+// or a server that does not expose a digest) likewise reports false, so we fall
+// back to releasing the reservation.
+func adoptBundleWentLive(cfg *cliConfig, slug, preDeployDigest string) bool {
+	dg, err := readPromotedDigest(cfg, slug)
+	if err != nil || dg == "" {
+		return false
+	}
+	return dg != preDeployDigest
+}
+
+// releaseAdoptReservation restores managed_by to its observed prior value
+// after an adopt redeploy fails, undoing the ownership reservation. The patch
+// is gated on the marker we just stamped so it cannot clobber an intervening
+// writer. Best-effort: a failed release narrows but cannot fully close the
+// limbo window, which is strictly better than always leaving the marker
+// stamped on deploy failure.
+//
+// In degraded mode (no precondition support) the release would be unguarded
+// and could clear or overwrite a new owner that took the app between the
+// reservation and the deploy failure, so it is skipped: the documented
+// degraded race is accepted rather than risking a clobber.
+func releaseAdoptReservation(cfg *cliConfig, slug string, prior *string, marker string, opt convergeOpts) {
+	if !opt.preconditions {
+		return
+	}
+	m := marker
+	_ = patchManagedBy(cfg, slug, prior, nil, &m, opt.runID)
 }
 
 // convergeApp reconciles one app. It is total over fleet.Action; an
@@ -111,8 +161,11 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 			res.note = "present, not owned by this fleet; re-run with --adopt"
 			return done(statusSkipped)
 		}
-		// Stamp the marker, asserting the managed_by we observed is still
-		// current (empty string asserts "currently unmanaged").
+		// Reserve ownership FIRST with a precondition asserting the managed_by
+		// we observed is still current (empty string asserts "currently
+		// unmanaged"). Reserving before the deploy means a concurrent ownership
+		// change is rejected as a 409 BEFORE we upload a bundle - otherwise we
+		// could overwrite an app we no longer own.
 		var ifMB *string
 		if opt.preconditions {
 			cur := ""
@@ -124,13 +177,23 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		if err := patchManagedBy(cfg, d.Slug, &marker, nil, ifMB, opt.runID); err != nil {
 			return fail(err, 1)
 		}
-		// Reconcile like an update: redeploy (idempotent if identical) then
-		// assert the manifest's full declared config on top of the bundle's.
-		promoted, attempts, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		// Redeploy (idempotent if identical). If it fails without the new
+		// bundle going live, RELEASE the reservation - restore managed_by to
+		// its observed prior value - so a deploy failure never leaves an "owned
+		// but undeployed" record and the next plan proposes a clean adopt
+		// rather than mislabelling it update(source). If the bundle did go live
+		// (2xx, or an ambiguous error whose readback shows the promoted digest
+		// advanced past the pre-deploy one), the reservation is KEPT because
+		// this fleet's source is now the app's bundle.
+		promoted, attempts, committed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		if err != nil {
+			if !committed && !adoptBundleWentLive(cfg, d.Slug, d.ServerDigest) {
+				releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt)
+			}
 			return fail(err, attempts)
 		}
 		res.attempts = attempts
+		// Assert the manifest's full declared config on top of the bundle's.
 		ifD, ifM := precondPtrs(opt, promoted, marker)
 		if err := patchApp(cfg, d.Slug, fleetConfigBody(entry.Config), ifD, ifM, opt.runID); err != nil {
 			return fail(err, attempts)
@@ -158,7 +221,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
-		promoted, attempts, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
 			return fail(err, attempts)
@@ -185,7 +248,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusCreated)
 
 	case fleet.ActionUpdateSource:
-		_, attempts, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		_, attempts, _, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
 			return fail(err, attempts)
@@ -203,7 +266,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// Mandatory ordering: deploy first, then patch fleet config
 		// on top with a precondition built from the FRESHLY promoted digest -
 		// never the stale pre-deploy one.
-		promoted, attempts, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
 			return fail(err, attempts)

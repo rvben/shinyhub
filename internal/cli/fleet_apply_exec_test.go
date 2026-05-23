@@ -153,6 +153,225 @@ func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
 	}
 }
 
+func TestConvergeApp_AdoptReservesOwnershipBeforeDeployAndReleasesOnFailure(t *testing.T) {
+	// Two properties at once:
+	//  1. Ownership is RESERVED (preconditioned stamp) BEFORE the bundle is
+	//     uploaded, so a concurrent ownership change is rejected before any
+	//     deploy can overwrite an app we no longer own.
+	//  2. If the redeploy then fails, the reservation is RELEASED (managed_by
+	//     restored to its observed prior value) so the app is never left
+	//     "owned but undeployed" and the next plan proposes a clean adopt.
+	var mbValues []any // ordered managed_by values seen on PATCH /api/apps/legacy
+	var deployedBeforeReserve bool
+	var reserved bool
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			mu.Lock()
+			if !reserved {
+				deployedBeforeReserve = true
+			}
+			mu.Unlock()
+			// 400 = clean client-side rejection: nothing committed, so the
+			// reservation is safe to release.
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"bundle rejected"}`))
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/legacy":
+			b, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(b, &body)
+			if v, ok := body["managed_by"]; ok {
+				mu.Lock()
+				mbValues = append(mbValues, v)
+				if v == "fleet:eu" {
+					reserved = true
+				}
+				mu.Unlock()
+			}
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{Slug: "legacy", Action: fleet.ActionAdopt}
+	entry := fleet.AppEntry{Slug: "legacy", Source: "./x", Visibility: "private"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "legacy"}, dir,
+		convergeOpts{adopt: true, preconditions: true, retries: 0, fleetID: "eu", runID: "r"},
+		"fleet:eu", io.Discard)
+	if r.status != statusFailed {
+		t.Fatalf("status = %s (%v), want failed", r.status, r.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if deployedBeforeReserve {
+		t.Fatalf("bundle was deployed before ownership was reserved (TOCTOU overwrite risk)")
+	}
+	// Net effect: reserve then release. First managed_by stamp is the marker,
+	// last is the cleared (nil) value - so ownership is not left stamped.
+	if len(mbValues) < 2 {
+		t.Fatalf("want a reserve + release pair, got managed_by sequence %v", mbValues)
+	}
+	if mbValues[0] != "fleet:eu" {
+		t.Fatalf("first managed_by must reserve the marker, got %v", mbValues[0])
+	}
+	if last := mbValues[len(mbValues)-1]; last != nil {
+		t.Fatalf("ownership must be released (managed_by=null) after a failed adopt deploy, got %v", last)
+	}
+}
+
+func TestConvergeApp_AdoptDegradedDoesNotReleaseUnguarded(t *testing.T) {
+	// In degraded mode (no precondition support) the release PATCH would carry
+	// no If-Managed-By guard, so it could clear or overwrite a new owner that
+	// took the app between our reservation and the deploy failure. We therefore
+	// must NOT issue an unguarded release in degraded mode - the documented
+	// degraded race is accepted rather than risking a clobber.
+	var mbValues []any
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"bundle rejected"}`))
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/legacy":
+			b, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(b, &body)
+			if v, ok := body["managed_by"]; ok {
+				mu.Lock()
+				mbValues = append(mbValues, v)
+				mu.Unlock()
+			}
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{Slug: "legacy", Action: fleet.ActionAdopt}
+	entry := fleet.AppEntry{Slug: "legacy", Source: "./x", Visibility: "private"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "legacy"}, dir,
+		convergeOpts{adopt: true, preconditions: false, retries: 0, fleetID: "eu", runID: "r"},
+		"fleet:eu", io.Discard)
+	if r.status != statusFailed {
+		t.Fatalf("status = %s (%v), want failed", r.status, r.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(mbValues); i++ {
+		t.Fatalf("degraded mode must not issue a release PATCH; managed_by sequence = %v", mbValues)
+	}
+}
+
+func TestConvergeApp_AdoptDoesNotReleaseAfterCommittedDeploy(t *testing.T) {
+	// If the bundle POST is accepted (deploy committed) but the post-deploy
+	// health wait then fails, this fleet's source is now running on the app.
+	// Releasing ownership back to the prior owner would leave the app marked
+	// as theirs while running OUR bundle - an inconsistent state worse than
+	// keeping the marker. The reservation must be kept once the deploy commits.
+	var mbValues []any
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(200) // deploy COMMITS
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/legacy":
+			// Health wait sees a terminal crash -> deploy fails post-commit.
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "crashed"}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/legacy":
+			b, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(b, &body)
+			if v, ok := body["managed_by"]; ok {
+				mu.Lock()
+				mbValues = append(mbValues, v)
+				mu.Unlock()
+			}
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{Slug: "legacy", Action: fleet.ActionAdopt}
+	entry := fleet.AppEntry{Slug: "legacy", Source: "./x", Visibility: "private"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "legacy"}, dir,
+		convergeOpts{adopt: true, preconditions: true, retries: 0, fleetID: "eu", runID: "r"},
+		"fleet:eu", io.Discard)
+	if r.status != statusFailed {
+		t.Fatalf("status = %s (%v), want failed", r.status, r.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mbValues) != 1 || mbValues[0] != "fleet:eu" {
+		t.Fatalf("after a committed deploy, ownership must be reserved and NOT released; managed_by sequence = %v", mbValues)
+	}
+}
+
+func TestConvergeApp_AdoptKeepsOwnershipWhenBundleWentLive(t *testing.T) {
+	// The deploy endpoint returns 500 on post-promotion paths (e.g. manifest
+	// schedule apply) with the new bundle already live. The HTTP status cannot
+	// distinguish that from a pre-promotion 500, so the adopt path reads back
+	// the live digest: here it advanced past the pre-deploy digest, proving the
+	// bundle went live, so the ownership reservation must be KEPT (not released).
+	var mbValues []any
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(500) // ambiguous: post-promotion failure
+			_, _ = w.Write([]byte(`{"error":"schedule apply failed: boom"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			// Live digest advanced past the pre-deploy one -> bundle went live.
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "legacy", "content_digest": "sha256:NEW"}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/legacy":
+			b, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(b, &body)
+			if v, ok := body["managed_by"]; ok {
+				mu.Lock()
+				mbValues = append(mbValues, v)
+				mu.Unlock()
+			}
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{Slug: "legacy", Action: fleet.ActionAdopt, ServerDigest: "sha256:OLD"}
+	entry := fleet.AppEntry{Slug: "legacy", Source: "./x", Visibility: "private"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "legacy"}, dir,
+		convergeOpts{adopt: true, preconditions: true, retries: 0, fleetID: "eu", runID: "r"},
+		"fleet:eu", io.Discard)
+	if r.status != statusFailed {
+		t.Fatalf("status = %s (%v), want failed", r.status, r.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mbValues) != 1 || mbValues[0] != "fleet:eu" {
+		t.Fatalf("a bundle that went live must keep its ownership reservation; managed_by sequence = %v", mbValues)
+	}
+}
+
 func TestConvergeApp_ConflictRecordedNotRetried(t *testing.T) {
 	var patchCalls int
 	var mu sync.Mutex

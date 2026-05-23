@@ -51,9 +51,12 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
-	dg, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1")
+	dg, committed, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1")
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
+	}
+	if !committed {
+		t.Fatal("a successful deploy must report committed=true")
 	}
 	if dg != "sha256:PROMOTED" {
 		t.Fatalf("promoted digest = %q, want sha256:PROMOTED", dg)
@@ -66,15 +69,18 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	}
 }
 
-func TestDeployAppBundle_PropagatesDeployFailure(t *testing.T) {
+func TestDeployAppBundle_ClientRejectionIsNotCommitted(t *testing.T) {
+	// A 4xx is a clean validation rejection: the server refused the request
+	// before promoting anything, so committed=false (caller may roll back).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy") {
-			w.WriteHeader(500)
-			_, _ = w.Write([]byte(`{"error":"boom"}`))
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"bundle rejected"}`))
 			return
 		}
 		if r.Method == "GET" && r.URL.Path == "/api/apps/demo" {
-			w.WriteHeader(404)
+			w.WriteHeader(200) // app already exists; skip create
+			_, _ = w.Write([]byte(`{"app":{"slug":"demo"}}`))
 			return
 		}
 		w.WriteHeader(200)
@@ -84,7 +90,44 @@ func TestDeployAppBundle_PropagatesDeployFailure(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	if _, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "r"); err == nil {
+	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r")
+	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
+	}
+	if committed {
+		t.Fatal("a deploy rejected with HTTP 4xx must report committed=false")
+	}
+}
+
+func TestDeployAppBundle_ServerErrorIsNotCommitted(t *testing.T) {
+	// A 5xx is ambiguous at the deploy layer: the handler returns 500 both
+	// before promotion (BeginDeployment, quota) and after it (PromoteDeployment
+	// record / schedule apply). committed therefore stays false - only a 2xx is
+	// known-committed - and callers that care (adopt) resolve whether the
+	// bundle actually went live with a digest readback.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy") {
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":"deploy succeeded but recording it failed; retry to commit"}`))
+			return
+		}
+		if r.Method == "GET" && r.URL.Path == "/api/apps/demo" {
+			w.WriteHeader(200) // app already exists; skip create
+			_, _ = w.Write([]byte(`{"app":{"slug":"demo"}}`))
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r")
+	if err == nil {
+		t.Fatal("expected deploy failure to propagate")
+	}
+	if committed {
+		t.Fatal("only a 2xx deploy is known-committed; a 5xx must report committed=false")
 	}
 }
