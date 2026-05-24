@@ -20,7 +20,6 @@ import (
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
-	"github.com/rvben/shinyhub/internal/storage"
 )
 
 var portCounter atomic.Int64
@@ -125,11 +124,6 @@ type Params struct {
 	// It receives the runtime-returned endpoint URL (e.g. http://127.0.0.1:PORT).
 	// If nil, the default HTTP health poller (waitHealthy) is used.
 	HealthCheck func(endpointURL string, timeout time.Duration) error
-	// BundleStore publishes the immutable bundle after post-deploy hooks run.
-	// nil => skip publishing (single-node callers that have not opted in).
-	BundleStore storage.BundleStore
-	// BundleVersion is the deployment version recorded with the published bundle.
-	BundleVersion string
 }
 
 // Result contains identifiers for a single successfully deployed replica.
@@ -223,12 +217,6 @@ func Run(p Params) (*PoolResult, error) {
 	hooksSkipped, err := runManifestPostDeployHooks(p)
 	if err != nil {
 		return nil, err
-	}
-
-	if p.BundleStore != nil {
-		if _, err := p.BundleStore.Put(p.Slug, p.BundleVersion, p.BundleDir); err != nil {
-			return nil, fmt.Errorf("publish bundle: %w", err)
-		}
 	}
 
 	type bootResult struct {

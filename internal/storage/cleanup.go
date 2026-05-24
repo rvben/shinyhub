@@ -1,9 +1,9 @@
 // Package storage owns ShinyHub's on-disk and pluggable storage concerns: the
 // on-disk lifecycle helpers shared by the API and CLI (the slug-keyed
 // convention for per-app directories, one under Storage.AppsDir for code and
-// one under Storage.AppDataDir for persistent data), plus the immutable-bundle
-// (BundleStore) and mutable-data (DataVolume) abstractions that let bundles and
-// per-app data live on a single host's local disk or a shared/object backend.
+// one under Storage.AppDataDir for persistent data), plus the DataVolume
+// abstraction that provisions per-app mutable data on a single host's local
+// disk (or, in a later phase, a shared backend).
 package storage
 
 import (

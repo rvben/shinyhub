@@ -21,7 +21,6 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
-	"github.com/rvben/shinyhub/internal/storage"
 )
 
 func TestExtractBundle(t *testing.T) {
@@ -809,45 +808,6 @@ func (f *fakeContainerRuntime) Stats(_ context.Context, _ process.RunHandle) (fl
 }
 func (f *fakeContainerRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
-}
-
-type recordingBundleStore struct {
-	putSlug, putVersion, putDir string
-	called                      bool
-}
-
-func (r *recordingBundleStore) Put(slug, version, dir string) (storage.BundleRef, error) {
-	r.called = true
-	r.putSlug, r.putVersion, r.putDir = slug, version, dir
-	return storage.BundleRef{Slug: slug, Version: version, Path: dir}, nil
-}
-
-func (r *recordingBundleStore) Resolve(ref storage.BundleRef, _ string) (storage.Localization, error) {
-	return storage.Localization{LocalPath: ref.Path}, nil
-}
-
-func TestRunPublishesBundle(t *testing.T) {
-	bs := &recordingBundleStore{}
-	bundle := t.TempDir()
-	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	defer mgr.Stop("pub-app")
-
-	_, err := deploy.Run(deploy.Params{
-		Slug:          "pub-app",
-		BundleDir:     bundle,
-		BundleStore:   bs,
-		BundleVersion: "v9",
-		Manager:       mgr,
-		Proxy:         proxy.New(),
-		Command:       []string{"sleep", "30"},
-		HealthCheck:   func(string, time.Duration) error { return nil },
-	})
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if !bs.called || bs.putSlug != "pub-app" || bs.putVersion != "v9" || bs.putDir != bundle {
-		t.Fatalf("BundleStore.Put not called as expected: %+v", bs)
-	}
 }
 
 func TestResolveResourceLimits(t *testing.T) {
