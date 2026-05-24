@@ -59,7 +59,7 @@ type ProcessInfo struct {
 type StartParams struct {
 	Slug            string
 	Index           int
-	Tier            string        // runtime tier; empty => DefaultTier
+	Tier            string // runtime tier; empty => DefaultTier
 	Dir             string
 	Command         []string
 	Port            int
