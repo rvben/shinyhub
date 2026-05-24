@@ -482,7 +482,17 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	for _, rep := range result.Replicas {
 		pid, port := rep.PID, rep.Port
 		if uerr := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID: app.ID, Index: rep.Index, PID: &pid, Port: &port, Status: "running",
+			AppID:        app.ID,
+			Index:        rep.Index,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     rep.Provider,
+			Tier:         rep.Tier,
+			EndpointURL:  rep.EndpointURL,
+			WorkerID:     rep.WorkerID,
+			AppVersion:   prev.Version,
+			DesiredState: "running",
 		}); uerr != nil {
 			slog.Error("restore: upsert replica", "slug", slug, "idx", rep.Index, "err", uerr)
 		}
@@ -745,11 +755,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:  app.ID,
-			Index:  r.Index,
-			PID:    &pid,
-			Port:   &port,
-			Status: "running",
+			AppID:        app.ID,
+			Index:        r.Index,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     r.Provider,
+			Tier:         r.Tier,
+			EndpointURL:  r.EndpointURL,
+			WorkerID:     r.WorkerID,
+			AppVersion:   version,
+			DesiredState: "running",
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
@@ -962,11 +978,17 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:  app.ID,
-			Index:  r.Index,
-			PID:    &pid,
-			Port:   &port,
-			Status: "running",
+			AppID:        app.ID,
+			Index:        r.Index,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     r.Provider,
+			Tier:         r.Tier,
+			EndpointURL:  r.EndpointURL,
+			WorkerID:     r.WorkerID,
+			AppVersion:   prev.Version,
+			DesiredState: "running",
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
@@ -1068,11 +1090,17 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:  app.ID,
-			Index:  r.Index,
-			PID:    &pid,
-			Port:   &port,
-			Status: "running",
+			AppID:        app.ID,
+			Index:        r.Index,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     r.Provider,
+			Tier:         r.Tier,
+			EndpointURL:  r.EndpointURL,
+			WorkerID:     r.WorkerID,
+			AppVersion:   current.Version,
+			DesiredState: "running",
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
@@ -1205,9 +1233,10 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	} else {
 		for _, rep := range replicas {
 			if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-				AppID:  app.ID,
-				Index:  rep.Index,
-				Status: "stopped",
+				AppID:        app.ID,
+				Index:        rep.Index,
+				Status:       "stopped",
+				DesiredState: "stopped",
 			}); err != nil {
 				slog.Error("upsert replica on stop", "slug", slug, "index", rep.Index, "err", err)
 			}

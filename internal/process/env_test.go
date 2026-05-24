@@ -16,14 +16,19 @@ type captureRuntime struct {
 	captured *StartParams
 }
 
-func (r *captureRuntime) Start(_ context.Context, p StartParams, _ io.Writer) (RunHandle, error) {
+func (r *captureRuntime) Start(_ context.Context, p StartParams, _ io.Writer) (ReplicaEndpoint, error) {
 	// Mirror NativeRuntime: the full child env is filteredEnv() + p.Env, with
 	// p.Env appended last so it wins on duplicate keys.
 	full := append(filteredEnv(), p.Env...)
 	p.Env = full
 	r.captured = &p
 	// Return a non-zero PID so the manager accepts the handle as valid.
-	return RunHandle{PID: 1}, nil
+	return ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: "1",
+		Handle:   RunHandle{PID: 1},
+	}, nil
 }
 
 func (r *captureRuntime) Signal(_ RunHandle, _ syscall.Signal) error { return nil }

@@ -2,6 +2,7 @@ package process_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -27,13 +28,18 @@ func newFakeContainerRuntime() *fakeContainerRuntime {
 	return &fakeContainerRuntime{nextID: 1, stops: make(map[string]chan struct{})}
 }
 
-func (f *fakeContainerRuntime) Start(_ context.Context, _ process.StartParams, _ io.Writer) (process.RunHandle, error) {
+func (f *fakeContainerRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := "ctr-" + time.Now().Format("150405.000000") + "-" + strconv.Itoa(f.nextID)
 	f.nextID++
 	f.stops[id] = make(chan struct{})
-	return process.RunHandle{ContainerID: id}, nil
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "docker",
+		WorkerID: id,
+		Handle:   process.RunHandle{ContainerID: id},
+	}, nil
 }
 
 func (f *fakeContainerRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {

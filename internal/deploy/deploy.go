@@ -121,16 +121,20 @@ type Params struct {
 	// default before calling).
 	MaxSessionsPerReplica int
 	// HealthCheck is called after each replica starts to verify it is ready.
-	// If nil, the default HTTP health poller is used.
-	// Set to a no-op function in tests that do not serve HTTP.
-	HealthCheck func(port int, timeout time.Duration) error
+	// It receives the runtime-returned endpoint URL (e.g. http://127.0.0.1:PORT).
+	// If nil, the default HTTP health poller (waitHealthy) is used.
+	HealthCheck func(endpointURL string, timeout time.Duration) error
 }
 
 // Result contains identifiers for a single successfully deployed replica.
 type Result struct {
-	Index int
-	PID   int
-	Port  int
+	Index       int
+	PID         int
+	Port        int
+	EndpointURL string
+	Tier        string
+	Provider    string
+	WorkerID    string
 }
 
 // PoolResult contains the full set of replicas that were successfully booted.
@@ -152,7 +156,7 @@ type PoolResult struct {
 // HealthTimeout defaults for a pool/replica boot. Returns the resolved
 // base command, detected app type, the effective health-check func, and
 // the effective timeout.
-func resolveBootParams(p Params) (baseCmd []string, appType string, hc func(int, time.Duration) error, timeout time.Duration, err error) {
+func resolveBootParams(p Params) (baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration, err error) {
 	if len(p.Command) > 0 {
 		baseCmd = p.Command
 	} else {
@@ -306,7 +310,7 @@ func runManifestPostDeployHooks(p Params) (int, error) {
 // bootReplica starts a single replica: allocates a port, starts the process,
 // health-checks it, and registers it with the proxy. baseCmd == nil signals
 // that the command should be built from appType using the allocated port.
-func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(int, time.Duration) error, timeout time.Duration) (Result, error) {
+func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration) (Result, error) {
 	port := AllocatePort()
 
 	var cmd []string
@@ -347,17 +351,24 @@ func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(in
 		return Result{}, fmt.Errorf("start: %w", err)
 	}
 
-	if err := hc(port, timeout); err != nil {
+	if err := hc(info.EndpointURL, timeout); err != nil {
 		_ = p.Manager.StopReplica(p.Slug, idx)
 		return Result{}, fmt.Errorf("health: %w", err)
 	}
 
-	targetURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	if err := p.Proxy.RegisterReplica(p.Slug, idx, targetURL); err != nil {
+	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL); err != nil {
 		_ = p.Manager.StopReplica(p.Slug, idx)
 		return Result{}, fmt.Errorf("register: %w", err)
 	}
-	return Result{Index: idx, PID: info.PID, Port: port}, nil
+	return Result{
+		Index:       idx,
+		PID:         info.PID,
+		Port:        port,
+		EndpointURL: info.EndpointURL,
+		Tier:        info.Tier,
+		Provider:    info.Provider,
+		WorkerID:    info.WorkerID,
+	}, nil
 }
 
 // RunReplica boots a single replica at the given index. The proxy pool size
@@ -418,13 +429,17 @@ func buildCommand(bundleDir string, port, workers int, bindHost string) []string
 
 // waitHealthy polls the app's root endpoint until it responds with a non-5xx
 // status or the deadline is exceeded. Each HTTP attempt is capped at 5 seconds.
-func waitHealthy(port int, timeout time.Duration) error {
+func waitHealthy(endpointURL string, timeout time.Duration) error {
 	client := &http.Client{Timeout: 5 * time.Second}
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	healthURL := strings.TrimSuffix(endpointURL, "/") + "/"
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("build request for %s: %w", healthURL, err)
+		}
 		resp, err := client.Do(req)
 		cancel()
 		if err == nil {
@@ -435,7 +450,7 @@ func waitHealthy(port int, timeout time.Duration) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("app on port %d did not become healthy within %s", port, timeout)
+	return fmt.Errorf("app at %s did not become healthy within %s", endpointURL, timeout)
 }
 
 // ErrBundleTooLarge is returned by ExtractBundle when a single entry, or the

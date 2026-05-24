@@ -2,9 +2,11 @@ package process_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,7 +34,7 @@ func newFakeRuntime() *fakeRuntime {
 	}
 }
 
-func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// Mirror the real-runtime contract: SHINYHUB_APP_DATA is injected by the
@@ -46,7 +48,12 @@ func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Write
 	pid := f.nextPID
 	f.nextPID++
 	f.stops[pid] = make(chan struct{})
-	return process.RunHandle{PID: pid}, nil
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: strconv.Itoa(pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
 }
 
 func (f *fakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
@@ -446,7 +453,7 @@ func newCaptureRuntime(onStart func(process.StartParams)) *captureRuntime {
 	}
 }
 
-func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.RunHandle, error) {
+func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	c.mu.Lock()
 	pid := c.nextPID
 	c.nextPID++
@@ -455,7 +462,12 @@ func (c *captureRuntime) Start(_ context.Context, p process.StartParams, _ io.Wr
 	if c.onStart != nil {
 		c.onStart(p)
 	}
-	return process.RunHandle{PID: pid}, nil
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: strconv.Itoa(pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
 }
 
 func (c *captureRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
@@ -810,5 +822,77 @@ func TestStart_RefusesIfBundleHasDataDir(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "data") {
 		t.Fatalf("expected data-conflict error for pre-existing dir, got %v", err)
+	}
+}
+
+func TestManagerProvisionsDataDirViaVolume(t *testing.T) {
+	root := t.TempDir()
+	bundle := t.TempDir()
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+	if err := m.SetAppDataRoot(root); err != nil {
+		t.Fatalf("set root: %v", err)
+	}
+	if _, err := m.Start(process.StartParams{
+		Slug: "v", Index: 0, Dir: bundle, Command: []string{"x"}, Port: 1,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if fi, err := os.Stat(filepath.Join(root, "v")); err != nil || !fi.IsDir() {
+		t.Fatalf("expected data dir %s: err=%v", filepath.Join(root, "v"), err)
+	}
+	if _, err := os.Lstat(filepath.Join(bundle, "data")); err != nil {
+		t.Fatalf("expected data symlink in bundle: %v", err)
+	}
+	target, err := os.Readlink(filepath.Join(bundle, "data"))
+	if err != nil {
+		t.Fatalf("readlink data symlink: %v", err)
+	}
+	if want := filepath.Join(root, "v"); target != want {
+		t.Errorf("symlink target = %q, want %q", target, want)
+	}
+}
+
+func TestManagerDispatchesByTier(t *testing.T) {
+	def := newFakeRuntime()
+	burst := newFakeRuntime()
+	burst.nextPID = 50000 // distinct PID range proves which runtime started it
+
+	m := process.NewManager(t.TempDir(), def)
+	m.RegisterRuntime("burst", burst)
+
+	// Default tier (empty Tier => "local") uses def.
+	localInfo, err := m.Start(process.StartParams{
+		Slug: "a", Index: 0, Command: []string{"x"}, Port: 1,
+	})
+	if err != nil {
+		t.Fatalf("start local: %v", err)
+	}
+	if localInfo.PID < 10000 || localInfo.PID >= 50000 {
+		t.Fatalf("local replica got PID %d; expected default-runtime range", localInfo.PID)
+	}
+	if localInfo.Tier != process.DefaultTier {
+		t.Errorf("local replica Tier = %q, want %q", localInfo.Tier, process.DefaultTier)
+	}
+
+	// Explicit burst tier uses burst.
+	burstInfo, err := m.Start(process.StartParams{
+		Slug: "b", Index: 0, Command: []string{"x"}, Port: 2, Tier: "burst",
+	})
+	if err != nil {
+		t.Fatalf("start burst: %v", err)
+	}
+	if burstInfo.PID < 50000 {
+		t.Fatalf("burst replica got PID %d; expected burst-runtime range", burstInfo.PID)
+	}
+	if burstInfo.Tier != "burst" {
+		t.Errorf("burst replica Tier = %q, want %q", burstInfo.Tier, "burst")
+	}
+
+	// Stop dispatches to the owning runtime without panicking.
+	if err := m.StopReplica("a", 0); err != nil {
+		t.Fatalf("stop local: %v", err)
+	}
+	if err := m.StopReplica("b", 0); err != nil {
+		t.Fatalf("stop burst: %v", err)
 	}
 }

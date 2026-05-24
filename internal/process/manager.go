@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/storage"
 )
 
 // EnvResolver returns a slice of "KEY=VALUE" strings for the given app slug.
@@ -38,17 +40,26 @@ const (
 	StatusUnknown Status = "unknown"
 )
 
+// DefaultTier is the tier name a replica runs under when StartParams.Tier is
+// empty. Single-node deployments use exactly this one tier.
+const DefaultTier = "local"
+
 type ProcessInfo struct {
-	Slug   string
-	Index  int
-	PID    int
-	Port   int
-	Status Status
+	Slug        string
+	Index       int
+	PID         int
+	Port        int
+	Status      Status
+	Tier        string
+	Provider    string
+	EndpointURL string
+	WorkerID    string
 }
 
 type StartParams struct {
 	Slug            string
 	Index           int
+	Tier            string // runtime tier; empty => DefaultTier
 	Dir             string
 	Command         []string
 	Port            int
@@ -62,6 +73,7 @@ type StartParams struct {
 type entry struct {
 	info    *ProcessInfo
 	handle  RunHandle
+	tier    string
 	done    chan struct{}
 	stopped bool
 }
@@ -75,15 +87,16 @@ type replicaKey struct {
 // Manager tracks running app processes as a pool of replicas per slug.
 // entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
-	mu              sync.Mutex
-	entries         map[string][]*entry
-	logFiles        map[replicaKey]*LogFile
-	appsDir         string
-	runtime         Runtime
-	envResolver     EnvResolver
-	platformEnv     PlatformDefaultEnvResolver
-	mountResolver   SharedMountResolver
-	appDataRoot     string
+	mu            sync.Mutex
+	entries       map[string][]*entry
+	logFiles      map[replicaKey]*LogFile
+	appsDir       string
+	runtimes      map[string]Runtime
+	defaultTier   string
+	envResolver   EnvResolver
+	platformEnv   PlatformDefaultEnvResolver
+	mountResolver SharedMountResolver
+	appDataRoot   string
 }
 
 // SetEnvResolver sets the function used to inject per-app environment variables
@@ -128,21 +141,39 @@ func (m *Manager) SetAppDataRoot(root string) error {
 // HostPreparesDeps proxies to the underlying Runtime so deploy code can ask
 // whether host-side dependency installation (uv sync, renv::restore) is
 // expected before Start. See Runtime.HostPreparesDeps for the contract.
-func (m *Manager) HostPreparesDeps() bool { return m.runtime.HostPreparesDeps() }
+func (m *Manager) HostPreparesDeps() bool { return m.runtimeFor(m.defaultTier).HostPreparesDeps() }
 
 // AppBindHost proxies to the underlying Runtime so deploy code can construct
 // the per-replica command with the right listen address. See
 // Runtime.AppBindHost for the contract.
-func (m *Manager) AppBindHost() string { return m.runtime.AppBindHost() }
+func (m *Manager) AppBindHost() string { return m.runtimeFor(m.defaultTier).AppBindHost() }
 
-// NewManager returns an initialized Manager using the given Runtime.
+// NewManager returns an initialized Manager using the given Runtime as the
+// default ("local") tier. Additional tiers are added via RegisterRuntime.
 func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
-		entries:  make(map[string][]*entry),
-		logFiles: make(map[replicaKey]*LogFile),
-		appsDir:  appsDir,
-		runtime:  rt,
+		entries:     make(map[string][]*entry),
+		logFiles:    make(map[replicaKey]*LogFile),
+		appsDir:     appsDir,
+		runtimes:    map[string]Runtime{DefaultTier: rt},
+		defaultTier: DefaultTier,
 	}
+}
+
+// RegisterRuntime adds a runtime under the named tier. Must be called before
+// the manager begins starting processes; not safe to call concurrently with
+// Start.
+func (m *Manager) RegisterRuntime(tier string, rt Runtime) {
+	m.runtimes[tier] = rt
+}
+
+// runtimeFor returns the runtime for the named tier, falling back to the
+// default tier when tier is empty or unregistered.
+func (m *Manager) runtimeFor(tier string) Runtime {
+	if rt, ok := m.runtimes[tier]; ok {
+		return rt
+	}
+	return m.runtimes[m.defaultTier]
 }
 
 // Start spawns a new process for the given slug and replica index.
@@ -170,10 +201,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 
 	var appDataPath string
 	if m.appDataRoot != "" {
-		appDataPath = filepath.Join(m.appDataRoot, p.Slug)
-		if err := os.MkdirAll(appDataPath, 0o750); err != nil {
-			return nil, fmt.Errorf("ensure app data dir: %w", err)
+		ref, err := storage.LocalVolume{Root: m.appDataRoot}.Provision(p.Slug)
+		if err != nil {
+			return nil, fmt.Errorf("provision app data: %w", err)
 		}
+		appDataPath = ref.Path
 		p.AppDataPath = appDataPath
 
 		linkPath := filepath.Join(p.Dir, "data")
@@ -232,26 +264,37 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	}
 	m.logFiles[key] = lf
 
-	handle, err := m.runtime.Start(context.Background(), p, lf)
+	tier := p.Tier
+	if tier == "" {
+		tier = m.defaultTier
+	}
+	rt := m.runtimeFor(tier)
+
+	ep, err := rt.Start(context.Background(), p, lf)
 	if err != nil {
 		lf.Close()
 		delete(m.logFiles, key)
 		return nil, fmt.Errorf("start process: %w", err)
 	}
+	handle := ep.Handle
 
 	info := &ProcessInfo{
-		Slug:   p.Slug,
-		Index:  p.Index,
-		PID:    handle.PID,
-		Port:   p.Port,
-		Status: StatusRunning,
+		Slug:        p.Slug,
+		Index:       p.Index,
+		PID:         handle.PID,
+		Port:        p.Port,
+		Status:      StatusRunning,
+		Tier:        tier,
+		Provider:    ep.Provider,
+		EndpointURL: ep.URL,
+		WorkerID:    ep.WorkerID,
 	}
 	done := make(chan struct{})
-	pool[p.Index] = &entry{info: info, handle: handle, done: done}
+	pool[p.Index] = &entry{info: info, handle: handle, tier: tier, done: done}
 	m.entries[p.Slug] = pool
 
 	go func() {
-		m.runtime.Wait(context.Background(), handle)
+		rt.Wait(context.Background(), handle)
 		m.mu.Lock()
 		if pool := m.entries[p.Slug]; p.Index < len(pool) {
 			if e := pool[p.Index]; e != nil && e.handle == handle {
@@ -287,15 +330,17 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	done := e.done
 	handle := e.handle
 	e.stopped = true
+	tier := e.tier
 	m.mu.Unlock()
 
-	if err := m.runtime.Signal(handle, syscall.SIGTERM); err != nil {
+	rt := m.runtimeFor(tier)
+	if err := rt.Signal(handle, syscall.SIGTERM); err != nil {
 		return fmt.Errorf("sigterm: %w", err)
 	}
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		m.runtime.Signal(handle, syscall.SIGKILL) //nolint:errcheck
+		rt.Signal(handle, syscall.SIGKILL) //nolint:errcheck
 		<-done
 	}
 
@@ -319,7 +364,7 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	// has confirmed this replica exited on an intentional stop/replace, drop
 	// it so stopped containers do not accumulate. Native runtime does not
 	// implement this capability; the assertion simply fails and is skipped.
-	if cr, ok := m.runtime.(containerRemover); ok {
+	if cr, ok := rt.(containerRemover); ok {
 		if err := cr.RemoveHandle(handle); err != nil {
 			slog.Warn("manager: remove container after stop", "slug", slug, "idx", index, "err", err)
 		}
@@ -503,15 +548,21 @@ func (m *Manager) HandleReplica(slug string, index int) (RunHandle, bool) {
 func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	tier := info.Tier
+	if tier == "" {
+		tier = m.defaultTier
+	}
+	info.Tier = tier
+	rt := m.runtimeFor(tier)
 	pool := m.entries[slug]
 	for len(pool) <= info.Index {
 		pool = append(pool, nil)
 	}
 	done := make(chan struct{})
-	pool[info.Index] = &entry{info: &info, handle: handle, done: done}
+	pool[info.Index] = &entry{info: &info, handle: handle, tier: tier, done: done}
 	m.entries[slug] = pool
 	go func() {
-		m.runtime.Wait(context.Background(), handle)
+		rt.Wait(context.Background(), handle)
 		m.mu.Lock()
 		if p := m.entries[slug]; info.Index < len(p) {
 			if e := p[info.Index]; e != nil && e.handle == handle && !e.stopped {
@@ -533,7 +584,7 @@ func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
 	for len(pool) <= info.Index {
 		pool = append(pool, nil)
 	}
-	pool[info.Index] = &entry{info: &info, handle: RunHandle{PID: info.PID}, done: make(chan struct{})}
+	pool[info.Index] = &entry{info: &info, handle: RunHandle{PID: info.PID}, tier: m.defaultTier, done: make(chan struct{})}
 	m.entries[slug] = pool
 }
 

@@ -2,6 +2,7 @@ package lifecycle_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"syscall"
 	"testing"
@@ -15,8 +16,14 @@ import (
 // duration of the test instead of immediately transitioning to crashed.
 type blockingRuntime struct{ done chan struct{} }
 
-func (b *blockingRuntime) Start(context.Context, process.StartParams, io.Writer) (process.RunHandle, error) {
-	return process.RunHandle{}, nil
+func (b *blockingRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	id := fmt.Sprintf("blocking-%d", p.Port)
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "docker",
+		WorkerID: id,
+		Handle:   process.RunHandle{ContainerID: id},
+	}, nil
 }
 func (b *blockingRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
 func (b *blockingRuntime) Wait(ctx context.Context, _ process.RunHandle) error {

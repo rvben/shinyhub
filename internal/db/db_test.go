@@ -1195,6 +1195,69 @@ func TestListAppsExposesDigestAndManagedBy(t *testing.T) {
 	}
 }
 
+func TestReplicaMetadataRoundTrip(t *testing.T) {
+	store := openTestStore(t)
+	owner := mustCreateUser(t, store, "meta-owner", "developer")
+	app := mustCreateApp(t, store, "metadata-app", owner.ID)
+
+	pid, port := 4242, 33001
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:        app.ID,
+		Index:        0,
+		PID:          &pid,
+		Port:         &port,
+		Status:       "running",
+		Provider:     "native",
+		Tier:         "local",
+		EndpointURL:  "http://127.0.0.1:33001",
+		WorkerID:     "4242",
+		AppVersion:   "v3",
+		DesiredState: "running",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(reps) != 1 {
+		t.Fatalf("got %d replicas; want 1", len(reps))
+	}
+	r := reps[0]
+	if r.Provider != "native" || r.Tier != "local" ||
+		r.EndpointURL != "http://127.0.0.1:33001" || r.WorkerID != "4242" ||
+		r.AppVersion != "v3" || r.DesiredState != "running" {
+		t.Fatalf("metadata not round-tripped: %+v", r)
+	}
+}
+
+func TestUpsertReplicaDefaultsDesiredStateToRunning(t *testing.T) {
+	store := openTestStore(t)
+	owner := mustCreateUser(t, store, "default-owner", "developer")
+	app := mustCreateApp(t, store, "default-desired-app", owner.ID)
+
+	// Caller omits DesiredState entirely (the live path for all current call sites).
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:  app.ID,
+		Index:  0,
+		Status: "stopped",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(reps) != 1 {
+		t.Fatalf("got %d replicas; want 1", len(reps))
+	}
+	if reps[0].DesiredState != "running" {
+		t.Fatalf("DesiredState = %q; want %q (empty input must default to running)", reps[0].DesiredState, "running")
+	}
+}
+
 func TestListAppsDigestNilUntilPromoted(t *testing.T) {
 	store := mustOpenDB(t)
 	owner := mustCreateUser(t, store, "owner-pending", "developer")

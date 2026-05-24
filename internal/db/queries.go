@@ -1449,35 +1449,60 @@ func (s *Store) CountAppEnvVars(appID int64) (int, error) {
 // Replica represents a single backend process instance for an app.
 // Multiple replicas allow an app to run N parallel processes behind the proxy.
 type Replica struct {
-	AppID     int64  `json:"app_id"`
-	Index     int    `json:"index"`
-	PID       *int   `json:"pid,omitempty"`
-	Port      *int   `json:"port,omitempty"`
-	Status    string `json:"status"`
-	UpdatedAt time.Time `json:"updated_at"`
+	AppID        int64     `json:"app_id"`
+	Index        int       `json:"index"`
+	PID          *int      `json:"pid,omitempty"`
+	Port         *int      `json:"port,omitempty"`
+	Status       string    `json:"status"`
+	Provider     string    `json:"provider"`
+	Tier         string    `json:"tier"`
+	EndpointURL  string    `json:"endpoint_url"`
+	WorkerID     string    `json:"worker_id"`
+	AppVersion   string    `json:"app_version"`
+	DesiredState string    `json:"desired_state"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
 type UpsertReplicaParams struct {
-	AppID  int64
-	Index  int
-	PID    *int
-	Port   *int
-	Status string
+	AppID        int64
+	Index        int
+	PID          *int
+	Port         *int
+	Status       string
+	Provider     string
+	Tier         string
+	EndpointURL  string
+	WorkerID     string
+	AppVersion   string
+	DesiredState string
 }
 
 // UpsertReplica inserts a new replica or updates an existing one identified by
-// (app_id, idx). All fields are replaced on conflict.
+// (app_id, idx). All fields are replaced on conflict. DesiredState defaults to
+// "running" when the caller leaves it empty.
 func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
+	desired := p.DesiredState
+	if desired == "" {
+		desired = "running"
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO replicas (app_id, idx, pid, port, status, updated_at)
-		VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
+		                      endpoint_url, worker_id, app_version, desired_state, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
 		ON CONFLICT(app_id, idx) DO UPDATE SET
-			pid        = excluded.pid,
-			port       = excluded.port,
-			status     = excluded.status,
-			updated_at = excluded.updated_at`,
-		p.AppID, p.Index, p.PID, p.Port, p.Status,
+			pid           = excluded.pid,
+			port          = excluded.port,
+			status        = excluded.status,
+			provider      = excluded.provider,
+			tier          = excluded.tier,
+			endpoint_url  = excluded.endpoint_url,
+			worker_id     = excluded.worker_id,
+			app_version   = excluded.app_version,
+			desired_state = excluded.desired_state,
+			updated_at    = excluded.updated_at`,
+		p.AppID, p.Index, p.PID, p.Port, p.Status, p.Provider, p.Tier,
+		p.EndpointURL, p.WorkerID, p.AppVersion, desired,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert replica: %w", err)
@@ -1489,7 +1514,8 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 // Returns an empty (non-nil) slice when no replicas exist.
 func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	rows, err := s.db.Query(`
-		SELECT app_id, idx, pid, port, status, updated_at
+		SELECT app_id, idx, pid, port, status, provider, tier,
+		       endpoint_url, worker_id, app_version, desired_state, updated_at
 		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
 	if err != nil {
 		return nil, err
@@ -1499,7 +1525,9 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	for rows.Next() {
 		var r Replica
 		var updatedAt int64
-		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status, &updatedAt); err != nil {
+		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
+			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
+			&r.DesiredState, &updatedAt); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)

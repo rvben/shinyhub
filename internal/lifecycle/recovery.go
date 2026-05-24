@@ -153,13 +153,20 @@ func recoverNativeProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 				continue
 			}
 			mgr.Adopt(app.Slug, process.ProcessInfo{
-				Slug:   app.Slug,
-				Index:  r.Index,
-				PID:    *r.PID,
-				Port:   *r.Port,
-				Status: process.StatusRunning,
+				Slug:        app.Slug,
+				Index:       r.Index,
+				PID:         *r.PID,
+				Port:        *r.Port,
+				Status:      process.StatusRunning,
+				Tier:        r.Tier,
+				Provider:    r.Provider,
+				EndpointURL: r.EndpointURL,
+				WorkerID:    r.WorkerID,
 			}, process.RunHandle{PID: *r.PID})
-			targetURL := fmt.Sprintf("http://localhost:%d", *r.Port)
+			targetURL := r.EndpointURL
+			if targetURL == "" {
+				targetURL = fmt.Sprintf("http://127.0.0.1:%d", *r.Port)
+			}
 			if err := prx.RegisterReplica(app.Slug, r.Index, targetURL); err != nil {
 				slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 				continue
@@ -234,10 +241,14 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 	touched := make(map[string]bool)
 	for _, r := range alive {
 		app := bySlug[r.slug]
+		var rep *db.Replica
 		var port int
-		for _, rep := range replicasByApp[app.ID] {
-			if rep.Index == r.idx && rep.Port != nil {
-				port = *rep.Port
+		for _, candidate := range replicasByApp[app.ID] {
+			if candidate.Index == r.idx {
+				rep = candidate
+				if candidate.Port != nil {
+					port = *candidate.Port
+				}
 				break
 			}
 		}
@@ -245,14 +256,25 @@ func recoverDockerProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Pr
 			slog.Warn("recovery: no port row for adopted container", "slug", r.slug, "idx", r.idx)
 			continue
 		}
-		mgr.Adopt(r.slug, process.ProcessInfo{
+		targetURL := ""
+		if rep != nil {
+			targetURL = rep.EndpointURL
+		}
+		if targetURL == "" {
+			targetURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+		}
+		info := process.ProcessInfo{
 			Slug:   r.slug,
 			Index:  r.idx,
 			PID:    r.pid,
 			Port:   port,
 			Status: process.StatusRunning,
-		}, process.RunHandle{ContainerID: r.cID})
-		targetURL := fmt.Sprintf("http://localhost:%d", port)
+		}
+		if rep != nil {
+			info.Tier, info.Provider = rep.Tier, rep.Provider
+			info.EndpointURL, info.WorkerID = rep.EndpointURL, rep.WorkerID
+		}
+		mgr.Adopt(r.slug, info, process.RunHandle{ContainerID: r.cID})
 		if err := prx.RegisterReplica(r.slug, r.idx, targetURL); err != nil {
 			slog.Error("recovery: register docker proxy", "slug", r.slug, "idx", r.idx, "err", err)
 			continue

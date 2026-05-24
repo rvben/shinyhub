@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -90,12 +91,12 @@ func (r *NativeRuntime) HostPreparesDeps() bool { return true }
 // must only be reachable via the in-process proxy.
 func (r *NativeRuntime) AppBindHost() string { return "127.0.0.1" }
 
-func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (RunHandle, error) {
+func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (ReplicaEndpoint, error) {
 	if len(p.Command) == 0 {
-		return RunHandle{}, fmt.Errorf("command must not be empty")
+		return ReplicaEndpoint{}, fmt.Errorf("command must not be empty")
 	}
 	if err := applySharedMounts(p); err != nil {
-		return RunHandle{}, err
+		return ReplicaEndpoint{}, err
 	}
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
@@ -107,7 +108,7 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
-		return RunHandle{}, fmt.Errorf("start process: %w", err)
+		return ReplicaEndpoint{}, fmt.Errorf("start process: %w", err)
 	}
 	pid := cmd.Process.Pid
 	r.mu.Lock()
@@ -115,7 +116,12 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	r.mu.Unlock()
 	// MemoryLimitMB and CPUQuotaPercent are enforced by DockerRuntime only;
 	// the native runtime inherits OS scheduling with no additional limits.
-	return RunHandle{PID: pid}, nil
+	return ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: strconv.Itoa(pid),
+		Handle:   RunHandle{PID: pid},
+	}, nil
 }
 
 func (r *NativeRuntime) Signal(handle RunHandle, sig syscall.Signal) error {

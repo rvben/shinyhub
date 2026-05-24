@@ -102,7 +102,7 @@ func dataHostPath(p StartParams) string {
 	return filepath.Join(p.Dir, "data")
 }
 
-func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (RunHandle, error) {
+func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (ReplicaEndpoint, error) {
 	image := r.imageForCommand(p.Command)
 
 	labels := map[string]string{
@@ -144,7 +144,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
 	}
 	if err := addSharedMounts(&cfg, p.SharedMounts, dataHostPath(p)); err != nil {
-		return RunHandle{}, err
+		return ReplicaEndpoint{}, err
 	}
 	if p.MemoryLimitMB > 0 {
 		cfg.MemoryBytes = int64(p.MemoryLimitMB) * 1024 * 1024
@@ -156,19 +156,24 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 
 	id, err := r.client.createContainer(cfg)
 	if err != nil {
-		return RunHandle{}, fmt.Errorf("create container for %s: %w", p.Slug, err)
+		return ReplicaEndpoint{}, fmt.Errorf("create container for %s: %w", p.Slug, err)
 	}
 
 	if err := r.client.startContainer(id); err != nil {
 		if err := r.client.removeContainer(id); err != nil {
 			slog.Warn("docker cleanup container after failed start", "container", id, "err", err)
 		}
-		return RunHandle{}, fmt.Errorf("start container for %s: %w", p.Slug, err)
+		return ReplicaEndpoint{}, fmt.Errorf("start container for %s: %w", p.Slug, err)
 	}
 
 	go r.streamLogs(id, logWriter)
 
-	return RunHandle{ContainerID: id}, nil
+	return ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "docker",
+		WorkerID: id,
+		Handle:   RunHandle{ContainerID: id},
+	}, nil
 }
 
 // RemoveHandle force-removes the container behind handle. Long-running app
