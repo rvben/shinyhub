@@ -93,6 +93,29 @@ func newDockerRuntimeWithServerAndMode(t *testing.T, handler http.Handler, netwo
 	}
 }
 
+func TestDockerLabels_StampsTierAndProvider(t *testing.T) {
+	got := dockerLabels(StartParams{Slug: "my-app", Index: 2, Tier: "burst"})
+	want := map[string]string{
+		labelManaged:      "true",
+		labelSlug:         "my-app",
+		labelReplicaIndex: "2",
+		labelTier:         "burst",
+		labelProvider:     providerDocker,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("label %q = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+func TestDockerLabels_EmptyTierDefaultsToDefaultTier(t *testing.T) {
+	got := dockerLabels(StartParams{Slug: "my-app", Index: 0})
+	if got[labelTier] != DefaultTier {
+		t.Errorf("label %q = %q, want %q", labelTier, got[labelTier], DefaultTier)
+	}
+}
+
 func TestDockerRuntimeStart(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {

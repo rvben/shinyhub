@@ -14,6 +14,40 @@ import (
 	"time"
 )
 
+// providerDocker is the provider name DockerRuntime reports for the replicas it
+// starts (in ReplicaEndpoint and the shinyhub.provider container label).
+const providerDocker = "docker"
+
+// Container label keys stamped on every long-running app replica container.
+// Recovery and the orphan sweep read these back to rebuild a replica's
+// identity from a surviving container after a control-plane restart. tier lets
+// recovery re-adopt the container onto the runtime registered for its tier;
+// provider records which runtime owns it.
+const (
+	labelManaged      = "shinyhub.managed"
+	labelSlug         = "shinyhub.slug"
+	labelReplicaIndex = "shinyhub.replica_index"
+	labelTier         = "shinyhub.tier"
+	labelProvider     = "shinyhub.provider"
+)
+
+// dockerLabels builds the label set for a long-running app replica container.
+// An empty StartParams.Tier defaults to DefaultTier so every replica container
+// carries a concrete tier for recovery to route on.
+func dockerLabels(p StartParams) map[string]string {
+	tier := p.Tier
+	if tier == "" {
+		tier = DefaultTier
+	}
+	return map[string]string{
+		labelManaged:      "true",
+		labelSlug:         p.Slug,
+		labelReplicaIndex: strconv.Itoa(p.Index),
+		labelTier:         tier,
+		labelProvider:     providerDocker,
+	}
+}
+
 // DockerRuntime implements Runtime using the Docker Engine API.
 // Each app runs in its own container with the bundle directory mounted at /app.
 type DockerRuntime struct {
@@ -105,11 +139,7 @@ func dataHostPath(p StartParams) string {
 func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (ReplicaEndpoint, error) {
 	image := r.imageForCommand(p.Command)
 
-	labels := map[string]string{
-		"shinyhub.managed":       "true",
-		"shinyhub.slug":          p.Slug,
-		"shinyhub.replica_index": strconv.Itoa(p.Index),
-	}
+	labels := dockerLabels(p)
 
 	cfg := containerConfig{
 		Image:   image,
@@ -170,7 +200,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 
 	return ReplicaEndpoint{
 		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
-		Provider: "docker",
+		Provider: providerDocker,
 		WorkerID: id,
 		Handle:   RunHandle{ContainerID: id},
 	}, nil
