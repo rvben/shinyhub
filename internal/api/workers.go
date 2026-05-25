@@ -5,9 +5,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/worker"
 	workerapi "github.com/rvben/shinyhub/internal/worker/api"
@@ -21,9 +24,10 @@ type WorkerAPI struct {
 	store    *db.Store
 	registry *worker.Registry
 	ca       *worker.CA
+	appsDir  string
 	certTTL  time.Duration
 
-	limMu    sync.Mutex
+	limMu sync.Mutex
 	// limiters holds one rate.Limiter per source host. Entries are created on
 	// demand and never evicted, which is acceptable because the worker
 	// source-IP set is bounded to known hosts.
@@ -31,11 +35,14 @@ type WorkerAPI struct {
 }
 
 // NewWorkerAPI constructs the worker API with a default short cert TTL.
-func NewWorkerAPI(store *db.Store, reg *worker.Registry, ca *worker.CA) *WorkerAPI {
+// appsDir is the root directory under which per-app bundle zips are stored;
+// it may be empty during tests that override appsDir directly.
+func NewWorkerAPI(store *db.Store, reg *worker.Registry, ca *worker.CA, appsDir string) *WorkerAPI {
 	return &WorkerAPI{
 		store:    store,
 		registry: reg,
 		ca:       ca,
+		appsDir:  appsDir,
 		certTTL:  1 * time.Hour,
 		limiters: map[string]*rate.Limiter{},
 	}
@@ -135,4 +142,35 @@ func (a *WorkerAPI) authenticatedNodeID(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return nodeID, true
+}
+
+// handleBundleFetch streams the stored bundle zip for a content digest. The
+// caller (agent) verifies the digest on receipt, so this path only resolves the
+// digest to a deployment and serves its archived zip artifact.
+func (a *WorkerAPI) handleBundleFetch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.authenticatedNodeID(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	digest := chi.URLParam(r, "digest")
+	dep, err := a.store.GetDeploymentByDigest(digest)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "bundle not found")
+		return
+	}
+	app, err := a.store.GetAppByID(dep.AppID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "bundle not found")
+		return
+	}
+	zipPath := filepath.Join(a.appsDir, app.Slug, "bundles", dep.Version+".zip")
+	f, err := os.Open(zipPath)
+	if err != nil {
+		slog.Error("bundle fetch: open artifact", "digest", digest, "path", zipPath, "err", err)
+		writeError(w, http.StatusNotFound, "bundle artifact missing")
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/zip")
+	http.ServeContent(w, r, dep.Version+".zip", time.Time{}, f)
 }
