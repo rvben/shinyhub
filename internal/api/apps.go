@@ -714,7 +714,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if manifest != nil {
-		if ve := s.validateManifestForServer(manifest.App); ve != nil {
+		if ve := s.validateManifestForServer(app, manifest.App); ve != nil {
 			writeError(w, http.StatusBadRequest, ve.Error())
 			return
 		}

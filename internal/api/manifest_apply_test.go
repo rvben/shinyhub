@@ -88,26 +88,63 @@ func TestApplyManifestAppSettings_AbsentFieldsLeftAlone(t *testing.T) {
 }
 
 func TestValidateManifestForServer_ExceedsMaxReplicas(t *testing.T) {
-	srv, _, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 2)
+	srv, store, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 2)
+	app, _ := store.GetAppBySlug("alpha")
 
-	if ve := srv.validateManifestForServer(deploy.AppSettings{Replicas: ptrIntAPI(5)}); ve == nil {
+	if ve := srv.validateManifestForServer(app, deploy.AppSettings{Replicas: ptrIntAPI(5)}); ve == nil {
 		t.Fatal("expected validation error for replicas > MaxReplicas")
 	}
 }
 
 func TestValidateManifestForServer_WithinPolicyPasses(t *testing.T) {
-	srv, _, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 4)
+	srv, store, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 4)
+	app, _ := store.GetAppBySlug("alpha")
 
-	if ve := srv.validateManifestForServer(deploy.AppSettings{Replicas: ptrIntAPI(3)}); ve != nil {
+	if ve := srv.validateManifestForServer(app, deploy.AppSettings{Replicas: ptrIntAPI(3)}); ve != nil {
 		t.Errorf("unexpected validation error: %v", ve)
 	}
 }
 
 func TestValidateManifestForServer_ZeroManifestIsNoop(t *testing.T) {
-	srv, _, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 1)
+	srv, store, _ := newServerWithOwnedAppAndMaxReplicas(t, "alpha", 1)
+	app, _ := store.GetAppBySlug("alpha")
 
-	if ve := srv.validateManifestForServer(deploy.AppSettings{}); ve != nil {
+	if ve := srv.validateManifestForServer(app, deploy.AppSettings{}); ve != nil {
 		t.Errorf("expected nil for zero manifest, got %v", ve)
+	}
+}
+
+// TestValidateManifestForServer_RejectsReplicasWhenPlacementStored proves a
+// manifest that sets [app].replicas is rejected when the app already carries a
+// tier placement. Honoring the manifest replicas would leave app.Replicas
+// drifting from the placement sum, because deploy.Run derives the pool from
+// the stored placement and ignores the replicas column.
+func TestValidateManifestForServer_RejectsReplicasWhenPlacementStored(t *testing.T) {
+	srv, store, _ := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	if err := store.SetAppPlacement(app.ID, `{"local":2}`, 2); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = store.GetAppBySlug("alpha")
+
+	if ve := srv.validateManifestForServer(app, deploy.AppSettings{Replicas: ptrIntAPI(5)}); ve == nil {
+		t.Fatal("expected validation error: manifest replicas vs stored tier placement")
+	}
+}
+
+// TestValidateManifestForServer_PlacementWithoutReplicasPasses proves a
+// manifest that leaves replicas untouched is accepted even when a placement is
+// stored — only a replicas change conflicts with placement.
+func TestValidateManifestForServer_PlacementWithoutReplicasPasses(t *testing.T) {
+	srv, store, _ := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	if err := store.SetAppPlacement(app.ID, `{"local":2}`, 2); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = store.GetAppBySlug("alpha")
+
+	if ve := srv.validateManifestForServer(app, deploy.AppSettings{MaxSessionsPerReplica: ptrIntAPI(10)}); ve != nil {
+		t.Errorf("unexpected validation error: %v", ve)
 	}
 }
 
