@@ -661,12 +661,13 @@ func (s *Store) DeleteApp(slug string) error {
 // --- Deployments ---
 
 type Deployment struct {
-	ID        int64
-	AppID     int64
-	Version   string
-	BundleDir string
-	Status    string
-	CreatedAt time.Time
+	ID            int64
+	AppID         int64
+	Version       string
+	BundleDir     string
+	Status        string
+	ContentDigest string // "" until SetDeploymentDigest records it
+	CreatedAt     time.Time
 }
 
 // Deployment status lifecycle. A deploy records DeploymentPending before any
@@ -790,7 +791,7 @@ func (s *Store) SetDeploymentDigest(id int64, digest string) error {
 // good deployment.
 func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	rows, err := s.db.Query(
-		`SELECT id, app_id, version, bundle_dir, status, created_at
+		`SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
 		FROM deployments WHERE status = ? ORDER BY id`, DeploymentPending)
 	if err != nil {
 		return nil, fmt.Errorf("list inflight deployments: %w", err)
@@ -799,9 +800,11 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	var ds []*Deployment
 	for rows.Next() {
 		var d Deployment
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &d.CreatedAt); err != nil {
+		var digest sql.NullString
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt); err != nil {
 			return nil, err
 		}
+		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
 	return ds, rows.Err()
@@ -846,7 +849,7 @@ type DeploymentSummary struct {
 // this pointer until PromoteDeployment confirms the new pool.
 func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
-		SELECT id, app_id, version, bundle_dir, status, created_at
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
 		FROM deployments
 		WHERE app_id = ? AND status NOT IN ('pending', 'failed')
 		ORDER BY id DESC`, appID)
@@ -857,9 +860,11 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	var ds []*Deployment
 	for rows.Next() {
 		var d Deployment
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &d.CreatedAt); err != nil {
+		var digest sql.NullString
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt); err != nil {
 			return nil, err
 		}
+		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
 	return ds, rows.Err()
@@ -884,18 +889,43 @@ func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
 // deployment does not exist or belongs to a different app.
 func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, error) {
 	row := s.db.QueryRow(`
-		SELECT d.id, d.app_id, d.version, d.bundle_dir, d.status, d.created_at
+		SELECT d.id, d.app_id, d.version, d.bundle_dir, d.status, d.content_digest, d.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE d.id = ? AND a.slug = ?`, id, slug)
 	var dep Deployment
-	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &dep.CreatedAt); err != nil {
+	var digest sql.NullString
+	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	dep.ContentDigest = digest.String
 	return &dep, nil
+}
+
+// GetDeploymentByDigest returns the newest non-failed deployment whose recorded
+// content digest matches. The control-plane bundle-fetch endpoint uses it to
+// resolve a worker's pull-by-digest request to a stored bundle artifact. A
+// pending row is eligible (a remote replica may pull before promotion); a
+// failed row is not.
+func (s *Store) GetDeploymentByDigest(digest string) (*Deployment, error) {
+	row := s.db.QueryRow(`
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
+		FROM deployments
+		WHERE content_digest = ? AND status != 'failed'
+		ORDER BY id DESC LIMIT 1`, digest)
+	var d Deployment
+	var dg sql.NullString
+	if err := row.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &dg, &d.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	d.ContentDigest = dg.String
+	return &d, nil
 }
 
 // --- App Members ---
