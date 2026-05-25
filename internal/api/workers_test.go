@@ -60,7 +60,7 @@ func TestRegisterRejectsBadToken(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/workers/register", bytes.NewReader(body))
 	req.RemoteAddr = "9.9.9.9:1"
 	w := httptest.NewRecorder()
-	h.handleWorkerRegister(w, req)
+	h.HandleRegister(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
@@ -75,7 +75,7 @@ func TestRegisterSignsAndPersists(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/workers/register", bytes.NewReader(body))
 	req.RemoteAddr = "9.9.9.9:1"
 	w := httptest.NewRecorder()
-	h.handleWorkerRegister(w, req)
+	h.HandleRegister(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
@@ -106,7 +106,7 @@ func TestRegisterRateLimited(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/workers/register", bytes.NewReader(body))
 		req.RemoteAddr = "5.5.5.5:1"
 		w := httptest.NewRecorder()
-		h.handleWorkerRegister(w, req)
+		h.HandleRegister(w, req)
 		return w.Code
 	}
 	// Burst of registrations from one source eventually trips the limiter (429).
@@ -213,7 +213,7 @@ func TestBundleFetchStreamsZipByDigest(t *testing.T) {
 	req = withWorkerCert(t, req, h, "node-auth")
 	req = withURLParam(req, "digest", digest)
 	w := httptest.NewRecorder()
-	h.handleBundleFetch(w, req)
+	h.HandleBundleFetch(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
@@ -229,7 +229,7 @@ func TestBundleFetchRejectsUnauthenticated(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/internal/bundles/sha256:aabbcc", nil)
 	req = withURLParam(req, "digest", "sha256:aabbcc")
 	w := httptest.NewRecorder()
-	h.handleBundleFetch(w, req)
+	h.HandleBundleFetch(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
@@ -250,7 +250,7 @@ func TestBundleFetchUnknownDigest(t *testing.T) {
 	req = withWorkerCert(t, req, h, "node-unknown-digest")
 	req = withURLParam(req, "digest", "sha256:notfound")
 	w := httptest.NewRecorder()
-	h.handleBundleFetch(w, req)
+	h.HandleBundleFetch(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
 	}
@@ -300,7 +300,7 @@ func TestBundleFetchMissingArtifact(t *testing.T) {
 	req = withWorkerCert(t, req, h, "node-missing-artifact")
 	req = withURLParam(req, "digest", digest)
 	w := httptest.NewRecorder()
-	h.handleBundleFetch(w, req)
+	h.HandleBundleFetch(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
 	}

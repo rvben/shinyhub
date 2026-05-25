@@ -70,7 +70,7 @@ func sourceHost(r *http.Request) string {
 	return host
 }
 
-func (a *WorkerAPI) handleWorkerRegister(w http.ResponseWriter, r *http.Request) {
+func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	if !a.registerLimiter(sourceHost(r)).Allow() {
 		writeError(w, http.StatusTooManyRequests, "rate limited")
 		return
@@ -112,7 +112,7 @@ func (a *WorkerAPI) handleWorkerRegister(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func (a *WorkerAPI) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
+func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	nodeID, ok := a.authenticatedNodeID(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -144,10 +144,10 @@ func (a *WorkerAPI) authenticatedNodeID(r *http.Request) (string, bool) {
 	return nodeID, true
 }
 
-// handleBundleFetch streams the stored bundle zip for a content digest. The
+// HandleBundleFetch streams the stored bundle zip for a content digest. The
 // caller (agent) verifies the digest on receipt, so this path only resolves the
 // digest to a deployment and serves its archived zip artifact.
-func (a *WorkerAPI) handleBundleFetch(w http.ResponseWriter, r *http.Request) {
+func (a *WorkerAPI) HandleBundleFetch(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.authenticatedNodeID(r); !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return

@@ -12,6 +12,27 @@ import (
 	"time"
 )
 
+func TestCAServerCertificateVerifies(t *testing.T) {
+	ca, err := OpenCA(t.TempDir(), []string{"t"})
+	if err != nil {
+		t.Fatalf("open ca: %v", err)
+	}
+	cert, err := ca.ServerCertificate()
+	if err != nil {
+		t.Fatalf("server cert: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     ca.Pool(),
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Fatalf("server cert does not verify against CA: %v", err)
+	}
+}
+
 func TestCASignsCSRWithNodeIDBinding(t *testing.T) {
 	dir := t.TempDir()
 	ca, err := OpenCA(dir, []string{"join-secret"})

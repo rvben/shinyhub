@@ -221,6 +221,16 @@ type WorkerConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	JoinTokenFile string `yaml:"join_token_file"`
 	CADir         string `yaml:"ca_dir"`
+	// ListenAddr is the TCP address the worker-facing mTLS listener binds to.
+	// The effective default when this is empty is 0.0.0.0:8443 (applied by
+	// workerListenAddr in cmd/shinyhub/worker.go).
+	ListenAddr string `yaml:"listen_addr"`
+	// AdvertiseHosts lists the hostnames and IP addresses that remote workers
+	// use to reach the control plane. They are placed as SANs in the
+	// worker-API server certificate so workers can verify the TLS connection.
+	// When empty the certificate defaults to loopback addresses only, which
+	// is sufficient for local testing but will fail remote worker connections.
+	AdvertiseHosts []string `yaml:"advertise_hosts"`
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -1022,6 +1032,18 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_WORKER_CA_DIR"); v != "" {
 		cfg.Worker.CADir = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_LISTEN_ADDR"); v != "" {
+		cfg.Worker.ListenAddr = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_ADVERTISE_HOSTS"); v != "" {
+		var hosts []string
+		for _, h := range strings.Split(v, ",") {
+			if s := strings.TrimSpace(h); s != "" {
+				hosts = append(hosts, s)
+			}
+		}
+		cfg.Worker.AdvertiseHosts = hosts
 	}
 	return nil
 }

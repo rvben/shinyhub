@@ -132,7 +132,7 @@ func init() {
 	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
-	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd)
+	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd())
 	cli.AddCommandsTo(rootCmd)
 }
 
@@ -229,6 +229,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}()
 	if err := store.Migrate(); err != nil {
 		return fmt.Errorf("db migrate: %w", err)
+	}
+
+	if cfg.Worker.Enabled {
+		if err := startWorkerHosting(ctx, logger, cfg, store); err != nil {
+			return err
+		}
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)

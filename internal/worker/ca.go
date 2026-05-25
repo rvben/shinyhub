@@ -7,12 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -173,4 +175,46 @@ func NodeIDFromCert(cert *x509.Certificate) string {
 func Fingerprint(cert *x509.Certificate) string {
 	sum := sha256.Sum256(cert.Raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// ServerCertificate signs a fresh server keypair off the CA for the control
+// plane's worker-facing listener. When no hosts are given it defaults to
+// loopback (127.0.0.1, ::1, localhost). IP-literal hosts become IP SANs and
+// the rest become DNS SANs. The returned certificate carries the leaf and the
+// CA certificate so clients pinning the CA can build a full chain.
+func (c *CA) ServerCertificate(hosts ...string) (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate server key: %w", err)
+	}
+	if len(hosts) == 0 {
+		hosts = []string{"127.0.0.1", "::1", "localhost"}
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("serial: %w", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "shinyhub-control-plane"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().AddDate(1, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
+		} else {
+			tmpl.DNSNames = append(tmpl.DNSNames, h)
+		}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("sign server cert: %w", err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der, c.cert.Raw},
+		PrivateKey:  key,
+	}, nil
 }
