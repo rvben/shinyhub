@@ -102,6 +102,7 @@ type Config struct {
 	Tracing          TracingConfig
 	Metrics          MetricsConfig
 	Branding         BrandingConfig
+	Worker           WorkerConfig
 	OAuth            OAuthConfig  `yaml:"-"`
 	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
 }
@@ -212,6 +213,14 @@ func (b BrandingConfig) ResolvedAssets() map[string]string {
 	out := make(map[string]string, len(b.resolvedAssets))
 	maps.Copy(out, b.resolvedAssets)
 	return out
+}
+
+// WorkerConfig holds the control-plane settings for hosting remote workers. The
+// worker role (shinyhub worker) takes no yaml; it is configured by CLI flags.
+type WorkerConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	JoinTokenFile string `yaml:"join_token_file"`
+	CADir         string `yaml:"ca_dir"`
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -372,6 +381,7 @@ type rawConfig struct {
 	Tracing   rawTracingConfig   `yaml:"tracing"`
 	Metrics   rawMetricsConfig   `yaml:"metrics"`
 	Branding  BrandingConfig     `yaml:"branding"`
+	Worker    WorkerConfig       `yaml:"worker"`
 }
 
 type rawMetricsConfig struct {
@@ -480,6 +490,7 @@ func Load(path string) (*Config, error) {
 			Addr:    raw.Metrics.Addr,
 		},
 		Branding: raw.Branding,
+		Worker:   raw.Worker,
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
@@ -998,6 +1009,19 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_BRANDING_LANDING_PAGE"); v != "" {
 		cfg.Branding.LandingPage = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_ENABLED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_WORKER_ENABLED: %w", err)
+		}
+		cfg.Worker.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_JOIN_TOKEN_FILE"); v != "" {
+		cfg.Worker.JoinTokenFile = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_CA_DIR"); v != "" {
+		cfg.Worker.CADir = v
 	}
 	return nil
 }
