@@ -1,6 +1,78 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
+
+// columnExists reports whether the given table has the named column.
+func columnExists(t *testing.T, store *Store, table, column string) bool {
+	t.Helper()
+	var n int
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = '%s'`, table, column)
+	if err := store.db.QueryRow(q).Scan(&n); err != nil {
+		t.Fatalf("pragma %s.%s: %v", table, column, err)
+	}
+	return n > 0
+}
+
+// TestMigrate_LegacyBaselineAppliesPostBaselineMigrations proves that a
+// pre-ledger database (schema through the legacy baseline version, no ledger)
+// still receives migrations that were added after the ledger. Recording every
+// embedded migration as "applied" without running them would leave a legacy DB
+// permanently missing the columns those later migrations add.
+func TestMigrate_LegacyBaselineAppliesPostBaselineMigrations(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Build a pre-ledger schema: apply only migrations up to the legacy
+	// baseline version, leaving no schema_migrations ledger behind.
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	for _, m := range ms {
+		if m.version > legacyBaselineVersion {
+			continue
+		}
+		if _, err := store.db.Exec(m.sql); err != nil {
+			t.Fatalf("seed legacy migration %s: %v", m.name, err)
+		}
+	}
+
+	// Precondition: a post-baseline column must be absent in the legacy schema.
+	if columnExists(t, store, "apps", "replica_placement") {
+		t.Fatal("precondition failed: apps.replica_placement should be absent before migrate")
+	}
+
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Post-baseline migrations must have actually run against the legacy DB.
+	if !columnExists(t, store, "apps", "replica_placement") {
+		t.Error("migration 018 not applied to legacy DB: apps.replica_placement missing")
+	}
+	if !columnExists(t, store, "replicas", "deployment_id") {
+		t.Error("migration 019 not applied to legacy DB: replicas.deployment_id missing")
+	}
+
+	// The ledger must record the full embedded set (baselined + freshly run).
+	latest, err := LatestSchemaVersion()
+	if err != nil {
+		t.Fatalf("latest schema version: %v", err)
+	}
+	got, err := store.SchemaVersion()
+	if err != nil {
+		t.Fatalf("schema version: %v", err)
+	}
+	if got != latest {
+		t.Errorf("ledger schema version = %d, want %d", got, latest)
+	}
+}
 
 // TestLoadMigrationsOrderedAndUnique guards the migration filename convention
 // and ordering. A misnamed or duplicate-versioned file is a build-time
