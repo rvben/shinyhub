@@ -561,12 +561,15 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	bundleDir := deployments[0].BundleDir
 
 	params := process.StartParams{
-		Slug:         app.Slug,
-		Dir:          bundleDir,
-		Command:      cmd,
-		Env:          env,
-		AppDataPath:  appDataPath,
-		SharedMounts: sharedMounts,
+		Slug:          app.Slug,
+		Dir:           bundleDir,
+		Command:       cmd,
+		Env:           env,
+		AppDataPath:   appDataPath,
+		SharedMounts:  sharedMounts,
+		ContentDigest: deployments[0].ContentDigest,
+		AppVersion:    deployments[0].Version,
+		DeploymentID:  deployments[0].ID,
 	}
 
 	// Run the command.
