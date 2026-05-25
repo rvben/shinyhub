@@ -242,6 +242,11 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setMaxSessions           bool
 		newManagedBy             *string
 		setManagedBy             bool
+		placementKeyPresent      bool
+		setPlacement             bool // a non-null placement object was provided
+		clearPlacement           bool // an explicit null placement was provided
+		placementJSON            string
+		placementTotal           int
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -348,6 +353,65 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		newManagedBy, setManagedBy = v, true
 	}
 
+	if rawVal, present := raw["placement"]; present {
+		placementKeyPresent = true
+		if string(rawVal) == "null" {
+			// Explicit null clears placement: all replicas fall back to the
+			// default tier, keeping the current replica count.
+			clearPlacement = true
+		} else {
+			var pm map[string]int
+			if err := json.Unmarshal(rawVal, &pm); err != nil {
+				writeError(w, http.StatusBadRequest,
+					"placement must be an object mapping tier names to replica counts, or null")
+				return
+			}
+			known := make(map[string]bool)
+			for _, name := range s.cfg.Runtime.TierOrder() {
+				known[name] = true
+			}
+			total := 0
+			for tier, count := range pm {
+				if !known[tier] {
+					writeError(w, http.StatusBadRequest,
+						fmt.Sprintf("placement: %q is not a configured tier", tier))
+					return
+				}
+				if count < 0 {
+					writeError(w, http.StatusBadRequest,
+						fmt.Sprintf("placement: tier %q count must be >= 0", tier))
+					return
+				}
+				total += count
+			}
+			if total < 1 {
+				writeError(w, http.StatusBadRequest, "placement: total replica count must be >= 1")
+				return
+			}
+			if s.cfg.Runtime.MaxReplicas > 0 && total > s.cfg.Runtime.MaxReplicas {
+				writeError(w, http.StatusBadRequest,
+					fmt.Sprintf("placement: total replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas))
+				return
+			}
+			b, _ := json.Marshal(pm)
+			placementJSON, placementTotal, setPlacement = string(b), total, true
+		}
+	}
+
+	// replicas and placement both describe the pool shape, so a single request
+	// may carry only one of them.
+	if placementKeyPresent && setReplicas {
+		writeError(w, http.StatusBadRequest, "set either replicas or placement, not both")
+		return
+	}
+	// Changing the bare replica count on an app that already uses tier placement
+	// would drift the stored placement from the replica count. Require the caller
+	// to update (or clear) placement instead.
+	if setReplicas && len(app.PlacementMap()) > 0 {
+		writeError(w, http.StatusBadRequest, "app uses tier placement; update placement instead of replicas")
+		return
+	}
+
 	// Fail fast: CPU/memory limits are only enforced by the Docker runtime.
 	// Under native mode they would be silently ignored, giving a false sense
 	// of containment. Reject the write rather than store an unenforceable
@@ -410,13 +474,31 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Placement is the authoritative writer for replica_placement + the derived
+	// replica count, so it runs after the core settings transaction. Clearing
+	// keeps the current replica count (all replicas on the default tier).
+	if setPlacement || clearPlacement {
+		total := placementTotal
+		if clearPlacement {
+			total, placementJSON = app.Replicas, ""
+		}
+		if err := s.store.SetAppPlacement(app.ID, placementJSON, total); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
 	// Post-commit side effects. These only take effect once the settings are
 	// durably persisted.
 	if setMaxSessions && s.proxy != nil {
 		s.proxy.SetPoolCap(slug,
 			deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
-	if setReplicas && priorStatus == "running" {
+	if (setReplicas || setPlacement || clearPlacement) && priorStatus == "running" {
 		// Mark in-flight synchronously before launching the goroutine so the
 		// first GET after this PATCH returns observes the redeploy even though
 		// the app row still reads "running". The redeploy goroutine clears it.

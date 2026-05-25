@@ -1156,6 +1156,35 @@ func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Se
 	return srv, store
 }
 
+// newTestServerWithTiers builds a server whose runtime declares two tiers
+// (local/native default + burst/docker), so tests can exercise per-tier
+// placement validation on PATCH.
+func newTestServerWithTiers(t *testing.T) (*api.Server, *db.Store) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir},
+		Runtime: config.RuntimeConfig{
+			MaxReplicas: 8,
+			Tiers: []config.TierConfig{
+				{Name: "local", Runtime: "native"},
+				{Name: "burst", Runtime: "docker"},
+			},
+		},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	t.Cleanup(func() { store.Close() })
+	return srv, store
+}
+
 // newManagerTestServerWithRuntimeMode builds a server whose runtime mode is set
 // explicitly, so tests can exercise behavior that branches on native vs docker.
 func newManagerTestServerWithRuntimeMode(t *testing.T, mode string) (*api.Server, *db.Store) {
@@ -1319,6 +1348,127 @@ func TestAppsAPI_PatchReplicasBelowMinRejected(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for replicas=0, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// patchTierApp is a small helper for the placement tests: it spins up a
+// tier-configured server, creates an owner + app, and returns everything needed
+// to issue authenticated PATCH requests.
+func patchTierApp(t *testing.T) (*api.Server, *db.Store, *db.App, string) {
+	t.Helper()
+	srv, store := newTestServerWithTiers(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("demo")
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	return srv, store, app, token
+}
+
+func patchDemo(t *testing.T, srv *api.Server, token string, payload map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(payload)
+	req := authedRequest(t, "PATCH", "/api/apps/demo", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestPatchApp_SetPlacement persists a per-tier placement and derives the total
+// replica count from the placement sum.
+func TestPatchApp_SetPlacement(t *testing.T) {
+	srv, store, _, token := patchTierApp(t)
+
+	rec := patchDemo(t, srv, token, map[string]any{"placement": map[string]int{"local": 2, "burst": 1}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got, _ := store.GetAppBySlug("demo")
+	if got.Replicas != 3 {
+		t.Errorf("want replicas=3 (placement sum), got %d", got.Replicas)
+	}
+	pm := got.PlacementMap()
+	if pm["local"] != 2 || pm["burst"] != 1 {
+		t.Errorf("want placement {local:2, burst:1}, got %+v", pm)
+	}
+}
+
+// TestPatchApp_ClearPlacement clears a stored placement with an explicit null,
+// preserving the current replica count (all replicas fall back to the default tier).
+func TestPatchApp_ClearPlacement(t *testing.T) {
+	srv, store, app, token := patchTierApp(t)
+	if err := store.SetAppPlacement(app.ID, `{"local":2,"burst":1}`, 3); err != nil {
+		t.Fatalf("seed placement: %v", err)
+	}
+
+	rec := patchDemo(t, srv, token, map[string]any{"placement": nil})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got, _ := store.GetAppBySlug("demo")
+	if len(got.PlacementMap()) != 0 {
+		t.Errorf("expected placement cleared, got %+v", got.PlacementMap())
+	}
+	if got.Replicas != 3 {
+		t.Errorf("expected replica count preserved at 3, got %d", got.Replicas)
+	}
+}
+
+// TestPatchApp_PlacementUnknownTierRejected rejects a placement naming a tier
+// that is not configured.
+func TestPatchApp_PlacementUnknownTierRejected(t *testing.T) {
+	srv, _, _, token := patchTierApp(t)
+	rec := patchDemo(t, srv, token, map[string]any{"placement": map[string]int{"nope": 1}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown tier, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApp_PlacementAndReplicasConflict rejects a request that sets both
+// replicas and placement (they both describe the pool shape).
+func TestPatchApp_PlacementAndReplicasConflict(t *testing.T) {
+	srv, _, _, token := patchTierApp(t)
+	rec := patchDemo(t, srv, token, map[string]any{
+		"placement": map[string]int{"local": 1},
+		"replicas":  2,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for replicas+placement, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApp_PlacementZeroTotalRejected rejects a placement whose counts sum to zero.
+func TestPatchApp_PlacementZeroTotalRejected(t *testing.T) {
+	srv, _, _, token := patchTierApp(t)
+	rec := patchDemo(t, srv, token, map[string]any{"placement": map[string]int{"local": 0, "burst": 0}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for zero-total placement, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApp_PlacementAboveMaxRejected rejects a placement whose total exceeds MaxReplicas.
+func TestPatchApp_PlacementAboveMaxRejected(t *testing.T) {
+	srv, _, _, token := patchTierApp(t) // MaxReplicas=8
+	rec := patchDemo(t, srv, token, map[string]any{"placement": map[string]int{"local": 5, "burst": 4}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for over-cap placement, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApp_ReplicasRejectedWhenPlacementStored rejects a bare replicas change
+// on an app that already uses tier placement, so the stored placement cannot
+// drift out of sync with the replica count.
+func TestPatchApp_ReplicasRejectedWhenPlacementStored(t *testing.T) {
+	srv, store, app, token := patchTierApp(t)
+	if err := store.SetAppPlacement(app.ID, `{"local":2}`, 2); err != nil {
+		t.Fatalf("seed placement: %v", err)
+	}
+	rec := patchDemo(t, srv, token, map[string]any{"replicas": 5})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for replicas on placement app, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
