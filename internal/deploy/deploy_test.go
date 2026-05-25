@@ -307,6 +307,92 @@ func TestRun_AllFailHealthErrors(t *testing.T) {
 	}
 }
 
+func TestRun_PlacementAssignsTiersOverGlobalIndex(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("burst", process.NewNativeRuntime())
+	defer mgr.Stop("placed")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug: "placed", BundleDir: bundle,
+		Placement:   map[string]int{"local": 1, "burst": 2},
+		TierOrder:   []string{"local", "burst"},
+		DefaultTier: "local",
+		Manager:     mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(result.Replicas) != 3 {
+		t.Fatalf("want 3 replicas, got %d", len(result.Replicas))
+	}
+	tierByIndex := map[int]string{}
+	for _, r := range result.Replicas {
+		tierByIndex[r.Index] = r.Tier
+	}
+	if tierByIndex[0] != "local" {
+		t.Errorf("index 0 tier = %q, want local", tierByIndex[0])
+	}
+	if tierByIndex[1] != "burst" || tierByIndex[2] != "burst" {
+		t.Errorf("indices 1,2 tiers = %q,%q, want burst,burst", tierByIndex[1], tierByIndex[2])
+	}
+}
+
+func TestRun_EmptyPlacementUsesDefaultTier(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("default-tier")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug: "default-tier", BundleDir: bundle, Replicas: 2,
+		Manager: mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(result.Replicas) != 2 {
+		t.Fatalf("want 2 replicas, got %d", len(result.Replicas))
+	}
+	for _, r := range result.Replicas {
+		if r.Tier != process.DefaultTier {
+			t.Errorf("replica %d tier = %q, want %q", r.Index, r.Tier, process.DefaultTier)
+		}
+	}
+}
+
+func TestRunReplica_RestartsOnPlacedTier(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("burst", process.NewNativeRuntime())
+	defer mgr.Stop("restart-placed")
+	prx := proxy.New()
+	prx.SetPoolSize("restart-placed", 3)
+
+	// Index 2 belongs to the burst tier under this placement; a crash-restart of
+	// that index must land on burst, not the default tier.
+	r, err := deploy.RunReplica(deploy.Params{
+		Slug: "restart-placed", BundleDir: bundle,
+		Placement:   map[string]int{"local": 1, "burst": 2},
+		TierOrder:   []string{"local", "burst"},
+		DefaultTier: "local",
+		Manager:     mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration) error { return nil },
+	}, 2)
+	if err != nil {
+		t.Fatalf("run replica: %v", err)
+	}
+	if r.Tier != "burst" {
+		t.Errorf("restarted replica 2 tier = %q, want burst", r.Tier)
+	}
+}
+
 func TestRunReplica_SingleBoot(t *testing.T) {
 	bundle := t.TempDir()
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -447,8 +533,8 @@ command = ["should-not-run"]
 
 	_, err := deploy.Run(deploy.Params{
 		Slug: "docker-hook", BundleDir: bundle, Replicas: 1,
-		Manager: process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
-		Proxy:   proxy.New(),
+		Manager:     process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
+		Proxy:       proxy.New(),
 		HealthCheck: func(string, time.Duration) error { return nil },
 	})
 	if err != nil {
@@ -728,9 +814,9 @@ func TestExtractBundle_SoftSkipsCacheDirs(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "bundle.zip")
 	if err := createTestBundle(zipPath, map[string]string{
-		"app.R":               "x",
-		".git/HEAD":           "ref",
-		"__pycache__/x.pyc":  "p",
+		"app.R":             "x",
+		".git/HEAD":         "ref",
+		"__pycache__/x.pyc": "p",
 	}); err != nil {
 		t.Fatal(err)
 	}

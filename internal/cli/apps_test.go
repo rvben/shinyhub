@@ -111,6 +111,73 @@ func TestAppsSet_CombinedFlags(t *testing.T) {
 	}
 }
 
+// TestAppsSet_TierPlacement sends a repeatable --tier flag as a placement object
+// and omits the replicas key.
+func TestAppsSet_TierPlacement(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--tier", "local=2", "--tier", "burst=1", "--yes"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	placement, ok := body["placement"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected placement object, got %v (%T)", body["placement"], body["placement"])
+	}
+	if placement["local"] != float64(2) || placement["burst"] != float64(1) {
+		t.Errorf("expected placement {local:2, burst:1}, got %v", placement)
+	}
+	if _, present := body["replicas"]; present {
+		t.Errorf("expected replicas to be absent when --tier is used, got %v", body["replicas"])
+	}
+}
+
+// TestAppsSet_TierAndReplicasConflict rejects --tier together with --replicas
+// before any HTTP request is made.
+func TestAppsSet_TierAndReplicasConflict(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "apps", "set", "demo", "--tier", "local=1", "--replicas", "2")
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected 'mutually exclusive' error, got %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
+	}
+}
+
+// TestAppsSet_RejectsInvalidTierFormat rejects a --tier value lacking name=count.
+func TestAppsSet_RejectsInvalidTierFormat(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "apps", "set", "demo", "--tier", "local")
+	if err == nil || !strings.Contains(err.Error(), "name=count") {
+		t.Errorf("expected 'name=count' error, got %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
+	}
+}
+
+// TestAppsSet_RejectsTierNonIntCount rejects a --tier value whose count is not a
+// non-negative integer.
+func TestAppsSet_RejectsTierNonIntCount(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "apps", "set", "demo", "--tier", "local=-1")
+	if err == nil || !strings.Contains(err.Error(), "non-negative integer") {
+		t.Errorf("expected 'non-negative integer' error, got %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests when validation fails, got %d", len(*reqs))
+	}
+}
+
 func TestAppsSet_RejectsReplicasZero(t *testing.T) {
 	_, reqs, _ := setupCLITest(t)
 

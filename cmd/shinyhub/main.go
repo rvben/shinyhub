@@ -164,6 +164,31 @@ func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net
 	return srv, ln, nil
 }
 
+// buildRuntime constructs a process.Runtime for a single tier from its mode
+// ("native" or "docker"). Docker tiers share the daemon settings from
+// cfg.Runtime.Docker; a burst tier may therefore point at the same daemon
+// under a distinct tier name. config.Load validates tier modes, so the
+// default case is unreachable in production.
+func buildRuntime(mode string, cfg *config.Config) (process.Runtime, error) {
+	switch mode {
+	case "docker":
+		dockerRT, err := process.NewDockerRuntime(
+			cfg.Runtime.Docker.Socket,
+			cfg.Runtime.Docker.Images.Python,
+			cfg.Runtime.Docker.Images.R,
+			cfg.Runtime.Docker.NetworkMode,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("docker runtime: %w", err)
+		}
+		return dockerRT, nil
+	case "native":
+		return process.NewNativeRuntime(), nil
+	default:
+		return nil, fmt.Errorf("unsupported runtime mode: %s", mode)
+	}
+}
+
 func runServe(ctx context.Context, logger *slog.Logger) error {
 	cfg, err := config.Load(serverConfigPath())
 	if err != nil {
@@ -256,28 +281,33 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			"role", sysUser.Role)
 	}
 
-	var rt process.Runtime
-	switch cfg.Runtime.Mode {
-	case "docker":
-		dockerRT, err := process.NewDockerRuntime(
-			cfg.Runtime.Docker.Socket,
-			cfg.Runtime.Docker.Images.Python,
-			cfg.Runtime.Docker.Images.R,
-			cfg.Runtime.Docker.NetworkMode,
-		)
-		if err != nil {
-			return fmt.Errorf("docker runtime: %w", err)
-		}
-		rt = dockerRT
-		slog.Info("runtime configured", "mode", "docker", "socket", cfg.Runtime.Docker.Socket, "network_mode", cfg.Runtime.Docker.NetworkMode)
-	case "native":
-		rt = process.NewNativeRuntime()
-		slog.Info("runtime configured", "mode", "native")
-	default:
-		// Unreachable: config.Load validates Runtime.Mode before we get here.
-		return fmt.Errorf("unsupported runtime mode: %s", cfg.Runtime.Mode)
+	// Build one runtime per configured tier. The first tier is the default
+	// (config.Load synthesizes a single "local" tier from Mode when none are
+	// declared, so single-node behavior is unchanged). The default tier's
+	// runtime backs the Manager and every runtime-typed consumer (sampler,
+	// jobs, recovery lister, sweeper); additional tiers are registered so
+	// placement can route replicas to them.
+	defaultTier := cfg.Runtime.DefaultTierName()
+	defaultMode, _ := cfg.Runtime.RuntimeForTier(defaultTier)
+	rt, err := buildRuntime(defaultMode, cfg)
+	if err != nil {
+		return err
 	}
+	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultMode)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
+	mgr.SetDefaultTier(defaultTier)
+	for _, name := range cfg.Runtime.TierOrder() {
+		if name == defaultTier {
+			continue
+		}
+		mode, _ := cfg.Runtime.RuntimeForTier(name)
+		tierRT, err := buildRuntime(mode, cfg)
+		if err != nil {
+			return err
+		}
+		mgr.RegisterRuntime(name, tierRT)
+		slog.Info("runtime tier registered", "tier", name, "mode", mode)
+	}
 	mgr.SetEnvResolver(func(slug string) ([]string, error) {
 		app, err := store.GetApp(slug)
 		if err != nil {
@@ -446,6 +476,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			BundleDir:             bundleDir,
 			Manager:               mgr,
 			Proxy:                 prx,
+			Replicas:              app.Replicas,
+			Placement:             app.PlacementMap(),
+			TierOrder:             cfg.Runtime.TierOrder(),
+			DefaultTier:           cfg.Runtime.DefaultTierName(),
 			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
@@ -470,12 +504,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	lifecycle.ReconcileDeletingApps(store, cfg)
 	lifecycle.LogOrphanAppDirs(store, cfg)
 
-	// Re-adopt any processes that survived a server restart.
-	var lister lifecycle.ContainerLister
-	if dockerRT, ok := rt.(lifecycle.ContainerLister); ok {
-		lister = dockerRT
-	}
-	lifecycle.RecoverProcesses(store, mgr, prx, lister, cfg.Runtime.DefaultMaxSessionsPerReplica)
+	// Re-adopt any processes that survived a server restart. Recovery routes
+	// each replica to its tier's runtime via the Manager's registry, so it
+	// needs no runtime argument here.
+	lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica)
 
 	// Remove ShinyHub-managed app containers no live replica re-adopted, so
 	// stopped containers from prior runs do not accumulate.

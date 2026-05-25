@@ -156,6 +156,14 @@ func (s *Store) timed(op string) func() {
 	}
 }
 
+// legacyBaselineVersion is the highest schema version that any pre-ledger
+// binary ever produced. The original non-versioned runner shipped migrations
+// 001-012; the schema_migrations ledger and every migration after 012 were
+// added later. A pre-ledger database therefore has schema through this
+// version and nothing beyond it, so baselining records 1..legacyBaselineVersion
+// as applied without running them and lets the normal loop apply the rest.
+const legacyBaselineVersion = 12
+
 // Migrate applies every embedded migration that has not yet been recorded in
 // the schema_migrations ledger. Each migration runs inside its own
 // transaction; a failure aborts that migration without recording it and stops
@@ -195,26 +203,7 @@ func (s *Store) Migrate() error {
 			return err
 		}
 		if legacy {
-			// The old runner left a fully-migrated DB without a ledger.
-			// Adopt it: record the embedded set as applied, run nothing.
-			now := time.Now().UTC().Format(time.RFC3339)
-			tx, err := s.db.Begin()
-			if err != nil {
-				return fmt.Errorf("baseline begin: %w", err)
-			}
-			for _, m := range migrations {
-				if _, err := tx.Exec(
-					`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
-					m.version, m.name, now); err != nil {
-					_ = tx.Rollback()
-					return fmt.Errorf("baseline record %s: %w", m.name, err)
-				}
-			}
-			if err := tx.Commit(); err != nil {
-				return fmt.Errorf("baseline commit: %w", err)
-			}
-			slog.Info("migrations: baselined existing database", "versions", len(migrations))
-			return nil
+			return s.adoptLegacySchema(migrations)
 		}
 	}
 
@@ -242,6 +231,69 @@ func (s *Store) Migrate() error {
 		slog.Info("migrations: applied", "version", m.version, "name", m.name)
 	}
 	return nil
+}
+
+// adoptLegacySchema brings a pre-ledger database under ledger management.
+// Migrations through legacyBaselineVersion predate the ledger and are already
+// present, so they are recorded as applied without running. Later migrations
+// run normally; an ALTER whose column already exists (a database whose ledger
+// was lost after a newer upgrade) is treated as already-satisfied. Any other
+// error aborts so the schema never silently drifts.
+func (s *Store) adoptLegacySchema(migrations []migration) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	baselined, applied := 0, 0
+	for _, m := range migrations {
+		if m.version <= legacyBaselineVersion {
+			if err := s.recordMigration(m, now); err != nil {
+				return fmt.Errorf("baseline %s: %w", m.name, err)
+			}
+			baselined++
+			continue
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("adopt %s: begin: %w", m.name, err)
+		}
+		if _, err := tx.Exec(m.sql); err != nil {
+			_ = tx.Rollback()
+			if !isColumnAlreadyPresent(err) {
+				return fmt.Errorf("adopt %s: %w", m.name, err)
+			}
+			// Schema already present (ledger lost after a newer upgrade).
+			if rerr := s.recordMigration(m, now); rerr != nil {
+				return fmt.Errorf("adopt %s: record: %w", m.name, rerr)
+			}
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
+			m.version, m.name, now); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("adopt %s: record: %w", m.name, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("adopt %s: commit: %w", m.name, err)
+		}
+		applied++
+	}
+	slog.Info("migrations: adopted legacy database", "baselined", baselined, "applied", applied)
+	return nil
+}
+
+// recordMigration marks a migration as applied without running it.
+func (s *Store) recordMigration(m migration, appliedAt string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
+		m.version, m.name, appliedAt)
+	return err
+}
+
+// isColumnAlreadyPresent matches the SQLite error for ADD COLUMN against a
+// column that already exists. On the legacy adoption path it means the
+// migration's schema is already present, so the migration is recorded as
+// applied rather than treated as a failure.
+func isColumnAlreadyPresent(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
 }
 
 // appliedMigrations returns the set of versions recorded in the ledger.

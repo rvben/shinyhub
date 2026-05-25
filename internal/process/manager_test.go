@@ -172,8 +172,8 @@ func TestNativeRuntime_AppBindHost(t *testing.T) {
 // surfaces the runtime's bind host to deploy-time command builders.
 func TestManager_AppBindHost_ProxiesRuntime(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	if got := m.AppBindHost(); got != "127.0.0.1" {
-		t.Errorf("Manager.AppBindHost (native) = %q, want 127.0.0.1", got)
+	if got := m.AppBindHostFor(process.DefaultTier); got != "127.0.0.1" {
+		t.Errorf("Manager.AppBindHostFor (native) = %q, want 127.0.0.1", got)
 	}
 }
 

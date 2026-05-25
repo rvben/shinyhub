@@ -1030,3 +1030,62 @@ tracing:
 		t.Errorf("YAML endpoint lost: got %q", cfg.Tracing.OTLPEndpoint)
 	}
 }
+
+func TestRuntimeTiers_Default_WhenAbsent(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	tiers := cfg.Runtime.TierOrder()
+	if len(tiers) != 1 || tiers[0] != "local" {
+		t.Fatalf("expected single synthesized 'local' tier, got %v", tiers)
+	}
+	if cfg.Runtime.DefaultTierName() != "local" {
+		t.Fatalf("default tier = %q, want local", cfg.Runtime.DefaultTierName())
+	}
+	mode, ok := cfg.Runtime.RuntimeForTier("local")
+	if !ok || mode != cfg.Runtime.Mode {
+		t.Fatalf("synthesized tier runtime = %q,%v want %q,true", mode, ok, cfg.Runtime.Mode)
+	}
+}
+
+func TestRuntimeTiers_ParsedInOrder(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	path := writeYAML(t, `
+runtime:
+  mode: native
+  tiers:
+    - name: local
+      runtime: native
+    - name: burst
+      runtime: docker
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Runtime.TierOrder(); len(got) != 2 || got[0] != "local" || got[1] != "burst" {
+		t.Fatalf("tier order = %v, want [local burst]", got)
+	}
+	if cfg.Runtime.DefaultTierName() != "local" {
+		t.Fatalf("default tier = %q, want local (first declared)", cfg.Runtime.DefaultTierName())
+	}
+}
+
+func TestRuntimeTiers_RejectsDuplicateAndUnknownRuntime(t *testing.T) {
+	for name, body := range map[string]string{
+		"duplicate name":  "runtime:\n  tiers:\n    - {name: a, runtime: native}\n    - {name: a, runtime: docker}\n",
+		"empty name":      "runtime:\n  tiers:\n    - {name: \"\", runtime: native}\n",
+		"unknown runtime": "runtime:\n  tiers:\n    - {name: a, runtime: kubernetes}\n",
+		"remote not yet":  "runtime:\n  tiers:\n    - {name: a, runtime: remote_docker}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+			path := writeYAML(t, body)
+			if _, err := config.Load(path); err == nil {
+				t.Fatalf("expected validation error for %q", name)
+			}
+		})
+	}
+}

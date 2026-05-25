@@ -45,15 +45,17 @@ const (
 const DefaultTier = "local"
 
 type ProcessInfo struct {
-	Slug        string
-	Index       int
-	PID         int
-	Port        int
-	Status      Status
-	Tier        string
-	Provider    string
-	EndpointURL string
-	WorkerID    string
+	Slug         string
+	Index        int
+	PID          int
+	Port         int
+	Status       Status
+	Tier         string
+	Provider     string
+	EndpointURL  string
+	WorkerID     string
+	AppVersion   string
+	DeploymentID int64
 }
 
 type StartParams struct {
@@ -68,6 +70,8 @@ type StartParams struct {
 	MemoryLimitMB   int           // 0 = no limit
 	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
 	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
+	AppVersion      string        // app version stamped onto labels/metadata
+	DeploymentID    int64         // owning deployment; 0 when unknown
 }
 
 type entry struct {
@@ -138,15 +142,21 @@ func (m *Manager) SetAppDataRoot(root string) error {
 	return nil
 }
 
-// HostPreparesDeps proxies to the underlying Runtime so deploy code can ask
-// whether host-side dependency installation (uv sync, renv::restore) is
-// expected before Start. See Runtime.HostPreparesDeps for the contract.
-func (m *Manager) HostPreparesDeps() bool { return m.runtimeFor(m.defaultTier).HostPreparesDeps() }
+// HostPreparesDepsFor proxies to the runtime registered for the named tier so
+// deploy code can ask whether host-side dependency installation (uv sync,
+// renv::restore) is expected before Start. An empty or unregistered tier falls
+// back to the default tier. See Runtime.HostPreparesDeps for the contract.
+func (m *Manager) HostPreparesDepsFor(tier string) bool {
+	return m.runtimeFor(tier).HostPreparesDeps()
+}
 
-// AppBindHost proxies to the underlying Runtime so deploy code can construct
-// the per-replica command with the right listen address. See
+// AppBindHostFor proxies to the runtime registered for the named tier so deploy
+// code can construct the per-replica command with the right listen address. An
+// empty or unregistered tier falls back to the default tier. See
 // Runtime.AppBindHost for the contract.
-func (m *Manager) AppBindHost() string { return m.runtimeFor(m.defaultTier).AppBindHost() }
+func (m *Manager) AppBindHostFor(tier string) string {
+	return m.runtimeFor(tier).AppBindHost()
+}
 
 // NewManager returns an initialized Manager using the given Runtime as the
 // default ("local") tier. Additional tiers are added via RegisterRuntime.
@@ -166,6 +176,27 @@ func NewManager(appsDir string, rt Runtime) *Manager {
 func (m *Manager) RegisterRuntime(tier string, rt Runtime) {
 	m.runtimes[tier] = rt
 }
+
+// SetDefaultTier renames the default tier and rekeys the seed runtime under
+// that name. NewManager registers the seed runtime under DefaultTier ("local");
+// when the config's first tier is named differently, call this once at startup
+// so empty/unknown tiers still resolve to the seed runtime. A no-op when name
+// is empty or already the default.
+func (m *Manager) SetDefaultTier(name string) {
+	if name == "" || name == m.defaultTier {
+		return
+	}
+	rt := m.runtimes[m.defaultTier]
+	delete(m.runtimes, m.defaultTier)
+	m.runtimes[name] = rt
+	m.defaultTier = name
+}
+
+// RuntimeForTier returns the runtime backing the named tier, falling back to
+// the default tier when tier is empty or unregistered. Exposed for recovery,
+// which routes each replica's re-adoption to its tier's runtime (so one app's
+// replicas can span a native default tier and a container-backed burst tier).
+func (m *Manager) RuntimeForTier(tier string) Runtime { return m.runtimeFor(tier) }
 
 // runtimeFor returns the runtime for the named tier, falling back to the
 // default tier when tier is empty or unregistered.
@@ -279,15 +310,17 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	handle := ep.Handle
 
 	info := &ProcessInfo{
-		Slug:        p.Slug,
-		Index:       p.Index,
-		PID:         handle.PID,
-		Port:        p.Port,
-		Status:      StatusRunning,
-		Tier:        tier,
-		Provider:    ep.Provider,
-		EndpointURL: ep.URL,
-		WorkerID:    ep.WorkerID,
+		Slug:         p.Slug,
+		Index:        p.Index,
+		PID:          handle.PID,
+		Port:         p.Port,
+		Status:       StatusRunning,
+		Tier:         tier,
+		Provider:     ep.Provider,
+		EndpointURL:  ep.URL,
+		WorkerID:     ep.WorkerID,
+		AppVersion:   p.AppVersion,
+		DeploymentID: p.DeploymentID,
 	}
 	done := make(chan struct{})
 	pool[p.Index] = &entry{info: info, handle: handle, tier: tier, done: done}

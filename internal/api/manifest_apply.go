@@ -22,15 +22,19 @@ func newValidationError(format string, args ...any) *validationError {
 	return &validationError{msg: fmt.Sprintf(format, args...)}
 }
 
-// validateManifestForServer applies server-policy checks (e.g. MaxReplicas)
-// that depend on runtime config, not just on the manifest itself. Called by
-// the deploy handler BEFORE tearing down the running pool so that a manifest
-// rejected by policy returns 400 without disturbing live traffic. The basic
-// per-field bounds (Replicas >= 1, MaxSessions 0..1000) are already enforced
-// at parse time in deploy.LoadManifest.
-func (s *Server) validateManifestForServer(m deploy.AppSettings) *validationError {
+// validateManifestForServer applies server-policy checks (MaxReplicas, tier
+// placement) that depend on runtime config or stored app state, not just on
+// the manifest itself. Called by the deploy handler BEFORE tearing down the
+// running pool so that a manifest rejected by policy returns 400 without
+// disturbing live traffic. The basic per-field bounds (Replicas >= 1,
+// MaxSessions 0..1000) are already enforced at parse time in
+// deploy.LoadManifest.
+func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *validationError {
 	if m.IsZero() {
 		return nil
+	}
+	if m.Replicas != nil && len(app.PlacementMap()) > 0 {
+		return newValidationError("app uses tier placement; update placement instead of setting replicas")
 	}
 	if m.Replicas != nil && s.cfg.Runtime.MaxReplicas > 0 && *m.Replicas > s.cfg.Runtime.MaxReplicas {
 		return newValidationError("replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas)
