@@ -287,6 +287,46 @@ type RuntimeConfig struct {
 	// reaches this many active connections, new cookie-less requests are shed
 	// with 503. 0 here disables the cap entirely (unlimited).
 	DefaultMaxSessionsPerReplica int
+	// Tiers is the ordered list of runtime tiers. The first entry is the
+	// default tier (used when a replica has no explicit tier). When the config
+	// omits tiers, Load synthesizes a single tier named "local" whose runtime
+	// equals Mode, so single-node behavior is unchanged.
+	Tiers []TierConfig
+}
+
+// TierConfig names a runtime tier and the runtime that backs it.
+// Runtime is one of "native" or "docker" in this phase ("remote_docker"
+// arrives with the remote provider).
+type TierConfig struct {
+	Name    string
+	Runtime string
+}
+
+// TierOrder returns the tier names in declaration order.
+func (r RuntimeConfig) TierOrder() []string {
+	out := make([]string, len(r.Tiers))
+	for i, t := range r.Tiers {
+		out[i] = t.Name
+	}
+	return out
+}
+
+// DefaultTierName returns the first declared tier's name (the default tier).
+func (r RuntimeConfig) DefaultTierName() string {
+	if len(r.Tiers) == 0 {
+		return "local"
+	}
+	return r.Tiers[0].Name
+}
+
+// RuntimeForTier returns the runtime mode backing the named tier.
+func (r RuntimeConfig) RuntimeForTier(name string) (string, bool) {
+	for _, t := range r.Tiers {
+		if t.Name == name {
+			return t.Runtime, true
+		}
+	}
+	return "", false
 }
 
 // DockerRuntimeConfig holds Docker-specific runtime settings.
@@ -360,13 +400,19 @@ type rawLifecycleConfig struct {
 }
 
 type rawRuntimeConfig struct {
-	Mode                         string                 `yaml:"mode"`
-	Docker                       rawDockerRuntimeConfig `yaml:"docker"`
-	DefaultReplicas int `yaml:"default_replicas"`
-	MaxReplicas     int `yaml:"max_replicas"`
+	Mode            string                 `yaml:"mode"`
+	Docker          rawDockerRuntimeConfig `yaml:"docker"`
+	DefaultReplicas int                    `yaml:"default_replicas"`
+	MaxReplicas     int                    `yaml:"max_replicas"`
 	// Pointer so an explicit 0 (documented as "unlimited") is
 	// distinguishable from the key being absent (apply the safe default).
-	DefaultMaxSessionsPerReplica *int `yaml:"default_max_sessions_per_replica"`
+	DefaultMaxSessionsPerReplica *int            `yaml:"default_max_sessions_per_replica"`
+	Tiers                        []rawTierConfig `yaml:"tiers"`
+}
+
+type rawTierConfig struct {
+	Name    string `yaml:"name"`
+	Runtime string `yaml:"runtime"`
 }
 
 type rawDockerRuntimeConfig struct {
@@ -535,6 +581,30 @@ func Load(path string) (*Config, error) {
 		// allowed
 	default:
 		return nil, fmt.Errorf("runtime.docker.network_mode: %q is not supported; must be one of bridge, host", cfg.Runtime.Docker.NetworkMode)
+	}
+	// Tiers: copy from raw, or synthesize a single default tier from Mode.
+	if len(raw.Runtime.Tiers) == 0 {
+		cfg.Runtime.Tiers = []TierConfig{{Name: "local", Runtime: cfg.Runtime.Mode}}
+	} else {
+		seen := map[string]bool{}
+		for _, t := range raw.Runtime.Tiers {
+			if t.Name == "" {
+				return nil, fmt.Errorf("runtime.tiers: tier name must not be empty")
+			}
+			if seen[t.Name] {
+				return nil, fmt.Errorf("runtime.tiers: duplicate tier name %q", t.Name)
+			}
+			seen[t.Name] = true
+			switch t.Runtime {
+			case "native", "docker":
+				// supported this phase
+			case "remote_docker":
+				return nil, fmt.Errorf("runtime.tiers: tier %q uses %q which is not yet available", t.Name, t.Runtime)
+			default:
+				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native or docker)", t.Name, t.Runtime)
+			}
+			cfg.Runtime.Tiers = append(cfg.Runtime.Tiers, TierConfig{Name: t.Name, Runtime: t.Runtime})
+		}
 	}
 	if err := normalizeTracing(&cfg.Tracing); err != nil {
 		return nil, err
