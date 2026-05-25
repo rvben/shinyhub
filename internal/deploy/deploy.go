@@ -106,15 +106,26 @@ type Params struct {
 	BundleDir string
 	// Command overrides auto-detection. If empty, the app type is detected from
 	// the bundle and the appropriate runtime command is built per replica.
-	Command         []string
-	Env             []string
-	Workers         int
-	Replicas        int // 0 → 1 (single-replica fallback)
+	Command  []string
+	Env      []string
+	Workers  int
+	Replicas int // 0 → 1 (single-replica fallback); also the fallback total when Placement is empty
+	// Placement maps tier name → replica count. Empty means "all Replicas on the
+	// default tier", reproducing single-tier behavior. When set, the sum of its
+	// counts is the authoritative replica total and Replicas is ignored.
+	Placement map[string]int
+	// TierOrder is the config-declared tier order used to lay out placement
+	// counts deterministically over a single global replica index space. Empty
+	// is treated as just the default tier.
+	TierOrder []string
+	// DefaultTier is the tier a replica runs under when Placement is empty or a
+	// tier is otherwise unresolved. Empty falls back to process.DefaultTier.
+	DefaultTier     string
 	Manager         *process.Manager
 	Proxy           *proxy.Proxy
 	HealthTimeout   time.Duration // 0 means the 120 s default
-	MemoryLimitMB   int          // 0 = no limit
-	CPUQuotaPercent int          // 0 = no limit; 100 = 1 full core
+	MemoryLimitMB   int           // 0 = no limit
+	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
 	// MaxSessionsPerReplica caps the per-replica active connection count the
 	// proxy will route cookie-less requests to; saturated pools shed with
 	// 503 + Retry-After. 0 = unlimited (caller should resolve the runtime
@@ -152,11 +163,82 @@ type PoolResult struct {
 	HooksSkipped int
 }
 
+// distinctTiers returns the unique tiers present in an assignment set, in first
+// appearance order.
+func distinctTiers(asn []process.TierAssignment) []string {
+	seen := make(map[string]struct{}, len(asn))
+	var out []string
+	for _, a := range asn {
+		if _, ok := seen[a.Tier]; ok {
+			continue
+		}
+		seen[a.Tier] = struct{}{}
+		out = append(out, a.Tier)
+	}
+	return out
+}
+
+// effectiveDefaultTier returns the tier a replica runs under when placement is
+// empty or a tier is unresolved.
+func (p Params) effectiveDefaultTier() string {
+	if p.DefaultTier != "" {
+		return p.DefaultTier
+	}
+	return process.DefaultTier
+}
+
+// assignments expands this deploy's placement into deterministic (index, tier)
+// assignments over a single global index space. An empty placement assigns
+// max(Replicas, 1) replicas to the default tier, reproducing single-tier
+// behavior exactly.
+func (p Params) assignments() ([]process.TierAssignment, error) {
+	fallback := p.Replicas
+	if fallback <= 0 {
+		fallback = 1
+	}
+	return process.ExpandPlacement(p.Placement, p.TierOrder, fallback, p.effectiveDefaultTier())
+}
+
+// tierForIndex returns the tier assigned to the given global replica index.
+// Indices outside the expanded assignment set (e.g. a watchdog restarting a
+// replica beyond the current placement total) fall back to the default tier so
+// recovery never wedges.
+func (p Params) tierForIndex(index int) string {
+	asn, err := p.assignments()
+	if err != nil {
+		return p.effectiveDefaultTier()
+	}
+	for _, a := range asn {
+		if a.Index == index {
+			return a.Tier
+		}
+	}
+	return p.effectiveDefaultTier()
+}
+
+// hostPreparesDeps reports whether host-side dependency installation should run
+// for a boot touching the given tiers. It returns true if the Manager is nil
+// (test/no-runtime path) or if any of the named tiers prepares deps on the
+// host: the bundle's host venv is shared, so a single host sync serves every
+// native replica while container replicas ignore it.
+func (p Params) hostPreparesDeps(tiers ...string) bool {
+	if p.Manager == nil {
+		return true
+	}
+	for _, t := range tiers {
+		if p.Manager.HostPreparesDepsFor(t) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveBootParams resolves Command defaults, HealthCheck defaults, and
-// HealthTimeout defaults for a pool/replica boot. Returns the resolved
-// base command, detected app type, the effective health-check func, and
-// the effective timeout.
-func resolveBootParams(p Params) (baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration, err error) {
+// HealthTimeout defaults for a pool/replica boot. hostDeps reports whether
+// host-side dependency installation should run (false under container-only
+// tiers). Returns the resolved base command, detected app type, the effective
+// health-check func, and the effective timeout.
+func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration, err error) {
 	if len(p.Command) > 0 {
 		baseCmd = p.Command
 	} else {
@@ -164,8 +246,8 @@ func resolveBootParams(p Params) (baseCmd []string, appType string, hc func(stri
 		// Container runtimes prepare dependencies inside the image/container, so
 		// running uv sync / renv::restore on the host would leak host state into
 		// what is supposed to be an isolated boot path (and fail outright on
-		// hosts where uv/Rscript aren't installed).
-		hostDeps := p.Manager == nil || p.Manager.HostPreparesDeps()
+		// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
+		// caller from the tiers this boot touches.
 		switch appType {
 		case "python":
 			if hostDeps {
@@ -202,19 +284,25 @@ func resolveBootParams(p Params) (baseCmd []string, appType string, hc func(stri
 // Partial failure (some replicas healthy, some not) is accepted and logged.
 // All-fail returns an error.
 func Run(p Params) (*PoolResult, error) {
-	if p.Replicas <= 0 {
-		p.Replicas = 1
+	asn, err := p.assignments()
+	if err != nil {
+		return nil, fmt.Errorf("expand placement: %w", err)
 	}
+	total := len(asn)
 
-	p.Proxy.SetPoolSize(p.Slug, p.Replicas)
+	p.Proxy.SetPoolSize(p.Slug, total)
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
 
-	baseCmd, appType, hc, timeout, err := resolveBootParams(p)
+	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
+	// any assigned tier prepares deps on the host.
+	hostDeps := p.hostPreparesDeps(distinctTiers(asn)...)
+
+	baseCmd, appType, hc, timeout, err := resolveBootParams(p, hostDeps)
 	if err != nil {
 		return nil, err
 	}
 
-	hooksSkipped, err := runManifestPostDeployHooks(p)
+	hooksSkipped, err := runManifestPostDeployHooks(p, hostDeps)
 	if err != nil {
 		return nil, err
 	}
@@ -224,21 +312,21 @@ func Run(p Params) (*PoolResult, error) {
 		res Result
 		err error
 	}
-	results := make(chan bootResult, p.Replicas)
+	results := make(chan bootResult, total)
 	var wg sync.WaitGroup
 
-	for i := 0; i < p.Replicas; i++ {
+	for _, a := range asn {
 		wg.Add(1)
-		go func(idx int) {
+		go func(a process.TierAssignment) {
 			defer wg.Done()
-			r, err := bootReplica(p, idx, baseCmd, appType, hc, timeout)
-			results <- bootResult{idx: idx, res: r, err: err}
-		}(i)
+			r, err := bootReplica(p, a.Index, a.Tier, baseCmd, appType, hc, timeout)
+			results <- bootResult{idx: a.Index, res: r, err: err}
+		}(a)
 	}
 	wg.Wait()
 	close(results)
 
-	ok := make([]Result, 0, p.Replicas)
+	ok := make([]Result, 0, total)
 	var failed []int
 	var bootErrs []error
 	for br := range results {
@@ -276,7 +364,7 @@ func Run(p Params) (*PoolResult, error) {
 // runManifestPostDeployHooks returns the number of declared hooks it skipped
 // (non-zero only under a container runtime) so the caller can surface it to the
 // developer; a returned error means an executed hook failed.
-func runManifestPostDeployHooks(p Params) (int, error) {
+func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 	manifest, err := LoadManifest(p.BundleDir)
 	if err != nil {
 		return 0, err
@@ -285,7 +373,7 @@ func runManifestPostDeployHooks(p Params) (int, error) {
 	if len(hooks) == 0 {
 		return 0, nil
 	}
-	if p.Manager != nil && !p.Manager.HostPreparesDeps() {
+	if !hostDeps {
 		slog.Warn("skipping post-deploy hooks under non-host runtime; bake them into the image entrypoint instead",
 			"slug", p.Slug, "hooks", len(hooks))
 		return len(hooks), nil
@@ -310,7 +398,7 @@ func runManifestPostDeployHooks(p Params) (int, error) {
 // bootReplica starts a single replica: allocates a port, starts the process,
 // health-checks it, and registers it with the proxy. baseCmd == nil signals
 // that the command should be built from appType using the allocated port.
-func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration) (Result, error) {
+func bootReplica(p Params, idx int, tier string, baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration) (Result, error) {
 	port := AllocatePort()
 
 	var cmd []string
@@ -319,7 +407,7 @@ func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(st
 	} else {
 		bindHost := "127.0.0.1"
 		if p.Manager != nil {
-			bindHost = p.Manager.AppBindHost()
+			bindHost = p.Manager.AppBindHostFor(tier)
 		}
 		switch appType {
 		case "python":
@@ -340,6 +428,7 @@ func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(st
 	info, err := p.Manager.Start(process.StartParams{
 		Slug:            p.Slug,
 		Index:           idx,
+		Tier:            tier,
 		Dir:             p.BundleDir,
 		Command:         cmd,
 		Port:            port,
@@ -375,11 +464,12 @@ func bootReplica(p Params, idx int, baseCmd []string, appType string, hc func(st
 // must already be set to at least index+1 before calling this function.
 // Used by the watchdog's per-replica crash-restart path.
 func RunReplica(p Params, index int) (*Result, error) {
-	baseCmd, appType, hc, timeout, err := resolveBootParams(p)
+	tier := p.tierForIndex(index)
+	baseCmd, appType, hc, timeout, err := resolveBootParams(p, p.hostPreparesDeps(tier))
 	if err != nil {
 		return nil, err
 	}
-	r, err := bootReplica(p, index, baseCmd, appType, hc, timeout)
+	r, err := bootReplica(p, index, tier, baseCmd, appType, hc, timeout)
 	if err != nil {
 		return nil, err
 	}
