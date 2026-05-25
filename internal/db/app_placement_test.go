@@ -69,3 +69,30 @@ func TestSetAppPlacement_DefaultEmptyOnCreate(t *testing.T) {
 		t.Fatalf("new app placement = %q, want empty", app.ReplicaPlacement)
 	}
 }
+
+func TestApp_PlacementMap(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want map[string]int
+	}{
+		{"empty is nil", "", nil},
+		{"single tier", `{"local":3}`, map[string]int{"local": 3}},
+		{"two tiers", `{"local":1,"burst":2}`, map[string]int{"local": 1, "burst": 2}},
+		{"malformed is nil", `{not json`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := db.App{ReplicaPlacement: tc.json}
+			got := a.PlacementMap()
+			if len(got) != len(tc.want) {
+				t.Fatalf("PlacementMap() = %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Fatalf("PlacementMap()[%q] = %d, want %d", k, got[k], v)
+				}
+			}
+		})
+	}
+}

@@ -162,6 +162,18 @@ func (s *Server) Router() http.Handler { return s.router }
 // locate temp directories (e.g. AppsDir, AppDataDir) created by the test helper.
 func (s *Server) Config() *config.Config { return s.cfg }
 
+// withTierPlacement fills the tier-routing fields (Placement, TierOrder,
+// DefaultTier) on p from the app's persisted placement and the server's
+// configured tiers. Every deploy/redeploy/rollback site routes its replicas
+// through this helper so a single app's placement is applied identically
+// regardless of which control-plane action triggered the pool launch.
+func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
+	p.Placement = app.PlacementMap()
+	p.TierOrder = s.cfg.Runtime.TierOrder()
+	p.DefaultTier = s.cfg.Runtime.DefaultTierName()
+	return p
+}
+
 // SetSampler replaces the metrics sampler. Must be called before the server
 // begins handling requests; it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetSampler(sampler process.Sampler) { s.sampler = sampler }

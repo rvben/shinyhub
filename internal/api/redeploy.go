@@ -114,7 +114,7 @@ func (s *Server) redeployApp(slug string) {
 		s.proxy.Deregister(slug)
 	}
 
-	result, err := deploy.Run(deploy.Params{
+	result, err := deploy.Run(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -123,7 +123,7 @@ func (s *Server) redeployApp(slug string) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
-	})
+	}, app))
 	if err != nil {
 		slog.Error("redeployApp: deploy failed", "slug", slug, "err", err)
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); err != nil {

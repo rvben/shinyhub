@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -351,6 +352,20 @@ type App struct {
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
 	ReplicaPlacement string `json:"replica_placement,omitempty"`
+}
+
+// PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
+// when placement is unset (all replicas on the default tier) or when the stored
+// JSON is malformed, so callers treat an unreadable placement the same as none.
+func (a App) PlacementMap() map[string]int {
+	if a.ReplicaPlacement == "" {
+		return nil
+	}
+	var m map[string]int
+	if err := json.Unmarshal([]byte(a.ReplicaPlacement), &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // deploymentSummarySQL is the SELECT fragment that adds last_deployed_at and

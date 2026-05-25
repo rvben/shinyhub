@@ -462,7 +462,7 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		}
 		return
 	}
-	result, err := s.deployRun(deploy.Params{
+	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
@@ -471,7 +471,7 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
-	})
+	}, app))
 	if err != nil {
 		slog.Error("restore: previous pool failed to start; app is down", "slug", slug, "err", err)
 		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
@@ -711,7 +711,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := s.deployRun(deploy.Params{
+	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
 		Replicas:              app.Replicas,
@@ -720,7 +720,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
-	})
+	}, app))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
 		_ = s.store.FailDeployment(pendingDep.ID)
@@ -957,7 +957,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
-	result, err := deploy.Run(deploy.Params{
+	result, err := deploy.Run(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
@@ -966,7 +966,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
-	})
+	}, app))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
 		_ = s.store.FailDeployment(pendingDep.ID)
@@ -1068,7 +1068,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
-	result, err := deploy.Run(deploy.Params{
+	result, err := deploy.Run(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -1077,7 +1077,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
-	})
+	}, app))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "restart %s: %v\n", slug, err)
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {

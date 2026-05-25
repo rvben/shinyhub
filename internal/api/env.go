@@ -243,7 +243,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
-	result, runErr := s.deployRun(deploy.Params{
+	result, runErr := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -252,7 +252,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
-	})
+	}, app))
 	if runErr != nil {
 		// The old process is gone; reflect that in the DB so callers don't
 		// see a stale "running" status with a dead PID.

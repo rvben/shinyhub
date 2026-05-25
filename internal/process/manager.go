@@ -177,6 +177,21 @@ func (m *Manager) RegisterRuntime(tier string, rt Runtime) {
 	m.runtimes[tier] = rt
 }
 
+// SetDefaultTier renames the default tier and rekeys the seed runtime under
+// that name. NewManager registers the seed runtime under DefaultTier ("local");
+// when the config's first tier is named differently, call this once at startup
+// so empty/unknown tiers still resolve to the seed runtime. A no-op when name
+// is empty or already the default.
+func (m *Manager) SetDefaultTier(name string) {
+	if name == "" || name == m.defaultTier {
+		return
+	}
+	rt := m.runtimes[m.defaultTier]
+	delete(m.runtimes, m.defaultTier)
+	m.runtimes[name] = rt
+	m.defaultTier = name
+}
+
 // runtimeFor returns the runtime for the named tier, falling back to the
 // default tier when tier is empty or unregistered.
 func (m *Manager) runtimeFor(tier string) Runtime {
