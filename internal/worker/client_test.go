@@ -18,7 +18,8 @@ func TestClientFetchBundleStreams(t *testing.T) {
 	defer srv.Close()
 
 	// A plaintext-transport client is enough to exercise FetchBundle's request
-	// shaping; mTLS wiring is exercised in the CP integration test.
+	// shaping; the mTLS transport (cert presentation and server-cert pinning) is
+	// exercised by TestClientMTLSRoundTrip.
 	c := &Client{serverURL: srv.URL, httpc: srv.Client()}
 	rc, err := c.FetchBundle(t.Context(), "sha256:abc")
 	if err != nil {
