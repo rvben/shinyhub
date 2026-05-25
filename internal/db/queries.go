@@ -1464,6 +1464,7 @@ type Replica struct {
 	WorkerID     string    `json:"worker_id"`
 	AppVersion   string    `json:"app_version"`
 	DesiredState string    `json:"desired_state"`
+	DeploymentID *int64    `json:"deployment_id,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
@@ -1480,6 +1481,7 @@ type UpsertReplicaParams struct {
 	WorkerID     string
 	AppVersion   string
 	DesiredState string
+	DeploymentID *int64
 }
 
 // UpsertReplica inserts a new replica or updates an existing one identified by
@@ -1492,8 +1494,9 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
-		                      endpoint_url, worker_id, app_version, desired_state, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+		                      endpoint_url, worker_id, app_version, desired_state,
+		                      deployment_id, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid           = excluded.pid,
 			port          = excluded.port,
@@ -1504,9 +1507,10 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 			worker_id     = excluded.worker_id,
 			app_version   = excluded.app_version,
 			desired_state = excluded.desired_state,
+			deployment_id = excluded.deployment_id,
 			updated_at    = excluded.updated_at`,
 		p.AppID, p.Index, p.PID, p.Port, p.Status, p.Provider, p.Tier,
-		p.EndpointURL, p.WorkerID, p.AppVersion, desired,
+		p.EndpointURL, p.WorkerID, p.AppVersion, desired, p.DeploymentID,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert replica: %w", err)
@@ -1519,7 +1523,8 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	rows, err := s.db.Query(`
 		SELECT app_id, idx, pid, port, status, provider, tier,
-		       endpoint_url, worker_id, app_version, desired_state, updated_at
+		       endpoint_url, worker_id, app_version, desired_state,
+		       deployment_id, updated_at
 		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
 	if err != nil {
 		return nil, err
@@ -1531,7 +1536,7 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		var updatedAt int64
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
-			&r.DesiredState, &updatedAt); err != nil {
+			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)

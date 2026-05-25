@@ -45,15 +45,17 @@ const (
 const DefaultTier = "local"
 
 type ProcessInfo struct {
-	Slug        string
-	Index       int
-	PID         int
-	Port        int
-	Status      Status
-	Tier        string
-	Provider    string
-	EndpointURL string
-	WorkerID    string
+	Slug         string
+	Index        int
+	PID          int
+	Port         int
+	Status       Status
+	Tier         string
+	Provider     string
+	EndpointURL  string
+	WorkerID     string
+	AppVersion   string
+	DeploymentID int64
 }
 
 type StartParams struct {
@@ -68,6 +70,8 @@ type StartParams struct {
 	MemoryLimitMB   int           // 0 = no limit
 	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
 	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
+	AppVersion      string        // app version stamped onto labels/metadata
+	DeploymentID    int64         // owning deployment; 0 when unknown
 }
 
 type entry struct {
@@ -279,15 +283,17 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	handle := ep.Handle
 
 	info := &ProcessInfo{
-		Slug:        p.Slug,
-		Index:       p.Index,
-		PID:         handle.PID,
-		Port:        p.Port,
-		Status:      StatusRunning,
-		Tier:        tier,
-		Provider:    ep.Provider,
-		EndpointURL: ep.URL,
-		WorkerID:    ep.WorkerID,
+		Slug:         p.Slug,
+		Index:        p.Index,
+		PID:          handle.PID,
+		Port:         p.Port,
+		Status:       StatusRunning,
+		Tier:         tier,
+		Provider:     ep.Provider,
+		EndpointURL:  ep.URL,
+		WorkerID:     ep.WorkerID,
+		AppVersion:   p.AppVersion,
+		DeploymentID: p.DeploymentID,
 	}
 	done := make(chan struct{})
 	pool[p.Index] = &entry{info: info, handle: handle, tier: tier, done: done}
