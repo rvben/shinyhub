@@ -318,21 +318,21 @@ func (s *Store) APIKeyNameExists(userID int64, name string) (bool, error) {
 // --- Apps ---
 
 type App struct {
-	ID                      int64      `json:"id"`
-	Slug                    string     `json:"slug"`
-	Name                    string     `json:"name"`
-	ProjectSlug             string     `json:"project_slug,omitempty"`
-	OwnerID                 int64      `json:"owner_id"`
-	Access                  string     `json:"access"`
-	Status                  string     `json:"status"`
-	Replicas                int        `json:"replicas"`
-	MaxSessionsPerReplica   int        `json:"max_sessions_per_replica"`
-	DeployCount             int        `json:"deploy_count"`
-	HibernateTimeoutMinutes *int       `json:"hibernate_timeout_minutes"`
-	MemoryLimitMB           *int       `json:"memory_limit_mb"`
-	CPUQuotaPercent         *int       `json:"cpu_quota_percent"`
-	CreatedAt               time.Time  `json:"created_at"`
-	UpdatedAt               time.Time  `json:"updated_at"`
+	ID                      int64     `json:"id"`
+	Slug                    string    `json:"slug"`
+	Name                    string    `json:"name"`
+	ProjectSlug             string    `json:"project_slug,omitempty"`
+	OwnerID                 int64     `json:"owner_id"`
+	Access                  string    `json:"access"`
+	Status                  string    `json:"status"`
+	Replicas                int       `json:"replicas"`
+	MaxSessionsPerReplica   int       `json:"max_sessions_per_replica"`
+	DeployCount             int       `json:"deploy_count"`
+	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes"`
+	MemoryLimitMB           *int      `json:"memory_limit_mb"`
+	CPUQuotaPercent         *int      `json:"cpu_quota_percent"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
 	// LastDeployedAt is the created_at of the most-recent deployment row,
 	// or nil if the app has never been deployed. Joined in via the
 	// deploymentSummarySQL fragment below.
@@ -347,6 +347,10 @@ type App struct {
 	// deployment, or "" if it has never had one. Joined via
 	// deploymentSummarySQL; pending/failed deployments are never reflected.
 	ContentDigest string `json:"content_digest,omitempty"`
+	// ReplicaPlacement is the per-app replica placement as a JSON object
+	// {"tier": count}, or "" when no placement is set (all Replicas on the
+	// default tier). The Replicas column remains the authoritative total.
+	ReplicaPlacement string `json:"replica_placement,omitempty"`
 }
 
 // deploymentSummarySQL is the SELECT fragment that adds last_deployed_at and
@@ -400,7 +404,7 @@ func (s *Store) GetAppBySlug(slug string) (*App, error) {
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
-		       managed_by,`+deploymentSummarySQL+`
+		       managed_by, replica_placement,`+deploymentSummarySQL+`
 		FROM apps WHERE slug = ?`, slug)
 	return scanApp(row)
 }
@@ -417,7 +421,7 @@ func (s *Store) GetAppByID(id int64) (*App, error) {
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
-		       managed_by,`+deploymentSummarySQL+`
+		       managed_by, replica_placement,`+deploymentSummarySQL+`
 		FROM apps WHERE id = ?`, id)
 	return scanApp(row)
 }
@@ -432,7 +436,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
-		       managed_by,`+deploymentSummarySQL+`
+		       managed_by, replica_placement,`+deploymentSummarySQL+`
 		FROM apps ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -459,7 +463,7 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
-		       managed_by,`+deploymentSummarySQL+`
+		       managed_by, replica_placement,` + deploymentSummarySQL + `
 		FROM apps WHERE status = 'running'`)
 	if err != nil {
 		return nil, err
@@ -487,7 +491,7 @@ func (s *Store) ListDeletingApps() ([]*App, error) {
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
-		       managed_by,`+deploymentSummarySQL+`
+		       managed_by, replica_placement,` + deploymentSummarySQL + `
 		FROM apps WHERE status = 'deleting'`)
 	if err != nil {
 		return nil, err
@@ -533,7 +537,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
-		       managed_by,`+deploymentSummarySQL+`
+		       managed_by, replica_placement,`+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		   OR access = 'shared'
@@ -573,7 +577,7 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 		       hibernate_timeout_minutes,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
-		       managed_by,`+deploymentSummarySQL+`
+		       managed_by, replica_placement,`+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		ORDER BY created_at DESC
@@ -1561,6 +1565,24 @@ func (s *Store) UpdateAppReplicas(appID int64, n int) error {
 	return nil
 }
 
+// SetAppPlacement persists the per-app replica placement JSON and the resolved
+// total replica count in one update. placementJSON is "" to clear placement
+// (all replicas on the default tier). total is the authoritative replica count.
+func (s *Store) SetAppPlacement(appID int64, placementJSON string, total int) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET replica_placement = ?, replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		placementJSON, total, appID,
+	)
+	if err != nil {
+		return fmt.Errorf("set placement: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ApplyAppManifestSettingsParams carries the subset of [app] manifest fields
 // to apply. Callers set the Set* booleans to true for each field they want
 // written; absent fields are left untouched.
@@ -1794,7 +1816,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
-		&a.ManagedBy,
+		&a.ManagedBy, &a.ReplicaPlacement,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
