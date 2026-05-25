@@ -504,12 +504,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	lifecycle.ReconcileDeletingApps(store, cfg)
 	lifecycle.LogOrphanAppDirs(store, cfg)
 
-	// Re-adopt any processes that survived a server restart.
-	var lister lifecycle.ContainerLister
-	if dockerRT, ok := rt.(lifecycle.ContainerLister); ok {
-		lister = dockerRT
-	}
-	lifecycle.RecoverProcesses(store, mgr, prx, lister, cfg.Runtime.DefaultMaxSessionsPerReplica)
+	// Re-adopt any processes that survived a server restart. Recovery routes
+	// each replica to its tier's runtime via the Manager's registry, so it
+	// needs no runtime argument here.
+	lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica)
 
 	// Remove ShinyHub-managed app containers no live replica re-adopted, so
 	// stopped containers from prior runs do not accumulate.

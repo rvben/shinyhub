@@ -192,6 +192,12 @@ func (m *Manager) SetDefaultTier(name string) {
 	m.defaultTier = name
 }
 
+// RuntimeForTier returns the runtime backing the named tier, falling back to
+// the default tier when tier is empty or unregistered. Exposed for recovery,
+// which routes each replica's re-adoption to its tier's runtime (so one app's
+// replicas can span a native default tier and a container-backed burst tier).
+func (m *Manager) RuntimeForTier(tier string) Runtime { return m.runtimeFor(tier) }
+
 // runtimeFor returns the runtime for the named tier, falling back to the
 // default tier when tier is empty or unregistered.
 func (m *Manager) runtimeFor(tier string) Runtime {

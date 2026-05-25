@@ -1,10 +1,13 @@
 package lifecycle_test
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
+	"syscall"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -27,17 +30,34 @@ func liveListener(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// fakeContainerLister implements lifecycle.ContainerLister for tests.
-type fakeContainerLister struct {
+// fakeDockerRuntime is a process.Runtime that also implements
+// lifecycle.ContainerLister, so a Manager can be constructed with it (as the
+// default tier) or have it registered to a tier. Recovery routes a replica to
+// the container path when its tier's runtime is a ContainerLister.
+type fakeDockerRuntime struct {
 	containers []process.ContainerInfo
 	pids       map[string]int // containerID → host PID
 }
 
-func (f *fakeContainerLister) ListByLabel(_ string) ([]process.ContainerInfo, error) {
+func (f *fakeDockerRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{}, nil
+}
+func (f *fakeDockerRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
+func (f *fakeDockerRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
+func (f *fakeDockerRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (f *fakeDockerRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (f *fakeDockerRuntime) HostPreparesDeps() bool { return false }
+func (f *fakeDockerRuntime) AppBindHost() string    { return "0.0.0.0" }
+
+func (f *fakeDockerRuntime) ListByLabel(_ string) ([]process.ContainerInfo, error) {
 	return f.containers, nil
 }
 
-func (f *fakeContainerLister) InspectPID(id string) (int, error) {
+func (f *fakeDockerRuntime) InspectPID(id string) (int, error) {
 	if pid, ok := f.pids[id]; ok {
 		return pid, nil
 	}
@@ -93,7 +113,7 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	// App should now be stopped in the DB.
 	a, err := store.GetAppBySlug("myapp")
@@ -114,7 +134,7 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0) // must not panic
+	lifecycle.RecoverProcesses(store, mgr, prx, 0) // must not panic
 
 
 	a, err := store.GetAppBySlug("myapp")
@@ -140,7 +160,7 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	// App should still be running in the DB.
 	a, err := store.GetAppBySlug("myapp")
@@ -187,7 +207,7 @@ func TestRecovery_PartialPool(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	// Replica 0 adopted, replica 1 not.
 	if _, ok := mgr.GetReplica("partial-pool", 0); !ok {
@@ -234,7 +254,7 @@ func TestRecoverDockerProcesses(t *testing.T) {
 	}
 	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='docker-app'`)
 
-	lister := &fakeContainerLister{
+	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
 			{ID: "cont-abc", Labels: map[string]string{
 				"shinyhub.slug":          "docker-app",
@@ -243,9 +263,9 @@ func TestRecoverDockerProcesses(t *testing.T) {
 		},
 		pids: map[string]int{"cont-abc": 99001},
 	}
-	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	info, ok := mgr.GetReplica("docker-app", 0)
 	if !ok {
@@ -289,7 +309,7 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	}
 
 	// Only "alive-app" has a running container.
-	lister := &fakeContainerLister{
+	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
 			{ID: "cont-alive", Labels: map[string]string{
 				"shinyhub.slug":          "alive-app",
@@ -298,9 +318,9 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 		},
 		pids: map[string]int{"cont-alive": 99002},
 	}
-	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	// "alive-app" should be adopted.
 	if _, ok := mgr.GetReplica("alive-app", 0); !ok {
@@ -337,15 +357,15 @@ func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
 	}
 	store.DB().Exec(`UPDATE apps SET status='running', replicas=2 WHERE slug='multi-docker'`)
 
-	lister := &fakeContainerLister{
+	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
 			{ID: "c0", Labels: map[string]string{"shinyhub.slug": "multi-docker", "shinyhub.replica_index": "0"}},
 			{ID: "c1", Labels: map[string]string{"shinyhub.slug": "multi-docker", "shinyhub.replica_index": "1"}},
 		},
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
-	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
+	mgr := process.NewManager(t.TempDir(), rt)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	if _, ok := mgr.GetReplica("multi-docker", 0); !ok {
 		t.Error("want replica 0 adopted")
@@ -369,7 +389,7 @@ func TestRecovery_NilPIDMarkedCrashed(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	reps, _ := store.ListReplicas(app.ID)
 	if len(reps) != 1 || reps[0].Status != "crashed" {
@@ -382,31 +402,96 @@ func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 	prx := proxy.New()
 	app := mustCreateApp(t, store, "shrunk-docker")
 
-	// App has 2 replicas configured.
+	// The app was scaled down to 1 replica, but a stale replica row and its
+	// container at index 1 survive from before the scale-down. Both indexes
+	// still have a live container; recovery must adopt idx 0 (within the pool)
+	// and skip idx 1 (r.Index >= app.Replicas).
 	port0, pid0 := 20800, 99020
+	port1, pid1 := 20801, 99021
 	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, PID: &pid0, Port: &port0, Status: "running"}); err != nil {
 		t.Fatal(err)
 	}
-	store.DB().Exec(`UPDATE apps SET status='running', replicas=2 WHERE slug='shrunk-docker'`)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 1, PID: &pid1, Port: &port1, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='shrunk-docker'`)
 
-	// Container presents with idx=5, which is beyond the pool size of 2.
-	lister := &fakeContainerLister{
+	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
-			{ID: "c-stale", Labels: map[string]string{"shinyhub.slug": "shrunk-docker", "shinyhub.replica_index": "5"}},
+			{ID: "c0", Labels: map[string]string{"shinyhub.slug": "shrunk-docker", "shinyhub.replica_index": "0"}},
+			{ID: "c1", Labels: map[string]string{"shinyhub.slug": "shrunk-docker", "shinyhub.replica_index": "1"}},
 		},
-		pids: map[string]int{"c-stale": 99025},
+		pids: map[string]int{"c0": pid0, "c1": pid1},
+	}
+	mgr := process.NewManager(t.TempDir(), rt)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	// idx 0 is within the pool of 1 → adopted.
+	if _, ok := mgr.GetReplica("shrunk-docker", 0); !ok {
+		t.Error("expected in-pool replica 0 to be adopted")
+	}
+	// idx 1 is beyond the pool of 1 → skipped despite a live container.
+	if _, ok := mgr.GetReplica("shrunk-docker", 1); ok {
+		t.Error("expected out-of-pool replica 1 to be skipped")
+	}
+	// One replica adopted, so the app stays running.
+	a, _ := store.GetAppBySlug("shrunk-docker")
+	if a.Status != "running" {
+		t.Errorf("expected running, got %s", a.Status)
+	}
+}
+
+// TestRecoverProcesses_MixedTier exercises an app whose replicas span a native
+// default tier and a container-backed burst tier. Recovery must route each
+// replica to its tier's runtime: the native replica through the PID path and
+// the burst replica through the container path, adopting both.
+func TestRecoverProcesses_MixedTier(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "mixed-tier")
+
+	// Replica 0 on the native default tier: alive PID + a real listener.
+	pidNative, portNative := os.Getpid(), liveListener(t)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pidNative, Port: &portNative,
+		Status: "running", Provider: "native", Tier: "local",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Replica 1 on the container-backed "burst" tier.
+	pidBurst, portBurst := 99030, 20900
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 1, PID: &pidBurst, Port: &portBurst,
+		Status: "running", Provider: "docker", Tier: "burst",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=2 WHERE slug='mixed-tier'`)
+
+	burst := &fakeDockerRuntime{
+		containers: []process.ContainerInfo{
+			{ID: "cb1", Labels: map[string]string{"shinyhub.slug": "mixed-tier", "shinyhub.replica_index": "1"}},
+		},
+		pids: map[string]int{"cb1": pidBurst},
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	lifecycle.RecoverProcesses(store, mgr, prx, lister, 0)
+	mgr.RegisterRuntime("burst", burst)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
-	// The stale container is skipped — no replica adopted.
-	if _, ok := mgr.GetReplica("shrunk-docker", 5); ok {
-		t.Error("expected out-of-pool container to be skipped")
+	if info, ok := mgr.GetReplica("mixed-tier", 0); !ok {
+		t.Error("expected native replica 0 to be adopted")
+	} else if info.PID != pidNative {
+		t.Errorf("native replica: expected pid %d, got %d", pidNative, info.PID)
 	}
-	// App has no adopted replicas so it gets marked stopped.
-	a, _ := store.GetAppBySlug("shrunk-docker")
-	if a.Status != "stopped" {
-		t.Errorf("expected stopped, got %s", a.Status)
+	if info, ok := mgr.GetReplica("mixed-tier", 1); !ok {
+		t.Error("expected burst replica 1 to be adopted")
+	} else if info.PID != pidBurst {
+		t.Errorf("burst replica: expected pid %d, got %d", pidBurst, info.PID)
+	}
+
+	a, _ := store.GetAppBySlug("mixed-tier")
+	if a.Status != "running" {
+		t.Errorf("expected running, got %s", a.Status)
 	}
 }
 
@@ -440,7 +525,7 @@ func TestRecoveryRegistersPersistedEndpointURL(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 
-	lifecycle.RecoverProcesses(store, mgr, prx, nil, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
 
 	if got := prx.ReplicaTargetURL("rec-endpoint", 0); got != endpoint {
 		t.Fatalf("recovered replica registered %q; want stored endpoint %q", got, endpoint)
