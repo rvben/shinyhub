@@ -135,6 +135,12 @@ type Params struct {
 	// It receives the runtime-returned endpoint URL (e.g. http://127.0.0.1:PORT).
 	// If nil, the default HTTP health poller (waitHealthy) is used.
 	HealthCheck func(endpointURL string, timeout time.Duration) error
+	// ContentDigest, DeploymentID, and AppVersion travel with the launch so a
+	// remote runtime can pull-by-digest and stamp recovery labels. Empty/zero is
+	// allowed for local-only deploys but every API launch path now populates them.
+	ContentDigest string
+	DeploymentID  int64
+	AppVersion    string
 }
 
 // Result contains identifiers for a single successfully deployed replica.
@@ -435,6 +441,9 @@ func bootReplica(p Params, idx int, tier string, baseCmd []string, appType strin
 		Env:             env,
 		MemoryLimitMB:   p.MemoryLimitMB,
 		CPUQuotaPercent: p.CPUQuotaPercent,
+		AppVersion:      p.AppVersion,
+		DeploymentID:    p.DeploymentID,
+		ContentDigest:   p.ContentDigest,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("start: %w", err)

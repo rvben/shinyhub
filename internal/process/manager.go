@@ -72,6 +72,7 @@ type StartParams struct {
 	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
 	AppVersion      string        // app version stamped onto labels/metadata
 	DeploymentID    int64         // owning deployment; 0 when unknown
+	ContentDigest   string        // bundle content digest; "" when unknown (remote runtime pulls by this)
 }
 
 type entry struct {
