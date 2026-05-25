@@ -142,15 +142,21 @@ func (m *Manager) SetAppDataRoot(root string) error {
 	return nil
 }
 
-// HostPreparesDeps proxies to the underlying Runtime so deploy code can ask
-// whether host-side dependency installation (uv sync, renv::restore) is
-// expected before Start. See Runtime.HostPreparesDeps for the contract.
-func (m *Manager) HostPreparesDeps() bool { return m.runtimeFor(m.defaultTier).HostPreparesDeps() }
+// HostPreparesDepsFor proxies to the runtime registered for the named tier so
+// deploy code can ask whether host-side dependency installation (uv sync,
+// renv::restore) is expected before Start. An empty or unregistered tier falls
+// back to the default tier. See Runtime.HostPreparesDeps for the contract.
+func (m *Manager) HostPreparesDepsFor(tier string) bool {
+	return m.runtimeFor(tier).HostPreparesDeps()
+}
 
-// AppBindHost proxies to the underlying Runtime so deploy code can construct
-// the per-replica command with the right listen address. See
+// AppBindHostFor proxies to the runtime registered for the named tier so deploy
+// code can construct the per-replica command with the right listen address. An
+// empty or unregistered tier falls back to the default tier. See
 // Runtime.AppBindHost for the contract.
-func (m *Manager) AppBindHost() string { return m.runtimeFor(m.defaultTier).AppBindHost() }
+func (m *Manager) AppBindHostFor(tier string) string {
+	return m.runtimeFor(tier).AppBindHost()
+}
 
 // NewManager returns an initialized Manager using the given Runtime as the
 // default ("local") tier. Additional tiers are added via RegisterRuntime.
