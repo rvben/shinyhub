@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -488,6 +490,7 @@ type appsSetFlags struct {
 	hibernateTimeout      int
 	replicas              int
 	maxSessionsPerReplica int
+	tiers                 []string
 	yes                   bool
 	wait                  bool
 	waitTimeout           time.Duration
@@ -509,6 +512,8 @@ func newAppsSetCmd() *cobra.Command {
 		"Number of replica processes serving this app (>= 1)")
 	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", 0,
 		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
+	cmd.Flags().StringArrayVar(&f.tiers, "tier", nil,
+		"Per-tier replica placement as name=count (repeatable, e.g. --tier local=2 --tier burst=1); mutually exclusive with --replicas")
 	cmd.Flags().BoolVar(&f.yes, "yes", false,
 		"Skip the confirmation prompt for a replica change (which restarts the app)")
 	cmd.Flags().BoolVar(&f.wait, "wait", false,
@@ -522,9 +527,10 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	hibernateChanged := cmd.Flags().Changed("hibernate-timeout")
 	replicasChanged := cmd.Flags().Changed("replicas")
 	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
+	tierChanged := cmd.Flags().Changed("tier")
 
-	if !hibernateChanged && !replicasChanged && !capChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --max-sessions-per-replica)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !tierChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica)")
 	}
 	if replicasChanged && f.replicas < 1 {
 		return fmt.Errorf("--replicas must be >= 1")
@@ -534,6 +540,29 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if hibernateChanged && f.hibernateTimeout < -1 {
 		return fmt.Errorf("--hibernate-timeout must be -1 (reset to global default), 0 (disable), or a positive number of minutes")
+	}
+
+	// --tier and --replicas both set the pool size/shape, so only one may be
+	// given. Parse the repeatable name=count specs into a placement map the
+	// server accepts directly.
+	var placement map[string]int
+	if tierChanged {
+		if replicasChanged {
+			return fmt.Errorf("--tier and --replicas are mutually exclusive")
+		}
+		placement = make(map[string]int, len(f.tiers))
+		for _, spec := range f.tiers {
+			name, countStr, ok := strings.Cut(spec, "=")
+			name = strings.TrimSpace(name)
+			if !ok || name == "" {
+				return fmt.Errorf("--tier must be name=count, got %q", spec)
+			}
+			count, err := strconv.Atoi(strings.TrimSpace(countStr))
+			if err != nil || count < 0 {
+				return fmt.Errorf("--tier %q count must be a non-negative integer", spec)
+			}
+			placement[name] = count
+		}
 	}
 
 	cfg, err := loadConfig()
@@ -547,9 +576,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	// The prompt is tty-gated: a non-interactive caller (CI, cron, piped
 	// script) proceeds without prompting so automation that scales via the CLI
 	// keeps working. --yes skips the prompt explicitly.
-	if replicasChanged && !f.yes && isStdinTTY() {
+	if (replicasChanged || tierChanged) && !f.yes && isStdinTTY() {
 		fmt.Fprintf(cmd.ErrOrStderr(),
-			"Changing replicas restarts %q and drops active sessions. Continue? [y/N]: ", slug)
+			"Changing the replica pool restarts %q and drops active sessions. Continue? [y/N]: ", slug)
 		var confirm string
 		if _, err := fmt.Fscan(cmd.InOrStdin(), &confirm); err != nil {
 			return fmt.Errorf("read confirmation: %w", err)
@@ -558,7 +587,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		case "y", "yes":
 			// proceed
 		default:
-			return fmt.Errorf("aborted - replicas unchanged")
+			return fmt.Errorf("aborted - replica pool unchanged")
 		}
 	}
 
@@ -575,6 +604,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if replicasChanged {
 		payload["replicas"] = f.replicas
+	}
+	if tierChanged {
+		payload["placement"] = placement
 	}
 	if capChanged {
 		payload["max_sessions_per_replica"] = f.maxSessionsPerReplica
@@ -615,6 +647,15 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	if replicasChanged {
 		fmt.Printf("%s: replicas set to %d\n", slug, f.replicas)
 	}
+	if tierChanged {
+		parts := make([]string, 0, len(f.tiers))
+		total := 0
+		for _, name := range sortedTierNames(placement) {
+			parts = append(parts, fmt.Sprintf("%s=%d", name, placement[name]))
+			total += placement[name]
+		}
+		fmt.Printf("%s: placement set to %s (%d replicas)\n", slug, strings.Join(parts, ", "), total)
+	}
 	if capChanged {
 		if f.maxSessionsPerReplica == 0 {
 			fmt.Printf("%s: max-sessions-per-replica reset to runtime default\n", slug)
@@ -627,6 +668,17 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		return waitForHealthyWithOutput(cfg, slug, f.waitTimeout, cmd.ErrOrStderr())
 	}
 	return nil
+}
+
+// sortedTierNames returns the placement map's tier names in alphabetical order
+// so the confirmation output is deterministic.
+func sortedTierNames(placement map[string]int) []string {
+	names := make([]string, 0, len(placement))
+	for name := range placement {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ── apps access ─────────────────────────────────────────────────────────────
