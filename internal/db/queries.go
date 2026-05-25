@@ -1892,6 +1892,128 @@ func scanApp(s scanner) (*App, error) {
 	return &a, nil
 }
 
+// --- Workers ---
+
+// Worker is one joined worker host (node). NodeID is the stable identity bound
+// into the worker's client certificate; it is distinct from a replica's
+// container id.
+type Worker struct {
+	NodeID        string
+	Name          string
+	AdvertiseAddr string
+	Tier          string
+	Status        string // "up" | "down"
+	Fingerprint   string // SHA-256 of the trusted client cert (hex)
+	Version       string
+	LastHeartbeat string
+	CreatedAt     time.Time
+}
+
+// UpsertWorker inserts or replaces a worker row by node id. Registration uses
+// it to record a newly joined node; re-registration (agent restart) refreshes
+// the advertise address and certificate fingerprint.
+func (s *Store) UpsertWorker(w Worker) error {
+	_, err := s.db.Exec(`
+		INSERT INTO workers (node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat)
+		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(node_id) DO UPDATE SET
+			name = excluded.name,
+			advertise_addr = excluded.advertise_addr,
+			tier = excluded.tier,
+			status = excluded.status,
+			cert_fingerprint = excluded.cert_fingerprint,
+			version = excluded.version,
+			last_heartbeat = excluded.last_heartbeat`,
+		w.NodeID, w.Name, w.AdvertiseAddr, w.Tier, w.Status, w.Fingerprint, w.Version)
+	if err != nil {
+		return fmt.Errorf("upsert worker %q: %w", w.NodeID, err)
+	}
+	return nil
+}
+
+// GetWorker returns the worker row for nodeID, or ErrNotFound if it does not exist.
+func (s *Store) GetWorker(nodeID string) (*Worker, error) {
+	row := s.db.QueryRow(`
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		FROM workers WHERE node_id = ?`, nodeID)
+	var w Worker
+	var createdAtRaw string
+	if err := row.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
+		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if t, ok := parseSQLiteTime(createdAtRaw); ok {
+		w.CreatedAt = t
+	}
+	return &w, nil
+}
+
+// ListWorkers returns all registered workers ordered by node_id.
+// Returns a non-nil empty slice when no workers are registered.
+func (s *Store) ListWorkers() ([]*Worker, error) {
+	rows, err := s.db.Query(`
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		FROM workers ORDER BY node_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ws := []*Worker{}
+	for rows.Next() {
+		var w Worker
+		var createdAtRaw string
+		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			return nil, err
+		}
+		if t, ok := parseSQLiteTime(createdAtRaw); ok {
+			w.CreatedAt = t
+		}
+		ws = append(ws, &w)
+	}
+	return ws, rows.Err()
+}
+
+// TouchWorkerHeartbeat records a heartbeat: updates last_heartbeat, refreshes
+// the trusted cert fingerprint (renewal), and marks the worker up.
+func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint string) error {
+	res, err := s.db.Exec(`
+		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = 'up'
+		WHERE node_id = ?`, fingerprint, nodeID)
+	if err != nil {
+		return fmt.Errorf("touch worker %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetWorkerStatus(nodeID, status string) error {
+	res, err := s.db.Exec(`UPDATE workers SET status = ? WHERE node_id = ?`, status, nodeID)
+	if err != nil {
+		return fmt.Errorf("set worker status %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteWorker(nodeID string) error {
+	res, err := s.db.Exec(`DELETE FROM workers WHERE node_id = ?`, nodeID)
+	if err != nil {
+		return fmt.Errorf("delete worker %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // parseSQLiteTime parses the timestamp formats SQLite emits for DATETIME
 // columns and aggregates over them. CURRENT_TIMESTAMP uses
 // "2006-01-02 15:04:05"; values written via Go's time.Time round-trip as
