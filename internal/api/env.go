@@ -252,6 +252,9 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		ContentDigest:         current.ContentDigest,
+		DeploymentID:          current.ID,
+		AppVersion:            current.Version,
 	}, app))
 	if runErr != nil {
 		// The old process is gone; reflect that in the DB so callers don't
@@ -264,6 +267,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	}
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
+		depID := current.ID
 		_ = s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:        app.ID,
 			Index:        r.Index,
@@ -276,6 +280,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 			WorkerID:     r.WorkerID,
 			AppVersion:   current.Version,
 			DesiredState: "running",
+			DeploymentID: &depID,
 		})
 	}
 	for _, idx := range result.Failed {

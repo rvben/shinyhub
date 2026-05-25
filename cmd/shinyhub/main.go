@@ -477,7 +477,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
-		return deploy.RunReplica(deploy.Params{
+		p := deploy.Params{
 			Slug:                  slug,
 			BundleDir:             bundleDir,
 			Manager:               mgr,
@@ -489,7 +489,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
-		}, index)
+		}
+		if deps, derr := store.ListDeployments(app.ID); derr == nil && len(deps) > 0 {
+			p.ContentDigest = deps[0].ContentDigest
+			p.DeploymentID = deps[0].ID
+			p.AppVersion = deps[0].Version
+		}
+		return deploy.RunReplica(p, index)
 	}
 
 	lcCfg := lifecycle.Config{
