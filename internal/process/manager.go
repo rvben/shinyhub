@@ -65,6 +65,11 @@ type StartParams struct {
 	Dir             string
 	Command         []string
 	Port            int
+	// HostPublishPort, when non-zero, is the host port to publish the
+	// in-container bind Port to. The control plane allocates Port (baked into
+	// the command and PORT env); a remote worker allocates HostPublishPort on
+	// its own host. Zero means publish to the same port as Port (local case).
+	HostPublishPort int
 	Env             []string
 	AppDataPath     string        // host path to per-app data dir; empty disables data-dir wiring in runtime
 	MemoryLimitMB   int           // 0 = no limit

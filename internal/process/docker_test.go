@@ -524,6 +524,15 @@ func TestDockerRuntime_RunOnce_ExitsCleanly(t *testing.T) {
 	}
 }
 
+func TestHostPublishPort_FallsBackToBindPort(t *testing.T) {
+	if got := hostPublishPort(StartParams{Port: 8080}); got != 8080 {
+		t.Errorf("hostPublishPort with no HostPublishPort = %d, want 8080", got)
+	}
+	if got := hostPublishPort(StartParams{Port: 8080, HostPublishPort: 49213}); got != 49213 {
+		t.Errorf("hostPublishPort with HostPublishPort = %d, want 49213", got)
+	}
+}
+
 func TestDockerRuntime_RunOnce_SharedMountIsReadOnly(t *testing.T) {
 	rt := dockerRuntimeWithImage(t, "alpine:3")
 	sourceData := t.TempDir()

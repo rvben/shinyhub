@@ -130,6 +130,16 @@ func addSharedMounts(cfg *containerConfig, mounts []SharedMount, dataHostPath st
 	return nil
 }
 
+// hostPublishPort returns the host port that the in-container bind port should
+// be published to. A remote worker sets HostPublishPort to a host-allocated
+// port; the local case leaves it zero and publishes to the same port.
+func hostPublishPort(p StartParams) int {
+	if p.HostPublishPort > 0 {
+		return p.HostPublishPort
+	}
+	return p.Port
+}
+
 // dataHostPath returns the host directory that backs /app/data inside the
 // container for the given StartParams. With an explicit AppDataPath that
 // directory is used directly; otherwise /app/data lives inside the bundle dir.
@@ -163,7 +173,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		// AppBindHost so this mapping actually routes.
 		cfg.Ports = []containerPortBinding{{
 			ContainerPort: p.Port,
-			HostPort:      p.Port,
+			HostPort:      hostPublishPort(p),
 			HostIP:        "127.0.0.1",
 		}}
 	}
