@@ -1495,6 +1495,15 @@ func (s *Store) CountAppEnvVars(appID int64) (int, error) {
 
 // --- Replicas ---
 
+// Replica status values stored in replicas.status.
+const (
+	// ReplicaStatusRunning marks a replica the control plane considers healthy.
+	ReplicaStatusRunning = "running"
+	// ReplicaStatusLost marks a replica whose worker stopped heartbeating. It is
+	// excluded from routing and is not auto-restarted.
+	ReplicaStatusLost = "lost"
+)
+
 // Replica represents a single backend process instance for an app.
 // Multiple replicas allow an app to run N parallel processes behind the proxy.
 type Replica struct {

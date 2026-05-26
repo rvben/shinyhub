@@ -70,6 +70,23 @@ func TestSetAppPlacement_DefaultEmptyOnCreate(t *testing.T) {
 	}
 }
 
+func TestReplica_LostStatusRoundTrips(t *testing.T) {
+	store := mustOpenDB(t)
+	u := mustCreateUser(t, store, "owner", "developer")
+	app := mustCreateApp(t, store, "demo", u.ID)
+
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost}); err != nil {
+		t.Fatalf("upsert lost replica: %v", err)
+	}
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatalf("list replicas: %v", err)
+	}
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Fatalf("replica status = %+v, want one row with status %q", reps, db.ReplicaStatusLost)
+	}
+}
+
 func TestApp_PlacementMap(t *testing.T) {
 	cases := []struct {
 		name string
