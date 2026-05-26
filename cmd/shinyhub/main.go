@@ -236,13 +236,26 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("db migrate: %w", err)
 	}
 
-	var workerReg *worker.Registry
+	var (
+		workerCA  *worker.CA
+		workerReg *worker.Registry
+	)
 	if cfg.Worker.Enabled {
-		reg, err := startWorkerHosting(ctx, logger, cfg, store)
+		ca, reg, err := startWorkerHosting(ctx, logger, cfg, store)
 		if err != nil {
 			return err
 		}
+		workerCA = ca
 		workerReg = reg
+	}
+
+	var dialer worker.AgentDialer
+	if workerCA != nil {
+		clientCert, err := workerCA.ControlClientCertificate()
+		if err != nil {
+			return fmt.Errorf("control client cert: %w", err)
+		}
+		dialer = worker.NewMTLSDialer(clientCert, workerCA.Pool())
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
@@ -315,6 +328,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			continue
 		}
 		mode, _ := cfg.Runtime.RuntimeForTier(name)
+		if mode == "remote_docker" {
+			if workerReg == nil || dialer == nil {
+				return fmt.Errorf("tier %q requires worker hosting to be enabled", name)
+			}
+			mgr.RegisterRuntime(name, worker.NewRemoteRuntime(workerReg, name, dialer))
+			slog.Info("remote runtime tier registered", "tier", name, "mode", mode)
+			continue
+		}
 		tierRT, err := buildRuntime(mode, cfg)
 		if err != nil {
 			return err

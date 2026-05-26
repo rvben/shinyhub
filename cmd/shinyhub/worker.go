@@ -127,24 +127,24 @@ func workerListenAddr(cfg *config.Config) string {
 
 // startWorkerHosting builds the CA, registry, and worker API and starts the
 // dedicated mTLS listener in the background. Called from runServe when worker
-// hosting is enabled. Returns the registry so the control plane can resolve
-// tier-to-node identity for co-location checks.
-func startWorkerHosting(ctx context.Context, logger *slog.Logger, cfg *config.Config, store *db.Store) (*worker.Registry, error) {
+// hosting is enabled. Returns the CA and registry so the control plane can
+// build the mTLS dialer and resolve tier-to-node identity.
+func startWorkerHosting(ctx context.Context, logger *slog.Logger, cfg *config.Config, store *db.Store) (*worker.CA, *worker.Registry, error) {
 	tokens, err := readJoinTokens(cfg.Worker.JoinTokenFile)
 	if err != nil {
-		return nil, fmt.Errorf("worker join tokens: %w", err)
+		return nil, nil, fmt.Errorf("worker join tokens: %w", err)
 	}
 	ca, err := worker.OpenCA(cfg.Worker.CADir, tokens)
 	if err != nil {
-		return nil, fmt.Errorf("worker CA: %w", err)
+		return nil, nil, fmt.Errorf("worker CA: %w", err)
 	}
 	reg, err := worker.NewRegistry(store)
 	if err != nil {
-		return nil, fmt.Errorf("worker registry: %w", err)
+		return nil, nil, fmt.Errorf("worker registry: %w", err)
 	}
 	workerAPI := api.NewWorkerAPI(store, reg, ca, cfg.Storage.AppsDir)
 	go serveWorkerMTLS(ctx, logger, cfg, ca, workerAPI)
-	return reg, nil
+	return ca, reg, nil
 }
 
 // serveWorkerMTLS serves the worker-facing API on a dedicated listener that

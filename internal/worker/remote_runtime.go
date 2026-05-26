@@ -50,6 +50,12 @@ func newRemoteRuntime(lookup WorkerLookup, tier string, dialer AgentDialer) *rem
 	return &remoteRuntime{lookup: lookup, tier: tier, dialer: dialer}
 }
 
+// NewRemoteRuntime builds a tier-bound runtime that delegates to whichever
+// worker is currently live for the tier, dialing it over the mTLS tunnel.
+func NewRemoteRuntime(lookup WorkerLookup, tier string, dialer AgentDialer) process.Runtime {
+	return newRemoteRuntime(lookup, tier, dialer)
+}
+
 func encodeRemoteHandle(nodeID, containerID string) string {
 	return nodeID + "/" + containerID
 }
