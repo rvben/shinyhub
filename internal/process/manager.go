@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,6 +164,17 @@ func (m *Manager) HostPreparesDepsFor(tier string) bool {
 // Runtime.AppBindHost for the contract.
 func (m *Manager) AppBindHostFor(tier string) string {
 	return m.runtimeFor(tier).AppBindHost()
+}
+
+// TransportForTier returns the HTTP transport a tier's runtime requires for
+// reaching its replicas, or nil to use the default transport. Runtimes opt in
+// by implementing ReplicaTransporter.
+func (m *Manager) TransportForTier(tier string) http.RoundTripper {
+	rt := m.runtimeFor(tier)
+	if tr, ok := rt.(ReplicaTransporter); ok {
+		return tr.ReplicaTransport()
+	}
+	return nil
 }
 
 // NewManager returns an initialized Manager using the given Runtime as the

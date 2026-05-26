@@ -386,10 +386,10 @@ func TestProxyAccessLogStickyReplica(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("app", 2)
-	if err := p.RegisterReplica("app", 0, backend0.URL); err != nil {
+	if err := p.RegisterReplica("app", 0, backend0.URL, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("app", 1, backend1.URL); err != nil {
+	if err := p.RegisterReplica("app", 1, backend1.URL, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -737,13 +737,13 @@ func TestProxy_PoolRegister(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("demo", 3)
 
-	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:20001"); err != nil {
+	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("demo", 1, "http://127.0.0.1:20002"); err != nil {
+	if err := p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("demo", 3, "http://x"); err == nil {
+	if err := p.RegisterReplica("demo", 3, "http://x", nil); err == nil {
 		t.Fatal("expected error for out-of-range index")
 	}
 }
@@ -751,8 +751,8 @@ func TestProxy_PoolRegister(t *testing.T) {
 func TestProxy_DeregisterReplica(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001")
-	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002")
+	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil)
+	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil)
 
 	p.DeregisterReplica("demo", 0)
 	if !p.HasLiveReplica("demo") {
@@ -777,8 +777,8 @@ func TestProxy_StickyCookie(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL)
-	_ = p.RegisterReplica("demo", 1, b1.URL)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	rec := httptest.NewRecorder()
@@ -811,7 +811,7 @@ func TestProxy_StickyCookieStale(t *testing.T) {
 	defer b0.Close()
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1"})
@@ -1027,8 +1027,8 @@ func TestProxy_LeastConnectionsDistribution(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL)
-	_ = p.RegisterReplica("demo", 1, b1.URL)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
 
 	for i := 0; i < 20; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
@@ -1075,8 +1075,8 @@ func TestProxy_SessionCap_Sheds503WhenAllSaturated(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL)
-	_ = p.RegisterReplica("demo", 1, b1.URL)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
 	p.SetPoolCap("demo", 1) // 1 in-flight per replica = 2 total capacity
 
 	// Launch 2 requests that will block in the backend handlers, pinning
@@ -1130,8 +1130,8 @@ func TestProxy_SessionCap_StickyCookieBypassesCap(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL)
-	_ = p.RegisterReplica("demo", 1, b1.URL)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
 	p.SetPoolCap("demo", 1)
 
 	// Pin one in-flight request against replica 0 so it sits at cap.
@@ -1177,7 +1177,7 @@ func TestProxy_SessionCap_ZeroMeansUnlimited(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 1)
-	_ = p.RegisterReplica("demo", 0, b0.URL)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
 	p.SetPoolCap("demo", 0) // explicit "unlimited"
 
 	var wg sync.WaitGroup
@@ -1224,7 +1224,7 @@ func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2) // 2 slots, but only slot 0 is registered
-	_ = p.RegisterReplica("demo", 0, b0.URL)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
 
 	counts := p.ReplicaSessionCounts("demo")
 	if len(counts) != 2 {
@@ -1354,7 +1354,7 @@ func TestProxy_ReadyProbe_ClearedByLifecycleEvents(t *testing.T) {
 		}},
 		{"RegisterReplica swap", func(p *proxy.Proxy) {
 			// Hot redeploy: re-register replica 0 in-place.
-			if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1"); err != nil {
+			if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1", nil); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -1431,3 +1431,45 @@ func TestProxy_ReadyProbe_DoesNotRecordActivity(t *testing.T) {
 		t.Errorf("ready probe must not update LastSeen: before=%v after=%v", before, after)
 	}
 }
+
+// TestRegisterReplica_PrependsTargetPathAndUsesTransport verifies that a remote
+// tunnel URL's path prefix is prepended to the app-relative path and that the
+// caller-supplied transport is used for all outbound requests.
+func TestRegisterReplica_PrependsTargetPathAndUsesTransport(t *testing.T) {
+	var gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("app", 1)
+
+	target := backend.URL + "/v1/data/tok123"
+
+	used := false
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		used = true
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	if err := p.RegisterReplica("app", 0, target, tr); err != nil {
+		t.Fatalf("RegisterReplica: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/app/app/health/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if !used {
+		t.Error("custom transport was not used")
+	}
+	if gotPath != "/v1/data/tok123/health/ready" {
+		t.Errorf("backend path = %q, want /v1/data/tok123/health/ready", gotPath)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

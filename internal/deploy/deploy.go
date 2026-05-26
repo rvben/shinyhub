@@ -454,7 +454,7 @@ func bootReplica(p Params, idx int, tier string, baseCmd []string, appType strin
 		return Result{}, fmt.Errorf("health: %w", err)
 	}
 
-	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL); err != nil {
+	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, nil); err != nil {
 		_ = p.Manager.StopReplica(p.Slug, idx)
 		return Result{}, fmt.Errorf("register: %w", err)
 	}

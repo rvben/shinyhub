@@ -194,7 +194,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("http://127.0.0.1:%d", *r.Port)
 	}
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil); err != nil {
 		slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}
@@ -248,7 +248,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		EndpointURL: r.EndpointURL,
 		WorkerID:    r.WorkerID,
 	}, process.RunHandle{ContainerID: cID})
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil); err != nil {
 		slog.Error("recovery: register docker proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}

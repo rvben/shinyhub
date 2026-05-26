@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -968,5 +969,32 @@ func TestManagerDispatchesByTier(t *testing.T) {
 	}
 	if err := m.StopReplica("b", 0); err != nil {
 		t.Fatalf("stop burst: %v", err)
+	}
+}
+
+// transportRuntime is a Runtime that also implements ReplicaTransporter,
+// used to prove Manager.TransportForTier surfaces the capability.
+type transportRuntime struct {
+	fakeRemoteRuntime
+	tr http.RoundTripper
+}
+
+func (r *transportRuntime) ReplicaTransport() http.RoundTripper { return r.tr }
+
+// roundTripFunc is an http.RoundTripper that delegates to a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestManager_TransportForTier(t *testing.T) {
+	tr := roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })
+	m := process.NewManager(t.TempDir(), &fakeRemoteRuntime{})
+	m.RegisterRuntime("remote", &transportRuntime{fakeRemoteRuntime: fakeRemoteRuntime{}, tr: tr})
+	if got := m.TransportForTier("remote"); got == nil {
+		t.Fatal("TransportForTier(remote) = nil, want the runtime's transport")
+	}
+	// A runtime without the capability yields nil (default transport).
+	if got := m.TransportForTier("local-default"); got != nil {
+		t.Errorf("TransportForTier for non-transporter = %v, want nil", got)
 	}
 }
