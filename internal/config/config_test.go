@@ -1073,12 +1073,35 @@ runtime:
 	}
 }
 
+func TestConfig_AcceptsRemoteDockerTier(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	path := writeYAML(t, `
+runtime:
+  mode: native
+  tiers:
+    - name: local
+      runtime: native
+    - name: remote
+      runtime: remote_docker
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := cfg.Runtime.RuntimeForTier("remote")
+	if !ok {
+		t.Fatal("RuntimeForTier(remote) = not found")
+	}
+	if got != "remote_docker" {
+		t.Errorf("tier remote mode = %q, want remote_docker", got)
+	}
+}
+
 func TestRuntimeTiers_RejectsDuplicateAndUnknownRuntime(t *testing.T) {
 	for name, body := range map[string]string{
 		"duplicate name":  "runtime:\n  tiers:\n    - {name: a, runtime: native}\n    - {name: a, runtime: docker}\n",
 		"empty name":      "runtime:\n  tiers:\n    - {name: \"\", runtime: native}\n",
 		"unknown runtime": "runtime:\n  tiers:\n    - {name: a, runtime: kubernetes}\n",
-		"remote not yet":  "runtime:\n  tiers:\n    - {name: a, runtime: remote_docker}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")

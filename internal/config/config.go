@@ -620,9 +620,9 @@ func Load(path string) (*Config, error) {
 			case "native", "docker":
 				// supported this phase
 			case "remote_docker":
-				return nil, fmt.Errorf("runtime.tiers: tier %q uses %q which is not yet available", t.Name, t.Runtime)
+				// accepted: a remoteRuntime is registered for this tier at startup
 			default:
-				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native or docker)", t.Name, t.Runtime)
+				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, or remote_docker)", t.Name, t.Runtime)
 			}
 			cfg.Runtime.Tiers = append(cfg.Runtime.Tiers, TierConfig{Name: t.Name, Runtime: t.Runtime})
 		}

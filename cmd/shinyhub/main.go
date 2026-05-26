@@ -184,6 +184,10 @@ func buildRuntime(mode string, cfg *config.Config) (process.Runtime, error) {
 		return dockerRT, nil
 	case "native":
 		return process.NewNativeRuntime(), nil
+	case "remote_docker":
+		// Handled upstream: remote tiers are registered via NewRemoteRuntime before
+		// RegisterRuntime; buildRuntime is not called for remote_docker tiers.
+		return nil, fmt.Errorf("buildRuntime called for remote_docker tier; wire via NewRemoteRuntime instead")
 	default:
 		return nil, fmt.Errorf("unsupported runtime mode: %s", mode)
 	}
