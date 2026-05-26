@@ -1086,3 +1086,37 @@ func TestAppsSet_Wait_RedeployInFlightBlocksReady(t *testing.T) {
 		t.Fatalf("wait returned on the first redeploying poll: got %d GET polls, want >= 2", got)
 	}
 }
+
+func TestAppsShow_RendersRejectsByReason(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":1,"deploy_count":1,"hibernate_timeout_minutes":null,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"effective_max_sessions_per_replica":1,"replicas_status":[],"rejects_by_reason":{"window_seconds":600,"counts":{"pool-saturated":4103,"app-not-ready":12}}}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"rejects (last 10m):",
+		"  pool-saturated: 4103",
+		"  app-not-ready: 12",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// TestAppsShow_OmitsRejectsWhenAbsent guards against the rejects section
+// rendering when the server sends no rejects_by_reason block.
+func TestAppsShow_OmitsRejectsWhenAbsent(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":1,"deploy_count":1,"hibernate_timeout_minutes":null,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"effective_max_sessions_per_replica":1,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "rejects (") {
+		t.Errorf("rejects section should be omitted when server sends no rejects_by_reason block\nfull output:\n%s", out)
+	}
+}

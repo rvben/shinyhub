@@ -176,6 +176,10 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			PID    *int   `json:"pid"`
 			Port   *int   `json:"port"`
 		} `json:"replicas_status"`
+		RejectsByReason *struct {
+			WindowSeconds int               `json:"window_seconds"`
+			Counts        map[string]uint64 `json:"counts"`
+		} `json:"rejects_by_reason"`
 	}
 	if err := json.Unmarshal(out, &resp2); err != nil {
 		return fmt.Errorf("decode response: %w", err)
@@ -222,6 +226,19 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	case a.MaxSessionsPerReplica > 0:
 		eff := a.MaxSessionsPerReplica
 		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
+	}
+	if rr := resp2.RejectsByReason; rr != nil && len(rr.Counts) > 0 {
+		mins := rr.WindowSeconds / 60
+		fmt.Fprintf(w, "rejects (last %dm):\n", mins)
+		// Stable ordering so the output is deterministic.
+		reasons := make([]string, 0, len(rr.Counts))
+		for reason := range rr.Counts {
+			reasons = append(reasons, reason)
+		}
+		sort.Strings(reasons)
+		for _, reason := range reasons {
+			fmt.Fprintf(w, "  %s: %d\n", reason, rr.Counts[reason])
+		}
 	}
 	if a.HibernateTimeoutMinutes != nil {
 		fmt.Fprintf(w, "Hibernate:   %d min\n", *a.HibernateTimeoutMinutes)
