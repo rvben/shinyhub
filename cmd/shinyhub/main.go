@@ -422,6 +422,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if cfg.Metrics.Enabled {
 		reg := metrics.New(version)
 		srv.SetMetrics(reg)
+		prx.SetRejectRecorder(reg)
 		var mln net.Listener
 		metricsSrv, mln, err = startMetricsListener(cfg.Metrics.Addr, reg)
 		if err != nil {
@@ -484,6 +485,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		if e.ReplicaIndex >= 0 {
 			attrs = append(attrs, "replica", e.ReplicaIndex, "sticky", e.Sticky)
+		}
+		if e.Reject != "" {
+			attrs = append(attrs, "reject", string(e.Reject))
 		}
 		slog.Info("proxy_access", attrs...)
 	})
