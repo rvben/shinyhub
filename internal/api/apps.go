@@ -1310,6 +1310,14 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The app is logically gone now (tombstoned). Drop its rejection history so
+	// the rollup does not carry a deleted slug. Done here, not on the earlier
+	// Deregister, because Deregister also fires on redeploy/restart/stop where
+	// the app still exists.
+	if s.proxy != nil {
+		s.proxy.ForgetRejects(slug)
+	}
+
 	detail := ""
 	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
 		// Disk cleanup failed: keep the 'deleting' tombstone so startup
