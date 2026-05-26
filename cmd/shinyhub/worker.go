@@ -16,6 +16,7 @@ import (
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/rvben/shinyhub/internal/worker/agent"
 	"github.com/spf13/cobra"
@@ -55,7 +56,25 @@ func newWorkerCmd() *cobra.Command {
 				return fmt.Errorf("worker bootstrap: %w", err)
 			}
 			slog.Info("worker joined control plane", "node_id", ag.NodeID(), "tier", tier)
-			_ = dockerSocket // consumed when the local DockerRuntime is wired
+			cfg, err := config.Load(serverConfigPath())
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			rt, err := process.NewDockerRuntime(dockerSocket,
+				cfg.Runtime.Docker.Images.Python,
+				cfg.Runtime.Docker.Images.R,
+				cfg.Runtime.Docker.NetworkMode,
+			)
+			if err != nil {
+				return fmt.Errorf("docker runtime: %w", err)
+			}
+			replicas := worker.NewReplicaServer(worker.ReplicaServerConfig{
+				Runtime:   rt,
+				DataDir:   dataDir,
+				NodeID:    ag.NodeID(),
+				Advertise: advertiseAddr,
+			})
+			_ = replicas // consumed when the inbound mTLS server is wired
 			return ag.Run(ctx, 10*time.Second)
 		},
 	}
