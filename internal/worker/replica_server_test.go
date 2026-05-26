@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -350,6 +351,65 @@ func (f *fakeEnsurer) Ensure(_ context.Context, digest string) (string, error) {
 	f.called = true
 	f.digest = digest
 	return f.dir, nil
+}
+
+// spyFlusher counts Flush calls so tests can assert a closed writer never
+// touches the (by then finalized) response.
+type spyFlusher struct{ flushes int }
+
+func (s *spyFlusher) Flush() { s.flushes++ }
+
+// TestFrameLogWriter_InertAfterClose pins the contract that makes the worker
+// crash-safe: the runtime spawns a detached goroutine that keeps writing
+// container logs into the frame writer, but the request handler returns (and
+// the response is finalized) as soon as the user disconnects. Writing to the
+// finalized ResponseWriter then panics and kills the worker. After close() the
+// writer must be inert - Write returns an error and touches neither the encoder
+// nor the flusher.
+func TestFrameLogWriter_InertAfterClose(t *testing.T) {
+	var buf bytes.Buffer
+	fl := &spyFlusher{}
+	w := &frameLogWriter{enc: json.NewEncoder(&buf), flusher: fl}
+
+	n, err := w.Write([]byte("hello"))
+	if err != nil || n != len("hello") {
+		t.Fatalf("pre-close Write = (%d, %v), want (%d, nil)", n, err, len("hello"))
+	}
+	if fl.flushes != 1 {
+		t.Fatalf("pre-close flushes = %d, want 1", fl.flushes)
+	}
+
+	w.close()
+
+	encodedLen := buf.Len()
+	if _, err := w.Write([]byte("late log from a detached streamLogs goroutine")); err == nil {
+		t.Error("post-close Write returned nil error, want a closed error")
+	}
+	if buf.Len() != encodedLen {
+		t.Error("post-close Write encoded a frame; writer must be inert after close")
+	}
+	if fl.flushes != 1 {
+		t.Errorf("post-close flushes = %d, want 1 (close must stop flushing)", fl.flushes)
+	}
+}
+
+// TestFrameLogWriter_ConcurrentWriteAndCloseRaceSafe runs writes concurrently
+// with close(), mirroring the handler returning while the runtime's detached
+// log goroutine is still writing. It must be race-free under -race.
+func TestFrameLogWriter_ConcurrentWriteAndCloseRaceSafe(t *testing.T) {
+	var buf bytes.Buffer
+	w := &frameLogWriter{enc: json.NewEncoder(&buf), flusher: &spyFlusher{}}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_, _ = w.Write([]byte("log line from the streaming goroutine"))
+		}
+	}()
+	w.close()
+	wg.Wait()
 }
 
 func TestBuildStartParams_BundleCacheWired(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -99,21 +100,59 @@ func (s *replicaServer) provisionAppData(slug string) (string, error) {
 	return ref.Path, nil
 }
 
+// errLogWriterClosed is returned by writes after the handler has closed the
+// writer; it signals the runtime's detached log goroutine to stop.
+var errLogWriterClosed = errors.New("frame log writer closed")
+
 // frameLogWriter writes each Write call as a FrameLog frame and flushes so the
 // control plane receives logs continuously over the long-lived response.
+//
+// The runtime keeps a detached goroutine writing container logs into this
+// writer for the replica's lifetime, but the request handler returns (and the
+// ResponseWriter is finalized) as soon as the client disconnects. Touching a
+// finalized ResponseWriter panics, so the handler calls close() before
+// returning and every frame write goes through the mutex: after close the
+// writer is inert and the late goroutine can no longer reach the response.
 type frameLogWriter struct {
 	enc     *json.Encoder
 	flusher http.Flusher
+
+	mu     sync.Mutex
+	closed bool
 }
 
-func (w *frameLogWriter) Write(p []byte) (int, error) {
-	if err := w.enc.Encode(api.Frame{Kind: api.FrameLog, Data: p}); err != nil {
-		return 0, err
+// writeFrame encodes a frame and flushes under the lock. Once closed it is a
+// no-op that reports errLogWriterClosed, so concurrent writers neither race on
+// the encoder nor touch the finalized response.
+func (w *frameLogWriter) writeFrame(f api.Frame) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return errLogWriterClosed
+	}
+	if err := w.enc.Encode(f); err != nil {
+		return err
 	}
 	if w.flusher != nil {
 		w.flusher.Flush()
 	}
+	return nil
+}
+
+func (w *frameLogWriter) Write(p []byte) (int, error) {
+	if err := w.writeFrame(api.Frame{Kind: api.FrameLog, Data: p}); err != nil {
+		return 0, err
+	}
 	return len(p), nil
+}
+
+// close makes the writer inert. After it returns, Write and writeFrame stop
+// encoding and flushing, so a detached log goroutine cannot write to the
+// response once the handler has returned.
+func (w *frameLogWriter) close() {
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
 }
 
 // newToken returns a random opaque data-plane token.
@@ -189,25 +228,21 @@ func (s *replicaServer) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
-	enc := json.NewEncoder(w)
 	flusher, _ := w.(http.Flusher)
-	logw := &frameLogWriter{enc: enc, flusher: flusher}
+	logw := &frameLogWriter{enc: json.NewEncoder(w), flusher: flusher}
+	// Close the writer before returning so the runtime's detached log goroutine
+	// cannot write to the response once it is finalized.
+	defer logw.close()
 
 	endpoint, err := s.runtime.Start(r.Context(), params, logw)
 	if err != nil {
-		_ = enc.Encode(api.Frame{Kind: api.FrameError, Error: err.Error()})
-		if flusher != nil {
-			flusher.Flush()
-		}
+		_ = logw.writeFrame(api.Frame{Kind: api.FrameError, Error: err.Error()})
 		return
 	}
 
 	token, err := newToken()
 	if err != nil {
-		_ = enc.Encode(api.Frame{Kind: api.FrameError, Error: err.Error()})
-		if flusher != nil {
-			flusher.Flush()
-		}
+		_ = logw.writeFrame(api.Frame{Kind: api.FrameError, Error: err.Error()})
 		return
 	}
 
@@ -228,10 +263,7 @@ func (s *replicaServer) handleStart(w http.ResponseWriter, r *http.Request) {
 		URL:         fmt.Sprintf("https://%s/v1/data/%s", s.advertise, token),
 	}
 	resultData, _ := json.Marshal(result)
-	_ = enc.Encode(api.Frame{Kind: api.FrameResult, Data: resultData})
-	if flusher != nil {
-		flusher.Flush()
-	}
+	_ = logw.writeFrame(api.Frame{Kind: api.FrameResult, Data: resultData})
 
 	// Keep streaming logs until the replica's output writer is closed by the
 	// runtime or the request context ends. The runtime drives writes into logw
@@ -319,23 +351,17 @@ func (s *replicaServer) handleRunOnce(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
-	enc := json.NewEncoder(w)
 	flusher, _ := w.(http.Flusher)
-	logw := &frameLogWriter{enc: enc, flusher: flusher}
+	logw := &frameLogWriter{enc: json.NewEncoder(w), flusher: flusher}
+	defer logw.close()
 
 	info, err := s.runtime.RunOnce(r.Context(), params, logw)
 	if err != nil {
-		_ = enc.Encode(api.Frame{Kind: api.FrameError, Error: err.Error()})
-		if flusher != nil {
-			flusher.Flush()
-		}
+		_ = logw.writeFrame(api.Frame{Kind: api.FrameError, Error: err.Error()})
 		return
 	}
 	resultData, _ := json.Marshal(api.ExitResult{Code: info.Code, Signaled: info.Signaled})
-	_ = enc.Encode(api.Frame{Kind: api.FrameResult, Data: resultData})
-	if flusher != nil {
-		flusher.Flush()
-	}
+	_ = logw.writeFrame(api.Frame{Kind: api.FrameResult, Data: resultData})
 }
 
 // handleData reverse-proxies a data-plane request to the worker-local host port
