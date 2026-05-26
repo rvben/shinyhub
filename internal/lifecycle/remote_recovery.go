@@ -1,8 +1,10 @@
 package lifecycle
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
@@ -73,4 +75,75 @@ func recoverRemoteReplica(
 	}
 	slog.Info("recovery: re-adopted remote replica", "slug", app.Slug, "idx", r.Index, "container", item.ContainerID)
 	return true
+}
+
+// WorkerDownMonitor periodically marks stale workers down and transitions their
+// running replicas to lost, removing them from proxy routing. deregister is the
+// proxy removal hook, injected so the monitor is unit-testable.
+type WorkerDownMonitor struct {
+	store      *db.Store
+	timeout    time.Duration
+	deregister func(slug string, index int)
+}
+
+// NewWorkerDownMonitor builds a monitor that marks a worker down once its
+// heartbeat is older than timeout and transitions that worker's running
+// replicas to lost, calling deregister for each removed replica.
+func NewWorkerDownMonitor(store *db.Store, timeout time.Duration, deregister func(slug string, index int)) *WorkerDownMonitor {
+	return &WorkerDownMonitor{store: store, timeout: timeout, deregister: deregister}
+}
+
+// Sweep performs one monitor pass as of now: every worker whose heartbeat
+// predates now-timeout is marked down and each of its running replicas becomes
+// lost and is deregistered from routing.
+func (m *WorkerDownMonitor) Sweep(now time.Time) {
+	stale, err := m.store.ListWorkersStale(now.Add(-m.timeout))
+	if err != nil {
+		slog.Error("worker monitor: list stale workers", "err", err)
+		return
+	}
+	for _, w := range stale {
+		if err := m.store.SetWorkerStatus(w.NodeID, "down"); err != nil {
+			slog.Error("worker monitor: mark down", "node", w.NodeID, "err", err)
+			continue
+		}
+		slog.Warn("worker monitor: worker down", "node", w.NodeID, "tier", w.Tier)
+		reps, err := m.store.ListReplicasByWorker(w.NodeID)
+		if err != nil {
+			slog.Error("worker monitor: list replicas", "node", w.NodeID, "err", err)
+			continue
+		}
+		for _, r := range reps {
+			if r.Status != db.ReplicaStatusRunning {
+				continue
+			}
+			app, err := m.store.GetAppByID(r.AppID)
+			if err != nil {
+				slog.Error("worker monitor: resolve app", "app_id", r.AppID, "err", err)
+				continue
+			}
+			if err := m.store.UpdateReplicaStatus(r.AppID, r.Index, db.ReplicaStatusLost); err != nil {
+				slog.Error("worker monitor: mark replica lost", "slug", app.Slug, "idx", r.Index, "err", err)
+				continue
+			}
+			if m.deregister != nil {
+				m.deregister(app.Slug, r.Index)
+			}
+			slog.Warn("worker monitor: replica lost", "slug", app.Slug, "idx", r.Index, "node", w.NodeID)
+		}
+	}
+}
+
+// Run sweeps once per interval until ctx is cancelled.
+func (m *WorkerDownMonitor) Run(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			m.Sweep(now)
+		}
+	}
 }

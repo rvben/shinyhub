@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/lifecycle"
@@ -695,5 +696,52 @@ func TestReconcileInflightDeployments(t *testing.T) {
 	}
 	if len(live) != 1 || live[0].Version != "v1" {
 		t.Fatalf("after reconcile, live = %+v, want only v1", live)
+	}
+}
+
+func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "wd-app")
+
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-a", AdvertiseAddr: "w:8443", Tier: "remote", Status: "up",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, old, "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
+		Provider: "remote_docker", Tier: "remote", WorkerID: "node-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prx.SetPoolSize("wd-app", 1)
+	if err := prx.RegisterReplica("wd-app", 0, "https://w:8443/v1/data/tok", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	deregistered := false
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, func(slug string, index int) {
+		deregistered = true
+		prx.DeregisterReplica(slug, index)
+	})
+	monitor.Sweep(time.Now())
+
+	if w, _ := store.GetWorker("node-a"); w == nil || w.Status != "down" {
+		t.Errorf("worker status = %+v, want down", w)
+	}
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Errorf("replica status = %+v, want lost", reps)
+	}
+	if !deregistered {
+		t.Error("lost replica was not deregistered from the proxy")
+	}
+	if got := prx.ReplicaTargetURL("wd-app", 0); got != "" {
+		t.Errorf("replica still routable after deregister: %q", got)
 	}
 }

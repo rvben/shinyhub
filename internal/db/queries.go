@@ -2023,6 +2023,71 @@ func (s *Store) DeleteWorker(nodeID string) error {
 	return nil
 }
 
+// ListWorkersStale returns workers whose last_heartbeat is at or before cutoff
+// and that are not already marked down. last_heartbeat is stored as a UTC
+// datetime string ('YYYY-MM-DD HH:MM:SS'); cutoff is formatted the same way so
+// the string comparison is chronological. A worker registered with no heartbeat
+// (empty string) sorts before any real timestamp and is reported stale.
+func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
+	rows, err := s.db.Query(`
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		FROM workers WHERE last_heartbeat <= ? AND status != 'down'`,
+		cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ws := []*Worker{}
+	for rows.Next() {
+		var w Worker
+		var createdAtRaw string
+		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			return nil, err
+		}
+		if t, ok := parseSQLiteTime(createdAtRaw); ok {
+			w.CreatedAt = t
+		}
+		ws = append(ws, &w)
+	}
+	return ws, rows.Err()
+}
+
+// ListReplicasByWorker returns the replicas whose worker_id matches nodeID.
+func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
+	rows, err := s.db.Query(`
+		SELECT app_id, idx, pid, port, status, provider, tier,
+		       endpoint_url, worker_id, app_version, desired_state,
+		       deployment_id, updated_at
+		FROM replicas WHERE worker_id = ? ORDER BY app_id, idx`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Replica{}
+	for rows.Next() {
+		var r Replica
+		var updatedAt int64
+		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
+			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
+			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			return nil, err
+		}
+		r.UpdatedAt = time.Unix(updatedAt, 0)
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// UpdateReplicaStatus sets the status of a single replica identified by
+// (app_id, idx) and refreshes its updated_at timestamp.
+func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error {
+	_, err := s.db.Exec(
+		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		   WHERE app_id = ? AND idx = ?`, status, appID, index)
+	return err
+}
+
 // parseSQLiteTime parses the timestamp formats SQLite emits for DATETIME
 // columns and aggregates over them. CURRENT_TIMESTAMP uses
 // "2006-01-02 15:04:05"; values written via Go's time.Time round-trip as
