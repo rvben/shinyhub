@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,7 +219,7 @@ func TestDeploy_CommandOnly(t *testing.T) {
 		Command:   []string{"sleep", "30"},
 		Manager:   mgr,
 		Proxy:     prx,
-		HealthCheck: func(_ string, _ time.Duration) error {
+		HealthCheck: func(_ string, _ time.Duration, _ http.RoundTripper) error {
 			return nil // no HTTP server in this test
 		},
 	}
@@ -249,7 +250,7 @@ func TestRun_PoolBootsAllReplicas(t *testing.T) {
 		Slug: "pool-all", BundleDir: bundle, Replicas: 3,
 		Manager: mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -273,7 +274,7 @@ func TestRun_PartialHealthStillSucceeds(t *testing.T) {
 		Slug: "pool-partial", BundleDir: bundle, Replicas: 2,
 		Manager: mgr, Proxy: prx,
 		Command: []string{"sleep", "30"},
-		HealthCheck: func(_ string, _ time.Duration) error {
+		HealthCheck: func(_ string, _ time.Duration, _ http.RoundTripper) error {
 			if failOnce.CompareAndSwap(false, true) {
 				return fmt.Errorf("simulated")
 			}
@@ -297,7 +298,7 @@ func TestRun_AllFailHealthErrors(t *testing.T) {
 		Slug: "pool-allfail", BundleDir: bundle, Replicas: 2,
 		Manager: mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error { return fmt.Errorf("boom") },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return fmt.Errorf("boom") },
 	})
 	if err == nil {
 		t.Fatal("expected error when all replicas fail health")
@@ -321,7 +322,7 @@ func TestRun_PlacementAssignsTiersOverGlobalIndex(t *testing.T) {
 		DefaultTier: "local",
 		Manager:     mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -351,7 +352,7 @@ func TestRun_EmptyPlacementUsesDefaultTier(t *testing.T) {
 		Slug: "default-tier", BundleDir: bundle, Replicas: 2,
 		Manager: mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -383,7 +384,7 @@ func TestRunReplica_RestartsOnPlacedTier(t *testing.T) {
 		DefaultTier: "local",
 		Manager:     mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	}, 2)
 	if err != nil {
 		t.Fatalf("run replica: %v", err)
@@ -404,7 +405,7 @@ func TestRunReplica_SingleBoot(t *testing.T) {
 		Slug: "one-rep", BundleDir: bundle, Replicas: 3,
 		Manager: mgr, Proxy: prx,
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	}, 2)
 	if err != nil {
 		t.Fatalf("run replica: %v", err)
@@ -450,7 +451,7 @@ command = ["python", "-m", "scripts.migrate"]
 		Slug: "hook-app", BundleDir: bundle, Replicas: 1,
 		Manager: mgr, Proxy: prx,
 		Command: []string{"sleep", "30"},
-		HealthCheck: func(_ string, _ time.Duration) error {
+		HealthCheck: func(_ string, _ time.Duration, _ http.RoundTripper) error {
 			mu.Lock()
 			defer mu.Unlock()
 			events = append(events, "boot")
@@ -494,7 +495,7 @@ command = ["broken"]
 		Manager: process.NewManager(t.TempDir(), process.NewNativeRuntime()),
 		Proxy:   prx,
 		Command: []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error {
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error {
 			t.Error("replica boot should not be reached when post-deploy hook fails")
 			return nil
 		},
@@ -535,7 +536,7 @@ command = ["should-not-run"]
 		Slug: "docker-hook", BundleDir: bundle, Replicas: 1,
 		Manager:     process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
 		Proxy:       proxy.New(),
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -575,7 +576,7 @@ command = ["also-skipped"]
 		Slug: "docker-hook-count", BundleDir: bundle, Replicas: 1,
 		Manager:     process.NewManager(t.TempDir(), &fakeContainerRuntime{}),
 		Proxy:       proxy.New(),
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -613,7 +614,7 @@ command = ["echo", "ok"]
 		Manager:     mgr,
 		Proxy:       proxy.New(),
 		Command:     []string{"sleep", "30"},
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -658,7 +659,7 @@ func TestRun_DockerSkipsHostDepInstall(t *testing.T) {
 	_, err := deploy.Run(deploy.Params{
 		Slug: "docker-app", BundleDir: bundle, Replicas: 1,
 		Manager: mgr, Proxy: proxy.New(),
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -704,7 +705,7 @@ func TestRun_NativeStillRunsHostDepInstall(t *testing.T) {
 	_, err := deploy.Run(deploy.Params{
 		Slug: "native-app", BundleDir: bundle, Replicas: 1,
 		Manager: mgr, Proxy: proxy.New(),
-		HealthCheck: func(string, time.Duration) error { return nil },
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
 		Command:     nil,
 	})
 	if err != nil {
@@ -940,7 +941,7 @@ func TestBootRegistersRuntimeEndpoint(t *testing.T) {
 		Command:   []string{"sleep", "30"},
 		Manager:   mgr,
 		Proxy:     prx,
-		HealthCheck: func(endpointURL string, _ time.Duration) error {
+		HealthCheck: func(endpointURL string, _ time.Duration, _ http.RoundTripper) error {
 			gotHealthURL = endpointURL
 			return nil
 		},

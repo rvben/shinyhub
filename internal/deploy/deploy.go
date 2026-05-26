@@ -134,7 +134,7 @@ type Params struct {
 	// HealthCheck is called after each replica starts to verify it is ready.
 	// It receives the runtime-returned endpoint URL (e.g. http://127.0.0.1:PORT).
 	// If nil, the default HTTP health poller (waitHealthy) is used.
-	HealthCheck func(endpointURL string, timeout time.Duration) error
+	HealthCheck func(endpointURL string, timeout time.Duration, transport http.RoundTripper) error
 	// ContentDigest, DeploymentID, and AppVersion travel with the launch so a
 	// remote runtime can pull-by-digest and stamp recovery labels. Empty/zero is
 	// allowed for local-only deploys but every API launch path now populates them.
@@ -244,7 +244,7 @@ func (p Params) hostPreparesDeps(tiers ...string) bool {
 // host-side dependency installation should run (false under container-only
 // tiers). Returns the resolved base command, detected app type, the effective
 // health-check func, and the effective timeout.
-func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration, err error) {
+func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration, err error) {
 	if len(p.Command) > 0 {
 		baseCmd = p.Command
 	} else {
@@ -404,7 +404,7 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 // bootReplica starts a single replica: allocates a port, starts the process,
 // health-checks it, and registers it with the proxy. baseCmd == nil signals
 // that the command should be built from appType using the allocated port.
-func bootReplica(p Params, idx int, tier string, baseCmd []string, appType string, hc func(string, time.Duration) error, timeout time.Duration) (Result, error) {
+func bootReplica(p Params, idx int, tier string, baseCmd []string, appType string, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
 	port := AllocatePort()
 
 	var cmd []string
@@ -429,6 +429,11 @@ func bootReplica(p Params, idx int, tier string, baseCmd []string, appType strin
 		}
 	}
 
+	var transport http.RoundTripper
+	if p.Manager != nil {
+		transport = p.Manager.TransportForTier(tier)
+	}
+
 	env := append(append([]string{}, p.Env...), fmt.Sprintf("PORT=%d", port))
 
 	info, err := p.Manager.Start(process.StartParams{
@@ -449,12 +454,12 @@ func bootReplica(p Params, idx int, tier string, baseCmd []string, appType strin
 		return Result{}, fmt.Errorf("start: %w", err)
 	}
 
-	if err := hc(info.EndpointURL, timeout); err != nil {
+	if err := hc(info.EndpointURL, timeout, transport); err != nil {
 		_ = p.Manager.StopReplica(p.Slug, idx)
 		return Result{}, fmt.Errorf("health: %w", err)
 	}
 
-	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, nil); err != nil {
+	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport); err != nil {
 		_ = p.Manager.StopReplica(p.Slug, idx)
 		return Result{}, fmt.Errorf("register: %w", err)
 	}
@@ -528,8 +533,12 @@ func buildCommand(bundleDir string, port, workers int, bindHost string) []string
 
 // waitHealthy polls the app's root endpoint until it responds with a non-5xx
 // status or the deadline is exceeded. Each HTTP attempt is capped at 5 seconds.
-func waitHealthy(endpointURL string, timeout time.Duration) error {
+// When transport is non-nil it is installed on the client (required for mTLS endpoints).
+func waitHealthy(endpointURL string, timeout time.Duration, transport http.RoundTripper) error {
 	client := &http.Client{Timeout: 5 * time.Second}
+	if transport != nil {
+		client.Transport = transport
+	}
 	healthURL := strings.TrimSuffix(endpointURL, "/") + "/"
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
