@@ -90,3 +90,32 @@ func TestRejectCounter_SentinelStaysSingleKey(t *testing.T) {
 		t.Errorf("key count = %d, want 1 (sentinel only)", n)
 	}
 }
+
+func TestRejectCounter_SubMinuteClamp(t *testing.T) {
+	c, _ := newTestCounter()
+	c.record("demo", ReasonPoolSaturated)
+
+	// A zero duration and a sub-minute duration both clamp to a 1-minute window,
+	// so the event recorded in the current minute must be visible.
+	if got := c.window("demo", 0); got[ReasonPoolSaturated] != 1 {
+		t.Errorf("window(0): count = %d, want 1", got[ReasonPoolSaturated])
+	}
+	if got := c.window("demo", 30*time.Second); got[ReasonPoolSaturated] != 1 {
+		t.Errorf("window(30s): count = %d, want 1", got[ReasonPoolSaturated])
+	}
+}
+
+func TestRejectCounter_RingSlotReuse(t *testing.T) {
+	c, clk := newTestCounter()
+	c.record("demo", ReasonPoolSaturated) // at minute E, slot E%rejectRingBuckets
+
+	// Advance exactly rejectRingBuckets minutes so the same ring slot is reused.
+	// The old bucket must be reset and only the new count returned.
+	clk.add(rejectRingBuckets * time.Minute)
+	c.record("demo", ReasonPoolSaturated)
+
+	got := c.window("demo", 1*time.Minute)
+	if got[ReasonPoolSaturated] != 1 {
+		t.Errorf("after slot reuse: count = %d, want 1 (old bucket must be reset)", got[ReasonPoolSaturated])
+	}
+}

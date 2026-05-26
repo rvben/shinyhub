@@ -55,7 +55,7 @@ func (c *rejectCounter) record(key string, reason RejectReason) {
 	b.counts[reason]++
 }
 
-// window returns the per-reason counts for key over roughly the last d
+// window returns the per-reason counts for key over roughly the last d minutes
 // (quantised to whole minutes). Reasons with a zero sum are omitted; a key with
 // no live buckets returns nil.
 func (c *rejectCounter) window(key string, d time.Duration) map[RejectReason]uint64 {
