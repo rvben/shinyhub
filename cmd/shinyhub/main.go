@@ -572,7 +572,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			workerTimeout   = 90 * time.Second
 			monitorInterval = 30 * time.Second
 		)
-		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, func(slug string, index int) {
+		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerReg.MarkDown, func(slug string, index int) {
 			prx.DeregisterReplica(slug, index)
 		})
 		go monitor.Run(ctx, monitorInterval)

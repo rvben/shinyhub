@@ -83,14 +83,18 @@ func recoverRemoteReplica(
 type WorkerDownMonitor struct {
 	store      *db.Store
 	timeout    time.Duration
+	markDown   func(nodeID string) error
 	deregister func(slug string, index int)
 }
 
 // NewWorkerDownMonitor builds a monitor that marks a worker down once its
 // heartbeat is older than timeout and transitions that worker's running
-// replicas to lost, calling deregister for each removed replica.
-func NewWorkerDownMonitor(store *db.Store, timeout time.Duration, deregister func(slug string, index int)) *WorkerDownMonitor {
-	return &WorkerDownMonitor{store: store, timeout: timeout, deregister: deregister}
+// replicas to lost, calling deregister for each removed replica. markDown
+// performs the down transition; wiring it to the registry keeps the in-memory
+// routing index consistent with the store so a downed worker is excluded from
+// routing without a control-plane restart.
+func NewWorkerDownMonitor(store *db.Store, timeout time.Duration, markDown func(nodeID string) error, deregister func(slug string, index int)) *WorkerDownMonitor {
+	return &WorkerDownMonitor{store: store, timeout: timeout, markDown: markDown, deregister: deregister}
 }
 
 // Sweep performs one monitor pass as of now: every worker whose heartbeat
@@ -103,7 +107,7 @@ func (m *WorkerDownMonitor) Sweep(now time.Time) {
 		return
 	}
 	for _, w := range stale {
-		if err := m.store.SetWorkerStatus(w.NodeID, "down"); err != nil {
+		if err := m.markDown(w.NodeID); err != nil {
 			slog.Error("worker monitor: mark down", "node", w.NodeID, "err", err)
 			continue
 		}

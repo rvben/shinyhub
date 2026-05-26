@@ -15,6 +15,7 @@ import (
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/worker"
 )
 
 // liveListener opens a real loopback listener and returns its port. Native
@@ -699,6 +700,32 @@ func TestReconcileInflightDeployments(t *testing.T) {
 	}
 }
 
+func TestWorkerDownMonitor_ExcludesDownedWorkerFromRouting(t *testing.T) {
+	store := mustOpenStore(t)
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(worker.RegisterParams{AdvertiseAddr: "w:8443", Tier: "remote"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, ok := reg.WorkerForTier("remote"); !ok {
+		t.Fatal("worker not routable immediately after register")
+	}
+	stale := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, stale, node.NodeID); err != nil {
+		t.Fatal(err)
+	}
+
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, reg.MarkDown, func(string, int) {})
+	monitor.Sweep(time.Now())
+
+	if _, ok := reg.WorkerForTier("remote"); ok {
+		t.Fatal("downed worker still routable: monitor did not update the in-memory registry index")
+	}
+}
+
 func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T) {
 	store := mustOpenStore(t)
 	prx := proxy.New()
@@ -725,10 +752,12 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	}
 
 	deregistered := false
-	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, func(slug string, index int) {
-		deregistered = true
-		prx.DeregisterReplica(slug, index)
-	})
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute,
+		func(nodeID string) error { return store.SetWorkerStatus(nodeID, "down") },
+		func(slug string, index int) {
+			deregistered = true
+			prx.DeregisterReplica(slug, index)
+		})
 	monitor.Sweep(time.Now())
 
 	if w, _ := store.GetWorker("node-a"); w == nil || w.Status != "down" {

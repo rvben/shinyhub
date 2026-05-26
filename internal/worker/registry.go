@@ -64,9 +64,40 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 		return db.Worker{}, err
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Single worker per tier: the newest registrant wins the routing slot. Retire
+	// any other up worker on this tier so routing never resolves a superseded
+	// node, e.g. a worker that restarted under a fresh node id (its advertise
+	// address and certificate identity are stale and a dial would fail).
+	for id, existing := range r.byID {
+		if id == nodeID || existing.Tier != w.Tier || existing.Status != "up" {
+			continue
+		}
+		if err := r.store.SetWorkerStatus(id, "down"); err != nil {
+			return db.Worker{}, fmt.Errorf("retire superseded worker %q: %w", id, err)
+		}
+		existing.Status = "down"
+		r.byID[id] = existing
+	}
 	r.byID[nodeID] = w
-	r.mu.Unlock()
 	return w, nil
+}
+
+// MarkDown transitions a worker to down in both the durable store and the
+// in-memory routing index, so a worker whose heartbeat went stale is excluded
+// from routing without waiting for a control-plane restart to rebuild the
+// index. Unknown node ids are a no-op in memory; the store write still runs.
+func (r *Registry) MarkDown(nodeID string) error {
+	if err := r.store.SetWorkerStatus(nodeID, "down"); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if w, ok := r.byID[nodeID]; ok {
+		w.Status = "down"
+		r.byID[nodeID] = w
+	}
+	r.mu.Unlock()
+	return nil
 }
 
 // Worker returns the indexed worker for a node id.

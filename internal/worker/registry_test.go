@@ -53,6 +53,60 @@ func TestRegistryRegisterAndLookup(t *testing.T) {
 	}
 }
 
+func TestRegistryReregisterSupersedesPriorWorkerOnTier(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	first, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register first: %v", err)
+	}
+	second, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "burst", Fingerprint: "bb"})
+	if err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+
+	// Single worker per tier: the newest registrant wins the routing slot, and
+	// the superseded worker must not be a routing candidate (its advertise
+	// address and certificate identity are stale).
+	for i := 0; i < 50; i++ {
+		got, ok := reg.WorkerForTier("burst")
+		if !ok || got.NodeID != second.NodeID {
+			t.Fatalf("WorkerForTier(burst) = %+v ok=%v, want %s", got, ok, second.NodeID)
+		}
+	}
+
+	if w, _ := store.GetWorker(first.NodeID); w == nil || w.Status != "down" {
+		t.Fatalf("superseded worker %s status = %+v, want down in store", first.NodeID, w)
+	}
+	if got, ok := reg.Worker(first.NodeID); !ok || got.Status != "down" {
+		t.Fatalf("superseded worker %s in-memory status = %+v ok=%v, want down", first.NodeID, got, ok)
+	}
+}
+
+func TestRegistryMarkDownExcludesFromRouting(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := reg.MarkDown(node.NodeID); err != nil {
+		t.Fatalf("mark down: %v", err)
+	}
+	if _, ok := reg.WorkerForTier("burst"); ok {
+		t.Fatal("WorkerForTier returned a worker after it was marked down")
+	}
+	if w, _ := store.GetWorker(node.NodeID); w == nil || w.Status != "down" {
+		t.Fatalf("worker status = %+v, want down in store", w)
+	}
+}
+
 func TestRegistryRebuildsFromStore(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.UpsertWorker(db.Worker{
