@@ -49,6 +49,13 @@ type Server struct {
 	tracer        *servertrace.Tracer // nil when server tracing is disabled
 	router        http.Handler
 
+	// nodeForTier resolves a tier name to the node identity backing it: a remote
+	// worker's node id, or "" for any tier the control plane itself backs (all
+	// such tiers share the "" identity, so they are mutually co-located). Nil
+	// when worker hosting is disabled; cross-node checks are then a no-op because
+	// no remote tiers exist.
+	nodeForTier func(tier string) string
+
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
 	// authenticates as the synthetic system user without a DB lookup. Set via
 	// SetDeployToken at startup when SHINYHUB_DEPLOY_TOKEN is configured.
@@ -172,6 +179,52 @@ func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
 	p.TierOrder = s.cfg.Runtime.TierOrder()
 	p.DefaultTier = s.cfg.Runtime.DefaultTierName()
 	return p
+}
+
+// SetNodeForTier injects the tier-to-node resolver used to reject cross-node
+// shared mounts. Wired at startup from the worker registry; left nil when
+// worker hosting is disabled. Must be called before the server begins handling
+// requests.
+func (s *Server) SetNodeForTier(fn func(tier string) string) { s.nodeForTier = fn }
+
+// tiersForApp returns the tiers an app's replicas run on: the keys of its
+// placement, or the default tier when no explicit placement is set.
+func (s *Server) tiersForApp(app *db.App) []string {
+	pm := app.PlacementMap()
+	if len(pm) == 0 {
+		return []string{s.cfg.Runtime.DefaultTierName()}
+	}
+	out := make([]string, 0, len(pm))
+	for tier := range pm {
+		out = append(out, tier)
+	}
+	return out
+}
+
+// checkColocatedShared rejects a boot whose consumer (running on consumerTiers)
+// would land on a node that does not also host every app it mounts shared data
+// from. A nil resolver means single-node operation (every tier is the control
+// plane), so there is nothing to reject.
+func (s *Server) checkColocatedShared(appID int64, consumerTiers []string) error {
+	if s.nodeForTier == nil {
+		return nil
+	}
+	sources, err := s.store.ListSharedDataSources(appID)
+	if err != nil {
+		return fmt.Errorf("list shared data sources: %w", err)
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	sourceTiers := make(map[string][]string, len(sources))
+	for _, m := range sources {
+		srcApp, err := s.store.GetAppBySlug(m.SourceSlug)
+		if err != nil {
+			return fmt.Errorf("load shared source %q: %w", m.SourceSlug, err)
+		}
+		sourceTiers[m.SourceSlug] = s.tiersForApp(srcApp)
+	}
+	return deploy.CheckColocatedShared(consumerTiers, sourceTiers, s.nodeForTier)
 }
 
 // SetSampler replaces the metrics sampler. Must be called before the server

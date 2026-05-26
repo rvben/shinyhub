@@ -107,6 +107,11 @@ func (s *Server) redeployApp(slug string) {
 	}
 	current := deployments[0]
 
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		slog.Error("redeploy: cross-node shared mount rejected", "slug", slug, "err", err)
+		return
+	}
+
 	if s.manager != nil {
 		_ = s.manager.Stop(slug)
 	}

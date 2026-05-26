@@ -36,6 +36,7 @@ import (
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
+	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -235,10 +236,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("db migrate: %w", err)
 	}
 
+	var workerReg *worker.Registry
 	if cfg.Worker.Enabled {
-		if err := startWorkerHosting(ctx, logger, cfg, store); err != nil {
+		reg, err := startWorkerHosting(ctx, logger, cfg, store)
+		if err != nil {
 			return err
 		}
+		workerReg = reg
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
@@ -382,6 +386,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
+	if workerReg != nil {
+		srv.SetNodeForTier(func(tier string) string {
+			if w, ok := workerReg.WorkerForTier(tier); ok {
+				return w.NodeID
+			}
+			return ""
+		})
+	}
 
 	// Server self-telemetry: when enabled, instrument the API router and serve
 	// the Prometheus scrape endpoint on its own loopback-by-default listener.

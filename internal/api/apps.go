@@ -226,27 +226,27 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Parse and validate all fields first so a bad request never causes a
 	// partial write (e.g. hibernate_timeout persisted while name rejected).
 	var (
-		hibernateTimeout         *int
-		setHibernateTimeout      bool
-		newName                  string
-		setName                  bool
-		newProjectSlug           string
-		setProjectSlug           bool
-		memoryLimitMB            *int
-		setMemoryLimitMB         bool
-		cpuQuotaPercent          *int
-		setCPUQuotaPercent       bool
-		newReplicas              int
-		setReplicas              bool
-		newMaxSessions           int
-		setMaxSessions           bool
-		newManagedBy             *string
-		setManagedBy             bool
-		placementKeyPresent      bool
-		setPlacement             bool // a non-null placement object was provided
-		clearPlacement           bool // an explicit null placement was provided
-		placementJSON            string
-		placementTotal           int
+		hibernateTimeout    *int
+		setHibernateTimeout bool
+		newName             string
+		setName             bool
+		newProjectSlug      string
+		setProjectSlug      bool
+		memoryLimitMB       *int
+		setMemoryLimitMB    bool
+		cpuQuotaPercent     *int
+		setCPUQuotaPercent  bool
+		newReplicas         int
+		setReplicas         bool
+		newMaxSessions      int
+		setMaxSessions      bool
+		newManagedBy        *string
+		setManagedBy        bool
+		placementKeyPresent bool
+		setPlacement        bool // a non-null placement object was provided
+		clearPlacement      bool // an explicit null placement was provided
+		placementJSON       string
+		placementTotal      int
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -765,6 +765,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			"slug", slug, "version", version, "err", derr)
 	}
 
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
 	// Stop existing instance before re-deploying; ignore the error since the
 	// app may not have been running yet.
 	_ = s.manager.Stop(slug)
@@ -1048,6 +1053,11 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
@@ -1172,6 +1182,11 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := deployments[0]
+
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
