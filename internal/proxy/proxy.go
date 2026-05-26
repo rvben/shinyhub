@@ -787,7 +787,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// default) rather than 404ing a possibly-valid app — see
 		// slugConfidentlyUnknown for the fail-open rationale.
 		if p.slugConfidentlyUnknown(slug) {
-			writeUnknownApp(rec, r, slug)
+			p.writeUnknownApp(rec, r, slug)
 			return
 		}
 		if onMiss != nil {
@@ -801,13 +801,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	picked, isStickyHit, saturated := p.pickReplicaLocked(pool, slug, r)
 	if saturated {
-		// All replicas are at or above the per-replica cap and the caller has
-		// no valid sticky cookie, so this is a brand-new session. Shed it
-		// rather than overload a replica that's already full. The
-		// Retry-After hint is conservative: 5 s is long enough that a
-		// just-finishing session has a realistic chance of freeing a slot,
-		// short enough that the client doesn't perceive a complete outage.
+		// All live replicas are at the per-replica cap and this is a new
+		// session (no valid sticky cookie). Distinguish genuine capacity
+		// saturation (all configured replicas live) from a degraded pool
+		// (fewer replicas registered than configured) while still under the
+		// read lock, then shed. Retry-After: 5 gives a finishing session a
+		// realistic chance to free a slot.
+		live := 0
+		for _, rep := range pool.replicas {
+			if rep != nil {
+				live++
+			}
+		}
+		reason := ReasonPoolSaturated
+		if live < pool.size {
+			reason = ReasonPoolDegraded
+		}
 		p.mu.RUnlock()
+		p.recordReject(rec, slug, reason, true)
 		rec.Header().Set("Retry-After", "5")
 		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 		return
@@ -863,7 +874,7 @@ func (p *Proxy) serveReadyProbe(w http.ResponseWriter, r *http.Request, slug str
 	// monitors would otherwise hammer on every poll. Checking existence before
 	// the method gate keeps "unknown slug = 404" true for every method.
 	if !ready && p.slugConfidentlyUnknown(slug) {
-		writeUnknownApp(w, r, slug)
+		p.writeUnknownApp(w, r, slug)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -874,6 +885,14 @@ func (p *Proxy) serveReadyProbe(w http.ResponseWriter, r *http.Request, slug str
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if !ready {
+		// The probe holds no route-table lock, so read pool presence under a
+		// brief RLock to set the cardinality guard: a registered app records
+		// under its slug, an unregistered/fail-open slug collapses to the
+		// sentinel.
+		p.mu.RLock()
+		registered := p.pools[slug] != nil
+		p.mu.RUnlock()
+		p.recordReject(w, slug, ReasonAppNotReady, registered)
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if r.Method == http.MethodGet {
@@ -919,7 +938,8 @@ type unknownAppBody struct {
 // what lets external monitoring distinguish "no such app here" (a deploy
 // regression) from "known app, not ready yet" (503). HEAD callers get the
 // status line only.
-func writeUnknownApp(w http.ResponseWriter, r *http.Request, slug string) {
+func (p *Proxy) writeUnknownApp(w http.ResponseWriter, r *http.Request, slug string) {
+	p.recordReject(w, slug, ReasonUnknownSlug, false)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNotFound)
