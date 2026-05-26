@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,12 +60,17 @@ type ProcessInfo struct {
 }
 
 type StartParams struct {
-	Slug            string
-	Index           int
-	Tier            string // runtime tier; empty => DefaultTier
-	Dir             string
-	Command         []string
-	Port            int
+	Slug    string
+	Index   int
+	Tier    string // runtime tier; empty => DefaultTier
+	Dir     string
+	Command []string
+	Port    int
+	// HostPublishPort, when non-zero, is the host port to publish the
+	// in-container bind Port to. The control plane allocates Port (baked into
+	// the command and PORT env); a remote worker allocates HostPublishPort on
+	// its own host. Zero means publish to the same port as Port (local case).
+	HostPublishPort int
 	Env             []string
 	AppDataPath     string        // host path to per-app data dir; empty disables data-dir wiring in runtime
 	MemoryLimitMB   int           // 0 = no limit
@@ -72,6 +78,7 @@ type StartParams struct {
 	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
 	AppVersion      string        // app version stamped onto labels/metadata
 	DeploymentID    int64         // owning deployment; 0 when unknown
+	ContentDigest   string        // bundle content digest; "" when unknown (remote runtime pulls by this)
 }
 
 type entry struct {
@@ -95,6 +102,7 @@ type Manager struct {
 	entries       map[string][]*entry
 	logFiles      map[replicaKey]*LogFile
 	appsDir       string
+	runtimesMu    sync.RWMutex
 	runtimes      map[string]Runtime
 	defaultTier   string
 	envResolver   EnvResolver
@@ -158,6 +166,17 @@ func (m *Manager) AppBindHostFor(tier string) string {
 	return m.runtimeFor(tier).AppBindHost()
 }
 
+// TransportForTier returns the HTTP transport a tier's runtime requires for
+// reaching its replicas, or nil to use the default transport. Runtimes opt in
+// by implementing ReplicaTransporter.
+func (m *Manager) TransportForTier(tier string) http.RoundTripper {
+	rt := m.runtimeFor(tier)
+	if tr, ok := rt.(ReplicaTransporter); ok {
+		return tr.ReplicaTransport()
+	}
+	return nil
+}
+
 // NewManager returns an initialized Manager using the given Runtime as the
 // default ("local") tier. Additional tiers are added via RegisterRuntime.
 func NewManager(appsDir string, rt Runtime) *Manager {
@@ -170,22 +189,34 @@ func NewManager(appsDir string, rt Runtime) *Manager {
 	}
 }
 
-// RegisterRuntime adds a runtime under the named tier. Must be called before
-// the manager begins starting processes; not safe to call concurrently with
-// Start.
+// RegisterRuntime adds or replaces the runtime for the named tier. Safe to
+// call concurrently with RuntimeForTier lookups.
 func (m *Manager) RegisterRuntime(tier string, rt Runtime) {
+	m.runtimesMu.Lock()
+	defer m.runtimesMu.Unlock()
 	m.runtimes[tier] = rt
+}
+
+// removeRuntime drops the runtime registered for a tier. Lookups for that tier
+// fall back to the default runtime afterward.
+func (m *Manager) removeRuntime(tier string) {
+	m.runtimesMu.Lock()
+	defer m.runtimesMu.Unlock()
+	delete(m.runtimes, tier)
 }
 
 // SetDefaultTier renames the default tier and rekeys the seed runtime under
 // that name. NewManager registers the seed runtime under DefaultTier ("local");
 // when the config's first tier is named differently, call this once at startup
 // so empty/unknown tiers still resolve to the seed runtime. A no-op when name
-// is empty or already the default.
+// is empty or already the default. Must be called before the manager begins
+// starting processes; it is not safe to call concurrently with Start.
 func (m *Manager) SetDefaultTier(name string) {
 	if name == "" || name == m.defaultTier {
 		return
 	}
+	m.runtimesMu.Lock()
+	defer m.runtimesMu.Unlock()
 	rt := m.runtimes[m.defaultTier]
 	delete(m.runtimes, m.defaultTier)
 	m.runtimes[name] = rt
@@ -201,6 +232,8 @@ func (m *Manager) RuntimeForTier(tier string) Runtime { return m.runtimeFor(tier
 // runtimeFor returns the runtime for the named tier, falling back to the
 // default tier when tier is empty or unregistered.
 func (m *Manager) runtimeFor(tier string) Runtime {
+	m.runtimesMu.RLock()
+	defer m.runtimesMu.RUnlock()
 	if rt, ok := m.runtimes[tier]; ok {
 		return rt
 	}
@@ -230,33 +263,41 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		delete(m.logFiles, key)
 	}
 
-	var appDataPath string
-	if m.appDataRoot != "" {
-		ref, err := storage.LocalVolume{Root: m.appDataRoot}.Provision(p.Slug)
-		if err != nil {
-			return nil, fmt.Errorf("provision app data: %w", err)
-		}
-		appDataPath = ref.Path
-		p.AppDataPath = appDataPath
+	tier := p.Tier
+	if tier == "" {
+		tier = m.defaultTier
+	}
+	rt := m.runtimeFor(tier)
 
-		linkPath := filepath.Join(p.Dir, "data")
-		switch info, err := os.Lstat(linkPath); {
-		case err == nil:
-			// Something is already at <bundle>/data. Accept only if it's a symlink
-			// pointing to the correct target — that's the idempotent restart case.
-			if info.Mode()&os.ModeSymlink != 0 {
-				existing, readErr := os.Readlink(linkPath)
-				if readErr == nil && existing == appDataPath {
-					break // already correct, nothing to do
-				}
+	if rt.HostProvidesAppData() {
+		var appDataPath string
+		if m.appDataRoot != "" {
+			ref, err := storage.LocalVolume{Root: m.appDataRoot}.Provision(p.Slug)
+			if err != nil {
+				return nil, fmt.Errorf("provision app data: %w", err)
 			}
-			return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
-		case !os.IsNotExist(err):
-			return nil, fmt.Errorf("stat %s: %w", linkPath, err)
-		default:
-			// Path does not exist — create the symlink.
-			if err := os.Symlink(appDataPath, linkPath); err != nil {
-				return nil, fmt.Errorf("symlink data: %w", err)
+			appDataPath = ref.Path
+			p.AppDataPath = appDataPath
+
+			linkPath := filepath.Join(p.Dir, "data")
+			switch info, err := os.Lstat(linkPath); {
+			case err == nil:
+				// Something is already at <bundle>/data. Accept only if it's a symlink
+				// pointing to the correct target — that's the idempotent restart case.
+				if info.Mode()&os.ModeSymlink != 0 {
+					existing, readErr := os.Readlink(linkPath)
+					if readErr == nil && existing == appDataPath {
+						break // already correct, nothing to do
+					}
+				}
+				return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
+			case !os.IsNotExist(err):
+				return nil, fmt.Errorf("stat %s: %w", linkPath, err)
+			default:
+				// Path does not exist — create the symlink.
+				if err := os.Symlink(appDataPath, linkPath); err != nil {
+					return nil, fmt.Errorf("symlink data: %w", err)
+				}
 			}
 		}
 	}
@@ -288,18 +329,18 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		p.SharedMounts = mounts
 	}
 
+	if !rt.HostProvidesAppData() {
+		for i := range p.SharedMounts {
+			p.SharedMounts[i].HostPath = ""
+		}
+	}
+
 	logPath := filepath.Join(m.appsDir, p.Slug, fmt.Sprintf("app-%d.log", p.Index))
 	lf, err := OpenLogFile(logPath, DefaultLogMaxSize)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
 	m.logFiles[key] = lf
-
-	tier := p.Tier
-	if tier == "" {
-		tier = m.defaultTier
-	}
-	rt := m.runtimeFor(tier)
 
 	ep, err := rt.Start(context.Background(), p, lf)
 	if err != nil {

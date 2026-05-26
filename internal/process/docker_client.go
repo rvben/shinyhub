@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -215,12 +216,16 @@ func (c *dockerClient) containerStats(ctx context.Context, id string) (float64, 
 
 	var stats struct {
 		CPUStats struct {
-			CPUUsage    struct{ TotalUsage uint64 `json:"total_usage"` } `json:"cpu_usage"`
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
 			SystemUsage uint64 `json:"system_cpu_usage"`
 			OnlineCPUs  int    `json:"online_cpus"`
 		} `json:"cpu_stats"`
 		PreCPUStats struct {
-			CPUUsage    struct{ TotalUsage uint64 `json:"total_usage"` } `json:"cpu_usage"`
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
 			SystemUsage uint64 `json:"system_cpu_usage"`
 		} `json:"precpu_stats"`
 		MemoryStats struct {
@@ -305,6 +310,37 @@ func (c *dockerClient) killContainer(id string, sig string) error {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("kill container: status %d: %s", resp.StatusCode, body)
+}
+
+// publishedHostPort returns the host port the container's first published TCP
+// port maps to, or 0 when nothing is published (for example host-network mode).
+// A replica container publishes exactly one port, so the first binding is the
+// one the data plane needs.
+func (c *dockerClient) publishedHostPort(id string) (int, error) {
+	var resp struct {
+		NetworkSettings struct {
+			Ports map[string][]struct {
+				HostIP   string `json:"HostIp"`
+				HostPort string `json:"HostPort"`
+			} `json:"Ports"`
+		} `json:"NetworkSettings"`
+	}
+	if err := c.get(fmt.Sprintf("/containers/%s/json", id), &resp); err != nil {
+		return 0, fmt.Errorf("inspect container ports: %w", err)
+	}
+	for _, bindings := range resp.NetworkSettings.Ports {
+		for _, b := range bindings {
+			if b.HostPort == "" {
+				continue
+			}
+			p, err := strconv.Atoi(b.HostPort)
+			if err != nil {
+				return 0, fmt.Errorf("parse host port %q: %w", b.HostPort, err)
+			}
+			return p, nil
+		}
+	}
+	return 0, nil
 }
 
 // --- helpers ---

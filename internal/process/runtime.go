@@ -3,6 +3,7 @@ package process
 import (
 	"context"
 	"io"
+	"net/http"
 	"syscall"
 )
 
@@ -46,6 +47,40 @@ type Runtime interface {
 	// runtimes return "0.0.0.0" so the published port mapping (which lives in
 	// the container's separate network namespace) is reachable from the host.
 	AppBindHost() string
+	// HostProvidesAppData reports whether the host running this Manager is
+	// responsible for provisioning the per-app data directory and shared-mount
+	// host paths. Local runtimes (native, docker on the control-plane host)
+	// return true. Remote runtimes return false: the worker provisions its own
+	// app-data, so the Manager must not create host directories or symlinks and
+	// must strip host paths before dispatching Start.
+	HostProvidesAppData() bool
+}
+
+// ReplicaTransporter is an optional capability for runtimes that route replica
+// traffic through a non-default HTTP transport (for example a remote worker's
+// mTLS tunnel). The proxy and health-check paths use this transport so that
+// requests to the replica's reported URL authenticate correctly.
+type ReplicaTransporter interface {
+	// ReplicaTransport returns the RoundTripper to use when dialing replicas
+	// started by this runtime, or nil to use the default transport.
+	ReplicaTransport() http.RoundTripper
+}
+
+// InventoryItem describes one managed container as reported by a remote
+// runtime's inventory. Recovery reconciles a replica row against these items by
+// matching the slug/replica_index/deployment_id labels, then routes to URL.
+type InventoryItem struct {
+	ContainerID string
+	Labels      map[string]string
+	Running     bool
+	URL         string
+}
+
+// ReplicaInventory is an optional capability for runtimes that can enumerate
+// their live replicas without a host PID (remote workers). RecoverProcesses
+// uses it to reconcile remote tiers by deployment id instead of InspectPID.
+type ReplicaInventory interface {
+	Inventory(ctx context.Context) ([]InventoryItem, error)
 }
 
 // ExitInfo summarizes how a one-shot process ended.

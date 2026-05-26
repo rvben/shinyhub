@@ -107,6 +107,11 @@ func (s *Server) redeployApp(slug string) {
 	}
 	current := deployments[0]
 
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		slog.Error("redeploy: cross-node shared mount rejected", "slug", slug, "err", err)
+		return
+	}
+
 	if s.manager != nil {
 		_ = s.manager.Stop(slug)
 	}
@@ -114,7 +119,7 @@ func (s *Server) redeployApp(slug string) {
 		s.proxy.Deregister(slug)
 	}
 
-	result, err := deploy.Run(s.withTierPlacement(deploy.Params{
+	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -123,6 +128,9 @@ func (s *Server) redeployApp(slug string) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		ContentDigest:         current.ContentDigest,
+		DeploymentID:          current.ID,
+		AppVersion:            current.Version,
 	}, app))
 	if err != nil {
 		slog.Error("redeployApp: deploy failed", "slug", slug, "err", err)
@@ -134,6 +142,7 @@ func (s *Server) redeployApp(slug string) {
 
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
+		depID := current.ID
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:        app.ID,
 			Index:        r.Index,
@@ -146,6 +155,7 @@ func (s *Server) redeployApp(slug string) {
 			WorkerID:     r.WorkerID,
 			AppVersion:   current.Version,
 			DesiredState: "running",
+			DeploymentID: &depID,
 		}); err != nil {
 			slog.Error("redeployApp: upsert replica", "slug", slug, "index", r.Index, "err", err)
 		}

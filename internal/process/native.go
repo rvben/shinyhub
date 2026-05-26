@@ -91,6 +91,10 @@ func (r *NativeRuntime) HostPreparesDeps() bool { return true }
 // must only be reachable via the in-process proxy.
 func (r *NativeRuntime) AppBindHost() string { return "127.0.0.1" }
 
+// HostProvidesAppData reports that the native runtime provisions app data on
+// the local host.
+func (r *NativeRuntime) HostProvidesAppData() bool { return true }
+
 func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (ReplicaEndpoint, error) {
 	if len(p.Command) == 0 {
 		return ReplicaEndpoint{}, fmt.Errorf("command must not be empty")

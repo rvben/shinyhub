@@ -90,8 +90,9 @@ func (f *manifestFakeRuntime) RunOnce(_ context.Context, _ process.StartParams, 
 // Container-mode semantics: dependency installation is treated as a no-op on
 // the host, which is exactly what we want for a test that never spawns real
 // processes.
-func (f *manifestFakeRuntime) HostPreparesDeps() bool { return false }
-func (f *manifestFakeRuntime) AppBindHost() string    { return "127.0.0.1" }
+func (f *manifestFakeRuntime) HostPreparesDeps() bool    { return false }
+func (f *manifestFakeRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (f *manifestFakeRuntime) HostProvidesAppData() bool { return true }
 
 // newManifestE2EServer wires a Server with a fake runtime, no-op sync hooks,
 // a no-op health check, and a started (wired) scheduler stub. Returns the
@@ -142,7 +143,7 @@ func newManifestE2EServerCfg(t *testing.T, runtime config.RuntimeConfig) (*Serve
 	// are already bypassed because manifestFakeRuntime.HostPreparesDeps()
 	// returns false (container-mode semantics: no host-side dep installation).
 	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
-		p.HealthCheck = func(string, time.Duration) error { return nil }
+		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error { return nil }
 		return deploy.Run(p)
 	})
 
@@ -210,8 +211,8 @@ cmd     = "echo hello"
 `
 
 	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
-		"app.py":          "from shiny import App\n",
-		"shinyhub.toml":  manifest,
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
 	})
 	req := httptest.NewRequest("POST", "/api/apps/myapp/deploy", body)
 	req.Header.Set("Content-Type", ctype)
@@ -264,7 +265,7 @@ cron    = "0 6 * * *"
 cmd     = "echo hello"
 `
 	body2, ctype2 := buildMultiFileBundleUpload(t, map[string]string{
-		"app.py":         "from shiny import App\n",
+		"app.py":        "from shiny import App\n",
 		"shinyhub.toml": manifest2,
 	})
 	req2 := httptest.NewRequest("POST", "/api/apps/myapp/deploy", body2)

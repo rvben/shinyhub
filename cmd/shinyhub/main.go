@@ -36,6 +36,7 @@ import (
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
+	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -132,7 +133,7 @@ func init() {
 	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
-	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd)
+	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd())
 	cli.AddCommandsTo(rootCmd)
 }
 
@@ -184,6 +185,10 @@ func buildRuntime(mode string, cfg *config.Config) (process.Runtime, error) {
 		return dockerRT, nil
 	case "native":
 		return process.NewNativeRuntime(), nil
+	case "remote_docker":
+		// Handled upstream: remote tiers are registered via NewRemoteRuntime before
+		// RegisterRuntime; buildRuntime is not called for remote_docker tiers.
+		return nil, fmt.Errorf("buildRuntime called for remote_docker tier; wire via NewRemoteRuntime instead")
 	default:
 		return nil, fmt.Errorf("unsupported runtime mode: %s", mode)
 	}
@@ -229,6 +234,28 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}()
 	if err := store.Migrate(); err != nil {
 		return fmt.Errorf("db migrate: %w", err)
+	}
+
+	var (
+		workerCA  *worker.CA
+		workerReg *worker.Registry
+	)
+	if cfg.Worker.Enabled {
+		ca, reg, err := startWorkerHosting(ctx, logger, cfg, store)
+		if err != nil {
+			return err
+		}
+		workerCA = ca
+		workerReg = reg
+	}
+
+	var dialer worker.AgentDialer
+	if workerCA != nil {
+		clientCert, err := workerCA.ControlClientCertificate()
+		if err != nil {
+			return fmt.Errorf("control client cert: %w", err)
+		}
+		dialer = worker.NewMTLSDialer(clientCert, workerCA.Pool())
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
@@ -301,6 +328,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			continue
 		}
 		mode, _ := cfg.Runtime.RuntimeForTier(name)
+		if mode == "remote_docker" {
+			if workerReg == nil || dialer == nil {
+				return fmt.Errorf("tier %q requires worker hosting to be enabled", name)
+			}
+			mgr.RegisterRuntime(name, worker.NewRemoteRuntime(workerReg, name, dialer))
+			slog.Info("remote runtime tier registered", "tier", name, "mode", mode)
+			continue
+		}
 		tierRT, err := buildRuntime(mode, cfg)
 		if err != nil {
 			return err
@@ -372,6 +407,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
+	if workerReg != nil {
+		srv.SetNodeForTier(func(tier string) string {
+			if w, ok := workerReg.WorkerForTier(tier); ok {
+				return w.NodeID
+			}
+			return ""
+		})
+	}
 
 	// Server self-telemetry: when enabled, instrument the API router and serve
 	// the Prometheus scrape endpoint on its own loopback-by-default listener.
@@ -471,7 +514,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
-		return deploy.RunReplica(deploy.Params{
+		p := deploy.Params{
 			Slug:                  slug,
 			BundleDir:             bundleDir,
 			Manager:               mgr,
@@ -483,7 +526,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
-		}, index)
+		}
+		if deps, derr := store.ListDeployments(app.ID); derr == nil && len(deps) > 0 {
+			p.ContentDigest = deps[0].ContentDigest
+			p.DeploymentID = deps[0].ID
+			p.AppVersion = deps[0].Version
+		}
+		return deploy.RunReplica(p, index)
 	}
 
 	lcCfg := lifecycle.Config{
@@ -515,6 +564,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		lifecycle.SweepOrphanContainers(mgr, sweeper)
 	}
 
+	// Start the worker-down monitor: when a worker's heartbeat goes stale it is
+	// marked down and each of its running replicas transitions to lost and is
+	// removed from proxy routing. Only relevant when worker hosting is enabled.
+	if workerReg != nil {
+		const (
+			workerTimeout   = 90 * time.Second
+			monitorInterval = 30 * time.Second
+		)
+		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerReg.MarkDown, func(slug string, index int) {
+			prx.DeregisterReplica(slug, index)
+		})
+		go monitor.Run(ctx, monitorInterval)
+		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval)
+	}
+
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
 	defer cancelWatcher()
 	watcherDone := make(chan struct{})
@@ -523,7 +587,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		close(watcherDone)
 	}()
 
-	jobsMgr, err := jobs.NewManager(rt, store, secretsKey, cfg.Storage.AppsDir, absAppDataDir)
+	jobsMgr, err := jobs.NewManager(mgr, cfg.Runtime.TierOrder(), cfg.Runtime.DefaultTierName(), store, secretsKey, cfg.Storage.AppsDir, absAppDataDir)
 	if err != nil {
 		return fmt.Errorf("init jobs manager: %w", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -88,9 +89,9 @@ func (f *fakeRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Wri
 	return process.ExitInfo{}, nil
 }
 
-func (f *fakeRuntime) HostPreparesDeps() bool { return true }
-
-func (f *fakeRuntime) AppBindHost() string { return "127.0.0.1" }
+func (f *fakeRuntime) HostPreparesDeps() bool    { return true }
+func (f *fakeRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (f *fakeRuntime) HostProvidesAppData() bool { return true }
 
 func TestManagerStartStop(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -502,9 +503,9 @@ func (c *captureRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.
 	return process.ExitInfo{}, nil
 }
 
-func (c *captureRuntime) HostPreparesDeps() bool { return true }
-
-func (c *captureRuntime) AppBindHost() string { return "127.0.0.1" }
+func (c *captureRuntime) HostPreparesDeps() bool    { return true }
+func (c *captureRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (c *captureRuntime) HostProvidesAppData() bool { return true }
 
 func lastValue(env []string, key string) string {
 	out := ""
@@ -852,6 +853,80 @@ func TestManagerProvisionsDataDirViaVolume(t *testing.T) {
 	}
 }
 
+// fakeRemoteRuntime is a Runtime that does not provide host app data,
+// used to prove Manager.Start skips host-side provisioning for remote tiers.
+type fakeRemoteRuntime struct {
+	startParams process.StartParams
+}
+
+func (f *fakeRemoteRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	f.startParams = p
+	return process.ReplicaEndpoint{URL: "https://worker.example/v1/data/tok", Provider: "remote_docker"}, nil
+}
+func (f *fakeRemoteRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
+func (f *fakeRemoteRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
+func (f *fakeRemoteRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (f *fakeRemoteRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (f *fakeRemoteRuntime) HostPreparesDeps() bool    { return false }
+func (f *fakeRemoteRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (f *fakeRemoteRuntime) HostProvidesAppData() bool { return false }
+
+func TestManagerStart_RemoteRuntimeSkipsHostAppData(t *testing.T) {
+	dir := t.TempDir()
+	rt := &fakeRemoteRuntime{}
+	m := process.NewManager(dir, rt)
+	if err := m.SetAppDataRoot(filepath.Join(dir, "app-data")); err != nil {
+		t.Fatal(err)
+	}
+	// The resolver supplies the mount with a non-empty HostPath; stripping must
+	// happen after resolution, not before, so we prove the ordering here.
+	m.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
+		return []process.SharedMount{{SourceSlug: "shared", HostPath: filepath.Join(dir, "resolved-host-path")}}, nil
+	})
+
+	bundleDir := filepath.Join(dir, "bundle")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := m.Start(process.StartParams{
+		Slug:    "app",
+		Index:   0,
+		Dir:     bundleDir,
+		Command: []string{"run"},
+		Port:    8080,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// No app-data dir should have been provisioned on the host.
+	if _, statErr := os.Stat(filepath.Join(dir, "app-data", "app")); !os.IsNotExist(statErr) {
+		t.Errorf("host app-data dir was provisioned for a remote runtime: %v", statErr)
+	}
+	// No data symlink should have been created in the bundle.
+	if _, statErr := os.Lstat(filepath.Join(bundleDir, "data")); !os.IsNotExist(statErr) {
+		t.Errorf("data symlink created for a remote runtime")
+	}
+	// HostPath must be cleared after resolution; only SourceSlug survives for remote resolution.
+	if got := rt.startParams.AppDataPath; got != "" {
+		t.Errorf("AppDataPath = %q, want empty for remote runtime", got)
+	}
+	if len(rt.startParams.SharedMounts) != 1 {
+		t.Fatalf("SharedMounts len = %d, want 1", len(rt.startParams.SharedMounts))
+	}
+	if hp := rt.startParams.SharedMounts[0].HostPath; hp != "" {
+		t.Errorf("SharedMount.HostPath = %q, want empty for remote runtime", hp)
+	}
+	if ss := rt.startParams.SharedMounts[0].SourceSlug; ss != "shared" {
+		t.Errorf("SharedMount.SourceSlug = %q, want \"shared\"", ss)
+	}
+}
+
 func TestManagerDispatchesByTier(t *testing.T) {
 	def := newFakeRuntime()
 	burst := newFakeRuntime()
@@ -894,5 +969,32 @@ func TestManagerDispatchesByTier(t *testing.T) {
 	}
 	if err := m.StopReplica("b", 0); err != nil {
 		t.Fatalf("stop burst: %v", err)
+	}
+}
+
+// transportRuntime is a Runtime that also implements ReplicaTransporter,
+// used to prove Manager.TransportForTier surfaces the capability.
+type transportRuntime struct {
+	fakeRemoteRuntime
+	tr http.RoundTripper
+}
+
+func (r *transportRuntime) ReplicaTransport() http.RoundTripper { return r.tr }
+
+// roundTripFunc is an http.RoundTripper that delegates to a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestManager_TransportForTier(t *testing.T) {
+	tr := roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })
+	m := process.NewManager(t.TempDir(), &fakeRemoteRuntime{})
+	m.RegisterRuntime("remote", &transportRuntime{fakeRemoteRuntime: fakeRemoteRuntime{}, tr: tr})
+	if got := m.TransportForTier("remote"); got == nil {
+		t.Fatal("TransportForTier(remote) = nil, want the runtime's transport")
+	}
+	// A runtime without the capability yields nil (default transport).
+	if got := m.TransportForTier("local-default"); got != nil {
+		t.Errorf("TransportForTier for non-transporter = %v, want nil", got)
 	}
 }

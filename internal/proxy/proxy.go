@@ -391,14 +391,20 @@ func (p *Proxy) SetPoolCap(slug string, max int) {
 }
 
 // RegisterReplica registers a backend URL at the given index within slug's pool.
+// base is the HTTP transport used for outbound requests; nil uses the default
+// transport. Remote tunnel URLs may carry a path prefix (e.g. /v1/data/<token>)
+// that is prepended to every forwarded app-relative path.
 // Returns an error if the pool size has not been set or the index is out of range.
-func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error {
+func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("register %s#%d: invalid url: %w", slug, index, err)
 	}
 	if target.Scheme == "" || target.Host == "" {
 		return fmt.Errorf("register %s#%d: url needs scheme and host", slug, index)
+	}
+	if base == nil {
+		base = http.DefaultTransport
 	}
 
 	p.mu.Lock()
@@ -410,6 +416,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
+	targetPath := strings.TrimRight(target.Path, "/")
 	// Capture pre-response upstream failures (connection refused, timeout)
 	// onto the statusRecorder so the trace span surfaces span.Error. Mirrors
 	// httputil's default handler (log + 502) and adds the capture.
@@ -424,7 +431,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 	// sent: ReverseProxy reports those only on the body copy. Wrap the
 	// transport so a mid-stream upstream read error is captured too, which is
 	// the only signal that admits an otherwise-200, not-slow span to the buffer.
-	rp.Transport = &errCapturingTransport{base: http.DefaultTransport}
+	rp.Transport = &errCapturingTransport{base: base}
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -463,15 +470,17 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
 		prefix := "/app/" + slugCopy
-		req.URL.Path = strings.TrimPrefix(req.URL.Path, prefix)
-		if req.URL.Path == "" {
-			req.URL.Path = "/"
+		appRelative := strings.TrimPrefix(req.URL.Path, prefix)
+		if appRelative == "" {
+			appRelative = "/"
 		}
+		req.URL.Path = singleJoiningSlash(targetPath, appRelative)
 		if req.URL.RawPath != "" {
-			req.URL.RawPath = strings.TrimPrefix(req.URL.RawPath, prefix)
-			if req.URL.RawPath == "" {
-				req.URL.RawPath = "/"
+			rawRelative := strings.TrimPrefix(req.URL.RawPath, prefix)
+			if rawRelative == "" {
+				rawRelative = "/"
 			}
+			req.URL.RawPath = singleJoiningSlash(targetPath, rawRelative)
 		}
 		req.Host = target.Host
 	}
@@ -481,6 +490,24 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string) error 
 	// replicas without an intermediate Deregister.
 	p.clearWSReady(slug)
 	return nil
+}
+
+// singleJoiningSlash joins two URL path segments with exactly one slash
+// between them. When a is empty the result is b unchanged, preserving local
+// replica behavior where target.Path is empty.
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		if a == "" {
+			return b
+		}
+		return a + "/" + b
+	}
+	return a + b
 }
 
 // DeregisterReplica removes the replica at index from slug's pool.
@@ -608,10 +635,10 @@ func (p *Proxy) HasLiveReplica(slug string) bool {
 }
 
 // Register is kept for single-replica callers. It is equivalent to
-// SetPoolSize(slug, 1) + RegisterReplica(slug, 0, targetURL).
+// SetPoolSize(slug, 1) + RegisterReplica(slug, 0, targetURL, nil).
 func (p *Proxy) Register(slug, targetURL string) error {
 	p.SetPoolSize(slug, 1)
-	return p.RegisterReplica(slug, 0, targetURL)
+	return p.RegisterReplica(slug, 0, targetURL, nil)
 }
 
 // ServeHTTP handles /app/:slug/* requests. When the slug has no live replica,

@@ -69,11 +69,13 @@ func (l *schedLock) unlock() { <-l.ch }
 // policies, building run contexts, recording run rows, invoking the runtime,
 // and updating final status.
 type Manager struct {
-	rt         process.Runtime
-	store      Store
-	secretsKey []byte
-	appsDir    string
-	appDataDir string
+	procMgr     *process.Manager
+	tierOrder   []string
+	defaultTier string
+	store       Store
+	secretsKey  []byte
+	appsDir     string
+	appDataDir  string
 
 	// globalSem caps the number of schedule runs executing simultaneously
 	// across every schedule. overlap_policy "concurrent" otherwise spawns an
@@ -101,6 +103,9 @@ var ErrManagerStopped = fmt.Errorf("jobs manager stopped")
 const defaultMaxConcurrentRuns = 32
 
 // NewManager constructs a Manager. secretsKey may be nil if no env vars are encrypted.
+// tierOrder controls which tier jobs are routed to: the lowest-indexed tier in
+// the app's placement is selected. defaultTier is used as a fallback when the
+// placement is empty or yields no assignments.
 //
 // appDataDir is normalized to an absolute path so that scheduled runs always
 // hand the runtime an absolute SHINYHUB_APP_DATA value. Without this, a
@@ -108,7 +113,7 @@ const defaultMaxConcurrentRuns = 32
 // through the bundle-dir-side `data` symlink at run time and produce a
 // doubly-nested path inside the persistent data dir. process.Manager applies
 // the same normalization in SetAppDataRoot — the two must agree.
-func NewManager(rt process.Runtime, st Store, secretsKey []byte, appsDir, appDataDir string) (*Manager, error) {
+func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string, st Store, secretsKey []byte, appsDir, appDataDir string) (*Manager, error) {
 	if appDataDir != "" {
 		abs, err := filepath.Abs(appDataDir)
 		if err != nil {
@@ -117,15 +122,17 @@ func NewManager(rt process.Runtime, st Store, secretsKey []byte, appsDir, appDat
 		appDataDir = abs
 	}
 	return &Manager{
-		rt:         rt,
-		store:      st,
-		secretsKey: secretsKey,
-		appsDir:    appsDir,
-		appDataDir: appDataDir,
-		globalSem:  make(chan struct{}, defaultMaxConcurrentRuns),
-		locks:      make(map[int64]*schedLock),
-		queues:     make(map[int64]chan struct{}),
-		active:     make(map[int64]context.CancelFunc),
+		procMgr:     procMgr,
+		tierOrder:   tierOrder,
+		defaultTier: defaultTier,
+		store:       st,
+		secretsKey:  secretsKey,
+		appsDir:     appsDir,
+		appDataDir:  appDataDir,
+		globalSem:   make(chan struct{}, defaultMaxConcurrentRuns),
+		locks:       make(map[int64]*schedLock),
+		queues:      make(map[int64]chan struct{}),
+		active:      make(map[int64]context.CancelFunc),
 	}, nil
 }
 
@@ -560,18 +567,48 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	}
 	bundleDir := deployments[0].BundleDir
 
+	// Jobs run on the lowest-indexed placement tier so they execute on the
+	// same runtime that serves replica 0 of the app. A single replica is
+	// used as the fallback count so ExpandPlacement never errors on apps
+	// with no explicit placement.
+	assignments, err := process.ExpandPlacement(app.PlacementMap(), m.tierOrder, 1, m.defaultTier)
+	if err != nil {
+		fmt.Fprintf(logFile, "shinyhub: resolve job tier: %v\n", err)
+		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		return
+	}
+	jobTier := m.defaultTier
+	if len(assignments) > 0 {
+		jobTier = assignments[0].Tier
+	}
+	rt := m.procMgr.RuntimeForTier(jobTier)
+
 	params := process.StartParams{
-		Slug:         app.Slug,
-		Dir:          bundleDir,
-		Command:      cmd,
-		Env:          env,
-		AppDataPath:  appDataPath,
-		SharedMounts: sharedMounts,
+		Slug:          app.Slug,
+		Dir:           bundleDir,
+		Command:       cmd,
+		Env:           env,
+		Tier:          jobTier,
+		AppDataPath:   appDataPath,
+		SharedMounts:  sharedMounts,
+		ContentDigest: deployments[0].ContentDigest,
+		AppVersion:    deployments[0].Version,
+		DeploymentID:  deployments[0].ID,
+	}
+
+	// Remote tiers do not have host-side app data. Drop the host-only paths
+	// so the remote runtime receives only the source slug and can pull data
+	// through its own mechanism.
+	if !rt.HostProvidesAppData() {
+		params.AppDataPath = ""
+		for i := range params.SharedMounts {
+			params.SharedMounts[i].HostPath = ""
+		}
 	}
 
 	// Run the command.
 	var logWriter io.Writer = logFile
-	info, runErr := m.rt.RunOnce(runCtx, params, logWriter)
+	info, runErr := rt.RunOnce(runCtx, params, logWriter)
 
 	// Determine final status.
 	status := "succeeded"

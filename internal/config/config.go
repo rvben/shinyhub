@@ -102,6 +102,7 @@ type Config struct {
 	Tracing          TracingConfig
 	Metrics          MetricsConfig
 	Branding         BrandingConfig
+	Worker           WorkerConfig
 	OAuth            OAuthConfig  `yaml:"-"`
 	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
 }
@@ -212,6 +213,24 @@ func (b BrandingConfig) ResolvedAssets() map[string]string {
 	out := make(map[string]string, len(b.resolvedAssets))
 	maps.Copy(out, b.resolvedAssets)
 	return out
+}
+
+// WorkerConfig holds the control-plane settings for hosting remote workers. The
+// worker role (shinyhub worker) takes no yaml; it is configured by CLI flags.
+type WorkerConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	JoinTokenFile string `yaml:"join_token_file"`
+	CADir         string `yaml:"ca_dir"`
+	// ListenAddr is the TCP address the worker-facing mTLS listener binds to.
+	// The effective default when this is empty is 0.0.0.0:8443 (applied by
+	// workerListenAddr in cmd/shinyhub/worker.go).
+	ListenAddr string `yaml:"listen_addr"`
+	// AdvertiseHosts lists the hostnames and IP addresses that remote workers
+	// use to reach the control plane. They are placed as SANs in the
+	// worker-API server certificate so workers can verify the TLS connection.
+	// When empty the certificate defaults to loopback addresses only, which
+	// is sufficient for local testing but will fail remote worker connections.
+	AdvertiseHosts []string `yaml:"advertise_hosts"`
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -372,6 +391,7 @@ type rawConfig struct {
 	Tracing   rawTracingConfig   `yaml:"tracing"`
 	Metrics   rawMetricsConfig   `yaml:"metrics"`
 	Branding  BrandingConfig     `yaml:"branding"`
+	Worker    WorkerConfig       `yaml:"worker"`
 }
 
 type rawMetricsConfig struct {
@@ -480,6 +500,7 @@ func Load(path string) (*Config, error) {
 			Addr:    raw.Metrics.Addr,
 		},
 		Branding: raw.Branding,
+		Worker:   raw.Worker,
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
@@ -599,9 +620,9 @@ func Load(path string) (*Config, error) {
 			case "native", "docker":
 				// supported this phase
 			case "remote_docker":
-				return nil, fmt.Errorf("runtime.tiers: tier %q uses %q which is not yet available", t.Name, t.Runtime)
+				// accepted: a remoteRuntime is registered for this tier at startup
 			default:
-				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native or docker)", t.Name, t.Runtime)
+				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, or remote_docker)", t.Name, t.Runtime)
 			}
 			cfg.Runtime.Tiers = append(cfg.Runtime.Tiers, TierConfig{Name: t.Name, Runtime: t.Runtime})
 		}
@@ -745,16 +766,26 @@ func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 	return lc, nil
 }
 
+// Docker runtime defaults, shared between the control-plane config loader and
+// the standalone worker command so both agree on the same baseline images,
+// socket, and network mode without duplicating the literals.
+const (
+	DefaultDockerSocket = "/var/run/docker.sock"
+	DefaultPythonImage  = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+	DefaultRImage       = "rocker/r-base"
+	DefaultNetworkMode  = "bridge"
+)
+
 func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	rc := RuntimeConfig{
 		Mode: "native",
 		Docker: DockerRuntimeConfig{
-			Socket: "/var/run/docker.sock",
+			Socket: DefaultDockerSocket,
 			Images: DockerImages{
-				Python: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
-				R:      "rocker/r-base",
+				Python: DefaultPythonImage,
+				R:      DefaultRImage,
 			},
-			NetworkMode: "bridge",
+			NetworkMode: DefaultNetworkMode,
 		},
 	}
 	if r.Mode != "" {
@@ -998,6 +1029,31 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_BRANDING_LANDING_PAGE"); v != "" {
 		cfg.Branding.LandingPage = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_ENABLED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_WORKER_ENABLED: %w", err)
+		}
+		cfg.Worker.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_JOIN_TOKEN_FILE"); v != "" {
+		cfg.Worker.JoinTokenFile = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_CA_DIR"); v != "" {
+		cfg.Worker.CADir = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_LISTEN_ADDR"); v != "" {
+		cfg.Worker.ListenAddr = v
+	}
+	if v := os.Getenv("SHINYHUB_WORKER_ADVERTISE_HOSTS"); v != "" {
+		var hosts []string
+		for _, h := range strings.Split(v, ",") {
+			if s := strings.TrimSpace(h); s != "" {
+				hosts = append(hosts, s)
+			}
+		}
+		cfg.Worker.AdvertiseHosts = hosts
 	}
 	return nil
 }

@@ -116,6 +116,43 @@ func TestDockerLabels_EmptyTierDefaultsToDefaultTier(t *testing.T) {
 	}
 }
 
+func TestDockerLabels_IncludeDeploymentMetadata(t *testing.T) {
+	labels := dockerLabels(StartParams{
+		Slug:          "app",
+		Index:         1,
+		Tier:          "burst",
+		DeploymentID:  7,
+		AppVersion:    "v3",
+		ContentDigest: "sha256:abc",
+	})
+	if labels[labelDeploymentID] != "7" {
+		t.Errorf("deployment_id label = %q, want 7", labels[labelDeploymentID])
+	}
+	if labels[labelAppVersion] != "v3" {
+		t.Errorf("app_version label = %q, want v3", labels[labelAppVersion])
+	}
+	if labels[labelContentDigest] != "sha256:abc" {
+		t.Errorf("content_digest label = %q, want sha256:abc", labels[labelContentDigest])
+	}
+	// Existing labels remain.
+	if labels[labelSlug] != "app" || labels[labelReplicaIndex] != "1" || labels[labelTier] != "burst" {
+		t.Errorf("base labels changed: %v", labels)
+	}
+}
+
+func TestDockerLabels_OmitEmptyDeploymentMetadata(t *testing.T) {
+	labels := dockerLabels(StartParams{Slug: "app", Index: 0})
+	if _, ok := labels[labelDeploymentID]; ok {
+		t.Error("deployment_id label present for zero DeploymentID")
+	}
+	if _, ok := labels[labelAppVersion]; ok {
+		t.Error("app_version label present for empty AppVersion")
+	}
+	if _, ok := labels[labelContentDigest]; ok {
+		t.Error("content_digest label present for empty ContentDigest")
+	}
+}
+
 func TestDockerRuntimeStart(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +558,53 @@ func TestDockerRuntime_RunOnce_ExitsCleanly(t *testing.T) {
 	}
 	if info.Code != 5 {
 		t.Fatalf("expected exit 5, got %d", info.Code)
+	}
+}
+
+func TestHostPublishPort_FallsBackToBindPort(t *testing.T) {
+	if got := hostPublishPort(StartParams{Port: 8080}); got != 8080 {
+		t.Errorf("hostPublishPort with no HostPublishPort = %d, want 8080", got)
+	}
+	if got := hostPublishPort(StartParams{Port: 8080, HostPublishPort: 49213}); got != 49213 {
+		t.Errorf("hostPublishPort with HostPublishPort = %d, want 49213", got)
+	}
+}
+
+func TestDockerRuntime_PublishedHostPort(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/c-1/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"NetworkSettings": map[string]any{
+				"Ports": map[string]any{
+					"8080/tcp": []map[string]string{{"HostIp": "127.0.0.1", "HostPort": "49001"}},
+				},
+			},
+		})
+	})
+	rt := newDockerRuntimeWithServer(t, mux)
+	port, err := rt.PublishedHostPort("c-1")
+	if err != nil {
+		t.Fatalf("PublishedHostPort: %v", err)
+	}
+	if port != 49001 {
+		t.Errorf("port = %d, want 49001", port)
+	}
+}
+
+func TestDockerRuntime_PublishedHostPort_NonePublished(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/c-2/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+		})
+	})
+	rt := newDockerRuntimeWithServer(t, mux)
+	port, err := rt.PublishedHostPort("c-2")
+	if err != nil {
+		t.Fatalf("PublishedHostPort: %v", err)
+	}
+	if port != 0 {
+		t.Errorf("port = %d, want 0", port)
 	}
 }
 

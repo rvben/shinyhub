@@ -105,6 +105,26 @@ func TestLoadMigrationsOrderedAndUnique(t *testing.T) {
 	}
 }
 
+func TestMigration021_IndexesReplicaStatus(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var n int
+	row := store.DB().QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_replicas_status'`)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("query index: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("idx_replicas_status: want 1, got %d", n)
+	}
+}
+
 func TestMigrations015And016AddColumns(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

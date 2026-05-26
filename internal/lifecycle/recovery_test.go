@@ -9,11 +9,13 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/worker"
 )
 
 // liveListener opens a real loopback listener and returns its port. Native
@@ -50,8 +52,9 @@ func (f *fakeDockerRuntime) Stats(context.Context, process.RunHandle) (float64, 
 func (f *fakeDockerRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
 }
-func (f *fakeDockerRuntime) HostPreparesDeps() bool { return false }
-func (f *fakeDockerRuntime) AppBindHost() string    { return "0.0.0.0" }
+func (f *fakeDockerRuntime) HostPreparesDeps() bool    { return false }
+func (f *fakeDockerRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (f *fakeDockerRuntime) HostProvidesAppData() bool { return true }
 
 func (f *fakeDockerRuntime) ListByLabel(_ string) ([]process.ContainerInfo, error) {
 	return f.containers, nil
@@ -135,7 +138,6 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx, 0) // must not panic
-
 
 	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
@@ -532,6 +534,140 @@ func TestRecoveryRegistersPersistedEndpointURL(t *testing.T) {
 	}
 }
 
+// fakeRemoteRuntime is a process.Runtime that also implements
+// process.ReplicaInventory, standing in for a remote tier whose replicas live
+// on a separate worker and are reconciled from the agent inventory.
+type fakeRemoteRuntime struct {
+	items []process.InventoryItem
+}
+
+func (f *fakeRemoteRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{}, nil
+}
+func (f *fakeRemoteRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
+func (f *fakeRemoteRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
+func (f *fakeRemoteRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (f *fakeRemoteRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (f *fakeRemoteRuntime) HostPreparesDeps() bool    { return false }
+func (f *fakeRemoteRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (f *fakeRemoteRuntime) HostProvidesAppData() bool { return true }
+func (f *fakeRemoteRuntime) Inventory(context.Context) ([]process.InventoryItem, error) {
+	return f.items, nil
+}
+
+func TestRecoverProcesses_RemoteTierAdoptsByDeploymentID(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "remote-app")
+
+	depID := int64(7)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running",
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-a", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='remote-app'`)
+
+	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
+		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok",
+			Labels: map[string]string{
+				"shinyhub.slug": "remote-app", "shinyhub.replica_index": "0",
+				"shinyhub.deployment_id": "7",
+			}},
+	}}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	info, ok := mgr.GetReplica("remote-app", 0)
+	if !ok {
+		t.Fatal("expected remote replica 0 adopted from inventory")
+	}
+	if info.EndpointURL != "https://w:8443/v1/data/tok" {
+		t.Errorf("adopted EndpointURL = %q, want inventory URL", info.EndpointURL)
+	}
+	if got := prx.ReplicaTargetURL("remote-app", 0); got != "https://w:8443/v1/data/tok" {
+		t.Errorf("proxy target = %q, want inventory URL", got)
+	}
+	a, _ := store.GetAppBySlug("remote-app")
+	if a.Status != "running" {
+		t.Errorf("expected app running, got %s", a.Status)
+	}
+}
+
+func TestRecoverProcesses_RemoteStaleDeploymentNotAdopted(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "stale-app")
+
+	depID := int64(8) // current deployment is 8
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running",
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-a", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='stale-app'`)
+
+	// Inventory has a container for slug+index but from a superseded deployment.
+	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
+		{ContainerID: "c-old", Running: true, URL: "https://w:8443/v1/data/old",
+			Labels: map[string]string{
+				"shinyhub.slug": "stale-app", "shinyhub.replica_index": "0",
+				"shinyhub.deployment_id": "5",
+			}},
+	}}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	if _, ok := mgr.GetReplica("stale-app", 0); ok {
+		t.Error("stale-deployment container must not be adopted as current")
+	}
+}
+
+func TestRecoverProcesses_RemoteLostReplicaSkipped(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "lost-app")
+
+	depID := int64(7)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost,
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-a", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='lost-app'`)
+
+	// A matching live container exists, but a lost replica must be skipped.
+	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
+		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok",
+			Labels: map[string]string{
+				"shinyhub.slug": "lost-app", "shinyhub.replica_index": "0",
+				"shinyhub.deployment_id": "7",
+			}},
+	}}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	if _, ok := mgr.GetReplica("lost-app", 0); ok {
+		t.Error("lost replica must not be adopted")
+	}
+}
+
 // TestReconcileInflightDeployments verifies a deploy interrupted before
 // promotion is failed at startup so the previous good deployment remains the
 // authoritative live bundle.
@@ -561,5 +697,80 @@ func TestReconcileInflightDeployments(t *testing.T) {
 	}
 	if len(live) != 1 || live[0].Version != "v1" {
 		t.Fatalf("after reconcile, live = %+v, want only v1", live)
+	}
+}
+
+func TestWorkerDownMonitor_ExcludesDownedWorkerFromRouting(t *testing.T) {
+	store := mustOpenStore(t)
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(worker.RegisterParams{AdvertiseAddr: "w:8443", Tier: "remote"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, ok := reg.WorkerForTier("remote"); !ok {
+		t.Fatal("worker not routable immediately after register")
+	}
+	stale := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, stale, node.NodeID); err != nil {
+		t.Fatal(err)
+	}
+
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, reg.MarkDown, func(string, int) {})
+	monitor.Sweep(time.Now())
+
+	if _, ok := reg.WorkerForTier("remote"); ok {
+		t.Fatal("downed worker still routable: monitor did not update the in-memory registry index")
+	}
+}
+
+func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "wd-app")
+
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-a", AdvertiseAddr: "w:8443", Tier: "remote", Status: "up",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, old, "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
+		Provider: "remote_docker", Tier: "remote", WorkerID: "node-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prx.SetPoolSize("wd-app", 1)
+	if err := prx.RegisterReplica("wd-app", 0, "https://w:8443/v1/data/tok", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	deregistered := false
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute,
+		func(nodeID string) error { return store.SetWorkerStatus(nodeID, "down") },
+		func(slug string, index int) {
+			deregistered = true
+			prx.DeregisterReplica(slug, index)
+		})
+	monitor.Sweep(time.Now())
+
+	if w, _ := store.GetWorker("node-a"); w == nil || w.Status != "down" {
+		t.Errorf("worker status = %+v, want down", w)
+	}
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Errorf("replica status = %+v, want lost", reps)
+	}
+	if !deregistered {
+		t.Error("lost replica was not deregistered from the proxy")
+	}
+	if got := prx.ReplicaTargetURL("wd-app", 0); got != "" {
+		t.Errorf("replica still routable after deregister: %q", got)
 	}
 }

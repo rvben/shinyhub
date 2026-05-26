@@ -661,12 +661,13 @@ func (s *Store) DeleteApp(slug string) error {
 // --- Deployments ---
 
 type Deployment struct {
-	ID        int64
-	AppID     int64
-	Version   string
-	BundleDir string
-	Status    string
-	CreatedAt time.Time
+	ID            int64
+	AppID         int64
+	Version       string
+	BundleDir     string
+	Status        string
+	ContentDigest string // "" until SetDeploymentDigest records it
+	CreatedAt     time.Time
 }
 
 // Deployment status lifecycle. A deploy records DeploymentPending before any
@@ -790,7 +791,7 @@ func (s *Store) SetDeploymentDigest(id int64, digest string) error {
 // good deployment.
 func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	rows, err := s.db.Query(
-		`SELECT id, app_id, version, bundle_dir, status, created_at
+		`SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
 		FROM deployments WHERE status = ? ORDER BY id`, DeploymentPending)
 	if err != nil {
 		return nil, fmt.Errorf("list inflight deployments: %w", err)
@@ -799,9 +800,11 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	var ds []*Deployment
 	for rows.Next() {
 		var d Deployment
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &d.CreatedAt); err != nil {
+		var digest sql.NullString
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt); err != nil {
 			return nil, err
 		}
+		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
 	return ds, rows.Err()
@@ -846,7 +849,7 @@ type DeploymentSummary struct {
 // this pointer until PromoteDeployment confirms the new pool.
 func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
-		SELECT id, app_id, version, bundle_dir, status, created_at
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
 		FROM deployments
 		WHERE app_id = ? AND status NOT IN ('pending', 'failed')
 		ORDER BY id DESC`, appID)
@@ -857,9 +860,11 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	var ds []*Deployment
 	for rows.Next() {
 		var d Deployment
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &d.CreatedAt); err != nil {
+		var digest sql.NullString
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt); err != nil {
 			return nil, err
 		}
+		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
 	return ds, rows.Err()
@@ -884,18 +889,43 @@ func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
 // deployment does not exist or belongs to a different app.
 func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, error) {
 	row := s.db.QueryRow(`
-		SELECT d.id, d.app_id, d.version, d.bundle_dir, d.status, d.created_at
+		SELECT d.id, d.app_id, d.version, d.bundle_dir, d.status, d.content_digest, d.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE d.id = ? AND a.slug = ?`, id, slug)
 	var dep Deployment
-	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &dep.CreatedAt); err != nil {
+	var digest sql.NullString
+	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	dep.ContentDigest = digest.String
 	return &dep, nil
+}
+
+// GetDeploymentByDigest returns the newest non-failed deployment whose recorded
+// content digest matches. The control-plane bundle-fetch endpoint uses it to
+// resolve a worker's pull-by-digest request to a stored bundle artifact. A
+// pending row is eligible (a remote replica may pull before promotion); a
+// failed row is not.
+func (s *Store) GetDeploymentByDigest(digest string) (*Deployment, error) {
+	row := s.db.QueryRow(`
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
+		FROM deployments
+		WHERE content_digest = ? AND status != 'failed'
+		ORDER BY id DESC LIMIT 1`, digest)
+	var d Deployment
+	var dg sql.NullString
+	if err := row.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &dg, &d.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	d.ContentDigest = dg.String
+	return &d, nil
 }
 
 // --- App Members ---
@@ -1465,6 +1495,15 @@ func (s *Store) CountAppEnvVars(appID int64) (int, error) {
 
 // --- Replicas ---
 
+// Replica status values stored in replicas.status.
+const (
+	// ReplicaStatusRunning marks a replica the control plane considers healthy.
+	ReplicaStatusRunning = "running"
+	// ReplicaStatusLost marks a replica whose worker stopped heartbeating. It is
+	// excluded from routing and is not auto-restarted.
+	ReplicaStatusLost = "lost"
+)
+
 // Replica represents a single backend process instance for an app.
 // Multiple replicas allow an app to run N parallel processes behind the proxy.
 type Replica struct {
@@ -1860,6 +1899,193 @@ func scanApp(s scanner) (*App, error) {
 		a.ContentDigest = contentDigest.String
 	}
 	return &a, nil
+}
+
+// --- Workers ---
+
+// Worker is one joined worker host (node). NodeID is the stable identity bound
+// into the worker's client certificate; it is distinct from a replica's
+// container id.
+type Worker struct {
+	NodeID        string
+	Name          string
+	AdvertiseAddr string
+	Tier          string
+	Status        string // "up" | "down"
+	Fingerprint   string // SHA-256 of the trusted client cert (hex)
+	Version       string
+	LastHeartbeat string
+	CreatedAt     time.Time
+}
+
+// UpsertWorker inserts or replaces a worker row by node id. Registration uses
+// it to record a newly joined node; re-registration (agent restart) refreshes
+// the advertise address and certificate fingerprint.
+func (s *Store) UpsertWorker(w Worker) error {
+	_, err := s.db.Exec(`
+		INSERT INTO workers (node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat)
+		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(node_id) DO UPDATE SET
+			name = excluded.name,
+			advertise_addr = excluded.advertise_addr,
+			tier = excluded.tier,
+			status = excluded.status,
+			cert_fingerprint = excluded.cert_fingerprint,
+			version = excluded.version,
+			last_heartbeat = excluded.last_heartbeat`,
+		w.NodeID, w.Name, w.AdvertiseAddr, w.Tier, w.Status, w.Fingerprint, w.Version)
+	if err != nil {
+		return fmt.Errorf("upsert worker %q: %w", w.NodeID, err)
+	}
+	return nil
+}
+
+// GetWorker returns the worker row for nodeID, or ErrNotFound if it does not exist.
+func (s *Store) GetWorker(nodeID string) (*Worker, error) {
+	row := s.db.QueryRow(`
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		FROM workers WHERE node_id = ?`, nodeID)
+	var w Worker
+	var createdAtRaw string
+	if err := row.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
+		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if t, ok := parseSQLiteTime(createdAtRaw); ok {
+		w.CreatedAt = t
+	}
+	return &w, nil
+}
+
+// ListWorkers returns all registered workers ordered by node_id.
+// Returns a non-nil empty slice when no workers are registered.
+func (s *Store) ListWorkers() ([]*Worker, error) {
+	rows, err := s.db.Query(`
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		FROM workers ORDER BY node_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ws := []*Worker{}
+	for rows.Next() {
+		var w Worker
+		var createdAtRaw string
+		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			return nil, err
+		}
+		if t, ok := parseSQLiteTime(createdAtRaw); ok {
+			w.CreatedAt = t
+		}
+		ws = append(ws, &w)
+	}
+	return ws, rows.Err()
+}
+
+// TouchWorkerHeartbeat records a heartbeat: updates last_heartbeat, refreshes
+// the trusted cert fingerprint (renewal), and marks the worker up.
+func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint string) error {
+	res, err := s.db.Exec(`
+		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = 'up'
+		WHERE node_id = ?`, fingerprint, nodeID)
+	if err != nil {
+		return fmt.Errorf("touch worker %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetWorkerStatus(nodeID, status string) error {
+	res, err := s.db.Exec(`UPDATE workers SET status = ? WHERE node_id = ?`, status, nodeID)
+	if err != nil {
+		return fmt.Errorf("set worker status %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteWorker(nodeID string) error {
+	res, err := s.db.Exec(`DELETE FROM workers WHERE node_id = ?`, nodeID)
+	if err != nil {
+		return fmt.Errorf("delete worker %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListWorkersStale returns workers whose last_heartbeat is at or before cutoff
+// and that are not already marked down. last_heartbeat is stored as a UTC
+// datetime string ('YYYY-MM-DD HH:MM:SS'); cutoff is formatted the same way so
+// the string comparison is chronological. A worker registered with no heartbeat
+// (empty string) sorts before any real timestamp and is reported stale.
+func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
+	rows, err := s.db.Query(`
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		FROM workers WHERE last_heartbeat <= ? AND status != 'down'`,
+		cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ws := []*Worker{}
+	for rows.Next() {
+		var w Worker
+		var createdAtRaw string
+		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			return nil, err
+		}
+		if t, ok := parseSQLiteTime(createdAtRaw); ok {
+			w.CreatedAt = t
+		}
+		ws = append(ws, &w)
+	}
+	return ws, rows.Err()
+}
+
+// ListReplicasByWorker returns the replicas whose worker_id matches nodeID.
+func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
+	rows, err := s.db.Query(`
+		SELECT app_id, idx, pid, port, status, provider, tier,
+		       endpoint_url, worker_id, app_version, desired_state,
+		       deployment_id, updated_at
+		FROM replicas WHERE worker_id = ? ORDER BY app_id, idx`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Replica{}
+	for rows.Next() {
+		var r Replica
+		var updatedAt int64
+		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
+			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
+			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			return nil, err
+		}
+		r.UpdatedAt = time.Unix(updatedAt, 0)
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// UpdateReplicaStatus sets the status of a single replica identified by
+// (app_id, idx) and refreshes its updated_at timestamp.
+func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error {
+	_, err := s.db.Exec(
+		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		   WHERE app_id = ? AND idx = ?`, status, appID, index)
+	return err
 }
 
 // parseSQLiteTime parses the timestamp formats SQLite emits for DATETIME

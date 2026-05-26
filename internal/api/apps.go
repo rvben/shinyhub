@@ -226,27 +226,27 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Parse and validate all fields first so a bad request never causes a
 	// partial write (e.g. hibernate_timeout persisted while name rejected).
 	var (
-		hibernateTimeout         *int
-		setHibernateTimeout      bool
-		newName                  string
-		setName                  bool
-		newProjectSlug           string
-		setProjectSlug           bool
-		memoryLimitMB            *int
-		setMemoryLimitMB         bool
-		cpuQuotaPercent          *int
-		setCPUQuotaPercent       bool
-		newReplicas              int
-		setReplicas              bool
-		newMaxSessions           int
-		setMaxSessions           bool
-		newManagedBy             *string
-		setManagedBy             bool
-		placementKeyPresent      bool
-		setPlacement             bool // a non-null placement object was provided
-		clearPlacement           bool // an explicit null placement was provided
-		placementJSON            string
-		placementTotal           int
+		hibernateTimeout    *int
+		setHibernateTimeout bool
+		newName             string
+		setName             bool
+		newProjectSlug      string
+		setProjectSlug      bool
+		memoryLimitMB       *int
+		setMemoryLimitMB    bool
+		cpuQuotaPercent     *int
+		setCPUQuotaPercent  bool
+		newReplicas         int
+		setReplicas         bool
+		newMaxSessions      int
+		setMaxSessions      bool
+		newManagedBy        *string
+		setManagedBy        bool
+		placementKeyPresent bool
+		setPlacement        bool // a non-null placement object was provided
+		clearPlacement      bool // an explicit null placement was provided
+		placementJSON       string
+		placementTotal      int
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -553,6 +553,9 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		ContentDigest:         prev.ContentDigest,
+		DeploymentID:          prev.ID,
+		AppVersion:            prev.Version,
 	}, app))
 	if err != nil {
 		slog.Error("restore: previous pool failed to start; app is down", "slug", slug, "err", err)
@@ -563,6 +566,7 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	}
 	for _, rep := range result.Replicas {
 		pid, port := rep.PID, rep.Port
+		depID := prev.ID
 		if uerr := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:        app.ID,
 			Index:        rep.Index,
@@ -575,6 +579,7 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 			WorkerID:     rep.WorkerID,
 			AppVersion:   prev.Version,
 			DesiredState: "running",
+			DeploymentID: &depID,
 		}); uerr != nil {
 			slog.Error("restore: upsert replica", "slug", slug, "idx", rep.Index, "err", uerr)
 		}
@@ -740,19 +745,29 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// same accepted entries the extractor validates, so it matches the digest
 	// the CLI computes from the produced bundle. Becomes authoritative only
 	// once PromoteDeployment runs; a failed deploy never exposes it.
+	// digest is hoisted so deploy.Params can carry it to the runtime.
+	var digest string
 	if zr, derr := zip.OpenReader(bundleZip); derr == nil {
-		digest, derr := bundle.DigestZipReader(&zr.Reader)
+		d, derr := bundle.DigestZipReader(&zr.Reader)
 		zr.Close()
 		if derr != nil {
 			slog.Warn("deploy: content digest computation rejected bundle",
 				"slug", slug, "version", version, "err", derr)
-		} else if serr := s.store.SetDeploymentDigest(pendingDep.ID, digest); serr != nil {
-			slog.Error("deploy: failed to record content digest (non-fatal; next deploy self-heals)",
-				"slug", slug, "version", version, "err", serr)
+		} else {
+			digest = d
+			if serr := s.store.SetDeploymentDigest(pendingDep.ID, digest); serr != nil {
+				slog.Error("deploy: failed to record content digest (non-fatal; next deploy self-heals)",
+					"slug", slug, "version", version, "err", serr)
+			}
 		}
 	} else {
 		slog.Warn("deploy: could not re-open bundle for digest (non-fatal)",
 			"slug", slug, "version", version, "err", derr)
+	}
+
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
 	}
 
 	// Stop existing instance before re-deploying; ignore the error since the
@@ -802,6 +817,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		ContentDigest:         digest,
+		DeploymentID:          pendingDep.ID,
+		AppVersion:            version,
 	}, app))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
@@ -836,6 +854,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
+		depID := pendingDep.ID
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:        app.ID,
 			Index:        r.Index,
@@ -848,6 +867,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			WorkerID:     r.WorkerID,
 			AppVersion:   version,
 			DesiredState: "running",
+			DeploymentID: &depID,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
@@ -1033,13 +1053,18 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
 
-	result, err := deploy.Run(s.withTierPlacement(deploy.Params{
+	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
@@ -1048,6 +1073,9 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		ContentDigest:         prev.ContentDigest,
+		DeploymentID:          pendingDep.ID,
+		AppVersion:            prev.Version,
 	}, app))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
@@ -1059,6 +1087,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
+		depID := pendingDep.ID
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:        app.ID,
 			Index:        r.Index,
@@ -1071,6 +1100,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			WorkerID:     r.WorkerID,
 			AppVersion:   prev.Version,
 			DesiredState: "running",
+			DeploymentID: &depID,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}
@@ -1086,6 +1116,15 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		Status: "running",
 	}); err != nil {
 		slog.Error("rollback: persist running status failed; pool is live", "slug", slug, "err", err)
+	}
+
+	// Copy the target's digest onto the pending row so the promoted live
+	// deployment row carries the correct bundle identity. Must run before
+	// PromoteDeployment so the update is visible to any concurrent reader.
+	if prev.ContentDigest != "" {
+		if err := s.store.SetDeploymentDigest(pendingDep.ID, prev.ContentDigest); err != nil {
+			slog.Error("rollback: copy target digest to pending", "err", err)
+		}
 	}
 
 	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
@@ -1144,13 +1183,18 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 	current := deployments[0]
 
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
 
-	result, err := deploy.Run(s.withTierPlacement(deploy.Params{
+	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -1159,6 +1203,9 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		ContentDigest:         current.ContentDigest,
+		DeploymentID:          current.ID,
+		AppVersion:            current.Version,
 	}, app))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "restart %s: %v\n", slug, err)
@@ -1171,6 +1218,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
+		depID := current.ID
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:        app.ID,
 			Index:        r.Index,
@@ -1183,6 +1231,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			WorkerID:     r.WorkerID,
 			AppVersion:   current.Version,
 			DesiredState: "running",
+			DeploymentID: &depID,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
 		}

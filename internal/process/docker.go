@@ -24,28 +24,44 @@ const providerDocker = "docker"
 // recovery re-adopt the container onto the runtime registered for its tier;
 // provider records which runtime owns it.
 const (
-	labelManaged      = "shinyhub.managed"
-	labelSlug         = "shinyhub.slug"
-	labelReplicaIndex = "shinyhub.replica_index"
-	labelTier         = "shinyhub.tier"
-	labelProvider     = "shinyhub.provider"
+	labelManaged       = "shinyhub.managed"
+	labelSlug          = "shinyhub.slug"
+	labelReplicaIndex  = "shinyhub.replica_index"
+	labelTier          = "shinyhub.tier"
+	labelProvider      = "shinyhub.provider"
+	labelDeploymentID  = "shinyhub.deployment_id"
+	labelAppVersion    = "shinyhub.app_version"
+	labelContentDigest = "shinyhub.content_digest"
 )
 
 // dockerLabels builds the label set for a long-running app replica container.
 // An empty StartParams.Tier defaults to DefaultTier so every replica container
-// carries a concrete tier for recovery to route on.
+// carries a concrete tier for recovery to route on. When present, deployment_id,
+// app_version, and content_digest are stamped so recovery can reconcile by
+// deployment and reject stale containers. Zero/empty values are omitted to keep
+// the label set clean for callers that do not supply deployment metadata.
 func dockerLabels(p StartParams) map[string]string {
 	tier := p.Tier
 	if tier == "" {
 		tier = DefaultTier
 	}
-	return map[string]string{
+	labels := map[string]string{
 		labelManaged:      "true",
 		labelSlug:         p.Slug,
 		labelReplicaIndex: strconv.Itoa(p.Index),
 		labelTier:         tier,
 		labelProvider:     providerDocker,
 	}
+	if p.DeploymentID != 0 {
+		labels[labelDeploymentID] = strconv.FormatInt(p.DeploymentID, 10)
+	}
+	if p.AppVersion != "" {
+		labels[labelAppVersion] = p.AppVersion
+	}
+	if p.ContentDigest != "" {
+		labels[labelContentDigest] = p.ContentDigest
+	}
+	return labels
 }
 
 // DockerRuntime implements Runtime using the Docker Engine API.
@@ -100,6 +116,10 @@ func (r *DockerRuntime) AppBindHost() string {
 	return "0.0.0.0"
 }
 
+// HostProvidesAppData reports that the local Docker runtime provisions app data
+// on the control-plane host and mounts it into the container.
+func (r *DockerRuntime) HostProvidesAppData() bool { return true }
+
 // addSharedMounts appends a read-only mount per SharedMount to cfg.Mounts,
 // targeted at /app/data/shared/<source-slug>. Source paths are MkdirAll'd
 // host-side so the consumer always has a directory to mount.
@@ -124,6 +144,16 @@ func addSharedMounts(cfg *containerConfig, mounts []SharedMount, dataHostPath st
 		})
 	}
 	return nil
+}
+
+// hostPublishPort returns the host port that the in-container bind port should
+// be published to. A remote worker sets HostPublishPort to a host-allocated
+// port; the local case leaves it zero and publishes to the same port.
+func hostPublishPort(p StartParams) int {
+	if p.HostPublishPort > 0 {
+		return p.HostPublishPort
+	}
+	return p.Port
 }
 
 // dataHostPath returns the host directory that backs /app/data inside the
@@ -159,7 +189,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		// AppBindHost so this mapping actually routes.
 		cfg.Ports = []containerPortBinding{{
 			ContainerPort: p.Port,
-			HostPort:      p.Port,
+			HostPort:      hostPublishPort(p),
 			HostIP:        "127.0.0.1",
 		}}
 	}
@@ -257,6 +287,13 @@ func (r *DockerRuntime) InspectPID(containerID string) (int, error) {
 		return 0, err
 	}
 	return state.Pid, nil
+}
+
+// PublishedHostPort returns the host port the container's published bind port
+// maps to, or 0 when nothing is published. The data-plane proxy uses this to
+// rebuild its target after an agent restart re-adopts a running container.
+func (r *DockerRuntime) PublishedHostPort(containerID string) (int, error) {
+	return r.client.publishedHostPort(containerID)
 }
 
 // imageForCommand selects the base image based on the command.

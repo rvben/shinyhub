@@ -47,9 +47,9 @@ func (r *captureRuntime) RunOnce(_ context.Context, _ StartParams, _ io.Writer) 
 	return ExitInfo{}, nil
 }
 
-func (r *captureRuntime) HostPreparesDeps() bool { return true }
-
-func (r *captureRuntime) AppBindHost() string { return "127.0.0.1" }
+func (r *captureRuntime) HostPreparesDeps() bool    { return true }
+func (r *captureRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (r *captureRuntime) HostProvidesAppData() bool { return true }
 
 func TestFilteredEnvStripsShinyHubVars(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "super-secret")

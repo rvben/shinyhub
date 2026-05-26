@@ -74,8 +74,9 @@ func (f *fakeContainerRuntime) RunOnce(context.Context, process.StartParams, io.
 	return process.ExitInfo{}, nil
 }
 
-func (f *fakeContainerRuntime) HostPreparesDeps() bool { return false }
-func (f *fakeContainerRuntime) AppBindHost() string    { return "0.0.0.0" }
+func (f *fakeContainerRuntime) HostPreparesDeps() bool    { return false }
+func (f *fakeContainerRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (f *fakeContainerRuntime) HostProvidesAppData() bool { return true }
 
 // RemoveHandle satisfies the optional containerRemover capability the Manager
 // type-asserts for after a replica stops.
