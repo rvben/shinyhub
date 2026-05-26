@@ -11,6 +11,9 @@ CLAUDE.local.md
 # JS toolchain (only used for JSDOM tests of UI assets)
 node_modules/
 
+# Compiled server binary from `go build` at the repo root.
+/shinyhub
+
 # Runtime artifacts created when running the server from a checkout
 # (default config writes the SQLite DB and per-app data under ./data).
 /data/

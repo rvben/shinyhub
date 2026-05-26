@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -765,22 +766,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mu.RLock()
 	pool := p.pools[slug]
 	onMiss := p.onMiss
-	slugExists := p.slugExists
 	if pool == nil || !poolHasAny(pool) {
 		p.mu.RUnlock()
-		// If we have a predicate and it confidently says the slug is unknown,
-		// return a real 404 instead of looping the user on the loading page
-		// forever. A non-nil lookupErr means the predicate couldn't tell —
-		// e.g. the DB was momentarily unavailable. Treating that as "missing"
-		// would confusingly 404 a perfectly valid app while the database
-		// recovers; instead we fall through to the loading page (the
-		// pre-predicate default) and let the caller log the error.
-		if slugExists != nil {
-			exists, lookupErr := slugExists(slug)
-			if lookupErr == nil && !exists {
-				http.NotFound(rec, r)
-				return
-			}
+		// When the slug is confidently unknown, return a real 404 instead of
+		// looping the user on the loading page forever. An uncertain lookup
+		// (DB blip) falls through to the loading page (the pre-predicate
+		// default) rather than 404ing a possibly-valid app — see
+		// slugConfidentlyUnknown for the fail-open rationale.
+		if p.slugConfidentlyUnknown(slug) {
+			writeUnknownApp(rec, r, slug)
+			return
 		}
 		if onMiss != nil {
 			go onMiss(slug)
@@ -830,20 +825,39 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	picked.rp.ServeHTTP(rec, r)
 }
 
-// serveReadyProbe answers GET /app/<slug>/.shinyhub/ready. It returns 200
-// with {"ready":true} once at least one upstream replica has completed a
-// WebSocket handshake, and 503 with {"ready":false} otherwise. A
-// Retry-After: 1 hint lets polling deploy scripts back off politely.
-// The endpoint accepts GET and HEAD; other methods are rejected with 405
-// so a misconfigured client (e.g. an unintended POST) fails loudly rather
-// than appearing to succeed.
+// serveReadyProbe answers GET /app/<slug>/.shinyhub/ready with one of three
+// states, so external monitoring can tell them apart:
+//
+//   - 200 {"ready":true}  - at least one replica has completed a WebSocket
+//     handshake; the app is actually serving.
+//   - 503 {"ready":false} - a known app that hasn't handshaken yet (cold
+//     start / restart). Carries Retry-After: 1 so pollers back off politely.
+//   - 404 {"error":"unknown app","slug":...} - no such app on this server.
+//     Collapsing this into 503 would let a monitor that treats 503 as a
+//     healthy cold-start band pass against an empty registry, masking a
+//     deploy regression.
+//
+// For a known app the endpoint accepts GET and HEAD; other methods are rejected
+// with 405 so a misconfigured client (e.g. an unintended POST) fails loudly
+// rather than appearing to succeed. An unknown slug is 404 before the method
+// gate: a method complaint about a resource that doesn't exist on this server
+// is noise.
 func (p *Proxy) serveReadyProbe(w http.ResponseWriter, r *http.Request, slug string) {
+	ready := p.IsWSReady(slug)
+	// The unknown-vs-cold-start distinction only matters when we're about to
+	// answer "not ready": a ready slug is known by definition (a replica has
+	// handshaked), so the steady-state 200 path skips the existence lookup the
+	// monitors would otherwise hammer on every poll. Checking existence before
+	// the method gate keeps "unknown slug = 404" true for every method.
+	if !ready && p.slugConfidentlyUnknown(slug) {
+		writeUnknownApp(w, r, slug)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	ready := p.IsWSReady(slug)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if !ready {
@@ -858,6 +872,49 @@ func (p *Proxy) serveReadyProbe(w http.ResponseWriter, r *http.Request, slug str
 	if r.Method == http.MethodGet {
 		w.Write([]byte(`{"ready":true}`)) //nolint:errcheck
 	}
+}
+
+// slugConfidentlyUnknown reports whether the existence predicate is wired AND
+// confidently reports that slug is not registered on this server. It returns
+// false when no predicate is set or the lookup itself failed (DB unavailable,
+// ctx cancelled), so every caller fails open: an uncertain answer must never be
+// treated as "unknown", or a momentary DB blip would 404 a perfectly valid app
+// while the database recovers. The predicate is invoked without holding p.mu
+// because it may touch the database.
+func (p *Proxy) slugConfidentlyUnknown(slug string) bool {
+	p.mu.RLock()
+	pred := p.slugExists
+	p.mu.RUnlock()
+	if pred == nil {
+		return false
+	}
+	exists, err := pred(slug)
+	return err == nil && !exists
+}
+
+// unknownAppBody is the 404 payload returned for any /app/<slug>/ request whose
+// slug is not registered on this server. Field order is fixed by struct
+// declaration order so the wire form (`{"error":...,"slug":...}`) is stable for
+// clients that string-match it.
+type unknownAppBody struct {
+	Error string `json:"error"`
+	Slug  string `json:"slug"`
+}
+
+// writeUnknownApp answers a /app/<slug>/ request for a slug this server does not
+// know about with 404 and a machine-readable body identifying the slug. This is
+// what lets external monitoring distinguish "no such app here" (a deploy
+// regression) from "known app, not ready yet" (503). HEAD callers get the
+// status line only.
+func writeUnknownApp(w http.ResponseWriter, r *http.Request, slug string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotFound)
+	if r.Method == http.MethodHead {
+		return
+	}
+	body, _ := json.Marshal(unknownAppBody{Error: "unknown app", Slug: slug})
+	w.Write(body) //nolint:errcheck
 }
 
 // resolveClientIP returns the trusted-proxy-aware client IP when a resolver is
