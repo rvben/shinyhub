@@ -564,6 +564,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		lifecycle.SweepOrphanContainers(mgr, sweeper)
 	}
 
+	// Start the worker-down monitor: when a worker's heartbeat goes stale it is
+	// marked down and each of its running replicas transitions to lost and is
+	// removed from proxy routing. Only relevant when worker hosting is enabled.
+	if workerReg != nil {
+		const (
+			workerTimeout   = 90 * time.Second
+			monitorInterval = 30 * time.Second
+		)
+		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, func(slug string, index int) {
+			prx.DeregisterReplica(slug, index)
+		})
+		go monitor.Run(ctx, monitorInterval)
+		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval)
+	}
+
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
 	defer cancelWatcher()
 	watcherDone := make(chan struct{})
