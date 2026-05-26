@@ -34,8 +34,12 @@ type statusRecorder struct {
 	// Switching Protocols header is written. The reverse-proxy WS upgrade
 	// path writes 101 before calling Hijack, so this hook observes the
 	// successful handshake without waiting for the hijacked goroutine to
-	// finish — which it never does until the client disconnects.
+	// finish - which it never does until the client disconnects.
 	onUpgrade func()
+	// rejectReason, when set by recordReject, is the platform rejection reason
+	// for this request. The ServeHTTP access-log defer copies it into
+	// AccessLogEntry.Reject. Empty for non-rejected requests.
+	rejectReason RejectReason
 }
 
 func newStatusRecorder(w http.ResponseWriter) *statusRecorder {

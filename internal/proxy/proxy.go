@@ -191,6 +191,11 @@ type AccessLogEntry struct {
 	Peer         string // raw r.RemoteAddr (direct TCP peer)
 	ReplicaIndex int    // -1 when no replica served the request
 	Sticky       bool
+	// Reject is the platform rejection reason for this request, set only for
+	// rejections emitted on the main ServeHTTP path (pool-saturated,
+	// pool-degraded, unknown-slug). Empty for routed requests and for
+	// readiness-probe rejections (which bypass this access-log path).
+	Reject RejectReason
 }
 
 // accessLogFn and clientIPFn are named function types so atomic.Pointer can
@@ -225,8 +230,14 @@ type Proxy struct {
 	// WebSocket handshake (HTTP 101) since the last deregister/hibernate.
 	// Surfaced via GET /app/<slug>/.shinyhub/ready so deploy scripts can
 	// distinguish "process started" from "actually accepting WS connections"
-	// — the latter is what end users care about for Shiny/Streamlit apps.
+	// - the latter is what end users care about for Shiny/Streamlit apps.
 	wsReady map[string]struct{}
+
+	// rejects is the in-memory rolling rejection rollup surfaced by apps show.
+	rejects *rejectCounter
+	// rejectRecorder is an optional sink (the Prometheus registry) for
+	// admission-reject events. Nil disables metrics emission (e.g. in tests).
+	rejectRecorder atomic.Pointer[RejectRecorder]
 }
 
 func New() *Proxy {
@@ -234,6 +245,7 @@ func New() *Proxy {
 		pools:    make(map[string]*backendPool),
 		lastSeen: make(map[string]time.Time),
 		wsReady:  make(map[string]struct{}),
+		rejects:  newRejectCounter(),
 	}
 }
 
@@ -754,6 +766,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Peer:         r.RemoteAddr,
 			ReplicaIndex: replicaIndex,
 			Sticky:       sticky,
+			Reject:       rec.rejectReason,
 		})
 	}()
 
