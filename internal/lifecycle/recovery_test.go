@@ -50,8 +50,9 @@ func (f *fakeDockerRuntime) Stats(context.Context, process.RunHandle) (float64, 
 func (f *fakeDockerRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
 }
-func (f *fakeDockerRuntime) HostPreparesDeps() bool { return false }
-func (f *fakeDockerRuntime) AppBindHost() string    { return "0.0.0.0" }
+func (f *fakeDockerRuntime) HostPreparesDeps() bool    { return false }
+func (f *fakeDockerRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (f *fakeDockerRuntime) HostProvidesAppData() bool { return true }
 
 func (f *fakeDockerRuntime) ListByLabel(_ string) ([]process.ContainerInfo, error) {
 	return f.containers, nil

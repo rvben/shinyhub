@@ -876,8 +876,9 @@ func TestExtractBundle_RejectsDataDirEntryWithoutCreating(t *testing.T) {
 // touching real OS processes.
 type fakeContainerRuntime struct{}
 
-func (f *fakeContainerRuntime) HostPreparesDeps() bool { return false }
-func (f *fakeContainerRuntime) AppBindHost() string    { return "0.0.0.0" }
+func (f *fakeContainerRuntime) HostPreparesDeps() bool    { return false }
+func (f *fakeContainerRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (f *fakeContainerRuntime) HostProvidesAppData() bool { return true }
 func (f *fakeContainerRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	id := fmt.Sprintf("fake-%s-%d", p.Slug, p.Index)
 	return process.ReplicaEndpoint{

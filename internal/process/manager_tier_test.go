@@ -29,8 +29,9 @@ func (s stubRuntime) Stats(context.Context, process.RunHandle) (float64, uint64,
 func (s stubRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
 }
-func (s stubRuntime) HostPreparesDeps() bool { return s.hostDeps }
-func (s stubRuntime) AppBindHost() string    { return s.bindHost }
+func (s stubRuntime) HostPreparesDeps() bool    { return s.hostDeps }
+func (s stubRuntime) AppBindHost() string       { return s.bindHost }
+func (s stubRuntime) HostProvidesAppData() bool { return true }
 
 func TestHostPreparesDepsFor_RoutesByTier(t *testing.T) {
 	m := process.NewManager(t.TempDir(), stubRuntime{hostDeps: true, bindHost: "127.0.0.1"})

@@ -100,6 +100,10 @@ func (r *DockerRuntime) AppBindHost() string {
 	return "0.0.0.0"
 }
 
+// HostProvidesAppData reports that the local Docker runtime provisions app data
+// on the control-plane host and mounts it into the container.
+func (r *DockerRuntime) HostProvidesAppData() bool { return true }
+
 // addSharedMounts appends a read-only mount per SharedMount to cfg.Mounts,
 // targeted at /app/data/shared/<source-slug>. Source paths are MkdirAll'd
 // host-side so the consumer always has a directory to mount.

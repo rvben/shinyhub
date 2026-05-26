@@ -90,8 +90,9 @@ func (f *manifestFakeRuntime) RunOnce(_ context.Context, _ process.StartParams, 
 // Container-mode semantics: dependency installation is treated as a no-op on
 // the host, which is exactly what we want for a test that never spawns real
 // processes.
-func (f *manifestFakeRuntime) HostPreparesDeps() bool { return false }
-func (f *manifestFakeRuntime) AppBindHost() string    { return "127.0.0.1" }
+func (f *manifestFakeRuntime) HostPreparesDeps() bool    { return false }
+func (f *manifestFakeRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (f *manifestFakeRuntime) HostProvidesAppData() bool { return true }
 
 // newManifestE2EServer wires a Server with a fake runtime, no-op sync hooks,
 // a no-op health check, and a started (wired) scheduler stub. Returns the

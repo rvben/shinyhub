@@ -39,8 +39,9 @@ func (b *blockingRuntime) Stats(context.Context, process.RunHandle) (float64, ui
 func (b *blockingRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
 }
-func (b *blockingRuntime) HostPreparesDeps() bool { return false }
-func (b *blockingRuntime) AppBindHost() string    { return "127.0.0.1" }
+func (b *blockingRuntime) HostPreparesDeps() bool    { return false }
+func (b *blockingRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (b *blockingRuntime) HostProvidesAppData() bool { return true }
 
 // fakeSweeper implements lifecycle.ContainerSweeper, recording every container
 // it is asked to remove.

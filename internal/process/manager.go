@@ -231,33 +231,41 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		delete(m.logFiles, key)
 	}
 
-	var appDataPath string
-	if m.appDataRoot != "" {
-		ref, err := storage.LocalVolume{Root: m.appDataRoot}.Provision(p.Slug)
-		if err != nil {
-			return nil, fmt.Errorf("provision app data: %w", err)
-		}
-		appDataPath = ref.Path
-		p.AppDataPath = appDataPath
+	tier := p.Tier
+	if tier == "" {
+		tier = m.defaultTier
+	}
+	rt := m.runtimeFor(tier)
 
-		linkPath := filepath.Join(p.Dir, "data")
-		switch info, err := os.Lstat(linkPath); {
-		case err == nil:
-			// Something is already at <bundle>/data. Accept only if it's a symlink
-			// pointing to the correct target — that's the idempotent restart case.
-			if info.Mode()&os.ModeSymlink != 0 {
-				existing, readErr := os.Readlink(linkPath)
-				if readErr == nil && existing == appDataPath {
-					break // already correct, nothing to do
-				}
+	if rt.HostProvidesAppData() {
+		var appDataPath string
+		if m.appDataRoot != "" {
+			ref, err := storage.LocalVolume{Root: m.appDataRoot}.Provision(p.Slug)
+			if err != nil {
+				return nil, fmt.Errorf("provision app data: %w", err)
 			}
-			return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
-		case !os.IsNotExist(err):
-			return nil, fmt.Errorf("stat %s: %w", linkPath, err)
-		default:
-			// Path does not exist — create the symlink.
-			if err := os.Symlink(appDataPath, linkPath); err != nil {
-				return nil, fmt.Errorf("symlink data: %w", err)
+			appDataPath = ref.Path
+			p.AppDataPath = appDataPath
+
+			linkPath := filepath.Join(p.Dir, "data")
+			switch info, err := os.Lstat(linkPath); {
+			case err == nil:
+				// Something is already at <bundle>/data. Accept only if it's a symlink
+				// pointing to the correct target — that's the idempotent restart case.
+				if info.Mode()&os.ModeSymlink != 0 {
+					existing, readErr := os.Readlink(linkPath)
+					if readErr == nil && existing == appDataPath {
+						break // already correct, nothing to do
+					}
+				}
+				return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
+			case !os.IsNotExist(err):
+				return nil, fmt.Errorf("stat %s: %w", linkPath, err)
+			default:
+				// Path does not exist — create the symlink.
+				if err := os.Symlink(appDataPath, linkPath); err != nil {
+					return nil, fmt.Errorf("symlink data: %w", err)
+				}
 			}
 		}
 	}
@@ -289,18 +297,18 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		p.SharedMounts = mounts
 	}
 
+	if !rt.HostProvidesAppData() {
+		for i := range p.SharedMounts {
+			p.SharedMounts[i].HostPath = ""
+		}
+	}
+
 	logPath := filepath.Join(m.appsDir, p.Slug, fmt.Sprintf("app-%d.log", p.Index))
 	lf, err := OpenLogFile(logPath, DefaultLogMaxSize)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
 	m.logFiles[key] = lf
-
-	tier := p.Tier
-	if tier == "" {
-		tier = m.defaultTier
-	}
-	rt := m.runtimeFor(tier)
 
 	ep, err := rt.Start(context.Background(), p, lf)
 	if err != nil {
