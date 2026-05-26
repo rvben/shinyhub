@@ -2012,6 +2012,21 @@ func (s *Store) SetWorkerStatus(nodeID, status string) error {
 	return nil
 }
 
+// SupersedeTierWorkers marks every up worker on a tier down except the given
+// node id, in a single statement. Used when a new worker wins a tier's routing
+// slot so prior registrants stop being routing candidates. Zero affected rows
+// is valid (no prior worker on the tier), so unlike SetWorkerStatus this does
+// not return ErrNotFound.
+func (s *Store) SupersedeTierWorkers(tier, exceptNodeID string) error {
+	_, err := s.db.Exec(
+		`UPDATE workers SET status = 'down' WHERE tier = ? AND node_id <> ? AND status = 'up'`,
+		tier, exceptNodeID)
+	if err != nil {
+		return fmt.Errorf("supersede tier %q workers: %w", tier, err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteWorker(nodeID string) error {
 	res, err := s.db.Exec(`DELETE FROM workers WHERE node_id = ?`, nodeID)
 	if err != nil {
