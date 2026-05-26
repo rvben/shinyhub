@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -162,7 +164,10 @@ func TestReplicaServer_StartStreamsResultThenLogs(t *testing.T) {
 }
 
 func withURLParam(r *http.Request, key, val string) *http.Request {
-	rctx := chi.NewRouteContext()
+	rctx, ok := r.Context().Value(chi.RouteCtxKey).(*chi.Context)
+	if !ok {
+		rctx = chi.NewRouteContext()
+	}
 	rctx.URLParams.Add(key, val)
 	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 }
@@ -233,5 +238,40 @@ func TestReplicaServer_SignalWaitStats(t *testing.T) {
 	srv.mu.RUnlock()
 	if okC || okT {
 		t.Errorf("wait did not remove replica from both tables: byContainer=%v byToken=%v", okC, okT)
+	}
+}
+
+func TestReplicaServer_DataPlaneProxiesToHostPort(t *testing.T) {
+	// Backend stands in for the published container port on the worker.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "path="+r.URL.Path)
+	}))
+	defer backend.Close()
+
+	// Parse the backend port so the record points at it.
+	u, _ := url.Parse(backend.URL)
+	hostPort, _ := strconv.Atoi(u.Port())
+
+	dir := t.TempDir()
+	srv := NewReplicaServer(ReplicaServerConfig{
+		Runtime: &fakeRuntime{}, DataDir: dir, NodeID: "node-a", Advertise: "w:8443",
+		AllocatePort: func() int { return hostPort },
+	})
+	srv.mu.Lock()
+	srv.byToken["tok"] = &replicaRecord{token: "tok", containerID: "c-1", hostPort: hostPort}
+	srv.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/data/tok/health/ready", nil)
+	req = withURLParam(req, "token", "tok")
+	req = withURLParam(req, "*", "health/ready")
+	rec := httptest.NewRecorder()
+	srv.handleData(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// The /v1/data/{token} prefix must be stripped before reaching the backend.
+	if got := rec.Body.String(); got != "path=/health/ready" {
+		t.Errorf("backend saw %q, want path=/health/ready", got)
 	}
 }

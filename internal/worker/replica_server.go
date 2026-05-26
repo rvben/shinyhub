@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -307,4 +309,39 @@ func (s *replicaServer) handleRunOnce(w http.ResponseWriter, r *http.Request) {
 	if flusher != nil {
 		flusher.Flush()
 	}
+}
+
+// handleData reverse-proxies a data-plane request to the worker-local host port
+// the replica's container is published on. The /v1/data/{token} prefix is
+// stripped so the backend sees the app-relative path.
+func (s *replicaServer) handleData(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	s.mu.RLock()
+	rec, ok := s.byToken[token]
+	s.mu.RUnlock()
+	if !ok {
+		http.Error(w, "unknown replica", http.StatusNotFound)
+		return
+	}
+
+	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", rec.hostPort)}
+	rp := httputil.NewSingleHostReverseProxy(target)
+
+	// Strip the /v1/data/{token} prefix; forward only the app-relative path.
+	rest := chi.URLParam(r, "*")
+	r.URL.Path = "/" + rest
+	r.URL.RawPath = ""
+
+	rp.ServeHTTP(w, r)
+}
+
+// Routes registers the replica-control and data-plane endpoints on r. The agent
+// mounts this on its mTLS listener.
+func (s *replicaServer) Routes(r chi.Router) {
+	r.Post("/v1/replicas", s.handleStart)
+	r.Post("/v1/replicas/run-once", s.handleRunOnce)
+	r.Post("/v1/replicas/{container}/signal", s.handleSignal)
+	r.Get("/v1/replicas/{container}/wait", s.handleWait)
+	r.Get("/v1/replicas/{container}/stats", s.handleStats)
+	r.HandleFunc("/v1/data/{token}/*", s.handleData)
 }
