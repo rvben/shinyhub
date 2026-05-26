@@ -177,6 +177,41 @@ func Fingerprint(cert *x509.Certificate) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ControlClientCertificate issues a short-lived ECDSA client certificate that
+// the control plane presents to worker agents over mTLS. The cert is signed by
+// this CA, carries only the ClientAuth EKU, and verifies against CA.Pool().
+func (c *CA) ControlClientCertificate() (tls.Certificate, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate control client key: %w", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("serial: %w", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "shinyhub-control-plane"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &priv.PublicKey, c.key)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("sign control client cert: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("parse control client cert: %w", err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	}, nil
+}
+
 // ServerCertificate signs a fresh server keypair off the CA for the control
 // plane's worker-facing listener. When no hosts are given it defaults to
 // loopback (127.0.0.1, ::1, localhost). IP-literal hosts become IP SANs and
