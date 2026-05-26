@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +29,15 @@ type replicaRecord struct {
 	hostPort    int // host publish port the in-container bind port maps to
 }
 
+// BundleEnsurer makes an app bundle present on the worker's local disk,
+// keyed by content digest, and returns the extracted bundle directory.
+// It is an interface rather than the concrete *agent.BundleCache because
+// the agent package imports this one; depending on the concrete type
+// would create an import cycle.
+type BundleEnsurer interface {
+	Ensure(ctx context.Context, digest string) (string, error)
+}
+
 // ReplicaServerConfig configures a replicaServer. AllocatePort is injectable
 // for tests; production wraps deploy.AllocatePort (which returns int, no error).
 type ReplicaServerConfig struct {
@@ -36,6 +46,9 @@ type ReplicaServerConfig struct {
 	NodeID       string
 	Advertise    string // host:port base used to build tunnel URLs
 	AllocatePort func() int
+	// Bundles, when set, is called on every remote replica start to pull and
+	// verify the app bundle by content digest, returning the local extracted dir.
+	Bundles BundleEnsurer
 }
 
 // replicaServer runs and tracks app replicas on a worker and proxies their
@@ -46,6 +59,7 @@ type replicaServer struct {
 	nodeID    string
 	advertise string
 	allocate  func() int
+	bundles   BundleEnsurer
 
 	mu          sync.RWMutex
 	byContainer map[string]*replicaRecord
@@ -65,6 +79,7 @@ func NewReplicaServer(cfg ReplicaServerConfig) *replicaServer {
 		nodeID:      cfg.NodeID,
 		advertise:   cfg.Advertise,
 		allocate:    alloc,
+		bundles:     cfg.Bundles,
 		byContainer: make(map[string]*replicaRecord),
 		byToken:     make(map[string]*replicaRecord),
 	}
@@ -110,7 +125,7 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func (s *replicaServer) buildStartParams(reqBody api.ReplicaStartRequest, hostPort int) (process.StartParams, error) {
+func (s *replicaServer) buildStartParams(ctx context.Context, reqBody api.ReplicaStartRequest, hostPort int) (process.StartParams, error) {
 	appData, err := s.provisionAppData(reqBody.Slug)
 	if err != nil {
 		return process.StartParams{}, err
@@ -129,7 +144,7 @@ func (s *replicaServer) buildStartParams(reqBody api.ReplicaStartRequest, hostPo
 	for k, v := range reqBody.Env {
 		env = append(env, k+"="+v)
 	}
-	return process.StartParams{
+	params := process.StartParams{
 		Slug:            reqBody.Slug,
 		Index:           reqBody.Index,
 		Tier:            reqBody.Tier,
@@ -144,7 +159,18 @@ func (s *replicaServer) buildStartParams(reqBody api.ReplicaStartRequest, hostPo
 		AppVersion:      reqBody.AppVersion,
 		DeploymentID:    reqBody.DeploymentID,
 		ContentDigest:   reqBody.ContentDigest,
-	}, nil
+	}
+	if s.bundles != nil {
+		if reqBody.ContentDigest == "" {
+			return process.StartParams{}, fmt.Errorf("remote replica start for %q missing content digest", reqBody.Slug)
+		}
+		dir, err := s.bundles.Ensure(ctx, reqBody.ContentDigest)
+		if err != nil {
+			return process.StartParams{}, fmt.Errorf("ensure bundle %s: %w", reqBody.ContentDigest, err)
+		}
+		params.Dir = dir
+	}
+	return params, nil
 }
 
 func (s *replicaServer) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +181,7 @@ func (s *replicaServer) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hostPort := s.allocatePort()
-	params, err := s.buildStartParams(reqBody, hostPort)
+	params, err := s.buildStartParams(r.Context(), reqBody, hostPort)
 	if err != nil {
 		http.Error(w, "provision failed", http.StatusInternalServerError)
 		return
@@ -286,7 +312,7 @@ func (s *replicaServer) handleRunOnce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hostPort := s.allocatePort()
-	params, err := s.buildStartParams(reqBody, hostPort)
+	params, err := s.buildStartParams(r.Context(), reqBody, hostPort)
 	if err != nil {
 		http.Error(w, "provision failed", http.StatusInternalServerError)
 		return

@@ -337,3 +337,56 @@ func TestReplicaServer_DataPlaneProxiesToHostPort(t *testing.T) {
 		t.Errorf("backend saw %q, want path=/health/ready", got)
 	}
 }
+
+// fakeEnsurer implements BundleEnsurer for tests. It records the digest it was
+// called with and returns a fixed directory path.
+type fakeEnsurer struct {
+	called bool
+	digest string
+	dir    string
+}
+
+func (f *fakeEnsurer) Ensure(_ context.Context, digest string) (string, error) {
+	f.called = true
+	f.digest = digest
+	return f.dir, nil
+}
+
+func TestBuildStartParams_BundleCacheWired(t *testing.T) {
+	ensureDir := t.TempDir()
+	fe := &fakeEnsurer{dir: ensureDir}
+
+	srv := NewReplicaServer(ReplicaServerConfig{
+		Runtime:      &fakeRuntime{},
+		DataDir:      t.TempDir(),
+		NodeID:       "node-a",
+		Advertise:    "w:8443",
+		AllocatePort: func() int { return 49001 },
+		Bundles:      fe,
+	})
+
+	// Happy path: content digest present, ensurer called, params.Dir set.
+	params, err := srv.buildStartParams(context.Background(), api.ReplicaStartRequest{
+		Slug: "app", Index: 0, BindPort: 8000, ContentDigest: "sha256:deadbeef",
+	}, 49001)
+	if err != nil {
+		t.Fatalf("buildStartParams: %v", err)
+	}
+	if !fe.called {
+		t.Error("BundleEnsurer.Ensure was not called")
+	}
+	if fe.digest != "sha256:deadbeef" {
+		t.Errorf("Ensure called with digest %q, want sha256:deadbeef", fe.digest)
+	}
+	if params.Dir != ensureDir {
+		t.Errorf("params.Dir = %q, want %q", params.Dir, ensureDir)
+	}
+
+	// Error path: Bundles wired but ContentDigest empty returns an error.
+	_, err = srv.buildStartParams(context.Background(), api.ReplicaStartRequest{
+		Slug: "app", Index: 0, BindPort: 8000, ContentDigest: "",
+	}, 49001)
+	if err == nil {
+		t.Error("expected error when ContentDigest is empty with Bundles set, got nil")
+	}
+}

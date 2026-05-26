@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,7 @@ func (c *BundleCache) Ensure(ctx context.Context, digest string) (retDir string,
 		return "", err
 	}
 	if _, err := os.Stat(cacheDir); err == nil {
+		slog.Info("bundle: cache hit", "digest", digest)
 		return cacheDir, nil
 	}
 
@@ -149,5 +151,6 @@ func (c *BundleCache) Ensure(ctx context.Context, digest string) (retDir string,
 		os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("install bundle dir: %w", err)
 	}
+	slog.Info("bundle: pulled", "digest", digest)
 	return cacheDir, nil
 }

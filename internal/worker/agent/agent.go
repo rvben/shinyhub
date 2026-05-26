@@ -50,6 +50,10 @@ type Agent struct {
 // NodeID returns the control-plane-assigned node id.
 func (a *Agent) NodeID() string { return a.nodeID }
 
+// Bundles returns the agent's bundle cache so the replica server can pull
+// and mount app bundles by content digest on demand.
+func (a *Agent) Bundles() *BundleCache { return a.cache }
+
 // IssuedCert returns the cert issued by the control plane during Bootstrap.
 // Used by the inbound mTLS server to present its identity.
 func (a *Agent) IssuedCert() tls.Certificate { return a.issuedCert }

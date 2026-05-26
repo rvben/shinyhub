@@ -73,6 +73,7 @@ func newWorkerCmd() *cobra.Command {
 				DataDir:   dataDir,
 				NodeID:    ag.NodeID(),
 				Advertise: advertiseAddr,
+				Bundles:   ag.Bundles(),
 			})
 			if err := replicas.RebuildFromContainers(); err != nil {
 				slog.Warn("agent: rebuild data-plane table from containers", "err", err)
