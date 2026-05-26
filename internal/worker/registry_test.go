@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -83,6 +84,58 @@ func TestRegistryReregisterSupersedesPriorWorkerOnTier(t *testing.T) {
 	}
 	if got, ok := reg.Worker(first.NodeID); !ok || got.Status != "down" {
 		t.Fatalf("superseded worker %s in-memory status = %+v ok=%v, want down", first.NodeID, got, ok)
+	}
+}
+
+// TestRegistryConcurrentSameTierRegistrationsConverge asserts that many
+// concurrent registrations on one tier converge to a single up worker that the
+// store and the in-memory index agree on. If the supersede store write is not
+// serialized with the registration, two registrations can each mark the other
+// down in the store, leaving zero up workers persisted while one is up in
+// memory -- the tier then has no routing candidate after a control-plane
+// restart rebuilds the index from the store.
+func TestRegistryConcurrentSameTierRegistrationsConverge(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := reg.Register(RegisterParams{
+				AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa",
+			}); err != nil {
+				t.Errorf("register: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Exactly one worker is up in the store, matching the in-memory routing slot.
+	all, err := store.ListWorkers()
+	if err != nil {
+		t.Fatalf("list workers: %v", err)
+	}
+	var upInStore []string
+	for _, w := range all {
+		if w.Status == "up" {
+			upInStore = append(upInStore, w.NodeID)
+		}
+	}
+	if len(upInStore) != 1 {
+		t.Fatalf("up workers in store = %v, want exactly 1", upInStore)
+	}
+	routed, ok := reg.WorkerForTier("burst")
+	if !ok {
+		t.Fatal("WorkerForTier(burst) found no worker after concurrent registrations")
+	}
+	if routed.NodeID != upInStore[0] {
+		t.Fatalf("routing slot %s disagrees with the up worker in store %s", routed.NodeID, upInStore[0])
 	}
 }
 

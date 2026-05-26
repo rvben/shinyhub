@@ -16,6 +16,12 @@ import (
 // index do not preclude multi-worker selection later.
 type Registry struct {
 	store *db.Store
+	// regMu serializes registrations so the multi-row store writes of one
+	// Register (upsert + tier supersede) and its index update complete before
+	// another begins. Without it, two concurrent registrations on the same tier
+	// could each supersede the other's store row and leave both workers down in
+	// the store while one is up in memory, wedging the tier after a restart.
+	regMu sync.Mutex
 	mu    sync.RWMutex
 	byID  map[string]db.Worker
 }
@@ -60,21 +66,30 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 		Fingerprint:   p.Fingerprint,
 		Version:       p.Version,
 	}
+	// Serialize the whole registration so concurrent same-tier joins cannot
+	// interleave their store writes. regMu, not the routing RWMutex, guards the
+	// database I/O, so routing lookups are never blocked on the database.
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+
 	if err := r.store.UpsertWorker(w); err != nil {
 		return db.Worker{}, err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	// Single worker per tier: the newest registrant wins the routing slot. Retire
 	// any other up worker on this tier so routing never resolves a superseded
 	// node, e.g. a worker that restarted under a fresh node id (its advertise
 	// address and certificate identity are stale and a dial would fail).
+	if err := r.store.SupersedeTierWorkers(w.Tier, nodeID); err != nil {
+		return db.Worker{}, err
+	}
+
+	// Take the routing lock only to mutate the in-memory index, mirroring the
+	// store supersede above.
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for id, existing := range r.byID {
 		if id == nodeID || existing.Tier != w.Tier || existing.Status != "up" {
 			continue
-		}
-		if err := r.store.SetWorkerStatus(id, "down"); err != nil {
-			return db.Worker{}, fmt.Errorf("retire superseded worker %q: %w", id, err)
 		}
 		existing.Status = "down"
 		r.byID[id] = existing
