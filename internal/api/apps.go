@@ -192,14 +192,30 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 	// effective_max_sessions_per_replica resolves the app's own cap against the
 	// runtime default (0 = inherit). Clients use it to render an honest
-	// admission ceiling (replicas × effective cap) instead of a bare "0".
+	// admission ceiling (replicas x effective cap) instead of a bare "0".
 	effectiveCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
-	writeJSON(w, http.StatusOK, map[string]any{
+	envelope := map[string]any{
 		"app":                                app,
 		"replicas_status":                    replicas,
 		"effective_max_sessions_per_replica": effectiveCap,
 		"redeploy_in_flight":                 s.isRedeployInFlight(slug),
-	})
+	}
+	// rejects_by_reason is a rolling 10-minute rollup of platform rejections for
+	// this app, keyed by reason. Omitted entirely when no proxy is wired or when
+	// the app has had no rejections in the window.
+	if s.proxy != nil {
+		if counts := s.proxy.RejectsByReason(slug, 10*time.Minute); len(counts) > 0 {
+			byReason := make(map[string]uint64, len(counts))
+			for reason, n := range counts {
+				byReason[string(reason)] = n
+			}
+			envelope["rejects_by_reason"] = map[string]any{
+				"window_seconds": 600,
+				"counts":         byReason,
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, envelope)
 }
 
 func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {

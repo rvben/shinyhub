@@ -18,6 +18,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 // newManagerTestServer creates a test server with a real in-memory process manager.
@@ -2123,5 +2124,67 @@ func TestPatchAppIfContentDigestMismatch409(t *testing.T) {
 	}
 	if app.Name != "digestprecond" {
 		t.Fatalf("app name must remain unchanged after 409, got %q", app.Name)
+	}
+}
+
+func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
+	// Build a server that shares one proxy handle so the test can drive a reject
+	// through the proxy and read it back via the app-detail GET. (newTestServer
+	// passes a nil proxy and returns no handle, so we wire it inline here,
+	// mirroring newTestServerWithTrustedProxies.)
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+	}
+	prx := proxy.New()
+	srv := api.New(cfg, store, nil, prx)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register a pool for "demo" but never complete a WS handshake. A readiness
+	// poll then records exactly one app-not-ready reject under slug "demo"
+	// (registered == true), synchronously and with no goroutines.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+	if err := prx.Register("demo", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil))
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/demo", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	block, ok := body["rejects_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("rejects_by_reason missing or wrong type: %v", body["rejects_by_reason"])
+	}
+	if block["window_seconds"].(float64) != 600 {
+		t.Errorf("window_seconds = %v, want 600", block["window_seconds"])
+	}
+	counts := block["counts"].(map[string]any)
+	if counts["app-not-ready"].(float64) != 1 {
+		t.Errorf("counts[app-not-ready] = %v, want 1", counts["app-not-ready"])
 	}
 }
