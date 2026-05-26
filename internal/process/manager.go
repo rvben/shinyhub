@@ -59,12 +59,12 @@ type ProcessInfo struct {
 }
 
 type StartParams struct {
-	Slug            string
-	Index           int
-	Tier            string // runtime tier; empty => DefaultTier
-	Dir             string
-	Command         []string
-	Port            int
+	Slug    string
+	Index   int
+	Tier    string // runtime tier; empty => DefaultTier
+	Dir     string
+	Command []string
+	Port    int
 	// HostPublishPort, when non-zero, is the host port to publish the
 	// in-container bind Port to. The control plane allocates Port (baked into
 	// the command and PORT env); a remote worker allocates HostPublishPort on
@@ -101,6 +101,7 @@ type Manager struct {
 	entries       map[string][]*entry
 	logFiles      map[replicaKey]*LogFile
 	appsDir       string
+	runtimesMu    sync.RWMutex
 	runtimes      map[string]Runtime
 	defaultTier   string
 	envResolver   EnvResolver
@@ -176,22 +177,34 @@ func NewManager(appsDir string, rt Runtime) *Manager {
 	}
 }
 
-// RegisterRuntime adds a runtime under the named tier. Must be called before
-// the manager begins starting processes; not safe to call concurrently with
-// Start.
+// RegisterRuntime adds or replaces the runtime for the named tier. Safe to
+// call concurrently with RuntimeForTier lookups.
 func (m *Manager) RegisterRuntime(tier string, rt Runtime) {
+	m.runtimesMu.Lock()
+	defer m.runtimesMu.Unlock()
 	m.runtimes[tier] = rt
+}
+
+// removeRuntime drops the runtime registered for a tier. Lookups for that tier
+// fall back to the default runtime afterward.
+func (m *Manager) removeRuntime(tier string) {
+	m.runtimesMu.Lock()
+	defer m.runtimesMu.Unlock()
+	delete(m.runtimes, tier)
 }
 
 // SetDefaultTier renames the default tier and rekeys the seed runtime under
 // that name. NewManager registers the seed runtime under DefaultTier ("local");
 // when the config's first tier is named differently, call this once at startup
 // so empty/unknown tiers still resolve to the seed runtime. A no-op when name
-// is empty or already the default.
+// is empty or already the default. Must be called before the manager begins
+// starting processes; it is not safe to call concurrently with Start.
 func (m *Manager) SetDefaultTier(name string) {
 	if name == "" || name == m.defaultTier {
 		return
 	}
+	m.runtimesMu.Lock()
+	defer m.runtimesMu.Unlock()
 	rt := m.runtimes[m.defaultTier]
 	delete(m.runtimes, m.defaultTier)
 	m.runtimes[name] = rt
@@ -207,6 +220,8 @@ func (m *Manager) RuntimeForTier(tier string) Runtime { return m.runtimeFor(tier
 // runtimeFor returns the runtime for the named tier, falling back to the
 // default tier when tier is empty or unregistered.
 func (m *Manager) runtimeFor(tier string) Runtime {
+	m.runtimesMu.RLock()
+	defer m.runtimesMu.RUnlock()
 	if rt, ok := m.runtimes[tier]; ok {
 		return rt
 	}
