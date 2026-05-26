@@ -20,9 +20,10 @@ import (
 // Registry bundles a private Prometheus registry with the server's HTTP
 // instruments. Construct with New; the zero value is not usable.
 type Registry struct {
-	reg          *prometheus.Registry
-	httpRequests *prometheus.CounterVec
-	httpDuration *prometheus.HistogramVec
+	reg              *prometheus.Registry
+	httpRequests     *prometheus.CounterVec
+	httpDuration     *prometheus.HistogramVec
+	admissionRejects *prometheus.CounterVec
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -61,12 +62,25 @@ func New(version string) *Registry {
 	}, []string{"method", "route", "status"})
 	reg.MustRegister(httpDuration)
 
-	return &Registry{reg: reg, httpRequests: httpRequests, httpDuration: httpDuration}
+	admissionRejects := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_admission_rejects_total",
+		Help: "Total data-plane admission rejections by slug and reason. The slug label is __unknown__ for slugs that are not registered apps.",
+	}, []string{"slug", "reason"})
+	reg.MustRegister(admissionRejects)
+
+	return &Registry{reg: reg, httpRequests: httpRequests, httpDuration: httpDuration, admissionRejects: admissionRejects}
 }
 
 // Handler returns the Prometheus scrape handler for this registry.
 func (r *Registry) Handler() http.Handler {
 	return promhttp.HandlerFor(r.reg, promhttp.HandlerOpts{})
+}
+
+// RecordReject increments the admission-rejects counter for the given slug and
+// reason. Satisfies proxy.RejectRecorder so the proxy can record without
+// importing Prometheus. slug is the caller's cardinality-guarded key.
+func (r *Registry) RecordReject(slug, reason string) {
+	r.admissionRejects.WithLabelValues(slug, reason).Inc()
 }
 
 // Middleware records a request count and latency observation for every request,

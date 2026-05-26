@@ -165,3 +165,35 @@ func TestHandler_ExposesRuntimeAndCustomMetrics(t *testing.T) {
 		}
 	}
 }
+
+func scrape(t *testing.T, reg *Registry) string {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rec := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(rec, req)
+	return rec.Body.String()
+}
+
+func TestRecordReject_IncrementsCounter(t *testing.T) {
+	reg := New("test")
+	reg.RecordReject("demo", "pool-saturated")
+	reg.RecordReject("demo", "pool-saturated")
+	reg.RecordReject("__unknown__", "unknown-slug")
+
+	if got := testutil.ToFloat64(reg.admissionRejects.WithLabelValues("demo", "pool-saturated")); got != 2 {
+		t.Errorf("demo/pool-saturated = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(reg.admissionRejects.WithLabelValues("__unknown__", "unknown-slug")); got != 1 {
+		t.Errorf("__unknown__/unknown-slug = %v, want 1", got)
+	}
+}
+
+func TestRecordReject_AppearsInScrape(t *testing.T) {
+	reg := New("test")
+	reg.RecordReject("demo", "app-not-ready")
+
+	rr := scrape(t, reg)
+	if !strings.Contains(rr, `shinyhub_admission_rejects_total{reason="app-not-ready",slug="demo"}`) {
+		t.Errorf("scrape missing admission-rejects series:\n%s", rr)
+	}
+}
