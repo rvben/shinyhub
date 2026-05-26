@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/worker/api"
 )
@@ -157,5 +158,80 @@ func TestReplicaServer_StartStreamsResultThenLogs(t *testing.T) {
 	}
 	if len(rt.startParams.SharedMounts) != 1 || rt.startParams.SharedMounts[0].HostPath == "" {
 		t.Errorf("shared mount not resolved to worker-local path: %+v", rt.startParams.SharedMounts)
+	}
+}
+
+func withURLParam(r *http.Request, key, val string) *http.Request {
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add(key, val)
+	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+}
+
+func TestReplicaServer_SignalWaitStats(t *testing.T) {
+	dir := t.TempDir()
+	rt := &fakeRuntime{}
+	srv := NewReplicaServer(ReplicaServerConfig{
+		Runtime: rt, DataDir: dir, NodeID: "node-a", Advertise: "w:8443",
+		AllocatePort: func() int { return 49001 },
+	})
+	// Seed a record as if a replica were started.
+	srv.mu.Lock()
+	srv.byContainer["c-1"] = &replicaRecord{token: "tok", containerID: "c-1", handle: process.RunHandle{ContainerID: "c-1"}, hostPort: 49001}
+	srv.mu.Unlock()
+
+	// Signal
+	sb, _ := json.Marshal(api.SignalRequest{Signal: int(syscall.SIGTERM)})
+	req := httptest.NewRequest(http.MethodPost, "/v1/replicas/c-1/signal", bytes.NewReader(sb))
+	req = withURLParam(req, "container", "c-1")
+	rec := httptest.NewRecorder()
+	srv.handleSignal(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("signal status = %d", rec.Code)
+	}
+
+	// Stats
+	req = httptest.NewRequest(http.MethodGet, "/v1/replicas/c-1/stats", nil)
+	req = withURLParam(req, "container", "c-1")
+	rec = httptest.NewRecorder()
+	srv.handleStats(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats status = %d", rec.Code)
+	}
+	var stats api.StatsResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if stats.CPUPercent != 1.5 || stats.RSSBytes != 2048 {
+		t.Errorf("stats = %+v, want {CPUPercent:1.5 RSSBytes:2048}", stats)
+	}
+
+	// Unknown container is rejected.
+	req = httptest.NewRequest(http.MethodGet, "/v1/replicas/nope/stats", nil)
+	req = withURLParam(req, "container", "nope")
+	rec = httptest.NewRecorder()
+	srv.handleStats(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown container stats status = %d, want 404", rec.Code)
+	}
+
+	// Wait: seed both tables, then wait removes the replica from both.
+	srv.mu.Lock()
+	srv.byContainer["c-2"] = &replicaRecord{token: "tok2", containerID: "c-2", handle: process.RunHandle{ContainerID: "c-2"}, hostPort: 49002}
+	srv.byToken["tok2"] = srv.byContainer["c-2"]
+	srv.mu.Unlock()
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/replicas/c-2/wait", nil)
+	req = withURLParam(req, "container", "c-2")
+	rec = httptest.NewRecorder()
+	srv.handleWait(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("wait status = %d, want 204", rec.Code)
+	}
+	srv.mu.RLock()
+	_, okC := srv.byContainer["c-2"]
+	_, okT := srv.byToken["tok2"]
+	srv.mu.RUnlock()
+	if okC || okT {
+		t.Errorf("wait did not remove replica from both tables: byContainer=%v byToken=%v", okC, okT)
 	}
 }

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"sync"
+	"syscall"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/storage"
@@ -206,4 +208,103 @@ func (s *replicaServer) handleStart(w http.ResponseWriter, r *http.Request) {
 	// runtime or the request context ends. The runtime drives writes into logw
 	// for its lifetime; block until the client disconnects.
 	<-r.Context().Done()
+}
+
+// lookupContainer resolves a tracked replica by its worker-local container id.
+func (s *replicaServer) lookupContainer(id string) (*replicaRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok := s.byContainer[id]
+	return rec, ok
+}
+
+func (s *replicaServer) handleSignal(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "container")
+	rec, ok := s.lookupContainer(id)
+	if !ok {
+		http.Error(w, "unknown container", http.StatusNotFound)
+		return
+	}
+	var req api.SignalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.runtime.Signal(rec.handle, syscall.Signal(req.Signal)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *replicaServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "container")
+	rec, ok := s.lookupContainer(id)
+	if !ok {
+		http.Error(w, "unknown container", http.StatusNotFound)
+		return
+	}
+	cpu, rss, err := s.runtime.Stats(r.Context(), rec.handle)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(api.StatsResult{CPUPercent: cpu, RSSBytes: rss})
+}
+
+func (s *replicaServer) handleWait(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "container")
+	rec, ok := s.lookupContainer(id)
+	if !ok {
+		http.Error(w, "unknown container", http.StatusNotFound)
+		return
+	}
+	// Wait reports completion through error alone; it does not surface an exit
+	// code. The caller uses this purely to detect that the replica has stopped.
+	if err := s.runtime.Wait(r.Context(), rec.handle); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Replica has exited: drop it from the tables.
+	s.mu.Lock()
+	delete(s.byContainer, rec.containerID)
+	delete(s.byToken, rec.token)
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRunOnce runs a job to completion, streaming logs as NDJSON FrameLog
+// frames and finishing with a FrameResult carrying the ExitResult.
+func (s *replicaServer) handleRunOnce(w http.ResponseWriter, r *http.Request) {
+	var reqBody api.ReplicaStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	hostPort := s.allocatePort()
+	params, err := s.buildStartParams(reqBody, hostPort)
+	if err != nil {
+		http.Error(w, "provision failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(w)
+	flusher, _ := w.(http.Flusher)
+	logw := &frameLogWriter{enc: enc, flusher: flusher}
+
+	info, err := s.runtime.RunOnce(r.Context(), params, logw)
+	if err != nil {
+		_ = enc.Encode(api.Frame{Kind: api.FrameError, Error: err.Error()})
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+	resultData, _ := json.Marshal(api.ExitResult{Code: info.Code, Signaled: info.Signaled})
+	_ = enc.Encode(api.Frame{Kind: api.FrameResult, Data: resultData})
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
