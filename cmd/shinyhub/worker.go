@@ -74,7 +74,14 @@ func newWorkerCmd() *cobra.Command {
 				NodeID:    ag.NodeID(),
 				Advertise: advertiseAddr,
 			})
-			_ = replicas // consumed when the inbound mTLS server is wired
+			agentSrv := worker.NewAgentServer(worker.AgentServerConfig{
+				ListenAddr: advertiseAddr,
+				ServerCert: ag.IssuedCert(),
+				ClientCAs:  ag.CAPool(),
+				NodeID:     ag.NodeID(),
+				Replicas:   replicas,
+			})
+			ag.ServeFunc = agentSrv.Serve
 			return ag.Run(ctx, 10*time.Second)
 		},
 	}
