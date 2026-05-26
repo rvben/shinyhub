@@ -74,6 +74,9 @@ func newWorkerCmd() *cobra.Command {
 				NodeID:    ag.NodeID(),
 				Advertise: advertiseAddr,
 			})
+			if err := replicas.RebuildFromContainers(); err != nil {
+				slog.Warn("agent: rebuild data-plane table from containers", "err", err)
+			}
 			agentSrv := worker.NewAgentServer(worker.AgentServerConfig{
 				ListenAddr: advertiseAddr,
 				ServerCert: ag.IssuedCert(),

@@ -289,6 +289,13 @@ func (r *DockerRuntime) InspectPID(containerID string) (int, error) {
 	return state.Pid, nil
 }
 
+// PublishedHostPort returns the host port the container's published bind port
+// maps to, or 0 when nothing is published. The data-plane proxy uses this to
+// rebuild its target after an agent restart re-adopts a running container.
+func (r *DockerRuntime) PublishedHostPort(containerID string) (int, error) {
+	return r.client.publishedHostPort(containerID)
+}
+
 // imageForCommand selects the base image based on the command.
 // uv → Python image; Rscript → R image.
 func (r *DockerRuntime) imageForCommand(cmd []string) string {

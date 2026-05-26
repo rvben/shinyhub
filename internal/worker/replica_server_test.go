@@ -241,6 +241,68 @@ func TestReplicaServer_SignalWaitStats(t *testing.T) {
 	}
 }
 
+func TestReplicaServer_RebuildFromContainers(t *testing.T) {
+	dir := t.TempDir()
+	rt := &fakeLister{
+		containers: []process.ContainerInfo{
+			{ID: "c-1", Labels: map[string]string{
+				"shinyhub.slug": "app", "shinyhub.replica_index": "0",
+			}},
+			// A one-shot job container (no replica_index) must be ignored.
+			{ID: "job-1", Labels: map[string]string{"shinyhub.slug": "app"}},
+		},
+		hostPorts: map[string]int{"c-1": 49001},
+	}
+	srv := NewReplicaServer(ReplicaServerConfig{
+		Runtime: rt, DataDir: dir, NodeID: "node-a", Advertise: "w:8443",
+		AllocatePort: func() int { return 49001 },
+	})
+
+	if err := srv.RebuildFromContainers(); err != nil {
+		t.Fatalf("RebuildFromContainers: %v", err)
+	}
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	rec, ok := srv.byContainer["c-1"]
+	if !ok {
+		t.Fatal("replica container c-1 not re-adopted")
+	}
+	if rec.token == "" {
+		t.Error("re-adopted container has no token")
+	}
+	if rec.hostPort != 49001 {
+		t.Errorf("re-adopted hostPort = %d, want 49001", rec.hostPort)
+	}
+	if srv.byToken[rec.token] != rec {
+		t.Error("byToken not rebuilt consistently with byContainer")
+	}
+	if _, ok := srv.byContainer["job-1"]; ok {
+		t.Error("one-shot job container should not be re-adopted as a replica")
+	}
+}
+
+func TestReplicaServer_DataPlaneUnresolvedPortReturns503(t *testing.T) {
+	dir := t.TempDir()
+	srv := NewReplicaServer(ReplicaServerConfig{
+		Runtime: &fakeRuntime{}, DataDir: dir, NodeID: "node-a", Advertise: "w:8443",
+		AllocatePort: func() int { return 0 },
+	})
+	srv.mu.Lock()
+	srv.byToken["tok"] = &replicaRecord{token: "tok", containerID: "c-1"} // hostPort 0
+	srv.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/data/tok/health", nil)
+	req = withURLParam(req, "token", "tok")
+	req = withURLParam(req, "*", "health")
+	rec := httptest.NewRecorder()
+	srv.handleData(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
 func TestReplicaServer_DataPlaneProxiesToHostPort(t *testing.T) {
 	// Backend stands in for the published container port on the worker.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

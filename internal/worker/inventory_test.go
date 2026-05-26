@@ -13,16 +13,16 @@ import (
 	"github.com/rvben/shinyhub/internal/worker/api"
 )
 
-// fakeLister is a fakeRuntime that also lists containers, standing in for the
-// worker DockerRuntime during inventory tests.
+// fakeLister is a fakeRuntime that also lists containers and resolves published
+// ports, standing in for the worker DockerRuntime during inventory and rebuild tests.
 type fakeLister struct {
 	fakeRuntime
 	containers []process.ContainerInfo
+	hostPorts  map[string]int
 }
 
-func (f *fakeLister) ListByLabel(string) ([]process.ContainerInfo, error) {
-	return f.containers, nil
-}
+func (f *fakeLister) ListByLabel(string) ([]process.ContainerInfo, error) { return f.containers, nil }
+func (f *fakeLister) PublishedHostPort(id string) (int, error)            { return f.hostPorts[id], nil }
 
 func TestReplicaServer_Inventory_ReturnsLabelsAndTunnelURL(t *testing.T) {
 	dir := t.TempDir()

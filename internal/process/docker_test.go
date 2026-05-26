@@ -570,6 +570,44 @@ func TestHostPublishPort_FallsBackToBindPort(t *testing.T) {
 	}
 }
 
+func TestDockerRuntime_PublishedHostPort(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/c-1/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"NetworkSettings": map[string]any{
+				"Ports": map[string]any{
+					"8080/tcp": []map[string]string{{"HostIp": "127.0.0.1", "HostPort": "49001"}},
+				},
+			},
+		})
+	})
+	rt := newDockerRuntimeWithServer(t, mux)
+	port, err := rt.PublishedHostPort("c-1")
+	if err != nil {
+		t.Fatalf("PublishedHostPort: %v", err)
+	}
+	if port != 49001 {
+		t.Errorf("port = %d, want 49001", port)
+	}
+}
+
+func TestDockerRuntime_PublishedHostPort_NonePublished(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/c-2/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+		})
+	})
+	rt := newDockerRuntimeWithServer(t, mux)
+	port, err := rt.PublishedHostPort("c-2")
+	if err != nil {
+		t.Fatalf("PublishedHostPort: %v", err)
+	}
+	if port != 0 {
+		t.Errorf("port = %d, want 0", port)
+	}
+}
+
 func TestDockerRuntime_RunOnce_SharedMountIsReadOnly(t *testing.T) {
 	rt := dockerRuntimeWithImage(t, "alpine:3")
 	sourceData := t.TempDir()

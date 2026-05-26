@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -323,6 +324,10 @@ func (s *replicaServer) handleData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown replica", http.StatusNotFound)
 		return
 	}
+	if rec.hostPort == 0 {
+		http.Error(w, "replica port not resolved", http.StatusServiceUnavailable)
+		return
+	}
 
 	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", rec.hostPort)}
 	rp := httputil.NewSingleHostReverseProxy(target)
@@ -333,6 +338,57 @@ func (s *replicaServer) handleData(w http.ResponseWriter, r *http.Request) {
 	r.URL.RawPath = ""
 
 	rp.ServeHTTP(w, r)
+}
+
+// portResolver is the optional runtime capability used to recover a re-adopted
+// container's published host port after an agent restart. *process.DockerRuntime
+// satisfies it.
+type portResolver interface {
+	PublishedHostPort(containerID string) (int, error)
+}
+
+// RebuildFromContainers re-adopts managed replica containers after an agent
+// restart. The byContainer/byToken tables start empty on restart while managed
+// containers may still be running; this enumerates them, mints a fresh
+// data-plane token per replica, and resolves each container's published host
+// port so inventory reports a tunnel URL and the data plane routes again.
+// One-shot job containers (no replica_index label) are skipped, and any
+// container already tracked is left untouched.
+func (s *replicaServer) RebuildFromContainers() error {
+	lister, ok := s.runtime.(containerLister)
+	if !ok {
+		return nil
+	}
+	containers, err := lister.ListByLabel(`{"label":["shinyhub.managed=true"]}`)
+	if err != nil {
+		return err
+	}
+	resolver, _ := s.runtime.(portResolver)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range containers {
+		if _, isReplica := c.Labels["shinyhub.replica_index"]; !isReplica {
+			continue
+		}
+		if _, already := s.byContainer[c.ID]; already {
+			continue
+		}
+		token, err := newToken()
+		if err != nil {
+			return err
+		}
+		rec := &replicaRecord{token: token, containerID: c.ID}
+		if resolver != nil {
+			if port, err := resolver.PublishedHostPort(c.ID); err != nil {
+				slog.Warn("agent: resolve published host port for re-adopted container", "container", c.ID, "err", err)
+			} else {
+				rec.hostPort = port
+			}
+		}
+		s.byContainer[c.ID] = rec
+		s.byToken[token] = rec
+	}
+	return nil
 }
 
 // Routes registers the replica-control and data-plane endpoints on r. The agent
