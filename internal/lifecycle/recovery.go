@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -127,6 +128,22 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		return cs
 	}
 
+	// Query each remote tier's agent inventory at most once, shared across every
+	// app that places replicas on that tier.
+	remoteInventory := map[string][]process.InventoryItem{}
+	getInventory := func(tier string, inv process.ReplicaInventory) []process.InventoryItem {
+		if items, ok := remoteInventory[tier]; ok {
+			return items
+		}
+		items, err := inv.Inventory(context.Background())
+		if err != nil {
+			slog.Error("recovery: remote inventory", "tier", tier, "err", err)
+			items = nil
+		}
+		remoteInventory[tier] = items
+		return items
+	}
+
 	for _, app := range apps {
 		reps, err := store.ListReplicas(app.ID)
 		if err != nil || len(reps) == 0 {
@@ -139,7 +156,18 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 
 		anyAlive := false
 		for _, r := range reps {
-			if lister, ok := mgr.RuntimeForTier(r.Tier).(ContainerLister); ok {
+			if r.Status == db.ReplicaStatusLost {
+				// A lost replica is never re-adopted; the next deploy re-places it.
+				continue
+			}
+			rt := mgr.RuntimeForTier(r.Tier)
+			if inv, ok := rt.(process.ReplicaInventory); ok {
+				if recoverRemoteReplica(mgr, prx, app, r, getInventory(r.Tier, inv)) {
+					anyAlive = true
+				}
+				continue
+			}
+			if lister, ok := rt.(ContainerLister); ok {
 				if recoverContainerReplica(store, mgr, prx, app, r, lister, listContainers(lister)) {
 					anyAlive = true
 				}

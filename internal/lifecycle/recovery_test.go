@@ -137,7 +137,6 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx, 0) // must not panic
 
-
 	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
 		t.Fatal(err)
@@ -530,6 +529,140 @@ func TestRecoveryRegistersPersistedEndpointURL(t *testing.T) {
 
 	if got := prx.ReplicaTargetURL("rec-endpoint", 0); got != endpoint {
 		t.Fatalf("recovered replica registered %q; want stored endpoint %q", got, endpoint)
+	}
+}
+
+// fakeRemoteRuntime is a process.Runtime that also implements
+// process.ReplicaInventory, standing in for a remote tier whose replicas live
+// on a separate worker and are reconciled from the agent inventory.
+type fakeRemoteRuntime struct {
+	items []process.InventoryItem
+}
+
+func (f *fakeRemoteRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{}, nil
+}
+func (f *fakeRemoteRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
+func (f *fakeRemoteRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
+func (f *fakeRemoteRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (f *fakeRemoteRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (f *fakeRemoteRuntime) HostPreparesDeps() bool    { return false }
+func (f *fakeRemoteRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (f *fakeRemoteRuntime) HostProvidesAppData() bool { return true }
+func (f *fakeRemoteRuntime) Inventory(context.Context) ([]process.InventoryItem, error) {
+	return f.items, nil
+}
+
+func TestRecoverProcesses_RemoteTierAdoptsByDeploymentID(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "remote-app")
+
+	depID := int64(7)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running",
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-a", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='remote-app'`)
+
+	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
+		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok",
+			Labels: map[string]string{
+				"shinyhub.slug": "remote-app", "shinyhub.replica_index": "0",
+				"shinyhub.deployment_id": "7",
+			}},
+	}}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	info, ok := mgr.GetReplica("remote-app", 0)
+	if !ok {
+		t.Fatal("expected remote replica 0 adopted from inventory")
+	}
+	if info.EndpointURL != "https://w:8443/v1/data/tok" {
+		t.Errorf("adopted EndpointURL = %q, want inventory URL", info.EndpointURL)
+	}
+	if got := prx.ReplicaTargetURL("remote-app", 0); got != "https://w:8443/v1/data/tok" {
+		t.Errorf("proxy target = %q, want inventory URL", got)
+	}
+	a, _ := store.GetAppBySlug("remote-app")
+	if a.Status != "running" {
+		t.Errorf("expected app running, got %s", a.Status)
+	}
+}
+
+func TestRecoverProcesses_RemoteStaleDeploymentNotAdopted(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "stale-app")
+
+	depID := int64(8) // current deployment is 8
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running",
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-a", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='stale-app'`)
+
+	// Inventory has a container for slug+index but from a superseded deployment.
+	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
+		{ContainerID: "c-old", Running: true, URL: "https://w:8443/v1/data/old",
+			Labels: map[string]string{
+				"shinyhub.slug": "stale-app", "shinyhub.replica_index": "0",
+				"shinyhub.deployment_id": "5",
+			}},
+	}}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	if _, ok := mgr.GetReplica("stale-app", 0); ok {
+		t.Error("stale-deployment container must not be adopted as current")
+	}
+}
+
+func TestRecoverProcesses_RemoteLostReplicaSkipped(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "lost-app")
+
+	depID := int64(7)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost,
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-a", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='lost-app'`)
+
+	// A matching live container exists, but a lost replica must be skipped.
+	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
+		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok",
+			Labels: map[string]string{
+				"shinyhub.slug": "lost-app", "shinyhub.replica_index": "0",
+				"shinyhub.deployment_id": "7",
+			}},
+	}}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	if _, ok := mgr.GetReplica("lost-app", 0); ok {
+		t.Error("lost replica must not be adopted")
 	}
 }
 
