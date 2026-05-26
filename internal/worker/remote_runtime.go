@@ -338,4 +338,5 @@ func (r *remoteRuntime) RunOnce(ctx context.Context, p process.StartParams, logW
 var (
 	_ process.Runtime            = (*remoteRuntime)(nil)
 	_ process.ReplicaTransporter = (*remoteRuntime)(nil)
+	_ process.ReplicaInventory   = (*remoteRuntime)(nil)
 )

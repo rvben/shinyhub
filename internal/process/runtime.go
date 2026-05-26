@@ -66,6 +66,23 @@ type ReplicaTransporter interface {
 	ReplicaTransport() http.RoundTripper
 }
 
+// InventoryItem describes one managed container as reported by a remote
+// runtime's inventory. Recovery reconciles a replica row against these items by
+// matching the slug/replica_index/deployment_id labels, then routes to URL.
+type InventoryItem struct {
+	ContainerID string
+	Labels      map[string]string
+	Running     bool
+	URL         string
+}
+
+// ReplicaInventory is an optional capability for runtimes that can enumerate
+// their live replicas without a host PID (remote workers). RecoverProcesses
+// uses it to reconcile remote tiers by deployment id instead of InspectPID.
+type ReplicaInventory interface {
+	Inventory(ctx context.Context) ([]InventoryItem, error)
+}
+
 // ExitInfo summarizes how a one-shot process ended.
 type ExitInfo struct {
 	Code     int  // exit code; -1 if Signaled

@@ -338,6 +338,7 @@ func (s *replicaServer) handleData(w http.ResponseWriter, r *http.Request) {
 // Routes registers the replica-control and data-plane endpoints on r. The agent
 // mounts this on its mTLS listener.
 func (s *replicaServer) Routes(r chi.Router) {
+	r.Get("/v1/inventory", s.handleInventory)
 	r.Post("/v1/replicas", s.handleStart)
 	r.Post("/v1/replicas/run-once", s.handleRunOnce)
 	r.Post("/v1/replicas/{container}/signal", s.handleSignal)

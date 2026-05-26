@@ -46,3 +46,11 @@ type ExitResult struct {
 	Code     int  `json:"code"`
 	Signaled bool `json:"signaled"`
 }
+
+// InventoryItem is the wire form of a managed container in the agent inventory.
+type InventoryItem struct {
+	ContainerID string            `json:"container_id"`
+	Labels      map[string]string `json:"labels"`
+	Running     bool              `json:"running"`
+	URL         string            `json:"url"`
+}
