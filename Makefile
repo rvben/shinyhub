@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js lint run dev goreleaser-check
+.PHONY: build clean test test-go test-js test-remote-e2e lint run dev goreleaser-check
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -17,6 +17,14 @@ test-js:
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required for UI tests)"; exit 1; }
 	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
 	node --test 'internal/ui/jstests/*.test.js'
+
+# test-remote-e2e launches a control plane and a real `shinyhub worker` against
+# the local Docker daemon, deploys an app onto the remote tier with two
+# replicas, and asserts the full data path plus recovery behaviors (bundle
+# dedup, agent-tunnel routing, control-plane-restart re-adoption, worker-down
+# lost-replica handling). Requires a working Docker daemon.
+test-remote-e2e:
+	./scripts/remote-e2e.sh
 
 lint:
 	go vet ./...
