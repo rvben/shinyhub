@@ -766,16 +766,26 @@ func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 	return lc, nil
 }
 
+// Docker runtime defaults, shared between the control-plane config loader and
+// the standalone worker command so both agree on the same baseline images,
+// socket, and network mode without duplicating the literals.
+const (
+	DefaultDockerSocket = "/var/run/docker.sock"
+	DefaultPythonImage  = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+	DefaultRImage       = "rocker/r-base"
+	DefaultNetworkMode  = "bridge"
+)
+
 func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	rc := RuntimeConfig{
 		Mode: "native",
 		Docker: DockerRuntimeConfig{
-			Socket: "/var/run/docker.sock",
+			Socket: DefaultDockerSocket,
 			Images: DockerImages{
-				Python: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
-				R:      "rocker/r-base",
+				Python: DefaultPythonImage,
+				R:      DefaultRImage,
 			},
-			NetworkMode: "bridge",
+			NetworkMode: DefaultNetworkMode,
 		},
 	}
 	if r.Mode != "" {

@@ -30,6 +30,14 @@ type Config struct {
 	DataDir       string
 	Version       string
 	Name          string
+	// CAPEM pins the control plane's CA certificate for the join handshake.
+	// The worker has no CA bundle until register completes, so without this
+	// the register TLS connection verifies against the host's system roots and
+	// fails for the internal self-signed CA. When empty, system roots are used
+	// (sufficient only when the worker API is fronted by a publicly trusted
+	// certificate). After register, the CA bundle the control plane returns
+	// pins every subsequent mTLS call.
+	CAPEM []byte
 }
 
 // Agent is a running worker: it holds its identity (node id + signed cert), an
@@ -89,7 +97,7 @@ func Bootstrap(ctx context.Context, cfg Config) (*Agent, error) {
 		Tier:          cfg.Tier,
 		Version:       cfg.Version,
 		CSRPEM:        string(csrPEM),
-	}, nil)
+	}, cfg.CAPEM)
 	if err != nil {
 		return nil, fmt.Errorf("register: %w", err)
 	}

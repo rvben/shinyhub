@@ -31,6 +31,10 @@ func newWorkerCmd() *cobra.Command {
 		dataDir       string
 		name          string
 		dockerSocket  string
+		caFile        string
+		pythonImage   string
+		rImage        string
+		networkMode   string
 	)
 	cmd := &cobra.Command{
 		Use:   "worker",
@@ -42,6 +46,17 @@ func newWorkerCmd() *cobra.Command {
 			if token == "" {
 				return fmt.Errorf("--token is required")
 			}
+			if caFile == "" {
+				caFile = os.Getenv("SHINYHUB_WORKER_CA")
+			}
+			var caPEM []byte
+			if caFile != "" {
+				b, err := os.ReadFile(caFile)
+				if err != nil {
+					return fmt.Errorf("read ca file: %w", err)
+				}
+				caPEM = b
+			}
 			ctx := cmd.Context()
 			ag, err := agent.Bootstrap(ctx, agent.Config{
 				ServerURL:     serverURL,
@@ -51,20 +66,13 @@ func newWorkerCmd() *cobra.Command {
 				DataDir:       dataDir,
 				Name:          name,
 				Version:       version,
+				CAPEM:         caPEM,
 			})
 			if err != nil {
 				return fmt.Errorf("worker bootstrap: %w", err)
 			}
 			slog.Info("worker joined control plane", "node_id", ag.NodeID(), "tier", tier)
-			cfg, err := config.Load(serverConfigPath())
-			if err != nil {
-				return fmt.Errorf("load config: %w", err)
-			}
-			rt, err := process.NewDockerRuntime(dockerSocket,
-				cfg.Runtime.Docker.Images.Python,
-				cfg.Runtime.Docker.Images.R,
-				cfg.Runtime.Docker.NetworkMode,
-			)
+			rt, err := process.NewDockerRuntime(dockerSocket, pythonImage, rImage, networkMode)
 			if err != nil {
 				return fmt.Errorf("docker runtime: %w", err)
 			}
@@ -95,7 +103,11 @@ func newWorkerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tier, "tier", "", "tier this worker serves")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "./worker-data", "worker-local data root")
 	cmd.Flags().StringVar(&name, "name", "", "optional human-readable worker name")
-	cmd.Flags().StringVar(&dockerSocket, "docker-socket", "/var/run/docker.sock", "Docker socket for the local runtime")
+	cmd.Flags().StringVar(&dockerSocket, "docker-socket", config.DefaultDockerSocket, "Docker socket for the local runtime")
+	cmd.Flags().StringVar(&caFile, "ca-file", "", "path to the control plane's CA certificate (PEM) to trust at join; overrides SHINYHUB_WORKER_CA. Required for the internal self-signed CA; omit only when the worker API is fronted by a publicly trusted certificate")
+	cmd.Flags().StringVar(&pythonImage, "python-image", config.DefaultPythonImage, "Docker image used to run Python/Shiny apps")
+	cmd.Flags().StringVar(&rImage, "r-image", config.DefaultRImage, "Docker image used to run R/Shiny apps")
+	cmd.Flags().StringVar(&networkMode, "network-mode", config.DefaultNetworkMode, "Docker network mode for app containers (bridge or host)")
 	return cmd
 }
 
