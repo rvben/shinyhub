@@ -1432,6 +1432,174 @@ func TestProxy_ReadyProbe_DoesNotRecordActivity(t *testing.T) {
 	}
 }
 
+// TestProxy_ReadyProbe_UnknownSlugReturns404 asserts that when the slugExists
+// predicate confidently reports the slug is unknown, the readiness probe
+// returns 404 (not 503). Collapsing "no such app" into the cold-start 503 lets
+// a smoke test pass against a server whose registry is empty — exactly the
+// deploy regression external monitoring is meant to catch. The body identifies
+// the slug so the caller knows which app this server is missing.
+func TestProxy_ReadyProbe_UnknownSlugReturns404(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/missing/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for unknown slug", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := rec.Body.String(); got != `{"error":"unknown app","slug":"missing"}` {
+		t.Errorf("body = %q, want {\"error\":\"unknown app\",\"slug\":\"missing\"}", got)
+	}
+}
+
+// TestProxy_ReadyProbe_UnknownSlugReturns404RegardlessOfMethod pins the
+// precedence: an unknown slug is 404 for any method, not 405. A method
+// complaint about a resource that doesn't exist on this server is noise — the
+// caller's first problem is that the app isn't here. Known slugs still get the
+// 405 method gate (see TestProxy_ReadyProbe_MethodNotAllowed).
+func TestProxy_ReadyProbe_UnknownSlugReturns404RegardlessOfMethod(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) (bool, error) { return false, nil })
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/app/missing/.shinyhub/ready", nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404 for unknown slug", method, rec.Code)
+		}
+	}
+}
+
+// TestProxy_ReadyProbe_KnownNotReadyStays503 asserts that a known app that has
+// not yet completed a WS handshake still returns the cold-start 503 — the 404
+// path must fire only for slugs the predicate confidently rejects.
+func TestProxy_ReadyProbe_KnownNotReadyStays503(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) (bool, error) { return true, nil })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/known/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for known-but-not-ready app", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"ready":false}` {
+		t.Errorf("body = %q, want {\"ready\":false}", got)
+	}
+}
+
+// TestProxy_ReadyProbe_LookupErrorStays503 guards the fail-open contract: when
+// the predicate cannot tell whether the slug exists (DB unavailable, ctx
+// cancelled), the probe must NOT 404. A momentary lookup failure 404ing a real
+// app's readiness probe would surface as a phantom "app deleted" during normal
+// operation. Falling through to the cold-start 503 is the safe default.
+func TestProxy_ReadyProbe_LookupErrorStays503(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) (bool, error) {
+		return false, errors.New("database is locked")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/app/maybe-real/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 on lookup error (fail-open)", rec.Code)
+	}
+}
+
+// TestProxy_ReadyProbe_NilPredicateStays503 pins the legacy default: with no
+// slugExists predicate wired the proxy cannot distinguish known from unknown,
+// so it must preserve the pre-existing cold-start 503 rather than 404 every
+// slug.
+func TestProxy_ReadyProbe_NilPredicateStays503(t *testing.T) {
+	p := proxy.New()
+
+	req := httptest.NewRequest(http.MethodGet, "/app/whatever/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 with nil predicate", rec.Code)
+	}
+}
+
+// TestProxy_ReadyProbe_UnknownSlugHEADHasNoBody ensures the 404 path honours
+// HEAD: status only, no body, so HEAD-based health checkers still parse the
+// status line correctly.
+func TestProxy_ReadyProbe_UnknownSlugHEADHasNoBody(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) (bool, error) { return false, nil })
+
+	req := httptest.NewRequest(http.MethodHead, "/app/missing/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD body should be empty, got %d bytes", rec.Body.Len())
+	}
+}
+
+// TestProxy_ReadyProbe_ReadyShortCircuitsExistenceCheck pins the ordering
+// decision: a slug that has handshaked a WebSocket is serving traffic and must
+// report 200 even if the existence predicate would call it unknown. Readiness
+// wins because a live replica is ground truth that the app is present — 404ing
+// something actively serving would be a worse lie than any registry skew. This
+// also keeps the steady-state 200 path off the predicate's database lookup.
+func TestProxy_ReadyProbe_ReadyShortCircuitsExistenceCheck(t *testing.T) {
+	p := proxy.New()
+	var predicateCalls int
+	p.SetSlugExists(func(slug string) (bool, error) {
+		predicateCalls++
+		return false, nil // would say "unknown" if consulted
+	})
+	p.MarkWSReady("demo")
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a ready slug", rec.Code)
+	}
+	if predicateCalls != 0 {
+		t.Errorf("existence predicate called %d times; a ready slug must skip the lookup", predicateCalls)
+	}
+}
+
+// TestProxy_UnknownSlugBodyIdentifiesSlug asserts the regular /app/<slug>/ miss
+// path returns the same slug-identifying JSON 404 as the probe, so any unknown
+// slug under /app/ produces a consistent, machine-readable signal.
+func TestProxy_UnknownSlugBodyIdentifiesSlug(t *testing.T) {
+	p := proxy.New()
+	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/typo/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := rec.Body.String(); got != `{"error":"unknown app","slug":"typo"}` {
+		t.Errorf("body = %q, want {\"error\":\"unknown app\",\"slug\":\"typo\"}", got)
+	}
+}
+
 // TestRegisterReplica_PrependsTargetPathAndUsesTransport verifies that a remote
 // tunnel URL's path prefix is prepended to the app-relative path and that the
 // caller-supplied transport is used for all outbound requests.
