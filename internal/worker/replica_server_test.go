@@ -1,13 +1,20 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/worker/api"
 )
 
 // fakeRuntime records Start params and returns a canned endpoint, letting the
@@ -68,5 +75,87 @@ func TestNewReplicaServer_AllocatesPortAndProvisionsAppData(t *testing.T) {
 	port := srv.allocatePort()
 	if port != 49001 {
 		t.Errorf("allocatePort = %d, want 49001", port)
+	}
+}
+
+func TestReplicaServer_StartStreamsResultThenLogs(t *testing.T) {
+	dir := t.TempDir()
+	rt := &fakeRuntime{startURL: "http://127.0.0.1:49001"}
+	srv := NewReplicaServer(ReplicaServerConfig{
+		Runtime:      rt,
+		DataDir:      dir,
+		NodeID:       "node-a",
+		Advertise:    "worker.example:8443",
+		AllocatePort: func() int { return 49001 },
+	})
+
+	body, _ := json.Marshal(api.ReplicaStartRequest{
+		Slug: "app", Index: 0, Tier: "remote",
+		Command: []string{"./server"}, BindPort: 8080,
+		SharedMountSlugs: []string{"shared"},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/replicas", bytes.NewReader(body)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() { srv.handleStart(rec, req); close(done) }()
+	// Give the handler time to write the result and log frames, then cancel so
+	// the blocking handler returns.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	dec := json.NewDecoder(rec.Body)
+	var result api.ReplicaResult
+	sawResult, sawLog := false, false
+	for {
+		var fr api.Frame
+		if err := dec.Decode(&fr); err != nil {
+			break
+		}
+		switch fr.Kind {
+		case api.FrameResult:
+			if err := json.Unmarshal(fr.Data, &result); err != nil {
+				t.Fatalf("decode result: %v", err)
+			}
+			sawResult = true
+		case api.FrameLog:
+			sawLog = true
+		}
+	}
+	if !sawResult {
+		t.Fatal("no result frame received")
+	}
+	if !sawLog {
+		t.Error("expected at least one log frame")
+	}
+	if result.NodeID != "node-a" {
+		t.Errorf("result NodeID = %q, want node-a", result.NodeID)
+	}
+	if !strings.HasPrefix(result.URL, "https://worker.example:8443/v1/data/") {
+		t.Errorf("result URL = %q, want tunnel URL", result.URL)
+	}
+
+	// Bind port is preserved into the container; host publish port is allocated.
+	if rt.startParams.Port != 8080 {
+		t.Errorf("bind Port = %d, want 8080", rt.startParams.Port)
+	}
+	if rt.startParams.HostPublishPort != 49001 {
+		t.Errorf("HostPublishPort = %d, want 49001", rt.startParams.HostPublishPort)
+	}
+	// app-data provisioned locally on the worker; shared mount resolved to a
+	// worker-local path.
+	if rt.startParams.AppDataPath == "" {
+		t.Error("AppDataPath empty: worker must provision app-data locally")
+	}
+	if len(rt.startParams.SharedMounts) != 1 || rt.startParams.SharedMounts[0].HostPath == "" {
+		t.Errorf("shared mount not resolved to worker-local path: %+v", rt.startParams.SharedMounts)
 	}
 }
