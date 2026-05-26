@@ -551,7 +551,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		close(watcherDone)
 	}()
 
-	jobsMgr, err := jobs.NewManager(rt, store, secretsKey, cfg.Storage.AppsDir, absAppDataDir)
+	jobsMgr, err := jobs.NewManager(mgr, cfg.Runtime.TierOrder(), cfg.Runtime.DefaultTierName(), store, secretsKey, cfg.Storage.AppsDir, absAppDataDir)
 	if err != nil {
 		return fmt.Errorf("init jobs manager: %w", err)
 	}

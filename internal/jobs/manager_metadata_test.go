@@ -22,7 +22,8 @@ func TestManager_Run_PassesDeploymentMetadataToRuntime(t *testing.T) {
 		{ID: 42, AppID: 10, Version: "v9", ContentDigest: "sha256:job", BundleDir: "/tmp/fake-bundle"},
 	}
 	dir := t.TempDir()
-	m, err := jobs.NewManager(rt, st, nil, dir, dir)
+	pm := process.NewManager(dir, rt)
+	m, err := jobs.NewManager(pm, nil, process.DefaultTier, st, nil, dir, dir)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

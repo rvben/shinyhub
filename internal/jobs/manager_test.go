@@ -35,7 +35,15 @@ type fakeRuntime struct {
 
 	exitInfo process.ExitInfo
 	err      error
+
+	// remote controls HostProvidesAppData: true means the host does NOT
+	// provide app data (remote runtime behavior).
+	remote bool
 }
+
+// HostProvidesAppData reports whether the host provides app data. Remote
+// fakes return false; local fakes return true (default).
+func (f *fakeRuntime) HostProvidesAppData() bool { return !f.remote }
 
 func (f *fakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	f.mu.Lock()
@@ -211,7 +219,8 @@ func makeApp() *db.App {
 func newTestManager(t *testing.T, rt *fakeRuntime, st *fakeStore) *jobs.Manager {
 	t.Helper()
 	dir := t.TempDir()
-	m, err := jobs.NewManager(rt, st, nil, dir, dir)
+	pm := process.NewManager(dir, rt)
+	m, err := jobs.NewManager(pm, nil, process.DefaultTier, st, nil, dir, dir)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -233,7 +242,8 @@ func TestManager_NormalizesRelativeAppDataDir(t *testing.T) {
 
 	// Use a relative path that is guaranteed to round-trip through filepath.Abs.
 	relative := "./relative-data-dir"
-	m, err := jobs.NewManager(rt, st, nil, t.TempDir(), relative)
+	pm := process.NewManager(t.TempDir(), rt)
+	m, err := jobs.NewManager(pm, nil, process.DefaultTier, st, nil, t.TempDir(), relative)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -264,7 +274,8 @@ func TestManager_Run_PassesAppDataPathToRuntime(t *testing.T) {
 	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
 	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
 	dir := t.TempDir()
-	m, err := jobs.NewManager(rt, st, nil, dir, dir)
+	pm := process.NewManager(dir, rt)
+	m, err := jobs.NewManager(pm, nil, process.DefaultTier, st, nil, dir, dir)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -956,5 +967,73 @@ func TestManager_Run_FailsWhenNoDeployments(t *testing.T) {
 	}
 	if rt.calls != 0 {
 		t.Errorf("expected RunOnce not to be called when no deployments, got %d calls", rt.calls)
+	}
+}
+
+// TestJobsManager_RoutesToLowestIndexedTier verifies that a job runs on the
+// lowest-indexed placement tier. When the placement map assigns replica 0 to
+// "remote" and replica 1 to "local", the lowest-indexed tier is "remote" and
+// the remote runtime must be invoked. Because the remote runtime does not
+// provide host-side app data, AppDataPath and every SharedMounts HostPath must
+// be stripped from the params while SourceSlug is preserved.
+func TestJobsManager_RoutesToLowestIndexedTier(t *testing.T) {
+	dir := t.TempDir()
+
+	defaultRT := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	remote := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, remote: true}
+
+	pm := process.NewManager(dir, defaultRT)
+	pm.RegisterRuntime("remote", remote)
+
+	app := makeApp()
+	app.ReplicaPlacement = `{"remote":1,"local":1}`
+
+	sched := makeSchedule("skip", 0)
+	st := newFakeStore(sched, app)
+	st.mounts = []*db.SharedDataMount{{SourceSlug: "shared-src"}}
+
+	m, err := jobs.NewManager(pm, []string{"remote", "local"}, "local", st, nil, dir, dir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, remote, 1, 2*time.Second)
+
+	defaultRT.mu.Lock()
+	localCalls := defaultRT.calls
+	defaultRT.mu.Unlock()
+	if localCalls != 0 {
+		t.Errorf("local runtime calls = %d, want 0 - job must not run on local when remote is lowest-indexed tier", localCalls)
+	}
+
+	remote.mu.Lock()
+	remoteCalls := remote.calls
+	params := remote.lastParams
+	remote.mu.Unlock()
+
+	if remoteCalls != 1 {
+		t.Errorf("remote runtime calls = %d, want 1", remoteCalls)
+	}
+	if params.Tier != "remote" {
+		t.Errorf("StartParams.Tier = %q, want %q", params.Tier, "remote")
+	}
+	if params.AppDataPath != "" {
+		t.Errorf("StartParams.AppDataPath = %q, want empty - remote runtime must not receive host app-data path", params.AppDataPath)
+	}
+	for i, sm := range params.SharedMounts {
+		if sm.HostPath != "" {
+			t.Errorf("SharedMounts[%d].HostPath = %q, want empty - remote runtime must not receive host mount paths", i, sm.HostPath)
+		}
+		if sm.SourceSlug == "" {
+			t.Errorf("SharedMounts[%d].SourceSlug is empty, want preserved", i)
+		}
+	}
+	if len(params.SharedMounts) == 0 {
+		t.Error("SharedMounts is empty, want at least one entry with SourceSlug=shared-src")
+	} else if params.SharedMounts[0].SourceSlug != "shared-src" {
+		t.Errorf("SharedMounts[0].SourceSlug = %q, want %q", params.SharedMounts[0].SourceSlug, "shared-src")
 	}
 }
