@@ -116,6 +116,43 @@ func TestDockerLabels_EmptyTierDefaultsToDefaultTier(t *testing.T) {
 	}
 }
 
+func TestDockerLabels_IncludeDeploymentMetadata(t *testing.T) {
+	labels := dockerLabels(StartParams{
+		Slug:          "app",
+		Index:         1,
+		Tier:          "burst",
+		DeploymentID:  7,
+		AppVersion:    "v3",
+		ContentDigest: "sha256:abc",
+	})
+	if labels[labelDeploymentID] != "7" {
+		t.Errorf("deployment_id label = %q, want 7", labels[labelDeploymentID])
+	}
+	if labels[labelAppVersion] != "v3" {
+		t.Errorf("app_version label = %q, want v3", labels[labelAppVersion])
+	}
+	if labels[labelContentDigest] != "sha256:abc" {
+		t.Errorf("content_digest label = %q, want sha256:abc", labels[labelContentDigest])
+	}
+	// Existing labels remain.
+	if labels[labelSlug] != "app" || labels[labelReplicaIndex] != "1" || labels[labelTier] != "burst" {
+		t.Errorf("base labels changed: %v", labels)
+	}
+}
+
+func TestDockerLabels_OmitEmptyDeploymentMetadata(t *testing.T) {
+	labels := dockerLabels(StartParams{Slug: "app", Index: 0})
+	if _, ok := labels[labelDeploymentID]; ok {
+		t.Error("deployment_id label present for zero DeploymentID")
+	}
+	if _, ok := labels[labelAppVersion]; ok {
+		t.Error("app_version label present for empty AppVersion")
+	}
+	if _, ok := labels[labelContentDigest]; ok {
+		t.Error("content_digest label present for empty ContentDigest")
+	}
+}
+
 func TestDockerRuntimeStart(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {

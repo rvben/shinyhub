@@ -24,28 +24,44 @@ const providerDocker = "docker"
 // recovery re-adopt the container onto the runtime registered for its tier;
 // provider records which runtime owns it.
 const (
-	labelManaged      = "shinyhub.managed"
-	labelSlug         = "shinyhub.slug"
-	labelReplicaIndex = "shinyhub.replica_index"
-	labelTier         = "shinyhub.tier"
-	labelProvider     = "shinyhub.provider"
+	labelManaged       = "shinyhub.managed"
+	labelSlug          = "shinyhub.slug"
+	labelReplicaIndex  = "shinyhub.replica_index"
+	labelTier          = "shinyhub.tier"
+	labelProvider      = "shinyhub.provider"
+	labelDeploymentID  = "shinyhub.deployment_id"
+	labelAppVersion    = "shinyhub.app_version"
+	labelContentDigest = "shinyhub.content_digest"
 )
 
 // dockerLabels builds the label set for a long-running app replica container.
 // An empty StartParams.Tier defaults to DefaultTier so every replica container
-// carries a concrete tier for recovery to route on.
+// carries a concrete tier for recovery to route on. When present, deployment_id,
+// app_version, and content_digest are stamped so recovery can reconcile by
+// deployment and reject stale containers. Zero/empty values are omitted to keep
+// the label set clean for callers that do not supply deployment metadata.
 func dockerLabels(p StartParams) map[string]string {
 	tier := p.Tier
 	if tier == "" {
 		tier = DefaultTier
 	}
-	return map[string]string{
+	labels := map[string]string{
 		labelManaged:      "true",
 		labelSlug:         p.Slug,
 		labelReplicaIndex: strconv.Itoa(p.Index),
 		labelTier:         tier,
 		labelProvider:     providerDocker,
 	}
+	if p.DeploymentID != 0 {
+		labels[labelDeploymentID] = strconv.FormatInt(p.DeploymentID, 10)
+	}
+	if p.AppVersion != "" {
+		labels[labelAppVersion] = p.AppVersion
+	}
+	if p.ContentDigest != "" {
+		labels[labelContentDigest] = p.ContentDigest
+	}
+	return labels
 }
 
 // DockerRuntime implements Runtime using the Docker Engine API.
