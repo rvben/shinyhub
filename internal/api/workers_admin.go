@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"sort"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
@@ -40,17 +39,23 @@ func toWorkerResponse(w db.Worker) workerResponse {
 
 // handleListWorkers returns the joined-worker fleet, including down and revoked
 // nodes, ordered by node id. Admin only. Returns an empty list when worker
-// hosting is disabled.
+// hosting is disabled. It reads from the store, the authoritative source for
+// per-worker metadata such as last_heartbeat: the in-memory registry index
+// tracks routing status but is not refreshed with the heartbeat timestamp the
+// store writes server-side, so listing from it would report stale liveness.
 func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
 	out := []workerResponse{}
 	if s.workerReg != nil {
-		workers := s.workerReg.Workers()
-		sort.Slice(workers, func(i, j int) bool { return workers[i].NodeID < workers[j].NodeID })
+		workers, err := s.store.ListWorkers()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
 		for _, wk := range workers {
-			out = append(out, toWorkerResponse(wk))
+			out = append(out, toWorkerResponse(*wk))
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

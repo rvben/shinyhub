@@ -152,19 +152,6 @@ func (r *Registry) Forget(nodeID string) {
 	r.mu.Unlock()
 }
 
-// Workers returns a snapshot of every known worker (including down and revoked
-// nodes) for the admin fleet view. The slice is a copy; mutating it does not
-// affect the registry's index.
-func (r *Registry) Workers() []db.Worker {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]db.Worker, 0, len(r.byID))
-	for _, w := range r.byID {
-		out = append(out, w)
-	}
-	return out
-}
-
 // Worker returns the indexed worker for a node id.
 func (r *Registry) Worker(nodeID string) (db.Worker, bool) {
 	r.mu.RLock()

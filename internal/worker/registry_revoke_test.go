@@ -157,47 +157,7 @@ func TestRegistryForgetDropsFromIndex(t *testing.T) {
 	if _, ok := reg.Worker(node.NodeID); ok {
 		t.Fatal("forgotten worker still present in the index")
 	}
-	if len(reg.Workers()) != 0 {
-		t.Fatalf("Workers() still lists a forgotten worker: %+v", reg.Workers())
-	}
 
 	// Unknown node: no panic, no effect.
 	reg.Forget("ghost")
-}
-
-// TestRegistryWorkersSnapshot asserts Workers returns every known worker
-// (including down/revoked) for the admin fleet view, decoupled from the
-// internal map.
-func TestRegistryWorkersSnapshot(t *testing.T) {
-	store := newTestStore(t)
-	reg, err := NewRegistry(store)
-	if err != nil {
-		t.Fatalf("new registry: %v", err)
-	}
-	a, _ := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
-	b, _ := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "base", Fingerprint: "bb"})
-	if err := reg.Revoke(a.NodeID); err != nil {
-		t.Fatalf("revoke: %v", err)
-	}
-
-	ws := reg.Workers()
-	if len(ws) != 2 {
-		t.Fatalf("Workers() returned %d workers, want 2", len(ws))
-	}
-	byID := map[string]db.Worker{}
-	for _, w := range ws {
-		byID[w.NodeID] = w
-	}
-	if !byID[a.NodeID].Revoked() {
-		t.Errorf("revoked worker %s not marked revoked in snapshot", a.NodeID)
-	}
-	if byID[b.NodeID].Revoked() {
-		t.Errorf("live worker %s wrongly marked revoked", b.NodeID)
-	}
-
-	// Mutating the returned slice must not affect the registry's index.
-	ws[0].Status = "mutated"
-	if w, _ := reg.Worker(ws[0].NodeID); w.Status == "mutated" {
-		t.Error("Workers() leaked a reference into the registry index")
-	}
 }

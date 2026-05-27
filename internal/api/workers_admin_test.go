@@ -90,6 +90,45 @@ func TestHandleListWorkers(t *testing.T) {
 	}
 }
 
+// TestHandleListWorkers_ReportsFreshHeartbeat asserts the fleet view reports the
+// authoritative last_heartbeat after a worker heartbeats. The registry's
+// in-memory row is not updated with the heartbeat timestamp (the store writes it
+// server-side), so listing from the stale in-memory snapshot would show an empty
+// last_heartbeat until a control-plane restart reloaded the table.
+func TestHandleListWorkers_ReportsFreshHeartbeat(t *testing.T) {
+	srv, reg, store := newWorkerAdminServer(t)
+	adminUser := ctxUser(t, store, "ops", "admin")
+
+	node, err := reg.Register(worker.RegisterParams{Tier: "burst", AdvertiseAddr: "10.0.0.5:8443"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := reg.Heartbeat(node.NodeID, "fp-1"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workers", http.NoBody)
+	req = req.WithContext(auth.WithUser(req.Context(), adminUser))
+	w := httptest.NewRecorder()
+	srv.handleListWorkers(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var got []struct {
+		NodeID        string `json:"node_id"`
+		LastHeartbeat string `json:"last_heartbeat"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, w.Body.String())
+	}
+	if len(got) != 1 {
+		t.Fatalf("listed %d workers, want 1", len(got))
+	}
+	if got[0].LastHeartbeat == "" {
+		t.Fatalf("fleet view reported empty last_heartbeat after a heartbeat; want the stored timestamp")
+	}
+}
+
 // TestHandleRevokeWorker asserts an admin can revoke a worker (excluding it from
 // routing and recording an audit event), non-admins are forbidden, and an
 // unknown node yields 404.
