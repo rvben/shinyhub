@@ -175,6 +175,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			Status string `json:"status"`
 			PID    *int   `json:"pid"`
 			Port   *int   `json:"port"`
+			Reason string `json:"reason"`
 		} `json:"replicas_status"`
 		RejectsByReason *struct {
 			WindowSeconds int               `json:"window_seconds"`
@@ -266,7 +267,11 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			if r.Port != nil {
 				port = fmt.Sprintf("%d", *r.Port)
 			}
-			fmt.Fprintf(w, "  %-6d %-10s %-8s %s\n", r.Index, r.Status, pid, port)
+			reason := ""
+			if r.Reason != "" {
+				reason = "  (" + r.Reason + ")"
+			}
+			fmt.Fprintf(w, "  %-6d %-10s %-8s %s%s\n", r.Index, r.Status, pid, port, reason)
 		}
 	}
 	return nil
