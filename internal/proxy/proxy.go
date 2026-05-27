@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -434,7 +434,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	// onto the statusRecorder so the trace span surfaces span.Error. Mirrors
 	// httputil's default handler (log + 502) and adds the capture.
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
-		log.Printf("proxy: upstream error for %s: %v", slugCopy, err)
+		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
 		}

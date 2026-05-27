@@ -455,12 +455,16 @@ func bootReplica(p Params, idx int, tier string, baseCmd []string, appType strin
 	}
 
 	if err := hc(info.EndpointURL, timeout, transport); err != nil {
-		_ = p.Manager.StopReplica(p.Slug, idx)
+		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
+			slog.Warn("deploy: stop replica after failed health check", "slug", p.Slug, "index", idx, "err", serr)
+		}
 		return Result{}, fmt.Errorf("health: %w", err)
 	}
 
 	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport); err != nil {
-		_ = p.Manager.StopReplica(p.Slug, idx)
+		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
+			slog.Warn("deploy: stop replica after failed proxy register", "slug", p.Slug, "index", idx, "err", serr)
+		}
 		return Result{}, fmt.Errorf("register: %w", err)
 	}
 	return Result{
