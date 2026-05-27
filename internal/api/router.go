@@ -281,6 +281,14 @@ func (s *Server) SetTraceBuffer(b *tracing.Buffer) { s.traceBuffer = b }
 // it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetMetrics(m *metrics.Registry) { s.metrics = m }
 
+// recordDeploy increments the deploy-outcome counter when metrics are enabled.
+// result is "success" or "failure". A no-op when metrics are disabled.
+func (s *Server) recordDeploy(result string) {
+	if s.metrics != nil {
+		s.metrics.RecordDeploy(result)
+	}
+}
+
 // SetTracer wires the OpenTelemetry tracer whose middleware records one server
 // span per API request, exported to the configured OTLP endpoint. May be nil
 // (the default) to leave server tracing disabled. Must be called before the
@@ -336,7 +344,7 @@ func (s *Server) revocationChecker() auth.RevocationChecker {
 
 func (s *Server) buildRouter() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(s.accessLog)
 	r.Use(middleware.Recoverer)
 
 	// Public endpoints

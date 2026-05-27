@@ -875,6 +875,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.restorePreviousPool(slug, &preManifestApp, prevActive)
+		s.recordDeploy("failure")
 		writeError(w, http.StatusInternalServerError, "deploy failed")
 		return
 	}
@@ -946,6 +947,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
 		slog.Error("deploy: promote deployment failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
+		s.recordDeploy("failure")
 		writeError(w, http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit")
 		return
 	}
@@ -958,8 +960,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			// Phase B is post-commit: bundle is live, deployment row is durable.
 			// Failure leaves schedules incomplete; the next deploy converges
-			// (idempotent upserts).
+			// (idempotent upserts). The client still sees HTTP 500, so the
+			// deploy metric records failure to match the client-visible result.
 			slog.Error("manifest [[schedule]] apply failed", "slug", slug, "err", err)
+			s.recordDeploy("failure")
 			writeError(w, http.StatusInternalServerError, "schedule apply failed: "+err.Error())
 			return
 		}
@@ -975,6 +979,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
+		s.recordDeploy("failure")
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -1004,6 +1009,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if !manifestSummary.IsEmpty() {
 		resp.Manifest = &manifestSummary
 	}
+	// Record success only here, after every remaining error path has passed, so
+	// shinyhub_deploys_total{result} matches the client-visible HTTP result.
+	s.recordDeploy("success")
 	writeJSON(w, http.StatusOK, resp)
 }
 
