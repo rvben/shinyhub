@@ -2172,6 +2172,22 @@ func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error
 	return err
 }
 
+// UpdateReplicaEndpoint sets the routing endpoint URL of a single replica
+// identified by (app_id, idx) and refreshes its updated_at timestamp. Recovery
+// uses it after re-adopting a remote replica so the stored endpoint_url tracks
+// the URL the proxy route was actually registered with: the worker-loss path
+// deregisters a slot only while the live route still equals the row's
+// endpoint_url, so a stale stored value would leave a dead worker routable.
+func (s *Store) UpdateReplicaEndpoint(appID int64, index int, endpointURL string) error {
+	_, err := s.db.Exec(
+		`UPDATE replicas SET endpoint_url = ?, updated_at = strftime('%s','now')
+		   WHERE app_id = ? AND idx = ?`, endpointURL, appID, index)
+	if err != nil {
+		return fmt.Errorf("update replica endpoint: %w", err)
+	}
+	return nil
+}
+
 // MarkReplicaLostIfOwnedBy transitions (app_id, idx) to lost only while it is
 // still running and still attributed to workerID, returning whether the row
 // actually changed. The ownership-and-status guard prevents a worker-loss pass

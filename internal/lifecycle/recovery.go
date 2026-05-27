@@ -162,7 +162,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			}
 			rt := mgr.RuntimeForTier(r.Tier)
 			if inv, ok := rt.(process.ReplicaInventory); ok {
-				if recoverRemoteReplica(mgr, prx, app, r, getInventory(r.Tier, inv)) {
+				if recoverRemoteReplica(store, mgr, prx, app, r, getInventory(r.Tier, inv)) {
 					anyAlive = true
 				}
 				continue

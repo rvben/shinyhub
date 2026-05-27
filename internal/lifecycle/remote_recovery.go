@@ -39,7 +39,7 @@ func matchInventoryItem(items []process.InventoryItem, slug string, index int, d
 // match the remote runtime's handle format, so later signal and stop calls
 // resolve the owning worker and container.
 func recoverRemoteReplica(
-	mgr *process.Manager, prx *proxy.Proxy,
+	store *db.Store, mgr *process.Manager, prx *proxy.Proxy,
 	app *db.App, r *db.Replica, items []process.InventoryItem,
 ) bool {
 	if r.Index >= app.Replicas {
@@ -72,6 +72,16 @@ func recoverRemoteReplica(
 	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, mgr.TransportForTier(r.Tier)); err != nil {
 		slog.Error("recovery: register remote proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
+	}
+	// Persist the URL the route was registered with so the stored endpoint_url
+	// tracks the live route. The worker-loss path (down-sweep or admin revoke)
+	// deregisters a slot only while the live route still equals the row's
+	// endpoint_url; a stale or legacy-empty value would otherwise leave a dead
+	// worker's route in place.
+	if r.EndpointURL != item.URL {
+		if err := store.UpdateReplicaEndpoint(app.ID, r.Index, item.URL); err != nil {
+			slog.Error("recovery: persist remote endpoint", "slug", app.Slug, "idx", r.Index, "err", err)
+		}
 	}
 	slog.Info("recovery: re-adopted remote replica", "slug", app.Slug, "idx", r.Index, "container", item.ContainerID)
 	return true
