@@ -548,6 +548,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
+	// When worker hosting is enabled, let the watchdog re-place replicas lost to
+	// a dead worker onto a healthy worker for the tier. The gate keeps a
+	// no-worker replica lost at zero cost (no restart-budget burn) and lets it
+	// auto-heal once a replacement worker joins.
+	if workerReg != nil {
+		watcher.EnableLostReplicaHealing(func(tier string) bool {
+			_, ok := workerReg.WorkerForTier(tier)
+			return ok
+		})
+	}
+
 	// Fail any deploy interrupted mid-flight before recovery so adoption falls
 	// back to the last good deployment.
 	lifecycle.ReconcileInflightDeployments(store)
@@ -583,7 +594,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		)
 		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int, expectURL string) {
 			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
-		}, workerReg.Forget)
+		}, mgr.EvictReplicaIfWorker, workerReg.Forget)
 		go monitor.Run(ctx, monitorInterval)
 		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
 	}
