@@ -24,6 +24,9 @@ type Registry struct {
 	httpRequests     *prometheus.CounterVec
 	httpDuration     *prometheus.HistogramVec
 	admissionRejects *prometheus.CounterVec
+	deploys          *prometheus.CounterVec
+	stateTransitions *prometheus.CounterVec
+	replicaRestarts  prometheus.Counter
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -68,7 +71,64 @@ func New(version string) *Registry {
 	}, []string{"slug", "reason"})
 	reg.MustRegister(admissionRejects)
 
-	return &Registry{reg: reg, httpRequests: httpRequests, httpDuration: httpDuration, admissionRejects: admissionRejects}
+	deploys := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_deploys_total",
+		Help: "Total app deployments by result (success or failure).",
+	}, []string{"result"})
+	reg.MustRegister(deploys)
+
+	stateTransitions := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_app_state_transitions_total",
+		Help: "Total app lifecycle state transitions by event (hibernate, wake, restart).",
+	}, []string{"event"})
+	reg.MustRegister(stateTransitions)
+
+	replicaRestarts := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_replica_restarts_total",
+		Help: "Total replica crash-restarts performed by the watchdog.",
+	})
+	reg.MustRegister(replicaRestarts)
+
+	return &Registry{
+		reg:              reg,
+		httpRequests:     httpRequests,
+		httpDuration:     httpDuration,
+		admissionRejects: admissionRejects,
+		deploys:          deploys,
+		stateTransitions: stateTransitions,
+		replicaRestarts:  replicaRestarts,
+	}
+}
+
+// RecordDeploy increments the deployment counter for the given result, which
+// should be "success" or "failure".
+func (r *Registry) RecordDeploy(result string) {
+	r.deploys.WithLabelValues(result).Inc()
+}
+
+// RecordStateTransition increments the app lifecycle transition counter for the
+// given event (e.g. "hibernate", "wake", "restart").
+func (r *Registry) RecordStateTransition(event string) {
+	r.stateTransitions.WithLabelValues(event).Inc()
+}
+
+// RecordReplicaRestart increments the replica crash-restart counter.
+func (r *Registry) RecordReplicaRestart() {
+	r.replicaRestarts.Inc()
+}
+
+// RegisterFleetGauges registers two GaugeFuncs reporting the live count of
+// running apps and running replicas. The callbacks are evaluated lazily at
+// scrape time, so the reported values always reflect current fleet state.
+func (r *Registry) RegisterFleetGauges(appsRunning, replicasRunning func() float64) {
+	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "shinyhub_apps_running",
+		Help: "Number of apps currently in the running state.",
+	}, appsRunning))
+	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "shinyhub_replicas_running",
+		Help: "Number of app replicas currently running.",
+	}, replicasRunning))
 }
 
 // Handler returns the Prometheus scrape handler for this registry.

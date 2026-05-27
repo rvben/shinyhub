@@ -495,6 +495,22 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// CountRunningApps returns the number of apps currently in the running state.
+// Used by the fleet metrics gauge.
+func (s *Store) CountRunningApps() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps WHERE status = 'running'`).Scan(&n)
+	return n, err
+}
+
+// CountRunningReplicas returns the number of replica rows currently in the
+// running state across all apps. Used by the fleet metrics gauge.
+func (s *Store) CountRunningReplicas() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM replicas WHERE status = ?`, ReplicaStatusRunning).Scan(&n)
+	return n, err
+}
+
 // ListReconcilableApps returns all apps whose status is 'running' or 'degraded'
 // - the states the watchdog reconciler may act on. Degraded apps are included so
 // a re-placed lost replica (or a recovered crashed slot) can heal the app back
