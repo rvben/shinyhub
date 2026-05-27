@@ -576,12 +576,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		const (
 			workerTimeout   = 90 * time.Second
 			monitorInterval = 30 * time.Second
+			// workerRetention is how long a down, non-revoked worker row with no
+			// live replicas is kept before being reaped. It is far longer than the
+			// down timeout so a briefly-flapping worker is never tombstoned.
+			workerRetention = 24 * time.Hour
 		)
-		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerReg.MarkDown, func(slug string, index int) {
+		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int) {
 			prx.DeregisterReplica(slug, index)
-		})
+		}, workerReg.Forget)
 		go monitor.Run(ctx, monitorInterval)
-		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval)
+		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
 	}
 
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())

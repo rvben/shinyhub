@@ -134,6 +134,16 @@ func (r *Registry) Revoke(nodeID string) error {
 	return nil
 }
 
+// Forget drops a worker from the in-memory index. The monitor calls it after the
+// store reaps a long-dead worker row so the fleet snapshot does not keep listing
+// a node that no longer exists. Unknown node ids are a no-op. Forget never
+// touches the store; the row is already gone.
+func (r *Registry) Forget(nodeID string) {
+	r.mu.Lock()
+	delete(r.byID, nodeID)
+	r.mu.Unlock()
+}
+
 // Workers returns a snapshot of every known worker (including down and revoked
 // nodes) for the admin fleet view. The slice is a copy; mutating it does not
 // affect the registry's index.

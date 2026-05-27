@@ -78,13 +78,18 @@ func recoverRemoteReplica(
 }
 
 // WorkerDownMonitor periodically marks stale workers down and transitions their
-// running replicas to lost, removing them from proxy routing. deregister is the
-// proxy removal hook, injected so the monitor is unit-testable.
+// running replicas to lost, removing them from proxy routing. It also reaps
+// worker rows that have been down past a longer retention window so the table
+// does not grow without bound. deregister is the proxy removal hook and forget
+// drops a reaped worker from the routing index; both are injected so the monitor
+// is unit-testable.
 type WorkerDownMonitor struct {
 	store      *db.Store
 	timeout    time.Duration
+	retention  time.Duration
 	markDown   func(nodeID string) error
 	deregister func(slug string, index int)
+	forget     func(nodeID string)
 }
 
 // NewWorkerDownMonitor builds a monitor that marks a worker down once its
@@ -92,14 +97,17 @@ type WorkerDownMonitor struct {
 // replicas to lost, calling deregister for each removed replica. markDown
 // performs the down transition; wiring it to the registry keeps the in-memory
 // routing index consistent with the store so a downed worker is excluded from
-// routing without a control-plane restart.
-func NewWorkerDownMonitor(store *db.Store, timeout time.Duration, markDown func(nodeID string) error, deregister func(slug string, index int)) *WorkerDownMonitor {
-	return &WorkerDownMonitor{store: store, timeout: timeout, markDown: markDown, deregister: deregister}
+// routing without a control-plane restart. retention is the (much longer)
+// window after which a still-dead, non-revoked worker row with no live replicas
+// is reaped; forget drops the reaped node from the in-memory index.
+func NewWorkerDownMonitor(store *db.Store, timeout, retention time.Duration, markDown func(nodeID string) error, deregister func(slug string, index int), forget func(nodeID string)) *WorkerDownMonitor {
+	return &WorkerDownMonitor{store: store, timeout: timeout, retention: retention, markDown: markDown, deregister: deregister, forget: forget}
 }
 
 // Sweep performs one monitor pass as of now: every worker whose heartbeat
 // predates now-timeout is marked down and each of its running replicas becomes
-// lost and is deregistered from routing.
+// lost and is deregistered from routing. Finally, worker rows that have been
+// down past the retention window (and host no live replica) are reaped.
 func (m *WorkerDownMonitor) Sweep(now time.Time) {
 	stale, err := m.store.ListWorkersStale(now.Add(-m.timeout))
 	if err != nil {
@@ -135,6 +143,21 @@ func (m *WorkerDownMonitor) Sweep(now time.Time) {
 			}
 			slog.Warn("worker monitor: replica lost", "slug", app.Slug, "idx", r.Index, "node", w.NodeID)
 		}
+	}
+
+	// Reap rows that have been down past the retention window. The store keeps
+	// revoked rows (audit) and any worker still hosting a running/crashed
+	// replica; here we only drop the reaped nodes from the in-memory index.
+	reaped, err := m.store.DeleteStaleWorkers(now.Add(-m.retention))
+	if err != nil {
+		slog.Error("worker monitor: reap stale workers", "err", err)
+		return
+	}
+	for _, nodeID := range reaped {
+		if m.forget != nil {
+			m.forget(nodeID)
+		}
+		slog.Info("worker monitor: reaped dead worker", "node", nodeID)
 	}
 }
 

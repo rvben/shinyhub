@@ -718,7 +718,7 @@ func TestWorkerDownMonitor_ExcludesDownedWorkerFromRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, reg.MarkDown, func(string, int) {})
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour, reg.MarkDown, func(string, int) {}, reg.Forget)
 	monitor.Sweep(time.Now())
 
 	if _, ok := reg.WorkerForTier("remote"); ok {
@@ -752,12 +752,13 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	}
 
 	deregistered := false
-	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute,
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour,
 		func(nodeID string) error { return store.SetWorkerStatus(nodeID, "down") },
 		func(slug string, index int) {
 			deregistered = true
 			prx.DeregisterReplica(slug, index)
-		})
+		},
+		nil)
 	monitor.Sweep(time.Now())
 
 	if w, _ := store.GetWorker("node-a"); w == nil || w.Status != "down" {
@@ -772,5 +773,58 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	}
 	if got := prx.ReplicaTargetURL("wd-app", 0); got != "" {
 		t.Errorf("replica still routable after deregister: %q", got)
+	}
+}
+
+// TestWorkerDownMonitor_ReapsLongDeadWorkers asserts the sweep reaps worker rows
+// that have been down past the retention window (dropping them from both the
+// store and the in-memory registry), while leaving a worker that only just went
+// down (stale for the timeout but within retention) in place.
+func TestWorkerDownMonitor_ReapsLongDeadWorkers(t *testing.T) {
+	store := mustOpenStore(t)
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	// ancient: down well past retention -> reaped.
+	ancient, err := reg.Register(worker.RegisterParams{AdvertiseAddr: "old:8443", Tier: "remote"})
+	if err != nil {
+		t.Fatalf("register ancient: %v", err)
+	}
+	if err := reg.MarkDown(ancient.NodeID); err != nil {
+		t.Fatalf("mark ancient down: %v", err)
+	}
+	longAgo := time.Now().Add(-48 * time.Hour).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, longAgo, ancient.NodeID); err != nil {
+		t.Fatal(err)
+	}
+
+	// recent: down but within retention -> kept. A distinct tier avoids the
+	// single-up-per-tier supersede interfering with the assertion.
+	recent, err := reg.Register(worker.RegisterParams{AdvertiseAddr: "new:8443", Tier: "base"})
+	if err != nil {
+		t.Fatalf("register recent: %v", err)
+	}
+	if err := reg.MarkDown(recent.NodeID); err != nil {
+		t.Fatalf("mark recent down: %v", err)
+	}
+	withinRetention := time.Now().Add(-30 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, withinRetention, recent.NodeID); err != nil {
+		t.Fatal(err)
+	}
+
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour,
+		reg.MarkDown, func(string, int) {}, reg.Forget)
+	monitor.Sweep(time.Now())
+
+	if w, err := store.GetWorker(ancient.NodeID); err != db.ErrNotFound {
+		t.Errorf("ancient worker not reaped from store: %+v err=%v", w, err)
+	}
+	if _, ok := reg.Worker(ancient.NodeID); ok {
+		t.Error("ancient worker still in the in-memory registry after reap")
+	}
+	if _, err := store.GetWorker(recent.NodeID); err != nil {
+		t.Errorf("recently-downed worker wrongly reaped: %v", err)
 	}
 }

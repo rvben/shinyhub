@@ -2056,6 +2056,46 @@ func (s *Store) RevokeWorker(nodeID string) error {
 	return nil
 }
 
+// DeleteStaleWorkers tombstones long-dead worker rows so the table does not grow
+// without bound. A row is removed only when all of the following hold:
+//   - it is marked down (an up worker is never reaped),
+//   - it was never administratively revoked (revoked rows are kept for audit),
+//   - its last_heartbeat is at or before cutoff (well past the down timeout),
+//   - it hosts no non-terminal replica (running or crashed); lost and stopped
+//     replicas are terminal from this worker's perspective and do not block
+//     reaping, since re-placement assigns a fresh worker_id.
+//
+// cutoff is formatted to match the stored UTC datetime string so the comparison
+// is chronological. Returns the node ids of the reaped rows so the caller can
+// drop them from any in-memory index.
+func (s *Store) DeleteStaleWorkers(cutoff time.Time) ([]string, error) {
+	rows, err := s.db.Query(`
+		DELETE FROM workers
+		WHERE status = 'down'
+		  AND revoked_at = ''
+		  AND last_heartbeat <= ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM replicas r
+		      WHERE r.worker_id = workers.node_id
+		        AND r.status IN ('running', 'crashed')
+		  )
+		RETURNING node_id`,
+		cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, fmt.Errorf("delete stale workers: %w", err)
+	}
+	defer rows.Close()
+	var reaped []string
+	for rows.Next() {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
+			return nil, fmt.Errorf("scan reaped worker: %w", err)
+		}
+		reaped = append(reaped, nodeID)
+	}
+	return reaped, rows.Err()
+}
+
 func (s *Store) DeleteWorker(nodeID string) error {
 	res, err := s.db.Exec(`DELETE FROM workers WHERE node_id = ?`, nodeID)
 	if err != nil {

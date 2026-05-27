@@ -86,6 +86,32 @@ func TestRegistryHeartbeatRefusesRevokedWorker(t *testing.T) {
 	}
 }
 
+// TestRegistryForgetDropsFromIndex asserts Forget removes a reaped worker from
+// the in-memory index so it no longer appears in the fleet snapshot, while being
+// a no-op for unknown node ids.
+func TestRegistryForgetDropsFromIndex(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	reg.Forget(node.NodeID)
+	if _, ok := reg.Worker(node.NodeID); ok {
+		t.Fatal("forgotten worker still present in the index")
+	}
+	if len(reg.Workers()) != 0 {
+		t.Fatalf("Workers() still lists a forgotten worker: %+v", reg.Workers())
+	}
+
+	// Unknown node: no panic, no effect.
+	reg.Forget("ghost")
+}
+
 // TestRegistryWorkersSnapshot asserts Workers returns every known worker
 // (including down/revoked) for the admin fleet view, decoupled from the
 // internal map.
