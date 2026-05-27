@@ -2172,6 +2172,25 @@ func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error
 	return err
 }
 
+// MarkReplicaLostIfOwnedBy transitions (app_id, idx) to lost only while it is
+// still running and still attributed to workerID, returning whether the row
+// actually changed. The ownership-and-status guard prevents a worker-loss pass
+// (admin revoke or the down-sweep) that read a stale snapshot from clobbering a
+// replica that a concurrent redeploy already re-placed onto a healthy worker:
+// such a row no longer matches workerID, so the update is a no-op and the caller
+// skips deregistering the (now healthy) routing slot.
+func (s *Store) MarkReplicaLostIfOwnedBy(appID int64, index int, workerID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		   WHERE app_id = ? AND idx = ? AND worker_id = ? AND status = ?`,
+		ReplicaStatusLost, appID, index, workerID, ReplicaStatusRunning)
+	if err != nil {
+		return false, fmt.Errorf("mark replica lost: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // parseSQLiteTime parses the timestamp formats SQLite emits for DATETIME
 // columns and aggregates over them. CURRENT_TIMESTAMP uses
 // "2006-01-02 15:04:05"; values written via Go's time.Time round-trip as

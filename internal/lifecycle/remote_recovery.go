@@ -98,8 +98,16 @@ func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug str
 			slog.Error("lose replica: resolve app", "app_id", r.AppID, "err", err)
 			continue
 		}
-		if err := store.UpdateReplicaStatus(r.AppID, r.Index, db.ReplicaStatusLost); err != nil {
+		// Guard the transition on the row still being running and still owned by
+		// this worker: a concurrent redeploy may have re-placed this index onto a
+		// healthy worker since the snapshot above, and we must not mark that
+		// healthy replica lost nor pull its routing slot.
+		changed, err := store.MarkReplicaLostIfOwnedBy(r.AppID, r.Index, nodeID)
+		if err != nil {
 			slog.Error("lose replica: mark lost", "slug", app.Slug, "idx", r.Index, "err", err)
+			continue
+		}
+		if !changed {
 			continue
 		}
 		if deregister != nil {

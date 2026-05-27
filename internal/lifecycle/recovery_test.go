@@ -776,6 +776,54 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	}
 }
 
+// TestLoseWorkerReplicas asserts the loss pass transitions only the running
+// replicas genuinely owned by the worker and deregisters exactly those, leaving
+// replicas re-placed onto another worker and replicas already in a terminal
+// state untouched. (The atomic ownership guard that protects against a concurrent
+// re-placement landing mid-pass is covered by the DB-layer
+// MarkReplicaLostIfOwnedBy test.)
+func TestLoseWorkerReplicas(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "lose-app")
+
+	seed := func(idx int, status, workerID string) {
+		if err := store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: idx, Status: status,
+			Provider: "remote_docker", Tier: "remote", WorkerID: workerID,
+		}); err != nil {
+			t.Fatalf("seed replica %d: %v", idx, err)
+		}
+	}
+	// idx0: re-placed onto a healthy worker -> not in node-dead's set.
+	seed(0, db.ReplicaStatusRunning, "node-healthy")
+	// idx1: genuinely owned by the dead worker and running -> lost + deregistered.
+	seed(1, db.ReplicaStatusRunning, "node-dead")
+	// idx2: owned by the dead worker but already terminal -> skipped.
+	seed(2, "stopped", "node-dead")
+
+	deregistered := map[int]bool{}
+	if err := lifecycle.LoseWorkerReplicas(store, "node-dead", func(_ string, idx int) {
+		deregistered[idx] = true
+	}); err != nil {
+		t.Fatalf("LoseWorkerReplicas: %v", err)
+	}
+
+	reps, _ := store.ListReplicas(app.ID)
+	byIdx := map[int]*db.Replica{}
+	for _, r := range reps {
+		byIdx[r.Index] = r
+	}
+	if byIdx[0].Status != db.ReplicaStatusRunning || deregistered[0] {
+		t.Errorf("replica on a different worker was touched: status=%q deregistered=%v", byIdx[0].Status, deregistered[0])
+	}
+	if byIdx[1].Status != db.ReplicaStatusLost || !deregistered[1] {
+		t.Errorf("dead worker's running replica not lost/deregistered: status=%q deregistered=%v", byIdx[1].Status, deregistered[1])
+	}
+	if byIdx[2].Status != "stopped" || deregistered[2] {
+		t.Errorf("terminal replica was touched: status=%q deregistered=%v", byIdx[2].Status, deregistered[2])
+	}
+}
+
 // TestWorkerDownMonitor_ReapsLongDeadWorkers asserts the sweep reaps worker rows
 // that have been down past the retention window (dropping them from both the
 // store and the in-memory registry), while leaving a worker that only just went
