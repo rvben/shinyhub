@@ -1217,6 +1217,93 @@ func TestProxy_SessionCap_ZeroMeansUnlimited(t *testing.T) {
 	wg.Wait()
 }
 
+// TestProxy_DrainReplica_NoNewCookielessSessions verifies that once a slot is
+// marked draining, the least-connections picker stops routing new cookie-less
+// requests to it: every cookie-less request lands on the surviving replica.
+// This is the routing half of graceful scale-down.
+func TestProxy_DrainReplica_NoNewCookielessSessions(t *testing.T) {
+	var hits0, hits1 atomic.Int64
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits0.Add(1) }))
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits1.Add(1) }))
+	defer b0.Close()
+	defer b1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+
+	if !p.DrainReplica("demo", 0) {
+		t.Fatal("DrainReplica returned false for a live slot")
+	}
+	if !p.IsDraining("demo", 0) {
+		t.Fatal("IsDraining is false right after DrainReplica")
+	}
+
+	for i := 0; i < 20; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if hits0.Load() != 0 {
+		t.Errorf("draining replica 0 received %d new cookie-less requests; want 0", hits0.Load())
+	}
+	if hits1.Load() != 20 {
+		t.Errorf("surviving replica 1 received %d requests; want all 20", hits1.Load())
+	}
+}
+
+// TestProxy_DrainReplica_StickySessionsStillRouted verifies that a draining
+// slot still serves requests carrying its sticky cookie: established sessions
+// finish on the replica being drained rather than being severed. This is the
+// session-preservation half of graceful scale-down.
+func TestProxy_DrainReplica_StickySessionsStillRouted(t *testing.T) {
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "drained-replica-0")
+	}))
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "replica-1")
+	}))
+	defer b0.Close()
+	defer b1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	p.DrainReplica("demo", 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0"})
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sticky request to draining replica got %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "drained-replica-0" {
+		t.Errorf("sticky session was not served by the draining replica: got %q", rec.Body.String())
+	}
+}
+
+// TestProxy_DrainReplica_MissingSlotReturnsFalse verifies the primitive reports
+// failure for an absent pool, an out-of-range index, and a nil slot, so callers
+// can distinguish "marked draining" from "nothing to drain".
+func TestProxy_DrainReplica_MissingSlotReturnsFalse(t *testing.T) {
+	p := proxy.New()
+	if p.DrainReplica("ghost", 0) {
+		t.Error("DrainReplica returned true for an unregistered pool")
+	}
+	p.SetPoolSize("demo", 1) // slot 0 exists but is nil (no backend registered)
+	if p.DrainReplica("demo", 0) {
+		t.Error("DrainReplica returned true for a nil slot")
+	}
+	if p.DrainReplica("demo", 5) {
+		t.Error("DrainReplica returned true for an out-of-range index")
+	}
+	if p.IsDraining("demo", 0) {
+		t.Error("IsDraining should be false for a slot that was never drained")
+	}
+}
+
 // TestProxy_ReplicaSessionCounts_ReflectsInFlight verifies that
 // ReplicaSessionCounts returns -1 for empty slots and tracks live connections.
 func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {

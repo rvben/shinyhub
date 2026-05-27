@@ -156,6 +156,12 @@ type replicaBackend struct {
 	targetURL   string // the URL passed to RegisterReplica; used for introspection
 	rp          *httputil.ReverseProxy
 	activeConns atomic.Int64
+	// draining marks a slot scheduled for graceful removal. The least-
+	// connections picker skips draining slots so no new cookie-less session
+	// is routed to it, but the sticky-cookie path still forwards, letting
+	// established sessions finish before the slot is stopped. Reset implicitly
+	// because RegisterReplica installs a fresh replicaBackend.
+	draining atomic.Bool
 }
 
 // backendPool holds a fixed-size slice of replicas for one slug.
@@ -545,6 +551,40 @@ func (p *Proxy) DeregisterReplicaIfTarget(slug string, index int, expectURL stri
 	pool.replicas[index] = nil
 	p.clearWSReady(slug)
 	return true
+}
+
+// DrainReplica marks the slot at index in slug's pool as draining and reports
+// whether a live backend was marked. A draining slot is skipped by the least-
+// connections picker (no new cookie-less sessions) while the sticky-cookie path
+// still forwards, so established sessions finish before the slot is stopped.
+// Returns false if the pool is absent, the index is out of range, or the slot
+// holds no backend - the caller can then treat the scale-down as a no-op.
+func (p *Proxy) DrainReplica(slug string, index int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return false
+	}
+	rb := pool.replicas[index]
+	if rb == nil {
+		return false
+	}
+	rb.draining.Store(true)
+	return true
+}
+
+// IsDraining reports whether the slot at index in slug's pool is marked
+// draining. Returns false for an absent pool, out-of-range index, or nil slot.
+func (p *Proxy) IsDraining(slug string, index int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return false
+	}
+	rb := pool.replicas[index]
+	return rb != nil && rb.draining.Load()
 }
 
 // ReplicaTargetURL returns the target URL registered for slug at index, or an
@@ -1038,7 +1078,7 @@ func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Reques
 
 	var bestConns int64 = -1
 	for _, rep := range pool.replicas {
-		if rep == nil {
+		if rep == nil || rep.draining.Load() {
 			continue
 		}
 		c := rep.activeConns.Load()
