@@ -154,22 +154,27 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 
 	var resp2 struct {
 		App struct {
-			Slug                  string `json:"slug"`
-			Name                  string `json:"name"`
-			OwnerID               int64  `json:"owner_id"`
-			Access                string `json:"access"`
-			Status                string `json:"status"`
-			Replicas              int    `json:"replicas"`
-			MaxSessionsPerReplica int    `json:"max_sessions_per_replica"`
-			DeployCount           int    `json:"deploy_count"`
-			HibernateTimeoutMinutes *int   `json:"hibernate_timeout_minutes"`
-			MemoryLimitMB           *int   `json:"memory_limit_mb"`
-			CPUQuotaPercent         *int   `json:"cpu_quota_percent"`
-			ProjectSlug             string `json:"project_slug,omitempty"`
-			CreatedAt               string `json:"created_at"`
-			UpdatedAt               string `json:"updated_at"`
+			Slug                    string  `json:"slug"`
+			Name                    string  `json:"name"`
+			OwnerID                 int64   `json:"owner_id"`
+			Access                  string  `json:"access"`
+			Status                  string  `json:"status"`
+			Replicas                int     `json:"replicas"`
+			MaxSessionsPerReplica   int     `json:"max_sessions_per_replica"`
+			DeployCount             int     `json:"deploy_count"`
+			HibernateTimeoutMinutes *int    `json:"hibernate_timeout_minutes"`
+			MemoryLimitMB           *int    `json:"memory_limit_mb"`
+			CPUQuotaPercent         *int    `json:"cpu_quota_percent"`
+			ProjectSlug             string  `json:"project_slug,omitempty"`
+			CreatedAt               string  `json:"created_at"`
+			UpdatedAt               string  `json:"updated_at"`
+			AutoscaleEnabled        bool    `json:"autoscale_enabled"`
+			AutoscaleMinReplicas    int     `json:"autoscale_min_replicas"`
+			AutoscaleMaxReplicas    int     `json:"autoscale_max_replicas"`
+			AutoscaleTarget         float64 `json:"autoscale_target"`
 		} `json:"app"`
-		EffectiveMaxSessionsPerReplica *int `json:"effective_max_sessions_per_replica"`
+		EffectiveMaxSessionsPerReplica *int     `json:"effective_max_sessions_per_replica"`
+		EffectiveAutoscaleTarget       *float64 `json:"effective_autoscale_target"`
 		ReplicasStatus                 []struct {
 			Index  int    `json:"index"`
 			Status string `json:"status"`
@@ -227,6 +232,19 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	case a.MaxSessionsPerReplica > 0:
 		eff := a.MaxSessionsPerReplica
 		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
+	}
+	// Autoscale summary: when enabled, resolve the effective target (the app's
+	// own value, or the runtime default the server reports when the app's is 0)
+	// so a 0 never reads as a literal "0%".
+	if a.AutoscaleEnabled {
+		target := a.AutoscaleTarget
+		if resp2.EffectiveAutoscaleTarget != nil {
+			target = *resp2.EffectiveAutoscaleTarget
+		}
+		fmt.Fprintf(w, "Autoscale:   on (replicas %d-%d, target %.0f%%)\n",
+			a.AutoscaleMinReplicas, a.AutoscaleMaxReplicas, target*100)
+	} else {
+		fmt.Fprintln(w, "Autoscale:   off")
 	}
 	if rr := resp2.RejectsByReason; rr != nil && len(rr.Counts) > 0 {
 		mins := rr.WindowSeconds / 60
@@ -513,6 +531,10 @@ type appsSetFlags struct {
 	replicas              int
 	maxSessionsPerReplica int
 	tiers                 []string
+	autoscale             bool
+	autoscaleMin          int
+	autoscaleMax          int
+	autoscaleTarget       float64
 	yes                   bool
 	wait                  bool
 	waitTimeout           time.Duration
@@ -536,6 +558,14 @@ func newAppsSetCmd() *cobra.Command {
 		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
 	cmd.Flags().StringArrayVar(&f.tiers, "tier", nil,
 		"Per-tier replica placement as name=count (repeatable, e.g. --tier local=2 --tier burst=1); mutually exclusive with --replicas")
+	cmd.Flags().BoolVar(&f.autoscale, "autoscale", false,
+		"Enable (--autoscale) or disable (--autoscale=false) session-saturation replica autoscaling for this app")
+	cmd.Flags().IntVar(&f.autoscaleMin, "autoscale-min", 0,
+		"Autoscale floor: minimum replicas to keep running (>= 1)")
+	cmd.Flags().IntVar(&f.autoscaleMax, "autoscale-max", 0,
+		"Autoscale ceiling: maximum replicas the controller may add (>= autoscale-min)")
+	cmd.Flags().Float64Var(&f.autoscaleTarget, "autoscale-target", 0,
+		"Target average fraction of the per-replica session cap, in (0,1] (0 = inherit the runtime default)")
 	cmd.Flags().BoolVar(&f.yes, "yes", false,
 		"Skip the confirmation prompt for a replica change (which restarts the app)")
 	cmd.Flags().BoolVar(&f.wait, "wait", false,
@@ -550,9 +580,14 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	replicasChanged := cmd.Flags().Changed("replicas")
 	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
 	tierChanged := cmd.Flags().Changed("tier")
+	autoscaleChanged := cmd.Flags().Changed("autoscale")
+	autoscaleMinChanged := cmd.Flags().Changed("autoscale-min")
+	autoscaleMaxChanged := cmd.Flags().Changed("autoscale-max")
+	autoscaleTargetChanged := cmd.Flags().Changed("autoscale-target")
+	anyAutoscaleChanged := autoscaleChanged || autoscaleMinChanged || autoscaleMaxChanged || autoscaleTargetChanged
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !tierChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !tierChanged && !anyAutoscaleChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --autoscale)")
 	}
 	if replicasChanged && f.replicas < 1 {
 		return fmt.Errorf("--replicas must be >= 1")
@@ -562,6 +597,18 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if hibernateChanged && f.hibernateTimeout < -1 {
 		return fmt.Errorf("--hibernate-timeout must be -1 (reset to global default), 0 (disable), or a positive number of minutes")
+	}
+	// Validate the autoscale flags client-side for fast feedback; the server
+	// remains the authority on the cross-field rules (min >= 1 when enabled,
+	// max <= the runtime ceiling) since those depend on server config.
+	if autoscaleTargetChanged && (f.autoscaleTarget < 0 || f.autoscaleTarget > 1) {
+		return fmt.Errorf("--autoscale-target must be in [0,1] (0 inherits the runtime default)")
+	}
+	if autoscaleMinChanged && f.autoscaleMin < 0 {
+		return fmt.Errorf("--autoscale-min must be >= 0")
+	}
+	if autoscaleMaxChanged && f.autoscaleMax < 0 {
+		return fmt.Errorf("--autoscale-max must be >= 0")
 	}
 
 	// --tier and --replicas both set the pool size/shape, so only one may be
@@ -633,6 +680,24 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	if capChanged {
 		payload["max_sessions_per_replica"] = f.maxSessionsPerReplica
 	}
+	if anyAutoscaleChanged {
+		// Send only the fields the caller changed; the server merges them over
+		// the stored values so each field can be updated independently.
+		as := map[string]any{}
+		if autoscaleChanged {
+			as["enabled"] = f.autoscale
+		}
+		if autoscaleMinChanged {
+			as["min_replicas"] = f.autoscaleMin
+		}
+		if autoscaleMaxChanged {
+			as["max_replicas"] = f.autoscaleMax
+		}
+		if autoscaleTargetChanged {
+			as["target"] = f.autoscaleTarget
+		}
+		payload["autoscale"] = as
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -683,6 +748,28 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			fmt.Printf("%s: max-sessions-per-replica reset to runtime default\n", slug)
 		} else {
 			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, f.maxSessionsPerReplica)
+		}
+	}
+	if anyAutoscaleChanged {
+		if autoscaleChanged {
+			if f.autoscale {
+				fmt.Printf("%s: autoscale enabled\n", slug)
+			} else {
+				fmt.Printf("%s: autoscale disabled\n", slug)
+			}
+		}
+		if autoscaleMinChanged {
+			fmt.Printf("%s: autoscale-min set to %d\n", slug, f.autoscaleMin)
+		}
+		if autoscaleMaxChanged {
+			fmt.Printf("%s: autoscale-max set to %d\n", slug, f.autoscaleMax)
+		}
+		if autoscaleTargetChanged {
+			if f.autoscaleTarget == 0 {
+				fmt.Printf("%s: autoscale-target reset to runtime default\n", slug)
+			} else {
+				fmt.Printf("%s: autoscale-target set to %.0f%%\n", slug, f.autoscaleTarget*100)
+			}
 		}
 	}
 
