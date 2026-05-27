@@ -136,11 +136,18 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 		// either way there is no usable saturation signal, so do not act.
 		return
 	}
+	// A nil slot (-1) or fewer registered slots than the desired count means the
+	// pool is degraded and the self-healer is restoring it. Track this so we can
+	// withhold scale-down: ScaleDown removes the highest index and could stop the
+	// last healthy replica before the missing slot heals.
+	poolDegraded := len(counts) < a.Replicas
 	var total int64
 	for _, n := range counts {
-		if n > 0 {
-			total += n
+		if n < 0 {
+			poolDegraded = true
+			continue
 		}
+		total += n
 	}
 
 	sessionCap := a.MaxSessionsPerReplica
@@ -182,6 +189,12 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	if desired > a.Replicas {
 		acted = c.scaleUp(a.Slug, desired-a.Replicas) > 0
 	} else {
+		// Never remove capacity from a degraded pool: defer to the self-healer,
+		// which is restoring the missing slot, and let autoscale resume scaling
+		// down only once the pool reports a full, healthy set.
+		if poolDegraded {
+			return
+		}
 		// Scale down conservatively: one replica per tick, so a graceful drain
 		// completes and the signal is re-measured before removing the next.
 		ok, err := c.scaler.ScaleDown(a.Slug, c.cfg.DrainGrace)

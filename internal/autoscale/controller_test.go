@@ -217,6 +217,44 @@ func TestController_NoOpScaleUpDoesNotArmCooldown(t *testing.T) {
 	}
 }
 
+func TestController_DoesNotScaleDownDegradedPool(t *testing.T) {
+	// A degraded pool reports a missing/nil replica slot (count -1) and is being
+	// restored by the self-healer. ScaleDown removes the highest index and could
+	// stop the last healthy replica before the slot heals, so the controller must
+	// not scale such a pool down.
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {-1, 0}}} // slot 0 missing
+	scaler := newFakeScaler()
+	c := testController(lister, signal, scaler)
+
+	c.reconcile(time.Now())
+
+	if scaler.downs["demo"] != 0 {
+		t.Fatalf("scaled down a degraded pool: downs=%d", scaler.downs["demo"])
+	}
+}
+
+func TestController_ScalesUpSaturatedDegradedPool(t *testing.T) {
+	// Scale-up is still allowed on a degraded pool so a genuinely saturated app
+	// gains capacity while the healer restores the missing slot; only scale-down
+	// is withheld while the pool is not fully healthy.
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{
+		counts: map[string][]int64{"demo": {-1, 8}}, // slot 0 missing, slot 1 at cap
+		rejects: map[string]map[proxy.RejectReason]uint64{
+			"demo": {proxy.ReasonPoolSaturated: 3},
+		},
+	}
+	scaler := newFakeScaler()
+	c := testController(lister, signal, scaler)
+
+	c.reconcile(time.Now())
+
+	if scaler.ups["demo"] == 0 {
+		t.Fatalf("expected scale-up on a saturated degraded pool")
+	}
+}
+
 func TestController_SaturationBiasesScaleUp(t *testing.T) {
 	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
 	signal := &fakeSignal{
