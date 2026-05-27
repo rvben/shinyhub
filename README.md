@@ -10,6 +10,10 @@ reverse proxy, sign users in with OAuth or OIDC, and let idle apps hibernate
 and wake on demand. ShinyHub runs as a single Go binary backed by SQLite, with
 no external services to operate.
 
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="ShinyHub dashboard showing the app grid with running apps and per-app CPU and memory" width="900">
+</p>
+
 ## Contents
 
 - [Features](#features)
