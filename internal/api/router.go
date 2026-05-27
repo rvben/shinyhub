@@ -68,6 +68,10 @@ type Server struct {
 	// SetDeployToken at startup when SHINYHUB_DEPLOY_TOKEN is configured.
 	deployToken *auth.DeployToken
 	deployRun   func(deploy.Params) (*deploy.PoolResult, error)
+	// deployReplica boots a single replica at one index, used by the autoscale
+	// scale-up primitive to grow a pool by one without cycling the whole pool.
+	// Defaults to deploy.RunReplica; overridable in tests.
+	deployReplica func(deploy.Params, int) (*deploy.Result, error)
 
 	// deployLocksMu guards the deployLocks map. Each slug gets its own
 	// sync.Mutex which serializes deploy/restart/rollback/stop/delete
@@ -150,6 +154,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		actionLimiter: newKeyedRateLimiter(30, time.Minute),
 		oauthLimiter:  newKeyedRateLimiter(20, time.Minute),
 		deployRun:     deploy.Run,
+		deployReplica: deploy.RunReplica,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
