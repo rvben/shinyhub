@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -236,7 +237,54 @@ func (s *Server) checkColocatedShared(appID int64, consumerTiers []string) error
 		}
 		sourceTiers[m.SourceSlug] = s.tiersForApp(srcApp)
 	}
+	// Fail closed when a shared mount touches a multi-worker tier: the colocation
+	// guard maps each tier to a single node, which cannot guarantee the source
+	// and consumer land on the same worker once a tier has several. Reject until
+	// same-worker pinning lands rather than passing on the unsound assumption
+	// that every replica resolves to the first worker.
+	if tier := s.firstMultiWorkerTier(consumerTiers, sourceTiers); tier != "" {
+		return fmt.Errorf(
+			"shared mounts are not supported on multi-worker tier %q: the source and consumer cannot be guaranteed to share a worker",
+			tier)
+	}
 	return deploy.CheckColocatedShared(consumerTiers, sourceTiers, s.nodeForTier)
+}
+
+// firstMultiWorkerTier returns the first tier among the consumer's tiers and all
+// source tiers that is backed by more than one up worker, or "" when none is.
+// With no worker registry wired (single-node operation) it always returns "".
+func (s *Server) firstMultiWorkerTier(consumerTiers []string, sourceTiers map[string][]string) string {
+	if s.workerReg == nil {
+		return ""
+	}
+	seen := make(map[string]bool)
+	check := func(tiers []string) string {
+		for _, t := range tiers {
+			if seen[t] {
+				continue
+			}
+			seen[t] = true
+			if len(s.workerReg.WorkersForTier(t)) > 1 {
+				return t
+			}
+		}
+		return ""
+	}
+	if t := check(consumerTiers); t != "" {
+		return t
+	}
+	// Iterate source slugs in order so the reported tier is deterministic.
+	slugs := make([]string, 0, len(sourceTiers))
+	for slug := range sourceTiers {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	for _, slug := range slugs {
+		if t := check(sourceTiers[slug]); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // SetSampler replaces the metrics sampler. Must be called before the server
