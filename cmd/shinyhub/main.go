@@ -18,6 +18,7 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/autoscale"
 	"github.com/rvben/shinyhub/internal/backup"
 	"github.com/rvben/shinyhub/internal/cli"
 	"github.com/rvben/shinyhub/internal/config"
@@ -657,6 +658,33 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	slog.Info("scheduler started")
 
 	srv.SetJobs(jobsMgr, sched)
+
+	// Replica autoscaling is opt-in per app and gated by a global switch. When
+	// enabled, the controller evaluates opted-in apps on its own interval and
+	// drives the same incremental scale primitives the API exposes; it never
+	// scales worker hosts.
+	if cfg.Runtime.Autoscale.Enabled {
+		asCtx, cancelAutoscale := context.WithCancel(context.Background())
+		defer cancelAutoscale()
+		runtimeMax := cfg.Runtime.MaxReplicas
+		if runtimeMax <= 0 {
+			runtimeMax = 32
+		}
+		controller := autoscale.New(autoscale.Config{
+			ScanInterval:  cfg.Runtime.Autoscale.ScanInterval,
+			Cooldown:      cfg.Runtime.Autoscale.Cooldown,
+			DrainGrace:    30 * time.Second,
+			RejectWindow:  2 * cfg.Runtime.Autoscale.ScanInterval,
+			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
+			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
+			RuntimeMax:    runtimeMax,
+		}, store, prx, srv, slog.Default())
+		go controller.Run(asCtx)
+		slog.Info("autoscale controller started",
+			"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
+			"cooldown", cfg.Runtime.Autoscale.Cooldown,
+			"default_target", cfg.Runtime.Autoscale.DefaultTarget)
+	}
 
 	mux := http.NewServeMux()
 	// Observe wraps the timeout handler (not the inner router) so server metrics
