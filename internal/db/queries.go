@@ -495,6 +495,35 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListReconcilableApps returns all apps whose status is 'running' or 'degraded'
+// - the states the watchdog reconciler may act on. Degraded apps are included so
+// a re-placed lost replica (or a recovered crashed slot) can heal the app back
+// to running; the narrower ListRunningApps stays reserved for startup recovery,
+// which must not re-adopt degraded apps.
+func (s *Store) ListReconcilableApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT id, slug, name, project_slug, owner_id, access, status,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
+		       created_at, updated_at,
+		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		FROM apps WHERE status IN ('running', 'degraded')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // ListDeletingApps returns all apps left in the 'deleting' tombstone state.
 // handleDeleteApp marks an app 'deleting' before doing disk cleanup; a crash
 // (or a cleanup failure) between the tombstone and the row delete leaves such
@@ -1520,6 +1549,10 @@ type Replica struct {
 	DesiredState string    `json:"desired_state"`
 	DeploymentID *int64    `json:"deployment_id,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// Reason is a derived, presentation-only annotation set by the read layer
+	// (e.g. "worker unavailable" for a lost replica whose tier has no healthy
+	// worker). It is never scanned from or persisted to the database.
+	Reason string `json:"reason,omitempty"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
