@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -2186,5 +2188,158 @@ func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
 	counts := block["counts"].(map[string]any)
 	if counts["app-not-ready"].(float64) != 1 {
 		t.Errorf("counts[app-not-ready] = %v, want 1", counts["app-not-ready"])
+	}
+}
+
+// newInlineServerWithProxy builds an isolated test server that shares a real
+// proxy handle, mirroring the wiring in TestHandleGetApp_IncludesRejectsByReason.
+// It returns the server, store, and proxy so tests can drive rejects through
+// prx.ServeHTTP and read them back via the API.
+func newInlineServerWithProxy(t *testing.T) (*api.Server, *db.Store, *proxy.Proxy) {
+	t.Helper()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+	}
+	prx := proxy.New()
+	srv := api.New(cfg, store, nil, prx)
+	return srv, store, prx
+}
+
+func TestDeleteApp_ForgetsRejects(t *testing.T) {
+	srv, store, prx := newInlineServerWithProxy(t)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register a pool and drive one readiness-probe reject to populate reject
+	// history for the slug.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+	if err := prx.Register("demo", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil))
+
+	// Precondition: reject history is non-nil.
+	if got := prx.RejectsByReason("demo", 10*time.Minute); got == nil {
+		t.Fatal("precondition: RejectsByReason should be non-nil before delete")
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "DELETE", "/api/apps/demo", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Reject history must be cleared after the app is deleted.
+	if got := prx.RejectsByReason("demo", 10*time.Minute); got != nil {
+		t.Errorf("RejectsByReason after delete = %v, want nil", got)
+	}
+}
+
+func TestHandleGetApp_RejectsByReason_MultipleReasons(t *testing.T) {
+	// Verify that the rejects_by_reason envelope includes all distinct reasons
+	// recorded for the same slug, each with the correct count.
+	srv, store, prx := newInlineServerWithProxy(t)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// To produce pool-saturated: hold one connection open via a blocking backend
+	// (per-replica cap = 1, pool size = 1) so the next new-session request is shed.
+	// inFlight is closed by the backend handler the moment it starts blocking,
+	// giving the test a synchronisation point before it fires the saturated probe.
+	release := make(chan struct{})
+	inFlight := make(chan struct{})
+	var holdOnce sync.Once
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		held := false
+		holdOnce.Do(func() { held = true })
+		if held {
+			close(inFlight) // signal: held connection is now in-flight
+			<-release       // block until cleanup releases us
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	prx.SetPoolSize("demo", 1)
+	prx.SetPoolCap("demo", 1)
+	if err := prx.RegisterReplica("demo", 0, backend.URL, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drive the held request in a goroutine; wait for inFlight before probing.
+	// All three teardown steps run in one cleanup to guarantee ordering:
+	// close(release) unblocks the held request, wg.Wait() drains the goroutine,
+	// then backend.Close() tears down the server.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/", nil))
+	}()
+	t.Cleanup(func() {
+		close(release)
+		wg.Wait()
+		backend.Close()
+	})
+
+	// Wait until the held connection is actually in the backend handler before
+	// probing saturation. This is deterministic: no sleep, no polling.
+	select {
+	case <-inFlight:
+	case <-time.After(2 * time.Second):
+		t.Fatal("held request did not reach backend within 2s")
+	}
+
+	// This new-session request lands on a saturated pool -> pool-saturated reject.
+	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/", nil))
+
+	// Drive one app-not-ready reject via the readiness probe.
+	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil))
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/demo", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	block, ok := body["rejects_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("rejects_by_reason missing or wrong type: %v", body["rejects_by_reason"])
+	}
+	if block["window_seconds"].(float64) != 600 {
+		t.Errorf("window_seconds = %v, want 600", block["window_seconds"])
+	}
+	counts := block["counts"].(map[string]any)
+	if counts["app-not-ready"].(float64) != 1 {
+		t.Errorf("counts[app-not-ready] = %v, want 1", counts["app-not-ready"])
+	}
+	if counts["pool-saturated"].(float64) != 1 {
+		t.Errorf("counts[pool-saturated] = %v, want 1", counts["pool-saturated"])
 	}
 }
