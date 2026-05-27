@@ -28,6 +28,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.6.2](https://github.com/rvben/shinyhub/compare/v0.6.1...v0.6.2) - 2026-05-27
+
+### Added
+
+- **cmd**: wire fleet gauges, lifecycle metrics, and lifecycle tracing ([5acfb9a](https://github.com/rvben/shinyhub/commit/5acfb9a81283b720b7e61a11a536ee2f0622971d))
+- **api**: structured access log with request-ID and deploy metrics ([0f2a856](https://github.com/rvben/shinyhub/commit/0f2a856e26fc4daeac694b80b65689212ee0257e))
+- **servertrace**: add service.instance.id resource attr and tracer accessor ([a4328a2](https://github.com/rvben/shinyhub/commit/a4328a272ab6adc427f2793be4e1ea29dbf65a8d))
+- **lifecycle**: instrument background ops with metrics, spans, and logging ([6c9e0a8](https://github.com/rvben/shinyhub/commit/6c9e0a82de3ce3b8386e768412fc2e44e135fba5))
+- **metrics**: add deploy, lifecycle, and fleet Prometheus series ([44a407d](https://github.com/rvben/shinyhub/commit/44a407d8f758a801743b7aa55ec37d4cce80d541))
+- **cmd**: enable lost-replica healing and worker-aware monitor eviction ([9a35954](https://github.com/rvben/shinyhub/commit/9a3595419c174f64f2e946497eef779737e05f31))
+- **cli**: render lost-replica reason in apps show ([50da8a7](https://github.com/rvben/shinyhub/commit/50da8a795d5eab128b07d49c296adc05b518bc69))
+- **api**: derive worker-unavailable reason and evict on worker revoke ([0b8d3cf](https://github.com/rvben/shinyhub/commit/0b8d3cf79e98acb51b4bac29b586ed17f2088876))
+- **lifecycle**: self-heal lost replicas and gate eviction on worker ownership ([55221d5](https://github.com/rvben/shinyhub/commit/55221d5ca16adfc5ca5836549540fa792fbcbedc))
+- **db**: add ListReconcilableApps and derived replica reason field ([fccd6eb](https://github.com/rvben/shinyhub/commit/fccd6ebc208c3e30d6e4d3f901f5c9f05cde010d))
+- **process**: add restart sentinels and worker-aware replica eviction ([2d7f8db](https://github.com/rvben/shinyhub/commit/2d7f8db8da023e4e99ce127c944d4a11ae6cfed7))
+- **worker**: tombstone long-dead worker rows ([123c0f8](https://github.com/rvben/shinyhub/commit/123c0f8caf3838c30704c12e936bc211bb342f14))
+- **worker**: explicit worker revocation ([efbadfd](https://github.com/rvben/shinyhub/commit/efbadfde4e6552d6cfd87b2a14e242a33c75ce9e))
+- **worker**: re-adopt persisted identity and hot-reload CA trust with renewal escalation ([baf0ba0](https://github.com/rvben/shinyhub/commit/baf0ba059a8e6fa29dc72c53701a98b1fea51f13))
+- **worker**: renew worker certs on heartbeat with TLS hot-reload ([b467509](https://github.com/rvben/shinyhub/commit/b467509edf8a44cbd441bbadafd1b4b5bbc2fe2f))
+- **worker**: rotate control-plane client cert past its half-life ([e146e7f](https://github.com/rvben/shinyhub/commit/e146e7f84f6f261c51884c7ef0ddd46821465c8d))
+
+### Fixed
+
+- **ui**: size deployments version column to fit epoch-millis IDs ([c2c9ca9](https://github.com/rvben/shinyhub/commit/c2c9ca9267db0e57be026065b403b6c4363452e1))
+- **observability**: route proxy and deploy errors through structured slog ([2fd5e30](https://github.com/rvben/shinyhub/commit/2fd5e304332d8b27750bd05ff08c7f61214c8dc1))
+- **worker**: require join token only for fresh registration, not re-adoption ([3b1d47a](https://github.com/rvben/shinyhub/commit/3b1d47a9985e8399c85ff6bbab4e3e430886c677))
+- **api**: serve the worker fleet view from the authoritative store ([9fd8ed0](https://github.com/rvben/shinyhub/commit/9fd8ed07ad23821366ac9203f3e6623cf2da2acd))
+- **worker**: return a copy from the rotating certificate provider ([cd2f8fa](https://github.com/rvben/shinyhub/commit/cd2f8fabeb2841465a7739f08f8fd3b1b2a686b7))
+- **lifecycle**: persist live endpoint when re-adopting a remote replica ([1e16239](https://github.com/rvben/shinyhub/commit/1e162398246e9524bd6dcb94bab202d08d52f800))
+- **proxy**: gate worker-loss deregister on the live route still pointing at the lost replica ([86f6fc0](https://github.com/rvben/shinyhub/commit/86f6fc0d1aaa8600b17ef2ec0ececfae9434f5e5))
+- **lifecycle**: guard replica-loss transition on current worker ownership ([c10dd31](https://github.com/rvben/shinyhub/commit/c10dd310fd11024e81c8b9b6f177463045ba82ca))
+- **worker**: evict replicas on revoke and serialize revoke against heartbeats ([0c023c4](https://github.com/rvben/shinyhub/commit/0c023c49508f7f3ac6a9f1b5c9e3729f06fbdea1))
+- **worker**: rotate the worker-API listener certificate ([087fe02](https://github.com/rvben/shinyhub/commit/087fe0280387dbb21cc024820c1de457f1031080))
+- **api**: adopt self-evicting limiter for worker register throttle ([a9f659f](https://github.com/rvben/shinyhub/commit/a9f659f4a6f64b00a7212507911ae1edf12df20b))
+- **worker**: bind inbound listener before the up-front heartbeat ([efe5b91](https://github.com/rvben/shinyhub/commit/efe5b91d89127423a093c90551d8d7051ac753f3))
+- **worker**: keep single-tier ownership on heartbeat and renew re-adopted certs promptly ([65e5e6a](https://github.com/rvben/shinyhub/commit/65e5e6a4a98ff488379ab698599309785a291619))
+
 ## [0.6.1](https://github.com/rvben/shinyhub/compare/v0.6.0...v0.6.1) - 2026-05-27
 
 ### Added
