@@ -251,11 +251,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	var dialer worker.AgentDialer
 	if workerCA != nil {
-		clientCert, err := workerCA.ControlClientCertificate()
+		d, err := worker.NewMTLSDialer(workerCA.ControlClientCertificate, workerCA.Pool())
 		if err != nil {
 			return fmt.Errorf("control client cert: %w", err)
 		}
-		dialer = worker.NewMTLSDialer(clientCert, workerCA.Pool())
+		dialer = d
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
