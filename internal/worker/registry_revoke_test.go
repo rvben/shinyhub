@@ -3,6 +3,7 @@ package worker
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -83,6 +84,58 @@ func TestRegistryHeartbeatRefusesRevokedWorker(t *testing.T) {
 	}
 	if w, _ := reg.Worker(node.NodeID); w.Status == "up" {
 		t.Fatalf("revoked worker promoted to up: %+v", w)
+	}
+}
+
+// TestRegistryRevokeRaceWithHeartbeat asserts that a heartbeat racing a revoke
+// can never resurrect the worker to up/routable. Heartbeat reads the worker,
+// decides status, then writes it back; if revoke is not serialized against that
+// read-modify-write, a heartbeat that read the pre-revoke row writes status=up
+// after the revoke lands, and because that node stays revoked, no later
+// heartbeat ever corrects it. Once all goroutines settle, the worker must be
+// revoked, down, and unroutable on every iteration.
+func TestRegistryRevokeRaceWithHeartbeat(t *testing.T) {
+	for iter := 0; iter < 200; iter++ {
+		store := newTestStore(t)
+		reg, err := NewRegistry(store)
+		if err != nil {
+			t.Fatalf("new registry: %v", err)
+		}
+		node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				_ = reg.Heartbeat(node.NodeID, "bb")
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			_ = reg.Revoke(node.NodeID)
+		}()
+		wg.Wait()
+
+		// Drain any heartbeat that may still be promoting; the invariant must hold
+		// once revoke has returned, regardless of ordering.
+		w, ok := reg.Worker(node.NodeID)
+		if !ok {
+			t.Fatalf("iter %d: worker dropped from index", iter)
+		}
+		if !w.Revoked() {
+			t.Fatalf("iter %d: worker not revoked after concurrent revoke: %+v", iter, w)
+		}
+		if w.Status == "up" {
+			t.Fatalf("iter %d: revoked worker resurrected to up: %+v", iter, w)
+		}
+		if _, routable := reg.WorkerForTier("burst"); routable {
+			t.Fatalf("iter %d: revoked worker is routable", iter)
+		}
+		store.Close()
 	}
 }
 

@@ -2,11 +2,13 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/lifecycle"
 )
 
 // workerResponse is the admin-facing view of a joined worker.
@@ -74,6 +76,17 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+	// Revocation marks the worker down, but the down-timeout sweep skips workers
+	// that are already down, so its running replicas would otherwise keep serving
+	// user traffic. Evict them here: transition each to lost and drop its proxy
+	// route, mirroring how the monitor handles a worker that went stale.
+	var deregister func(slug string, index int)
+	if s.proxy != nil {
+		deregister = s.proxy.DeregisterReplica
+	}
+	if err := lifecycle.LoseWorkerReplicas(s.store, nodeID, deregister); err != nil {
+		slog.Error("revoke worker: evict replicas", "node", nodeID, "err", err)
 	}
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       callerID(r),

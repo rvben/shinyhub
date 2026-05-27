@@ -120,7 +120,15 @@ func (r *Registry) MarkDown(nodeID string) error {
 // the node is excluded from routing immediately, without waiting for a
 // control-plane restart. The row is kept (not deleted) so the revocation stays
 // auditable. Returns db.ErrNotFound for an unknown node.
+//
+// It holds regMu for the same reason Heartbeat and Register do: a heartbeat
+// performs a read-decide-write of the worker's status, so revoking without that
+// lock could land between a heartbeat's read and its write and let the heartbeat
+// resurrect the revoked node to up. Serializing closes that window.
 func (r *Registry) Revoke(nodeID string) error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+
 	if err := r.store.RevokeWorker(nodeID); err != nil {
 		return err
 	}

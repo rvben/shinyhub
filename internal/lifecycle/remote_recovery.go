@@ -77,6 +77,39 @@ func recoverRemoteReplica(
 	return true
 }
 
+// LoseWorkerReplicas transitions every running replica owned by nodeID to lost
+// and removes it from routing via deregister (nil-safe). It is shared by the
+// worker-down monitor (a worker whose heartbeat went stale) and the admin
+// revoke path (a worker pulled administratively) so both evict in-flight user
+// traffic from the worker identically. Replicas already in a terminal state are
+// left untouched. A failure to resolve or update one replica is logged and
+// skipped so the others still drain.
+func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug string, index int)) error {
+	reps, err := store.ListReplicasByWorker(nodeID)
+	if err != nil {
+		return err
+	}
+	for _, r := range reps {
+		if r.Status != db.ReplicaStatusRunning {
+			continue
+		}
+		app, err := store.GetAppByID(r.AppID)
+		if err != nil {
+			slog.Error("lose replica: resolve app", "app_id", r.AppID, "err", err)
+			continue
+		}
+		if err := store.UpdateReplicaStatus(r.AppID, r.Index, db.ReplicaStatusLost); err != nil {
+			slog.Error("lose replica: mark lost", "slug", app.Slug, "idx", r.Index, "err", err)
+			continue
+		}
+		if deregister != nil {
+			deregister(app.Slug, r.Index)
+		}
+		slog.Warn("lose replica", "slug", app.Slug, "idx", r.Index, "node", nodeID)
+	}
+	return nil
+}
+
 // WorkerDownMonitor periodically marks stale workers down and transitions their
 // running replicas to lost, removing them from proxy routing. It also reaps
 // worker rows that have been down past a longer retention window so the table
@@ -120,28 +153,9 @@ func (m *WorkerDownMonitor) Sweep(now time.Time) {
 			continue
 		}
 		slog.Warn("worker monitor: worker down", "node", w.NodeID, "tier", w.Tier)
-		reps, err := m.store.ListReplicasByWorker(w.NodeID)
-		if err != nil {
-			slog.Error("worker monitor: list replicas", "node", w.NodeID, "err", err)
+		if err := LoseWorkerReplicas(m.store, w.NodeID, m.deregister); err != nil {
+			slog.Error("worker monitor: lose replicas", "node", w.NodeID, "err", err)
 			continue
-		}
-		for _, r := range reps {
-			if r.Status != db.ReplicaStatusRunning {
-				continue
-			}
-			app, err := m.store.GetAppByID(r.AppID)
-			if err != nil {
-				slog.Error("worker monitor: resolve app", "app_id", r.AppID, "err", err)
-				continue
-			}
-			if err := m.store.UpdateReplicaStatus(r.AppID, r.Index, db.ReplicaStatusLost); err != nil {
-				slog.Error("worker monitor: mark replica lost", "slug", app.Slug, "idx", r.Index, "err", err)
-				continue
-			}
-			if m.deregister != nil {
-				m.deregister(app.Slug, r.Index)
-			}
-			slog.Warn("worker monitor: replica lost", "slug", app.Slug, "idx", r.Index, "node", w.NodeID)
 		}
 	}
 

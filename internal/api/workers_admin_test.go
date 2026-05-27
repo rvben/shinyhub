@@ -9,6 +9,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/worker"
 )
 
@@ -150,5 +151,63 @@ func TestHandleRevokeWorker(t *testing.T) {
 	srv.handleRevokeWorker(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("unknown-node revoke status = %d, want 404", w.Code)
+	}
+}
+
+// TestHandleRevokeWorkerEvictsReplicas asserts that revoking a worker that owns
+// running replicas transitions those replicas to lost and removes them from
+// proxy routing, so user traffic stops flowing to the revoked node immediately
+// rather than waiting for the down-timeout sweep (which skips already-down
+// workers).
+func TestHandleRevokeWorkerEvictsReplicas(t *testing.T) {
+	store := newTestStore(t)
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir()},
+	}
+	prx := proxy.New()
+	srv := New(cfg, store, nil, prx)
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	srv.SetWorkerRegistry(reg)
+
+	adminUser := ctxUser(t, store, "ops", "admin")
+	owner := ctxUser(t, store, "owner", "developer")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: owner.ID, Access: "private"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	node, _ := reg.Register(worker.RegisterParams{Tier: "remote", AdvertiseAddr: "10.0.0.9:8443"})
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
+		Provider: "remote_docker", Tier: "remote", WorkerID: node.NodeID,
+	}); err != nil {
+		t.Fatalf("upsert replica: %v", err)
+	}
+	prx.SetPoolSize("demo", 1)
+	if err := prx.RegisterReplica("demo", 0, "https://10.0.0.9:8443/v1/data/tok", nil); err != nil {
+		t.Fatalf("register replica route: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workers/"+node.NodeID+"/revoke", http.NoBody)
+	req = withURLParam(req, "node_id", node.NodeID)
+	req = req.WithContext(auth.WithUser(req.Context(), adminUser))
+	w := httptest.NewRecorder()
+	srv.handleRevokeWorker(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("revoke status = %d, want 204: %s", w.Code, w.Body.String())
+	}
+
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Fatalf("replica not transitioned to lost after revoke: %+v", reps)
+	}
+	if got := prx.ReplicaTargetURL("demo", 0); got != "" {
+		t.Fatalf("revoked worker's replica still routable: %q", got)
 	}
 }
