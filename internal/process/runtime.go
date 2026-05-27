@@ -20,6 +20,13 @@ var ErrNoLiveWorker = errors.New("no live worker for tier")
 // a re-placement that races a slot already (re)filled is a no-op, not a failure.
 var ErrReplicaAlreadyRunning = errors.New("replica already running")
 
+// ErrReplicaNotFound is returned (wrapped) by Manager.StopReplica when the
+// slug+index slot has no live entry. Callers that distinguish an already-gone
+// replica from a real stop failure (e.g. autoscale scale-down) match this
+// sentinel: a missing entry is benign, while any other error means the replica
+// may still be running and its control-plane state must be left intact.
+var ErrReplicaNotFound = errors.New("replica not found")
+
 // ReplicaEndpoint is the result of starting a replica: where the proxy routes
 // to it, which provider owns it, a stable worker identity used for recovery,
 // and the operational RunHandle for Signal/Wait/Stats/removal. A remote runtime

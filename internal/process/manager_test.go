@@ -2,6 +2,7 @@ package process_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -969,6 +970,23 @@ func TestManagerDispatchesByTier(t *testing.T) {
 	}
 	if err := m.StopReplica("b", 0); err != nil {
 		t.Fatalf("stop burst: %v", err)
+	}
+}
+
+// TestStopReplica_MissingEntryReturnsErrReplicaNotFound proves the missing-slot
+// case is reported as the ErrReplicaNotFound sentinel (not an opaque error), so
+// callers like the autoscale scale-down can distinguish a benign already-gone
+// replica from a real stop failure (e.g. a remote worker rejecting SIGTERM).
+func TestStopReplica_MissingEntryReturnsErrReplicaNotFound(t *testing.T) {
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+
+	// No replica ever started for this slug: the slot is absent.
+	err := m.StopReplica("ghost", 0)
+	if err == nil {
+		t.Fatalf("StopReplica on a missing entry returned nil, want error")
+	}
+	if !errors.Is(err, process.ErrReplicaNotFound) {
+		t.Fatalf("StopReplica error = %v, want errors.Is(..., ErrReplicaNotFound)", err)
 	}
 }
 

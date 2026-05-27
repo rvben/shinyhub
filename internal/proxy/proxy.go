@@ -574,6 +574,27 @@ func (p *Proxy) DrainReplica(slug string, index int) bool {
 	return true
 }
 
+// UndrainReplica clears the drain flag on the slot at index in slug's pool,
+// returning it to the least-connections rotation, and reports whether a live
+// backend was unmarked. It is the rollback for an aborted scale-down: when the
+// stop fails, the still-running replica must resume serving new cookie-less
+// sessions instead of being left permanently half-drained. Returns false for an
+// absent pool, out-of-range index, or nil slot.
+func (p *Proxy) UndrainReplica(slug string, index int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return false
+	}
+	rb := pool.replicas[index]
+	if rb == nil {
+		return false
+	}
+	rb.draining.Store(false)
+	return true
+}
+
 // IsDraining reports whether the slot at index in slug's pool is marked
 // draining. Returns false for an absent pool, out-of-range index, or nil slot.
 func (p *Proxy) IsDraining(slug string, index int) bool {

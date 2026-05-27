@@ -1304,6 +1304,59 @@ func TestProxy_DrainReplica_MissingSlotReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestProxy_UndrainReplica_RestoresRouting verifies that clearing the drain flag
+// puts the slot back into the least-connections rotation. This is the rollback
+// used when a scale-down aborts after marking a slot draining (e.g. the stop
+// failed): the still-running replica must resume serving new cookie-less
+// sessions rather than be left half-drained.
+func TestProxy_UndrainReplica_RestoresRouting(t *testing.T) {
+	var hits0, hits1 atomic.Int64
+	b0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits0.Add(1) }))
+	b1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits1.Add(1) }))
+	defer b0.Close()
+	defer b1.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+
+	p.DrainReplica("demo", 0)
+	if !p.UndrainReplica("demo", 0) {
+		t.Fatal("UndrainReplica returned false for a live drained slot")
+	}
+	if p.IsDraining("demo", 0) {
+		t.Fatal("slot still reports draining after UndrainReplica")
+	}
+
+	// With the drain cleared both slots are eligible again, so least-connections
+	// spreads cookie-less requests across both rather than avoiding slot 0.
+	for i := 0; i < 20; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if hits0.Load() == 0 {
+		t.Errorf("undrained replica 0 received no requests; want it back in rotation")
+	}
+}
+
+// TestProxy_UndrainReplica_MissingSlotReturnsFalse verifies the primitive reports
+// failure for an absent pool, an out-of-range index, and a nil slot, mirroring
+// DrainReplica so callers can treat a missing slot uniformly.
+func TestProxy_UndrainReplica_MissingSlotReturnsFalse(t *testing.T) {
+	p := proxy.New()
+	if p.UndrainReplica("ghost", 0) {
+		t.Error("UndrainReplica returned true for an unregistered pool")
+	}
+	p.SetPoolSize("demo", 1) // slot 0 exists but is nil
+	if p.UndrainReplica("demo", 0) {
+		t.Error("UndrainReplica returned true for a nil slot")
+	}
+	if p.UndrainReplica("demo", 5) {
+		t.Error("UndrainReplica returned true for an out-of-range index")
+	}
+}
+
 // TestProxy_ReplicaSessionCounts_ReflectsInFlight verifies that
 // ReplicaSessionCounts returns -1 for empty slots and tracks live connections.
 func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {

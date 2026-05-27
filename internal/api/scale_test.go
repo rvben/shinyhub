@@ -1,6 +1,10 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -15,6 +19,37 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
+
+// stopFailRuntime is a minimal Runtime whose Start succeeds (registering a
+// manager entry) but whose Signal always fails, so Manager.StopReplica returns a
+// non-benign error rather than ErrReplicaNotFound. It lets the scale-down abort
+// path be exercised against the real Manager.StopReplica code.
+type stopFailRuntime struct{ nextPID int }
+
+func (r *stopFailRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	r.nextPID++
+	pid := 60000 + r.nextPID
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: fmt.Sprintf("%d", pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
+}
+
+func (r *stopFailRuntime) Signal(process.RunHandle, syscall.Signal) error {
+	return errors.New("worker refused SIGTERM")
+}
+func (r *stopFailRuntime) Wait(context.Context, process.RunHandle) error { return nil }
+func (r *stopFailRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (r *stopFailRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (r *stopFailRuntime) HostPreparesDeps() bool    { return false }
+func (r *stopFailRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (r *stopFailRuntime) HostProvidesAppData() bool { return false }
 
 // newScaleTestServer seeds an in-memory store with one admin user, a running
 // app at the given replica count, a promoted deployment, and one running
@@ -309,6 +344,76 @@ func TestScaleDown_DrainsAndRemovesHighestReplica(t *testing.T) {
 		if r.Index == 1 {
 			t.Errorf("replica row index 1 not deleted after ScaleDown; rows=%+v", reps)
 		}
+	}
+}
+
+// TestScaleDown_StopFailureKeepsStateIntact proves that when stopping the victim
+// replica fails for a reason other than a benign already-gone entry (e.g. a
+// remote worker rejects the SIGTERM), ScaleDown aborts and leaves all state
+// intact: it returns an error, does not shrink the proxy pool, does not delete
+// the replica row, does not decrement the count, and clears the drain flag it
+// optimistically set so the still-running replica resumes full service. Without
+// this guard a stop failure would orphan a running replica while the control
+// plane believes capacity was removed.
+func TestScaleDown_StopFailureKeepsStateIntact(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	srv, app := newScaleTestServer(t, "demo", 2, cfg)
+
+	// Register a runtime that fails to stop, and start the victim (index 1) on
+	// its tier so Manager.StopReplica dispatches to it and returns a real error.
+	srv.manager.RegisterRuntime("failstop", &stopFailRuntime{})
+	if _, err := srv.manager.Start(process.StartParams{
+		Slug: "demo", Index: 1, Tier: "failstop", Dir: t.TempDir(),
+		Command: []string{"sleep", "30"}, Port: 19700,
+	}); err != nil {
+		t.Fatalf("seed victim process: %v", err)
+	}
+
+	// Give the proxy a live backend at the victim slot so the drain mark and its
+	// rollback are observable.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer backend.Close()
+	srv.proxy.SetPoolSize("demo", 2)
+	if err := srv.proxy.RegisterReplica("demo", 1, backend.URL, nil); err != nil {
+		t.Fatalf("register victim backend: %v", err)
+	}
+
+	scaled, err := srv.ScaleDown("demo", 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("ScaleDown returned nil error despite the stop failing")
+	}
+	if scaled {
+		t.Error("ScaleDown reported success despite the stop failing")
+	}
+	if errors.Is(err, process.ErrReplicaNotFound) {
+		t.Errorf("stop failure surfaced as ErrReplicaNotFound (benign); want a real error: %v", err)
+	}
+	// Proxy pool must not shrink: the replica is still running.
+	if got := srv.proxy.ReplicaSessionCounts("demo"); len(got) != 2 {
+		t.Errorf("proxy pool shrank to %d slots after a failed stop; want 2 untouched", len(got))
+	}
+	// Drain flag must be cleared so the surviving replica is back in rotation.
+	if srv.proxy.IsDraining("demo", 1) {
+		t.Error("victim slot left draining after the scale-down aborted")
+	}
+	// Replica row must survive and the count stay at 2.
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 2 {
+		t.Errorf("app replica count = %d after a failed stop; want 2 untouched", got.Replicas)
+	}
+	reps, err := srv.store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundVictim bool
+	for _, r := range reps {
+		if r.Index == 1 {
+			foundVictim = true
+		}
+	}
+	if !foundVictim {
+		t.Errorf("replica row index 1 deleted after a failed stop; rows=%+v", reps)
 	}
 }
 

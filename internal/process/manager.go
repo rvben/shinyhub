@@ -436,7 +436,7 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	pool := m.entries[slug]
 	if index >= len(pool) || pool[index] == nil {
 		m.mu.Unlock()
-		return fmt.Errorf("app %s replica %d not found", slug, index)
+		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
 	}
 	e := pool[index]
 	done := e.done

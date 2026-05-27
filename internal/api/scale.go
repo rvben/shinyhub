@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 // defaultMaxReplicas is the fallback per-app replica ceiling when the runtime
@@ -169,9 +171,24 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 	}
 	if s.manager != nil {
 		if err := s.manager.StopReplica(slug, victim); err != nil {
-			// A missing entry is benign (the replica may already be gone); log and
-			// proceed so the routing table and DB still converge on the new size.
-			slog.Warn("scale down: stop replica", "slug", slug, "index", victim, "err", err)
+			switch {
+			case errors.Is(err, process.ErrReplicaNotFound):
+				// A missing entry is benign (the replica may already be gone);
+				// log and proceed so the routing table and DB still converge on
+				// the new size.
+				slog.Warn("scale down: stop replica", "slug", slug, "index", victim, "err", err)
+			default:
+				// Any other failure means the replica may still be running (e.g. a
+				// remote worker rejected the SIGTERM). Shrinking the proxy and
+				// deleting the row now would orphan a live replica while the
+				// control plane believes capacity was removed. Roll back the drain
+				// mark so the still-running replica resumes full service, and abort
+				// with state intact.
+				if s.proxy != nil {
+					s.proxy.UndrainReplica(slug, victim)
+				}
+				return false, fmt.Errorf("scale down %s: stop replica %d: %w", slug, victim, err)
+			}
 		}
 	}
 	if s.proxy != nil {
