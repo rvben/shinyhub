@@ -151,6 +151,22 @@ func TestResource_CarriesServiceIdentity(t *testing.T) {
 	}
 }
 
+// TestResource_CarriesServiceInstanceID proves the exported resource carries a
+// non-empty service.instance.id so multiple ShinyHub instances exporting to the
+// same backend are distinguishable per the OTel service semantic conventions.
+func TestResource_CarriesServiceInstanceID(t *testing.T) {
+	res := buildResource("v1")
+	var instance string
+	for _, kv := range res.Attributes() {
+		if string(kv.Key) == "service.instance.id" {
+			instance = kv.Value.AsString()
+		}
+	}
+	if instance == "" {
+		t.Fatal("service.instance.id is empty; instances are indistinguishable in the backend")
+	}
+}
+
 // TestHTTPTracesEndpoint_AppendsSignalPath proves the configured OTLP endpoint
 // is treated as a BASE endpoint (the OTEL_EXPORTER_OTLP_ENDPOINT contract the
 // managed apps also use), so the HTTP exporter posts to the /v1/traces signal

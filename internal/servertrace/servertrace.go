@@ -12,8 +12,11 @@ package servertrace
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -68,6 +71,10 @@ func Setup(ctx context.Context, cfg config.TracingConfig, serviceVersion string)
 // Shutdown flushes pending spans and stops the exporter.
 func (t *Tracer) Shutdown(ctx context.Context) error { return t.tp.Shutdown(ctx) }
 
+// Tracer returns the underlying span tracer so other components (e.g. the
+// lifecycle watcher) can emit spans into the same provider/exporter.
+func (t *Tracer) Tracer() trace.Tracer { return t.tracer }
+
 // Middleware records one server span per request, named by the matched chi
 // route PATTERN (collapsing path params and unmatched 404s so span/attribute
 // cardinality stays bounded). An inbound W3C traceparent is adopted as the
@@ -102,11 +109,26 @@ func (t *Tracer) Middleware(next http.Handler) http.Handler {
 }
 
 // buildResource identifies the ShinyHub server process in the trace backend.
+// service.instance.id distinguishes multiple instances exporting to the same
+// backend; the hostname is used, falling back to a random token when it is
+// unavailable so the attribute is never empty.
 func buildResource(version string) *resource.Resource {
 	return resource.NewSchemaless(
 		attribute.String("service.name", "shinyhub"),
 		attribute.String("service.version", version),
+		attribute.String("service.instance.id", serviceInstanceID()),
 	)
+}
+
+// serviceInstanceID returns the host's name, or a random hex token when the
+// hostname cannot be determined.
+func serviceInstanceID() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // newExporter builds the OTLP span exporter for the configured protocol. The
