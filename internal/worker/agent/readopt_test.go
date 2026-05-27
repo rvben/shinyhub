@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,56 @@ func TestBootstrap_ReadoptsValidPersistedIdentity(t *testing.T) {
 	}
 	if len(ag.Certs().Get().Certificate) == 0 {
 		t.Error("cert holder is empty after re-adopt")
+	}
+}
+
+// TestBootstrap_ReadoptsWithoutToken verifies that re-adopting a still-valid
+// persisted identity needs no join token: a worker that joined earlier must
+// restart even after its join-token secret was rotated away. Bootstrap is the
+// path the worker CLI delegates to, so the token requirement must not gate this
+// branch.
+func TestBootstrap_ReadoptsWithoutToken(t *testing.T) {
+	dataDir := t.TempDir()
+	agentDir := filepath.Join(dataDir, "agent")
+	const nodeID = "node-no-token"
+	writePersistedIdentity(t, agentDir, nodeID, time.Hour)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ag, err := Bootstrap(ctx, Config{
+		ServerURL: "https://127.0.0.1:1", // unroutable: re-adoption must not dial it
+		Token:     "",                    // join token rotated away since the worker joined
+		DataDir:   dataDir,
+		Tier:      "remote",
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap re-adopt without token: %v", err)
+	}
+	if ag.NodeID() != nodeID {
+		t.Errorf("NodeID = %q, want %q", ag.NodeID(), nodeID)
+	}
+}
+
+// TestBootstrap_FreshJoinRequiresToken verifies that a fresh join (no persisted
+// identity) fails fast with a clear token error rather than attempting to
+// register without one. The requirement lives on the register path so it does
+// not block token-free re-adoption.
+func TestBootstrap_FreshJoinRequiresToken(t *testing.T) {
+	dataDir := t.TempDir() // empty: no persisted identity, forces the register path
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := Bootstrap(ctx, Config{
+		ServerURL: "https://127.0.0.1:1",
+		Token:     "",
+		DataDir:   dataDir,
+		Tier:      "remote",
+	})
+	if err == nil {
+		t.Fatal("expected an error when registering a fresh worker without a token")
+	}
+	if !strings.Contains(err.Error(), "token") {
+		t.Fatalf("error = %q, want it to identify the missing join token", err)
 	}
 }
 

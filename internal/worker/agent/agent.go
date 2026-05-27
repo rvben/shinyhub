@@ -119,6 +119,13 @@ func Bootstrap(ctx context.Context, cfg Config) (*Agent, error) {
 // clearing the agent data dir so this fresh-join path runs and carries the new
 // values to the control plane (heartbeat does not).
 func register(ctx context.Context, cfg Config, agentDir string) (*Agent, error) {
+	// The join token is required only to register a new worker; re-adopting a
+	// persisted identity (handled before this path) needs none. Enforcing it here
+	// rather than at the CLI lets a worker restart after its join token has been
+	// rotated away, as long as its on-disk certificate is still valid.
+	if cfg.Token == "" {
+		return nil, fmt.Errorf("join token required to register a new worker")
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)

@@ -42,9 +42,10 @@ func newWorkerCmd() *cobra.Command {
 			if serverURL == "" {
 				return fmt.Errorf("--server is required")
 			}
-			if token == "" {
-				return fmt.Errorf("--token is required")
-			}
+			// --token is required only for a fresh join; a worker with a valid
+			// persisted identity re-adopts it without one (Bootstrap enforces the
+			// token on the register path), so a worker can restart after its join
+			// token has been rotated away.
 			if caFile == "" {
 				caFile = os.Getenv("SHINYHUB_WORKER_CA")
 			}
