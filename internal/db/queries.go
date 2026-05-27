@@ -352,6 +352,17 @@ type App struct {
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
 	ReplicaPlacement string `json:"replica_placement,omitempty"`
+	// AutoscaleEnabled is true when the autoscale controller may adjust this
+	// app's replica count. Off by default; scaling is always opt-in per app.
+	AutoscaleEnabled bool `json:"autoscale_enabled"`
+	// AutoscaleMinReplicas / AutoscaleMaxReplicas bound the controller's
+	// replica count. Both are 0 when autoscaling is disabled.
+	AutoscaleMinReplicas int `json:"autoscale_min_replicas"`
+	AutoscaleMaxReplicas int `json:"autoscale_max_replicas"`
+	// AutoscaleTarget is the target average active sessions per replica as a
+	// fraction (0,1] of the per-replica session cap, or 0 to use the
+	// runtime-wide default target.
+	AutoscaleTarget float64 `json:"autoscale_target"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -378,6 +389,18 @@ const deploymentSummarySQL = `
 		(SELECT content_digest FROM deployments
 		   WHERE app_id = apps.id AND status = 'succeeded'
 		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest`
+
+// appColumns is the plain apps.* column list shared by every App SELECT, in the
+// exact order scanApp expects. It is kept as a single constant so the column
+// list and scanApp never drift across the queries below; each query appends
+// deploymentSummarySQL for the joined last_deployed_at/current_version/digest.
+const appColumns = `id, slug, name, project_slug, owner_id, access, status,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
+		       created_at, updated_at,
+		       managed_by, replica_placement,
+		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -414,12 +437,7 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	defer s.timed("GetAppBySlug")()
 	row := s.db.QueryRow(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps WHERE slug = ?`, slug)
 	return scanApp(row)
 }
@@ -431,12 +449,7 @@ func (s *Store) GetApp(slug string) (*App, error) {
 
 func (s *Store) GetAppByID(id int64) (*App, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps WHERE id = ?`, id)
 	return scanApp(row)
 }
@@ -446,12 +459,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 		limit = -1 // SQLite treats -1 as no limit
 	}
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -473,12 +481,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 // to re-adopt processes that survived a server restart.
 func (s *Store) ListRunningApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status = 'running'`)
 	if err != nil {
 		return nil, err
@@ -518,12 +521,7 @@ func (s *Store) CountRunningReplicas() (int64, error) {
 // which must not re-adopt degraded apps.
 func (s *Store) ListReconcilableApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status IN ('running', 'degraded')`)
 	if err != nil {
 		return nil, err
@@ -546,12 +544,7 @@ func (s *Store) ListReconcilableApps() ([]*App, error) {
 // rows behind for startup reconciliation to finish.
 func (s *Store) ListDeletingApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status = 'deleting'`)
 	if err != nil {
 		return nil, err
@@ -592,12 +585,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		limit = -1 // SQLite treats -1 as no limit
 	}
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		   OR access = 'shared'
@@ -632,12 +620,7 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 		limit = -1 // SQLite treats -1 as no limit
 	}
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		ORDER BY created_at DESC
@@ -1691,6 +1674,37 @@ func (s *Store) SetAppPlacement(appID int64, placementJSON string, total int) er
 	return nil
 }
 
+// SetAppAutoscaleParams carries the per-app autoscale settings written in one
+// update. When Enabled is false the bounds and target are still persisted so a
+// re-enable can restore the operator's last choice without re-entering them.
+type SetAppAutoscaleParams struct {
+	AppID       int64
+	Enabled     bool
+	MinReplicas int
+	MaxReplicas int
+	Target      float64
+}
+
+// SetAppAutoscale persists an app's autoscale configuration. Validation of the
+// bounds and target (min >= 1, max <= runtime ceiling, min <= max, target in
+// (0,1]) is the API layer's responsibility; this only writes the values.
+func (s *Store) SetAppAutoscale(p SetAppAutoscaleParams) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET autoscale_enabled = ?, autoscale_min_replicas = ?,
+		        autoscale_max_replicas = ?, autoscale_target = ?,
+		        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		boolToInt(p.Enabled), p.MinReplicas, p.MaxReplicas, p.Target, p.AppID,
+	)
+	if err != nil {
+		return fmt.Errorf("set autoscale: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ApplyAppManifestSettingsParams carries the subset of [app] manifest fields
 // to apply. Callers set the Set* booleans to true for each field they want
 // written; absent fields are left untouched.
@@ -1925,6 +1939,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
+		&a.AutoscaleEnabled, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
