@@ -880,12 +880,18 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		if err != nil {
 			return rc, fmt.Errorf("runtime.autoscale.scan_interval: %w", err)
 		}
+		if d <= 0 {
+			return rc, fmt.Errorf("runtime.autoscale.scan_interval: must be > 0, got %v", d)
+		}
 		rc.Autoscale.ScanInterval = d
 	}
 	if r.Autoscale.Cooldown != "" {
 		d, err := time.ParseDuration(r.Autoscale.Cooldown)
 		if err != nil {
 			return rc, fmt.Errorf("runtime.autoscale.cooldown: %w", err)
+		}
+		if d <= 0 {
+			return rc, fmt.Errorf("runtime.autoscale.cooldown: must be > 0, got %v", d)
 		}
 		rc.Autoscale.Cooldown = d
 	}

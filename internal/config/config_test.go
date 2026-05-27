@@ -586,6 +586,46 @@ auth:
 	}
 }
 
+func TestConfig_AutoscaleNonPositiveIntervalRejected(t *testing.T) {
+	// A zero or negative scan interval would panic time.NewTicker when the
+	// controller starts, so it must be rejected at load time.
+	for _, val := range []string{"0s", "-5s"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(`
+runtime:
+  autoscale:
+    scan_interval: "`+val+`"
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.Load(path); err == nil {
+			t.Fatalf("Load accepted non-positive scan_interval %q, want error", val)
+		}
+	}
+}
+
+func TestConfig_AutoscaleNonPositiveCooldownRejected(t *testing.T) {
+	// A zero or negative cooldown disables the gate that prevents the controller
+	// from acting every tick, so it must be rejected at load time.
+	for _, val := range []string{"0s", "-1m"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(`
+runtime:
+  autoscale:
+    cooldown: "`+val+`"
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.Load(path); err == nil {
+			t.Fatalf("Load accepted non-positive cooldown %q, want error", val)
+		}
+	}
+}
+
 func TestConfig_AutoscaleInvalidTargetRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(`
