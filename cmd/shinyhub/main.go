@@ -581,8 +581,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			// down timeout so a briefly-flapping worker is never tombstoned.
 			workerRetention = 24 * time.Hour
 		)
-		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int) {
-			prx.DeregisterReplica(slug, index)
+		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int, expectURL string) {
+			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
 		}, workerReg.Forget)
 		go monitor.Run(ctx, monitorInterval)
 		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)

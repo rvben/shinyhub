@@ -81,9 +81,11 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 	// that are already down, so its running replicas would otherwise keep serving
 	// user traffic. Evict them here: transition each to lost and drop its proxy
 	// route, mirroring how the monitor handles a worker that went stale.
-	var deregister func(slug string, index int)
+	var deregister func(slug string, index int, expectURL string)
 	if s.proxy != nil {
-		deregister = s.proxy.DeregisterReplica
+		deregister = func(slug string, index int, expectURL string) {
+			s.proxy.DeregisterReplicaIfTarget(slug, index, expectURL)
+		}
 	}
 	if err := lifecycle.LoseWorkerReplicas(s.store, nodeID, deregister); err != nil {
 		slog.Error("revoke worker: evict replicas", "node", nodeID, "err", err)

@@ -84,7 +84,13 @@ func recoverRemoteReplica(
 // traffic from the worker identically. Replicas already in a terminal state are
 // left untouched. A failure to resolve or update one replica is logged and
 // skipped so the others still drain.
-func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug string, index int)) error {
+//
+// deregister is passed the replica's expected routing target (its endpoint URL
+// at the time of the snapshot) so it can drop the slot only while the live route
+// still points at the lost replica: the deploy path registers a re-placed
+// replica's route before persisting its row, so a stale loss pass must not pull
+// a route a concurrent redeploy already re-pointed at a healthy backend.
+func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug string, index int, expectURL string)) error {
 	reps, err := store.ListReplicasByWorker(nodeID)
 	if err != nil {
 		return err
@@ -111,7 +117,7 @@ func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug str
 			continue
 		}
 		if deregister != nil {
-			deregister(app.Slug, r.Index)
+			deregister(app.Slug, r.Index, r.EndpointURL)
 		}
 		slog.Warn("lose replica", "slug", app.Slug, "idx", r.Index, "node", nodeID)
 	}
@@ -129,7 +135,7 @@ type WorkerDownMonitor struct {
 	timeout    time.Duration
 	retention  time.Duration
 	markDown   func(nodeID string) error
-	deregister func(slug string, index int)
+	deregister func(slug string, index int, expectURL string)
 	forget     func(nodeID string)
 }
 
@@ -141,7 +147,7 @@ type WorkerDownMonitor struct {
 // routing without a control-plane restart. retention is the (much longer)
 // window after which a still-dead, non-revoked worker row with no live replicas
 // is reaped; forget drops the reaped node from the in-memory index.
-func NewWorkerDownMonitor(store *db.Store, timeout, retention time.Duration, markDown func(nodeID string) error, deregister func(slug string, index int), forget func(nodeID string)) *WorkerDownMonitor {
+func NewWorkerDownMonitor(store *db.Store, timeout, retention time.Duration, markDown func(nodeID string) error, deregister func(slug string, index int, expectURL string), forget func(nodeID string)) *WorkerDownMonitor {
 	return &WorkerDownMonitor{store: store, timeout: timeout, retention: retention, markDown: markDown, deregister: deregister, forget: forget}
 }
 

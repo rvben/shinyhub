@@ -718,7 +718,7 @@ func TestWorkerDownMonitor_ExcludesDownedWorkerFromRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour, reg.MarkDown, func(string, int) {}, reg.Forget)
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour, reg.MarkDown, func(string, int, string) {}, reg.Forget)
 	monitor.Sweep(time.Now())
 
 	if _, ok := reg.WorkerForTier("remote"); ok {
@@ -743,6 +743,7 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
 		Provider: "remote_docker", Tier: "remote", WorkerID: "node-a",
+		EndpointURL: "https://w:8443/v1/data/tok",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -754,9 +755,9 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	deregistered := false
 	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour,
 		func(nodeID string) error { return store.SetWorkerStatus(nodeID, "down") },
-		func(slug string, index int) {
+		func(slug string, index int, expectURL string) {
 			deregistered = true
-			prx.DeregisterReplica(slug, index)
+			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
 		},
 		nil)
 	monitor.Sweep(time.Now())
@@ -802,7 +803,7 @@ func TestLoseWorkerReplicas(t *testing.T) {
 	seed(2, "stopped", "node-dead")
 
 	deregistered := map[int]bool{}
-	if err := lifecycle.LoseWorkerReplicas(store, "node-dead", func(_ string, idx int) {
+	if err := lifecycle.LoseWorkerReplicas(store, "node-dead", func(_ string, idx int, _ string) {
 		deregistered[idx] = true
 	}); err != nil {
 		t.Fatalf("LoseWorkerReplicas: %v", err)
@@ -863,7 +864,7 @@ func TestWorkerDownMonitor_ReapsLongDeadWorkers(t *testing.T) {
 	}
 
 	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour,
-		reg.MarkDown, func(string, int) {}, reg.Forget)
+		reg.MarkDown, func(string, int, string) {}, reg.Forget)
 	monitor.Sweep(time.Now())
 
 	if w, err := store.GetWorker(ancient.NodeID); err != db.ErrNotFound {

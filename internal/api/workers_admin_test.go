@@ -186,6 +186,7 @@ func TestHandleRevokeWorkerEvictsReplicas(t *testing.T) {
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
 		Provider: "remote_docker", Tier: "remote", WorkerID: node.NodeID,
+		EndpointURL: "https://10.0.0.9:8443/v1/data/tok",
 	}); err != nil {
 		t.Fatalf("upsert replica: %v", err)
 	}

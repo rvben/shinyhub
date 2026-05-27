@@ -754,7 +754,9 @@ func TestProxy_DeregisterReplica(t *testing.T) {
 	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil)
 	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil)
 
-	p.DeregisterReplica("demo", 0)
+	if !p.DeregisterReplicaIfTarget("demo", 0, "http://127.0.0.1:20001") {
+		t.Fatal("expected replica 0 to be deregistered")
+	}
 	if !p.HasLiveReplica("demo") {
 		t.Fatal("expected at least one live replica")
 	}
@@ -1344,7 +1346,7 @@ func TestProxy_ReadyProbe_ClearedByLifecycleEvents(t *testing.T) {
 		reset func(p *proxy.Proxy)
 	}{
 		{"Deregister", func(p *proxy.Proxy) { p.Deregister("demo") }},
-		{"DeregisterReplica", func(p *proxy.Proxy) { p.DeregisterReplica("demo", 0) }},
+		{"DeregisterReplicaIfTarget", func(p *proxy.Proxy) { p.DeregisterReplicaIfTarget("demo", 0, "http://127.0.0.1:1") }},
 		{"BeginHibernate", func(p *proxy.Proxy) {
 			// Pass a future time so the lastSeen check passes
 			// (no requests have been recorded for this slug).

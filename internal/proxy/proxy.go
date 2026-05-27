@@ -523,17 +523,28 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
-// DeregisterReplica removes the replica at index from slug's pool.
-// The slot becomes nil; other replicas are unaffected.
-func (p *Proxy) DeregisterReplica(slug string, index int) {
+// DeregisterReplicaIfTarget removes the replica at index only while its current
+// target still equals expectURL, returning whether it removed the slot. A
+// worker-loss pass uses it so it cannot pull a route that a concurrent redeploy
+// already re-pointed at a healthy backend: the deploy path registers the new
+// route before it persists the new replica row, so a loss pass reading the stale
+// row must confirm the live route still belongs to the lost replica before
+// deregistering it. Unknown pools, out-of-range indices, and empty slots are
+// no-ops.
+func (p *Proxy) DeregisterReplicaIfTarget(slug string, index int, expectURL string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	pool, ok := p.pools[slug]
 	if !ok || index < 0 || index >= len(pool.replicas) {
-		return
+		return false
+	}
+	rb := pool.replicas[index]
+	if rb == nil || rb.targetURL != expectURL {
+		return false
 	}
 	pool.replicas[index] = nil
 	p.clearWSReady(slug)
+	return true
 }
 
 // ReplicaTargetURL returns the target URL registered for slug at index, or an
