@@ -170,13 +170,40 @@ When tracing is disabled the endpoint still returns `200` with `enabled:
 false` and an empty `spans: []` so the UI can render an "off" state without
 extra error handling.
 
+## Server-side spans (control plane)
+
+The propagation and ring buffer above cover the **proxy hot path** and the
+**app processes**. Separately, when `tracing.enabled` is set, ShinyHub's own
+server process also exports spans through the OpenTelemetry SDK to the same
+OTLP endpoint, so a client/edge trace links through ShinyHub to the app it
+proxies:
+
+- **One server span per control-plane request**, named by the matched route
+  pattern (not the raw path, so cardinality stays bounded). Spans use HTTP
+  semantic-convention attributes (`http.request.method`, `http.route`,
+  `http.response.status_code`) and adopt an inbound `traceparent` as the
+  parent.
+- **Background lifecycle spans** for the watchdog's wake, restart, and
+  hibernate operations (`lifecycle.wake`, `lifecycle.restart`,
+  `lifecycle.hibernate`), each tagged with `shinyhub.app.slug`, so cold-start
+  latency and restart storms are visible in the backend.
+- Every exported span carries a resource identifying the instance
+  (`service.name`, `service.version`, `service.instance.id`).
+
+This reuses the same `tracing` config block above; there is no separate
+server-tracing switch. Server spans and the access log are correlated in both
+directions (the span carries the `request_id`; the access-log line carries the
+`trace_id`); see [metrics.md](metrics.md) for the access-log fields.
+
 ## What ShinyHub does not do
 
-- **No embedded OTLP receiver.** ShinyHub forwards trace context; it does not
-  collect, store, or visualise traces. Run a collector (Tempo, Jaeger,
-  Grafana Alloy, Honeycomb, etc.) and point apps at it.
-- **No log/metric correlation in the buffer.** The ring buffer is
-  proxy-level metadata only; for full request data, follow the trace ID into
-  your backend.
+- **No embedded OTLP receiver.** ShinyHub exports its own spans and propagates
+  trace context, but it does not receive, collect, or visualise traces for
+  other services. Run a collector (Tempo, Jaeger, Grafana Alloy, Honeycomb,
+  etc.) and point ShinyHub and the apps at it.
+- **No app-span correlation in the ring buffer.** The Traces-tab ring buffer
+  is proxy-level metadata only; for full request data, follow the trace ID
+  into your backend. (Server spans and the access log are correlated
+  separately, as noted above.)
 - **No sidecar.** The OTEL\_\* env approach uses the OpenTelemetry SDK that
-  Shiny already loads — no separate agent, no exporter binary on the host.
+  Shiny already loads, with no separate agent and no exporter binary on the host.
