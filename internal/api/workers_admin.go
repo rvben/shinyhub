@@ -92,7 +92,13 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 			s.proxy.DeregisterReplicaIfTarget(slug, index, expectURL)
 		}
 	}
-	if err := lifecycle.LoseWorkerReplicas(s.store, nodeID, deregister); err != nil {
+	// Drop each lost replica's process-manager entry so a re-placement Start at
+	// the same slug+index is not rejected as already running.
+	var evict func(slug string, index int, workerID string)
+	if s.manager != nil {
+		evict = s.manager.EvictReplicaIfWorker
+	}
+	if err := lifecycle.LoseWorkerReplicas(s.store, nodeID, deregister, evict); err != nil {
 		slog.Error("revoke worker: evict replicas", "node", nodeID, "err", err)
 	}
 	s.store.LogAuditEvent(db.AuditEventParams{
