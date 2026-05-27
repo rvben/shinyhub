@@ -85,6 +85,15 @@ func TestServeHTTP_RejectHeader_PoolSaturated(t *testing.T) {
 
 func TestServeHTTP_RejectHeader_PoolDegraded(t *testing.T) {
 	p := proxy.New()
+	var entry proxy.AccessLogEntry
+	var mu sync.Mutex
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		if e.Status == http.StatusServiceUnavailable {
+			mu.Lock()
+			entry = e
+			mu.Unlock()
+		}
+	})
 	// Configured size 2 but only replica 0 is live and at cap -> degraded.
 	done := occupyPoolToCap(t, p, "demo", 2)
 	defer done()
@@ -99,10 +108,24 @@ func TestServeHTTP_RejectHeader_PoolDegraded(t *testing.T) {
 	if got := rec.Header().Get("X-Shinyhub-Reject"); got != "pool-degraded" {
 		t.Errorf("X-Shinyhub-Reject = %q, want pool-degraded", got)
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	if entry.Reject != proxy.ReasonPoolDegraded {
+		t.Errorf("access-log Reject = %q, want pool-degraded", entry.Reject)
+	}
 }
 
 func TestServeHTTP_RejectHeader_UnknownSlug(t *testing.T) {
 	p := proxy.New()
+	var entry proxy.AccessLogEntry
+	var mu sync.Mutex
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) {
+		if e.Status == http.StatusNotFound {
+			mu.Lock()
+			entry = e
+			mu.Unlock()
+		}
+	})
 	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
 
 	req := httptest.NewRequest(http.MethodGet, "/app/missing/", nil)
@@ -114,6 +137,11 @@ func TestServeHTTP_RejectHeader_UnknownSlug(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-Shinyhub-Reject"); got != "unknown-slug" {
 		t.Errorf("X-Shinyhub-Reject = %q, want unknown-slug", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if entry.Reject != proxy.ReasonUnknownSlug {
+		t.Errorf("access-log Reject = %q, want unknown-slug", entry.Reject)
 	}
 }
 
