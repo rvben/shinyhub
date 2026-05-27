@@ -663,23 +663,39 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// enabled, the controller evaluates opted-in apps on its own interval and
 	// drives the same incremental scale primitives the API exposes; it never
 	// scales worker hosts.
+	var (
+		cancelAutoscale context.CancelFunc
+		autoscaleDone   chan struct{}
+	)
 	if cfg.Runtime.Autoscale.Enabled {
-		asCtx, cancelAutoscale := context.WithCancel(context.Background())
+		var asCtx context.Context
+		asCtx, cancelAutoscale = context.WithCancel(context.Background())
 		defer cancelAutoscale()
 		runtimeMax := cfg.Runtime.MaxReplicas
 		if runtimeMax <= 0 {
 			runtimeMax = 32
 		}
+		// Look back twice the scan interval so a saturated pool is still observed
+		// between ticks, but never beyond the cooldown: a stale saturation event
+		// must not bias successive actions once a fresh decision is allowed.
+		rejectWindow := 2 * cfg.Runtime.Autoscale.ScanInterval
+		if rejectWindow > cfg.Runtime.Autoscale.Cooldown {
+			rejectWindow = cfg.Runtime.Autoscale.Cooldown
+		}
 		controller := autoscale.New(autoscale.Config{
 			ScanInterval:  cfg.Runtime.Autoscale.ScanInterval,
 			Cooldown:      cfg.Runtime.Autoscale.Cooldown,
 			DrainGrace:    30 * time.Second,
-			RejectWindow:  2 * cfg.Runtime.Autoscale.ScanInterval,
+			RejectWindow:  rejectWindow,
 			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
 			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
 			RuntimeMax:    runtimeMax,
 		}, store, prx, srv, slog.Default())
-		go controller.Run(asCtx)
+		autoscaleDone = make(chan struct{})
+		go func() {
+			controller.Run(asCtx)
+			close(autoscaleDone)
+		}()
 		slog.Info("autoscale controller started",
 			"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
 			"cooldown", cfg.Runtime.Autoscale.Cooldown,
@@ -794,6 +810,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	jobsMgr.Stop(shutdownCtx)
 	cancelWatcher()
 	<-watcherDone
+	// Stop the autoscale controller and wait for its loop to exit before the
+	// store closes, so it cannot issue a scale query against a torn-down store.
+	if cancelAutoscale != nil {
+		cancelAutoscale()
+		<-autoscaleDone
+	}
 
 	switch cfg.Server.ShutdownApps {
 	case "stop":
