@@ -8,6 +8,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -86,4 +88,52 @@ func TestRotatingClientCert_ReMintsWhenPastHalfLife(t *testing.T) {
 	if serialOf(t, second) == firstSerial {
 		t.Fatal("provider returned the stale cert after re-mint")
 	}
+}
+
+// TestRotatingCert_ConcurrentReadDuringRotation runs many concurrent handshakes
+// (current() callers) against a provider whose cert is always past half-life, so
+// every call re-mints. The certificate the TLS stack reads must be stable for
+// the duration of the handshake: returning a pointer to the provider's own field
+// lets a concurrent re-mint overwrite the struct mid-read. Run under -race, this
+// fails when current() shares the live field and passes when it returns a copy.
+func TestRotatingCert_ConcurrentReadDuringRotation(t *testing.T) {
+	// Pre-build certs on the test goroutine (selfSignedCert calls t.Fatalf, which
+	// is illegal off the test goroutine). Each is already past half-life, so every
+	// current() call triggers a refresh that overwrites the held cert.
+	pool := make([]tls.Certificate, 8)
+	for i := range pool {
+		now := time.Now()
+		pool[i] = selfSignedCert(t, now.Add(-2*time.Hour), now.Add(time.Hour))
+	}
+	var idx int64
+	mint := func() (tls.Certificate, error) {
+		n := atomic.AddInt64(&idx, 1)
+		return pool[n%int64(len(pool))], nil
+	}
+
+	p, err := newRotatingCert(mint)
+	if err != nil {
+		t.Fatalf("new rotating cert: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 400; j++ {
+				c, err := p.current()
+				if err != nil {
+					t.Errorf("current: %v", err)
+					return
+				}
+				// Read the fields the TLS stack reads during a handshake; these
+				// must not be mutated by a concurrent re-mint.
+				if len(c.Certificate) == 0 || c.PrivateKey == nil {
+					t.Errorf("torn certificate: %d chains, key=%v", len(c.Certificate), c.PrivateKey)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

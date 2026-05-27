@@ -64,18 +64,23 @@ func (r *rotatingCert) refresh() error {
 // re-mint fails while the current cert is still valid, the current cert is kept
 // so a transient signing error does not break an otherwise-working provider;
 // only once the held cert has expired does the re-mint error surface.
+//
+// It returns a copy of the held cert, not a pointer to the provider's field: the
+// TLS stack reads the returned certificate for the duration of a handshake, and
+// a concurrent re-mint reassigns r.cert. Sharing the field would let that
+// reassignment mutate a certificate another in-flight handshake is still reading.
 func (r *rotatingCert) current() (*tls.Certificate, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if certPastHalfLife(r.notBefore, r.notAfter, time.Now()) {
 		if err := r.refresh(); err != nil {
-			if time.Now().Before(r.notAfter) {
-				return &r.cert, nil
+			if !time.Now().Before(r.notAfter) {
+				return nil, err
 			}
-			return nil, err
 		}
 	}
-	return &r.cert, nil
+	held := r.cert
+	return &held, nil
 }
 
 // getClientCertificate adapts the provider to tls.Config.GetClientCertificate
