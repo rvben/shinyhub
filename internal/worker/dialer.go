@@ -19,10 +19,12 @@ func certPastHalfLife(notBefore, notAfter, now time.Time) bool {
 	return !now.Before(halfLife)
 }
 
-// rotatingClientCert lazily re-mints the control plane's client certificate once
-// the current one passes its half-life, so long-running control planes never
-// present an expired cert to worker agents. It is safe for concurrent use.
-type rotatingClientCert struct {
+// rotatingCert lazily re-mints a certificate once the current one passes its
+// half-life, so a long-running process never presents an expired cert. The same
+// provider drives both the control plane's outbound client cert
+// (GetClientCertificate) and the worker-API listener's inbound server cert
+// (GetCertificate). It is safe for concurrent use.
+type rotatingCert struct {
 	mint func() (tls.Certificate, error)
 
 	mu        sync.Mutex
@@ -31,8 +33,8 @@ type rotatingClientCert struct {
 	notAfter  time.Time
 }
 
-func newRotatingClientCert(mint func() (tls.Certificate, error)) (*rotatingClientCert, error) {
-	r := &rotatingClientCert{mint: mint}
+func newRotatingCert(mint func() (tls.Certificate, error)) (*rotatingCert, error) {
+	r := &rotatingCert{mint: mint}
 	if err := r.refresh(); err != nil {
 		return nil, err
 	}
@@ -40,7 +42,7 @@ func newRotatingClientCert(mint func() (tls.Certificate, error)) (*rotatingClien
 }
 
 // refresh mints a new cert and records its validity window. Caller holds mu.
-func (r *rotatingClientCert) refresh() error {
+func (r *rotatingCert) refresh() error {
 	c, err := r.mint()
 	if err != nil {
 		return err
@@ -58,11 +60,11 @@ func (r *rotatingClientCert) refresh() error {
 	return nil
 }
 
-// getClientCertificate adapts the provider to tls.Config.GetClientCertificate,
-// re-minting when the held cert is past its half-life. If a re-mint fails while
-// the current cert is still valid, the current cert is used so a transient
-// signing error does not break an otherwise-working dialer.
-func (r *rotatingClientCert) getClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+// current returns the held cert, re-minting when it is past its half-life. If a
+// re-mint fails while the current cert is still valid, the current cert is kept
+// so a transient signing error does not break an otherwise-working provider;
+// only once the held cert has expired does the re-mint error surface.
+func (r *rotatingCert) current() (*tls.Certificate, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if certPastHalfLife(r.notBefore, r.notAfter, time.Now()) {
@@ -76,9 +78,21 @@ func (r *rotatingClientCert) getClientCertificate(*tls.CertificateRequestInfo) (
 	return &r.cert, nil
 }
 
+// getClientCertificate adapts the provider to tls.Config.GetClientCertificate
+// for the control plane's outbound dials to workers.
+func (r *rotatingCert) getClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return r.current()
+}
+
+// getCertificate adapts the provider to tls.Config.GetCertificate for the
+// worker-API listener's inbound server cert.
+func (r *rotatingCert) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return r.current()
+}
+
 // mtlsDialer builds per-worker HTTP/1.1 mTLS clients for the control plane.
 type mtlsDialer struct {
-	clientCert *rotatingClientCert
+	clientCert *rotatingCert
 	caPool     *x509.CertPool
 }
 
@@ -88,7 +102,7 @@ type mtlsDialer struct {
 // AgentDialer interface because callers wire it into a remoteRuntime, which
 // depends only on the interface.
 func NewMTLSDialer(mintClient func() (tls.Certificate, error), caPool *x509.CertPool) (AgentDialer, error) {
-	rc, err := newRotatingClientCert(mintClient)
+	rc, err := newRotatingCert(mintClient)
 	if err != nil {
 		return nil, err
 	}

@@ -57,7 +57,7 @@ func TestRotatingClientCert_ReMintsWhenPastHalfLife(t *testing.T) {
 		return selfSignedCert(t, now, now.Add(2*time.Second)), nil
 	}
 
-	p, err := newRotatingClientCert(mint)
+	p, err := newRotatingCert(mint)
 	if err != nil {
 		t.Fatalf("new rotating cert: %v", err)
 	}
