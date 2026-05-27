@@ -538,6 +538,29 @@ func (s *Store) ListReconcilableApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListAutoscaleApps returns apps that have opted into autoscaling and are in a
+// state the controller may act on (running or degraded). Stopped, hibernated,
+// and deploying apps are excluded so the controller never resurrects or fights
+// another lifecycle path; the scale primitives apply the same status guard.
+func (s *Store) ListAutoscaleApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + appColumns + deploymentSummarySQL + `
+		FROM apps WHERE autoscale_enabled = 1 AND status IN ('running', 'degraded')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // ListDeletingApps returns all apps left in the 'deleting' tombstone state.
 // handleDeleteApp marks an app 'deleting' before doing disk cleanup; a crash
 // (or a cleanup failure) between the tombstone and the row delete leaves such
