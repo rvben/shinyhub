@@ -367,6 +367,28 @@ func TestDeploymentsLoadDoesNotMask404AsEmpty(t *testing.T) {
 	}
 }
 
+// TestDeploymentRowFitsLongVersionIDs guards the Deployments-tab layout.
+// Deployment versions are epoch-millisecond IDs (e.g. v1779913177895, see
+// internal/api/apps.go which stamps version = time.Now().UnixMilli()), so the
+// .deployment-version column is ~14 monospace characters wide. The original
+// grid pinned that column to a fixed 5rem, which is far too narrow: the version
+// overflowed and visually collided with the adjacent .deployment-when
+// timestamp. The fix sizes the column to its content (minmax floor + max-content)
+// and keeps the version on a single line. This test fails if the narrow fixed
+// column comes back.
+func TestDeploymentRowFitsLongVersionIDs(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	if strings.Contains(css, "grid-template-columns: 5rem 1fr auto auto") {
+		t.Fatal("style.css: .deployment-row must not pin the version column to a fixed 5rem; epoch-millis version IDs overflow it and overlap the timestamp, so size the column to its content instead")
+	}
+	assertContains(t, "style.css", "grid-template-columns: minmax(9rem, max-content) 1fr auto auto",
+		"the Deployments-tab version column must grow to fit epoch-millis version IDs without overlapping the timestamp")
+}
+
 // TestNewUserSnippetIsRunnable guards the new-user handoff. The snippet is
 // shown to the admin who creates a new user and shared via Slack/email with
 // the recipient; the recipient must be able to paste it into a shell and have
