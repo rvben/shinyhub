@@ -7,14 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/worker"
 	workerapi "github.com/rvben/shinyhub/internal/worker/api"
-	"golang.org/x/time/rate"
 )
 
 // WorkerAPI serves the worker-facing endpoints (register, heartbeat, bundle
@@ -27,11 +25,10 @@ type WorkerAPI struct {
 	appsDir  string
 	certTTL  time.Duration
 
-	limMu sync.Mutex
-	// limiters holds one rate.Limiter per source host. Entries are created on
-	// demand and never evicted, which is acceptable because the worker
-	// source-IP set is bounded to known hosts.
-	limiters map[string]*rate.Limiter
+	// registerRL throttles the register endpoint per source host. Its
+	// sliding-window limiter self-evicts idle source keys on a periodic sweep,
+	// so the tracked-source map cannot grow without bound over long uptime.
+	registerRL *keyedRateLimiter
 }
 
 // NewWorkerAPI constructs the worker API with a default short cert TTL.
@@ -44,22 +41,10 @@ func NewWorkerAPI(store *db.Store, reg *worker.Registry, ca *worker.CA, appsDir 
 		ca:       ca,
 		appsDir:  appsDir,
 		certTTL:  1 * time.Hour,
-		limiters: map[string]*rate.Limiter{},
+		// Five registrations per second per source: a small burst for legitimate
+		// retries while throttling join-token guessing.
+		registerRL: newKeyedRateLimiter(5, time.Second),
 	}
-}
-
-// registerLimiter returns the per-source limiter, creating it on first use.
-// Allows a small burst then ~1 register/sec, enough for legitimate retries while
-// throttling token-guessing.
-func (a *WorkerAPI) registerLimiter(host string) *rate.Limiter {
-	a.limMu.Lock()
-	defer a.limMu.Unlock()
-	l, ok := a.limiters[host]
-	if !ok {
-		l = rate.NewLimiter(rate.Every(time.Second), 5)
-		a.limiters[host] = l
-	}
-	return l
 }
 
 func sourceHost(r *http.Request) string {
@@ -71,7 +56,7 @@ func sourceHost(r *http.Request) string {
 }
 
 func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
-	if !a.registerLimiter(sourceHost(r)).Allow() {
+	if !a.registerRL.allow(sourceHost(r)) {
 		writeError(w, http.StatusTooManyRequests, "rate limited")
 		return
 	}
