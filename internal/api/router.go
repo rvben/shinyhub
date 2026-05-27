@@ -185,6 +185,18 @@ func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
 	p.Placement = app.PlacementMap()
 	p.TierOrder = s.cfg.Runtime.TierOrder()
 	p.DefaultTier = s.cfg.Runtime.DefaultTierName()
+	// Pin a shared-mount consumer to the worker(s) hosting its source data so
+	// each replica lands beside the data it mounts. resolveColocation returns no
+	// pin (and no error) for the common case of no shared mounts or a
+	// deterministic single-worker/native placement. An infeasible colocation is
+	// surfaced as a 409 by the checkColocatedShared precheck on user-facing deploy
+	// paths; the internal recovery paths (restore/redeploy) that reach here
+	// without that precheck fall back to unconstrained placement rather than
+	// failing the recovery, and an unsatisfiable mount then fails its own health
+	// check.
+	if pins, err := s.resolveColocation(app.ID, s.tiersForApp(app)); err == nil {
+		p.ColocateWorkers = pins
+	}
 	return p
 }
 
@@ -215,76 +227,175 @@ func (s *Server) tiersForApp(app *db.App) []string {
 }
 
 // checkColocatedShared rejects a boot whose consumer (running on consumerTiers)
-// would land on a node that does not also host every app it mounts shared data
-// from. A nil resolver means single-node operation (every tier is the control
-// plane), so there is nothing to reject.
+// cannot be placed beside every app it mounts shared data from. It is the
+// user-facing precheck: it surfaces the same infeasibility resolveColocation
+// reports, as an error the deploy handlers turn into a 409.
 func (s *Server) checkColocatedShared(appID int64, consumerTiers []string) error {
-	if s.nodeForTier == nil {
+	_, err := s.resolveColocation(appID, consumerTiers)
+	return err
+}
+
+// ColocationPins returns the worker node ids a shared-mount consumer must be
+// pinned to so each replica co-locates with its source data, or nil when there
+// is no colocation constraint or it cannot currently be satisfied. It is the
+// best-effort form of resolveColocation (it swallows the infeasibility error)
+// exposed so the lifecycle watchdog's single-replica restart pins a recovered
+// replica to the same worker set the full deploy uses; an unsatisfiable pin
+// falls back to unconstrained placement rather than wedging recovery.
+func (s *Server) ColocationPins(app *db.App) []string {
+	pins, err := s.resolveColocation(app.ID, s.tiersForApp(app))
+	if err != nil {
 		return nil
+	}
+	return pins
+}
+
+// resolveColocation determines how a shared-mount consumer must be placed so each
+// replica lands on a node that also hosts every source's provisioned data
+// (shared mounts resolve to the source's local app-data on whatever node the
+// replica runs on, so the source must have a replica there).
+//
+// It returns:
+//   - (nil, nil) when there is no constraint: no tier resolver (single-node
+//     operation), no shared mounts, or a deterministic single-worker/native
+//     placement that the node-equality check below already governs.
+//   - (pins, nil) a sorted, de-duplicated set of worker node ids when the
+//     consumer touches a multi-worker tier and a common worker hosts the data;
+//     the caller pins the pool to these.
+//   - (nil, err) when colocation is infeasible.
+func (s *Server) resolveColocation(appID int64, consumerTiers []string) ([]string, error) {
+	if s.nodeForTier == nil {
+		return nil, nil
 	}
 	sources, err := s.store.ListSharedDataSources(appID)
 	if err != nil {
-		return fmt.Errorf("list shared data sources: %w", err)
+		return nil, fmt.Errorf("list shared data sources: %w", err)
 	}
 	if len(sources) == 0 {
-		return nil
+		return nil, nil
 	}
 	sourceTiers := make(map[string][]string, len(sources))
 	for _, m := range sources {
 		srcApp, err := s.store.GetAppBySlug(m.SourceSlug)
 		if err != nil {
-			return fmt.Errorf("load shared source %q: %w", m.SourceSlug, err)
+			return nil, fmt.Errorf("load shared source %q: %w", m.SourceSlug, err)
 		}
 		sourceTiers[m.SourceSlug] = s.tiersForApp(srcApp)
 	}
-	// Fail closed when a shared mount touches a multi-worker tier: the colocation
-	// guard maps each tier to a single node, which cannot guarantee the source
-	// and consumer land on the same worker once a tier has several. Reject until
-	// same-worker pinning lands rather than passing on the unsound assumption
-	// that every replica resolves to the first worker.
-	if tier := s.firstMultiWorkerTier(consumerTiers, sourceTiers); tier != "" {
-		return fmt.Errorf(
-			"shared mounts are not supported on multi-worker tier %q: the source and consumer cannot be guaranteed to share a worker",
-			tier)
+	// A multi-worker tier breaks the deterministic tier->node assumption the
+	// node-equality check relies on (it maps each tier to one node, but placement
+	// may pick any of a tier's workers). When a shared mount touches one, resolve
+	// the pin from where the source's data actually lives instead.
+	if s.workerReg != nil && s.anyMultiWorkerTier(consumerTiers, sourceTiers) {
+		return s.colocationPins(consumerTiers, sources)
 	}
-	return deploy.CheckColocatedShared(consumerTiers, sourceTiers, s.nodeForTier)
+	// Deterministic single-worker/native placement: the node-equality check is
+	// sound. No pin is needed (placement has no spread to constrain).
+	if err := deploy.CheckColocatedShared(consumerTiers, sourceTiers, s.nodeForTier); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
-// firstMultiWorkerTier returns the first tier among the consumer's tiers and all
-// source tiers that is backed by more than one up worker, or "" when none is.
-// With no worker registry wired (single-node operation) it always returns "".
-func (s *Server) firstMultiWorkerTier(consumerTiers []string, sourceTiers map[string][]string) string {
-	if s.workerReg == nil {
-		return ""
-	}
+// anyMultiWorkerTier reports whether any of the consumer's tiers or its sources'
+// tiers is backed by more than one up worker.
+func (s *Server) anyMultiWorkerTier(consumerTiers []string, sourceTiers map[string][]string) bool {
 	seen := make(map[string]bool)
-	check := func(tiers []string) string {
+	multi := func(tiers []string) bool {
 		for _, t := range tiers {
 			if seen[t] {
 				continue
 			}
 			seen[t] = true
 			if len(s.workerReg.WorkersForTier(t)) > 1 {
-				return t
+				return true
 			}
 		}
-		return ""
+		return false
 	}
-	if t := check(consumerTiers); t != "" {
-		return t
+	if multi(consumerTiers) {
+		return true
 	}
-	// Iterate source slugs in order so the reported tier is deterministic.
-	slugs := make([]string, 0, len(sourceTiers))
-	for slug := range sourceTiers {
-		slugs = append(slugs, slug)
-	}
-	sort.Strings(slugs)
-	for _, slug := range slugs {
-		if t := check(sourceTiers[slug]); t != "" {
-			return t
+	for _, tiers := range sourceTiers {
+		if multi(tiers) {
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+// colocationPins computes the worker node ids a consumer on consumerTiers must be
+// pinned to so each replica co-locates with every source's running data. It
+// intersects the workers that host a running replica of every source with the
+// workers backing the consumer's tiers. An empty intersection, or a consumer
+// that also runs on a native tier (whose replicas cannot reach worker-hosted
+// data), is infeasible.
+func (s *Server) colocationPins(consumerTiers []string, sources []*db.SharedDataMount) ([]string, error) {
+	consumerWorkers := make(map[string]bool)
+	nativeConsumerTier := false
+	var remoteTiers []string
+	for _, t := range consumerTiers {
+		ws := s.workerReg.WorkersForTier(t)
+		if len(ws) == 0 {
+			nativeConsumerTier = true
+			continue
+		}
+		remoteTiers = append(remoteTiers, t)
+		for _, w := range ws {
+			consumerWorkers[w.NodeID] = true
+		}
+	}
+
+	// ColocateWorkers is a flat worker set applied round-robin to every tier's
+	// replicas, so it can confine at most one worker tier: a worker belonging to
+	// one tier would otherwise be stamped onto another tier's replica and
+	// rejected as a wrong-tier target. A consumer spanning multiple worker tiers
+	// must therefore be rejected rather than deployed onto an unexecutable plan.
+	if len(remoteTiers) > 1 {
+		sort.Strings(remoteTiers)
+		return nil, fmt.Errorf(
+			"shared mount cannot be co-located: the consumer is placed on multiple worker tiers %v; place it on a single worker tier so its replicas can pin to the source's worker",
+			remoteTiers)
+	}
+
+	// common = workers hosting a running replica of every source.
+	var common map[string]bool
+	for _, m := range sources {
+		hosts, err := s.store.RunningReplicaWorkersForSlug(m.SourceSlug)
+		if err != nil {
+			return nil, fmt.Errorf("running replica workers for %q: %w", m.SourceSlug, err)
+		}
+		hset := make(map[string]bool, len(hosts))
+		for _, h := range hosts {
+			hset[h] = true
+		}
+		if common == nil {
+			common = hset
+			continue
+		}
+		for n := range common {
+			if !hset[n] {
+				delete(common, n)
+			}
+		}
+	}
+
+	pins := make([]string, 0, len(common))
+	for n := range common {
+		if consumerWorkers[n] {
+			pins = append(pins, n)
+		}
+	}
+	sort.Strings(pins)
+	if len(pins) == 0 {
+		return nil, fmt.Errorf(
+			"shared mount cannot be co-located: no worker backing the consumer's tier hosts a running replica of every mounted source; deploy the sources onto a shared worker first")
+	}
+	if nativeConsumerTier {
+		return nil, fmt.Errorf(
+			"shared mount cannot be co-located: the consumer also runs on a control-plane tier whose replicas cannot reach worker-hosted source data")
+	}
+	return pins, nil
 }
 
 // SetSampler replaces the metrics sampler. Must be called before the server

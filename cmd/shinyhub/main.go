@@ -551,6 +551,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
+			// Pin a shared-mount consumer's restarted replica to the worker set
+			// hosting its source data, matching the full-deploy placement so a
+			// recovered replica lands beside the data it mounts.
+			ColocateWorkers: srv.ColocationPins(app),
 		}
 		if deps, derr := store.ListDeployments(app.ID); derr == nil && len(deps) > 0 {
 			p.ContentDigest = deps[0].ContentDigest

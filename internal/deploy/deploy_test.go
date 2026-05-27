@@ -394,6 +394,39 @@ func TestRunReplica_RestartsOnPlacedTier(t *testing.T) {
 	}
 }
 
+// TestRunReplica_HonorsColocateWorkers asserts a single-replica restart of a
+// shared-mount consumer pins to a worker from the colocation set instead of
+// self-placing by least load. The watchdog re-places crashed/lost replicas one
+// at a time through RunReplica; if it ignored the pin, a recovered replica could
+// land on a worker that does not host the mounted source data.
+func TestRunReplica_HonorsColocateWorkers(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	// The runtime would self-place across both workers; the pin must confine the
+	// restarted replica to w-b.
+	mgr.RegisterRuntime("remote", &placerRuntime{workers: []string{"w-a", "w-b"}})
+	defer mgr.Stop("reheal")
+	prx := proxy.New()
+	prx.SetPoolSize("reheal", 2)
+
+	r, err := deploy.RunReplica(deploy.Params{
+		Slug: "reheal", BundleDir: bundle,
+		Placement:       map[string]int{"remote": 2},
+		TierOrder:       []string{"remote"},
+		DefaultTier:     "remote",
+		ColocateWorkers: []string{"w-b"},
+		Manager:         mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+	}, 0)
+	if err != nil {
+		t.Fatalf("run replica: %v", err)
+	}
+	if r.WorkerID != "w-b" {
+		t.Errorf("restarted replica on worker %q, want w-b (colocation pin ignored)", r.WorkerID)
+	}
+}
+
 func TestRunReplica_SingleBoot(t *testing.T) {
 	bundle := t.TempDir()
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -971,6 +1004,43 @@ func TestRun_PreplansWorkerSpreadAcrossPool(t *testing.T) {
 	}
 	if len(workers) != 2 {
 		t.Fatalf("pool co-located on %d worker(s): %v; want spread across both workers", len(workers), workers)
+	}
+}
+
+// TestRun_ColocateWorkersPinsPool asserts that ColocateWorkers overrides
+// least-loaded placement: every replica is pinned to a worker from the
+// colocation set even though the runtime's own PlanPlacement would round-robin
+// across all of the tier's workers. This is how a shared-mount consumer is kept
+// on a worker that also hosts its source's data.
+func TestRun_ColocateWorkersPinsPool(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	// The runtime can place on either worker; the colocation pin must confine
+	// the whole pool to w-b regardless.
+	mgr.RegisterRuntime("remote", &placerRuntime{workers: []string{"w-a", "w-b"}})
+	defer mgr.Stop("pinned")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug: "pinned", BundleDir: bundle,
+		Placement:       map[string]int{"remote": 3},
+		TierOrder:       []string{"remote"},
+		DefaultTier:     "remote",
+		ColocateWorkers: []string{"w-b"},
+		Manager:         mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(result.Replicas) != 3 {
+		t.Fatalf("want 3 replicas, got %d", len(result.Replicas))
+	}
+	for _, r := range result.Replicas {
+		if r.WorkerID != "w-b" {
+			t.Errorf("replica %d on worker %q, want w-b (colocation pin ignored)", r.Index, r.WorkerID)
+		}
 	}
 }
 

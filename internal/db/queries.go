@@ -2253,6 +2253,32 @@ func (s *Store) RunningReplicaLoadByWorker(slug string) (map[string]WorkerReplic
 	return out, rows.Err()
 }
 
+// RunningReplicaWorkersForSlug returns the distinct workers currently hosting a
+// running replica of slug. A shared-mount consumer pins to one of these so it
+// lands on a worker that also hosts its source's provisioned data. Only running
+// replicas count (a lost or crashed replica's former worker is not a valid mount
+// host) and replicas with no worker id (native/local tier) are excluded.
+func (s *Store) RunningReplicaWorkersForSlug(slug string) ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT r.worker_id
+		FROM replicas r JOIN apps a ON a.id = r.app_id
+		WHERE a.slug = ? AND r.status = ? AND r.worker_id <> ''
+		ORDER BY r.worker_id`, slug, ReplicaStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
+			return nil, err
+		}
+		out = append(out, nodeID)
+	}
+	return out, rows.Err()
+}
+
 // UpdateReplicaStatus sets the status of a single replica identified by
 // (app_id, idx) and refreshes its updated_at timestamp.
 func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error {

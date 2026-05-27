@@ -141,6 +141,13 @@ type Params struct {
 	ContentDigest string
 	DeploymentID  int64
 	AppVersion    string
+	// ColocateWorkers pins every replica of this pool to one of the named worker
+	// node ids, overriding least-loaded placement. The control plane sets it for
+	// a shared-mount consumer so each replica lands on a worker that also hosts
+	// its source's provisioned data. Empty means unconstrained placement. Only
+	// worker-routing tiers honor it; a tier whose runtime ignores TargetWorker
+	// (the native local tier) is unaffected.
+	ColocateWorkers []string
 }
 
 // Result contains identifiers for a single successfully deployed replica.
@@ -430,6 +437,16 @@ func planPoolWorkers(p Params, asn []process.TierAssignment) map[int]string {
 	}
 	for _, tier := range tierOrder {
 		indices := byTier[tier]
+		// A shared-mount consumer is confined to the workers hosting its source
+		// data; pin its replicas across that set (round-robin) instead of letting
+		// the runtime spread them least-loaded across the whole tier. Tiers whose
+		// runtime ignores TargetWorker (native local) drop the pin harmlessly.
+		if len(p.ColocateWorkers) > 0 {
+			for i, idx := range indices {
+				out[idx] = p.ColocateWorkers[i%len(p.ColocateWorkers)]
+			}
+			continue
+		}
 		nodes := p.Manager.PlanPlacement(tier, p.Slug, len(indices))
 		for i, idx := range indices {
 			if i < len(nodes) {
@@ -529,9 +546,16 @@ func RunReplica(p Params, index int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A single-replica restart self-places against live load: pass no pre-planned
-	// target so the runtime picks the least-loaded worker at restart time.
-	r, err := bootReplica(p, index, tier, "", baseCmd, appType, hc, timeout)
+	// A shared-mount consumer is confined to the workers hosting its source data,
+	// so a restarted replica must pin to one of them; index-keyed selection keeps
+	// the choice deterministic and spreads restarts across the set. Without a
+	// colocation pin the restart self-places against live load (empty target), so
+	// the runtime picks the least-loaded worker.
+	target := ""
+	if len(p.ColocateWorkers) > 0 {
+		target = p.ColocateWorkers[index%len(p.ColocateWorkers)]
+	}
+	r, err := bootReplica(p, index, tier, target, baseCmd, appType, hc, timeout)
 	if err != nil {
 		return nil, err
 	}
