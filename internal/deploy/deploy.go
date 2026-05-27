@@ -313,6 +313,13 @@ func Run(p Params) (*PoolResult, error) {
 		return nil, err
 	}
 
+	// Pre-plan each replica's target worker before launching the pool so a
+	// concurrent boot spreads across a tier's workers. Planning per-replica
+	// inside the goroutines would have every replica read the same pre-deploy
+	// load snapshot and stack onto the lowest-loaded worker; planning the whole
+	// batch up front folds each assignment into the next pick.
+	targets := planPoolWorkers(p, asn)
+
 	type bootResult struct {
 		idx int
 		res Result
@@ -325,7 +332,7 @@ func Run(p Params) (*PoolResult, error) {
 		wg.Add(1)
 		go func(a process.TierAssignment) {
 			defer wg.Done()
-			r, err := bootReplica(p, a.Index, a.Tier, baseCmd, appType, hc, timeout)
+			r, err := bootReplica(p, a.Index, a.Tier, targets[a.Index], baseCmd, appType, hc, timeout)
 			results <- bootResult{idx: a.Index, res: r, err: err}
 		}(a)
 	}
@@ -401,10 +408,44 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 	return 0, nil
 }
 
+// planPoolWorkers maps each assignment's replica index to the worker the
+// Manager planned for it, grouping the pool by tier (in first-appearance order)
+// so each tier's batch is planned together and spreads across that tier's
+// workers. Tiers whose runtime does not route to workers (the native local
+// tier) return no targets and their replicas self-place, which is a no-op for a
+// runtime that ignores TargetWorker. A nil Manager (test/no-runtime path) yields
+// no targets.
+func planPoolWorkers(p Params, asn []process.TierAssignment) map[int]string {
+	out := map[int]string{}
+	if p.Manager == nil {
+		return out
+	}
+	byTier := map[string][]int{}
+	var tierOrder []string
+	for _, a := range asn {
+		if _, seen := byTier[a.Tier]; !seen {
+			tierOrder = append(tierOrder, a.Tier)
+		}
+		byTier[a.Tier] = append(byTier[a.Tier], a.Index)
+	}
+	for _, tier := range tierOrder {
+		indices := byTier[tier]
+		nodes := p.Manager.PlanPlacement(tier, p.Slug, len(indices))
+		for i, idx := range indices {
+			if i < len(nodes) {
+				out[idx] = nodes[i]
+			}
+		}
+	}
+	return out
+}
+
 // bootReplica starts a single replica: allocates a port, starts the process,
 // health-checks it, and registers it with the proxy. baseCmd == nil signals
 // that the command should be built from appType using the allocated port.
-func bootReplica(p Params, idx int, tier string, baseCmd []string, appType string, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
+// targetWorker pins the replica to a pre-planned worker (empty means the runtime
+// self-places, e.g. a single-replica watchdog restart or a worker-agnostic tier).
+func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
 	port := AllocatePort()
 
 	var cmd []string
@@ -429,11 +470,6 @@ func bootReplica(p Params, idx int, tier string, baseCmd []string, appType strin
 		}
 	}
 
-	var transport http.RoundTripper
-	if p.Manager != nil {
-		transport = p.Manager.TransportForTier(tier)
-	}
-
 	env := append(append([]string{}, p.Env...), fmt.Sprintf("PORT=%d", port))
 
 	info, err := p.Manager.Start(process.StartParams{
@@ -449,10 +485,16 @@ func bootReplica(p Params, idx int, tier string, baseCmd []string, appType strin
 		AppVersion:      p.AppVersion,
 		DeploymentID:    p.DeploymentID,
 		ContentDigest:   p.ContentDigest,
+		TargetWorker:    targetWorker,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("start: %w", err)
 	}
+
+	// Resolve the route transport for the worker Start actually placed on, so a
+	// replica on any of a tier's workers is dialed with that worker's mTLS
+	// transport. Empty for the local tier (no remote transport).
+	transport := p.Manager.TransportForWorker(tier, info.WorkerID)
 
 	if err := hc(info.EndpointURL, timeout, transport); err != nil {
 		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
@@ -487,7 +529,9 @@ func RunReplica(p Params, index int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	r, err := bootReplica(p, index, tier, baseCmd, appType, hc, timeout)
+	// A single-replica restart self-places against live load: pass no pre-planned
+	// target so the runtime picks the least-loaded worker at restart time.
+	r, err := bootReplica(p, index, tier, "", baseCmd, appType, hc, timeout)
 	if err != nil {
 		return nil, err
 	}

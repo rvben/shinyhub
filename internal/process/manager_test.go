@@ -973,28 +973,37 @@ func TestManagerDispatchesByTier(t *testing.T) {
 }
 
 // transportRuntime is a Runtime that also implements ReplicaTransporter,
-// used to prove Manager.TransportForTier surfaces the capability.
+// used to prove Manager.TransportForWorker surfaces the capability and threads
+// the requested node id through to the runtime.
 type transportRuntime struct {
 	fakeRemoteRuntime
-	tr http.RoundTripper
+	tr      http.RoundTripper
+	gotNode string
 }
 
-func (r *transportRuntime) ReplicaTransport() http.RoundTripper { return r.tr }
+func (r *transportRuntime) ReplicaTransportForWorker(nodeID string) http.RoundTripper {
+	r.gotNode = nodeID
+	return r.tr
+}
 
 // roundTripFunc is an http.RoundTripper that delegates to a function.
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestManager_TransportForTier(t *testing.T) {
+func TestManager_TransportForWorker(t *testing.T) {
 	tr := roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })
+	rt := &transportRuntime{fakeRemoteRuntime: fakeRemoteRuntime{}, tr: tr}
 	m := process.NewManager(t.TempDir(), &fakeRemoteRuntime{})
-	m.RegisterRuntime("remote", &transportRuntime{fakeRemoteRuntime: fakeRemoteRuntime{}, tr: tr})
-	if got := m.TransportForTier("remote"); got == nil {
-		t.Fatal("TransportForTier(remote) = nil, want the runtime's transport")
+	m.RegisterRuntime("remote", rt)
+	if got := m.TransportForWorker("remote", "node-x"); got == nil {
+		t.Fatal("TransportForWorker(remote, node-x) = nil, want the runtime's transport")
+	}
+	if rt.gotNode != "node-x" {
+		t.Errorf("runtime received node id %q, want node-x", rt.gotNode)
 	}
 	// A runtime without the capability yields nil (default transport).
-	if got := m.TransportForTier("local-default"); got != nil {
-		t.Errorf("TransportForTier for non-transporter = %v, want nil", got)
+	if got := m.TransportForWorker("local-default", ""); got != nil {
+		t.Errorf("TransportForWorker for non-transporter = %v, want nil", got)
 	}
 }

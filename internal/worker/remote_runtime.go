@@ -19,10 +19,16 @@ import (
 // ProviderRemoteDocker labels replicas started on a remote Docker worker.
 const ProviderRemoteDocker = "remote_docker"
 
-// WorkerLookup resolves the live worker for a tier. Implemented by *Registry
-// in production; a stub is used in tests.
+// WorkerLookup resolves workers for routing. Implemented by *Registry in
+// production; a stub is used in tests. PlanPlacementForTier plans where to place
+// a batch of new replicas of a slug (least-loaded, spread across the tier, one
+// worker per replica); WorkersForTier enumerates every up worker on a tier
+// (inventory spans all of them); Worker resolves the specific worker that owns
+// an existing handle or a pre-planned target.
 type WorkerLookup interface {
-	WorkerForTier(tier string) (db.Worker, bool)
+	PlanPlacementForTier(tier, slug string, count int) []db.Worker
+	WorkersForTier(tier string) []db.Worker
+	Worker(nodeID string) (db.Worker, bool)
 }
 
 // AgentDialer returns an HTTP client and base URL for talking to a worker over
@@ -68,29 +74,78 @@ func decodeRemoteHandle(h string) (nodeID, containerID string, err error) {
 	return parts[0], parts[1], nil
 }
 
-// liveWorker resolves the current worker for this runtime's tier, failing
-// closed when none is live.
-func (r *remoteRuntime) liveWorker() (db.Worker, error) {
-	w, ok := r.lookup.WorkerForTier(r.tier)
-	if !ok {
-		return db.Worker{}, fmt.Errorf("tier %q: %w", r.tier, process.ErrNoLiveWorker)
+// PlanPlacement plans worker node ids for count new replicas of slug across the
+// tier, one per replica in assignment order, so deploy can pin a concurrent pool
+// boot up front instead of each replica self-placing against the same snapshot.
+// Returns nil when no worker is up on the tier; the caller then fails the boot
+// closed via Start's self-placement.
+func (r *remoteRuntime) PlanPlacement(slug string, count int) []string {
+	ws := r.lookup.PlanPlacementForTier(r.tier, slug, count)
+	if len(ws) == 0 {
+		return nil
 	}
-	return w, nil
+	ids := make([]string, len(ws))
+	for i, w := range ws {
+		ids[i] = w.NodeID
+	}
+	return ids
 }
 
-// workerForHandle resolves the worker that owns an opaque handle, validating
-// that the handle's node id matches the tier's currently-live worker.
+// workerForStart resolves the worker to start a replica on. When the replica
+// carries a pre-planned target worker (deploy pinned it for batch spread), it
+// resolves and validates that worker, failing closed unless it is up and on this
+// runtime's tier -- a stale target must never start a replica on a down or
+// wrong-tier worker. With no target it self-places against live load, spreading
+// across the tier's up workers, which is correct for a single-replica boot such
+// as a watchdog restart.
+func (r *remoteRuntime) workerForStart(p process.StartParams) (db.Worker, error) {
+	if p.TargetWorker != "" {
+		w, ok := r.lookup.Worker(p.TargetWorker)
+		if !ok {
+			return db.Worker{}, fmt.Errorf("target worker %q: %w", p.TargetWorker, process.ErrNoLiveWorker)
+		}
+		if w.Status != "up" {
+			return db.Worker{}, fmt.Errorf("target worker %q is %s: %w", p.TargetWorker, w.Status, process.ErrNoLiveWorker)
+		}
+		if w.Tier != r.tier {
+			return db.Worker{}, fmt.Errorf("target worker %q is on tier %q, not %q: %w", p.TargetWorker, w.Tier, r.tier, process.ErrNoLiveWorker)
+		}
+		return w, nil
+	}
+	return r.placeWorker(p.Slug)
+}
+
+// placeWorker selects the worker to place a new replica of slug on, spreading
+// load across the tier's up workers, failing closed when none is live.
+func (r *remoteRuntime) placeWorker(slug string) (db.Worker, error) {
+	ws := r.lookup.PlanPlacementForTier(r.tier, slug, 1)
+	if len(ws) == 0 {
+		return db.Worker{}, fmt.Errorf("tier %q: %w", r.tier, process.ErrNoLiveWorker)
+	}
+	return ws[0], nil
+}
+
+// workerForHandle resolves the worker that owns an opaque handle by the handle's
+// encoded node id, failing closed unless that worker is currently up. Resolving
+// by the handle's own node (rather than the tier's routing worker) is correct
+// under multi-worker placement, where a replica can live on any up worker on the
+// tier; a dial to a down or unknown worker would hang or fail, so it is rejected.
 func (r *remoteRuntime) workerForHandle(h process.RunHandle) (db.Worker, string, error) {
 	nodeID, containerID, err := decodeRemoteHandle(h.ContainerID)
 	if err != nil {
 		return db.Worker{}, "", err
 	}
-	w, err := r.liveWorker()
-	if err != nil {
-		return db.Worker{}, "", err
+	w, ok := r.lookup.Worker(nodeID)
+	if !ok {
+		return db.Worker{}, "", fmt.Errorf("handle node %q: %w", nodeID, process.ErrNoLiveWorker)
 	}
-	if w.NodeID != nodeID {
-		return db.Worker{}, "", fmt.Errorf("handle node %q does not match live worker %q", nodeID, w.NodeID)
+	if w.Status != "up" {
+		return db.Worker{}, "", fmt.Errorf("handle node %q is %s: %w", nodeID, w.Status, process.ErrNoLiveWorker)
+	}
+	// Constrain the resolved worker to this runtime's tier so a stale or
+	// mismatched handle can never operate on another tier's worker.
+	if w.Tier != r.tier {
+		return db.Worker{}, "", fmt.Errorf("handle node %q is on tier %q, not %q: %w", nodeID, w.Tier, r.tier, process.ErrNoLiveWorker)
 	}
 	return w, containerID, nil
 }
@@ -99,13 +154,14 @@ func (r *remoteRuntime) HostPreparesDeps() bool    { return false }
 func (r *remoteRuntime) AppBindHost() string       { return "0.0.0.0" }
 func (r *remoteRuntime) HostProvidesAppData() bool { return false }
 
-// ReplicaTransport returns the mTLS transport for the tier's live worker so the
-// proxy and health paths can reach the data plane. Returns nil when no worker
-// is live (callers fall back to the default transport, which will then fail the
-// health check cleanly).
-func (r *remoteRuntime) ReplicaTransport() http.RoundTripper {
-	w, err := r.liveWorker()
-	if err != nil {
+// ReplicaTransportForWorker returns the mTLS transport for the named worker so
+// the proxy and health paths reach that worker's data plane. It fails closed
+// (nil) when the worker is unknown, not up, or not on this runtime's tier, so a
+// route is never built with the wrong worker's transport; callers fall back to
+// the default transport, which then fails the health check cleanly.
+func (r *remoteRuntime) ReplicaTransportForWorker(nodeID string) http.RoundTripper {
+	w, ok := r.lookup.Worker(nodeID)
+	if !ok || w.Status != "up" || w.Tier != r.tier {
 		return nil
 	}
 	tr, err := r.dialer.Transport(w)
@@ -192,7 +248,7 @@ func streamFrames(rc io.ReadCloser, logWriter io.Writer) (json.RawMessage, error
 }
 
 func (r *remoteRuntime) Start(ctx context.Context, p process.StartParams, logWriter io.Writer) (process.ReplicaEndpoint, error) {
-	w, err := r.liveWorker()
+	w, err := r.workerForStart(p)
 	if err != nil {
 		return process.ReplicaEndpoint{}, err
 	}
@@ -303,7 +359,7 @@ func (r *remoteRuntime) Stats(ctx context.Context, h process.RunHandle) (float64
 }
 
 func (r *remoteRuntime) RunOnce(ctx context.Context, p process.StartParams, logWriter io.Writer) (process.ExitInfo, error) {
-	w, err := r.liveWorker()
+	w, err := r.workerForStart(p)
 	if err != nil {
 		return process.ExitInfo{}, err
 	}
@@ -339,4 +395,5 @@ var (
 	_ process.Runtime            = (*remoteRuntime)(nil)
 	_ process.ReplicaTransporter = (*remoteRuntime)(nil)
 	_ process.ReplicaInventory   = (*remoteRuntime)(nil)
+	_ process.ReplicaPlacer      = (*remoteRuntime)(nil)
 )

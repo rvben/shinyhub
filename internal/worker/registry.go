@@ -5,15 +5,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/rvben/shinyhub/internal/db"
 )
 
 // Registry is the control plane's view of joined workers: durable in the
-// workers table, indexed in memory for routing. Single-worker-per-tier in this
-// build (the last registrant for a tier wins the routing slot); the schema and
-// index do not preclude multi-worker selection later.
+// workers table, indexed in memory for routing. Multiple distinct-address
+// workers may be up on one tier (real multi-worker capacity); the invariant is
+// one up worker per (tier, advertise address), so a stale duplicate that rejoins
+// at an endpoint a live worker already owns is superseded.
 type Registry struct {
 	store *db.Store
 	// regMu serializes registrations so the multi-row store writes of one
@@ -75,11 +78,13 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 	if err := r.store.UpsertWorker(w); err != nil {
 		return db.Worker{}, err
 	}
-	// Single worker per tier: the newest registrant wins the routing slot. Retire
-	// any other up worker on this tier so routing never resolves a superseded
-	// node, e.g. a worker that restarted under a fresh node id (its advertise
-	// address and certificate identity are stale and a dial would fail).
-	if err := r.store.SupersedeTierWorkers(w.Tier, nodeID); err != nil {
+	// One up worker per (tier, advertise address): retire any other up worker at
+	// this exact endpoint so routing never resolves a stale duplicate, e.g. an
+	// agent that rejoined under a fresh node id after losing its persisted
+	// identity (the old node id's certificate identity is stale and a dial to it
+	// would fail). Distinct-address workers on the tier are real capacity and are
+	// left up.
+	if err := r.store.SupersedeTierAddrWorkers(w.Tier, w.AdvertiseAddr, nodeID); err != nil {
 		return db.Worker{}, err
 	}
 
@@ -88,7 +93,7 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, existing := range r.byID {
-		if id == nodeID || existing.Tier != w.Tier || existing.Status != "up" {
+		if id == nodeID || existing.Tier != w.Tier || existing.AdvertiseAddr != w.AdvertiseAddr || existing.Status != "up" {
 			continue
 		}
 		existing.Status = "down"
@@ -160,26 +165,88 @@ func (r *Registry) Worker(nodeID string) (db.Worker, bool) {
 	return w, ok
 }
 
-// WorkerForTier returns the (single) up worker routing a tier, if any.
-func (r *Registry) WorkerForTier(tier string) (db.Worker, bool) {
+// WorkersForTier returns every up worker on a tier, sorted by node id so the
+// order is deterministic (map iteration order is not). The returned slice is a
+// fresh copy safe for the caller to retain.
+func (r *Registry) WorkersForTier(tier string) []db.Worker {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	out := make([]db.Worker, 0, len(r.byID))
 	for _, w := range r.byID {
 		if w.Tier == tier && w.Status == "up" {
-			return w, true
+			out = append(out, w)
 		}
 	}
-	return db.Worker{}, false
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
+}
+
+// WorkerForTier returns a single up worker routing a tier, if any: the first of
+// WorkersForTier (lowest node id), so single-worker routing is deterministic.
+func (r *Registry) WorkerForTier(tier string) (db.Worker, bool) {
+	ws := r.WorkersForTier(tier)
+	if len(ws) == 0 {
+		return db.Worker{}, false
+	}
+	return ws[0], true
+}
+
+// PlanPlacementForTier plans where to place count new replicas of slug across a
+// tier's coexisting workers, spreading load deterministically. It returns one
+// worker per replica, in assignment order; the returned slice is empty when no
+// worker is up on the tier and may be shorter than count only in that case.
+//
+// Each pick chooses the worker hosting the fewest running replicas; ties break
+// toward the worker hosting fewer of slug's own replicas (anti-affinity, so an
+// app's replicas spread for HA), then toward the lowest node id (deterministic).
+// Picks within one call fold into a running tally before the next pick, so a
+// batch deployed concurrently spreads across workers instead of stacking every
+// replica on the lowest node id (which a per-replica read of the same pre-deploy
+// snapshot would do). If the load query fails it plans from a zero baseline
+// rather than refusing to place, so a transient store hiccup does not block
+// deploys.
+func (r *Registry) PlanPlacementForTier(tier, slug string, count int) []db.Worker {
+	ws := r.WorkersForTier(tier)
+	if len(ws) == 0 || count <= 0 {
+		return nil
+	}
+	loads, err := r.store.RunningReplicaLoadByWorker(slug)
+	if err != nil {
+		slog.Error("placement: load worker replica counts; planning from zero baseline", "tier", tier, "err", err)
+		loads = nil
+	}
+	// tally is a mutable working copy of each candidate's load that each pick
+	// increments, so successive picks in this batch see the replicas already
+	// assigned. ws is sorted by node id, so iterating it keeps node id as the
+	// final deterministic tiebreak.
+	tally := make([]db.WorkerReplicaLoad, len(ws))
+	for i, w := range ws {
+		tally[i] = loads[w.NodeID]
+	}
+	out := make([]db.Worker, 0, count)
+	for range count {
+		best := 0
+		for i := 1; i < len(ws); i++ {
+			if tally[i].Total < tally[best].Total ||
+				(tally[i].Total == tally[best].Total && tally[i].SameApp < tally[best].SameApp) {
+				best = i
+			}
+		}
+		out = append(out, ws[best])
+		tally[best].Total++
+		tally[best].SameApp++
+	}
+	return out
 }
 
 // Heartbeat records a worker's liveness and refreshes its trusted cert
 // fingerprint (cert renewal) in both the store and the index. It keeps an up
 // worker up, and promotes a down worker (one reaped for missed heartbeats, or
 // superseded while offline and now restarted under its old identity) back to up
-// only when its tier slot is free. Gating the promotion on tier ownership keeps
-// the single-up-worker-per-tier invariant: a replaced worker cannot resurrect
-// itself alongside the newer owner and make routing depend on map iteration
-// order.
+// only when no other up worker owns its (tier, advertise address). Gating the
+// promotion on endpoint ownership keeps the one-up-worker-per-(tier,address)
+// invariant: a stale duplicate cannot resurrect itself alongside the live worker
+// that now holds its endpoint.
 func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 	// Serialize against Register so the tier-ownership decision is made against a
 	// stable set of up workers, mirroring how Register guards its supersede.
@@ -202,8 +269,15 @@ func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 
 	status := "up"
 	if cur.Status != "up" {
-		if owner, ok := r.WorkerForTier(cur.Tier); ok && owner.NodeID != nodeID {
-			status = "down" // a newer worker owns the tier; stay superseded
+		// Promote a down worker back to up unless another up worker already owns
+		// its (tier, advertise address): a stale duplicate at an endpoint a live
+		// worker holds must stay superseded. Distinct-address workers on the tier
+		// do not block the promotion -- they are independent capacity.
+		for _, owner := range r.WorkersForTier(cur.Tier) {
+			if owner.NodeID != nodeID && owner.AdvertiseAddr == cur.AdvertiseAddr {
+				status = "down"
+				break
+			}
 		}
 	}
 

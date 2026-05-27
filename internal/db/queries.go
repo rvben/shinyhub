@@ -2069,17 +2069,20 @@ func (s *Store) SetWorkerStatus(nodeID, status string) error {
 	return nil
 }
 
-// SupersedeTierWorkers marks every up worker on a tier down except the given
-// node id, in a single statement. Used when a new worker wins a tier's routing
-// slot so prior registrants stop being routing candidates. Zero affected rows
-// is valid (no prior worker on the tier), so unlike SetWorkerStatus this does
-// not return ErrNotFound.
-func (s *Store) SupersedeTierWorkers(tier, exceptNodeID string) error {
+// SupersedeTierAddrWorkers marks down every up worker sharing a (tier, advertise
+// address) except the given node id, in a single statement. Used when a worker
+// (re)registers at an endpoint so a stale duplicate at that same endpoint - an
+// agent that rejoined under a fresh node id after losing its persisted identity -
+// stops being a routing candidate. Distinct-address workers on the tier are real
+// multi-worker capacity and are left up. Zero affected rows is valid (no prior
+// worker at the endpoint), so unlike SetWorkerStatus this does not return
+// ErrNotFound.
+func (s *Store) SupersedeTierAddrWorkers(tier, advertiseAddr, exceptNodeID string) error {
 	_, err := s.db.Exec(
-		`UPDATE workers SET status = 'down' WHERE tier = ? AND node_id <> ? AND status = 'up'`,
-		tier, exceptNodeID)
+		`UPDATE workers SET status = 'down' WHERE tier = ? AND advertise_addr = ? AND node_id <> ? AND status = 'up'`,
+		tier, advertiseAddr, exceptNodeID)
 	if err != nil {
-		return fmt.Errorf("supersede tier %q workers: %w", tier, err)
+		return fmt.Errorf("supersede tier %q addr %q workers: %w", tier, advertiseAddr, err)
 	}
 	return nil
 }
@@ -2208,6 +2211,44 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
 		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// WorkerReplicaLoad is a worker's running-replica load for least-loaded
+// placement: Total counts running replicas across all apps; SameApp counts how
+// many of those belong to the candidate app, so placement can break load ties
+// by avoiding co-locating an app's own replicas on one worker.
+type WorkerReplicaLoad struct {
+	Total   int
+	SameApp int
+}
+
+// RunningReplicaLoadByWorker returns, keyed by worker_id, each worker's running
+// replica load and how much of it belongs to slug. Only running replicas count
+// (a lost or crashed replica's former worker is not charged), and workers
+// hosting no running replica are absent (placement treats a missing entry as
+// zero load).
+func (s *Store) RunningReplicaLoadByWorker(slug string) (map[string]WorkerReplicaLoad, error) {
+	rows, err := s.db.Query(`
+		SELECT r.worker_id,
+		       COUNT(*) AS total,
+		       COALESCE(SUM(CASE WHEN a.slug = ? THEN 1 ELSE 0 END), 0) AS same_app
+		FROM replicas r JOIN apps a ON a.id = r.app_id
+		WHERE r.status = ? AND r.worker_id <> ''
+		GROUP BY r.worker_id`, slug, ReplicaStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]WorkerReplicaLoad{}
+	for rows.Next() {
+		var nodeID string
+		var load WorkerReplicaLoad
+		if err := rows.Scan(&nodeID, &load.Total, &load.SameApp); err != nil {
+			return nil, err
+		}
+		out[nodeID] = load
 	}
 	return out, rows.Err()
 }

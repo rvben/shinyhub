@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -129,19 +130,41 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 	}
 
 	// Query each remote tier's agent inventory at most once, shared across every
-	// app that places replicas on that tier.
-	remoteInventory := map[string][]process.InventoryItem{}
-	getInventory := func(tier string, inv process.ReplicaInventory) []process.InventoryItem {
-		if items, ok := remoteInventory[tier]; ok {
-			return items
+	// app that places replicas on that tier. unreachable holds the workers whose
+	// inventory could not be fetched (a partial outage); a replica owned by one of
+	// them has an unknown state and must not be reconciled as dead.
+	type tierInventory struct {
+		items       []process.InventoryItem
+		unreachable map[string]bool // workers whose inventory failed (partial outage)
+		allDown     bool            // whole-tier inventory failure: every replica indeterminate
+	}
+	remoteInventory := map[string]tierInventory{}
+	getInventory := func(tier string, inv process.ReplicaInventory) tierInventory {
+		if ti, ok := remoteInventory[tier]; ok {
+			return ti
 		}
 		items, err := inv.Inventory(context.Background())
-		if err != nil {
+		var ti tierInventory
+		var partial *process.PartialInventoryError
+		switch {
+		case errors.As(err, &partial):
+			ti.unreachable = make(map[string]bool, len(partial.Workers))
+			for _, nodeID := range partial.Workers {
+				ti.unreachable[nodeID] = true
+			}
+			ti.items = items
+			slog.Warn("recovery: partial remote inventory", "tier", tier, "unreachable", partial.Workers)
+		case err != nil:
+			// Whole-tier failure (every up worker unreachable, or none up): the
+			// tier's state is unknown, so no replica on it may be reconciled as
+			// dead or drive its app to stopped.
+			ti.allDown = true
 			slog.Error("recovery: remote inventory", "tier", tier, "err", err)
-			items = nil
+		default:
+			ti.items = items
 		}
-		remoteInventory[tier] = items
-		return items
+		remoteInventory[tier] = ti
+		return ti
 	}
 
 	for _, app := range apps {
@@ -155,6 +178,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		bundleDir := activeBundleDir(store, app.ID)
 
 		anyAlive := false
+		indeterminate := false
 		for _, r := range reps {
 			if r.Status == db.ReplicaStatusLost {
 				// A lost replica is never re-adopted; the next deploy re-places it.
@@ -162,7 +186,34 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			}
 			rt := mgr.RuntimeForTier(r.Tier)
 			if inv, ok := rt.(process.ReplicaInventory); ok {
-				if recoverRemoteReplica(store, mgr, prx, app, r, getInventory(r.Tier, inv)) {
+				ti := getInventory(r.Tier, inv)
+				if ti.allDown || ti.unreachable[r.WorkerID] {
+					// The worker owning this replica could not be queried (its
+					// worker failed, or the whole tier is unreachable); its
+					// container may still be running, so this slot must not drive
+					// the app to stopped. Mark the replica lost so the watcher's
+					// lost-replica healing re-places it onto a healthy worker once
+					// one is reachable: leaving it running would strand the slot
+					// with no manager entry or proxy route, because the watcher only
+					// reconciles crashed/lost rows. The app is kept out of stopped
+					// (indeterminate) so it remains reconcilable for that healing.
+					indeterminate = true
+					if r.Status != db.ReplicaStatusLost {
+						// UpsertReplica replaces every column, so carry the
+						// replica's identity forward; the watcher's lost-replica
+						// healing is gated on the tier and would never re-place a
+						// slot whose tier was wiped to empty.
+						_ = store.UpsertReplica(db.UpsertReplicaParams{
+							AppID: app.ID, Index: r.Index, Status: db.ReplicaStatusLost,
+							PID: r.PID, Port: r.Port, Provider: r.Provider, Tier: r.Tier,
+							EndpointURL: r.EndpointURL, WorkerID: r.WorkerID,
+							AppVersion: r.AppVersion, DesiredState: r.DesiredState,
+							DeploymentID: r.DeploymentID,
+						})
+					}
+					continue
+				}
+				if recoverRemoteReplica(store, mgr, prx, app, r, ti.items) {
 					anyAlive = true
 				}
 				continue
@@ -177,7 +228,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				anyAlive = true
 			}
 		}
-		if !anyAlive {
+		if !anyAlive && !indeterminate {
 			markRecoveryStopped(store, app.Slug)
 		}
 	}

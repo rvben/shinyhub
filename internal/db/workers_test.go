@@ -60,7 +60,11 @@ func TestWorkerRegistryCRUD(t *testing.T) {
 	}
 }
 
-func TestSupersedeTierWorkers(t *testing.T) {
+// TestSupersedeTierAddrWorkers asserts the address-scoped supersede: only other
+// up workers sharing the exact (tier, advertise address) are retired. A distinct-
+// address worker on the same tier is real multi-worker capacity and must stay up;
+// a same-address worker on a different tier is untouched.
+func TestSupersedeTierAddrWorkers(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -70,26 +74,27 @@ func TestSupersedeTierWorkers(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	seed := func(id, tier, status string) {
-		if err := store.UpsertWorker(Worker{NodeID: id, Tier: tier, Status: status}); err != nil {
+	seed := func(id, tier, addr, status string) {
+		if err := store.UpsertWorker(Worker{NodeID: id, Tier: tier, AdvertiseAddr: addr, Status: status}); err != nil {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 	}
-	seed("keep", "burst", "up")   // the surviving registrant on the tier
-	seed("old", "burst", "up")    // up on the same tier, must be retired
-	seed("gone", "burst", "down") // already down, untouched
-	seed("other", "base", "up")   // up on a different tier, untouched
+	seed("keep", "burst", "10.0.0.5:8443", "up")   // the surviving registrant at this endpoint
+	seed("stale", "burst", "10.0.0.5:8443", "up")  // same tier+addr, must be retired
+	seed("peer", "burst", "10.0.0.6:8443", "up")   // same tier, different addr: stays up
+	seed("gone", "burst", "10.0.0.5:8443", "down") // already down, untouched
+	seed("other", "base", "10.0.0.5:8443", "up")   // same addr, different tier: untouched
 
-	// Zero matching rows is valid (no prior worker), not ErrNotFound.
-	if err := store.SupersedeTierWorkers("empty-tier", "keep"); err != nil {
+	// Zero matching rows is valid (no prior worker at this endpoint), not ErrNotFound.
+	if err := store.SupersedeTierAddrWorkers("empty-tier", "10.0.0.9:1", "keep"); err != nil {
 		t.Fatalf("supersede empty tier: %v", err)
 	}
 
-	if err := store.SupersedeTierWorkers("burst", "keep"); err != nil {
+	if err := store.SupersedeTierAddrWorkers("burst", "10.0.0.5:8443", "keep"); err != nil {
 		t.Fatalf("supersede: %v", err)
 	}
 
-	want := map[string]string{"keep": "up", "old": "down", "gone": "down", "other": "up"}
+	want := map[string]string{"keep": "up", "stale": "down", "peer": "up", "gone": "down", "other": "up"}
 	for id, status := range want {
 		got, err := store.GetWorker(id)
 		if err != nil {
