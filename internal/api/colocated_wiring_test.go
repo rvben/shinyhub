@@ -2,12 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/worker"
 )
 
@@ -468,6 +471,113 @@ func TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource(t *testing.
 	}
 	if err := srv.checkColocatedShared(consumer.ID, srv.tiersForApp(consumer)); err != nil {
 		t.Errorf("checkColocatedShared: want nil for a feasible local-to-local mount, got %v", err)
+	}
+}
+
+// TestMaybeRestartForChange_RejectsInfeasibleColocationBeforeTeardown asserts
+// that an env-var-triggered restart (?restart=true) runs the colocation precheck
+// before tearing down the old pool: when a shared-mount consumer cannot be
+// co-located (its source is not running on any worker), the restart aborts with
+// the conflict, leaves the running pool intact, and never reaches the redeploy.
+// Without the precheck this path stops/deregisters the old pool and then deploys
+// with no colocation pin, landing the consumer away from its source data.
+func TestMaybeRestartForChange_RejectsInfeasibleColocationBeforeTeardown(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir()},
+		Runtime: config.RuntimeConfig{Tiers: []config.TierConfig{
+			{Name: "local", Runtime: "native"},
+			{Name: "burst", Runtime: "docker"},
+		}},
+	}
+	srv := New(cfg, store, process.NewManager(t.TempDir(), process.NewNativeRuntime()), nil)
+
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "owner", PasswordHash: "hash", Role: "admin",
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	for _, slug := range []string{"source", "consumer"} {
+		if err := store.CreateApp(db.CreateAppParams{
+			Slug: slug, Name: slug, OwnerID: owner.ID, Access: "private",
+		}); err != nil {
+			t.Fatalf("create app %q: %v", slug, err)
+		}
+	}
+	source, _ := store.GetAppBySlug("source")
+	consumer, _ := store.GetAppBySlug("consumer")
+
+	// Both on the multi-worker burst tier; consumer mounts source; source is not
+	// running anywhere, so colocation is infeasible.
+	burst, _ := json.Marshal(map[string]int{"burst": 1})
+	if err := store.SetAppPlacement(source.ID, string(burst), 1); err != nil {
+		t.Fatalf("set source placement: %v", err)
+	}
+	if err := store.SetAppPlacement(consumer.ID, string(burst), 1); err != nil {
+		t.Fatalf("set consumer placement: %v", err)
+	}
+	if err := store.GrantSharedData(consumer.ID, source.ID); err != nil {
+		t.Fatalf("grant shared data: %v", err)
+	}
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: consumer.ID, Version: "v1", BundleDir: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "consumer", Status: "running"}); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	for _, addr := range []string{"10.0.0.1:8443", "10.0.0.2:8443"} {
+		if _, err := reg.Register(worker.RegisterParams{
+			Name: addr, AdvertiseAddr: addr, Tier: "burst", Fingerprint: addr,
+		}); err != nil {
+			t.Fatalf("register worker %q: %v", addr, err)
+		}
+	}
+	srv.SetWorkerRegistry(reg)
+	srv.SetNodeForTier(func(tier string) string {
+		if w, ok := reg.WorkerForTier(tier); ok {
+			return w.NodeID
+		}
+		return ""
+	})
+
+	deployed := false
+	srv.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		deployed = true
+		return &deploy.PoolResult{}, nil
+	})
+
+	consumer, _ = store.GetAppBySlug("consumer")
+	req := httptest.NewRequest(http.MethodPut, "/app/consumer/env/X?restart=true", nil)
+	restarted, err := srv.maybeRestartForChange(req, consumer, "consumer")
+	if err == nil {
+		t.Fatal("maybeRestartForChange returned nil error despite infeasible colocation")
+	}
+	if restarted {
+		t.Error("maybeRestartForChange reported a restart despite infeasible colocation")
+	}
+	if deployed {
+		t.Error("redeploy ran despite infeasible colocation: the pool was torn down before the precheck")
+	}
+	got, _ := store.GetAppBySlug("consumer")
+	if got.Status != "running" {
+		t.Errorf("app status = %q after an aborted restart; want running (left intact)", got.Status)
 	}
 }
 
