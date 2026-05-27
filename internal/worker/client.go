@@ -60,17 +60,19 @@ func Register(ctx context.Context, serverURL string, req workerapi.RegisterReque
 	return out, nil
 }
 
-// NewClient builds an mTLS client from the signed cert keypair and pinned CA.
-func NewClient(serverURL string, cert tls.Certificate, caPEM []byte) (*Client, error) {
+// NewClient builds an mTLS client that presents the certificate held by
+// certSource and pins the CA. Sourcing the client cert through the holder lets
+// the worker rotate its expiring cert without rebuilding the client.
+func NewClient(serverURL string, certSource *CertHolder, caPEM []byte) (*Client, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("invalid CA bundle")
 	}
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
-			RootCAs:      pool,
+			MinVersion:           tls.VersionTLS12,
+			GetClientCertificate: certSource.GetClientCertificate,
+			RootCAs:              pool,
 		},
 		ForceAttemptHTTP2: true,
 	}
@@ -80,9 +82,11 @@ func NewClient(serverURL string, cert tls.Certificate, caPEM []byte) (*Client, e
 // Transport exposes the underlying transport for the data-plane tunnel (C1).
 func (c *Client) Transport() http.RoundTripper { return c.httpc.Transport }
 
-// Heartbeat posts a heartbeat and applies any renewed cert the CP returns.
-func (c *Client) Heartbeat(ctx context.Context, version string) (workerapi.HeartbeatResponse, error) {
-	body, _ := json.Marshal(workerapi.HeartbeatRequest{Version: version})
+// Heartbeat posts a heartbeat and returns the control plane's response. When
+// renewCSRPEM is non-empty it is sent as a certificate renewal request; the
+// caller applies any cert the response carries.
+func (c *Client) Heartbeat(ctx context.Context, version, renewCSRPEM string) (workerapi.HeartbeatResponse, error) {
+	body, _ := json.Marshal(workerapi.HeartbeatRequest{Version: version, RenewCSRPEM: renewCSRPEM})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serverURL+"/api/workers/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return workerapi.HeartbeatResponse{}, err

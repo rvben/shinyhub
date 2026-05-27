@@ -102,13 +102,13 @@ func TestClientMTLSRoundTrip(t *testing.T) {
 	srv := newMTLSServer(t, ca, mux)
 	defer srv.Close()
 
-	c, err := NewClient(srv.URL, clientCert, ca.CertPEM())
+	c, err := NewClient(srv.URL, NewCertHolder(clientCert), ca.CertPEM())
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
 
 	// Heartbeat must succeed over the mTLS connection.
-	if _, err := c.Heartbeat(t.Context(), "v-test"); err != nil {
+	if _, err := c.Heartbeat(t.Context(), "v-test", ""); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 

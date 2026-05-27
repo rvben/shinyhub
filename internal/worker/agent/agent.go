@@ -43,12 +43,22 @@ type Config struct {
 // Agent is a running worker: it holds its identity (node id + signed cert), an
 // mTLS client to the control plane, and the local process Manager.
 type Agent struct {
-	cfg        Config
-	nodeID     string
-	client     *worker.Client
-	cache      *BundleCache
-	issuedCert tls.Certificate
-	caPool     *x509.CertPool
+	cfg    Config
+	nodeID string
+	client *worker.Client
+	cache  *BundleCache
+	caPool *x509.CertPool
+
+	// certs holds the current issued keypair. The inbound mTLS server and the
+	// outbound control-plane client both read it through the holder, so a
+	// renewed cert applied during the heartbeat loop takes effect on both
+	// without a restart.
+	certs *worker.CertHolder
+	// keyPEM and csrPEM are retained so the agent can renew its certificate: it
+	// resubmits the same CSR on heartbeat and rebuilds the keypair from the
+	// re-signed cert plus this key.
+	keyPEM []byte
+	csrPEM []byte
 
 	// ServeFunc, when non-nil, is run concurrently with the heartbeat loop.
 	// The agent's inbound mTLS server sets this before Run is called.
@@ -62,9 +72,10 @@ func (a *Agent) NodeID() string { return a.nodeID }
 // and mount app bundles by content digest on demand.
 func (a *Agent) Bundles() *BundleCache { return a.cache }
 
-// IssuedCert returns the cert issued by the control plane during Bootstrap.
-// Used by the inbound mTLS server to present its identity.
-func (a *Agent) IssuedCert() tls.Certificate { return a.issuedCert }
+// Certs returns the holder for the cert issued during Bootstrap. The inbound
+// mTLS server reads its identity through it, so a cert renewed on heartbeat
+// takes effect on the next handshake.
+func (a *Agent) Certs() *worker.CertHolder { return a.certs }
 
 // CAPool returns the CA pool pinned during Bootstrap, used as the inbound
 // server's ClientCAs to verify the control plane's client cert.
@@ -126,22 +137,31 @@ func Bootstrap(ctx context.Context, cfg Config) (*Agent, error) {
 	if !caPool.AppendCertsFromPEM([]byte(resp.CABundle)) {
 		return nil, fmt.Errorf("parse CA bundle")
 	}
-	client, err := worker.NewClient(cfg.ServerURL, cert, []byte(resp.CABundle))
+	certs := worker.NewCertHolder(cert)
+	client, err := worker.NewClient(cfg.ServerURL, certs, []byte(resp.CABundle))
 	if err != nil {
 		return nil, fmt.Errorf("build mtls client: %w", err)
 	}
 
-	ag := &Agent{cfg: cfg, nodeID: resp.NodeID, client: client, issuedCert: cert, caPool: caPool}
+	ag := &Agent{cfg: cfg, nodeID: resp.NodeID, client: client, certs: certs, keyPEM: keyPEM, csrPEM: csrPEM, caPool: caPool}
 	ag.cache = NewBundleCache(filepath.Join(cfg.DataDir, "bundles"), func(ctx context.Context, digest string) (io.ReadCloser, error) {
 		return client.FetchBundle(ctx, digest)
 	})
 	return ag, nil
 }
 
-// heartbeatOnce posts a single heartbeat to the control plane.
+// heartbeatOnce posts a single heartbeat, requesting certificate renewal when
+// the current cert is past its half-life and applying any renewed cert the
+// control plane returns.
 func (a *Agent) heartbeatOnce(ctx context.Context) error {
-	_, err := a.client.Heartbeat(ctx, a.cfg.Version)
-	return err
+	resp, err := a.client.Heartbeat(ctx, a.cfg.Version, a.renewCSRIfDue(time.Now()))
+	if err != nil {
+		return err
+	}
+	if resp.CertPEM != "" {
+		return a.applyRenewedCert(resp.CertPEM)
+	}
+	return nil
 }
 
 // Run blocks, heartbeating every interval until ctx is cancelled. If

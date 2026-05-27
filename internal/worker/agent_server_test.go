@@ -20,7 +20,7 @@ func TestAgentServer_TLSConfig_RequiresClientCert(t *testing.T) {
 
 	srv := worker.NewAgentServer(worker.AgentServerConfig{
 		ListenAddr: "127.0.0.1:0",
-		ServerCert: serverCert,
+		CertSource: worker.NewCertHolder(serverCert),
 		ClientCAs:  ca.Pool(),
 		NodeID:     "node-a",
 	})
@@ -40,7 +40,16 @@ func TestAgentServer_TLSConfig_RequiresClientCert(t *testing.T) {
 	if len(tlsCfg.NextProtos) != 1 || tlsCfg.NextProtos[0] != "http/1.1" {
 		t.Errorf("NextProtos = %v, want [http/1.1]", tlsCfg.NextProtos)
 	}
-	if len(tlsCfg.Certificates) == 0 {
+	// The server cert is served via GetCertificate (holder-backed) so a renewed
+	// cert can be swapped in without restarting the listener.
+	if tlsCfg.GetCertificate == nil {
+		t.Fatal("GetCertificate is nil; server cert is not holder-backed")
+	}
+	got, err := tlsCfg.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+	if got == nil || len(got.Certificate) == 0 {
 		t.Error("no server certificate configured")
 	}
 }

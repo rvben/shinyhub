@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"net"
 	"net/http"
 	"time"
 
@@ -16,9 +17,11 @@ type AgentServerConfig struct {
 	// ListenAddr is the host:port the server binds. The agent command passes
 	// the --advertise-addr value (or a port offset from it).
 	ListenAddr string
-	// ServerCert is the issued keypair from SignWorkerCSR. It carries both
-	// ServerAuth and ClientAuth EKUs and the <nodeid>.node.shinyhub.internal SAN.
-	ServerCert tls.Certificate
+	// CertSource holds the issued keypair from SignWorkerCSR (ServerAuth +
+	// ClientAuth EKUs, <nodeid>.node.shinyhub.internal SAN). Reading the cert
+	// through the holder lets the agent swap a renewed cert in without restarting
+	// the listener, so the worker's routing surface survives cert rotation.
+	CertSource *CertHolder
 	// ClientCAs is the CA pool workers trust; the control plane must present a
 	// cert signed by this CA to authenticate.
 	ClientCAs *x509.CertPool
@@ -45,34 +48,41 @@ func NewAgentServer(cfg AgentServerConfig) *AgentServer {
 // verify the security posture without binding a port.
 func (s *AgentServer) TLSConfig() *tls.Config {
 	return &tls.Config{
-		Certificates: []tls.Certificate{s.cfg.ServerCert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    s.cfg.ClientCAs,
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"http/1.1"},
+		GetCertificate: s.cfg.CertSource.GetCertificate,
+		ClientAuth:     tls.RequireAndVerifyClientCert,
+		ClientCAs:      s.cfg.ClientCAs,
+		MinVersion:     tls.VersionTLS12,
+		NextProtos:     []string{"http/1.1"},
 	}
 }
 
-// Serve starts the HTTPS server and blocks until ctx is cancelled. It runs the
-// replica-control API and data-plane proxy on the chi router. Intended to be
-// called in a goroutine alongside the heartbeat loop in agent.Run.
+// Serve binds an mTLS listener on the configured ListenAddr and serves until
+// ctx is cancelled. Intended to be called in a goroutine alongside the
+// heartbeat loop in agent.Run.
 func (s *AgentServer) Serve(ctx context.Context) error {
+	ln, err := tls.Listen("tcp", s.cfg.ListenAddr, s.TLSConfig())
+	if err != nil {
+		return err
+	}
+	return s.ServeListener(ctx, ln)
+}
+
+// ServeListener serves the replica-control API and data-plane proxy on ln until
+// ctx is cancelled. ln must already terminate TLS (e.g. from tls.Listen with
+// TLSConfig); callers that need a known bound port can pass their own listener.
+func (s *AgentServer) ServeListener(ctx context.Context, ln net.Listener) error {
 	r := chi.NewRouter()
 	if s.cfg.Replicas != nil {
 		s.cfg.Replicas.Routes(r)
 	}
-	srv := &http.Server{
-		Addr:      s.cfg.ListenAddr,
-		Handler:   r,
-		TLSConfig: s.TLSConfig(),
-	}
+	srv := &http.Server{Handler: r}
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
-	if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

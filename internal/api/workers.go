@@ -125,7 +125,21 @@ func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unknown node")
 		return
 	}
-	writeJSON(w, http.StatusOK, workerapi.HeartbeatResponse{})
+	// Renew the worker's certificate when it submits a CSR, binding the same
+	// node id so the renewed cert keeps the worker's identity and SAN. The
+	// worker presents the current (still-valid) cert on this very call, then
+	// swaps in the returned one before the old cert expires.
+	var resp workerapi.HeartbeatResponse
+	if req.RenewCSRPEM != "" {
+		certPEM, err := a.ca.SignWorkerCSR(nodeID, []byte(req.RenewCSRPEM), a.certTTL)
+		if err != nil {
+			slog.Error("worker heartbeat: renew sign failed", "node", nodeID, "err", err)
+			writeError(w, http.StatusBadRequest, "bad csr")
+			return
+		}
+		resp.CertPEM = string(certPEM)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // authenticatedNodeID derives the caller's node id from its client certificate
