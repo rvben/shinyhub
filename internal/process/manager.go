@@ -447,6 +447,13 @@ func (m *Manager) StopReplica(slug string, index int) error {
 
 	rt := m.runtimeFor(tier)
 	if err := rt.Signal(handle, syscall.SIGTERM); err != nil {
+		// The signal was not delivered, so this replica is still running. Undo
+		// the intentional-stop mark set above so that if it later exits on its
+		// own the monitor classifies it as crashed (and the watchdog restarts
+		// it) rather than as an intentional stop left dead.
+		m.mu.Lock()
+		e.stopped = false
+		m.mu.Unlock()
 		return fmt.Errorf("sigterm: %w", err)
 	}
 	select {
