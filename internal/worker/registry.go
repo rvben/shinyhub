@@ -135,16 +135,41 @@ func (r *Registry) WorkerForTier(tier string) (db.Worker, bool) {
 	return db.Worker{}, false
 }
 
-// UpdateFingerprint refreshes the trusted cert fingerprint (cert renewal) in
-// both the store and the index.
-func (r *Registry) UpdateFingerprint(nodeID, fingerprint string) error {
-	if err := r.store.TouchWorkerHeartbeat(nodeID, fingerprint); err != nil {
+// Heartbeat records a worker's liveness and refreshes its trusted cert
+// fingerprint (cert renewal) in both the store and the index. It keeps an up
+// worker up, and promotes a down worker (one reaped for missed heartbeats, or
+// superseded while offline and now restarted under its old identity) back to up
+// only when its tier slot is free. Gating the promotion on tier ownership keeps
+// the single-up-worker-per-tier invariant: a replaced worker cannot resurrect
+// itself alongside the newer owner and make routing depend on map iteration
+// order.
+func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
+	// Serialize against Register so the tier-ownership decision is made against a
+	// stable set of up workers, mirroring how Register guards its supersede.
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+
+	r.mu.RLock()
+	cur, known := r.byID[nodeID]
+	r.mu.RUnlock()
+	if !known {
+		return db.ErrNotFound
+	}
+
+	status := "up"
+	if cur.Status != "up" {
+		if owner, ok := r.WorkerForTier(cur.Tier); ok && owner.NodeID != nodeID {
+			status = "down" // a newer worker owns the tier; stay superseded
+		}
+	}
+
+	if err := r.store.TouchWorkerHeartbeat(nodeID, fingerprint, status); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	if w, ok := r.byID[nodeID]; ok {
 		w.Fingerprint = fingerprint
-		w.Status = "up"
+		w.Status = status
 		r.byID[nodeID] = w
 	}
 	r.mu.Unlock()

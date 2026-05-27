@@ -296,6 +296,16 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 		go func() { serveErrCh <- a.ServeFunc(ctx) }()
 	}
 
+	// Heartbeat once up front so a freshly bootstrapped or re-adopted worker
+	// checks in (and renews a cert already past its half-life) without waiting a
+	// full interval. This closes the window where a re-adopted cert with little
+	// life left would expire before the first ticker-driven renewal.
+	if ctx.Err() == nil {
+		if err := a.heartbeatOnce(ctx); err != nil {
+			slog.Warn("worker heartbeat failed", "err", err)
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():

@@ -33,11 +33,11 @@ func TestWorkerRegistryCRUD(t *testing.T) {
 		t.Fatalf("get = %+v", got)
 	}
 
-	if err := store.TouchWorkerHeartbeat("node-1", "cd34"); err != nil {
+	if err := store.TouchWorkerHeartbeat("node-1", "cd34", "up"); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
 	got, _ = store.GetWorker("node-1")
-	if got.Fingerprint != "cd34" || got.LastHeartbeat == "" {
+	if got.Fingerprint != "cd34" || got.LastHeartbeat == "" || got.Status != "up" {
 		t.Fatalf("after touch = %+v", got)
 	}
 
@@ -75,10 +75,10 @@ func TestSupersedeTierWorkers(t *testing.T) {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 	}
-	seed("keep", "burst", "up")    // the surviving registrant on the tier
-	seed("old", "burst", "up")     // up on the same tier, must be retired
-	seed("gone", "burst", "down")  // already down, untouched
-	seed("other", "base", "up")    // up on a different tier, untouched
+	seed("keep", "burst", "up")   // the surviving registrant on the tier
+	seed("old", "burst", "up")    // up on the same tier, must be retired
+	seed("gone", "burst", "down") // already down, untouched
+	seed("other", "base", "up")   // up on a different tier, untouched
 
 	// Zero matching rows is valid (no prior worker), not ErrNotFound.
 	if err := store.SupersedeTierWorkers("empty-tier", "keep"); err != nil {

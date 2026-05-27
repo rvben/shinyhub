@@ -121,7 +121,7 @@ func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var req workerapi.HeartbeatRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	fingerprint := worker.Fingerprint(r.TLS.PeerCertificates[0])
-	if err := a.registry.UpdateFingerprint(nodeID, fingerprint); err != nil {
+	if err := a.registry.Heartbeat(nodeID, fingerprint); err != nil {
 		writeError(w, http.StatusUnauthorized, "unknown node")
 		return
 	}

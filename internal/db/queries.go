@@ -1986,12 +1986,14 @@ func (s *Store) ListWorkers() ([]*Worker, error) {
 	return ws, rows.Err()
 }
 
-// TouchWorkerHeartbeat records a heartbeat: updates last_heartbeat, refreshes
-// the trusted cert fingerprint (renewal), and marks the worker up.
-func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint string) error {
+// TouchWorkerHeartbeat records a heartbeat: updates last_heartbeat, refreshes the
+// trusted cert fingerprint (renewal), and sets status. The caller decides the
+// status so a heartbeat from a superseded worker does not resurrect it to up
+// alongside the tier's current owner.
+func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint, status string) error {
 	res, err := s.db.Exec(`
-		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = 'up'
-		WHERE node_id = ?`, fingerprint, nodeID)
+		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = ?
+		WHERE node_id = ?`, fingerprint, status, nodeID)
 	if err != nil {
 		return fmt.Errorf("touch worker %q: %w", nodeID, err)
 	}
