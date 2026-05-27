@@ -27,15 +27,20 @@ func (f *fakeSignal) RejectsByReason(slug string, _ time.Duration) map[proxy.Rej
 type fakeScaler struct {
 	ups   map[string]int
 	downs map[string]int
+	// upNoOp / downNoOp make the primitive return (false, nil) - the benign
+	// no-op the real primitives return at a ceiling/floor or for a non-running
+	// app - so tests can assert the controller does not arm a cooldown on it.
+	upNoOp   bool
+	downNoOp bool
 }
 
 func newFakeScaler() *fakeScaler {
 	return &fakeScaler{ups: map[string]int{}, downs: map[string]int{}}
 }
-func (f *fakeScaler) ScaleUp(slug string) (bool, error) { f.ups[slug]++; return true, nil }
+func (f *fakeScaler) ScaleUp(slug string) (bool, error) { f.ups[slug]++; return !f.upNoOp, nil }
 func (f *fakeScaler) ScaleDown(slug string, _ time.Duration) (bool, error) {
 	f.downs[slug]++
-	return true, nil
+	return !f.downNoOp, nil
 }
 
 func testController(lister Lister, signal Signal, scaler Scaler) *Controller {
@@ -136,6 +141,79 @@ func TestController_SkipsAppUnknownToProxy(t *testing.T) {
 
 	if scaler.ups["demo"] != 0 || scaler.downs["demo"] != 0 {
 		t.Fatalf("acted on app unknown to proxy: up=%d down=%d", scaler.ups["demo"], scaler.downs["demo"])
+	}
+}
+
+func TestController_SkipsAppWithInvalidBounds(t *testing.T) {
+	// An app flagged autoscale-enabled but with unset/zero bounds (e.g. a row
+	// written outside the API's validated enable path) must never be acted on:
+	// a zero max would otherwise clamp every decision to a single replica and
+	// silently scale a healthy pool down.
+	lister := &fakeLister{apps: []*db.App{app("demo", 4, 0, 0)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {1, 1, 1, 1}}}
+	scaler := newFakeScaler()
+	c := testController(lister, signal, scaler)
+
+	c.reconcile(time.Now())
+
+	if scaler.ups["demo"] != 0 || scaler.downs["demo"] != 0 {
+		t.Fatalf("acted on app with invalid bounds: up=%d down=%d", scaler.ups["demo"], scaler.downs["demo"])
+	}
+}
+
+func TestController_SkipsAppWithEmptyPool(t *testing.T) {
+	// A registered-but-empty pool yields a zero-length count slice, which carries
+	// no usable signal. The controller must skip it rather than read it as "zero
+	// load" and scale the recorded replicas down toward the floor.
+	lister := &fakeLister{apps: []*db.App{app("demo", 3, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {}}}
+	scaler := newFakeScaler()
+	c := testController(lister, signal, scaler)
+
+	c.reconcile(time.Now())
+
+	if scaler.ups["demo"] != 0 || scaler.downs["demo"] != 0 {
+		t.Fatalf("acted on app with empty pool: up=%d down=%d", scaler.ups["demo"], scaler.downs["demo"])
+	}
+}
+
+func TestController_NoOpScaleDownDoesNotArmCooldown(t *testing.T) {
+	// A ScaleDown the primitive refuses (floor reached, app not running) must not
+	// arm the cooldown, or the no-op would block a genuinely needed scale-up in
+	// the opposite direction within the cooldown window.
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {1, 1}}} // total 2 -> desired 1 (down)
+	scaler := newFakeScaler()
+	scaler.downNoOp = true
+	c := testController(lister, signal, scaler)
+
+	start := time.Now()
+	c.reconcile(start)
+	if scaler.downs["demo"] != 1 {
+		t.Fatalf("expected a ScaleDown attempt, got %d", scaler.downs["demo"])
+	}
+	// Load spikes within the cooldown window; the prior no-op must not block it.
+	signal.counts["demo"] = []int64{20, 20} // total 40 -> desired 5 (up)
+	c.reconcile(start.Add(time.Second))
+	if scaler.ups["demo"] == 0 {
+		t.Fatalf("scale-up blocked by a cooldown that a no-op scale-down should not have armed")
+	}
+}
+
+func TestController_NoOpScaleUpDoesNotArmCooldown(t *testing.T) {
+	// A ScaleUp the primitive refuses must not arm the cooldown either; the next
+	// tick should be free to try again rather than be suppressed for the window.
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}} // desired 5 (up)
+	scaler := newFakeScaler()
+	scaler.upNoOp = true
+	c := testController(lister, signal, scaler)
+
+	start := time.Now()
+	c.reconcile(start)
+	c.reconcile(start.Add(time.Second))
+	if scaler.ups["demo"] < 2 {
+		t.Fatalf("expected a retry after a no-op scale-up, got %d attempts", scaler.ups["demo"])
 	}
 }
 

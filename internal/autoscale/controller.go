@@ -120,9 +120,20 @@ func (c *Controller) reconcile(now time.Time) {
 
 // reconcileApp evaluates one app and takes at most one scaling decision.
 func (c *Controller) reconcileApp(a *db.App, now time.Time) {
+	// Defence in depth against a row that was flagged enabled without the bounds
+	// the API enforces on enable: a zero max would clamp every decision to one
+	// replica and scale a healthy pool down. Such a row is a misconfiguration,
+	// so hold rather than act on it.
+	if a.AutoscaleMinReplicas < 1 || a.AutoscaleMaxReplicas < a.AutoscaleMinReplicas {
+		c.log.Warn("autoscale: app has invalid bounds, skipping",
+			"slug", a.Slug, "min", a.AutoscaleMinReplicas, "max", a.AutoscaleMaxReplicas)
+		return
+	}
+
 	counts := c.signal.ReplicaSessionCounts(a.Slug)
-	if counts == nil {
-		// The proxy has no pool registered for this app; nothing to measure.
+	if len(counts) == 0 {
+		// The proxy has no pool registered for this app, or the pool is empty;
+		// either way there is no usable saturation signal, so do not act.
 		return
 	}
 	var total int64
@@ -144,13 +155,18 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 
 	desired := desiredReplicas(scaleInput{
 		activeSessions: total,
-		current:        a.Replicas,
-		cap:            sessionCap,
-		target:         target,
-		min:            a.AutoscaleMinReplicas,
-		max:            a.AutoscaleMaxReplicas,
-		runtimeMax:     c.cfg.RuntimeMax,
-		saturated:      saturated,
+		// a.Replicas is a best-effort snapshot from the list query and is not
+		// held under the per-slug scale lock. The scale primitives re-read the
+		// live count under that lock and no-op when it already matches, so a
+		// single decision can never be double-applied even if this snapshot is
+		// momentarily stale against a concurrent API-driven scale.
+		current:    a.Replicas,
+		cap:        sessionCap,
+		target:     target,
+		min:        a.AutoscaleMinReplicas,
+		max:        a.AutoscaleMaxReplicas,
+		runtimeMax: c.cfg.RuntimeMax,
+		saturated:  saturated,
 	})
 	if desired == a.Replicas {
 		return
@@ -159,24 +175,34 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 		return
 	}
 
+	// Arm the cooldown only when an action actually took effect. A no-op (the
+	// primitive refused at a ceiling/floor or for a non-running app) must not
+	// suppress a genuinely needed action in the next window.
+	var acted bool
 	if desired > a.Replicas {
-		c.scaleUp(a.Slug, desired-a.Replicas)
+		acted = c.scaleUp(a.Slug, desired-a.Replicas) > 0
 	} else {
 		// Scale down conservatively: one replica per tick, so a graceful drain
 		// completes and the signal is re-measured before removing the next.
-		if _, err := c.scaler.ScaleDown(a.Slug, c.cfg.DrainGrace); err != nil {
+		ok, err := c.scaler.ScaleDown(a.Slug, c.cfg.DrainGrace)
+		if err != nil {
 			c.log.Error("autoscale: scale down", "slug", a.Slug, "err", err)
 			return
 		}
-		c.log.Info("autoscale: scaled down", "slug", a.Slug, "from", a.Replicas, "toward", desired)
+		if ok {
+			c.log.Info("autoscale: scaled down", "slug", a.Slug, "from", a.Replicas, "toward", desired)
+		}
+		acted = ok
 	}
-	c.lastAction[a.Slug] = now
+	if acted {
+		c.lastAction[a.Slug] = now
+	}
 }
 
 // scaleUp jumps toward the desired count in one tick, since adding capacity
 // under load should be fast. It stops early on the first no-op (ceiling reached
-// / app no longer running) or error.
-func (c *Controller) scaleUp(slug string, steps int) {
+// / app no longer running) or error, and returns the number of replicas added.
+func (c *Controller) scaleUp(slug string, steps int) int {
 	added := 0
 	for i := 0; i < steps; i++ {
 		ok, err := c.scaler.ScaleUp(slug)
@@ -192,4 +218,5 @@ func (c *Controller) scaleUp(slug string, steps int) {
 	if added > 0 {
 		c.log.Info("autoscale: scaled up", "slug", slug, "added", added)
 	}
+	return added
 }
