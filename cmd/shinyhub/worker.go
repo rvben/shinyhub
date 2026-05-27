@@ -93,7 +93,8 @@ func newWorkerCmd() *cobra.Command {
 				NodeID:     ag.NodeID(),
 				Replicas:   replicas,
 			})
-			ag.ServeFunc = agentSrv.Serve
+			ag.Listen = agentSrv.Listen
+			ag.Serve = agentSrv.ServeListener
 			return ag.Run(ctx, 10*time.Second)
 		},
 	}

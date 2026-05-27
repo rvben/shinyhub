@@ -65,15 +65,12 @@ func (s *AgentServer) TLSConfig() *tls.Config {
 	}
 }
 
-// Serve binds an mTLS listener on the configured ListenAddr and serves until
-// ctx is cancelled. Intended to be called in a goroutine alongside the
-// heartbeat loop in agent.Run.
-func (s *AgentServer) Serve(ctx context.Context) error {
-	ln, err := tls.Listen("tcp", s.cfg.ListenAddr, s.TLSConfig())
-	if err != nil {
-		return err
-	}
-	return s.ServeListener(ctx, ln)
+// Listen binds an mTLS listener on the configured ListenAddr. It is the
+// fail-fast half of serving: agent.Run binds synchronously so a port conflict
+// surfaces before the worker announces liveness, then hands the listener to
+// ServeListener to serve until ctx is cancelled.
+func (s *AgentServer) Listen() (net.Listener, error) {
+	return tls.Listen("tcp", s.cfg.ListenAddr, s.TLSConfig())
 }
 
 // ServeListener serves the replica-control API and data-plane proxy on ln until

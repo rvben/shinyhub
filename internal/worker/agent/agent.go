@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -65,9 +66,15 @@ type Agent struct {
 	// how long renewal has been stuck; a successful renewal resets it to zero.
 	renewFailures int
 
-	// ServeFunc, when non-nil, is run concurrently with the heartbeat loop.
-	// The agent's inbound mTLS server sets this before Run is called.
-	ServeFunc func(ctx context.Context) error
+	// Listen binds the agent's inbound mTLS listener. Run calls it synchronously
+	// before its up-front heartbeat, so a bind failure (e.g. the advertised port
+	// is already in use) is returned before the worker ever announces itself up,
+	// and a success means the port is already held when it does. Serve then runs
+	// concurrently with the heartbeat loop on the bound listener. The agent's
+	// inbound mTLS server sets both before Run is called; nil disables the
+	// inbound server (used by tests that only exercise heartbeating).
+	Listen func() (net.Listener, error)
+	Serve  func(ctx context.Context, ln net.Listener) error
 }
 
 // NodeID returns the control-plane-assigned node id.
@@ -284,16 +291,26 @@ func (a *Agent) heartbeatOnce(ctx context.Context) error {
 	return nil
 }
 
-// Run blocks, heartbeating every interval until ctx is cancelled. If
-// ServeFunc is set, it is run concurrently; a non-nil error from it
-// terminates the run loop.
+// Run blocks, heartbeating every interval until ctx is cancelled. If Listen is
+// set, the inbound listener is bound synchronously first (a bind failure aborts
+// Run before any heartbeat) and then served concurrently; a non-nil error from
+// Serve terminates the run loop.
 func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
 	serveErrCh := make(chan error, 1)
-	if a.ServeFunc != nil {
-		go func() { serveErrCh <- a.ServeFunc(ctx) }()
+	if a.Listen != nil {
+		// Bind before announcing liveness. Binding is the fail-fast half of
+		// serving, so doing it synchronously means a port conflict surfaces here,
+		// before the up-front heartbeat, and a success guarantees the port is held
+		// when the worker reports up. This closes the race a deferred bind would
+		// open: heartbeating up just as the serving side fails to start.
+		ln, err := a.Listen()
+		if err != nil {
+			return fmt.Errorf("agent server: %w", err)
+		}
+		go func() { serveErrCh <- a.Serve(ctx, ln) }()
 	}
 
 	// Heartbeat once up front so a freshly bootstrapped or re-adopted worker
