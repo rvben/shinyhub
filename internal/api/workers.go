@@ -132,7 +132,9 @@ func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 // authenticatedNodeID derives the caller's node id from its client certificate
-// and confirms the node is still in the registry (revocation = registry removal).
+// and confirms the node is known to the registry and not revoked. A revoked
+// worker is rejected immediately, so its still-valid certificate cannot pull
+// bundles or heartbeat within its TTL.
 func (a *WorkerAPI) authenticatedNodeID(r *http.Request) (string, bool) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return "", false
@@ -141,7 +143,8 @@ func (a *WorkerAPI) authenticatedNodeID(r *http.Request) (string, bool) {
 	if nodeID == "" {
 		return "", false
 	}
-	if _, ok := a.registry.Worker(nodeID); !ok {
+	w, ok := a.registry.Worker(nodeID)
+	if !ok || w.Revoked() {
 		return "", false
 	}
 	return nodeID, true

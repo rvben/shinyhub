@@ -129,6 +129,9 @@ func (d *mtlsDialer) transport(w db.Worker) *http.Transport {
 }
 
 func (d *mtlsDialer) DialWorker(w db.Worker) (*http.Client, string, error) {
+	if w.Revoked() {
+		return nil, "", fmt.Errorf("worker %q is revoked", w.NodeID)
+	}
 	if w.AdvertiseAddr == "" {
 		return nil, "", fmt.Errorf("worker %q has no advertise address", w.NodeID)
 	}
@@ -137,6 +140,9 @@ func (d *mtlsDialer) DialWorker(w db.Worker) (*http.Client, string, error) {
 }
 
 func (d *mtlsDialer) Transport(w db.Worker) (http.RoundTripper, error) {
+	if w.Revoked() {
+		return nil, fmt.Errorf("worker %q is revoked", w.NodeID)
+	}
 	return d.transport(w), nil
 }
 

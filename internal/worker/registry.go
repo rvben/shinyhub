@@ -115,6 +115,38 @@ func (r *Registry) MarkDown(nodeID string) error {
 	return nil
 }
 
+// Revoke administratively revokes a worker. It persists the revocation (which
+// also marks the node down) and refreshes the in-memory index from the store so
+// the node is excluded from routing immediately, without waiting for a
+// control-plane restart. The row is kept (not deleted) so the revocation stays
+// auditable. Returns db.ErrNotFound for an unknown node.
+func (r *Registry) Revoke(nodeID string) error {
+	if err := r.store.RevokeWorker(nodeID); err != nil {
+		return err
+	}
+	w, err := r.store.GetWorker(nodeID)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.byID[nodeID] = *w
+	r.mu.Unlock()
+	return nil
+}
+
+// Workers returns a snapshot of every known worker (including down and revoked
+// nodes) for the admin fleet view. The slice is a copy; mutating it does not
+// affect the registry's index.
+func (r *Registry) Workers() []db.Worker {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]db.Worker, 0, len(r.byID))
+	for _, w := range r.byID {
+		out = append(out, w)
+	}
+	return out
+}
+
 // Worker returns the indexed worker for a node id.
 func (r *Registry) Worker(nodeID string) (db.Worker, bool) {
 	r.mu.RLock()
@@ -153,6 +185,13 @@ func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 	cur, known := r.byID[nodeID]
 	r.mu.RUnlock()
 	if !known {
+		return db.ErrNotFound
+	}
+	// A revoked worker can never be promoted back to up: reject the heartbeat so
+	// a resurrected agent presenting a still-valid cert cannot rejoin within its
+	// TTL. The worker API rejects revoked certs up front; this is defense in
+	// depth against any path that reaches Heartbeat directly.
+	if cur.Revoked() {
 		return db.ErrNotFound
 	}
 

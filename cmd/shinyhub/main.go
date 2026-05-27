@@ -414,6 +414,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			}
 			return ""
 		})
+		srv.SetWorkerRegistry(workerReg)
 	}
 
 	// Server self-telemetry: when enabled, instrument the API router and serve

@@ -1,0 +1,124 @@
+// internal/worker/registry_revoke_test.go
+package worker
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/rvben/shinyhub/internal/db"
+)
+
+// TestRegistryRevokeExcludesFromRoutingAndPersists asserts that revoking a
+// worker removes it from routing immediately, marks it revoked in both the
+// in-memory index and the store, and that the revocation survives a
+// control-plane restart (NewRegistry rebuild).
+func TestRegistryRevokeExcludesFromRoutingAndPersists(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if err := reg.Revoke(node.NodeID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if _, ok := reg.WorkerForTier("burst"); ok {
+		t.Fatal("revoked worker still routable for its tier")
+	}
+	w, ok := reg.Worker(node.NodeID)
+	if !ok {
+		t.Fatal("revoked worker dropped from in-memory index (revocation must remain auditable)")
+	}
+	if !w.Revoked() || w.Status != "down" {
+		t.Fatalf("in-memory worker not revoked/down: %+v", w)
+	}
+	if sw, _ := store.GetWorker(node.NodeID); sw == nil || !sw.Revoked() {
+		t.Fatalf("revocation not persisted to store: %+v", sw)
+	}
+
+	// A fresh registry rebuilt from the store keeps the revocation.
+	reg2, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("rebuild registry: %v", err)
+	}
+	if _, ok := reg2.WorkerForTier("burst"); ok {
+		t.Fatal("revoked worker routable after rebuild")
+	}
+	if w, ok := reg2.Worker(node.NodeID); !ok || !w.Revoked() {
+		t.Fatalf("rebuild lost revocation: %+v ok=%v", w, ok)
+	}
+
+	if err := reg.Revoke("ghost"); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("revoke unknown node err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRegistryHeartbeatRefusesRevokedWorker asserts a revoked worker can never
+// be promoted back to up by a heartbeat: the heartbeat is rejected, so a
+// resurrected agent presenting a still-valid (un-expired) cert cannot rejoin
+// routing within its TTL.
+func TestRegistryHeartbeatRefusesRevokedWorker(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := reg.Revoke(node.NodeID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	if err := reg.Heartbeat(node.NodeID, "bb"); err == nil {
+		t.Fatal("heartbeat from a revoked worker was accepted")
+	}
+	if _, ok := reg.WorkerForTier("burst"); ok {
+		t.Fatal("revoked worker re-upped via heartbeat")
+	}
+	if w, _ := reg.Worker(node.NodeID); w.Status == "up" {
+		t.Fatalf("revoked worker promoted to up: %+v", w)
+	}
+}
+
+// TestRegistryWorkersSnapshot asserts Workers returns every known worker
+// (including down/revoked) for the admin fleet view, decoupled from the
+// internal map.
+func TestRegistryWorkersSnapshot(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	a, _ := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	b, _ := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "base", Fingerprint: "bb"})
+	if err := reg.Revoke(a.NodeID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	ws := reg.Workers()
+	if len(ws) != 2 {
+		t.Fatalf("Workers() returned %d workers, want 2", len(ws))
+	}
+	byID := map[string]db.Worker{}
+	for _, w := range ws {
+		byID[w.NodeID] = w
+	}
+	if !byID[a.NodeID].Revoked() {
+		t.Errorf("revoked worker %s not marked revoked in snapshot", a.NodeID)
+	}
+	if byID[b.NodeID].Revoked() {
+		t.Errorf("live worker %s wrongly marked revoked", b.NodeID)
+	}
+
+	// Mutating the returned slice must not affect the registry's index.
+	ws[0].Status = "mutated"
+	if w, _ := reg.Worker(ws[0].NodeID); w.Status == "mutated" {
+		t.Error("Workers() leaked a reference into the registry index")
+	}
+}

@@ -1915,8 +1915,14 @@ type Worker struct {
 	Fingerprint   string // SHA-256 of the trusted client cert (hex)
 	Version       string
 	LastHeartbeat string
+	RevokedAt     string // UTC datetime the worker was revoked; empty when never revoked
 	CreatedAt     time.Time
 }
+
+// Revoked reports whether the worker has been administratively revoked. A
+// revoked worker's certificate is rejected by the worker API and excluded from
+// control->worker dials regardless of its up/down status or cert TTL.
+func (w Worker) Revoked() bool { return w.RevokedAt != "" }
 
 // UpsertWorker inserts or replaces a worker row by node id. Registration uses
 // it to record a newly joined node; re-registration (agent restart) refreshes
@@ -1943,12 +1949,12 @@ func (s *Store) UpsertWorker(w Worker) error {
 // GetWorker returns the worker row for nodeID, or ErrNotFound if it does not exist.
 func (s *Store) GetWorker(nodeID string) (*Worker, error) {
 	row := s.db.QueryRow(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
 		FROM workers WHERE node_id = ?`, nodeID)
 	var w Worker
 	var createdAtRaw string
 	if err := row.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1964,7 +1970,7 @@ func (s *Store) GetWorker(nodeID string) (*Worker, error) {
 // Returns a non-nil empty slice when no workers are registered.
 func (s *Store) ListWorkers() ([]*Worker, error) {
 	rows, err := s.db.Query(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
 		FROM workers ORDER BY node_id`)
 	if err != nil {
 		return nil, err
@@ -1975,7 +1981,7 @@ func (s *Store) ListWorkers() ([]*Worker, error) {
 		var w Worker
 		var createdAtRaw string
 		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
 			return nil, err
 		}
 		if t, ok := parseSQLiteTime(createdAtRaw); ok {
@@ -2029,6 +2035,27 @@ func (s *Store) SupersedeTierWorkers(tier, exceptNodeID string) error {
 	return nil
 }
 
+// RevokeWorker administratively revokes a worker: it marks the node down and
+// stamps revoked_at with the current UTC time, preserving the timestamp of the
+// first revocation if the worker is revoked again (audit stability). A revoked
+// worker's certificate is rejected by the worker API and excluded from
+// control->worker dials, independent of its short cert TTL. Returns ErrNotFound
+// for an unknown node.
+func (s *Store) RevokeWorker(nodeID string) error {
+	res, err := s.db.Exec(`
+		UPDATE workers
+		SET status = 'down',
+		    revoked_at = CASE WHEN revoked_at = '' THEN datetime('now') ELSE revoked_at END
+		WHERE node_id = ?`, nodeID)
+	if err != nil {
+		return fmt.Errorf("revoke worker %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) DeleteWorker(nodeID string) error {
 	res, err := s.db.Exec(`DELETE FROM workers WHERE node_id = ?`, nodeID)
 	if err != nil {
@@ -2047,7 +2074,7 @@ func (s *Store) DeleteWorker(nodeID string) error {
 // (empty string) sorts before any real timestamp and is reported stale.
 func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
 	rows, err := s.db.Query(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
 		FROM workers WHERE last_heartbeat <= ? AND status != 'down'`,
 		cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
@@ -2059,7 +2086,7 @@ func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
 		var w Worker
 		var createdAtRaw string
 		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
 			return nil, err
 		}
 		if t, ok := parseSQLiteTime(createdAtRaw); ok {
