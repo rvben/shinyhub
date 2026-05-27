@@ -420,10 +420,30 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Server self-telemetry: when enabled, instrument the API router and serve
 	// the Prometheus scrape endpoint on its own loopback-by-default listener.
 	var metricsSrv *http.Server
+	var metricsReg *metrics.Registry
 	if cfg.Metrics.Enabled {
 		reg := metrics.New(version)
+		metricsReg = reg
 		srv.SetMetrics(reg)
 		prx.SetRejectRecorder(reg)
+		// Fleet gauges read live counts from the store at scrape time, so
+		// "apps/replicas running right now" is answerable from Prometheus alone.
+		reg.RegisterFleetGauges(
+			func() float64 {
+				n, err := store.CountRunningApps()
+				if err != nil {
+					return 0
+				}
+				return float64(n)
+			},
+			func() float64 {
+				n, err := store.CountRunningReplicas()
+				if err != nil {
+					return 0
+				}
+				return float64(n)
+			},
+		)
 		var mln net.Listener
 		metricsSrv, mln, err = startMetricsListener(cfg.Metrics.Addr, reg)
 		if err != nil {
@@ -547,6 +567,18 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		DefaultMaxSessionsPerReplica: cfg.Runtime.DefaultMaxSessionsPerReplica,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
+
+	// Record hibernate/wake transitions and crash-restart counts when metrics
+	// are enabled. Nil-safe inside the watcher when metrics are disabled.
+	if metricsReg != nil {
+		watcher.SetMetrics(metricsReg)
+	}
+	// Emit spans for background wake/restart/hibernate operations into the same
+	// provider the API server uses, so cold-start latency and restart storms are
+	// visible in the trace backend.
+	if tracer != nil {
+		watcher.SetTracer(tracer.Tracer())
+	}
 
 	// When worker hosting is enabled, let the watchdog re-place replicas lost to
 	// a dead worker onto a healthy worker for the tier. The gate keeps a
