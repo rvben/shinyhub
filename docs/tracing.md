@@ -3,7 +3,7 @@
 ShinyHub propagates W3C trace context through its reverse proxy and injects
 the OTEL\_\* environment variables every app process needs to export its own
 spans to your OpenTelemetry collector. Apps export their spans directly to the
-collector — ShinyHub never sees the bytes — and the Traces tab in the UI shows
+collector (ShinyHub never sees the bytes) and the Traces tab in the UI shows
 a per-app ring buffer of recent slow or failed proxy spans, deep-linkable into
 your backend (Tempo, Jaeger, Honeycomb, etc.).
 
@@ -34,7 +34,7 @@ For every proxied request, ShinyHub:
 3. Records the proxy-level span (method, path, status, duration, replica,
    sampled flag) into a per-app ring buffer if the request was slow, returned
    5xx, or errored.
-4. Drops everything else — the buffer never grows beyond `ring_buffer_size`
+4. Drops everything else; the buffer never grows beyond `ring_buffer_size`
    spans per app.
 
 The sampling decision uses W3C parent-based traceidratio: child spans honor
@@ -94,7 +94,7 @@ OTEL_TRACES_SAMPLER_ARG=<sample_ratio>
 These are **platform defaults**. Per-app env vars (set via UI or
 `PUT /api/apps/<slug>/env/<KEY>`) win on duplicate keys, so any app can
 override the collector endpoint, service name, sampler, or headers
-independently. The `SHINYHUB_` prefix is the only reserved namespace —
+independently. The `SHINYHUB_` prefix is the only reserved namespace;
 `OTEL_*` is intentionally user-settable.
 
 ## Instrumenting your Shiny app
@@ -134,13 +134,13 @@ Each row shows:
 - **Status** (HTTP status from the backend)
 - **Duration** (ms)
 - **Replica** index that handled the request
-- **Trace** — the short trace ID, with a link to your backend if
+- **Trace**: the short trace ID, with a link to your backend if
   `trace_link_template` is configured (`{trace_id}` is replaced with the full
   32-hex trace ID).
 
 ## API
 
-`GET /api/apps/<slug>/traces` — same auth model as `/metrics` (any user who
+`GET /api/apps/<slug>/traces` uses the same auth model as `/metrics` (any user who
 can view the app):
 
 ```json

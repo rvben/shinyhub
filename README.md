@@ -104,7 +104,7 @@ go build -o bin/shinyhub ./cmd/shinyhub
 
 ## Configuration
 
-See [`shinyhub.yaml.example`](shinyhub.yaml.example) — every key is documented
+See [`shinyhub.yaml.example`](shinyhub.yaml.example); every key is documented
 inline. Environment variables (prefixed `SHINYHUB_`) override YAML; see the
 example file for the full list.
 
@@ -115,7 +115,7 @@ and `restore`), then the `SHINYHUB_CONFIG` environment variable, then
 
 Minimum required:
 
-- `auth.secret` — random 32+ character string. Generate with
+- `auth.secret`: random 32+ character string. Generate with
   `openssl rand -hex 32`. The server refuses to start with the placeholder
   value.
 
@@ -181,7 +181,7 @@ The data dir survives deploys, restarts, and rollbacks. It is removed only
 when the app itself is deleted. Recreating an app with the same slug starts
 with a fresh, empty data dir.
 
-Deploy bundles must not contain a `data/` entry — the server rejects bundles
+Deploy bundles must not contain a `data/` entry; the server rejects bundles
 where the first segment is a file, directory, or symlink named `data` (a 422
 with the offending path). Push data in separately:
 
@@ -201,7 +201,7 @@ rights or platform `admin` / `operator`.
 
 `GET /api/apps/:slug/data` requires the app's owner, an explicit member
 (any role), or a platform admin / operator. **Public or shared visibility
-alone is not enough** — file listings can leak business intent
+alone is not enough**: file listings can leak business intent
 (`q4-revenue.parquet`) and are kept off the public surface even when the
 app itself is public.
 
@@ -323,16 +323,16 @@ pass through to ShinyHub unmodified.
 
 Components:
 
-- `cmd/shinyhub` — single binary: `shinyhub serve` (HTTP + proxy + lifecycle) and developer subcommands (`deploy`, `login`, `apps`, `env`, `data`, …).
-- `internal/cli` — developer subcommand implementations.
-- `internal/api` — chi-routed HTTP handlers.
-- `internal/process` — native or Docker app process lifecycle.
-- `internal/proxy` — reverse proxy.
-- `internal/db` — SQLite store.
+- `cmd/shinyhub`: single binary with `shinyhub serve` (HTTP + proxy + lifecycle) and developer subcommands (`deploy`, `login`, `apps`, `env`, `data`, …).
+- `internal/cli`: developer subcommand implementations.
+- `internal/api`: chi-routed HTTP handlers.
+- `internal/process`: native or Docker app process lifecycle.
+- `internal/proxy`: reverse proxy.
+- `internal/db`: SQLite store.
 
 ## Status
 
-v0.2.x line — single-node, self-hosted. Used in production by the maintainer.
+v0.2.x line: single-node, self-hosted. Used in production by the maintainer.
 No SLA. Issues and PRs welcome. See [CHANGELOG.md](CHANGELOG.md) for the
 current release.
 
