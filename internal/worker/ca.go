@@ -253,3 +253,24 @@ func (c *CA) ServerCertificate(hosts ...string) (tls.Certificate, error) {
 		PrivateKey:  key,
 	}, nil
 }
+
+// ListenerTLSConfig builds the TLS config for the control plane's worker-facing
+// listener. The server cert is minted off the CA for the given hosts and served
+// through GetCertificate, which re-mints it past its half-life so a control
+// plane running beyond the cert's lifetime keeps serving without a restart.
+// Client certs are requested but not required (register runs before a worker
+// has a cert) and verified against the CA when presented.
+func (c *CA) ListenerTLSConfig(hosts ...string) (*tls.Config, error) {
+	rc, err := newRotatingCert(func() (tls.Certificate, error) {
+		return c.ServerCertificate(hosts...)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: rc.getCertificate,
+		ClientAuth:     tls.VerifyClientCertIfGiven,
+		ClientCAs:      c.pool,
+	}, nil
+}

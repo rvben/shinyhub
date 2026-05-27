@@ -5,12 +5,19 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 )
 
 func TestMTLSDialer_BuildsServerNameAndBaseURL(t *testing.T) {
-	d := newMTLSDialer(tls.Certificate{}, nil) // cert + CA pool; nil pool ok for shape test
+	mint := func() (tls.Certificate, error) {
+		return selfSignedCert(t, time.Now().Add(-time.Minute), time.Now().Add(time.Hour)), nil
+	}
+	d, err := NewMTLSDialer(mint, nil) // minter + CA pool; nil pool ok for shape test
+	if err != nil {
+		t.Fatalf("NewMTLSDialer: %v", err)
+	}
 	w := db.Worker{NodeID: "node-a", AdvertiseAddr: "10.0.0.5:8443"}
 
 	client, base, err := d.DialWorker(w)

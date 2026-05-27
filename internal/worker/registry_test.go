@@ -139,6 +139,76 @@ func TestRegistryConcurrentSameTierRegistrationsConverge(t *testing.T) {
 	}
 }
 
+// TestRegistryHeartbeatDoesNotResurrectSupersededWorker asserts that a heartbeat
+// from a worker that was superseded while offline (e.g. it restarted and
+// re-adopted its old identity) does not flip it back to up alongside the newer
+// tier owner. The newest registrant keeps the single routing slot; the heartbeat
+// still refreshes the superseded worker's fingerprint and liveness.
+func TestRegistryHeartbeatDoesNotResurrectSupersededWorker(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	first, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register first: %v", err)
+	}
+	second, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "burst", Fingerprint: "bb"})
+	if err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+
+	// The superseded worker restarts and heartbeats under its old node id.
+	if err := reg.Heartbeat(first.NodeID, "aa2"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+
+	got, ok := reg.WorkerForTier("burst")
+	if !ok || got.NodeID != second.NodeID {
+		t.Fatalf("WorkerForTier(burst) = %+v ok=%v, want %s", got, ok, second.NodeID)
+	}
+	w, ok := reg.Worker(first.NodeID)
+	if !ok || w.Status != "down" {
+		t.Errorf("superseded worker re-upped via heartbeat: %+v ok=%v", w, ok)
+	}
+	if w.Fingerprint != "aa2" {
+		t.Errorf("heartbeat did not refresh superseded worker fingerprint: %+v", w)
+	}
+	if sw, _ := store.GetWorker(first.NodeID); sw == nil || sw.Status != "down" {
+		t.Errorf("superseded worker re-upped in store: %+v", sw)
+	}
+}
+
+// TestRegistryHeartbeatReupsWhenTierSlotFree asserts that a worker reaped for
+// missed heartbeats (marked down with no successor) recovers its routing slot on
+// its next heartbeat, since the tier is otherwise unowned.
+func TestRegistryHeartbeatReupsWhenTierSlotFree(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := reg.MarkDown(node.NodeID); err != nil {
+		t.Fatalf("mark down: %v", err)
+	}
+	if _, ok := reg.WorkerForTier("burst"); ok {
+		t.Fatal("tier slot should be free after the only worker was marked down")
+	}
+
+	if err := reg.Heartbeat(node.NodeID, "bb"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	got, ok := reg.WorkerForTier("burst")
+	if !ok || got.NodeID != node.NodeID {
+		t.Fatalf("recovered worker not re-upped: %+v ok=%v", got, ok)
+	}
+}
+
 func TestRegistryMarkDownExcludesFromRouting(t *testing.T) {
 	store := newTestStore(t)
 	reg, err := NewRegistry(store)

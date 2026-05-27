@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -43,9 +42,10 @@ func newWorkerCmd() *cobra.Command {
 			if serverURL == "" {
 				return fmt.Errorf("--server is required")
 			}
-			if token == "" {
-				return fmt.Errorf("--token is required")
-			}
+			// --token is required only for a fresh join; a worker with a valid
+			// persisted identity re-adopts it without one (Bootstrap enforces the
+			// token on the register path), so a worker can restart after its join
+			// token has been rotated away.
 			if caFile == "" {
 				caFile = os.Getenv("SHINYHUB_WORKER_CA")
 			}
@@ -88,12 +88,13 @@ func newWorkerCmd() *cobra.Command {
 			}
 			agentSrv := worker.NewAgentServer(worker.AgentServerConfig{
 				ListenAddr: advertiseAddr,
-				ServerCert: ag.IssuedCert(),
-				ClientCAs:  ag.CAPool(),
+				CertSource: ag.Certs(),
+				CASource:   ag.CACerts(),
 				NodeID:     ag.NodeID(),
 				Replicas:   replicas,
 			})
-			ag.ServeFunc = agentSrv.Serve
+			ag.Listen = agentSrv.Listen
+			ag.Serve = agentSrv.ServeListener
 			return ag.Run(ctx, 10*time.Second)
 		},
 	}
@@ -173,20 +174,15 @@ func serveWorkerMTLS(ctx context.Context, logger *slog.Logger, cfg *config.Confi
 	r.Post("/api/workers/heartbeat", wapi.HandleHeartbeat)
 	r.Get("/internal/bundles/{digest}", wapi.HandleBundleFetch)
 
-	srvCert, err := ca.ServerCertificate(cfg.Worker.AdvertiseHosts...)
+	tlsConf, err := ca.ListenerTLSConfig(cfg.Worker.AdvertiseHosts...)
 	if err != nil {
-		logger.Error("worker mTLS: server cert", "err", err)
+		logger.Error("worker mTLS: listener tls config", "err", err)
 		return
 	}
 	srv := &http.Server{
-		Addr:    workerListenAddr(cfg),
-		Handler: r,
-		TLSConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{srvCert},
-			ClientAuth:   tls.VerifyClientCertIfGiven,
-			ClientCAs:    ca.Pool(),
-		},
+		Addr:      workerListenAddr(cfg),
+		Handler:   r,
+		TLSConfig: tlsConf,
 	}
 	go func() {
 		<-ctx.Done()

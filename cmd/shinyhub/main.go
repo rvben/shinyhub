@@ -251,11 +251,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	var dialer worker.AgentDialer
 	if workerCA != nil {
-		clientCert, err := workerCA.ControlClientCertificate()
+		d, err := worker.NewMTLSDialer(workerCA.ControlClientCertificate, workerCA.Pool())
 		if err != nil {
 			return fmt.Errorf("control client cert: %w", err)
 		}
-		dialer = worker.NewMTLSDialer(clientCert, workerCA.Pool())
+		dialer = d
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
@@ -414,6 +414,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			}
 			return ""
 		})
+		srv.SetWorkerRegistry(workerReg)
 	}
 
 	// Server self-telemetry: when enabled, instrument the API router and serve
@@ -547,6 +548,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
+	// When worker hosting is enabled, let the watchdog re-place replicas lost to
+	// a dead worker onto a healthy worker for the tier. The gate keeps a
+	// no-worker replica lost at zero cost (no restart-budget burn) and lets it
+	// auto-heal once a replacement worker joins.
+	if workerReg != nil {
+		watcher.EnableLostReplicaHealing(func(tier string) bool {
+			_, ok := workerReg.WorkerForTier(tier)
+			return ok
+		})
+	}
+
 	// Fail any deploy interrupted mid-flight before recovery so adoption falls
 	// back to the last good deployment.
 	lifecycle.ReconcileInflightDeployments(store)
@@ -575,12 +587,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		const (
 			workerTimeout   = 90 * time.Second
 			monitorInterval = 30 * time.Second
+			// workerRetention is how long a down, non-revoked worker row with no
+			// live replicas is kept before being reaped. It is far longer than the
+			// down timeout so a briefly-flapping worker is never tombstoned.
+			workerRetention = 24 * time.Hour
 		)
-		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerReg.MarkDown, func(slug string, index int) {
-			prx.DeregisterReplica(slug, index)
-		})
+		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int, expectURL string) {
+			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
+		}, mgr.EvictReplicaIfWorker, workerReg.Forget)
 		go monitor.Run(ctx, monitorInterval)
-		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval)
+		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
 	}
 
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())

@@ -1106,6 +1106,28 @@ func TestAppsShow_RendersRejectsByReason(t *testing.T) {
 	}
 }
 
+// TestAppsShow_RendersLostReplicaReason shows the derived per-replica reason
+// (e.g. "worker unavailable") alongside a lost replica so the degraded state is
+// disambiguated at a glance.
+func TestAppsShow_RendersLostReplicaReason(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"degraded","replicas":2,"max_sessions_per_replica":1,"deploy_count":1},"effective_max_sessions_per_replica":1,"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"lost","reason":"worker unavailable"}]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "worker unavailable") {
+		t.Errorf("expected lost replica reason in output\nfull output:\n%s", out)
+	}
+	// The running replica must not gain a spurious reason annotation.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "1234") && strings.Contains(line, "worker unavailable") {
+			t.Errorf("running replica should have no reason annotation: %q", line)
+		}
+	}
+}
+
 // TestAppsShow_OmitsRejectsWhenAbsent guards against the rejects section
 // rendering when the server sends no rejects_by_reason block.
 func TestAppsShow_OmitsRejectsWhenAbsent(t *testing.T) {

@@ -190,6 +190,21 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Derive a presentation-only reason for replicas lost to a dead worker: when
+	// the tier has no healthy worker, the watchdog cannot re-place the slot, so
+	// surface "worker unavailable" to disambiguate the degraded state. Once a
+	// replacement worker joins (mid-heal) the reason clears.
+	if s.workerReg != nil {
+		for i, rep := range replicas {
+			if rep.Status != db.ReplicaStatusLost {
+				continue
+			}
+			if _, ok := s.workerReg.WorkerForTier(rep.Tier); !ok {
+				replicas[i].Reason = "worker unavailable"
+			}
+		}
+	}
+
 	// effective_max_sessions_per_replica resolves the app's own cap against the
 	// runtime default (0 = inherit). Clients use it to render an honest
 	// admission ceiling (replicas x effective cap) instead of a bare "0".

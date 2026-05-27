@@ -28,16 +28,22 @@ type RegisterResponse struct {
 
 // HeartbeatRequest carries the worker's current version. The node id is NOT in
 // the body: the control plane derives it from the presented client certificate
-// so a heartbeat cannot impersonate another node.
+// so a heartbeat cannot impersonate another node. RenewCSRPEM, when non-empty,
+// is a PEM-encoded CSR the worker submits to renew its certificate before the
+// current one expires; the control plane re-signs it and returns the new cert.
 type HeartbeatRequest struct {
-	Version string `json:"version"`
+	Version     string `json:"version"`
+	RenewCSRPEM string `json:"renew_csr_pem,omitempty"`
 }
 
-// HeartbeatResponse optionally carries a renewed certificate. RenewCSRPEM in the
-// request (omitted here for brevity in Plan B's heartbeat) drives renewal; when
-// the control plane re-signs, CertPEM is non-empty and the agent swaps it in.
+// HeartbeatResponse carries a renewed certificate when the request included a
+// RenewCSRPEM the control plane re-signed; CertPEM is then non-empty and the
+// agent swaps it in. CABundle carries the control plane's current CA bundle so a
+// rotated trust root reaches the worker; the agent applies it only when it
+// differs from the bundle it already trusts.
 type HeartbeatResponse struct {
-	CertPEM string `json:"cert_pem,omitempty"`
+	CertPEM  string `json:"cert_pem,omitempty"`
+	CABundle string `json:"ca_bundle,omitempty"`
 }
 
 // FrameKind identifies an NDJSON streaming frame's payload. Used by the replica

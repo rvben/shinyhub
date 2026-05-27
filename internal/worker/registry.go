@@ -115,6 +115,43 @@ func (r *Registry) MarkDown(nodeID string) error {
 	return nil
 }
 
+// Revoke administratively revokes a worker. It persists the revocation (which
+// also marks the node down) and refreshes the in-memory index from the store so
+// the node is excluded from routing immediately, without waiting for a
+// control-plane restart. The row is kept (not deleted) so the revocation stays
+// auditable. Returns db.ErrNotFound for an unknown node.
+//
+// It holds regMu for the same reason Heartbeat and Register do: a heartbeat
+// performs a read-decide-write of the worker's status, so revoking without that
+// lock could land between a heartbeat's read and its write and let the heartbeat
+// resurrect the revoked node to up. Serializing closes that window.
+func (r *Registry) Revoke(nodeID string) error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+
+	if err := r.store.RevokeWorker(nodeID); err != nil {
+		return err
+	}
+	w, err := r.store.GetWorker(nodeID)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.byID[nodeID] = *w
+	r.mu.Unlock()
+	return nil
+}
+
+// Forget drops a worker from the in-memory index. The monitor calls it after the
+// store reaps a long-dead worker row so the fleet snapshot does not keep listing
+// a node that no longer exists. Unknown node ids are a no-op. Forget never
+// touches the store; the row is already gone.
+func (r *Registry) Forget(nodeID string) {
+	r.mu.Lock()
+	delete(r.byID, nodeID)
+	r.mu.Unlock()
+}
+
 // Worker returns the indexed worker for a node id.
 func (r *Registry) Worker(nodeID string) (db.Worker, bool) {
 	r.mu.RLock()
@@ -135,16 +172,48 @@ func (r *Registry) WorkerForTier(tier string) (db.Worker, bool) {
 	return db.Worker{}, false
 }
 
-// UpdateFingerprint refreshes the trusted cert fingerprint (cert renewal) in
-// both the store and the index.
-func (r *Registry) UpdateFingerprint(nodeID, fingerprint string) error {
-	if err := r.store.TouchWorkerHeartbeat(nodeID, fingerprint); err != nil {
+// Heartbeat records a worker's liveness and refreshes its trusted cert
+// fingerprint (cert renewal) in both the store and the index. It keeps an up
+// worker up, and promotes a down worker (one reaped for missed heartbeats, or
+// superseded while offline and now restarted under its old identity) back to up
+// only when its tier slot is free. Gating the promotion on tier ownership keeps
+// the single-up-worker-per-tier invariant: a replaced worker cannot resurrect
+// itself alongside the newer owner and make routing depend on map iteration
+// order.
+func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
+	// Serialize against Register so the tier-ownership decision is made against a
+	// stable set of up workers, mirroring how Register guards its supersede.
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+
+	r.mu.RLock()
+	cur, known := r.byID[nodeID]
+	r.mu.RUnlock()
+	if !known {
+		return db.ErrNotFound
+	}
+	// A revoked worker can never be promoted back to up: reject the heartbeat so
+	// a resurrected agent presenting a still-valid cert cannot rejoin within its
+	// TTL. The worker API rejects revoked certs up front; this is defense in
+	// depth against any path that reaches Heartbeat directly.
+	if cur.Revoked() {
+		return db.ErrNotFound
+	}
+
+	status := "up"
+	if cur.Status != "up" {
+		if owner, ok := r.WorkerForTier(cur.Tier); ok && owner.NodeID != nodeID {
+			status = "down" // a newer worker owns the tier; stay superseded
+		}
+	}
+
+	if err := r.store.TouchWorkerHeartbeat(nodeID, fingerprint, status); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	if w, ok := r.byID[nodeID]; ok {
 		w.Fingerprint = fingerprint
-		w.Status = "up"
+		w.Status = status
 		r.byID[nodeID] = w
 	}
 	r.mu.Unlock()

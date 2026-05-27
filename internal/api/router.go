@@ -22,6 +22,7 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
+	"github.com/rvben/shinyhub/internal/worker"
 )
 
 // Server holds the dependencies shared by all API handlers.
@@ -55,6 +56,11 @@ type Server struct {
 	// when worker hosting is disabled; cross-node checks are then a no-op because
 	// no remote tiers exist.
 	nodeForTier func(tier string) string
+
+	// workerReg is the control plane's view of joined workers, used by the admin
+	// fleet endpoints to list and revoke workers. Nil when worker hosting is
+	// disabled; the endpoints then report an empty fleet and 404 on revoke.
+	workerReg *worker.Registry
 
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
 	// authenticates as the synthetic system user without a DB lookup. Set via
@@ -186,6 +192,12 @@ func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
 // worker hosting is disabled. Must be called before the server begins handling
 // requests.
 func (s *Server) SetNodeForTier(fn func(tier string) string) { s.nodeForTier = fn }
+
+// SetWorkerRegistry injects the worker registry backing the admin fleet
+// endpoints (list and revoke). Wired at startup from the worker registry; left
+// nil when worker hosting is disabled. Must be called before the server begins
+// handling requests.
+func (s *Server) SetWorkerRegistry(reg *worker.Registry) { s.workerReg = reg }
 
 // tiersForApp returns the tiers an app's replicas run on: the keys of its
 // placement, or the default tier when no explicit placement is set.
@@ -410,6 +422,9 @@ func (s *Server) buildRouter() http.Handler {
 		r.Delete("/api/users/{id}", s.handleDeleteUser)                               // admin: delete user
 
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log
+
+		r.Get("/api/workers", s.handleListWorkers)                    // admin: list joined workers
+		r.Post("/api/workers/{node_id}/revoke", s.handleRevokeWorker) // admin: revoke a worker
 	})
 
 	return r

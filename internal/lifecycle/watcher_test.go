@@ -89,13 +89,13 @@ func (f *fakeProxy) SetPoolCap(slug string, max int) {
 }
 
 type fakeStore struct {
-	mu              sync.Mutex
-	apps            map[string]*db.App
-	deployments     []*db.Deployment
-	statusUpdates   []db.UpdateAppStatusParams
-	appStatus       map[string]string
+	mu               sync.Mutex
+	apps             map[string]*db.App
+	deployments      []*db.Deployment
+	statusUpdates    []db.UpdateAppStatusParams
+	appStatus        map[string]string
 	upsertedReplicas []db.UpsertReplicaParams
-	replicas        map[int64][]*db.Replica
+	replicas         map[int64][]*db.Replica
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -139,16 +139,35 @@ func (f *fakeStore) ListDeployments(_ int64) ([]*db.Deployment, error) {
 }
 func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.upsertedReplicas = append(f.upsertedReplicas, p)
-	f.mu.Unlock()
+	// Write through to the replica table so the status authority observes the
+	// new state, matching the real store where UpsertReplica is durable.
+	if f.replicas == nil {
+		f.replicas = make(map[int64][]*db.Replica)
+	}
+	for _, r := range f.replicas[p.AppID] {
+		if r.Index == p.Index {
+			r.Status, r.PID, r.Port = p.Status, p.PID, p.Port
+			r.Provider, r.Tier = p.Provider, p.Tier
+			r.EndpointURL, r.WorkerID = p.EndpointURL, p.WorkerID
+			r.AppVersion, r.DesiredState, r.DeploymentID = p.AppVersion, p.DesiredState, p.DeploymentID
+			return nil
+		}
+	}
+	f.replicas[p.AppID] = append(f.replicas[p.AppID], &db.Replica{
+		AppID: p.AppID, Index: p.Index, PID: p.PID, Port: p.Port, Status: p.Status,
+		Provider: p.Provider, Tier: p.Tier, EndpointURL: p.EndpointURL, WorkerID: p.WorkerID,
+		AppVersion: p.AppVersion, DesiredState: p.DesiredState, DeploymentID: p.DeploymentID,
+	})
 	return nil
 }
-func (f *fakeStore) ListRunningApps() ([]*db.App, error) {
+func (f *fakeStore) ListReconcilableApps() ([]*db.App, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []*db.App
 	for _, app := range f.apps {
-		if app.Status == "running" {
+		if app.Status == "running" || app.Status == "degraded" {
 			out = append(out, app)
 		}
 	}
@@ -183,7 +202,7 @@ func TestWatchdog_RestartsOnCrash(t *testing.T) {
 		{Slug: "myapp", Index: 0, Status: process.StatusCrashed},
 	}}
 	st := newFakeStore(
-		map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "crashed", Replicas: 1}},
+		map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "running", Replicas: 1}},
 		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
 	)
 	var deployed []string
@@ -288,7 +307,7 @@ func TestWatchdog_ExponentialBackoff(t *testing.T) {
 		{Slug: "app", Index: 0, Status: process.StatusCrashed},
 	}}
 	st := newFakeStore(
-		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "crashed", Replicas: 1}},
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", Replicas: 1}},
 		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
 	)
 	var deployCount int32
@@ -321,34 +340,40 @@ func TestWatchdog_ExponentialBackoff(t *testing.T) {
 	}
 }
 
+// TestWatchdog_GivesUpAfterMaxAttempts proves the broken-bundle path is bounded
+// and non-zero-cost: each tick that clears the backoff window spends one attempt
+// until RestartMaxAttempts is reached, after which no further deploy is entered,
+// and the app reflects degraded throughout (any down slot => degraded).
 func TestWatchdog_GivesUpAfterMaxAttempts(t *testing.T) {
 	mgr := &fakeManager{entries: []*process.ProcessInfo{
 		{Slug: "app", Index: 0, Status: process.StatusCrashed},
 	}}
 	st := newFakeStore(
-		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "crashed", Replicas: 1}},
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", Replicas: 1}},
 		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
 	)
+	st.replicas = map[int64][]*db.Replica{1: {{AppID: 1, Index: 0, Status: "crashed"}}}
+	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 3}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("always fails") })
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			atomic.AddInt32(&deployCount, 1)
+			return nil, fmt.Errorf("always fails")
+		})
 
-	// Exhaust all allowed attempts.
-	for i := 0; i < w.cfg.RestartMaxAttempts; i++ {
+	// Clear the backoff window each round so the next tick is allowed to attempt
+	// a deploy; run well past the budget to prove deploys stop climbing.
+	for i := 0; i < w.cfg.RestartMaxAttempts+3; i++ {
 		w.mu.Lock()
 		w.nextRetry[replicaKey{"app", 0}] = time.Now().Add(-time.Second)
 		w.mu.Unlock()
 		w.runOnce()
 	}
 
-	// This tick pushes attempts over the limit → must mark degraded.
-	w.mu.Lock()
-	w.nextRetry[replicaKey{"app", 0}] = time.Now().Add(-time.Second)
-	w.mu.Unlock()
-	w.runOnce()
-
-	updates := st.statusUpdates
-	if len(updates) == 0 || updates[len(updates)-1].Status != "degraded" {
-		t.Errorf("expected final status=degraded, got %v", updates)
+	if got := atomic.LoadInt32(&deployCount); got != int32(w.cfg.RestartMaxAttempts) {
+		t.Errorf("expected deploy attempts capped at %d, got %d", w.cfg.RestartMaxAttempts, got)
+	}
+	if st.appStatus["app"] != "degraded" {
+		t.Errorf("expected status=degraded, got %q", st.appStatus["app"])
 	}
 }
 
@@ -357,9 +382,10 @@ func TestWatchdog_ResetsAttemptsOnSuccess(t *testing.T) {
 		{Slug: "app", Index: 0, Status: process.StatusCrashed},
 	}}
 	st := newFakeStore(
-		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "crashed", Replicas: 1}},
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", Replicas: 1}},
 		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
 	)
+	st.replicas = map[int64][]*db.Replica{1: {{AppID: 1, Index: 0, Status: "crashed"}}}
 	var callCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
 		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
@@ -728,9 +754,15 @@ func TestWatcher_OneReplicaCrashesOtherStays(t *testing.T) {
 		},
 	}
 	st := newFakeStore(
-		map[string]*db.App{"demo": {ID: 1, Slug: "demo", Replicas: 2}},
+		map[string]*db.App{"demo": {ID: 1, Slug: "demo", Status: "running", Replicas: 2}},
 		[]*db.Deployment{{BundleDir: "/tmp/demo"}},
 	)
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "crashed"},
+			{AppID: 1, Index: 1, Status: "running"},
+		},
+	}
 	var restartedIndex int = -1
 	w := newTestWatcher(Config{WatchInterval: time.Millisecond, RestartMaxAttempts: 3},
 		mgr, newFakeProxy(), st,
@@ -756,9 +788,15 @@ func TestWatcher_AllReplicasDegraded(t *testing.T) {
 		},
 	}
 	st := newFakeStore(
-		map[string]*db.App{"demo": {ID: 1, Slug: "demo", Replicas: 2}},
-		nil,
+		map[string]*db.App{"demo": {ID: 1, Slug: "demo", Status: "running", Replicas: 2}},
+		[]*db.Deployment{{BundleDir: "/tmp/demo"}},
 	)
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "crashed"},
+			{AppID: 1, Index: 1, Status: "crashed"},
+		},
+	}
 	w := newTestWatcher(Config{WatchInterval: time.Millisecond, RestartMaxAttempts: 1},
 		mgr, newFakeProxy(), st,
 		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("boom") })

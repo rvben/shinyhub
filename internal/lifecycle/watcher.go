@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -53,7 +54,7 @@ type appStore interface {
 	UpdateAppStatus(p db.UpdateAppStatusParams) error
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
-	ListRunningApps() ([]*db.App, error)
+	ListReconcilableApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
 }
 
@@ -70,6 +71,12 @@ type Watcher struct {
 	prx    proxyBackend
 	store  appStore
 	deploy func(slug, bundleDir string, index int) (*deploy.Result, error)
+
+	// tierHealthy reports whether a healthy worker exists for a tier. It gates
+	// re-placement of lost replicas: nil disables lost-replica healing entirely;
+	// a false result keeps a no-worker replica lost at zero cost. Set once via
+	// EnableLostReplicaHealing before Start, then only read.
+	tierHealthy func(tier string) bool
 
 	mu        sync.Mutex
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
@@ -144,6 +151,14 @@ func (w *Watcher) drainWakes() {
 // RunOnce exposes a single watchdog/hibernation tick for testing.
 func (w *Watcher) RunOnce() { w.runOnce() }
 
+// EnableLostReplicaHealing turns on re-placement of lost replicas, gating it on
+// the supplied predicate: a lost replica is re-placed only when its tier has a
+// healthy worker. Called once at startup before Start; leaving it unset keeps
+// lost replicas untouched (crash recovery is unaffected).
+func (w *Watcher) EnableLostReplicaHealing(tierHealthy func(tier string) bool) {
+	w.tierHealthy = tierHealthy
+}
+
 // runOnce processes all current manager entries for one watchdog/hibernation tick.
 // handleIdle is called at most once per slug — since idleness is per-app (not
 // per-replica), iterating the whole pool would redundantly hibernate the same app.
@@ -162,18 +177,17 @@ func (w *Watcher) runOnce() {
 			}
 		}
 	}
-	w.reconcileCrashedReplicas(handled)
+	w.reconcileReplicas(handled)
+	w.reconcileStatuses()
 }
 
-// reconcileCrashedReplicas restarts replica slots that are persisted as
-// crashed but that the process manager is not tracking — the state left by a
-// partial-success deploy, where some indices never booted (and so were never
-// registered with the manager). Without this pass such an app would run
-// permanently under-replicated until the next server restart. handled holds
-// the replicas already processed via the manager this tick so they are not
-// driven twice.
-func (w *Watcher) reconcileCrashedReplicas(handled map[replicaKey]bool) {
-	apps, err := w.store.ListRunningApps()
+// reconcileReplicas re-places replica slots the process manager is not actively
+// driving: persisted-crashed slots with no live manager entry (the state left
+// by a partial-success deploy) and lost slots (whose worker died). Both run over
+// running+degraded apps so a degraded app can recover. handled holds the slots
+// already driven this tick via the manager loop so they are not driven twice.
+func (w *Watcher) reconcileReplicas(handled map[replicaKey]bool) {
+	apps, err := w.store.ListReconcilableApps()
 	if err != nil {
 		return
 	}
@@ -183,85 +197,87 @@ func (w *Watcher) reconcileCrashedReplicas(handled map[replicaKey]bool) {
 			continue
 		}
 		for _, r := range reps {
-			if r.Status != "crashed" || r.Index >= app.Replicas {
+			if r.Index >= app.Replicas || handled[replicaKey{app.Slug, r.Index}] {
 				continue
 			}
-			if handled[replicaKey{app.Slug, r.Index}] {
-				continue
+			switch r.Status {
+			case "crashed":
+				w.restartSlot(app, r.Index)
+			case db.ReplicaStatusLost:
+				// Lost-only gate: a healthy worker must exist for the tier before
+				// spending any effort. This is both the cheap fast-path skip and the
+				// on/off switch; ErrNoLiveWorker classification in restartSlot is the
+				// correctness backstop for the gate-vs-start TOCTOU.
+				if w.tierHealthy != nil && w.tierHealthy(r.Tier) {
+					w.restartSlot(app, r.Index)
+				}
 			}
-			w.handleCrashed(app.Slug, r.Index)
 		}
 	}
 }
 
-// handleCrashed attempts to restart a crashed replica with exponential backoff.
-// After RestartMaxAttempts consecutive failures the app is marked degraded only
-// if every replica in the pool has also exhausted its retry budget.
+// handleCrashed restarts a crashed replica reported by the process manager. It
+// loads the owning app and delegates to the shared restartSlot core.
 func (w *Watcher) handleCrashed(slug string, index int) {
-	k := replicaKey{slug, index}
+	app, err := w.store.GetAppBySlug(slug)
+	if err != nil {
+		return
+	}
+	w.restartSlot(app, index)
+}
+
+// restartSlot is the single deploy+persist+backoff core shared by the crash path
+// and lost-replica re-placement. It re-runs the current deployment for one
+// replica index and persists the result. A missing worker or a lost race against
+// a concurrent redeploy is classified as zero-cost (the restart budget is not
+// consumed); any other deploy error consumes one attempt and schedules backoff.
+// Status promotion is left to reconcileStatuses (the single status authority).
+func (w *Watcher) restartSlot(app *db.App, index int) {
+	k := replicaKey{app.Slug, index}
 
 	w.mu.Lock()
 	if retry, ok := w.nextRetry[k]; ok && time.Now().Before(retry) {
 		w.mu.Unlock()
 		return // still within backoff window
 	}
-	// If this replica has already exhausted its budget, skip the increment
-	// and re-check degraded status (handles the case where another replica
-	// later exhausts its budget too).
-	if w.attempts[k] > w.cfg.RestartMaxAttempts {
+	if w.attempts[k] >= w.cfg.RestartMaxAttempts {
 		w.mu.Unlock()
-		w.maybeMarkDegraded(slug)
-		return
+		return // restart budget spent; stay degraded
 	}
-	w.attempts[k]++
-	attempt := w.attempts[k]
 	w.mu.Unlock()
 
-	if attempt > w.cfg.RestartMaxAttempts {
-		// Do not delete the attempt key here — maybeMarkDegraded reads it
-		// to determine whether every replica has exhausted its budget.
-		// The keys are cleaned up on a successful restart.
-		w.maybeMarkDegraded(slug)
-		return
-	}
-
-	app, err := w.store.GetAppBySlug(slug)
-	if err != nil {
-		return
-	}
 	deployments, err := w.store.ListDeployments(app.ID)
 	if err != nil || len(deployments) == 0 {
 		return
 	}
-
-	res, err := w.deploy(slug, deployments[0].BundleDir, index)
+	res, err := w.deploy(app.Slug, deployments[0].BundleDir, index)
 	if err != nil {
-		// Schedule the next retry: 2^(attempt-1) seconds, capped at 5 minutes.
-		delaySec := 1 << uint(attempt-1)
-		if delaySec > 5*60 {
-			delaySec = 5 * 60
+		if errors.Is(err, process.ErrNoLiveWorker) || errors.Is(err, process.ErrReplicaAlreadyRunning) {
+			return // not the app's fault: retry next tick at zero cost
 		}
 		w.mu.Lock()
-		w.nextRetry[k] = time.Now().Add(time.Duration(delaySec) * time.Second)
+		w.attempts[k]++
+		w.scheduleBackoffLocked(k, w.attempts[k])
 		w.mu.Unlock()
 		return
 	}
 
 	pid, port := res.PID, res.Port
+	depID := deployments[0].ID
 	_ = w.store.UpsertReplica(db.UpsertReplicaParams{
 		AppID:        app.ID,
 		Index:        index,
 		PID:          &pid,
 		Port:         &port,
-		Status:       "running",
+		Status:       db.ReplicaStatusRunning,
 		Provider:     res.Provider,
 		Tier:         res.Tier,
 		EndpointURL:  res.EndpointURL,
 		WorkerID:     res.WorkerID,
 		AppVersion:   deployments[0].Version,
 		DesiredState: "running",
+		DeploymentID: &depID,
 	})
-	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
 
 	// Successful restart — reset backoff state for this replica.
 	w.mu.Lock()
@@ -270,28 +286,54 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 	w.mu.Unlock()
 }
 
-// maybeMarkDegraded sets app status to degraded only if every replica in the
-// pool has exhausted its retry budget. Running replicas keep the app green.
-func (w *Watcher) maybeMarkDegraded(slug string) {
-	app, err := w.store.GetAppBySlug(slug)
+// scheduleBackoffLocked sets the next retry time for k using exponential backoff
+// (2^(attempt-1) seconds, capped at 5 minutes). The caller must hold w.mu.
+func (w *Watcher) scheduleBackoffLocked(k replicaKey, attempt int) {
+	delaySec := 1 << uint(attempt-1)
+	if delaySec > 5*60 {
+		delaySec = 5 * 60
+	}
+	w.nextRetry[k] = time.Now().Add(time.Duration(delaySec) * time.Second)
+}
+
+// reconcileStatuses is the sole running<->degraded authority. It runs over
+// running+degraded apps and reconciles each app's status against its real
+// replica health, consistent with "UpdateAppStatus is soft state — the watchdog
+// reconciles".
+func (w *Watcher) reconcileStatuses() {
+	apps, err := w.store.ListReconcilableApps()
 	if err != nil {
 		return
 	}
-	// If any replica is still running, the app is not fully degraded.
-	for _, info := range w.mgr.All() {
-		if info.Slug == slug && info.Status == process.StatusRunning {
-			return
+	for _, app := range apps {
+		w.reconcileAppStatus(app)
+	}
+}
+
+// reconcileAppStatus marks an app running iff every desired slot is running,
+// else degraded. It only moves an app between running and degraded; it never
+// touches hibernated/deploying/stopped apps.
+func (w *Watcher) reconcileAppStatus(app *db.App) {
+	if app.Status != "running" && app.Status != "degraded" {
+		return
+	}
+	reps, err := w.store.ListReplicas(app.ID)
+	if err != nil {
+		return
+	}
+	running := 0
+	for _, r := range reps {
+		if r.Index < app.Replicas && r.Status == db.ReplicaStatusRunning {
+			running++
 		}
 	}
-	// No running replicas — check every index has exhausted attempts.
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for idx := 0; idx < app.Replicas; idx++ {
-		if w.attempts[replicaKey{slug, idx}] <= w.cfg.RestartMaxAttempts {
-			return
-		}
+	want := "running"
+	if running < app.Replicas {
+		want = "degraded"
 	}
-	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+	if want != app.Status {
+		_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: want})
+	}
 }
 
 // handleIdle checks whether a running app has been idle past its configured

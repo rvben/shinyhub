@@ -495,6 +495,35 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListReconcilableApps returns all apps whose status is 'running' or 'degraded'
+// - the states the watchdog reconciler may act on. Degraded apps are included so
+// a re-placed lost replica (or a recovered crashed slot) can heal the app back
+// to running; the narrower ListRunningApps stays reserved for startup recovery,
+// which must not re-adopt degraded apps.
+func (s *Store) ListReconcilableApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT id, slug, name, project_slug, owner_id, access, status,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
+		       created_at, updated_at,
+		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		FROM apps WHERE status IN ('running', 'degraded')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // ListDeletingApps returns all apps left in the 'deleting' tombstone state.
 // handleDeleteApp marks an app 'deleting' before doing disk cleanup; a crash
 // (or a cleanup failure) between the tombstone and the row delete leaves such
@@ -1520,6 +1549,10 @@ type Replica struct {
 	DesiredState string    `json:"desired_state"`
 	DeploymentID *int64    `json:"deployment_id,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// Reason is a derived, presentation-only annotation set by the read layer
+	// (e.g. "worker unavailable" for a lost replica whose tier has no healthy
+	// worker). It is never scanned from or persisted to the database.
+	Reason string `json:"reason,omitempty"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
@@ -1915,8 +1948,14 @@ type Worker struct {
 	Fingerprint   string // SHA-256 of the trusted client cert (hex)
 	Version       string
 	LastHeartbeat string
+	RevokedAt     string // UTC datetime the worker was revoked; empty when never revoked
 	CreatedAt     time.Time
 }
+
+// Revoked reports whether the worker has been administratively revoked. A
+// revoked worker's certificate is rejected by the worker API and excluded from
+// control->worker dials regardless of its up/down status or cert TTL.
+func (w Worker) Revoked() bool { return w.RevokedAt != "" }
 
 // UpsertWorker inserts or replaces a worker row by node id. Registration uses
 // it to record a newly joined node; re-registration (agent restart) refreshes
@@ -1943,12 +1982,12 @@ func (s *Store) UpsertWorker(w Worker) error {
 // GetWorker returns the worker row for nodeID, or ErrNotFound if it does not exist.
 func (s *Store) GetWorker(nodeID string) (*Worker, error) {
 	row := s.db.QueryRow(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
 		FROM workers WHERE node_id = ?`, nodeID)
 	var w Worker
 	var createdAtRaw string
 	if err := row.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1964,7 +2003,7 @@ func (s *Store) GetWorker(nodeID string) (*Worker, error) {
 // Returns a non-nil empty slice when no workers are registered.
 func (s *Store) ListWorkers() ([]*Worker, error) {
 	rows, err := s.db.Query(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
 		FROM workers ORDER BY node_id`)
 	if err != nil {
 		return nil, err
@@ -1975,7 +2014,7 @@ func (s *Store) ListWorkers() ([]*Worker, error) {
 		var w Worker
 		var createdAtRaw string
 		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
 			return nil, err
 		}
 		if t, ok := parseSQLiteTime(createdAtRaw); ok {
@@ -1986,12 +2025,14 @@ func (s *Store) ListWorkers() ([]*Worker, error) {
 	return ws, rows.Err()
 }
 
-// TouchWorkerHeartbeat records a heartbeat: updates last_heartbeat, refreshes
-// the trusted cert fingerprint (renewal), and marks the worker up.
-func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint string) error {
+// TouchWorkerHeartbeat records a heartbeat: updates last_heartbeat, refreshes the
+// trusted cert fingerprint (renewal), and sets status. The caller decides the
+// status so a heartbeat from a superseded worker does not resurrect it to up
+// alongside the tier's current owner.
+func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint, status string) error {
 	res, err := s.db.Exec(`
-		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = 'up'
-		WHERE node_id = ?`, fingerprint, nodeID)
+		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = ?
+		WHERE node_id = ?`, fingerprint, status, nodeID)
 	if err != nil {
 		return fmt.Errorf("touch worker %q: %w", nodeID, err)
 	}
@@ -2027,6 +2068,67 @@ func (s *Store) SupersedeTierWorkers(tier, exceptNodeID string) error {
 	return nil
 }
 
+// RevokeWorker administratively revokes a worker: it marks the node down and
+// stamps revoked_at with the current UTC time, preserving the timestamp of the
+// first revocation if the worker is revoked again (audit stability). A revoked
+// worker's certificate is rejected by the worker API and excluded from
+// control->worker dials, independent of its short cert TTL. Returns ErrNotFound
+// for an unknown node.
+func (s *Store) RevokeWorker(nodeID string) error {
+	res, err := s.db.Exec(`
+		UPDATE workers
+		SET status = 'down',
+		    revoked_at = CASE WHEN revoked_at = '' THEN datetime('now') ELSE revoked_at END
+		WHERE node_id = ?`, nodeID)
+	if err != nil {
+		return fmt.Errorf("revoke worker %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteStaleWorkers tombstones long-dead worker rows so the table does not grow
+// without bound. A row is removed only when all of the following hold:
+//   - it is marked down (an up worker is never reaped),
+//   - it was never administratively revoked (revoked rows are kept for audit),
+//   - its last_heartbeat is at or before cutoff (well past the down timeout),
+//   - it hosts no non-terminal replica (running or crashed); lost and stopped
+//     replicas are terminal from this worker's perspective and do not block
+//     reaping, since re-placement assigns a fresh worker_id.
+//
+// cutoff is formatted to match the stored UTC datetime string so the comparison
+// is chronological. Returns the node ids of the reaped rows so the caller can
+// drop them from any in-memory index.
+func (s *Store) DeleteStaleWorkers(cutoff time.Time) ([]string, error) {
+	rows, err := s.db.Query(`
+		DELETE FROM workers
+		WHERE status = 'down'
+		  AND revoked_at = ''
+		  AND last_heartbeat <= ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM replicas r
+		      WHERE r.worker_id = workers.node_id
+		        AND r.status IN ('running', 'crashed')
+		  )
+		RETURNING node_id`,
+		cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, fmt.Errorf("delete stale workers: %w", err)
+	}
+	defer rows.Close()
+	var reaped []string
+	for rows.Next() {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
+			return nil, fmt.Errorf("scan reaped worker: %w", err)
+		}
+		reaped = append(reaped, nodeID)
+	}
+	return reaped, rows.Err()
+}
+
 func (s *Store) DeleteWorker(nodeID string) error {
 	res, err := s.db.Exec(`DELETE FROM workers WHERE node_id = ?`, nodeID)
 	if err != nil {
@@ -2045,7 +2147,7 @@ func (s *Store) DeleteWorker(nodeID string) error {
 // (empty string) sorts before any real timestamp and is reported stale.
 func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
 	rows, err := s.db.Query(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
 		FROM workers WHERE last_heartbeat <= ? AND status != 'down'`,
 		cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
@@ -2057,7 +2159,7 @@ func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
 		var w Worker
 		var createdAtRaw string
 		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &createdAtRaw); err != nil {
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
 			return nil, err
 		}
 		if t, ok := parseSQLiteTime(createdAtRaw); ok {
@@ -2101,6 +2203,41 @@ func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error
 		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
 		   WHERE app_id = ? AND idx = ?`, status, appID, index)
 	return err
+}
+
+// UpdateReplicaEndpoint sets the routing endpoint URL of a single replica
+// identified by (app_id, idx) and refreshes its updated_at timestamp. Recovery
+// uses it after re-adopting a remote replica so the stored endpoint_url tracks
+// the URL the proxy route was actually registered with: the worker-loss path
+// deregisters a slot only while the live route still equals the row's
+// endpoint_url, so a stale stored value would leave a dead worker routable.
+func (s *Store) UpdateReplicaEndpoint(appID int64, index int, endpointURL string) error {
+	_, err := s.db.Exec(
+		`UPDATE replicas SET endpoint_url = ?, updated_at = strftime('%s','now')
+		   WHERE app_id = ? AND idx = ?`, endpointURL, appID, index)
+	if err != nil {
+		return fmt.Errorf("update replica endpoint: %w", err)
+	}
+	return nil
+}
+
+// MarkReplicaLostIfOwnedBy transitions (app_id, idx) to lost only while it is
+// still running and still attributed to workerID, returning whether the row
+// actually changed. The ownership-and-status guard prevents a worker-loss pass
+// (admin revoke or the down-sweep) that read a stale snapshot from clobbering a
+// replica that a concurrent redeploy already re-placed onto a healthy worker:
+// such a row no longer matches workerID, so the update is a no-op and the caller
+// skips deregistering the (now healthy) routing slot.
+func (s *Store) MarkReplicaLostIfOwnedBy(appID int64, index int, workerID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		   WHERE app_id = ? AND idx = ? AND worker_id = ? AND status = ?`,
+		ReplicaStatusLost, appID, index, workerID, ReplicaStatusRunning)
+	if err != nil {
+		return false, fmt.Errorf("mark replica lost: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // parseSQLiteTime parses the timestamp formats SQLite emits for DATETIME
