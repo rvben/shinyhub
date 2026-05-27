@@ -380,6 +380,97 @@ func TestResolveColocation_RejectsMultipleWorkerTiers(t *testing.T) {
 	}
 }
 
+// TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource asserts that a
+// consumer placed only on the control-plane tier is accepted when its source has
+// a control-plane replica, even though the source ALSO spreads onto a
+// multi-worker tier. The source's extra worker spread must not drag a
+// control-plane-only consumer into the pin path (where it has no consumer worker
+// and would be wrongly rejected): the consumer's node is fixed, so the
+// deterministic node-equality check soundly matches it against the source's
+// control-plane replica.
+func TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir()},
+		Runtime: config.RuntimeConfig{Tiers: []config.TierConfig{
+			{Name: "local", Runtime: "native"},
+			{Name: "burst", Runtime: "docker"},
+		}},
+	}
+	srv := New(cfg, store, nil, nil)
+
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "owner", PasswordHash: "hash", Role: "admin",
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	for _, slug := range []string{"source", "consumer"} {
+		if err := store.CreateApp(db.CreateAppParams{
+			Slug: slug, Name: slug, OwnerID: owner.ID, Access: "private",
+		}); err != nil {
+			t.Fatalf("create app %q: %v", slug, err)
+		}
+	}
+	source, _ := store.GetAppBySlug("source")
+	consumer, _ := store.GetAppBySlug("consumer")
+
+	// Source spans the control-plane tier and a multi-worker tier; consumer is on
+	// the control-plane tier only.
+	srcPl, _ := json.Marshal(map[string]int{"local": 1, "burst": 1})
+	if err := store.SetAppPlacement(source.ID, string(srcPl), 2); err != nil {
+		t.Fatalf("set source placement: %v", err)
+	}
+	conPl, _ := json.Marshal(map[string]int{"local": 1})
+	if err := store.SetAppPlacement(consumer.ID, string(conPl), 1); err != nil {
+		t.Fatalf("set consumer placement: %v", err)
+	}
+	if err := store.GrantSharedData(consumer.ID, source.ID); err != nil {
+		t.Fatalf("grant shared data: %v", err)
+	}
+
+	// burst is genuinely multi-worker (two up workers).
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	for _, addr := range []string{"10.0.0.1:8443", "10.0.0.2:8443"} {
+		if _, err := reg.Register(worker.RegisterParams{
+			Name: addr, AdvertiseAddr: addr, Tier: "burst", Fingerprint: addr,
+		}); err != nil {
+			t.Fatalf("register worker %q: %v", addr, err)
+		}
+	}
+	srv.SetWorkerRegistry(reg)
+	srv.SetNodeForTier(func(tier string) string {
+		if w, ok := reg.WorkerForTier(tier); ok {
+			return w.NodeID
+		}
+		return ""
+	})
+
+	consumer, _ = store.GetAppBySlug("consumer")
+	pins, err := srv.resolveColocation(consumer.ID, srv.tiersForApp(consumer))
+	if err != nil {
+		t.Fatalf("resolveColocation: want nil error for a control-plane consumer, got %v", err)
+	}
+	if pins != nil {
+		t.Errorf("pins = %v, want nil: a control-plane consumer needs no worker pin", pins)
+	}
+	if err := srv.checkColocatedShared(consumer.ID, srv.tiersForApp(consumer)); err != nil {
+		t.Errorf("checkColocatedShared: want nil for a feasible local-to-local mount, got %v", err)
+	}
+}
+
 // TestWithTierPlacement_SetsColocateWorkers asserts the pin computed by
 // resolveColocation is threaded onto deploy.Params for every deploy path, so the
 // pool launcher confines the consumer's replicas to the source-hosting worker.

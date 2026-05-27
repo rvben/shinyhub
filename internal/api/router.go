@@ -289,9 +289,10 @@ func (s *Server) resolveColocation(appID int64, consumerTiers []string) ([]strin
 	}
 	// A multi-worker tier breaks the deterministic tier->node assumption the
 	// node-equality check relies on (it maps each tier to one node, but placement
-	// may pick any of a tier's workers). When a shared mount touches one, resolve
-	// the pin from where the source's data actually lives instead.
-	if s.workerReg != nil && s.anyMultiWorkerTier(consumerTiers, sourceTiers) {
+	// may pick any of a tier's workers). When that ambiguity can affect this
+	// consumer, resolve the pin from where the source's data actually lives
+	// instead.
+	if s.workerReg != nil && s.needsColocationPins(consumerTiers, sourceTiers) {
 		return s.colocationPins(consumerTiers, sources)
 	}
 	// Deterministic single-worker/native placement: the node-equality check is
@@ -302,27 +303,55 @@ func (s *Server) resolveColocation(appID int64, consumerTiers []string) ([]strin
 	return nil, nil
 }
 
-// anyMultiWorkerTier reports whether any of the consumer's tiers or its sources'
-// tiers is backed by more than one up worker.
-func (s *Server) anyMultiWorkerTier(consumerTiers []string, sourceTiers map[string][]string) bool {
-	seen := make(map[string]bool)
-	multi := func(tiers []string) bool {
-		for _, t := range tiers {
-			if seen[t] {
-				continue
-			}
-			seen[t] = true
-			if len(s.workerReg.WorkersForTier(t)) > 1 {
-				return true
-			}
-		}
-		return false
-	}
-	if multi(consumerTiers) {
+// needsColocationPins reports whether colocation must be resolved by pinning the
+// consumer to specific source-hosting workers rather than by the deterministic
+// tier->node equality check.
+//
+// Pinning is required when:
+//   - the consumer is itself placed on a multi-worker tier: its replicas spread
+//     across that tier's workers, so we must constrain which worker each lands
+//     on; or
+//   - the consumer is placed on a worker-backed tier AND a source spans a
+//     multi-worker tier: the source's representative tier->node mapping is
+//     ambiguous, so node-equality cannot reliably decide whether the consumer's
+//     worker hosts the source's data.
+//
+// A consumer placed entirely on control-plane tiers (no workers) has a fixed
+// node, so node-equality soundly matches it against a source's control-plane
+// replica regardless of the source's extra multi-worker spread; such a consumer
+// must NOT be dragged into the pin path, where it has no worker and would be
+// rejected.
+func (s *Server) needsColocationPins(consumerTiers []string, sourceTiers map[string][]string) bool {
+	if s.anyMultiWorkerTier(consumerTiers) {
 		return true
 	}
+	if !s.anyRemoteTier(consumerTiers) {
+		return false
+	}
 	for _, tiers := range sourceTiers {
-		if multi(tiers) {
+		if s.anyMultiWorkerTier(tiers) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyMultiWorkerTier reports whether any of tiers is backed by more than one up
+// worker.
+func (s *Server) anyMultiWorkerTier(tiers []string) bool {
+	for _, t := range tiers {
+		if len(s.workerReg.WorkersForTier(t)) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// anyRemoteTier reports whether any of tiers is backed by at least one up worker
+// (i.e. is not a control-plane/native-only tier).
+func (s *Server) anyRemoteTier(tiers []string) bool {
+	for _, t := range tiers {
+		if len(s.workerReg.WorkersForTier(t)) > 0 {
 			return true
 		}
 	}
