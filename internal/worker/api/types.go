@@ -38,9 +38,12 @@ type HeartbeatRequest struct {
 
 // HeartbeatResponse carries a renewed certificate when the request included a
 // RenewCSRPEM the control plane re-signed; CertPEM is then non-empty and the
-// agent swaps it in. It is empty on heartbeats that did not request renewal.
+// agent swaps it in. CABundle carries the control plane's current CA bundle so a
+// rotated trust root reaches the worker; the agent applies it only when it
+// differs from the bundle it already trusts.
 type HeartbeatResponse struct {
-	CertPEM string `json:"cert_pem,omitempty"`
+	CertPEM  string `json:"cert_pem,omitempty"`
+	CABundle string `json:"ca_bundle,omitempty"`
 }
 
 // FrameKind identifies an NDJSON streaming frame's payload. Used by the replica

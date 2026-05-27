@@ -104,7 +104,7 @@ func TestWorkerCertRenewal_RoutingSurvivesPastOriginalExpiry(t *testing.T) {
 	// reading its server cert through the agent's holder so renewal hot-reloads.
 	agentSrv := worker.NewAgentServer(worker.AgentServerConfig{
 		CertSource: ag.Certs(),
-		ClientCAs:  ag.CAPool(),
+		CASource:   ag.CACerts(),
 		NodeID:     ag.NodeID(),
 	})
 	ln, err := tls.Listen("tcp", agentAddr, agentSrv.TLSConfig())

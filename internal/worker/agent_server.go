@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"net"
 	"net/http"
@@ -22,9 +21,11 @@ type AgentServerConfig struct {
 	// through the holder lets the agent swap a renewed cert in without restarting
 	// the listener, so the worker's routing surface survives cert rotation.
 	CertSource *CertHolder
-	// ClientCAs is the CA pool workers trust; the control plane must present a
-	// cert signed by this CA to authenticate.
-	ClientCAs *x509.CertPool
+	// CASource holds the CA pool the worker trusts; the control plane must present
+	// a client cert signed by this CA to authenticate. Reading it through the
+	// holder lets a CA bundle rotated on heartbeat take effect on the next
+	// handshake without restarting the listener.
+	CASource *CAHolder
 	// NodeID is the assigned node id, embedded in the server cert SAN.
 	NodeID string
 	// Replicas is the replica-control server whose Routes are mounted. Set
@@ -44,15 +45,23 @@ func NewAgentServer(cfg AgentServerConfig) *AgentServer {
 	return &AgentServer{cfg: cfg}
 }
 
-// TLSConfig returns the tls.Config for the listener. Exposed so tests can
-// verify the security posture without binding a port.
+// TLSConfig returns the tls.Config for the listener. The served cert and the
+// client-CA pool are resolved per handshake through GetConfigForClient so a
+// renewed cert or a rotated CA bundle takes effect on the next connection
+// without restarting the listener. Exposed so tests can verify the security
+// posture without binding a port.
 func (s *AgentServer) TLSConfig() *tls.Config {
 	return &tls.Config{
-		GetCertificate: s.cfg.CertSource.GetCertificate,
-		ClientAuth:     tls.RequireAndVerifyClientCert,
-		ClientCAs:      s.cfg.ClientCAs,
-		MinVersion:     tls.VersionTLS12,
-		NextProtos:     []string{"http/1.1"},
+		MinVersion: tls.VersionTLS12,
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return &tls.Config{
+				GetCertificate: s.cfg.CertSource.GetCertificate,
+				ClientAuth:     tls.RequireAndVerifyClientCert,
+				ClientCAs:      s.cfg.CASource.Pool(),
+				MinVersion:     tls.VersionTLS12,
+				NextProtos:     []string{"http/1.1"},
+			}, nil
+		},
 	}
 }
 

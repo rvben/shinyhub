@@ -43,11 +43,11 @@ type Config struct {
 // Agent is a running worker: it holds its identity (node id + signed cert), an
 // mTLS client to the control plane, and the local process Manager.
 type Agent struct {
-	cfg    Config
-	nodeID string
-	client *worker.Client
-	cache  *BundleCache
-	caPool *x509.CertPool
+	cfg     Config
+	nodeID  string
+	client  *worker.Client
+	cache   *BundleCache
+	cacerts *worker.CAHolder
 
 	// certs holds the current issued keypair. The inbound mTLS server and the
 	// outbound control-plane client both read it through the holder, so a
@@ -59,6 +59,11 @@ type Agent struct {
 	// re-signed cert plus this key.
 	keyPEM []byte
 	csrPEM []byte
+
+	// renewFailures counts consecutive heartbeats where renewal was due but not
+	// fulfilled. It accompanies the escalating renewal log so an operator can see
+	// how long renewal has been stuck; a successful renewal resets it to zero.
+	renewFailures int
 
 	// ServeFunc, when non-nil, is run concurrently with the heartbeat loop.
 	// The agent's inbound mTLS server sets this before Run is called.
@@ -77,29 +82,44 @@ func (a *Agent) Bundles() *BundleCache { return a.cache }
 // takes effect on the next handshake.
 func (a *Agent) Certs() *worker.CertHolder { return a.certs }
 
-// CAPool returns the CA pool pinned during Bootstrap, used as the inbound
-// server's ClientCAs to verify the control plane's client cert.
-func (a *Agent) CAPool() *x509.CertPool { return a.caPool }
+// CACerts returns the holder for the CA bundle pinned during Bootstrap. The
+// inbound server reads its ClientCAs through it, so a bundle rotated on
+// heartbeat takes effect on the next handshake.
+func (a *Agent) CACerts() *worker.CAHolder { return a.cacerts }
 
-// Bootstrap performs the join handshake and returns a ready agent.
+// Bootstrap returns a ready agent, reusing a still-valid persisted identity when
+// one exists and otherwise performing the join handshake. Re-adopting an on-disk
+// cert keeps the worker's node id stable across restarts and lets an established
+// worker restart even after the operator has rotated away its join token.
 func Bootstrap(ctx context.Context, cfg Config) (*Agent, error) {
 	agentDir := filepath.Join(cfg.DataDir, "agent")
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		return nil, fmt.Errorf("agent dir: %w", err)
 	}
 
-	// Generate the worker keypair and CSR.
+	if ag, ok, err := readoptFromDisk(cfg, agentDir, time.Now()); err != nil {
+		return nil, err
+	} else if ok {
+		return ag, nil
+	}
+
+	return register(ctx, cfg, agentDir)
+}
+
+// register performs the join handshake: it generates a fresh keypair and CSR,
+// registers with the control plane, persists the issued identity, and builds the
+// agent. Changing --advertise-addr or --tier on an already-joined worker requires
+// clearing the agent data dir so this fresh-join path runs and carries the new
+// values to the control plane (heartbeat does not).
+func register(ctx context.Context, cfg Config, agentDir string) (*Agent, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "shinyhub-worker"},
-	}, key)
+	csrPEM, err := csrPEMFromKey(key)
 	if err != nil {
-		return nil, fmt.Errorf("create csr: %w", err)
+		return nil, err
 	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	resp, err := worker.Register(ctx, cfg.ServerURL, workerapi.RegisterRequest{
 		Token:         cfg.Token,
@@ -113,12 +133,12 @@ func Bootstrap(ctx context.Context, cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("register: %w", err)
 	}
 
-	// Persist identity for restart re-adoption.
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
 		return nil, fmt.Errorf("marshal key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	// Persist identity so a restart re-adopts it without re-registering.
 	if err := os.WriteFile(filepath.Join(agentDir, "client-key.pem"), keyPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write key: %w", err)
 	}
@@ -129,21 +149,98 @@ func Bootstrap(ctx context.Context, cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("write ca bundle: %w", err)
 	}
 
-	cert, err := tls.X509KeyPair([]byte(resp.CertPEM), keyPEM)
+	return buildAgent(cfg, resp.NodeID, keyPEM, csrPEM, []byte(resp.CertPEM), []byte(resp.CABundle))
+}
+
+// readoptFromDisk rebuilds the agent from a previously persisted identity when
+// one is present and its certificate is still valid as of now. A missing,
+// unparseable, or expired identity returns ok=false so Bootstrap falls back to a
+// fresh join; only an unrecoverable build error (after a usable identity was
+// found) returns a non-nil error.
+func readoptFromDisk(cfg Config, agentDir string, now time.Time) (*Agent, bool, error) {
+	keyPEM, err := os.ReadFile(filepath.Join(agentDir, "client-key.pem"))
+	if err != nil {
+		return nil, false, nil
+	}
+	certPEM, err := os.ReadFile(filepath.Join(agentDir, "client-cert.pem"))
+	if err != nil {
+		return nil, false, nil
+	}
+	caBundle, err := os.ReadFile(filepath.Join(agentDir, "ca-bundle.pem"))
+	if err != nil {
+		return nil, false, nil
+	}
+
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		return nil, false, nil
+	}
+	leaf, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, false, nil
+	}
+	if !now.Before(leaf.NotAfter) {
+		return nil, false, nil // expired: re-join to get a fresh cert
+	}
+	nodeID := worker.NodeIDFromCert(leaf)
+	if nodeID == "" {
+		return nil, false, nil
+	}
+
+	// Rebuild a CSR from the persisted key so heartbeat renewal still works.
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, false, nil
+	}
+	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, false, nil
+	}
+	csrPEM, err := csrPEMFromKey(key)
+	if err != nil {
+		return nil, false, err
+	}
+
+	ag, err := buildAgent(cfg, nodeID, keyPEM, csrPEM, certPEM, caBundle)
+	if err != nil {
+		return nil, false, err
+	}
+	slog.Info("worker re-adopted persisted identity", "node_id", nodeID, "cert_not_after", leaf.NotAfter)
+	return ag, true, nil
+}
+
+// csrPEMFromKey builds the worker's PEM-encoded CSR from its private key. The
+// same subject is used at join and renewal; the control plane binds the node id
+// from the presented cert, not the CSR subject.
+func csrPEMFromKey(key *ecdsa.PrivateKey) ([]byte, error) {
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: "shinyhub-worker"},
+	}, key)
+	if err != nil {
+		return nil, fmt.Errorf("create csr: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), nil
+}
+
+// buildAgent assembles an Agent from an identity (issued cert + retained key +
+// CSR) and the pinned CA bundle. Both the fresh-join and re-adopt paths converge
+// here so the running agent is wired identically however it obtained its cert.
+func buildAgent(cfg Config, nodeID string, keyPEM, csrPEM, certPEM, caBundle []byte) (*Agent, error) {
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("load issued keypair: %w", err)
 	}
-	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM([]byte(resp.CABundle)) {
-		return nil, fmt.Errorf("parse CA bundle")
+	cacerts, err := worker.NewCAHolder(caBundle)
+	if err != nil {
+		return nil, err
 	}
 	certs := worker.NewCertHolder(cert)
-	client, err := worker.NewClient(cfg.ServerURL, certs, []byte(resp.CABundle))
+	client, err := worker.NewClient(cfg.ServerURL, certs, cacerts)
 	if err != nil {
 		return nil, fmt.Errorf("build mtls client: %w", err)
 	}
 
-	ag := &Agent{cfg: cfg, nodeID: resp.NodeID, client: client, certs: certs, keyPEM: keyPEM, csrPEM: csrPEM, caPool: caPool}
+	ag := &Agent{cfg: cfg, nodeID: nodeID, client: client, certs: certs, keyPEM: keyPEM, csrPEM: csrPEM, cacerts: cacerts}
 	ag.cache = NewBundleCache(filepath.Join(cfg.DataDir, "bundles"), func(ctx context.Context, digest string) (io.ReadCloser, error) {
 		return client.FetchBundle(ctx, digest)
 	})
@@ -151,16 +248,39 @@ func Bootstrap(ctx context.Context, cfg Config) (*Agent, error) {
 }
 
 // heartbeatOnce posts a single heartbeat, requesting certificate renewal when
-// the current cert is past its half-life and applying any renewed cert the
-// control plane returns.
+// the current cert is past its half-life, applying any renewed cert and rotated
+// CA bundle the control plane returns, and logging the renewal outcome with a
+// severity that escalates as an unfulfilled renewal nears the cert's expiry.
 func (a *Agent) heartbeatOnce(ctx context.Context) error {
-	resp, err := a.client.Heartbeat(ctx, a.cfg.Version, a.renewCSRIfDue(time.Now()))
+	now := time.Now()
+	phase, notAfter := a.currentRenewalPhase(now)
+	csr := ""
+	if phase >= renewalDue {
+		csr = string(a.csrPEM)
+	}
+
+	resp, err := a.client.Heartbeat(ctx, a.cfg.Version, csr)
 	if err != nil {
+		a.recordRenewal(ctx, phase, notAfter, false, err)
 		return err
 	}
-	if resp.CertPEM != "" {
-		return a.applyRenewedCert(resp.CertPEM)
+	// Apply a rotated CA bundle before the renewed cert: the new cert may be
+	// signed by the new CA, and the worker must trust that root first.
+	if resp.CABundle != "" {
+		if err := a.applyCABundle(resp.CABundle); err != nil {
+			return err
+		}
 	}
+	renewed := false
+	if resp.CertPEM != "" {
+		if err := a.applyRenewedCert(resp.CertPEM); err != nil {
+			return err
+		}
+		renewed = true
+		// Report the freshly issued cert's expiry, not the cert just replaced.
+		_, notAfter = a.currentRenewalPhase(now)
+	}
+	a.recordRenewal(ctx, phase, notAfter, renewed, nil)
 	return nil
 }
 

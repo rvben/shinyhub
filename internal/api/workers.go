@@ -139,6 +139,10 @@ func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.CertPEM = string(certPEM)
 	}
+	// Carry the current CA bundle on every heartbeat so a rotated trust root
+	// reaches established workers without re-registration. The worker applies it
+	// only when it differs from the bundle it already trusts.
+	resp.CABundle = string(a.ca.CertPEM())
 	writeJSON(w, http.StatusOK, resp)
 }
 

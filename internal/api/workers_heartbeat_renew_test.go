@@ -158,6 +158,42 @@ func TestHandleHeartbeat_RenewsCertWhenCSRProvided(t *testing.T) {
 	}
 }
 
+// TestHandleHeartbeat_ReturnsCABundle verifies every heartbeat carries the
+// control plane's current CA bundle so a rotated trust root reaches workers
+// without re-registration.
+func TestHandleHeartbeat_ReturnsCABundle(t *testing.T) {
+	store := newRenewalTestStore(t)
+	ca, err := worker.OpenCA(t.TempDir(), []string{"tok"})
+	if err != nil {
+		t.Fatalf("open ca: %v", err)
+	}
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	node, err := reg.Register(worker.RegisterParams{Tier: "remote", AdvertiseAddr: "127.0.0.1:9"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	keyPEM, csrPEM := newCSR(t)
+	origPEM, err := ca.SignWorkerCSR(node.NodeID, csrPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	clientCert, err := tls.X509KeyPair(origPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+
+	wapi := NewWorkerAPI(store, reg, ca, "")
+	srv, client := heartbeatTestServer(t, ca, wapi, clientCert)
+
+	resp := postHeartbeat(t, client, srv.URL, workerapi.HeartbeatRequest{Version: "v1"})
+	if resp.CABundle != string(ca.CertPEM()) {
+		t.Errorf("heartbeat CABundle = %q, want the control plane CA bundle", resp.CABundle)
+	}
+}
+
 // TestHandleHeartbeat_NoRenewalWhenNoCSR verifies a plain heartbeat returns no
 // certificate, so renewal only happens when explicitly requested.
 func TestHandleHeartbeat_NoRenewalWhenNoCSR(t *testing.T) {

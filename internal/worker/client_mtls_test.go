@@ -102,7 +102,11 @@ func TestClientMTLSRoundTrip(t *testing.T) {
 	srv := newMTLSServer(t, ca, mux)
 	defer srv.Close()
 
-	c, err := NewClient(srv.URL, NewCertHolder(clientCert), ca.CertPEM())
+	caHolder, err := NewCAHolder(ca.CertPEM())
+	if err != nil {
+		t.Fatalf("ca holder: %v", err)
+	}
+	c, err := NewClient(srv.URL, NewCertHolder(clientCert), caHolder)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

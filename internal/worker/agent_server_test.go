@@ -17,15 +17,29 @@ func TestAgentServer_TLSConfig_RequiresClientCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServerCertificate: %v", err)
 	}
+	caSource, err := worker.NewCAHolder(ca.CertPEM())
+	if err != nil {
+		t.Fatalf("NewCAHolder: %v", err)
+	}
 
 	srv := worker.NewAgentServer(worker.AgentServerConfig{
 		ListenAddr: "127.0.0.1:0",
 		CertSource: worker.NewCertHolder(serverCert),
-		ClientCAs:  ca.Pool(),
+		CASource:   caSource,
 		NodeID:     "node-a",
 	})
 
-	tlsCfg := srv.TLSConfig()
+	// The served cert and client-CA pool are resolved per handshake through
+	// GetConfigForClient so a renewed cert or rotated CA bundle takes effect on
+	// the next connection; assert the security posture on that resolved config.
+	base := srv.TLSConfig()
+	if base.GetConfigForClient == nil {
+		t.Fatal("GetConfigForClient is nil; per-handshake config is not resolved dynamically")
+	}
+	tlsCfg, err := base.GetConfigForClient(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetConfigForClient: %v", err)
+	}
 
 	if tlsCfg.ClientAuth != tls.RequireAndVerifyClientCert {
 		t.Errorf("ClientAuth = %v, want RequireAndVerifyClientCert", tlsCfg.ClientAuth)

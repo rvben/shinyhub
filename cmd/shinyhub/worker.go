@@ -89,7 +89,7 @@ func newWorkerCmd() *cobra.Command {
 			agentSrv := worker.NewAgentServer(worker.AgentServerConfig{
 				ListenAddr: advertiseAddr,
 				CertSource: ag.Certs(),
-				ClientCAs:  ag.CAPool(),
+				CASource:   ag.CACerts(),
 				NodeID:     ag.NodeID(),
 				Replicas:   replicas,
 			})
