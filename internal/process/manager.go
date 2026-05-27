@@ -254,7 +254,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		pool = append(pool, nil)
 	}
 	if existing := pool[p.Index]; existing != nil && existing.info.Status == StatusRunning {
-		return nil, fmt.Errorf("app %s replica %d already running", p.Slug, p.Index)
+		return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaAlreadyRunning)
 	}
 
 	key := replicaKey{p.Slug, p.Index}
@@ -370,6 +370,10 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	go func() {
 		rt.Wait(context.Background(), handle)
 		m.mu.Lock()
+		// Only the entry's current owner reacts to this exit. After an eviction or
+		// a replacement Start at the same key, a stale Wait sees a nil or different
+		// entry and must touch neither status nor the log file — otherwise it would
+		// close the replacement replica's log out from under it.
 		if pool := m.entries[p.Slug]; p.Index < len(pool) {
 			if e := pool[p.Index]; e != nil && e.handle == handle {
 				if e.stopped {
@@ -377,12 +381,12 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 				} else {
 					e.info.Status = StatusCrashed
 				}
+				key := replicaKey{p.Slug, p.Index}
+				if lf := m.logFiles[key]; lf != nil {
+					lf.Close()
+					delete(m.logFiles, key)
+				}
 			}
-		}
-		key := replicaKey{p.Slug, p.Index}
-		if lf := m.logFiles[key]; lf != nil {
-			lf.Close()
-			delete(m.logFiles, key)
 		}
 		m.mu.Unlock()
 		close(done)
@@ -451,6 +455,46 @@ func (m *Manager) StopReplica(slug string, index int) error {
 // does not implement it.
 type containerRemover interface {
 	RemoveHandle(RunHandle) error
+}
+
+// EvictReplicaIfWorker removes a replica from the manager's view without
+// signaling its runtime, freeing the slug+index slot so a re-placement Start
+// succeeds. It is used when the backing worker is already gone (heartbeat
+// down-sweep or admin revoke): unlike StopReplica it sends no signal, because
+// dialing a dead worker would hang. The evicted entry's log file is closed under
+// the lock; the entry's own (now stale) exit-monitor goroutine sees the slot nil
+// and is a no-op.
+//
+// Eviction is gated on the entry still being owned by workerID: a worker-loss
+// pass can race a redeploy that already re-placed this slot onto a healthy worker
+// (registering its route and starting a new manager entry before persisting the
+// new replica row). Evicting unconditionally would drop that live replacement; so
+// an entry owned by a different worker is left untouched. A no-op when the slot is
+// already empty.
+func (m *Manager) EvictReplicaIfWorker(slug string, index int, workerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pool := m.entries[slug]
+	if index >= len(pool) || pool[index] == nil {
+		return
+	}
+	if pool[index].info.WorkerID != workerID {
+		return
+	}
+	pool[index] = nil
+	for len(pool) > 0 && pool[len(pool)-1] == nil {
+		pool = pool[:len(pool)-1]
+	}
+	if len(pool) == 0 {
+		delete(m.entries, slug)
+	} else {
+		m.entries[slug] = pool
+	}
+	key := replicaKey{slug, index}
+	if lf := m.logFiles[key]; lf != nil {
+		lf.Close()
+		delete(m.logFiles, key)
+	}
 }
 
 // Stop signals all replicas for a slug to stop in parallel and waits for all to exit.

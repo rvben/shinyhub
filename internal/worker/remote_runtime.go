@@ -73,7 +73,7 @@ func decodeRemoteHandle(h string) (nodeID, containerID string, err error) {
 func (r *remoteRuntime) liveWorker() (db.Worker, error) {
 	w, ok := r.lookup.WorkerForTier(r.tier)
 	if !ok {
-		return db.Worker{}, fmt.Errorf("no live worker for tier %q", r.tier)
+		return db.Worker{}, fmt.Errorf("tier %q: %w", r.tier, process.ErrNoLiveWorker)
 	}
 	return w, nil
 }

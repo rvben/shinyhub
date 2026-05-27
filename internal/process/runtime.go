@@ -2,10 +2,22 @@ package process
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"syscall"
 )
+
+// ErrNoLiveWorker is returned (wrapped) when a tier-bound remote runtime has no
+// live worker to place a replica on. The watcher treats it as a zero-cost
+// failure: a missing worker is an infrastructure gap, not the app's fault, so it
+// must not consume the crash-restart budget.
+var ErrNoLiveWorker = errors.New("no live worker for tier")
+
+// ErrReplicaAlreadyRunning is returned (wrapped) by Manager.Start when the
+// target slug+index slot is already running. The watcher treats it as zero-cost:
+// a re-placement that races a slot already (re)filled is a no-op, not a failure.
+var ErrReplicaAlreadyRunning = errors.New("replica already running")
 
 // ReplicaEndpoint is the result of starting a replica: where the proxy routes
 // to it, which provider owns it, a stable worker identity used for recovery,

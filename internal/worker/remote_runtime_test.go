@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,6 +42,17 @@ func TestRemoteRuntime_NoWorker_FailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no live worker") {
 		t.Errorf("error = %q, want it to mention no live worker", err.Error())
+	}
+}
+
+// TestRemoteRuntime_NoWorker_WrapsSentinel verifies the no-live-worker failure
+// wraps process.ErrNoLiveWorker, so the watcher's restart path can classify it
+// as a zero-cost failure via errors.Is rather than burning the restart budget.
+func TestRemoteRuntime_NoWorker_WrapsSentinel(t *testing.T) {
+	rt := newRemoteRuntime(newStubLookup(), "remote", nil)
+	_, err := rt.Start(context.Background(), process.StartParams{Slug: "app", Port: 8080}, nil)
+	if !errors.Is(err, process.ErrNoLiveWorker) {
+		t.Fatalf("error = %v, want errors.Is(err, process.ErrNoLiveWorker)", err)
 	}
 }
 
