@@ -100,7 +100,13 @@ func recoverRemoteReplica(
 // still points at the lost replica: the deploy path registers a re-placed
 // replica's route before persisting its row, so a stale loss pass must not pull
 // a route a concurrent redeploy already re-pointed at a healthy backend.
-func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug string, index int, expectURL string)) error {
+//
+// evict (nil-safe) drops the lost replica's entry from the process manager so a
+// re-placement Start at the same slug+index is not rejected as already running.
+// It is called only for slots this pass actually transitioned to lost, and is
+// passed the lost worker's nodeID so the manager can skip an entry a concurrent
+// redeploy already re-placed onto a healthy worker.
+func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug string, index int, expectURL string), evict func(slug string, index int, workerID string)) error {
 	reps, err := store.ListReplicasByWorker(nodeID)
 	if err != nil {
 		return err
@@ -129,6 +135,9 @@ func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug str
 		if deregister != nil {
 			deregister(app.Slug, r.Index, r.EndpointURL)
 		}
+		if evict != nil {
+			evict(app.Slug, r.Index, nodeID)
+		}
 		slog.Warn("lose replica", "slug", app.Slug, "idx", r.Index, "node", nodeID)
 	}
 	return nil
@@ -146,6 +155,7 @@ type WorkerDownMonitor struct {
 	retention  time.Duration
 	markDown   func(nodeID string) error
 	deregister func(slug string, index int, expectURL string)
+	evict      func(slug string, index int, workerID string)
 	forget     func(nodeID string)
 }
 
@@ -156,9 +166,11 @@ type WorkerDownMonitor struct {
 // routing index consistent with the store so a downed worker is excluded from
 // routing without a control-plane restart. retention is the (much longer)
 // window after which a still-dead, non-revoked worker row with no live replicas
-// is reaped; forget drops the reaped node from the in-memory index.
-func NewWorkerDownMonitor(store *db.Store, timeout, retention time.Duration, markDown func(nodeID string) error, deregister func(slug string, index int, expectURL string), forget func(nodeID string)) *WorkerDownMonitor {
-	return &WorkerDownMonitor{store: store, timeout: timeout, retention: retention, markDown: markDown, deregister: deregister, forget: forget}
+// is reaped; forget drops the reaped node from the in-memory index. evict
+// (nil-safe) drops each lost replica's entry from the process manager so a
+// re-placement can start cleanly at the same slug+index.
+func NewWorkerDownMonitor(store *db.Store, timeout, retention time.Duration, markDown func(nodeID string) error, deregister func(slug string, index int, expectURL string), evict func(slug string, index int, workerID string), forget func(nodeID string)) *WorkerDownMonitor {
+	return &WorkerDownMonitor{store: store, timeout: timeout, retention: retention, markDown: markDown, deregister: deregister, evict: evict, forget: forget}
 }
 
 // Sweep performs one monitor pass as of now: every worker whose heartbeat
@@ -177,7 +189,7 @@ func (m *WorkerDownMonitor) Sweep(now time.Time) {
 			continue
 		}
 		slog.Warn("worker monitor: worker down", "node", w.NodeID, "tier", w.Tier)
-		if err := LoseWorkerReplicas(m.store, w.NodeID, m.deregister); err != nil {
+		if err := LoseWorkerReplicas(m.store, w.NodeID, m.deregister, m.evict); err != nil {
 			slog.Error("worker monitor: lose replicas", "node", w.NodeID, "err", err)
 			continue
 		}

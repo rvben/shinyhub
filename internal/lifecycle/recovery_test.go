@@ -718,7 +718,7 @@ func TestWorkerDownMonitor_ExcludesDownedWorkerFromRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour, reg.MarkDown, func(string, int, string) {}, reg.Forget)
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour, reg.MarkDown, func(string, int, string) {}, nil, reg.Forget)
 	monitor.Sweep(time.Now())
 
 	if _, ok := reg.WorkerForTier("remote"); ok {
@@ -759,7 +759,7 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 			deregistered = true
 			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
 		},
-		nil)
+		nil, nil)
 	monitor.Sweep(time.Now())
 
 	if w, _ := store.GetWorker("node-a"); w == nil || w.Status != "down" {
@@ -805,7 +805,7 @@ func TestLoseWorkerReplicas(t *testing.T) {
 	deregistered := map[int]bool{}
 	if err := lifecycle.LoseWorkerReplicas(store, "node-dead", func(_ string, idx int, _ string) {
 		deregistered[idx] = true
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("LoseWorkerReplicas: %v", err)
 	}
 
@@ -822,6 +822,49 @@ func TestLoseWorkerReplicas(t *testing.T) {
 	}
 	if byIdx[2].Status != "stopped" || deregistered[2] {
 		t.Errorf("terminal replica was touched: status=%q deregistered=%v", byIdx[2].Status, deregistered[2])
+	}
+}
+
+// TestLoseWorkerReplicas_EvictsManagerEntry asserts the loss pass invokes the
+// evict callback for exactly the slots it transitions to lost, so the process
+// manager drops the dead worker's entry and a re-placement Start at the same
+// slug+index is not rejected as already running. Terminal slots are not evicted.
+func TestLoseWorkerReplicas_EvictsManagerEntry(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "evict-app")
+
+	seed := func(idx int, status, workerID string) {
+		if err := store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: idx, Status: status,
+			Provider: "remote_docker", Tier: "remote", WorkerID: workerID,
+		}); err != nil {
+			t.Fatalf("seed replica %d: %v", idx, err)
+		}
+	}
+	seed(0, db.ReplicaStatusRunning, "node-dead") // changed -> evict
+	seed(1, "stopped", "node-dead")               // terminal -> no evict
+
+	evicted := map[int]bool{}
+	if err := lifecycle.LoseWorkerReplicas(store, "node-dead",
+		func(_ string, _ int, _ string) {},
+		func(slug string, idx int, workerID string) {
+			if slug != "evict-app" {
+				t.Errorf("evict slug = %q, want evict-app", slug)
+			}
+			if workerID != "node-dead" {
+				t.Errorf("evict workerID = %q, want node-dead", workerID)
+			}
+			evicted[idx] = true
+		},
+	); err != nil {
+		t.Fatalf("LoseWorkerReplicas: %v", err)
+	}
+
+	if !evicted[0] {
+		t.Error("expected evict for the lost replica slot 0")
+	}
+	if evicted[1] {
+		t.Error("terminal slot 1 must not be evicted")
 	}
 }
 
@@ -864,7 +907,7 @@ func TestWorkerDownMonitor_ReapsLongDeadWorkers(t *testing.T) {
 	}
 
 	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour,
-		reg.MarkDown, func(string, int, string) {}, reg.Forget)
+		reg.MarkDown, func(string, int, string) {}, nil, reg.Forget)
 	monitor.Sweep(time.Now())
 
 	if w, err := store.GetWorker(ancient.NodeID); err != db.ErrNotFound {
