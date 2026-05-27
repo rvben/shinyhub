@@ -18,6 +18,7 @@ type fakeManager struct {
 	mu      sync.Mutex
 	entries []*process.ProcessInfo
 	stopped []string
+	stopErr error // when set, Stop records the slug then returns this error
 }
 
 func (f *fakeManager) All() []*process.ProcessInfo {
@@ -31,8 +32,9 @@ func (f *fakeManager) All() []*process.ProcessInfo {
 func (f *fakeManager) Stop(slug string) error {
 	f.mu.Lock()
 	f.stopped = append(f.stopped, slug)
+	err := f.stopErr
 	f.mu.Unlock()
-	return nil
+	return err
 }
 
 type fakeProxy struct {
@@ -96,6 +98,8 @@ type fakeStore struct {
 	appStatus        map[string]string
 	upsertedReplicas []db.UpsertReplicaParams
 	replicas         map[int64][]*db.Replica
+	upsertErr        error // when set, UpsertReplica records the call then returns this
+	updateStatusErr  error // when set, UpdateAppStatus records the call then returns this
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -122,6 +126,11 @@ func (f *fakeStore) GetAppBySlug(slug string) (*db.App, error) {
 func (f *fakeStore) UpdateAppStatus(p db.UpdateAppStatusParams) error {
 	f.mu.Lock()
 	f.statusUpdates = append(f.statusUpdates, p)
+	if f.updateStatusErr != nil {
+		err := f.updateStatusErr
+		f.mu.Unlock()
+		return err
+	}
 	if app, ok := f.apps[p.Slug]; ok {
 		app.Status = p.Status
 	}
@@ -141,6 +150,9 @@ func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upsertedReplicas = append(f.upsertedReplicas, p)
+	if f.upsertErr != nil {
+		return f.upsertErr
+	}
 	// Write through to the replica table so the status authority observes the
 	// new state, matching the real store where UpsertReplica is durable.
 	if f.replicas == nil {

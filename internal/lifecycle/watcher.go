@@ -12,6 +12,9 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Config controls watchdog and hibernation behaviour. All fields have defaults
@@ -48,6 +51,14 @@ type proxyBackend interface {
 	SetPoolCap(slug string, max int)
 }
 
+// MetricsRecorder records lifecycle business metrics. A nil recorder disables
+// recording; the metrics package's *Registry satisfies it. Kept as an interface
+// so this package does not import Prometheus.
+type MetricsRecorder interface {
+	RecordStateTransition(event string)
+	RecordReplicaRestart()
+}
+
 // appStore is the subset of *db.Store used by the Watcher.
 type appStore interface {
 	GetAppBySlug(slug string) (*db.App, error)
@@ -77,6 +88,14 @@ type Watcher struct {
 	// a false result keeps a no-worker replica lost at zero cost. Set once via
 	// EnableLostReplicaHealing before Start, then only read.
 	tierHealthy func(tier string) bool
+
+	// metrics records lifecycle business metrics. nil disables recording. Set
+	// once via SetMetrics before Start, then only read.
+	metrics MetricsRecorder
+
+	// tracer emits spans for background operations (wake/restart/hibernate).
+	// nil disables tracing. Set once via SetTracer before Start, then only read.
+	tracer trace.Tracer
 
 	mu        sync.Mutex
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
@@ -157,6 +176,51 @@ func (w *Watcher) RunOnce() { w.runOnce() }
 // lost replicas untouched (crash recovery is unaffected).
 func (w *Watcher) EnableLostReplicaHealing(tierHealthy func(tier string) bool) {
 	w.tierHealthy = tierHealthy
+}
+
+// SetMetrics wires a recorder for lifecycle business metrics. Called once at
+// startup before Start; leaving it unset disables recording. The nil-safe
+// recordTransition/recordRestart helpers gate every call site.
+func (w *Watcher) SetMetrics(m MetricsRecorder) {
+	w.metrics = m
+}
+
+func (w *Watcher) recordTransition(event string) {
+	if w.metrics != nil {
+		w.metrics.RecordStateTransition(event)
+	}
+}
+
+func (w *Watcher) recordRestart() {
+	if w.metrics != nil {
+		w.metrics.RecordReplicaRestart()
+	}
+}
+
+// SetTracer wires a tracer for lifecycle background-operation spans. Called once
+// at startup before Start; leaving it unset disables tracing. The nil-safe
+// traceOp helper gates every call site.
+func (w *Watcher) SetTracer(t trace.Tracer) {
+	w.tracer = t
+}
+
+// traceOp starts an internal span named op for slug and returns a derived
+// context plus an end func that records the operation's error (if any) and ends
+// the span. A no-op when tracing is disabled. Background operations are
+// unparented, so the returned context carries a root span.
+func (w *Watcher) traceOp(ctx context.Context, op, slug string) (context.Context, func(err error)) {
+	if w.tracer == nil {
+		return ctx, func(error) {}
+	}
+	ctx, span := w.tracer.Start(ctx, op, trace.WithSpanKind(trace.SpanKindInternal))
+	span.SetAttributes(attribute.String("shinyhub.app.slug", slug))
+	return ctx, func(err error) {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}
 }
 
 // runOnce processes all current manager entries for one watchdog/hibernation tick.
@@ -246,8 +310,13 @@ func (w *Watcher) restartSlot(app *db.App, index int) {
 	}
 	w.mu.Unlock()
 
+	_, endSpan := w.traceOp(context.Background(), "lifecycle.restart", app.Slug)
+	var opErr error
+	defer func() { endSpan(opErr) }()
+
 	deployments, err := w.store.ListDeployments(app.ID)
 	if err != nil || len(deployments) == 0 {
+		opErr = err
 		return
 	}
 	res, err := w.deploy(app.Slug, deployments[0].BundleDir, index)
@@ -255,6 +324,7 @@ func (w *Watcher) restartSlot(app *db.App, index int) {
 		if errors.Is(err, process.ErrNoLiveWorker) || errors.Is(err, process.ErrReplicaAlreadyRunning) {
 			return // not the app's fault: retry next tick at zero cost
 		}
+		opErr = err
 		w.mu.Lock()
 		w.attempts[k]++
 		w.scheduleBackoffLocked(k, w.attempts[k])
@@ -264,7 +334,7 @@ func (w *Watcher) restartSlot(app *db.App, index int) {
 
 	pid, port := res.PID, res.Port
 	depID := deployments[0].ID
-	_ = w.store.UpsertReplica(db.UpsertReplicaParams{
+	if err := w.store.UpsertReplica(db.UpsertReplicaParams{
 		AppID:        app.ID,
 		Index:        index,
 		PID:          &pid,
@@ -277,13 +347,16 @@ func (w *Watcher) restartSlot(app *db.App, index int) {
 		AppVersion:   deployments[0].Version,
 		DesiredState: "running",
 		DeploymentID: &depID,
-	})
+	}); err != nil {
+		slog.Warn("watcher: persist restarted replica failed", "slug", app.Slug, "index", index, "err", err)
+	}
 
 	// Successful restart — reset backoff state for this replica.
 	w.mu.Lock()
 	delete(w.attempts, k)
 	delete(w.nextRetry, k)
 	w.mu.Unlock()
+	w.recordRestart()
 }
 
 // scheduleBackoffLocked sets the next retry time for k using exponential backoff
@@ -332,7 +405,9 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 		want = "degraded"
 	}
 	if want != app.Status {
-		_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: want})
+		if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: want}); err != nil {
+			slog.Warn("watcher: reconcile app status failed", "slug", app.Slug, "want", want, "err", err)
+		}
 	}
 }
 
@@ -373,11 +448,21 @@ func (w *Watcher) handleIdle(slug string) {
 		return
 	}
 
-	_ = w.mgr.Stop(slug) // stops all replicas in the pool
-	for i := 0; i < app.Replicas; i++ {
-		_ = w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped"})
+	_, endSpan := w.traceOp(context.Background(), "lifecycle.hibernate", slug)
+	defer func() { endSpan(nil) }()
+
+	if err := w.mgr.Stop(slug); err != nil { // stops all replicas in the pool
+		slog.Warn("watcher: stop on hibernate failed", "slug", slug, "err", err)
 	}
-	_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"})
+	for i := 0; i < app.Replicas; i++ {
+		if err := w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped"}); err != nil {
+			slog.Warn("watcher: persist hibernated replica failed", "slug", slug, "index", i, "err", err)
+		}
+	}
+	if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"}); err != nil {
+		slog.Warn("watcher: persist hibernated status failed", "slug", slug, "err", err)
+	}
+	w.recordTransition("hibernate")
 }
 
 // OnMiss is registered with the Proxy as the onMiss callback. When a request
@@ -405,12 +490,18 @@ func (w *Watcher) OnMiss(slug string) {
 			w.mu.Unlock()
 		}()
 
+		_, endSpan := w.traceOp(context.Background(), "lifecycle.wake", slug)
+		var opErr error
+		defer func() { endSpan(opErr) }()
+
 		app, err := w.store.GetAppBySlug(slug)
 		if err != nil || app.Status != "hibernated" {
+			opErr = err
 			return
 		}
 		deployments, err := w.store.ListDeployments(app.ID)
 		if err != nil || len(deployments) == 0 {
+			opErr = err
 			return
 		}
 
@@ -429,7 +520,7 @@ func (w *Watcher) OnMiss(slug string) {
 					return
 				}
 				pid, port := res.PID, res.Port
-				_ = w.store.UpsertReplica(db.UpsertReplicaParams{
+				if err := w.store.UpsertReplica(db.UpsertReplicaParams{
 					AppID:        app.ID,
 					Index:        idx,
 					PID:          &pid,
@@ -441,13 +532,18 @@ func (w *Watcher) OnMiss(slug string) {
 					WorkerID:     res.WorkerID,
 					AppVersion:   deployments[0].Version,
 					DesiredState: "running",
-				})
+				}); err != nil {
+					slog.Warn("watcher: persist woken replica failed", "slug", slug, "index", idx, "err", err)
+				}
 				started.Add(1)
 			}(i)
 		}
 		wg.Wait()
 		if started.Load() > 0 {
-			_ = w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
+			if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {
+				slog.Warn("watcher: persist woken status failed", "slug", slug, "err", err)
+			}
+			w.recordTransition("wake")
 		}
 	}()
 }

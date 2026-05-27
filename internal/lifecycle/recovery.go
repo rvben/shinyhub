@@ -189,7 +189,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir string) bool {
 	if r.PID == nil {
 		// No PID recorded → treat as crashed so the watcher can restart it.
-		_ = store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: r.Index, Status: "crashed"})
+		markReplicaCrashed(store, app, r.Index, "no PID recorded")
 		return false
 	}
 	if r.Port == nil {
@@ -198,13 +198,13 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		return false
 	}
 	if err := syscall.Kill(*r.PID, 0); err != nil {
-		_ = store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: r.Index, Status: "crashed"})
+		markReplicaCrashed(store, app, r.Index, "process not alive")
 		return false
 	}
 	if err := validateNativeProcess(*r.PID, *r.Port, bundleDir); err != nil {
 		slog.Warn("recovery: rejected stale/mismatched process; will restart",
 			"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "port", *r.Port, "err", err)
-		_ = store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: r.Index, Status: "crashed"})
+		markReplicaCrashed(store, app, r.Index, "stale/mismatched process")
 		return false
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
@@ -228,6 +228,18 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	}
 	slog.Info("process recovery: re-adopted process", "slug", app.Slug, "idx", r.Index, "pid", *r.PID)
 	return true
+}
+
+// markReplicaCrashed persists a replica's "crashed" status so the watcher
+// restarts it on the next tick. The write is best-effort during recovery, but a
+// failure is logged rather than dropped: a silent miss would leave the replica
+// un-restarted and the app permanently under-replicated. reason names why the
+// replica is being marked, for operator triage.
+func markReplicaCrashed(store *db.Store, app *db.App, index int, reason string) {
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: index, Status: "crashed"}); err != nil {
+		slog.Warn("recovery: persist crashed replica failed",
+			"slug", app.Slug, "idx", index, "reason", reason, "err", err)
+	}
 }
 
 // recoverContainerReplica re-adopts a single container-backed replica by
