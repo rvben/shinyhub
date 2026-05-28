@@ -191,14 +191,21 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 					// The worker owning this replica could not be queried (its
 					// worker failed, or the whole tier is unreachable); its
 					// container may still be running, so this slot must not drive
-					// the app to stopped. Mark the replica lost so the watcher's
-					// lost-replica healing re-places it onto a healthy worker once
-					// one is reachable: leaving it running would strand the slot
-					// with no manager entry or proxy route, because the watcher only
-					// reconciles crashed/lost rows. The app is kept out of stopped
-					// (indeterminate) so it remains reconcilable for that healing.
+					// the app to stopped. Keep the app out of stopped
+					// (indeterminate) so it stays reconcilable.
 					indeterminate = true
-					if r.Status != db.ReplicaStatusLost {
+					// Only enter the slot into the lost-replica healing path once
+					// its owning worker is actually declared down/revoked (or its
+					// row is gone). A worker still up is merely unreachable for this
+					// one-shot startup scan (a transient blip); marking it lost
+					// would let the watcher's tier-gated healing re-place the slot
+					// onto a sibling worker while the original container keeps
+					// running, orphaning it. The WorkerDownMonitor owns the
+					// up->down transition and will lose a still-up worker's replicas
+					// only if its heartbeat genuinely goes stale. An already-down
+					// worker is handled here because ListWorkersStale skips down
+					// rows, so the monitor never re-loses it.
+					if workerDeclaredGone(store, r.WorkerID) && r.Status != db.ReplicaStatusLost {
 						// UpsertReplica replaces every column, so carry the
 						// replica's identity forward; the watcher's lost-replica
 						// healing is gated on the tier and would never re-place a
@@ -232,6 +239,26 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			markRecoveryStopped(store, app.Slug)
 		}
 	}
+}
+
+// workerDeclaredGone reports whether the replica's owning worker has been
+// declared down or revoked, or its row reaped, i.e. it is genuinely gone rather
+// than transiently unreachable for a single inventory scan. Only then may
+// recovery enter the replica into the lost-replica healing path; a still-up
+// worker is left for the WorkerDownMonitor to lose if its heartbeat truly goes
+// stale. A revoked worker carries status "down" (RevokeWorker), so the single
+// status check covers both down and revoked. An empty worker id has no owner to
+// wait on and is treated as gone.
+func workerDeclaredGone(store *db.Store, workerID string) bool {
+	if workerID == "" {
+		return true
+	}
+	w, err := store.GetWorker(workerID)
+	if err != nil {
+		// Row missing/reaped, or a read error: do not assume the worker is up.
+		return true
+	}
+	return w.Status != "up"
 }
 
 // recoverNativeReplica re-adopts a single PID-backed replica. It returns true

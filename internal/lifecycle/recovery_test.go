@@ -604,19 +604,29 @@ func TestRecoverProcesses_RemoteTierAdoptsByDeploymentID(t *testing.T) {
 	}
 }
 
-// TestRecoverProcesses_UnreachableWorkerKeepsAppRunning asserts that when a
-// tier's inventory is only partial (one worker on the tier could not be
-// queried), an app whose only replica lives on the unreachable worker is NOT
-// marked stopped: a transient dial/decode failure at control-plane startup must
-// not flip a live app to stopped. The indeterminate replica is marked lost so
-// the watcher's lost-replica healing re-places it onto a healthy worker; leaving
-// it running would strand the slot with no manager entry or proxy route, since
-// the watcher only reconciles crashed/lost rows.
-func TestRecoverProcesses_UnreachableWorkerKeepsAppRunning(t *testing.T) {
+// TestRecoverProcesses_UnreachableUpWorkerLeavesReplicaRunning asserts that when
+// a tier's inventory is only partial (one worker could not be queried) but that
+// worker is still up in the registry, the replica it owns is left running rather
+// than marked lost. A still-up worker is merely unreachable for this one-shot
+// startup scan (a transient blip); marking it lost would let the watcher's
+// tier-gated healing re-place the slot onto a sibling worker while the original
+// container keeps running, orphaning it. The WorkerDownMonitor owns the up->down
+// transition and will lose the replica only if the heartbeat genuinely goes
+// stale. The app must still be kept out of stopped.
+func TestRecoverProcesses_UnreachableUpWorkerLeavesReplicaRunning(t *testing.T) {
 	store := mustOpenStore(t)
 	prx := proxy.New()
 	app := mustCreateApp(t, store, "partial-app")
 
+	// node-b owns the replica and is still up in the registry (its inventory
+	// request merely failed for this scan); node-a is a healthy sibling on the
+	// same tier, which is exactly the multi-worker case where premature healing
+	// would orphan node-b's container.
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-b", AdvertiseAddr: "b:8443", Tier: "remote", Status: "up",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	depID := int64(7)
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: 0, Status: "running",
@@ -627,9 +637,6 @@ func TestRecoverProcesses_UnreachableWorkerKeepsAppRunning(t *testing.T) {
 	}
 	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='partial-app'`)
 
-	// node-b (the replica's owner) failed its inventory request; node-a
-	// succeeded but reports nothing for this app. The partial result carries the
-	// unreachable worker so recovery can tell "container gone" from "unknown".
 	remote := &fakeRemoteRuntime{
 		items: nil,
 		err:   &process.PartialInventoryError{Workers: []string{"node-b"}},
@@ -644,31 +651,80 @@ func TestRecoverProcesses_UnreachableWorkerKeepsAppRunning(t *testing.T) {
 		t.Errorf("app marked stopped; an unreachable worker must not stop a live app")
 	}
 	reps, _ := store.ListReplicas(app.ID)
-	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
-		t.Errorf("replica status = %+v, want %q so the watcher re-places it", reps, db.ReplicaStatusLost)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusRunning {
+		t.Errorf("replica status = %+v, want %q (still-up worker must not be healed)", reps, db.ReplicaStatusRunning)
 	}
-	// Marking the replica lost must preserve its tier and worker identity: the
-	// watcher's lost-replica healing is gated on the replica's tier, so wiping
-	// it would strand the slot forever.
+}
+
+// TestRecoverProcesses_UnreachableDownWorkerMarksReplicaLost asserts that when
+// the owning worker has already been declared down, recovery marks its
+// indeterminate replica lost so the watcher re-places it. This is necessary
+// because ListWorkersStale skips rows already marked down, so the
+// WorkerDownMonitor never re-loses an already-down worker's replicas; recovery is
+// the one pass that enters them into the lost-healing path.
+func TestRecoverProcesses_UnreachableDownWorkerMarksReplicaLost(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "down-worker-app")
+
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-b", AdvertiseAddr: "b:8443", Tier: "remote", Status: "down",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	depID := int64(7)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running",
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-b", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='down-worker-app'`)
+
+	remote := &fakeRemoteRuntime{
+		items: nil,
+		err:   &process.PartialInventoryError{Workers: []string{"node-b"}},
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	a, _ := store.GetAppBySlug("down-worker-app")
+	if a.Status == "stopped" {
+		t.Errorf("app marked stopped; an indeterminate replica must not stop a live app")
+	}
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Errorf("replica status = %+v, want %q so the watcher re-places a down worker's slot", reps, db.ReplicaStatusLost)
+	}
+	// The lost replica must keep its tier and worker identity: the watcher's
+	// lost-replica healing is gated on the replica's tier.
 	if len(reps) == 1 && (reps[0].Tier != "remote" || reps[0].WorkerID != "node-b") {
 		t.Errorf("lost replica tier/worker = %q/%q, want %q/%q preserved for healing",
 			reps[0].Tier, reps[0].WorkerID, "remote", "node-b")
 	}
 }
 
-// TestRecoverProcesses_TotalInventoryOutageKeepsAppRunning asserts that when a
-// tier's inventory fails wholesale (every up worker unreachable, or none up),
-// recovery does not mark the tier's apps stopped. A plain (non-partial) error
-// means the whole tier's state is unknown, so every remote replica on it is
-// indeterminate; flipping live apps to stopped on a transient full-tier outage
-// at control-plane startup would be wrong. The indeterminate replica is marked
-// lost so the watcher re-places it once the tier is reachable again, rather than
-// being stranded as a running row with no manager entry or proxy route.
-func TestRecoverProcesses_TotalInventoryOutageKeepsAppRunning(t *testing.T) {
+// TestRecoverProcesses_TotalInventoryOutageLeavesUpWorkerRunning asserts that
+// when a tier's inventory fails wholesale (a plain, non-partial error) but the
+// replica's owning worker is still up in the registry, recovery neither stops
+// the app nor marks the replica lost. A full-tier inventory outage at
+// control-plane startup is treated like any other transient unreachability: a
+// still-up worker is left for the WorkerDownMonitor to lose only if its
+// heartbeat genuinely goes stale, so the watcher cannot orphan its container by
+// re-placing the slot onto a sibling worker.
+func TestRecoverProcesses_TotalInventoryOutageLeavesUpWorkerRunning(t *testing.T) {
 	store := mustOpenStore(t)
 	prx := proxy.New()
 	app := mustCreateApp(t, store, "outage-app")
 
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-a", AdvertiseAddr: "a:8443", Tier: "remote", Status: "up",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	depID := int64(7)
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: 0, Status: "running",
@@ -691,14 +747,8 @@ func TestRecoverProcesses_TotalInventoryOutageKeepsAppRunning(t *testing.T) {
 		t.Errorf("app marked stopped; a total inventory outage must not stop a live app")
 	}
 	reps, _ := store.ListReplicas(app.ID)
-	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
-		t.Errorf("replica status = %+v, want %q so the watcher re-places it", reps, db.ReplicaStatusLost)
-	}
-	// The lost replica must keep its tier and worker so the watcher's
-	// tier-gated lost-replica healing can re-place it once the tier recovers.
-	if len(reps) == 1 && (reps[0].Tier != "remote" || reps[0].WorkerID != "node-a") {
-		t.Errorf("lost replica tier/worker = %q/%q, want %q/%q preserved for healing",
-			reps[0].Tier, reps[0].WorkerID, "remote", "node-a")
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusRunning {
+		t.Errorf("replica status = %+v, want %q (still-up worker must not be healed)", reps, db.ReplicaStatusRunning)
 	}
 }
 
