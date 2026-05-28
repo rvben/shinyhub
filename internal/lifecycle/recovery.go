@@ -179,6 +179,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 
 		anyAlive := false
 		indeterminate := false
+		healable := false
 		for _, r := range reps {
 			if r.Status == db.ReplicaStatusLost {
 				// A lost replica is never re-adopted; the next deploy re-places it.
@@ -205,8 +206,8 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 					// only if its heartbeat genuinely goes stale. An already-down
 					// worker is handled here because ListWorkersStale skips down
 					// rows, so the monitor never re-loses it.
-					if workerDeclaredGone(store, r.WorkerID) {
-						markReplicaLostPreservingIdentity(store, app, r)
+					if workerDeclaredGone(store, r.WorkerID) && markReplicaLostPreservingIdentity(store, app, r) {
+						healable = true
 					}
 					continue
 				}
@@ -225,8 +226,8 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				// sibling. A still-up owner whose container merely vanished is left
 				// untouched for the watcher's own reconciliation rather than forced
 				// lost on this one-shot scan.
-				if workerDeclaredGone(store, r.WorkerID) {
-					markReplicaLostPreservingIdentity(store, app, r)
+				if workerDeclaredGone(store, r.WorkerID) && markReplicaLostPreservingIdentity(store, app, r) {
+					healable = true
 				}
 				continue
 			}
@@ -240,7 +241,12 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				anyAlive = true
 			}
 		}
-		if !anyAlive && !indeterminate {
+		// Keep the app reconcilable when a slot was queued for lost-replica
+		// healing: the healer only scans running/degraded apps, so driving the app
+		// to stopped here would strand the slot it just queued until a manual
+		// restart. Only an app with no live, no indeterminate, and no healable
+		// replica is genuinely down.
+		if !anyAlive && !indeterminate && !healable {
 			markRecoveryStopped(store, app.Slug)
 		}
 	}
@@ -252,10 +258,14 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 // would never re-place a slot whose tier/worker was wiped, so the
 // placement-relevant fields must be preserved. It is a no-op for a slot already
 // lost. A persistence failure is logged rather than dropped: a silent miss would
-// leave the slot stranded-running and unhealed.
-func markReplicaLostPreservingIdentity(store *db.Store, app *db.App, r *db.Replica) {
+// leave the slot stranded-running and unhealed. It returns true when the slot is
+// now in the lost-healing path (freshly marked or already lost), so the caller
+// can keep the app reconcilable: the lost-replica healer only scans
+// running/degraded apps, and an app driven to stopped would strand the slot it
+// just queued for healing.
+func markReplicaLostPreservingIdentity(store *db.Store, app *db.App, r *db.Replica) bool {
 	if r.Status == db.ReplicaStatusLost {
-		return
+		return true
 	}
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: r.Index, Status: db.ReplicaStatusLost,
@@ -266,7 +276,9 @@ func markReplicaLostPreservingIdentity(store *db.Store, app *db.App, r *db.Repli
 	}); err != nil {
 		slog.Warn("recovery: persist lost replica failed",
 			"slug", app.Slug, "idx", r.Index, "err", err)
+		return false
 	}
+	return true
 }
 
 // workerDeclaredGone reports whether the replica's owning worker has been

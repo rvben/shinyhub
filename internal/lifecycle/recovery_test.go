@@ -801,6 +801,13 @@ func TestRecoverProcesses_DownSiblingWorkerReplicaMarkedLost(t *testing.T) {
 		t.Errorf("lost replica tier/worker = %q/%q, want %q/%q preserved for healing",
 			reps[0].Tier, reps[0].WorkerID, "remote", "node-a")
 	}
+	// Marking the only replica lost must NOT drive the app to stopped: the
+	// lost-replica healer only scans running/degraded apps, so a stopped app
+	// would strand the slot it just queued for healing until a manual restart.
+	a, _ := store.GetAppBySlug("sibling-app")
+	if a.Status == "stopped" {
+		t.Errorf("app status = %q, want it kept reconcilable so the watcher can re-place the lost slot", a.Status)
+	}
 }
 
 func TestRecoverProcesses_RemoteStaleDeploymentNotAdopted(t *testing.T) {
