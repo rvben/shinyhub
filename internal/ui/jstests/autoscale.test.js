@@ -10,7 +10,11 @@ import {
 
 // summariseAutoscale normalises the {app, effective_autoscale_target} slice of
 // the GET /api/apps/:slug envelope into a flat shape ready for rendering, so
-// the view layer never has to re-derive the inherited-target fallback.
+// the view layer never has to re-derive the inherited-target fallback. It also
+// carries the live pool size (app.replicas) and a drift flag so the view can
+// call out when the live pool sits outside the configured autoscale bounds -
+// the controller will reconverge on its next tick, but the operator should see
+// the transient gap explicitly.
 test('summariseAutoscale reads the app + effective fields and flags inheritance', () => {
   const got = summariseAutoscale(
     {
@@ -18,16 +22,19 @@ test('summariseAutoscale reads the app + effective fields and flags inheritance'
       autoscale_min_replicas: 2,
       autoscale_max_replicas: 8,
       autoscale_target: 0.75,
+      replicas: 3,
     },
     { effective_autoscale_target: 0.75 },
   );
   assert.deepEqual(got, {
     enabled: true,
+    current: 3,
     min: 2,
     max: 8,
     target: 0.75,
     effectiveTarget: 0.75,
     inheritsTarget: false,
+    drift: false,
   });
 });
 
@@ -41,6 +48,7 @@ test('summariseAutoscale flags an inherited target when app.autoscale_target is 
       autoscale_min_replicas: 1,
       autoscale_max_replicas: 4,
       autoscale_target: 0,
+      replicas: 1,
     },
     { effective_autoscale_target: 0.8 },
   );
@@ -49,13 +57,64 @@ test('summariseAutoscale flags an inherited target when app.autoscale_target is 
   assert.equal(got.inheritsTarget, true);
 });
 
+test('summariseAutoscale flags drift when the live pool is above max with autoscale enabled', () => {
+  // A manual scale-out (or a lowered max while pool was higher) leaves the
+  // pool outside the band; the controller will scale down on its next tick,
+  // but the view should call this out so the operator knows what is about
+  // to happen.
+  const got = summariseAutoscale(
+    {
+      autoscale_enabled: true,
+      autoscale_min_replicas: 2,
+      autoscale_max_replicas: 4,
+      autoscale_target: 0.75,
+      replicas: 6,
+    },
+    { effective_autoscale_target: 0.75 },
+  );
+  assert.equal(got.current, 6);
+  assert.equal(got.drift, true);
+});
+
+test('summariseAutoscale flags drift when the live pool is below min with autoscale enabled', () => {
+  const got = summariseAutoscale(
+    {
+      autoscale_enabled: true,
+      autoscale_min_replicas: 3,
+      autoscale_max_replicas: 8,
+      autoscale_target: 0.75,
+      replicas: 1,
+    },
+    { effective_autoscale_target: 0.75 },
+  );
+  assert.equal(got.current, 1);
+  assert.equal(got.drift, true);
+});
+
+test('summariseAutoscale never flags drift when autoscale is disabled', () => {
+  // With autoscale disabled the min/max bounds are persisted (so a re-enable
+  // restores them) but do not govern the live pool; the operator owns the
+  // replica count directly and a "drift" call-out would be misleading.
+  const got = summariseAutoscale(
+    {
+      autoscale_enabled: false,
+      autoscale_min_replicas: 2,
+      autoscale_max_replicas: 4,
+      autoscale_target: 0,
+      replicas: 7,
+    },
+    { effective_autoscale_target: 0.8 },
+  );
+  assert.equal(got.drift, false);
+});
+
 test('summariseAutoscale tolerates missing fields with safe defaults', () => {
   // A legacy payload missing the autoscale_* keys (or a fetch error envelope)
   // must not throw; the controls then start at sensible defaults.
   const got = summariseAutoscale({}, {});
   assert.deepEqual(got, {
-    enabled: false, min: 1, max: 1, target: 0,
-    effectiveTarget: 0, inheritsTarget: true,
+    enabled: false, current: 1, min: 1, max: 1, target: 0,
+    effectiveTarget: 0, inheritsTarget: true, drift: false,
   });
 });
 
@@ -85,16 +144,16 @@ test('formatRejectsByReason sorts by count desc, then reason asc', () => {
 });
 
 // renderAutoscaleSummary populates the read-only summary block with one row per
-// fact (enabled, bounds, target). DOM refs are passed in so the helper is
-// reusable from a jsdom test without leaking globals; the same module is
-// reused by app-detail.js in production.
+// fact (enabled, replica count vs bounds, target). DOM refs are passed in so
+// the helper is reusable from a jsdom test without leaking globals; the same
+// module is reused by app-detail.js in production.
 test('renderAutoscaleSummary fills the rows and clears prior content', () => {
   const dom = new JSDOM('<dl id="autoscale-summary"><dt>stale</dt><dd>x</dd></dl>');
   const dl = dom.window.document.getElementById('autoscale-summary');
 
   renderAutoscaleSummary(dl, {
-    enabled: true, min: 2, max: 8,
-    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false,
+    enabled: true, current: 3, min: 2, max: 8,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
   });
 
   const rows = dl.querySelectorAll('dt');
@@ -103,9 +162,83 @@ test('renderAutoscaleSummary fills the rows and clears prior content', () => {
   assert.equal(dl.textContent.includes('stale'), false);
   // The summary surfaces each fact verbatim.
   assert.match(dl.textContent, /enabled/i);
+  assert.ok(dl.textContent.includes('3'), `want current pool 3 rendered: ${dl.textContent}`);
   assert.ok(dl.textContent.includes('2'));
   assert.ok(dl.textContent.includes('8'));
   assert.ok(dl.textContent.includes('0.75'));
+});
+
+test('renderAutoscaleSummary shows current pool alongside bounds when enabled', () => {
+  // With autoscale enabled the bounds govern the live pool, so the operator
+  // wants to see both ("3 / [2-8]") in a single row. The exact glyph between
+  // them doesn't matter; the test asserts that current, min, and max all
+  // co-occur on the replicas row so a refactor of the formatting does not
+  // silently drop one.
+  const dom = new JSDOM('<dl id="autoscale-summary"></dl>');
+  const dl = dom.window.document.getElementById('autoscale-summary');
+
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 3, min: 2, max: 8,
+    target: 0.5, effectiveTarget: 0.5, inheritsTarget: false, drift: false,
+  });
+
+  // Find the dd that immediately follows a dt mentioning replicas/pool.
+  let replicasDd = null;
+  for (const dt of dl.querySelectorAll('dt')) {
+    if (/replica|pool/i.test(dt.textContent)) {
+      replicasDd = dt.nextElementSibling;
+      break;
+    }
+  }
+  assert.ok(replicasDd, 'a replicas/pool row must be present when autoscale is enabled');
+  assert.match(replicasDd.textContent, /3/, `want current=3 on replicas row: ${replicasDd.textContent}`);
+  assert.match(replicasDd.textContent, /2/, `want min=2 on replicas row: ${replicasDd.textContent}`);
+  assert.match(replicasDd.textContent, /8/, `want max=8 on replicas row: ${replicasDd.textContent}`);
+});
+
+test('renderAutoscaleSummary calls out drift when the pool is outside bounds', () => {
+  // A drift call-out is the operator's hint that the controller will move the
+  // pool back into the band on its next tick. The exact phrasing is not
+  // pinned; what matters is that the word "drift" (or equivalent) appears so
+  // the row is visually distinguishable from a steady-state band.
+  const dom = new JSDOM('<dl id="autoscale-summary"></dl>');
+  const dl = dom.window.document.getElementById('autoscale-summary');
+
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 6, min: 2, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: true,
+  });
+
+  assert.match(dl.textContent, /drift|reconverge|outside/i,
+    `expected a drift call-out in: ${dl.textContent}`);
+});
+
+test('renderAutoscaleSummary shows a bare pool count when autoscale is disabled', () => {
+  // Disabled means the bounds do not govern the live pool; rendering "3 /
+  // [2-8]" would imply a relationship that does not exist. The summary
+  // should surface the count plainly and let the "Autoscale: disabled" row
+  // carry the rest of the context.
+  const dom = new JSDOM('<dl id="autoscale-summary"></dl>');
+  const dl = dom.window.document.getElementById('autoscale-summary');
+
+  renderAutoscaleSummary(dl, {
+    enabled: false, current: 3, min: 2, max: 8,
+    target: 0, effectiveTarget: 0.5, inheritsTarget: true, drift: false,
+  });
+
+  let replicasDd = null;
+  for (const dt of dl.querySelectorAll('dt')) {
+    if (/replica|pool/i.test(dt.textContent)) {
+      replicasDd = dt.nextElementSibling;
+      break;
+    }
+  }
+  assert.ok(replicasDd, 'a replicas/pool row must be present');
+  assert.match(replicasDd.textContent, /3/, 'current count must render');
+  // The bounds are not authoritative while disabled; we don't want the row
+  // to imply a band that isn't enforced.
+  assert.equal(/\[2.*8\]|2.*–.*8|2.*-.*8/.test(replicasDd.textContent), false,
+    `disabled row must not render a bounds band: ${replicasDd.textContent}`);
 });
 
 test('renderAutoscaleSummary marks the target as inherited when target == 0', () => {
@@ -113,8 +246,8 @@ test('renderAutoscaleSummary marks the target as inherited when target == 0', ()
   const dl = dom.window.document.getElementById('autoscale-summary');
 
   renderAutoscaleSummary(dl, {
-    enabled: false, min: 1, max: 4,
-    target: 0, effectiveTarget: 0.8, inheritsTarget: true,
+    enabled: false, current: 1, min: 1, max: 4,
+    target: 0, effectiveTarget: 0.8, inheritsTarget: true, drift: false,
   });
 
   // The effective value must be shown alongside an inheritance hint so the
