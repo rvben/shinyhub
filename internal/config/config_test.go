@@ -516,6 +516,132 @@ func TestConfig_RuntimeReplicaEnvOverride(t *testing.T) {
 	}
 }
 
+func TestConfig_AutoscaleDefaults(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("") // empty path → all defaults
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := cfg.Runtime.Autoscale
+	if as.Enabled {
+		t.Fatalf("default Autoscale.Enabled = true, want false")
+	}
+	if as.ScanInterval != 30*time.Second {
+		t.Fatalf("default ScanInterval = %v, want 30s", as.ScanInterval)
+	}
+	if as.Cooldown != 3*time.Minute {
+		t.Fatalf("default Cooldown = %v, want 3m", as.Cooldown)
+	}
+	if as.DefaultTarget != 0.8 {
+		t.Fatalf("default DefaultTarget = %v, want 0.8", as.DefaultTarget)
+	}
+}
+
+func TestConfig_AutoscaleFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+runtime:
+  autoscale:
+    enabled: true
+    scan_interval: 10s
+    cooldown: 1m
+    default_target: 0.6
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := cfg.Runtime.Autoscale
+	if !as.Enabled {
+		t.Fatalf("Autoscale.Enabled = false, want true")
+	}
+	if as.ScanInterval != 10*time.Second {
+		t.Fatalf("ScanInterval = %v, want 10s", as.ScanInterval)
+	}
+	if as.Cooldown != time.Minute {
+		t.Fatalf("Cooldown = %v, want 1m", as.Cooldown)
+	}
+	if as.DefaultTarget != 0.6 {
+		t.Fatalf("DefaultTarget = %v, want 0.6", as.DefaultTarget)
+	}
+}
+
+func TestConfig_AutoscaleInvalidIntervalRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+runtime:
+  autoscale:
+    scan_interval: "not-a-duration"
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err == nil {
+		t.Fatalf("Load accepted invalid scan_interval, want error")
+	}
+}
+
+func TestConfig_AutoscaleNonPositiveIntervalRejected(t *testing.T) {
+	// A zero or negative scan interval would panic time.NewTicker when the
+	// controller starts, so it must be rejected at load time.
+	for _, val := range []string{"0s", "-5s"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(`
+runtime:
+  autoscale:
+    scan_interval: "`+val+`"
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.Load(path); err == nil {
+			t.Fatalf("Load accepted non-positive scan_interval %q, want error", val)
+		}
+	}
+}
+
+func TestConfig_AutoscaleNonPositiveCooldownRejected(t *testing.T) {
+	// A zero or negative cooldown disables the gate that prevents the controller
+	// from acting every tick, so it must be rejected at load time.
+	for _, val := range []string{"0s", "-1m"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(`
+runtime:
+  autoscale:
+    cooldown: "`+val+`"
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.Load(path); err == nil {
+			t.Fatalf("Load accepted non-positive cooldown %q, want error", val)
+		}
+	}
+}
+
+func TestConfig_AutoscaleInvalidTargetRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+runtime:
+  autoscale:
+    default_target: 1.5
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err == nil {
+		t.Fatalf("Load accepted out-of-range default_target, want error")
+	}
+}
+
 func TestLoad_AcceptsStrongSecret(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

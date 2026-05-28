@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -129,19 +130,41 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 	}
 
 	// Query each remote tier's agent inventory at most once, shared across every
-	// app that places replicas on that tier.
-	remoteInventory := map[string][]process.InventoryItem{}
-	getInventory := func(tier string, inv process.ReplicaInventory) []process.InventoryItem {
-		if items, ok := remoteInventory[tier]; ok {
-			return items
+	// app that places replicas on that tier. unreachable holds the workers whose
+	// inventory could not be fetched (a partial outage); a replica owned by one of
+	// them has an unknown state and must not be reconciled as dead.
+	type tierInventory struct {
+		items       []process.InventoryItem
+		unreachable map[string]bool // workers whose inventory failed (partial outage)
+		allDown     bool            // whole-tier inventory failure: every replica indeterminate
+	}
+	remoteInventory := map[string]tierInventory{}
+	getInventory := func(tier string, inv process.ReplicaInventory) tierInventory {
+		if ti, ok := remoteInventory[tier]; ok {
+			return ti
 		}
 		items, err := inv.Inventory(context.Background())
-		if err != nil {
+		var ti tierInventory
+		var partial *process.PartialInventoryError
+		switch {
+		case errors.As(err, &partial):
+			ti.unreachable = make(map[string]bool, len(partial.Workers))
+			for _, nodeID := range partial.Workers {
+				ti.unreachable[nodeID] = true
+			}
+			ti.items = items
+			slog.Warn("recovery: partial remote inventory", "tier", tier, "unreachable", partial.Workers)
+		case err != nil:
+			// Whole-tier failure (every up worker unreachable, or none up): the
+			// tier's state is unknown, so no replica on it may be reconciled as
+			// dead or drive its app to stopped.
+			ti.allDown = true
 			slog.Error("recovery: remote inventory", "tier", tier, "err", err)
-			items = nil
+		default:
+			ti.items = items
 		}
-		remoteInventory[tier] = items
-		return items
+		remoteInventory[tier] = ti
+		return ti
 	}
 
 	for _, app := range apps {
@@ -155,6 +178,8 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		bundleDir := activeBundleDir(store, app.ID)
 
 		anyAlive := false
+		indeterminate := false
+		healable := false
 		for _, r := range reps {
 			if r.Status == db.ReplicaStatusLost {
 				// A lost replica is never re-adopted; the next deploy re-places it.
@@ -162,8 +187,47 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			}
 			rt := mgr.RuntimeForTier(r.Tier)
 			if inv, ok := rt.(process.ReplicaInventory); ok {
-				if recoverRemoteReplica(store, mgr, prx, app, r, getInventory(r.Tier, inv)) {
+				ti := getInventory(r.Tier, inv)
+				if ti.allDown || ti.unreachable[r.WorkerID] {
+					// The worker owning this replica could not be queried (its
+					// worker failed, or the whole tier is unreachable); its
+					// container may still be running, so this slot must not drive
+					// the app to stopped. Keep the app out of stopped
+					// (indeterminate) so it stays reconcilable.
+					indeterminate = true
+					// Only enter the slot into the lost-replica healing path once
+					// its owning worker is actually declared down/revoked (or its
+					// row is gone). A worker still up is merely unreachable for this
+					// one-shot startup scan (a transient blip); marking it lost
+					// would let the watcher's tier-gated healing re-place the slot
+					// onto a sibling worker while the original container keeps
+					// running, orphaning it. The WorkerDownMonitor owns the
+					// up->down transition and will lose a still-up worker's replicas
+					// only if its heartbeat genuinely goes stale. An already-down
+					// worker is handled here because ListWorkersStale skips down
+					// rows, so the monitor never re-loses it.
+					if workerDeclaredGone(store, r.WorkerID) && markReplicaLostPreservingIdentity(store, app, r) {
+						healable = true
+					}
+					continue
+				}
+				if recoverRemoteReplica(store, mgr, prx, app, r, ti.items) {
 					anyAlive = true
+					continue
+				}
+				// The replica was not adopted from a reachable inventory: the
+				// owning worker was queried (it is neither allDown nor in the
+				// partial-outage unreachable set) and reported no live container
+				// for this slot. If that worker has since been declared
+				// down/revoked, or its row was reaped, the WorkerDownMonitor will
+				// never (re-)lose this slot because ListWorkersStale skips
+				// already-down rows, so enter it into the lost-replica healing
+				// path here and let the watcher re-place it onto a healthy
+				// sibling. A still-up owner whose container merely vanished is left
+				// untouched for the watcher's own reconciliation rather than forced
+				// lost on this one-shot scan.
+				if workerDeclaredGone(store, r.WorkerID) && markReplicaLostPreservingIdentity(store, app, r) {
+					healable = true
 				}
 				continue
 			}
@@ -177,10 +241,64 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				anyAlive = true
 			}
 		}
-		if !anyAlive {
+		// Keep the app reconcilable when a slot was queued for lost-replica
+		// healing: the healer only scans running/degraded apps, so driving the app
+		// to stopped here would strand the slot it just queued until a manual
+		// restart. Only an app with no live, no indeterminate, and no healable
+		// replica is genuinely down.
+		if !anyAlive && !indeterminate && !healable {
 			markRecoveryStopped(store, app.Slug)
 		}
 	}
+}
+
+// markReplicaLostPreservingIdentity enters a replica into the lost-replica
+// healing path while carrying its full identity forward. UpsertReplica replaces
+// every column, and the watcher's lost-replica healing is gated on the tier and
+// would never re-place a slot whose tier/worker was wiped, so the
+// placement-relevant fields must be preserved. It is a no-op for a slot already
+// lost. A persistence failure is logged rather than dropped: a silent miss would
+// leave the slot stranded-running and unhealed. It returns true when the slot is
+// now in the lost-healing path (freshly marked or already lost), so the caller
+// can keep the app reconcilable: the lost-replica healer only scans
+// running/degraded apps, and an app driven to stopped would strand the slot it
+// just queued for healing.
+func markReplicaLostPreservingIdentity(store *db.Store, app *db.App, r *db.Replica) bool {
+	if r.Status == db.ReplicaStatusLost {
+		return true
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: r.Index, Status: db.ReplicaStatusLost,
+		PID: r.PID, Port: r.Port, Provider: r.Provider, Tier: r.Tier,
+		EndpointURL: r.EndpointURL, WorkerID: r.WorkerID,
+		AppVersion: r.AppVersion, DesiredState: r.DesiredState,
+		DeploymentID: r.DeploymentID,
+	}); err != nil {
+		slog.Warn("recovery: persist lost replica failed",
+			"slug", app.Slug, "idx", r.Index, "err", err)
+		return false
+	}
+	return true
+}
+
+// workerDeclaredGone reports whether the replica's owning worker has been
+// declared down or revoked, or its row reaped, i.e. it is genuinely gone rather
+// than transiently unreachable for a single inventory scan. Only then may
+// recovery enter the replica into the lost-replica healing path; a still-up
+// worker is left for the WorkerDownMonitor to lose if its heartbeat truly goes
+// stale. A revoked worker carries status "down" (RevokeWorker), so the single
+// status check covers both down and revoked. An empty worker id has no owner to
+// wait on and is treated as gone.
+func workerDeclaredGone(store *db.Store, workerID string) bool {
+	if workerID == "" {
+		return true
+	}
+	w, err := store.GetWorker(workerID)
+	if err != nil {
+		// Row missing/reaped, or a read error: do not assume the worker is up.
+		return true
+	}
+	return w.Status != "up"
 }
 
 // recoverNativeReplica re-adopts a single PID-backed replica. It returns true

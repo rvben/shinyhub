@@ -12,12 +12,17 @@ import (
 )
 
 // matchInventoryItem returns the inventory item for the replica identified by
-// slug + index + deploymentID, or nil when no live container matches. The
-// deployment_id match is required so a container left behind by a superseded
-// deployment (same slug+index, different deployment) is not re-adopted as
-// current. An empty deploymentID (a legacy replica row predating deployment
-// stamping) matches on slug+index alone.
-func matchInventoryItem(items []process.InventoryItem, slug string, index int, deploymentID string) *process.InventoryItem {
+// slug + index + deploymentID owned by workerID, or nil when no live container
+// matches. The deployment_id match is required so a container left behind by a
+// superseded deployment (same slug+index, different deployment) is not
+// re-adopted as current. An empty deploymentID (a legacy replica row predating
+// deployment stamping) matches on slug+index alone. The workerID match is
+// required because the tier inventory is aggregated across coexisting workers:
+// a same-labeled container reported by another worker must not be adopted, or
+// recovery would register that worker's URL while encoding the handle and
+// selecting the transport for the owning worker. An empty workerID disables the
+// owner check for callers that do not bind to a worker.
+func matchInventoryItem(items []process.InventoryItem, slug string, index int, deploymentID, workerID string) *process.InventoryItem {
 	idx := strconv.Itoa(index)
 	for i := range items {
 		l := items[i].Labels
@@ -25,6 +30,9 @@ func matchInventoryItem(items []process.InventoryItem, slug string, index int, d
 			continue
 		}
 		if deploymentID != "" && l["shinyhub.deployment_id"] != deploymentID {
+			continue
+		}
+		if workerID != "" && items[i].WorkerID != workerID {
 			continue
 		}
 		return &items[i]
@@ -56,7 +64,7 @@ func recoverRemoteReplica(
 	if r.DeploymentID != nil {
 		depID = strconv.FormatInt(*r.DeploymentID, 10)
 	}
-	item := matchInventoryItem(items, app.Slug, r.Index, depID)
+	item := matchInventoryItem(items, app.Slug, r.Index, depID, r.WorkerID)
 	if item == nil || !item.Running || item.URL == "" {
 		return false
 	}
@@ -69,7 +77,7 @@ func recoverRemoteReplica(
 		EndpointURL: item.URL,
 		WorkerID:    r.WorkerID,
 	}, process.RunHandle{ContainerID: r.WorkerID + "/" + item.ContainerID})
-	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, mgr.TransportForTier(r.Tier)); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, mgr.TransportForWorker(r.Tier, r.WorkerID)); err != nil {
 		slog.Error("recovery: register remote proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}

@@ -24,6 +24,12 @@ import (
 	"github.com/rvben/shinyhub/internal/storage"
 )
 
+// maxStoredReplicas mirrors the CHECK on the autoscale_min_replicas /
+// autoscale_max_replicas columns (migration 023). The handler validates against
+// it so an out-of-range bound is rejected with a 400 rather than failing the DB
+// constraint mid-PATCH after sibling fields were already committed.
+const maxStoredReplicas = 1000
+
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
@@ -209,10 +215,18 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	// runtime default (0 = inherit). Clients use it to render an honest
 	// admission ceiling (replicas x effective cap) instead of a bare "0".
 	effectiveCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	// effective_autoscale_target resolves the app's own target against the
+	// runtime default (0 = inherit), so clients render the figure the controller
+	// will actually use without re-deriving the fallback.
+	effectiveTarget := app.AutoscaleTarget
+	if effectiveTarget <= 0 {
+		effectiveTarget = s.cfg.Runtime.Autoscale.DefaultTarget
+	}
 	envelope := map[string]any{
 		"app":                                app,
 		"replicas_status":                    replicas,
 		"effective_max_sessions_per_replica": effectiveCap,
+		"effective_autoscale_target":         effectiveTarget,
 		"redeploy_in_flight":                 s.isRedeployInFlight(slug),
 	}
 	// rejects_by_reason is a rolling 10-minute rollup of platform rejections for
@@ -278,6 +292,11 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		clearPlacement      bool // an explicit null placement was provided
 		placementJSON       string
 		placementTotal      int
+		setAutoscale        bool
+		autoEnabled         bool
+		autoMin             int
+		autoMax             int
+		autoTarget          float64
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -382,6 +401,74 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newManagedBy, setManagedBy = v, true
+	}
+
+	if rawVal, present := raw["autoscale"]; present {
+		var patch struct {
+			Enabled     *bool    `json:"enabled"`
+			MinReplicas *int     `json:"min_replicas"`
+			MaxReplicas *int     `json:"max_replicas"`
+			Target      *float64 `json:"target"`
+		}
+		if err := json.Unmarshal(rawVal, &patch); err != nil {
+			writeError(w, http.StatusBadRequest, "autoscale must be an object")
+			return
+		}
+		// Merge over the current values so a caller can update fields one at a
+		// time; the DB write replaces all four columns atomically.
+		autoEnabled = app.AutoscaleEnabled
+		autoMin = app.AutoscaleMinReplicas
+		autoMax = app.AutoscaleMaxReplicas
+		autoTarget = app.AutoscaleTarget
+		if patch.Enabled != nil {
+			autoEnabled = *patch.Enabled
+		}
+		if patch.MinReplicas != nil {
+			autoMin = *patch.MinReplicas
+		}
+		if patch.MaxReplicas != nil {
+			autoMax = *patch.MaxReplicas
+		}
+		if patch.Target != nil {
+			autoTarget = *patch.Target
+		}
+		// target is validated regardless of enabled so a stored value is never
+		// out of range; 0 means "inherit the runtime default".
+		if autoTarget < 0 || autoTarget > 1 {
+			writeError(w, http.StatusBadRequest, "autoscale.target must be in [0,1] (0 inherits the runtime default)")
+			return
+		}
+		// Bounds are persisted even while disabled (so a re-enable restores the
+		// operator's last choice), so they must satisfy the stored column range
+		// regardless of the enabled flag. Without this a value outside [0,1000]
+		// would pass the handler and only fail the DB CHECK, returning a 500 after
+		// sibling fields in the same PATCH were already committed.
+		if autoMin < 0 || autoMin > maxStoredReplicas {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("autoscale.min_replicas must be between 0 and %d", maxStoredReplicas))
+			return
+		}
+		if autoMax < 0 || autoMax > maxStoredReplicas {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("autoscale.max_replicas must be between 0 and %d", maxStoredReplicas))
+			return
+		}
+		if autoEnabled {
+			if autoMin < 1 {
+				writeError(w, http.StatusBadRequest, "autoscale.min_replicas must be >= 1 when enabled")
+				return
+			}
+			if autoMax < autoMin {
+				writeError(w, http.StatusBadRequest, "autoscale.max_replicas must be >= min_replicas")
+				return
+			}
+			if s.cfg.Runtime.MaxReplicas > 0 && autoMax > s.cfg.Runtime.MaxReplicas {
+				writeError(w, http.StatusBadRequest,
+					fmt.Sprintf("autoscale.max_replicas must be <= %d", s.cfg.Runtime.MaxReplicas))
+				return
+			}
+		}
+		setAutoscale = true
 	}
 
 	if rawVal, present := raw["placement"]; present {
@@ -514,6 +601,25 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			total, placementJSON = app.Replicas, ""
 		}
 		if err := s.store.SetAppPlacement(app.ID, placementJSON, total); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
+	// Autoscale config is independent of the pool shape, so it never triggers a
+	// redeploy; the controller picks up the change on its next scan.
+	if setAutoscale {
+		if err := s.store.SetAppAutoscale(db.SetAppAutoscaleParams{
+			AppID:       app.ID,
+			Enabled:     autoEnabled,
+			MinReplicas: autoMin,
+			MaxReplicas: autoMax,
+			Target:      autoTarget,
+		}); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not found")
 				return

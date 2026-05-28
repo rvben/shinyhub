@@ -18,6 +18,7 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/autoscale"
 	"github.com/rvben/shinyhub/internal/backup"
 	"github.com/rvben/shinyhub/internal/cli"
 	"github.com/rvben/shinyhub/internal/config"
@@ -551,6 +552,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
+			// Pin a shared-mount consumer's restarted replica to the worker set
+			// hosting its source data, matching the full-deploy placement so a
+			// recovered replica lands beside the data it mounts.
+			ColocateWorkers: srv.ColocationPins(app),
 		}
 		if deps, derr := store.ListDeployments(app.ID); derr == nil && len(deps) > 0 {
 			p.ContentDigest = deps[0].ContentDigest
@@ -653,6 +658,49 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	slog.Info("scheduler started")
 
 	srv.SetJobs(jobsMgr, sched)
+
+	// Replica autoscaling is opt-in per app and gated by a global switch. When
+	// enabled, the controller evaluates opted-in apps on its own interval and
+	// drives the same incremental scale primitives the API exposes; it never
+	// scales worker hosts.
+	var (
+		cancelAutoscale context.CancelFunc
+		autoscaleDone   chan struct{}
+	)
+	if cfg.Runtime.Autoscale.Enabled {
+		var asCtx context.Context
+		asCtx, cancelAutoscale = context.WithCancel(context.Background())
+		defer cancelAutoscale()
+		runtimeMax := cfg.Runtime.MaxReplicas
+		if runtimeMax <= 0 {
+			runtimeMax = 32
+		}
+		// Look back twice the scan interval so a saturated pool is still observed
+		// between ticks, but never beyond the cooldown: a stale saturation event
+		// must not bias successive actions once a fresh decision is allowed.
+		rejectWindow := 2 * cfg.Runtime.Autoscale.ScanInterval
+		if rejectWindow > cfg.Runtime.Autoscale.Cooldown {
+			rejectWindow = cfg.Runtime.Autoscale.Cooldown
+		}
+		controller := autoscale.New(autoscale.Config{
+			ScanInterval:  cfg.Runtime.Autoscale.ScanInterval,
+			Cooldown:      cfg.Runtime.Autoscale.Cooldown,
+			DrainGrace:    30 * time.Second,
+			RejectWindow:  rejectWindow,
+			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
+			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
+			RuntimeMax:    runtimeMax,
+		}, store, prx, srv, slog.Default())
+		autoscaleDone = make(chan struct{})
+		go func() {
+			controller.Run(asCtx)
+			close(autoscaleDone)
+		}()
+		slog.Info("autoscale controller started",
+			"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
+			"cooldown", cfg.Runtime.Autoscale.Cooldown,
+			"default_target", cfg.Runtime.Autoscale.DefaultTarget)
+	}
 
 	mux := http.NewServeMux()
 	// Observe wraps the timeout handler (not the inner router) so server metrics
@@ -762,6 +810,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	jobsMgr.Stop(shutdownCtx)
 	cancelWatcher()
 	<-watcherDone
+	// Stop the autoscale controller and wait for its loop to exit before the
+	// store closes, so it cannot issue a scale query against a torn-down store.
+	if cancelAutoscale != nil {
+		cancelAutoscale()
+		<-autoscaleDone
+	}
 
 	switch cfg.Server.ShutdownApps {
 	case "stop":

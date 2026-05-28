@@ -9,8 +9,9 @@ import (
 )
 
 func TestMatchInventoryItem(t *testing.T) {
+	const wantWorker = "node-x"
 	items := []process.InventoryItem{
-		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok",
+		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok", WorkerID: wantWorker,
 			Labels: map[string]string{
 				"shinyhub.slug": "app", "shinyhub.replica_index": "0",
 				"shinyhub.deployment_id": "7",
@@ -18,7 +19,7 @@ func TestMatchInventoryItem(t *testing.T) {
 	}
 
 	// Current deployment: matches.
-	got := matchInventoryItem(items, "app", 0, "7")
+	got := matchInventoryItem(items, "app", 0, "7", wantWorker)
 	if got == nil {
 		t.Fatal("current-deployment replica not matched")
 	}
@@ -26,16 +27,47 @@ func TestMatchInventoryItem(t *testing.T) {
 		t.Errorf("URL = %q", got.URL)
 	}
 	// Superseded deployment (same slug+index, different deployment) must NOT match.
-	if stale := matchInventoryItem(items, "app", 0, "9"); stale != nil {
+	if stale := matchInventoryItem(items, "app", 0, "9", wantWorker); stale != nil {
 		t.Errorf("stale-deployment container was matched: %+v", stale)
 	}
 	// Wrong index does not match.
-	if mismatch := matchInventoryItem(items, "app", 1, "7"); mismatch != nil {
+	if mismatch := matchInventoryItem(items, "app", 1, "7", wantWorker); mismatch != nil {
 		t.Errorf("wrong-index match: %+v", mismatch)
 	}
 	// Empty deploymentID (legacy replica row) matches on slug+index alone.
-	if legacy := matchInventoryItem(items, "app", 0, ""); legacy == nil {
+	if legacy := matchInventoryItem(items, "app", 0, "", wantWorker); legacy == nil {
 		t.Error("legacy empty-deployment replica should match on slug+index")
+	}
+}
+
+// TestMatchInventoryItem_RequiresOwningWorker asserts that with inventory now
+// aggregated across multiple workers, a replica row is matched only to a
+// container reported by the worker that owns it. Two workers can report
+// same-labeled containers (a stale leftover from a failed move, or a duplicate
+// placement); matching the row to the wrong worker's item would adopt that
+// worker's URL while encoding the handle and selecting the transport for the
+// owning worker, breaking the route.
+func TestMatchInventoryItem_RequiresOwningWorker(t *testing.T) {
+	labels := map[string]string{
+		"shinyhub.slug": "app", "shinyhub.replica_index": "0", "shinyhub.deployment_id": "7",
+	}
+	items := []process.InventoryItem{
+		{ContainerID: "c-other", Running: true, URL: "https://a:8443/v1/data/aaa", WorkerID: "node-a", Labels: labels},
+		{ContainerID: "c-mine", Running: true, URL: "https://b:8443/v1/data/bbb", WorkerID: "node-b", Labels: labels},
+	}
+
+	got := matchInventoryItem(items, "app", 0, "7", "node-b")
+	if got == nil {
+		t.Fatal("replica owned by node-b not matched against node-b's container")
+	}
+	if got.ContainerID != "c-mine" || got.URL != "https://b:8443/v1/data/bbb" {
+		t.Fatalf("matched the wrong worker's container: %+v", got)
+	}
+
+	// A worker that reports no matching container yields no match, even though
+	// another worker has a same-labeled container.
+	if cross := matchInventoryItem(items, "app", 0, "7", "node-c"); cross != nil {
+		t.Fatalf("matched a container from a non-owning worker: %+v", cross)
 	}
 }
 
@@ -86,7 +118,7 @@ func TestRecoverRemoteReplica_PersistsLiveEndpoint(t *testing.T) {
 		EndpointURL: "https://w:8443/v1/data/stale"}
 
 	items := []process.InventoryItem{
-		{ContainerID: "c-1", Running: true, URL: liveURL,
+		{ContainerID: "c-1", Running: true, URL: liveURL, WorkerID: "node-x",
 			Labels: map[string]string{"shinyhub.slug": "app", "shinyhub.replica_index": "0"}},
 	}
 

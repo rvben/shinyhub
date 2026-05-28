@@ -79,6 +79,14 @@ type StartParams struct {
 	AppVersion      string        // app version stamped onto labels/metadata
 	DeploymentID    int64         // owning deployment; 0 when unknown
 	ContentDigest   string        // bundle content digest; "" when unknown (remote runtime pulls by this)
+	// TargetWorker pins this replica to a specific worker node id. Deploy
+	// pre-plans a multi-replica pool's worker assignments up front (so a
+	// concurrent batch spreads instead of every replica self-placing onto the
+	// same least-loaded worker against an identical pre-deploy snapshot) and
+	// stamps the chosen worker here. Empty means the runtime self-places against
+	// live load, which is correct for a single-replica boot (e.g. a watchdog
+	// restart). Runtimes that do not route to workers ignore it.
+	TargetWorker string
 }
 
 type entry struct {
@@ -166,13 +174,39 @@ func (m *Manager) AppBindHostFor(tier string) string {
 	return m.runtimeFor(tier).AppBindHost()
 }
 
-// TransportForTier returns the HTTP transport a tier's runtime requires for
-// reaching its replicas, or nil to use the default transport. Runtimes opt in
-// by implementing ReplicaTransporter.
-func (m *Manager) TransportForTier(tier string) http.RoundTripper {
+// TransportForWorker returns the HTTP transport a tier's runtime requires for
+// reaching replicas hosted by the named worker, or nil to use the default
+// transport. Runtimes opt in by implementing ReplicaTransporter; routes are
+// keyed per-worker so a replica is always dialed with its host worker's
+// transport even when several workers serve the tier.
+func (m *Manager) TransportForWorker(tier, nodeID string) http.RoundTripper {
 	rt := m.runtimeFor(tier)
 	if tr, ok := rt.(ReplicaTransporter); ok {
-		return tr.ReplicaTransport()
+		return tr.ReplicaTransportForWorker(nodeID)
+	}
+	return nil
+}
+
+// ReplicaPlacer is the optional capability a worker-routing Runtime implements
+// to plan where a batch of replicas should land. PlanPlacement returns one
+// target worker node id per replica, in assignment order, spreading the batch
+// across the tier's workers. Runtimes that do not route to workers (the native
+// local tier) do not implement it.
+type ReplicaPlacer interface {
+	PlanPlacement(slug string, count int) []string
+}
+
+// PlanPlacement asks the tier's runtime to plan worker assignments for count
+// replicas of slug, returning one target worker node id per replica in
+// assignment order. It returns nil when the tier's runtime does not route to
+// workers (native local tier), in which case replicas have no target worker and
+// the runtime places them itself. Deploy calls this once up front so a
+// concurrent pool boot spreads across workers instead of each replica
+// self-placing against the same pre-deploy load snapshot.
+func (m *Manager) PlanPlacement(tier, slug string, count int) []string {
+	rt := m.runtimeFor(tier)
+	if pl, ok := rt.(ReplicaPlacer); ok {
+		return pl.PlanPlacement(slug, count)
 	}
 	return nil
 }
@@ -402,7 +436,7 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	pool := m.entries[slug]
 	if index >= len(pool) || pool[index] == nil {
 		m.mu.Unlock()
-		return fmt.Errorf("app %s replica %d not found", slug, index)
+		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
 	}
 	e := pool[index]
 	done := e.done
@@ -413,6 +447,13 @@ func (m *Manager) StopReplica(slug string, index int) error {
 
 	rt := m.runtimeFor(tier)
 	if err := rt.Signal(handle, syscall.SIGTERM); err != nil {
+		// The signal was not delivered, so this replica is still running. Undo
+		// the intentional-stop mark set above so that if it later exits on its
+		// own the monitor classifies it as crashed (and the watchdog restarts
+		// it) rather than as an intentional stop left dead.
+		m.mu.Lock()
+		e.stopped = false
+		m.mu.Unlock()
 		return fmt.Errorf("sigterm: %w", err)
 	}
 	select {

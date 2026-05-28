@@ -111,6 +111,107 @@ func TestAppsSet_CombinedFlags(t *testing.T) {
 	}
 }
 
+func TestAppsSet_AutoscaleEnable(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo",
+		"--autoscale",
+		"--autoscale-min", "1",
+		"--autoscale-max", "4",
+		"--autoscale-target", "0.7",
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	as, ok := body["autoscale"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected an autoscale object, got %v (%T)", body["autoscale"], body["autoscale"])
+	}
+	if as["enabled"] != true {
+		t.Errorf("enabled: got %v", as["enabled"])
+	}
+	if as["min_replicas"] != float64(1) {
+		t.Errorf("min_replicas: got %v", as["min_replicas"])
+	}
+	if as["max_replicas"] != float64(4) {
+		t.Errorf("max_replicas: got %v", as["max_replicas"])
+	}
+	if as["target"] != 0.7 {
+		t.Errorf("target: got %v", as["target"])
+	}
+}
+
+// Disabling sends only the enabled flag; the other fields stay untouched so the
+// server keeps the stored bounds for a later re-enable.
+func TestAppsSet_AutoscaleDisable(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--autoscale=false"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	as, ok := body["autoscale"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected an autoscale object, got %v", body["autoscale"])
+	}
+	if as["enabled"] != false {
+		t.Errorf("enabled: got %v", as["enabled"])
+	}
+	if _, present := as["min_replicas"]; present {
+		t.Errorf("min_replicas should be absent when only disabling")
+	}
+	if _, present := as["target"]; present {
+		t.Errorf("target should be absent when only disabling")
+	}
+}
+
+// A single autoscale field can be changed on its own; the server merges it over
+// the stored values, so the CLI sends only the changed key.
+func TestAppsSet_AutoscaleTargetOnly(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--autoscale-target", "0.5"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	as, ok := body["autoscale"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected an autoscale object, got %v", body["autoscale"])
+	}
+	if as["target"] != 0.5 {
+		t.Errorf("target: got %v", as["target"])
+	}
+	if _, present := as["enabled"]; present {
+		t.Errorf("enabled should be absent when only the target changes")
+	}
+}
+
+func TestAppsSet_RejectsAutoscaleTargetOutOfRange(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--autoscale-target", "1.5"); err == nil {
+		t.Fatal("expected an error for an out-of-range autoscale target")
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no request to be sent on a validation error, got %d", len(*reqs))
+	}
+}
+
 // TestAppsSet_TierPlacement sends a repeatable --tier flag as a placement object
 // and omits the replicas key.
 func TestAppsSet_TierPlacement(t *testing.T) {
@@ -1125,6 +1226,49 @@ func TestAppsShow_RendersLostReplicaReason(t *testing.T) {
 		if strings.Contains(line, "1234") && strings.Contains(line, "worker unavailable") {
 			t.Errorf("running replica should have no reason annotation: %q", line)
 		}
+	}
+}
+
+// TestAppsShow_RendersAutoscaleEnabled pins the autoscale summary line so an
+// operator can read the bounds and effective target at a glance.
+func TestAppsShow_RendersAutoscaleEnabled(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":true,"autoscale_min_replicas":1,"autoscale_max_replicas":4,"autoscale_target":0.7},"effective_autoscale_target":0.7,"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Autoscale:   on (replicas 1-4, target 70%)") {
+		t.Errorf("expected autoscale summary line, got:\n%s", out)
+	}
+}
+
+// When an app's own target is 0 it inherits the runtime default; show resolves
+// the effective target the server reports rather than printing a bare 0%.
+func TestAppsShow_RendersAutoscaleInheritedTarget(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":true,"autoscale_min_replicas":2,"autoscale_max_replicas":6,"autoscale_target":0},"effective_autoscale_target":0.8,"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Autoscale:   on (replicas 2-6, target 80%)") {
+		t.Errorf("expected autoscale line with the inherited effective target, got:\n%s", out)
+	}
+}
+
+func TestAppsShow_RendersAutoscaleOff(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":false},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Autoscale:   off") {
+		t.Errorf("expected autoscale off line, got:\n%s", out)
 	}
 }
 

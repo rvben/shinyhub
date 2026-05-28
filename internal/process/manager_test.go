@@ -2,6 +2,7 @@ package process_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -972,29 +973,157 @@ func TestManagerDispatchesByTier(t *testing.T) {
 	}
 }
 
-// transportRuntime is a Runtime that also implements ReplicaTransporter,
-// used to prove Manager.TransportForTier surfaces the capability.
-type transportRuntime struct {
-	fakeRemoteRuntime
-	tr http.RoundTripper
+// TestStopReplica_MissingEntryReturnsErrReplicaNotFound proves the missing-slot
+// case is reported as the ErrReplicaNotFound sentinel (not an opaque error), so
+// callers like the autoscale scale-down can distinguish a benign already-gone
+// replica from a real stop failure (e.g. a remote worker rejecting SIGTERM).
+func TestStopReplica_MissingEntryReturnsErrReplicaNotFound(t *testing.T) {
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+
+	// No replica ever started for this slug: the slot is absent.
+	err := m.StopReplica("ghost", 0)
+	if err == nil {
+		t.Fatalf("StopReplica on a missing entry returned nil, want error")
+	}
+	if !errors.Is(err, process.ErrReplicaNotFound) {
+		t.Fatalf("StopReplica error = %v, want errors.Is(..., ErrReplicaNotFound)", err)
+	}
 }
 
-func (r *transportRuntime) ReplicaTransport() http.RoundTripper { return r.tr }
+// signalFailRuntime is a Runtime whose Start succeeds but whose Signal always
+// fails, with an independently triggerable exit. It lets a test drive the case
+// where StopReplica's SIGTERM is rejected yet the replica later exits on its
+// own.
+type signalFailRuntime struct {
+	mu      sync.Mutex
+	exits   map[int]chan struct{}
+	nextPID int
+}
+
+func newSignalFailRuntime() *signalFailRuntime {
+	return &signalFailRuntime{exits: make(map[int]chan struct{}), nextPID: 70000}
+}
+
+func (r *signalFailRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nextPID++
+	pid := r.nextPID
+	r.exits[pid] = make(chan struct{})
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: strconv.Itoa(pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
+}
+
+func (r *signalFailRuntime) Signal(process.RunHandle, syscall.Signal) error {
+	return errors.New("worker refused signal")
+}
+
+func (r *signalFailRuntime) Wait(_ context.Context, h process.RunHandle) error {
+	r.mu.Lock()
+	ch := r.exits[h.PID]
+	r.mu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+	return nil
+}
+
+// triggerExit unblocks Wait for pid, simulating the replica exiting on its own.
+func (r *signalFailRuntime) triggerExit(pid int) {
+	r.mu.Lock()
+	ch := r.exits[pid]
+	r.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func (r *signalFailRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (r *signalFailRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (r *signalFailRuntime) HostPreparesDeps() bool    { return false }
+func (r *signalFailRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (r *signalFailRuntime) HostProvidesAppData() bool { return false }
+
+// TestStopReplica_SignalFailureLeavesReplicaCrashable proves that when
+// StopReplica's signal fails, the replica is not left marked as intentionally
+// stopped: it is still running, so a later exit must be classified as a crash
+// (which the watchdog restarts), not as a stop (which it would leave dead).
+func TestStopReplica_SignalFailureLeavesReplicaCrashable(t *testing.T) {
+	rt := newSignalFailRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+
+	info, err := m.Start(process.StartParams{
+		Slug: "demo", Index: 0, Command: []string{"x"}, Port: 1,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := m.StopReplica("demo", 0); err == nil {
+		t.Fatal("StopReplica returned nil despite the signal failing")
+	}
+	if errors.Is(err, process.ErrReplicaNotFound) {
+		t.Fatalf("signal failure surfaced as ErrReplicaNotFound; want a real error")
+	}
+
+	// The replica was never signalled, so it is still running. Simulate it
+	// exiting on its own afterwards.
+	rt.triggerExit(info.PID)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, ok := m.GetReplica("demo", 0)
+		if ok && got.Status == process.StatusCrashed {
+			return // pass
+		}
+		if ok && got.Status == process.StatusStopped {
+			t.Fatal("replica classified StatusStopped after a FAILED stop; a later exit must be a crash so the watchdog restarts it")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("replica never reached a terminal status after exiting")
+}
+
+// transportRuntime is a Runtime that also implements ReplicaTransporter,
+// used to prove Manager.TransportForWorker surfaces the capability and threads
+// the requested node id through to the runtime.
+type transportRuntime struct {
+	fakeRemoteRuntime
+	tr      http.RoundTripper
+	gotNode string
+}
+
+func (r *transportRuntime) ReplicaTransportForWorker(nodeID string) http.RoundTripper {
+	r.gotNode = nodeID
+	return r.tr
+}
 
 // roundTripFunc is an http.RoundTripper that delegates to a function.
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestManager_TransportForTier(t *testing.T) {
+func TestManager_TransportForWorker(t *testing.T) {
 	tr := roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })
+	rt := &transportRuntime{fakeRemoteRuntime: fakeRemoteRuntime{}, tr: tr}
 	m := process.NewManager(t.TempDir(), &fakeRemoteRuntime{})
-	m.RegisterRuntime("remote", &transportRuntime{fakeRemoteRuntime: fakeRemoteRuntime{}, tr: tr})
-	if got := m.TransportForTier("remote"); got == nil {
-		t.Fatal("TransportForTier(remote) = nil, want the runtime's transport")
+	m.RegisterRuntime("remote", rt)
+	if got := m.TransportForWorker("remote", "node-x"); got == nil {
+		t.Fatal("TransportForWorker(remote, node-x) = nil, want the runtime's transport")
+	}
+	if rt.gotNode != "node-x" {
+		t.Errorf("runtime received node id %q, want node-x", rt.gotNode)
 	}
 	// A runtime without the capability yields nil (default transport).
-	if got := m.TransportForTier("local-default"); got != nil {
-		t.Errorf("TransportForTier for non-transporter = %v, want nil", got)
+	if got := m.TransportForWorker("local-default", ""); got != nil {
+		t.Errorf("TransportForWorker for non-transporter = %v, want nil", got)
 	}
 }

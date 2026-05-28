@@ -311,6 +311,28 @@ type RuntimeConfig struct {
 	// omits tiers, Load synthesizes a single tier named "local" whose runtime
 	// equals Mode, so single-node behavior is unchanged.
 	Tiers []TierConfig
+	// Autoscale holds the global replica-autoscale controller settings. The
+	// controller only ever acts on apps that have opted in (per-app
+	// autoscale_enabled); these values govern how it behaves for those apps.
+	Autoscale AutoscaleConfig
+}
+
+// AutoscaleConfig holds the global settings for the replica autoscale
+// controller. Autoscaling is opt-in per app; with no app opted in these values
+// have no effect.
+type AutoscaleConfig struct {
+	// Enabled is the global kill switch. When false the controller never runs,
+	// regardless of any per-app opt-in. Default false.
+	Enabled bool
+	// ScanInterval is how often the controller evaluates opted-in apps.
+	ScanInterval time.Duration
+	// Cooldown is the minimum time between successive scale actions on the same
+	// app, damping oscillation.
+	Cooldown time.Duration
+	// DefaultTarget is the target average active sessions per replica as a
+	// fraction (0,1] of the per-replica session cap, used when an app's own
+	// autoscale_target is 0.
+	DefaultTarget float64
 }
 
 // TierConfig names a runtime tier and the runtime that backs it.
@@ -426,8 +448,17 @@ type rawRuntimeConfig struct {
 	MaxReplicas     int                    `yaml:"max_replicas"`
 	// Pointer so an explicit 0 (documented as "unlimited") is
 	// distinguishable from the key being absent (apply the safe default).
-	DefaultMaxSessionsPerReplica *int            `yaml:"default_max_sessions_per_replica"`
-	Tiers                        []rawTierConfig `yaml:"tiers"`
+	DefaultMaxSessionsPerReplica *int               `yaml:"default_max_sessions_per_replica"`
+	Tiers                        []rawTierConfig    `yaml:"tiers"`
+	Autoscale                    rawAutoscaleConfig `yaml:"autoscale"`
+}
+
+type rawAutoscaleConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	ScanInterval string `yaml:"scan_interval"`
+	Cooldown     string `yaml:"cooldown"`
+	// Pointer so an explicit 0 is distinguishable from the key being absent.
+	DefaultTarget *float64 `yaml:"default_target"`
 }
 
 type rawTierConfig struct {
@@ -472,7 +503,10 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	rc := parseRuntime(raw.Runtime)
+	rc, err := parseRuntime(raw.Runtime)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		Database:  raw.Database,
@@ -776,9 +810,14 @@ const (
 	DefaultNetworkMode  = "bridge"
 )
 
-func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
+func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	rc := RuntimeConfig{
 		Mode: "native",
+		Autoscale: AutoscaleConfig{
+			ScanInterval:  30 * time.Second,
+			Cooldown:      3 * time.Minute,
+			DefaultTarget: 0.8,
+		},
 		Docker: DockerRuntimeConfig{
 			Socket: DefaultDockerSocket,
 			Images: DockerImages{
@@ -834,7 +873,36 @@ func parseRuntime(r rawRuntimeConfig) RuntimeConfig {
 	default:
 		rc.DefaultMaxSessionsPerReplica = *r.DefaultMaxSessionsPerReplica
 	}
-	return rc
+
+	rc.Autoscale.Enabled = r.Autoscale.Enabled
+	if r.Autoscale.ScanInterval != "" {
+		d, err := time.ParseDuration(r.Autoscale.ScanInterval)
+		if err != nil {
+			return rc, fmt.Errorf("runtime.autoscale.scan_interval: %w", err)
+		}
+		if d <= 0 {
+			return rc, fmt.Errorf("runtime.autoscale.scan_interval: must be > 0, got %v", d)
+		}
+		rc.Autoscale.ScanInterval = d
+	}
+	if r.Autoscale.Cooldown != "" {
+		d, err := time.ParseDuration(r.Autoscale.Cooldown)
+		if err != nil {
+			return rc, fmt.Errorf("runtime.autoscale.cooldown: %w", err)
+		}
+		if d <= 0 {
+			return rc, fmt.Errorf("runtime.autoscale.cooldown: must be > 0, got %v", d)
+		}
+		rc.Autoscale.Cooldown = d
+	}
+	if r.Autoscale.DefaultTarget != nil {
+		t := *r.Autoscale.DefaultTarget
+		if t <= 0 || t > 1 {
+			return rc, fmt.Errorf("runtime.autoscale.default_target: must be in (0,1], got %v", t)
+		}
+		rc.Autoscale.DefaultTarget = t
+	}
+	return rc, nil
 }
 
 func applyEnv(cfg *Config) error {

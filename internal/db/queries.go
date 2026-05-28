@@ -352,6 +352,17 @@ type App struct {
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
 	ReplicaPlacement string `json:"replica_placement,omitempty"`
+	// AutoscaleEnabled is true when the autoscale controller may adjust this
+	// app's replica count. Off by default; scaling is always opt-in per app.
+	AutoscaleEnabled bool `json:"autoscale_enabled"`
+	// AutoscaleMinReplicas / AutoscaleMaxReplicas bound the controller's
+	// replica count. Both are 0 when autoscaling is disabled.
+	AutoscaleMinReplicas int `json:"autoscale_min_replicas"`
+	AutoscaleMaxReplicas int `json:"autoscale_max_replicas"`
+	// AutoscaleTarget is the target average active sessions per replica as a
+	// fraction (0,1] of the per-replica session cap, or 0 to use the
+	// runtime-wide default target.
+	AutoscaleTarget float64 `json:"autoscale_target"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -378,6 +389,18 @@ const deploymentSummarySQL = `
 		(SELECT content_digest FROM deployments
 		   WHERE app_id = apps.id AND status = 'succeeded'
 		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest`
+
+// appColumns is the plain apps.* column list shared by every App SELECT, in the
+// exact order scanApp expects. It is kept as a single constant so the column
+// list and scanApp never drift across the queries below; each query appends
+// deploymentSummarySQL for the joined last_deployed_at/current_version/digest.
+const appColumns = `id, slug, name, project_slug, owner_id, access, status,
+		       replicas, max_sessions_per_replica, deploy_count,
+		       hibernate_timeout_minutes,
+		       memory_limit_mb, cpu_quota_percent,
+		       created_at, updated_at,
+		       managed_by, replica_placement,
+		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -414,12 +437,7 @@ func (s *Store) CreateApp(p CreateAppParams) error {
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	defer s.timed("GetAppBySlug")()
 	row := s.db.QueryRow(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps WHERE slug = ?`, slug)
 	return scanApp(row)
 }
@@ -431,12 +449,7 @@ func (s *Store) GetApp(slug string) (*App, error) {
 
 func (s *Store) GetAppByID(id int64) (*App, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps WHERE id = ?`, id)
 	return scanApp(row)
 }
@@ -446,12 +459,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 		limit = -1 // SQLite treats -1 as no limit
 	}
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -473,12 +481,7 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 // to re-adopt processes that survived a server restart.
 func (s *Store) ListRunningApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status = 'running'`)
 	if err != nil {
 		return nil, err
@@ -518,13 +521,31 @@ func (s *Store) CountRunningReplicas() (int64, error) {
 // which must not re-adopt degraded apps.
 func (s *Store) ListReconcilableApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status IN ('running', 'degraded')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// ListAutoscaleApps returns apps that have opted into autoscaling and are in a
+// state the controller may act on (running or degraded). Stopped, hibernated,
+// and deploying apps are excluded so the controller never resurrects or fights
+// another lifecycle path; the scale primitives apply the same status guard.
+func (s *Store) ListAutoscaleApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + appColumns + deploymentSummarySQL + `
+		FROM apps WHERE autoscale_enabled = 1 AND status IN ('running', 'degraded')`)
 	if err != nil {
 		return nil, err
 	}
@@ -546,12 +567,7 @@ func (s *Store) ListReconcilableApps() ([]*App, error) {
 // rows behind for startup reconciliation to finish.
 func (s *Store) ListDeletingApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,` + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status = 'deleting'`)
 	if err != nil {
 		return nil, err
@@ -592,12 +608,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		limit = -1 // SQLite treats -1 as no limit
 	}
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		   OR access = 'shared'
@@ -632,12 +643,7 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 		limit = -1 // SQLite treats -1 as no limit
 	}
 	rows, err := s.db.Query(`
-		SELECT id, slug, name, project_slug, owner_id, access, status,
-		       replicas, max_sessions_per_replica, deploy_count,
-		       hibernate_timeout_minutes,
-		       memory_limit_mb, cpu_quota_percent,
-		       created_at, updated_at,
-		       managed_by, replica_placement,`+deploymentSummarySQL+`
+		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		ORDER BY created_at DESC
@@ -1691,6 +1697,37 @@ func (s *Store) SetAppPlacement(appID int64, placementJSON string, total int) er
 	return nil
 }
 
+// SetAppAutoscaleParams carries the per-app autoscale settings written in one
+// update. When Enabled is false the bounds and target are still persisted so a
+// re-enable can restore the operator's last choice without re-entering them.
+type SetAppAutoscaleParams struct {
+	AppID       int64
+	Enabled     bool
+	MinReplicas int
+	MaxReplicas int
+	Target      float64
+}
+
+// SetAppAutoscale persists an app's autoscale configuration. Validation of the
+// bounds and target (min >= 1, max <= runtime ceiling, min <= max, target in
+// (0,1]) is the API layer's responsibility; this only writes the values.
+func (s *Store) SetAppAutoscale(p SetAppAutoscaleParams) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET autoscale_enabled = ?, autoscale_min_replicas = ?,
+		        autoscale_max_replicas = ?, autoscale_target = ?,
+		        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		boolToInt(p.Enabled), p.MinReplicas, p.MaxReplicas, p.Target, p.AppID,
+	)
+	if err != nil {
+		return fmt.Errorf("set autoscale: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ApplyAppManifestSettingsParams carries the subset of [app] manifest fields
 // to apply. Callers set the Set* booleans to true for each field they want
 // written; absent fields are left untouched.
@@ -1925,6 +1962,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
+		&a.AutoscaleEnabled, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
@@ -2069,17 +2107,20 @@ func (s *Store) SetWorkerStatus(nodeID, status string) error {
 	return nil
 }
 
-// SupersedeTierWorkers marks every up worker on a tier down except the given
-// node id, in a single statement. Used when a new worker wins a tier's routing
-// slot so prior registrants stop being routing candidates. Zero affected rows
-// is valid (no prior worker on the tier), so unlike SetWorkerStatus this does
-// not return ErrNotFound.
-func (s *Store) SupersedeTierWorkers(tier, exceptNodeID string) error {
+// SupersedeTierAddrWorkers marks down every up worker sharing a (tier, advertise
+// address) except the given node id, in a single statement. Used when a worker
+// (re)registers at an endpoint so a stale duplicate at that same endpoint - an
+// agent that rejoined under a fresh node id after losing its persisted identity -
+// stops being a routing candidate. Distinct-address workers on the tier are real
+// multi-worker capacity and are left up. Zero affected rows is valid (no prior
+// worker at the endpoint), so unlike SetWorkerStatus this does not return
+// ErrNotFound.
+func (s *Store) SupersedeTierAddrWorkers(tier, advertiseAddr, exceptNodeID string) error {
 	_, err := s.db.Exec(
-		`UPDATE workers SET status = 'down' WHERE tier = ? AND node_id <> ? AND status = 'up'`,
-		tier, exceptNodeID)
+		`UPDATE workers SET status = 'down' WHERE tier = ? AND advertise_addr = ? AND node_id <> ? AND status = 'up'`,
+		tier, advertiseAddr, exceptNodeID)
 	if err != nil {
-		return fmt.Errorf("supersede tier %q workers: %w", tier, err)
+		return fmt.Errorf("supersede tier %q addr %q workers: %w", tier, advertiseAddr, err)
 	}
 	return nil
 }
@@ -2208,6 +2249,70 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
 		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// WorkerReplicaLoad is a worker's running-replica load for least-loaded
+// placement: Total counts running replicas across all apps; SameApp counts how
+// many of those belong to the candidate app, so placement can break load ties
+// by avoiding co-locating an app's own replicas on one worker.
+type WorkerReplicaLoad struct {
+	Total   int
+	SameApp int
+}
+
+// RunningReplicaLoadByWorker returns, keyed by worker_id, each worker's running
+// replica load and how much of it belongs to slug. Only running replicas count
+// (a lost or crashed replica's former worker is not charged), and workers
+// hosting no running replica are absent (placement treats a missing entry as
+// zero load).
+func (s *Store) RunningReplicaLoadByWorker(slug string) (map[string]WorkerReplicaLoad, error) {
+	rows, err := s.db.Query(`
+		SELECT r.worker_id,
+		       COUNT(*) AS total,
+		       COALESCE(SUM(CASE WHEN a.slug = ? THEN 1 ELSE 0 END), 0) AS same_app
+		FROM replicas r JOIN apps a ON a.id = r.app_id
+		WHERE r.status = ? AND r.worker_id <> ''
+		GROUP BY r.worker_id`, slug, ReplicaStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]WorkerReplicaLoad{}
+	for rows.Next() {
+		var nodeID string
+		var load WorkerReplicaLoad
+		if err := rows.Scan(&nodeID, &load.Total, &load.SameApp); err != nil {
+			return nil, err
+		}
+		out[nodeID] = load
+	}
+	return out, rows.Err()
+}
+
+// RunningReplicaWorkersForSlug returns the distinct workers currently hosting a
+// running replica of slug. A shared-mount consumer pins to one of these so it
+// lands on a worker that also hosts its source's provisioned data. Only running
+// replicas count (a lost or crashed replica's former worker is not a valid mount
+// host) and replicas with no worker id (native/local tier) are excluded.
+func (s *Store) RunningReplicaWorkersForSlug(slug string) ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT r.worker_id
+		FROM replicas r JOIN apps a ON a.id = r.app_id
+		WHERE a.slug = ? AND r.status = ? AND r.worker_id <> ''
+		ORDER BY r.worker_id`, slug, ReplicaStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
+			return nil, err
+		}
+		out = append(out, nodeID)
 	}
 	return out, rows.Err()
 }

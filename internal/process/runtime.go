@@ -3,6 +3,7 @@ package process
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"syscall"
@@ -18,6 +19,13 @@ var ErrNoLiveWorker = errors.New("no live worker for tier")
 // target slug+index slot is already running. The watcher treats it as zero-cost:
 // a re-placement that races a slot already (re)filled is a no-op, not a failure.
 var ErrReplicaAlreadyRunning = errors.New("replica already running")
+
+// ErrReplicaNotFound is returned (wrapped) by Manager.StopReplica when the
+// slug+index slot has no live entry. Callers that distinguish an already-gone
+// replica from a real stop failure (e.g. autoscale scale-down) match this
+// sentinel: a missing entry is benign, while any other error means the replica
+// may still be running and its control-plane state must be left intact.
+var ErrReplicaNotFound = errors.New("replica not found")
 
 // ReplicaEndpoint is the result of starting a replica: where the proxy routes
 // to it, which provider owns it, a stable worker identity used for recovery,
@@ -71,21 +79,30 @@ type Runtime interface {
 // ReplicaTransporter is an optional capability for runtimes that route replica
 // traffic through a non-default HTTP transport (for example a remote worker's
 // mTLS tunnel). The proxy and health-check paths use this transport so that
-// requests to the replica's reported URL authenticate correctly.
+// requests to the replica's reported URL authenticate correctly. The transport
+// is per-worker: a tier may have several workers, and each replica's route must
+// use the mTLS transport of the worker that actually hosts it.
 type ReplicaTransporter interface {
-	// ReplicaTransport returns the RoundTripper to use when dialing replicas
-	// started by this runtime, or nil to use the default transport.
-	ReplicaTransport() http.RoundTripper
+	// ReplicaTransportForWorker returns the RoundTripper to use when dialing
+	// replicas hosted by the named worker, or nil to use the default transport
+	// (also returned when the worker is not a live host on this runtime's tier).
+	ReplicaTransportForWorker(nodeID string) http.RoundTripper
 }
 
 // InventoryItem describes one managed container as reported by a remote
 // runtime's inventory. Recovery reconciles a replica row against these items by
 // matching the slug/replica_index/deployment_id labels, then routes to URL.
+// WorkerID names the worker that reported the container; with inventory
+// aggregated across a tier's coexisting workers, recovery uses it to bind a
+// replica row to its owning worker's container, so a same-labeled container on
+// another worker is not adopted with the wrong worker's URL, handle, and
+// transport.
 type InventoryItem struct {
 	ContainerID string
 	Labels      map[string]string
 	Running     bool
 	URL         string
+	WorkerID    string
 }
 
 // ReplicaInventory is an optional capability for runtimes that can enumerate
@@ -93,6 +110,21 @@ type InventoryItem struct {
 // uses it to reconcile remote tiers by deployment id instead of InspectPID.
 type ReplicaInventory interface {
 	Inventory(ctx context.Context) ([]InventoryItem, error)
+}
+
+// PartialInventoryError reports that a tier's aggregated inventory is
+// incomplete: at least one worker was queried successfully, but Workers could
+// not be reached. The returned items hold what the reachable workers reported.
+// Recovery uses Workers to distinguish a replica whose container is genuinely
+// gone (its owning worker reported and the container was absent) from one whose
+// owning worker was merely unreachable (status unknown); the latter must not
+// drive a live app to stopped.
+type PartialInventoryError struct {
+	Workers []string
+}
+
+func (e *PartialInventoryError) Error() string {
+	return fmt.Sprintf("inventory incomplete: %d worker(s) unreachable: %v", len(e.Workers), e.Workers)
 }
 
 // ExitInfo summarizes how a one-shot process ended.

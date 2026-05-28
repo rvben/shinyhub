@@ -687,6 +687,53 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 		"app detail exposes the live deployment digest slot")
 }
 
+// TestAutoscaleSurfaceWiring pins the read-only autoscale overview surface to
+// its testable helper module. app-detail.js cannot be imported under jsdom, so
+// the autoscale logic lives in views/autoscale.js (unit-tested in
+// jstests/autoscale.test.js) and the overview panel must consume it rather than
+// re-implement the inherited-target / sorted-rejects logic inline.
+//
+// We also guard the field-name contract: autoscale.js reads
+// app.autoscale_enabled, envelope.effective_autoscale_target, and the
+// rejects_by_reason rollup. If any of these are renamed in
+// internal/api/apps.go handleGetApp, the dashboard summary stops rendering and
+// this test catches it before the regression ships.
+func TestAutoscaleSurfaceWiring(t *testing.T) {
+	// The overview panel imports the helper module and calls each helper.
+	assertContains(t, "views/app-detail.js", "/static/views/autoscale.js",
+		"app detail imports the autoscale helper module so the overview surface stays consistent with the unit tests")
+	assertContains(t, "views/app-detail.js", "renderAutoscaleSummary",
+		"the overview panel renders the autoscale facts via renderAutoscaleSummary")
+	assertContains(t, "views/app-detail.js", "renderRejectsByReason",
+		"the overview panel renders the rejects-by-reason rollup via renderRejectsByReason")
+	assertContains(t, "views/app-detail.js", "summariseAutoscale",
+		"the overview panel flattens the autoscale envelope slice via summariseAutoscale")
+	assertContains(t, "views/app-detail.js", "formatRejectsByReason",
+		"the overview panel normalises the rejects rollup via formatRejectsByReason")
+
+	// Slot ids the helpers populate. If these drift the helpers paint
+	// nowhere and the operator-facing summary silently disappears.
+	assertContains(t, "views/app-detail.js", `id="autoscale-summary"`,
+		"app detail must expose #autoscale-summary as the slot renderAutoscaleSummary fills")
+	assertContains(t, "views/app-detail.js", `id="overview-rejects-by-reason"`,
+		"app detail must expose #overview-rejects-by-reason as the container renderRejectsByReason reveals")
+	assertContains(t, "views/app-detail.js", `id="overview-rejects-by-reason-list"`,
+		"app detail must expose #overview-rejects-by-reason-list as the <ul> renderRejectsByReason populates")
+
+	// The helper module reads the API envelope fields. If internal/api/apps.go
+	// handleGetApp renames any of these, the dashboard goes blank.
+	assertContains(t, "views/autoscale.js", "autoscale_enabled",
+		"autoscale helper must read app.autoscale_enabled; see internal/api/apps.go handleGetApp")
+	assertContains(t, "views/autoscale.js", "autoscale_min_replicas",
+		"autoscale helper must read app.autoscale_min_replicas; see internal/api/apps.go handleGetApp")
+	assertContains(t, "views/autoscale.js", "autoscale_max_replicas",
+		"autoscale helper must read app.autoscale_max_replicas; see internal/api/apps.go handleGetApp")
+	assertContains(t, "views/autoscale.js", "autoscale_target",
+		"autoscale helper must read app.autoscale_target; see internal/api/apps.go handleGetApp")
+	assertContains(t, "views/autoscale.js", "effective_autoscale_target",
+		"autoscale helper must read envelope.effective_autoscale_target so the inherited fallback is honest; see internal/api/apps.go handleGetApp")
+}
+
 // TestTracesSurfaceWiring pins the traces panel to its testable helper module.
 // app-detail.js cannot be imported under jsdom, so the rendering logic lives in
 // views/traces-ui.js (unit-tested in jstests/traces-ui.test.js) and the panel

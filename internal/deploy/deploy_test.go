@@ -394,6 +394,39 @@ func TestRunReplica_RestartsOnPlacedTier(t *testing.T) {
 	}
 }
 
+// TestRunReplica_HonorsColocateWorkers asserts a single-replica restart of a
+// shared-mount consumer pins to a worker from the colocation set instead of
+// self-placing by least load. The watchdog re-places crashed/lost replicas one
+// at a time through RunReplica; if it ignored the pin, a recovered replica could
+// land on a worker that does not host the mounted source data.
+func TestRunReplica_HonorsColocateWorkers(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	// The runtime would self-place across both workers; the pin must confine the
+	// restarted replica to w-b.
+	mgr.RegisterRuntime("remote", &placerRuntime{workers: []string{"w-a", "w-b"}})
+	defer mgr.Stop("reheal")
+	prx := proxy.New()
+	prx.SetPoolSize("reheal", 2)
+
+	r, err := deploy.RunReplica(deploy.Params{
+		Slug: "reheal", BundleDir: bundle,
+		Placement:       map[string]int{"remote": 2},
+		TierOrder:       []string{"remote"},
+		DefaultTier:     "remote",
+		ColocateWorkers: []string{"w-b"},
+		Manager:         mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+	}, 0)
+	if err != nil {
+		t.Fatalf("run replica: %v", err)
+	}
+	if r.WorkerID != "w-b" {
+		t.Errorf("restarted replica on worker %q, want w-b (colocation pin ignored)", r.WorkerID)
+	}
+}
+
 func TestRunReplica_SingleBoot(t *testing.T) {
 	bundle := t.TempDir()
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -896,6 +929,119 @@ func (f *fakeContainerRuntime) Stats(_ context.Context, _ process.RunHandle) (fl
 }
 func (f *fakeContainerRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
+}
+
+// placerRuntime is a Runtime that also implements process.ReplicaPlacer. It
+// hands deploy a pre-planned worker per replica (round-robin over its worker
+// set) and echoes whatever TargetWorker each Start receives back as the
+// replica's WorkerID, so a test can assert the pre-planned assignment actually
+// reached Manager.Start instead of every replica self-placing.
+type placerRuntime struct {
+	workers []string
+}
+
+func (p *placerRuntime) PlanPlacement(_ string, count int) []string {
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		out = append(out, p.workers[i%len(p.workers)])
+	}
+	return out
+}
+func (p *placerRuntime) HostPreparesDeps() bool    { return false }
+func (p *placerRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (p *placerRuntime) HostProvidesAppData() bool { return false }
+func (p *placerRuntime) Start(_ context.Context, sp process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", sp.Port),
+		Provider: "remote_docker",
+		WorkerID: sp.TargetWorker,
+		Handle:   process.RunHandle{ContainerID: sp.TargetWorker + "/c-" + fmt.Sprint(sp.Index)},
+	}, nil
+}
+func (p *placerRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
+func (p *placerRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
+func (p *placerRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (p *placerRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+
+// TestRun_PreplansWorkerSpreadAcrossPool asserts that a concurrent multi-replica
+// pool boot spreads across the tier's workers: deploy pre-plans worker
+// assignments up front and threads each chosen worker into the replica's Start,
+// so two replicas land on two different workers. Without pre-planning, every
+// replica would self-place against the same pre-deploy snapshot and stack onto
+// one worker.
+func TestRun_PreplansWorkerSpreadAcrossPool(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", &placerRuntime{workers: []string{"w-a", "w-b"}})
+	defer mgr.Stop("spread")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug: "spread", BundleDir: bundle,
+		Placement:   map[string]int{"remote": 2},
+		TierOrder:   []string{"remote"},
+		DefaultTier: "remote",
+		Manager:     mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(result.Replicas) != 2 {
+		t.Fatalf("want 2 replicas, got %d", len(result.Replicas))
+	}
+	workers := map[string]int{}
+	for _, r := range result.Replicas {
+		if r.WorkerID == "" {
+			t.Fatalf("replica %d has empty WorkerID: deploy did not thread a pre-planned target", r.Index)
+		}
+		workers[r.WorkerID]++
+	}
+	if len(workers) != 2 {
+		t.Fatalf("pool co-located on %d worker(s): %v; want spread across both workers", len(workers), workers)
+	}
+}
+
+// TestRun_ColocateWorkersPinsPool asserts that ColocateWorkers overrides
+// least-loaded placement: every replica is pinned to a worker from the
+// colocation set even though the runtime's own PlanPlacement would round-robin
+// across all of the tier's workers. This is how a shared-mount consumer is kept
+// on a worker that also hosts its source's data.
+func TestRun_ColocateWorkersPinsPool(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	// The runtime can place on either worker; the colocation pin must confine
+	// the whole pool to w-b regardless.
+	mgr.RegisterRuntime("remote", &placerRuntime{workers: []string{"w-a", "w-b"}})
+	defer mgr.Stop("pinned")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug: "pinned", BundleDir: bundle,
+		Placement:       map[string]int{"remote": 3},
+		TierOrder:       []string{"remote"},
+		DefaultTier:     "remote",
+		ColocateWorkers: []string{"w-b"},
+		Manager:         mgr, Proxy: prx,
+		Command:     []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(result.Replicas) != 3 {
+		t.Fatalf("want 3 replicas, got %d", len(result.Replicas))
+	}
+	for _, r := range result.Replicas {
+		if r.WorkerID != "w-b" {
+			t.Errorf("replica %d on worker %q, want w-b (colocation pin ignored)", r.Index, r.WorkerID)
+		}
+	}
 }
 
 func TestResolveResourceLimits(t *testing.T) {

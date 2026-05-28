@@ -239,6 +239,14 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	}
 	current := deployments[0]
 
+	// Reject an infeasible shared-mount colocation before disrupting the running
+	// pool, matching the user-facing deploy/restart/rollback paths. Otherwise the
+	// stop/deregister below would tear the app down and the redeploy would land it
+	// without a colocation pin, away from its source data.
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		return false, err
+	}
+
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
