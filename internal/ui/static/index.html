@@ -241,6 +241,57 @@
               <span id="scaling-status" class="hibernate-status" hidden></span>
             </div>
             <p id="scaling-error" class="error" hidden></p>
+
+            <fieldset class="access-level autoscale-options" id="autoscale-options">
+              <legend>Autoscale</legend>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Enable autoscale</span>
+                  <span class="scaling-option-help">Let the controller resize the replica pool based on observed session load. The bounds below cap how far it can move.</span>
+                </span>
+                <input id="autoscale-enabled" type="checkbox" autocomplete="off" aria-label="Enable autoscale">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Min replicas</span>
+                  <span class="scaling-option-help">Lower bound the controller will not scale below. Must be at least 1 when autoscale is enabled.</span>
+                </span>
+                <input id="autoscale-min" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Minimum replicas">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Max replicas</span>
+                  <span class="scaling-option-help">Upper bound the controller will not scale above. Must be at least min when enabled.</span>
+                </span>
+                <input id="autoscale-max" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Maximum replicas">
+              </label>
+              <label>
+                <input type="radio" name="autoscale-target-mode" value="default">
+                <span>
+                  <span class="hibernate-option-title">Use runtime default target</span>
+                  <span class="hibernate-option-help">Scale toward the server-wide target session load.</span>
+                </span>
+              </label>
+              <label>
+                <input type="radio" name="autoscale-target-mode" value="custom">
+                <span>
+                  <span class="hibernate-option-title">Custom target</span>
+                  <span class="hibernate-option-help">Override the server-wide target. Range 0.01 to 1.00; lower scales out sooner.</span>
+                  <span class="hibernate-custom-row">
+                    <input id="autoscale-target" type="number" min="0.01" max="1.00" step="0.01"
+                           inputmode="decimal" autocomplete="off" disabled aria-label="Custom target session load">
+                  </span>
+                </span>
+              </label>
+              <p id="autoscale-ceiling" class="scaling-ceiling" aria-live="polite"></p>
+            </fieldset>
+            <div class="env-form-actions">
+              <button id="autoscale-save-btn" type="button" class="env-btn-primary" hidden>Save</button>
+              <span id="autoscale-status" class="hibernate-status" hidden></span>
+            </div>
+            <p id="autoscale-error" class="error" hidden></p>
           </section>
 
           <section id="settings-env-panel">

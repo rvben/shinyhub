@@ -121,3 +121,57 @@ function formatTarget(n) {
   // glance; trailing zero is preserved on the form (0.80, not 0.8).
   return Number(n).toFixed(2);
 }
+
+// readAutoscaleForm is the pure validator behind the Configuration tab's
+// autoscale fieldset. It reads enabled/min/max/target from the form selectors
+// in internal/ui/static/index.html and returns either {payload, error: null}
+// or {payload: null, error: '<message>'} so the save wrapper can branch on a
+// single result. Validation mirrors handlePatchApp (internal/api/apps.go):
+//
+//   - bounds are checked against [0,1000] always (the stored column range),
+//   - when enabled, min must be >= 1 and max >= min,
+//   - the explicit target is checked against [0,1] (0 means "inherit"),
+//
+// so a clearly worded inline error appears before the PATCH lands instead of
+// a generic 400 surfacing the server-side message.
+export function readAutoscaleForm(doc) {
+  const enabled = !!doc.getElementById('autoscale-enabled').checked;
+  const minRaw = doc.getElementById('autoscale-min').value.trim();
+  const maxRaw = doc.getElementById('autoscale-max').value.trim();
+  const min = parseInt(minRaw, 10);
+  const max = parseInt(maxRaw, 10);
+  if (!Number.isFinite(min) || min < 0 || min > 1000) {
+    return { payload: null, error: 'Min replicas must be a whole number between 0 and 1000.' };
+  }
+  if (!Number.isFinite(max) || max < 0 || max > 1000) {
+    return { payload: null, error: 'Max replicas must be a whole number between 0 and 1000.' };
+  }
+  if (enabled) {
+    if (min < 1) {
+      return { payload: null, error: 'Min replicas must be at least 1 when autoscale is enabled.' };
+    }
+    if (max < min) {
+      return { payload: null, error: 'Max replicas must be greater than or equal to min replicas.' };
+    }
+  }
+  const targetMode = doc.querySelector('input[name="autoscale-target-mode"]:checked');
+  if (!targetMode) {
+    return { payload: null, error: 'Pick a target session load option.' };
+  }
+  let target;
+  if (targetMode.value === 'default') {
+    // 0 is the API's sentinel for "inherit the runtime default"; see
+    // effective_autoscale_target in internal/api/apps.go handleGetApp.
+    target = 0;
+  } else {
+    const t = Number(doc.getElementById('autoscale-target').value.trim());
+    if (!Number.isFinite(t) || t <= 0 || t > 1) {
+      return { payload: null, error: 'Target session load must be a number between 0 and 1.' };
+    }
+    target = t;
+  }
+  return {
+    payload: { enabled, min_replicas: min, max_replicas: max, target },
+    error: null,
+  };
+}

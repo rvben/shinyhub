@@ -6,6 +6,7 @@ import {
   formatRejectsByReason,
   renderAutoscaleSummary,
   renderRejectsByReason,
+  readAutoscaleForm,
 } from '../static/views/autoscale.js';
 
 // summariseAutoscale normalises the {app, effective_autoscale_target} slice of
@@ -293,5 +294,108 @@ test('renderRejectsByReason hides the container for an empty rollup', () => {
   // any stale rows) keeps the panel uncluttered for a healthy app.
   assert.equal(section.hidden, true);
   assert.equal(list.querySelectorAll('li').length, 0);
+});
+
+// readAutoscaleForm is the pure validator behind the Configuration tab's
+// autoscale fieldset. It reads enabled/min/max/target from a form-like
+// document and returns {payload, error}; payload is shaped for the PATCH
+// /api/apps/:slug autoscale block (see internal/api/apps.go handlePatchApp)
+// so the save wrapper in app.js never has to re-derive the contract. Keeping
+// validation in a pure function means the same rules run under jsdom in this
+// test and behind the production Save button.
+
+function autoscaleFormDom({
+  enabled = false,
+  min = '',
+  max = '',
+  targetMode = '',
+  target = '',
+} = {}) {
+  // Mirrors the fieldset shape in internal/ui/static/index.html so the form
+  // helper is exercised against the same selectors the production form uses.
+  const dom = new JSDOM(`
+    <form>
+      <input id="autoscale-enabled" type="checkbox" ${enabled ? 'checked' : ''}>
+      <input id="autoscale-min" type="number" value="${min}">
+      <input id="autoscale-max" type="number" value="${max}">
+      <input type="radio" name="autoscale-target-mode" value="default" ${targetMode === 'default' ? 'checked' : ''}>
+      <input type="radio" name="autoscale-target-mode" value="custom" ${targetMode === 'custom' ? 'checked' : ''}>
+      <input id="autoscale-target" type="number" value="${target}">
+    </form>
+  `);
+  return dom.window.document;
+}
+
+test('readAutoscaleForm builds a clean payload from a valid enabled form', () => {
+  const doc = autoscaleFormDom({
+    enabled: true, min: '2', max: '8',
+    targetMode: 'custom', target: '0.75',
+  });
+  const got = readAutoscaleForm(doc);
+  // The server merges the autoscale block over the current row, so the four
+  // fields are sent atomically; "target" carries the explicit override.
+  assert.equal(got.error, null);
+  assert.deepEqual(got.payload, {
+    enabled: true, min_replicas: 2, max_replicas: 8, target: 0.75,
+  });
+});
+
+test('readAutoscaleForm sends target=0 when the operator picks the runtime default', () => {
+  // Picking "Use runtime default" is the operator saying "inherit"; the server
+  // stores 0 to mean exactly that. The radio choice must round-trip through
+  // the payload so a save after a populate is idempotent.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1', max: '4', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.error, null);
+  assert.deepEqual(got.payload, {
+    enabled: true, min_replicas: 1, max_replicas: 4, target: 0,
+  });
+});
+
+test('readAutoscaleForm allows min=0 / max<min while disabled', () => {
+  // While autoscale is disabled the bounds are persisted but do not govern
+  // the live pool. The handler still rejects values outside [0,1000], but it
+  // does not require min>=1 or max>=min - so neither does the form. Saving a
+  // disabled row preserves the last edit verbatim, including a deliberately
+  // narrow band the operator parks for a future re-enable.
+  const doc = autoscaleFormDom({
+    enabled: false, min: '0', max: '0', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.error, null);
+  assert.deepEqual(got.payload, {
+    enabled: false, min_replicas: 0, max_replicas: 0, target: 0,
+  });
+});
+
+test('readAutoscaleForm rejects min<1 when autoscale is enabled', () => {
+  const doc = autoscaleFormDom({
+    enabled: true, min: '0', max: '4', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /min.*1|at least 1/i);
+});
+
+test('readAutoscaleForm rejects max<min when autoscale is enabled', () => {
+  const doc = autoscaleFormDom({
+    enabled: true, min: '5', max: '2', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /max.*min|greater than or equal/i);
+});
+
+test('readAutoscaleForm rejects an out-of-range custom target', () => {
+  // The handler caps target at [0,1]; the form mirrors that range so the user
+  // sees a clear inline message instead of a generic 400 from the API.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1', max: '4', targetMode: 'custom', target: '1.5',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /target/i);
 });
 
