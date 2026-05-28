@@ -4,6 +4,12 @@
 // soon" placeholders.
 import { makeFleetBadge, renderFleetDigest } from '/static/views/fleet-ui.js';
 import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
+import {
+  summariseAutoscale,
+  formatRejectsByReason,
+  renderAutoscaleSummary,
+  renderRejectsByReason,
+} from '/static/views/autoscale.js';
 
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
@@ -105,7 +111,7 @@ export function mountAppDetail(ctx) {
 
     // Render the active tab.
     if (tab === 'overview') {
-      renderOverview(panels.overview, app, replicasStatus, ctx);
+      renderOverview(panels.overview, app, replicasStatus, body, ctx);
     }
     if (tab === 'logs') {
       tabCleanup = renderLogs(panels.logs, app);
@@ -280,7 +286,7 @@ async function renderDeployments(panel, app, ctx) {
   await load();
 }
 
-function renderOverview(panel, app, replicasStatus, ctx) {
+function renderOverview(panel, app, replicasStatus, envelope, ctx) {
   if (app.deploy_count === 0) {
     panel.innerHTML = `
       <section class="emptystate-card">
@@ -317,11 +323,19 @@ function renderOverview(panel, app, replicasStatus, ctx) {
         <a href="/apps/${app.slug}/deployments" data-nav>Deployment history →</a>
       </div>
     </section>
+    <section class="overview-card overview-autoscale">
+      <h3>Autoscale</h3>
+      <dl id="autoscale-summary" class="overview-dl"></dl>
+    </section>
     <section class="overview-card overview-replicas">
       <h3>Replicas <span id="overview-replicas-cap" class="overview-replicas-cap"></span></h3>
       <ul id="overview-replicas-list" class="replicas-list" aria-live="polite">
         <li class="replicas-empty">Waiting for metrics…</li>
       </ul>
+    </section>
+    <section id="overview-rejects-by-reason" class="overview-card overview-rejects" hidden>
+      <h3>Recent rejections (10 min)</h3>
+      <ul id="overview-rejects-by-reason-list" class="rejects-list" aria-live="polite"></ul>
     </section>
   `;
 
@@ -329,6 +343,21 @@ function renderOverview(panel, app, replicasStatus, ctx) {
   // panel shows index + status immediately. Sessions / CPU / RAM stay as
   // placeholders until the metrics poll fills them in.
   seedReplicasFromStatus(app, replicasStatus);
+
+  // Autoscale summary reads app.autoscale_* + envelope.effective_autoscale_target;
+  // the helper resolves the inherited-target case so the row labels are honest.
+  const autoscaleDl = document.getElementById('autoscale-summary');
+  if (autoscaleDl) {
+    renderAutoscaleSummary(autoscaleDl, summariseAutoscale(app, envelope || {}));
+  }
+
+  // Rejects-by-reason is optional in the envelope; the helpers tolerate a
+  // missing/empty rollup and hide the card so a healthy app shows nothing.
+  const rejectsSection = document.getElementById('overview-rejects-by-reason');
+  const rejectsList = document.getElementById('overview-rejects-by-reason-list');
+  if (rejectsSection && rejectsList) {
+    renderRejectsByReason(rejectsSection, rejectsList, formatRejectsByReason(envelope && envelope.rejects_by_reason));
+  }
 }
 
 function seedReplicasFromStatus(app, replicasStatus) {
