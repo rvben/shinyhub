@@ -386,6 +386,7 @@ function seedReplicasFromStatus(app, replicasStatus) {
 function renderConfiguration(panel, app, ctx) {
   ctx.setSettingsSlug(app.slug);
   ctx.populateGeneralTab(app);
+  ctx.populateAutoscaleTab(app);
   ctx.refreshEnvList(app.slug);
   ctx.loadSchedules(app.slug);
 }

@@ -734,6 +734,55 @@ func TestAutoscaleSurfaceWiring(t *testing.T) {
 		"autoscale helper must read envelope.effective_autoscale_target so the inherited fallback is honest; see internal/api/apps.go handleGetApp")
 }
 
+// TestAutoscaleEditableFormWiring pins the editable autoscale form on the
+// Configuration tab. The validator lives in views/autoscale.js
+// (readAutoscaleForm, unit-tested in jstests/autoscale.test.js); the save
+// wrapper in app.js must import it, PATCH /api/apps/:slug with the autoscale
+// block the API expects, and reset state through populateAutoscaleTab on every
+// view of the Configuration tab. If any of these wires drift, the form either
+// silently sends a malformed payload or re-renders stale values after a save.
+func TestAutoscaleEditableFormWiring(t *testing.T) {
+	// The fieldset and its inputs are what readAutoscaleForm reads by id; if
+	// any id changes here the helper falls back to an error path that hides
+	// the real cause behind a generic "must be a whole number" message.
+	assertContains(t, "index.html", `id="autoscale-options"`,
+		"index.html must expose #autoscale-options as the editable autoscale fieldset")
+	assertContains(t, "index.html", `id="autoscale-enabled"`,
+		"index.html must expose #autoscale-enabled as the autoscale enable checkbox readAutoscaleForm reads")
+	assertContains(t, "index.html", `id="autoscale-min"`,
+		"index.html must expose #autoscale-min as the min-replicas input readAutoscaleForm reads")
+	assertContains(t, "index.html", `id="autoscale-max"`,
+		"index.html must expose #autoscale-max as the max-replicas input readAutoscaleForm reads")
+	assertContains(t, "index.html", `id="autoscale-target"`,
+		"index.html must expose #autoscale-target as the custom target input readAutoscaleForm reads")
+	assertContains(t, "index.html", `name="autoscale-target-mode"`,
+		"index.html must expose name=autoscale-target-mode for the default/custom radio readAutoscaleForm reads")
+	assertContains(t, "index.html", `id="autoscale-save-btn"`,
+		"index.html must expose #autoscale-save-btn so saveAutoscaleSettings has a click target")
+
+	// app.js wires the form: it imports the pure validator, populates the
+	// fieldset on every Configuration view, and PATCHes with the autoscale
+	// block handlePatchApp accepts.
+	assertContains(t, "app.js", "/static/views/autoscale.js",
+		"app.js must import the autoscale helper module so the form validator stays in lockstep with the unit tests")
+	assertContains(t, "app.js", "readAutoscaleForm",
+		"app.js must call readAutoscaleForm so the save path runs the same validation the unit tests pin")
+	assertContains(t, "app.js", "parseReplicaBound",
+		"app.js must share parseReplicaBound with the save path so the live ceiling preview cannot show a different bound than the one being saved")
+	assertContains(t, "app.js", "function populateAutoscaleTab",
+		"app.js must define populateAutoscaleTab so the Configuration tab seeds the form from the GET envelope")
+	assertContains(t, "app.js", "saveAutoscaleSettings",
+		"app.js must define saveAutoscaleSettings so the Save button issues the PATCH")
+	assertContains(t, "app.js", `JSON.stringify({ autoscale: payload })`,
+		"app.js must PATCH the autoscale block under the 'autoscale' key handlePatchApp expects (internal/api/apps.go)")
+
+	// app-detail.js calls populate on every Configuration tab view so a save
+	// followed by a tab switch re-renders the current persisted values, not
+	// the stale form state. Without this the form drifts visibly after edits.
+	assertContains(t, "views/app-detail.js", "ctx.populateAutoscaleTab(app)",
+		"app-detail.js must populate the autoscale tab whenever Configuration is rendered")
+}
+
 // TestTracesSurfaceWiring pins the traces panel to its testable helper module.
 // app-detail.js cannot be imported under jsdom, so the rendering logic lives in
 // views/traces-ui.js (unit-tested in jstests/traces-ui.test.js) and the panel

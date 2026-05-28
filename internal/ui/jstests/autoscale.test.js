@@ -6,11 +6,17 @@ import {
   formatRejectsByReason,
   renderAutoscaleSummary,
   renderRejectsByReason,
+  readAutoscaleForm,
+  parseReplicaBound,
 } from '../static/views/autoscale.js';
 
 // summariseAutoscale normalises the {app, effective_autoscale_target} slice of
 // the GET /api/apps/:slug envelope into a flat shape ready for rendering, so
-// the view layer never has to re-derive the inherited-target fallback.
+// the view layer never has to re-derive the inherited-target fallback. It also
+// carries the live pool size (app.replicas) and a drift flag so the view can
+// call out when the live pool sits outside the configured autoscale bounds -
+// the controller will reconverge on its next tick, but the operator should see
+// the transient gap explicitly.
 test('summariseAutoscale reads the app + effective fields and flags inheritance', () => {
   const got = summariseAutoscale(
     {
@@ -18,16 +24,19 @@ test('summariseAutoscale reads the app + effective fields and flags inheritance'
       autoscale_min_replicas: 2,
       autoscale_max_replicas: 8,
       autoscale_target: 0.75,
+      replicas: 3,
     },
     { effective_autoscale_target: 0.75 },
   );
   assert.deepEqual(got, {
     enabled: true,
+    current: 3,
     min: 2,
     max: 8,
     target: 0.75,
     effectiveTarget: 0.75,
     inheritsTarget: false,
+    drift: false,
   });
 });
 
@@ -41,6 +50,7 @@ test('summariseAutoscale flags an inherited target when app.autoscale_target is 
       autoscale_min_replicas: 1,
       autoscale_max_replicas: 4,
       autoscale_target: 0,
+      replicas: 1,
     },
     { effective_autoscale_target: 0.8 },
   );
@@ -49,13 +59,64 @@ test('summariseAutoscale flags an inherited target when app.autoscale_target is 
   assert.equal(got.inheritsTarget, true);
 });
 
+test('summariseAutoscale flags drift when the live pool is above max with autoscale enabled', () => {
+  // A manual scale-out (or a lowered max while pool was higher) leaves the
+  // pool outside the band; the controller will scale down on its next tick,
+  // but the view should call this out so the operator knows what is about
+  // to happen.
+  const got = summariseAutoscale(
+    {
+      autoscale_enabled: true,
+      autoscale_min_replicas: 2,
+      autoscale_max_replicas: 4,
+      autoscale_target: 0.75,
+      replicas: 6,
+    },
+    { effective_autoscale_target: 0.75 },
+  );
+  assert.equal(got.current, 6);
+  assert.equal(got.drift, true);
+});
+
+test('summariseAutoscale flags drift when the live pool is below min with autoscale enabled', () => {
+  const got = summariseAutoscale(
+    {
+      autoscale_enabled: true,
+      autoscale_min_replicas: 3,
+      autoscale_max_replicas: 8,
+      autoscale_target: 0.75,
+      replicas: 1,
+    },
+    { effective_autoscale_target: 0.75 },
+  );
+  assert.equal(got.current, 1);
+  assert.equal(got.drift, true);
+});
+
+test('summariseAutoscale never flags drift when autoscale is disabled', () => {
+  // With autoscale disabled the min/max bounds are persisted (so a re-enable
+  // restores them) but do not govern the live pool; the operator owns the
+  // replica count directly and a "drift" call-out would be misleading.
+  const got = summariseAutoscale(
+    {
+      autoscale_enabled: false,
+      autoscale_min_replicas: 2,
+      autoscale_max_replicas: 4,
+      autoscale_target: 0,
+      replicas: 7,
+    },
+    { effective_autoscale_target: 0.8 },
+  );
+  assert.equal(got.drift, false);
+});
+
 test('summariseAutoscale tolerates missing fields with safe defaults', () => {
   // A legacy payload missing the autoscale_* keys (or a fetch error envelope)
   // must not throw; the controls then start at sensible defaults.
   const got = summariseAutoscale({}, {});
   assert.deepEqual(got, {
-    enabled: false, min: 1, max: 1, target: 0,
-    effectiveTarget: 0, inheritsTarget: true,
+    enabled: false, current: 1, min: 1, max: 1, target: 0,
+    effectiveTarget: 0, inheritsTarget: true, drift: false,
   });
 });
 
@@ -85,16 +146,16 @@ test('formatRejectsByReason sorts by count desc, then reason asc', () => {
 });
 
 // renderAutoscaleSummary populates the read-only summary block with one row per
-// fact (enabled, bounds, target). DOM refs are passed in so the helper is
-// reusable from a jsdom test without leaking globals; the same module is
-// reused by app-detail.js in production.
+// fact (enabled, replica count vs bounds, target). DOM refs are passed in so
+// the helper is reusable from a jsdom test without leaking globals; the same
+// module is reused by app-detail.js in production.
 test('renderAutoscaleSummary fills the rows and clears prior content', () => {
   const dom = new JSDOM('<dl id="autoscale-summary"><dt>stale</dt><dd>x</dd></dl>');
   const dl = dom.window.document.getElementById('autoscale-summary');
 
   renderAutoscaleSummary(dl, {
-    enabled: true, min: 2, max: 8,
-    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false,
+    enabled: true, current: 3, min: 2, max: 8,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
   });
 
   const rows = dl.querySelectorAll('dt');
@@ -103,9 +164,83 @@ test('renderAutoscaleSummary fills the rows and clears prior content', () => {
   assert.equal(dl.textContent.includes('stale'), false);
   // The summary surfaces each fact verbatim.
   assert.match(dl.textContent, /enabled/i);
+  assert.ok(dl.textContent.includes('3'), `want current pool 3 rendered: ${dl.textContent}`);
   assert.ok(dl.textContent.includes('2'));
   assert.ok(dl.textContent.includes('8'));
   assert.ok(dl.textContent.includes('0.75'));
+});
+
+test('renderAutoscaleSummary shows current pool alongside bounds when enabled', () => {
+  // With autoscale enabled the bounds govern the live pool, so the operator
+  // wants to see both ("3 / [2-8]") in a single row. The exact glyph between
+  // them doesn't matter; the test asserts that current, min, and max all
+  // co-occur on the replicas row so a refactor of the formatting does not
+  // silently drop one.
+  const dom = new JSDOM('<dl id="autoscale-summary"></dl>');
+  const dl = dom.window.document.getElementById('autoscale-summary');
+
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 3, min: 2, max: 8,
+    target: 0.5, effectiveTarget: 0.5, inheritsTarget: false, drift: false,
+  });
+
+  // Find the dd that immediately follows a dt mentioning replicas/pool.
+  let replicasDd = null;
+  for (const dt of dl.querySelectorAll('dt')) {
+    if (/replica|pool/i.test(dt.textContent)) {
+      replicasDd = dt.nextElementSibling;
+      break;
+    }
+  }
+  assert.ok(replicasDd, 'a replicas/pool row must be present when autoscale is enabled');
+  assert.match(replicasDd.textContent, /3/, `want current=3 on replicas row: ${replicasDd.textContent}`);
+  assert.match(replicasDd.textContent, /2/, `want min=2 on replicas row: ${replicasDd.textContent}`);
+  assert.match(replicasDd.textContent, /8/, `want max=8 on replicas row: ${replicasDd.textContent}`);
+});
+
+test('renderAutoscaleSummary calls out drift when the pool is outside bounds', () => {
+  // A drift call-out is the operator's hint that the controller will move the
+  // pool back into the band on its next tick. The exact phrasing is not
+  // pinned; what matters is that the word "drift" (or equivalent) appears so
+  // the row is visually distinguishable from a steady-state band.
+  const dom = new JSDOM('<dl id="autoscale-summary"></dl>');
+  const dl = dom.window.document.getElementById('autoscale-summary');
+
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 6, min: 2, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: true,
+  });
+
+  assert.match(dl.textContent, /drift|reconverge|outside/i,
+    `expected a drift call-out in: ${dl.textContent}`);
+});
+
+test('renderAutoscaleSummary shows a bare pool count when autoscale is disabled', () => {
+  // Disabled means the bounds do not govern the live pool; rendering "3 /
+  // [2-8]" would imply a relationship that does not exist. The summary
+  // should surface the count plainly and let the "Autoscale: disabled" row
+  // carry the rest of the context.
+  const dom = new JSDOM('<dl id="autoscale-summary"></dl>');
+  const dl = dom.window.document.getElementById('autoscale-summary');
+
+  renderAutoscaleSummary(dl, {
+    enabled: false, current: 3, min: 2, max: 8,
+    target: 0, effectiveTarget: 0.5, inheritsTarget: true, drift: false,
+  });
+
+  let replicasDd = null;
+  for (const dt of dl.querySelectorAll('dt')) {
+    if (/replica|pool/i.test(dt.textContent)) {
+      replicasDd = dt.nextElementSibling;
+      break;
+    }
+  }
+  assert.ok(replicasDd, 'a replicas/pool row must be present');
+  assert.match(replicasDd.textContent, /3/, 'current count must render');
+  // The bounds are not authoritative while disabled; we don't want the row
+  // to imply a band that isn't enforced.
+  assert.equal(/\[2.*8\]|2.*–.*8|2.*-.*8/.test(replicasDd.textContent), false,
+    `disabled row must not render a bounds band: ${replicasDd.textContent}`);
 });
 
 test('renderAutoscaleSummary marks the target as inherited when target == 0', () => {
@@ -113,8 +248,8 @@ test('renderAutoscaleSummary marks the target as inherited when target == 0', ()
   const dl = dom.window.document.getElementById('autoscale-summary');
 
   renderAutoscaleSummary(dl, {
-    enabled: false, min: 1, max: 4,
-    target: 0, effectiveTarget: 0.8, inheritsTarget: true,
+    enabled: false, current: 1, min: 1, max: 4,
+    target: 0, effectiveTarget: 0.8, inheritsTarget: true, drift: false,
   });
 
   // The effective value must be shown alongside an inheritance hint so the
@@ -160,5 +295,165 @@ test('renderRejectsByReason hides the container for an empty rollup', () => {
   // any stale rows) keeps the panel uncluttered for a healthy app.
   assert.equal(section.hidden, true);
   assert.equal(list.querySelectorAll('li').length, 0);
+});
+
+// readAutoscaleForm is the pure validator behind the Configuration tab's
+// autoscale fieldset. It reads enabled/min/max/target from a form-like
+// document and returns {payload, error}; payload is shaped for the PATCH
+// /api/apps/:slug autoscale block (see internal/api/apps.go handlePatchApp)
+// so the save wrapper in app.js never has to re-derive the contract. Keeping
+// validation in a pure function means the same rules run under jsdom in this
+// test and behind the production Save button.
+
+function autoscaleFormDom({
+  enabled = false,
+  min = '',
+  max = '',
+  targetMode = '',
+  target = '',
+} = {}) {
+  // Mirrors the fieldset shape in internal/ui/static/index.html so the form
+  // helper is exercised against the same selectors the production form uses.
+  const dom = new JSDOM(`
+    <form>
+      <input id="autoscale-enabled" type="checkbox" ${enabled ? 'checked' : ''}>
+      <input id="autoscale-min" type="number" value="${min}">
+      <input id="autoscale-max" type="number" value="${max}">
+      <input type="radio" name="autoscale-target-mode" value="default" ${targetMode === 'default' ? 'checked' : ''}>
+      <input type="radio" name="autoscale-target-mode" value="custom" ${targetMode === 'custom' ? 'checked' : ''}>
+      <input id="autoscale-target" type="number" value="${target}">
+    </form>
+  `);
+  return dom.window.document;
+}
+
+test('readAutoscaleForm builds a clean payload from a valid enabled form', () => {
+  const doc = autoscaleFormDom({
+    enabled: true, min: '2', max: '8',
+    targetMode: 'custom', target: '0.75',
+  });
+  const got = readAutoscaleForm(doc);
+  // The server merges the autoscale block over the current row, so the four
+  // fields are sent atomically; "target" carries the explicit override.
+  assert.equal(got.error, null);
+  assert.deepEqual(got.payload, {
+    enabled: true, min_replicas: 2, max_replicas: 8, target: 0.75,
+  });
+});
+
+test('readAutoscaleForm sends target=0 when the operator picks the runtime default', () => {
+  // Picking "Use runtime default" is the operator saying "inherit"; the server
+  // stores 0 to mean exactly that. The radio choice must round-trip through
+  // the payload so a save after a populate is idempotent.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1', max: '4', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.error, null);
+  assert.deepEqual(got.payload, {
+    enabled: true, min_replicas: 1, max_replicas: 4, target: 0,
+  });
+});
+
+test('readAutoscaleForm allows min=0 / max<min while disabled', () => {
+  // While autoscale is disabled the bounds are persisted but do not govern
+  // the live pool. The handler still rejects values outside [0,1000], but it
+  // does not require min>=1 or max>=min - so neither does the form. Saving a
+  // disabled row preserves the last edit verbatim, including a deliberately
+  // narrow band the operator parks for a future re-enable.
+  const doc = autoscaleFormDom({
+    enabled: false, min: '0', max: '0', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.error, null);
+  assert.deepEqual(got.payload, {
+    enabled: false, min_replicas: 0, max_replicas: 0, target: 0,
+  });
+});
+
+test('readAutoscaleForm rejects min<1 when autoscale is enabled', () => {
+  const doc = autoscaleFormDom({
+    enabled: true, min: '0', max: '4', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /min.*1|at least 1/i);
+});
+
+test('readAutoscaleForm rejects max<min when autoscale is enabled', () => {
+  const doc = autoscaleFormDom({
+    enabled: true, min: '5', max: '2', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /max.*min|greater than or equal/i);
+});
+
+test('readAutoscaleForm rejects an out-of-range custom target', () => {
+  // The handler caps target at [0,1]; the form mirrors that range so the user
+  // sees a clear inline message instead of a generic 400 from the API.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1', max: '4', targetMode: 'custom', target: '1.5',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /target/i);
+});
+
+test('readAutoscaleForm rejects fractional replica bounds instead of truncating', () => {
+  // <input type="number"> accepts "1.5" because step is "1" by default but
+  // user agents do not always enforce step on raw entry; parseInt would
+  // silently truncate to 1 and the operator's intent ("between 1 and 1.5")
+  // would be lost without an error. We refuse the value so the typo surfaces.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1.5', max: '4', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /whole number|integer|fraction/i);
+});
+
+// parseReplicaBound is the shared integer parser the save path and the live
+// ceiling preview both consume so the preview never shows a different bound
+// than the one Save will send. It returns the integer value when the input
+// is a valid bound in [0,1000], or null for blank/fractional/exponent-
+// truncated/out-of-range/non-numeric inputs.
+test('parseReplicaBound accepts whole numbers in [0,1000]', () => {
+  assert.equal(parseReplicaBound('0'), 0);
+  assert.equal(parseReplicaBound('1'), 1);
+  assert.equal(parseReplicaBound('1000'), 1000);
+  // Exponent notation that resolves to an integer in range is accepted at its
+  // numeric value, matching what Number() would parse and what the server-side
+  // contract would store. The save path will surface a clearer error if the
+  // value exceeds runtime.MaxReplicas; the parser does not pretend to know.
+  assert.equal(parseReplicaBound('1e2'), 100);
+  // Trims surrounding whitespace so a stray space does not invalidate the entry.
+  assert.equal(parseReplicaBound(' 4 '), 4);
+});
+
+test('parseReplicaBound returns null for blank / fractional / out-of-range / non-numeric input', () => {
+  assert.equal(parseReplicaBound(''), null);
+  assert.equal(parseReplicaBound('   '), null);
+  assert.equal(parseReplicaBound('1.5'), null);   // fractional - not a whole number
+  assert.equal(parseReplicaBound('-1'), null);    // below the [0,1000] band
+  assert.equal(parseReplicaBound('1001'), null);  // above the [0,1000] band
+  assert.equal(parseReplicaBound('abc'), null);
+  assert.equal(parseReplicaBound(null), null);
+  assert.equal(parseReplicaBound(undefined), null);
+});
+
+test('readAutoscaleForm reads exponent-notation bounds as their numeric value, not the truncated prefix', () => {
+  // parseInt("1e2", 10) returns 1 (a silent two-order-of-magnitude off-by);
+  // Number("1e2") returns 100. The form must use the latter so an operator
+  // who types "1e2" either gets the value they wrote (100) or, if that
+  // exceeds the runtime cap, sees the server's clear "must be <= N" error.
+  // The silent truncation is the bug we will not ship.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1', max: '1e2', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.error, null);
+  assert.equal(got.payload.max_replicas, 100,
+    `want max_replicas=100 from "1e2", got ${got.payload && got.payload.max_replicas}`);
 });
 

@@ -7,6 +7,7 @@ import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
+import { readAutoscaleForm, parseReplicaBound } from '/static/views/autoscale.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -1136,6 +1137,120 @@ document.addEventListener('DOMContentLoaded', () => {
     await loadApps();
   }
 
+  // populateAutoscaleTab seeds the autoscale fieldset from the GET envelope
+  // (app.autoscale_* columns and replicas) and gates editing on the same
+  // canManageApp permission the rest of the General tab uses. The fleet-managed
+  // case is not read-only here either: the fleet badge in the app-detail header
+  // already tells the operator a plan apply will revert manual edits, matching
+  // hibernate / scaling / cap which are likewise editable for managed apps.
+  function populateAutoscaleTab(app) {
+    const enabledInput = document.getElementById('autoscale-enabled');
+    const minInput = document.getElementById('autoscale-min');
+    const maxInput = document.getElementById('autoscale-max');
+    const targetInput = document.getElementById('autoscale-target');
+    const canEdit = canManageApp(state.user, app);
+
+    enabledInput.checked = !!app.autoscale_enabled;
+    minInput.value = String(app.autoscale_min_replicas ?? 1);
+    maxInput.value = String(app.autoscale_max_replicas ?? 1);
+
+    // The API stores 0 to mean "inherit"; the radio mirrors that: "default"
+    // when target == 0 (no override), "custom" otherwise. The number input is
+    // pre-filled with the explicit value so a toggle to custom does not lose it.
+    const explicitTarget = Number(app.autoscale_target) || 0;
+    const mode = explicitTarget > 0 ? 'custom' : 'default';
+    document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
+      r.checked = r.value === mode;
+    });
+    targetInput.value = explicitTarget > 0 ? explicitTarget.toFixed(2) : '';
+    targetInput.disabled = mode !== 'custom' || !canEdit;
+
+    enabledInput.disabled = !canEdit;
+    minInput.disabled = !canEdit;
+    maxInput.disabled = !canEdit;
+    document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
+      r.disabled = !canEdit;
+    });
+    document.getElementById('autoscale-save-btn').hidden = !canEdit;
+
+    setError(document.getElementById('autoscale-error'), '');
+    setHidden(document.getElementById('autoscale-status'), true);
+    updateAutoscaleCeiling();
+  }
+
+  function onAutoscaleTargetModeChange() {
+    const selected = document.querySelector('input[name="autoscale-target-mode"]:checked');
+    const targetInput = document.getElementById('autoscale-target');
+    const isCustom = selected && selected.value === 'custom';
+    targetInput.disabled = !isCustom;
+    if (isCustom && !targetInput.value) targetInput.value = '0.80';
+    if (isCustom) targetInput.focus();
+    setError(document.getElementById('autoscale-error'), '');
+    setHidden(document.getElementById('autoscale-status'), true);
+  }
+
+  function updateAutoscaleCeiling() {
+    const el = document.getElementById('autoscale-ceiling');
+    if (!el) return;
+    const enabled = document.getElementById('autoscale-enabled').checked;
+    // Share the save-path parser so the live preview and the PATCH never
+    // disagree about what value will be sent (parseInt would have truncated
+    // "1.5" or "1e2" only here, leaving the preview off by orders of
+    // magnitude until the user clicked Save).
+    const min = parseReplicaBound(document.getElementById('autoscale-min').value);
+    const max = parseReplicaBound(document.getElementById('autoscale-max').value);
+    if (!enabled) {
+      el.textContent = 'Autoscale disabled: the controller will not change the replica count.';
+      return;
+    }
+    if (min === null || max === null || min < 1 || max < min) {
+      el.textContent = '';
+      return;
+    }
+    el.innerHTML = `Controller will steer between <strong>${min}</strong> and <strong>${max}</strong> replicas.`;
+  }
+
+  async function saveAutoscaleSettings() {
+    if (!settingsSlug) return;
+    const errEl = document.getElementById('autoscale-error');
+    const statusEl = document.getElementById('autoscale-status');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+
+    const { payload, error } = readAutoscaleForm(document);
+    if (error) {
+      setError(errEl, error);
+      return;
+    }
+
+    const btn = document.getElementById('autoscale-save-btn');
+    btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ autoscale: payload }),
+      });
+    } catch {
+      btn.disabled = false;
+      setError(errEl, 'Failed to save. Check your connection.');
+      return;
+    }
+    btn.disabled = false;
+
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to save.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      return;
+    }
+
+    statusEl.textContent = 'Saved.';
+    setHidden(statusEl, false);
+    await loadApps();
+  }
+
   function resetDangerZone() {
     const input = document.getElementById('delete-confirm');
     const btn = document.getElementById('delete-app-btn');
@@ -1590,6 +1705,15 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('scaling-save-btn').addEventListener('click', saveScalingSettings);
   document.getElementById('scaling-replicas').addEventListener('input', updateScalingCeiling);
   document.getElementById('scaling-cap').addEventListener('input', updateScalingCeiling);
+
+  // Autoscale fieldset: enable toggle, bounds inputs, target-mode radios.
+  document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
+    r.addEventListener('change', onAutoscaleTargetModeChange);
+  });
+  document.getElementById('autoscale-save-btn').addEventListener('click', saveAutoscaleSettings);
+  document.getElementById('autoscale-enabled').addEventListener('change', updateAutoscaleCeiling);
+  document.getElementById('autoscale-min').addEventListener('input', updateAutoscaleCeiling);
+  document.getElementById('autoscale-max').addEventListener('input', updateAutoscaleCeiling);
 
   // Environment tab: add button, form submit/cancel.
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));
@@ -2573,6 +2697,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateActiveNav,
     setSettingsSlug: (slug) => { settingsSlug = slug; },
     populateGeneralTab,
+    populateAutoscaleTab,
     populateAccessPanel,
     refreshEnvList,
     refreshDataTab,
