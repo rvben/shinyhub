@@ -1357,6 +1357,62 @@ func TestProxy_UndrainReplica_MissingSlotReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestProxy_AllDrainingPool_ShedsWithoutPanic guards against a nil-deref in
+// ServeHTTP when the only live backends in a pool are marked draining. The
+// path is reachable in real life during a scale-down race or a degraded pool
+// whose surviving slot is in graceful drain: poolHasAny still returns true
+// (the slot is registered), but pickReplicaLocked skips every draining
+// candidate and returns nil. The previous ServeHTTP read picked.index
+// unconditionally and panicked the proxy goroutine - so a cookie-less request
+// arriving in that window took the whole server with it instead of getting
+// a 503. The fix sheds with ReasonPoolDegraded (no fresh capacity is
+// available right now) and returns Retry-After so a polite client backs off.
+//
+// Sticky cookies for a draining slot remain routable (the existing
+// DrainReplica_StickySessionsStillRouted test pins that behaviour); this
+// test covers only the cookie-less new-session path that pickReplicaLocked
+// shed before the bug, but now nil-derefs on.
+func TestProxy_AllDrainingPool_ShedsWithoutPanic(t *testing.T) {
+	var hits atomic.Int64
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	defer b.Close()
+
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	if err := p.RegisterReplica("demo", 0, b.URL, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !p.DrainReplica("demo", 0) {
+		t.Fatal("DrainReplica returned false for a live slot")
+	}
+
+	// A cookie-less request would normally have picked slot 0 by
+	// least-connections; with the only candidate draining, ServeHTTP must
+	// shed without panicking and without forwarding to the draining backend.
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	rec := httptest.NewRecorder()
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("ServeHTTP panicked on an all-draining pool: %v (regression: picked == nil dereference in ServeHTTP)", r)
+			}
+		}()
+		p.ServeHTTP(rec, req)
+	}()
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("all-draining pool: got status %d, want 503 (ReasonPoolDegraded - no fresh capacity)", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got == "" {
+		t.Errorf("all-draining pool: missing Retry-After header; want a finite value so pollers back off politely")
+	}
+	if hits.Load() != 0 {
+		t.Errorf("draining backend received %d requests; want 0 (the slot is draining and the client carried no sticky cookie)", hits.Load())
+	}
+}
+
 // TestProxy_ReplicaSessionCounts_ReflectsInFlight verifies that
 // ReplicaSessionCounts returns -1 for empty slots and tracks live connections.
 func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {

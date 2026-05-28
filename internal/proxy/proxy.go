@@ -872,6 +872,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	picked, isStickyHit, saturated := p.pickReplicaLocked(pool, slug, r)
+	if picked == nil {
+		// poolHasAny passed (at least one slot is registered) but every live
+		// backend is marked draining: a cookie-less request has no fresh
+		// capacity to land on. Without this branch ServeHTTP would deref a
+		// nil picked.index and panic the proxy goroutine, taking the whole
+		// server with it during an otherwise routine scale-down window.
+		// Treat as ReasonPoolDegraded (the pool exists but cannot accept
+		// new sessions right now) and shed with Retry-After so a polite
+		// client retries once the drain completes and a fresh slot lands.
+		p.mu.RUnlock()
+		p.recordReject(rec, slug, ReasonPoolDegraded, true)
+		rec.Header().Set("Retry-After", "5")
+		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
+		return
+	}
 	if saturated {
 		// All live replicas are at the per-replica cap and this is a new
 		// session (no valid sticky cookie). Distinguish genuine capacity
