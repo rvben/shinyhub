@@ -44,6 +44,14 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	if app.Replicas >= max {
 		return false, nil
 	}
+	// Re-enforce the app's own autoscale ceiling under the lock. The controller
+	// clamps to this when it decides, but its decision is taken against an
+	// unlocked snapshot; re-reading the live row here closes the race where a
+	// concurrent config change lowered the cap after the decision was made, so a
+	// queued grow can never push an autoscaled pool past its configured maximum.
+	if app.AutoscaleEnabled && app.Replicas >= app.AutoscaleMaxReplicas {
+		return false, nil
+	}
 
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil || len(deployments) == 0 {
@@ -161,6 +169,15 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 		return false, nil
 	}
 	if app.Replicas <= 1 {
+		return false, nil
+	}
+	// Re-enforce the app's own autoscale floor under the lock, for the same
+	// reason ScaleUp re-checks the ceiling: the controller clamps to this when it
+	// decides, but against an unlocked snapshot. Re-reading the live row closes
+	// the race where a concurrent config change raised the minimum after the
+	// decision was made, so a queued shrink can never take an autoscaled pool
+	// below its configured minimum.
+	if app.AutoscaleEnabled && app.Replicas <= app.AutoscaleMinReplicas {
 		return false, nil
 	}
 	victim := app.Replicas - 1

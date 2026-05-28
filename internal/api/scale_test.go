@@ -296,6 +296,72 @@ func TestScaleUp_RefusesAboveMaxReplicas(t *testing.T) {
 	}
 }
 
+// TestScaleUp_RefusesAboveAutoscaleMax proves ScaleUp re-enforces the app's own
+// autoscale ceiling under the deploy lock, not just the runtime-wide ceiling. An
+// autoscale-enabled app already at its autoscale_max_replicas must be a benign
+// no-op even when the runtime ceiling is higher, so a controller decision that
+// was clamped earlier cannot add replicas past the per-app cap on a later loop
+// iteration racing against a concurrent config change.
+func TestScaleUp_RefusesAboveAutoscaleMax(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	srv, app := newScaleTestServer(t, "demo", 3, cfg)
+	if err := srv.store.SetAppAutoscale(db.SetAppAutoscaleParams{
+		AppID: app.ID, Enabled: true, MinReplicas: 1, MaxReplicas: 3, Target: 0.8,
+	}); err != nil {
+		t.Fatalf("SetAppAutoscale: %v", err)
+	}
+
+	called := false
+	srv.deployReplica = func(p deploy.Params, index int) (*deploy.Result, error) {
+		called = true
+		return &deploy.Result{Index: index}, nil
+	}
+
+	scaled, err := srv.ScaleUp("demo")
+	if err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+	if scaled {
+		t.Error("ScaleUp grew the pool past the app's autoscale_max_replicas")
+	}
+	if called {
+		t.Error("ScaleUp booted a replica despite being at the autoscale ceiling")
+	}
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 3 {
+		t.Errorf("replica count changed to %d at the autoscale ceiling; want 3", got.Replicas)
+	}
+}
+
+// TestScaleDown_RefusesBelowAutoscaleMin proves ScaleDown re-enforces the app's
+// own autoscale floor under the deploy lock, not just the absolute floor of one.
+// An autoscale-enabled app already at its autoscale_min_replicas must be a benign
+// no-op even when more than one replica remains, so a stale controller decision
+// cannot take the pool below the operator's configured minimum.
+func TestScaleDown_RefusesBelowAutoscaleMin(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	srv, app := newScaleTestServer(t, "demo", 2, cfg)
+	if err := srv.store.SetAppAutoscale(db.SetAppAutoscaleParams{
+		AppID: app.ID, Enabled: true, MinReplicas: 2, MaxReplicas: 8, Target: 0.8,
+	}); err != nil {
+		t.Fatalf("SetAppAutoscale: %v", err)
+	}
+
+	scaled, err := srv.ScaleDown("demo", 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("ScaleDown: %v", err)
+	}
+	if scaled {
+		t.Error("ScaleDown removed a replica below the app's autoscale_min_replicas")
+	}
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 2 {
+		t.Errorf("replica count changed to %d at the autoscale floor; want 2", got.Replicas)
+	}
+}
+
 // TestScaleDown_DrainsAndRemovesHighestReplica proves ScaleDown drains and
 // stops the highest-index replica, shrinks the proxy pool, deletes the replica
 // row, and decrements the app's replica count. The victim is a real native
