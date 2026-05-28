@@ -117,6 +117,30 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		return false, fmt.Errorf("scale up %s: boot replica %d: %w", slug, newIndex, err)
 	}
 
+	// rollbackStarted undoes a successful boot when a durable write afterwards
+	// fails, so a persistence error never leaves the started replica running and
+	// routable while the app row still advertises the old size (an orphaned,
+	// unmanaged backend that future autoscale decisions would misread). It stops
+	// the process and shrinks the proxy pool back to the pre-grow size; when the
+	// replica row was already written it is deleted too so no dangling row
+	// survives. Every step is best-effort and logged rather than masking the
+	// original persistence error returned to the caller.
+	rollbackStarted := func(deleteRow bool) {
+		if s.manager != nil {
+			if err := s.manager.StopReplica(slug, newIndex); err != nil && !errors.Is(err, process.ErrReplicaNotFound) {
+				slog.Error("scale up: rollback stop replica", "slug", slug, "index", newIndex, "err", err)
+			}
+		}
+		if s.proxy != nil {
+			s.proxy.SetPoolSize(slug, newIndex)
+		}
+		if deleteRow {
+			if err := s.store.DeleteReplica(app.ID, newIndex); err != nil {
+				slog.Error("scale up: rollback delete replica row", "slug", slug, "index", newIndex, "err", err)
+			}
+		}
+	}
+
 	depID := current.ID
 	pid, port := r.PID, r.Port
 	if err := s.store.UpsertReplica(db.UpsertReplicaParams{
@@ -133,13 +157,16 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		DesiredState: "running",
 		DeploymentID: &depID,
 	}); err != nil {
+		rollbackStarted(false)
 		return false, fmt.Errorf("scale up %s: upsert replica %d: %w", slug, r.Index, err)
 	}
 	if tierPlaced {
 		if err := s.store.SetAppPlacement(app.ID, app.ReplicaPlacement, total); err != nil {
+			rollbackStarted(true)
 			return false, fmt.Errorf("scale up %s: persist placement: %w", slug, err)
 		}
 	} else if err := s.store.UpdateAppReplicas(app.ID, total); err != nil {
+		rollbackStarted(true)
 		return false, fmt.Errorf("scale up %s: update replica count: %w", slug, err)
 	}
 	return true, nil

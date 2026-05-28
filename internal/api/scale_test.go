@@ -173,6 +173,57 @@ func TestScaleUp_BootsTrailingIndexAndGrowsPool(t *testing.T) {
 	}
 }
 
+// TestScaleUp_RollsBackStartedReplicaOnPersistFailure proves that when the
+// replica boots successfully but a durable write afterwards fails (a transient
+// DB error, disk-full, etc.), ScaleUp does not leave the started process running
+// and routable while the app row still advertises the old count. It must stop
+// the just-started replica and shrink the proxy pool back, so a persistence
+// failure never orphans an unmanaged backend or leaves a permanently nil
+// trailing slot the saturation signal would read as degraded.
+func TestScaleUp_RollsBackStartedReplicaOnPersistFailure(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	srv, _ := newScaleTestServer(t, "demo", 2, cfg)
+	srv.proxy.SetPoolSize("demo", 2)
+
+	var startedPID int
+	srv.deployReplica = func(p deploy.Params, index int) (*deploy.Result, error) {
+		// Simulate a real boot: start the trailing replica so the rollback has a
+		// live process to terminate (the production deployReplica starts it too).
+		info, err := srv.manager.Start(process.StartParams{
+			Slug: "demo", Index: index, Dir: t.TempDir(),
+			Command: []string{"sleep", "30"}, Port: 19800,
+		})
+		if err != nil {
+			t.Fatalf("seed started replica: %v", err)
+		}
+		startedPID = info.PID
+		// Force every subsequent durable write to fail, reproducing a transient
+		// persistence error after a successful boot.
+		srv.store.Close()
+		return &deploy.Result{
+			Index: index, PID: info.PID, Port: 19800, Provider: "native",
+			Tier: "default", EndpointURL: "http://127.0.0.1:19800",
+		}, nil
+	}
+
+	scaled, err := srv.ScaleUp("demo")
+	if err == nil {
+		t.Fatal("ScaleUp returned nil error despite the persistence failing")
+	}
+	if scaled {
+		t.Error("ScaleUp reported success despite the persistence failing")
+	}
+	// The started replica must be stopped, not left orphaned/unmanaged.
+	if err := syscall.Kill(startedPID, 0); err == nil {
+		t.Errorf("started replica (pid %d) still alive after the persist failure; want it rolled back", startedPID)
+	}
+	// The proxy pool must shrink back so the trailing slot is not left nil.
+	if got := srv.proxy.ReplicaSessionCounts("demo"); len(got) != 2 {
+		t.Errorf("proxy pool left at %d slots after rollback; want 2", len(got))
+	}
+}
+
 // TestScaleUp_TierPlaced_KeepsPlacementInSync proves that for an app using
 // explicit tier placement, ScaleUp grows the tier owning the highest index and
 // persists the updated placement, so the booted index maps to a real tier and
