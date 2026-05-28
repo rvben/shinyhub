@@ -752,10 +752,71 @@ func TestRecoverProcesses_TotalInventoryOutageLeavesUpWorkerRunning(t *testing.T
 	}
 }
 
+// TestRecoverProcesses_DownSiblingWorkerReplicaMarkedLost asserts that a replica
+// owned by an already-down worker is marked lost even when a sibling worker on
+// the same tier is up and reachable. A down worker is never queried, so it
+// appears in neither the allDown flag nor the partial-inventory unreachable set;
+// without explicit handling its replica would fall through unadopted and
+// unhealed, stranding capacity while the app still looks alive via the sibling.
+func TestRecoverProcesses_DownSiblingWorkerReplicaMarkedLost(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "sibling-app")
+
+	// node-a (the replica's owner) was persisted down before this restart;
+	// node-b is an up sibling on the same tier whose inventory query succeeds.
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-a", AdvertiseAddr: "a:8443", Tier: "remote", Status: "down",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-b", AdvertiseAddr: "b:8443", Tier: "remote", Status: "up",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	depID := int64(7)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running",
+		Provider: "remote_docker", Tier: "remote",
+		WorkerID: "node-a", DeploymentID: &depID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='sibling-app'`)
+
+	// The reachable sibling reports no container for this app (node-a's
+	// container is unreachable), and the query itself succeeds (no error).
+	remote := &fakeRemoteRuntime{items: nil, err: nil}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("remote", remote)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Errorf("replica status = %+v, want %q so the watcher re-places a down worker's slot", reps, db.ReplicaStatusLost)
+	}
+	if len(reps) == 1 && (reps[0].Tier != "remote" || reps[0].WorkerID != "node-a") {
+		t.Errorf("lost replica tier/worker = %q/%q, want %q/%q preserved for healing",
+			reps[0].Tier, reps[0].WorkerID, "remote", "node-a")
+	}
+}
+
 func TestRecoverProcesses_RemoteStaleDeploymentNotAdopted(t *testing.T) {
 	store := mustOpenStore(t)
 	prx := proxy.New()
 	app := mustCreateApp(t, store, "stale-app")
+
+	// The owning worker is up and reachable (it is the one reporting the
+	// inventory); only the container it reports is from a superseded deployment.
+	// An up owner must not be force-lost by recovery, so this isolates the test
+	// to deployment staleness rather than worker liveness.
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-a", AdvertiseAddr: "a:8443", Tier: "remote", Status: "up",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	depID := int64(8) // current deployment is 8
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
