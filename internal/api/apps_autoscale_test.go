@@ -112,6 +112,38 @@ func TestPatchApp_AutoscaleRejectsTargetOutOfRange(t *testing.T) {
 	}
 }
 
+func TestPatchApp_AutoscaleRejectsNegativeMinWhenDisabled(t *testing.T) {
+	// Bounds are persisted even while disabled (so a re-enable restores the
+	// operator's last choice), so they must satisfy the stored DB range
+	// regardless of the enabled flag. A negative min would otherwise pass this
+	// handler and only fail the column CHECK, returning a 500 after sibling
+	// fields in the same PATCH were already committed.
+	srv, store := newAutoscaleTestServer(t, 16, 0.8)
+	_, token := seedAutoscaleApp(t, store)
+	body := []byte(`{"name":"Renamed","autoscale":{"min_replicas":-1}}`)
+	rec := patchAutoscale(t, srv, token, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for negative min while disabled, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// The bad autoscale field must abort the whole PATCH: the sibling name change
+	// must not have been persisted before the validation failed.
+	app, _ := store.GetAppBySlug("myapp")
+	if app.Name != "My App" {
+		t.Fatalf("sibling name change persisted despite invalid autoscale bounds: %q", app.Name)
+	}
+}
+
+func TestPatchApp_AutoscaleRejectsBoundsAboveDBLimitWhenDisabled(t *testing.T) {
+	// The stored columns cap at 1000; a value above that must be rejected with a
+	// 400 here rather than failing the DB CHECK mid-update.
+	srv, store := newAutoscaleTestServer(t, 16, 0.8)
+	_, token := seedAutoscaleApp(t, store)
+	body := []byte(`{"autoscale":{"max_replicas":1001}}`)
+	if rec := patchAutoscale(t, srv, token, body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for max above the stored limit while disabled, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestPatchApp_DisableAutoscaleClearsEnabled(t *testing.T) {
 	srv, store := newAutoscaleTestServer(t, 16, 0.8)
 	_, token := seedAutoscaleApp(t, store)

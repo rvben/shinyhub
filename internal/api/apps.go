@@ -24,6 +24,12 @@ import (
 	"github.com/rvben/shinyhub/internal/storage"
 )
 
+// maxStoredReplicas mirrors the CHECK on the autoscale_min_replicas /
+// autoscale_max_replicas columns (migration 023). The handler validates against
+// it so an out-of-range bound is rejected with a 400 rather than failing the DB
+// constraint mid-PATCH after sibling fields were already committed.
+const maxStoredReplicas = 1000
+
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
@@ -430,6 +436,21 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		// out of range; 0 means "inherit the runtime default".
 		if autoTarget < 0 || autoTarget > 1 {
 			writeError(w, http.StatusBadRequest, "autoscale.target must be in [0,1] (0 inherits the runtime default)")
+			return
+		}
+		// Bounds are persisted even while disabled (so a re-enable restores the
+		// operator's last choice), so they must satisfy the stored column range
+		// regardless of the enabled flag. Without this a value outside [0,1000]
+		// would pass the handler and only fail the DB CHECK, returning a 500 after
+		// sibling fields in the same PATCH were already committed.
+		if autoMin < 0 || autoMin > maxStoredReplicas {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("autoscale.min_replicas must be between 0 and %d", maxStoredReplicas))
+			return
+		}
+		if autoMax < 0 || autoMax > maxStoredReplicas {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("autoscale.max_replicas must be between 0 and %d", maxStoredReplicas))
 			return
 		}
 		if autoEnabled {
