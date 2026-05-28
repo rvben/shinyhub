@@ -745,6 +745,8 @@ func TestAutoscaleEditableFormWiring(t *testing.T) {
 		"app.js must import the autoscale helper module so the form validator stays in lockstep with the unit tests")
 	assertContains(t, "app.js", "readAutoscaleForm",
 		"app.js must call readAutoscaleForm so the save path runs the same validation the unit tests pin")
+	assertContains(t, "app.js", "parseReplicaBound",
+		"app.js must share parseReplicaBound with the save path so the live ceiling preview cannot show a different bound than the one being saved")
 	assertContains(t, "app.js", "function populateAutoscaleTab",
 		"app.js must define populateAutoscaleTab so the Configuration tab seeds the form from the GET envelope")
 	assertContains(t, "app.js", "saveAutoscaleSettings",

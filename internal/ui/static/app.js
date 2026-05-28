@@ -7,7 +7,7 @@ import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
-import { readAutoscaleForm } from '/static/views/autoscale.js';
+import { readAutoscaleForm, parseReplicaBound } from '/static/views/autoscale.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -1193,13 +1193,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const el = document.getElementById('autoscale-ceiling');
     if (!el) return;
     const enabled = document.getElementById('autoscale-enabled').checked;
-    const min = parseInt(document.getElementById('autoscale-min').value, 10);
-    const max = parseInt(document.getElementById('autoscale-max').value, 10);
+    // Share the save-path parser so the live preview and the PATCH never
+    // disagree about what value will be sent (parseInt would have truncated
+    // "1.5" or "1e2" only here, leaving the preview off by orders of
+    // magnitude until the user clicked Save).
+    const min = parseReplicaBound(document.getElementById('autoscale-min').value);
+    const max = parseReplicaBound(document.getElementById('autoscale-max').value);
     if (!enabled) {
       el.textContent = 'Autoscale disabled: the controller will not change the replica count.';
       return;
     }
-    if (!Number.isFinite(min) || !Number.isFinite(max) || min < 1 || max < min) {
+    if (min === null || max === null || min < 1 || max < min) {
       el.textContent = '';
       return;
     }

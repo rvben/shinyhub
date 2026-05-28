@@ -134,20 +134,31 @@ function formatTarget(n) {
 //
 // so a clearly worded inline error appears before the PATCH lands instead of
 // a generic 400 surfacing the server-side message.
+// parseReplicaBound is the shared min/max integer parser used by both the
+// save path (readAutoscaleForm) and the live ceiling preview in app.js. The
+// preview and save MUST agree on what value will be sent, so they go through
+// the same gate: a value is a valid bound when it is a whole number in
+// [0,1000]. parseInt silently truncates "1.5" to 1 and "1e2" to 1, both of
+// which were real bugs Codex caught; Number() + Number.isInteger refuses the
+// first and reads the second at face value so the operator either sees the
+// numeric value they wrote or a clear "must be a whole number" rejection.
+export function parseReplicaBound(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (s === '') return null;
+  const n = Number(s);
+  if (!Number.isInteger(n) || n < 0 || n > 1000) return null;
+  return n;
+}
+
 export function readAutoscaleForm(doc) {
   const enabled = !!doc.getElementById('autoscale-enabled').checked;
-  const minRaw = doc.getElementById('autoscale-min').value.trim();
-  const maxRaw = doc.getElementById('autoscale-max').value.trim();
-  // Strict integer parse: parseInt would silently truncate "1.5" to 1 and
-  // "1e2" to 1, sending a different bound than the operator typed. Number()
-  // + Number.isInteger refuses both, so the user sees the typo instead of a
-  // surprise off-by-orders-of-magnitude rollout.
-  const min = Number(minRaw);
-  const max = Number(maxRaw);
-  if (minRaw === '' || !Number.isInteger(min) || min < 0 || min > 1000) {
+  const min = parseReplicaBound(doc.getElementById('autoscale-min').value);
+  const max = parseReplicaBound(doc.getElementById('autoscale-max').value);
+  if (min === null) {
     return { payload: null, error: 'Min replicas must be a whole number between 0 and 1000.' };
   }
-  if (maxRaw === '' || !Number.isInteger(max) || max < 0 || max > 1000) {
+  if (max === null) {
     return { payload: null, error: 'Max replicas must be a whole number between 0 and 1000.' };
   }
   if (enabled) {

@@ -7,6 +7,7 @@ import {
   renderAutoscaleSummary,
   renderRejectsByReason,
   readAutoscaleForm,
+  parseReplicaBound,
 } from '../static/views/autoscale.js';
 
 // summariseAutoscale normalises the {app, effective_autoscale_target} slice of
@@ -410,6 +411,35 @@ test('readAutoscaleForm rejects fractional replica bounds instead of truncating'
   const got = readAutoscaleForm(doc);
   assert.equal(got.payload, null);
   assert.match(got.error, /whole number|integer|fraction/i);
+});
+
+// parseReplicaBound is the shared integer parser the save path and the live
+// ceiling preview both consume so the preview never shows a different bound
+// than the one Save will send. It returns the integer value when the input
+// is a valid bound in [0,1000], or null for blank/fractional/exponent-
+// truncated/out-of-range/non-numeric inputs.
+test('parseReplicaBound accepts whole numbers in [0,1000]', () => {
+  assert.equal(parseReplicaBound('0'), 0);
+  assert.equal(parseReplicaBound('1'), 1);
+  assert.equal(parseReplicaBound('1000'), 1000);
+  // Exponent notation that resolves to an integer in range is accepted at its
+  // numeric value, matching what Number() would parse and what the server-side
+  // contract would store. The save path will surface a clearer error if the
+  // value exceeds runtime.MaxReplicas; the parser does not pretend to know.
+  assert.equal(parseReplicaBound('1e2'), 100);
+  // Trims surrounding whitespace so a stray space does not invalidate the entry.
+  assert.equal(parseReplicaBound(' 4 '), 4);
+});
+
+test('parseReplicaBound returns null for blank / fractional / out-of-range / non-numeric input', () => {
+  assert.equal(parseReplicaBound(''), null);
+  assert.equal(parseReplicaBound('   '), null);
+  assert.equal(parseReplicaBound('1.5'), null);   // fractional - not a whole number
+  assert.equal(parseReplicaBound('-1'), null);    // below the [0,1000] band
+  assert.equal(parseReplicaBound('1001'), null);  // above the [0,1000] band
+  assert.equal(parseReplicaBound('abc'), null);
+  assert.equal(parseReplicaBound(null), null);
+  assert.equal(parseReplicaBound(undefined), null);
 });
 
 test('readAutoscaleForm reads exponent-notation bounds as their numeric value, not the truncated prefix', () => {
