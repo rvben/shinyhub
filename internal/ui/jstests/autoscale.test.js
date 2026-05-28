@@ -399,3 +399,31 @@ test('readAutoscaleForm rejects an out-of-range custom target', () => {
   assert.match(got.error, /target/i);
 });
 
+test('readAutoscaleForm rejects fractional replica bounds instead of truncating', () => {
+  // <input type="number"> accepts "1.5" because step is "1" by default but
+  // user agents do not always enforce step on raw entry; parseInt would
+  // silently truncate to 1 and the operator's intent ("between 1 and 1.5")
+  // would be lost without an error. We refuse the value so the typo surfaces.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1.5', max: '4', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.payload, null);
+  assert.match(got.error, /whole number|integer|fraction/i);
+});
+
+test('readAutoscaleForm reads exponent-notation bounds as their numeric value, not the truncated prefix', () => {
+  // parseInt("1e2", 10) returns 1 (a silent two-order-of-magnitude off-by);
+  // Number("1e2") returns 100. The form must use the latter so an operator
+  // who types "1e2" either gets the value they wrote (100) or, if that
+  // exceeds the runtime cap, sees the server's clear "must be <= N" error.
+  // The silent truncation is the bug we will not ship.
+  const doc = autoscaleFormDom({
+    enabled: true, min: '1', max: '1e2', targetMode: 'default',
+  });
+  const got = readAutoscaleForm(doc);
+  assert.equal(got.error, null);
+  assert.equal(got.payload.max_replicas, 100,
+    `want max_replicas=100 from "1e2", got ${got.payload && got.payload.max_replicas}`);
+});
+

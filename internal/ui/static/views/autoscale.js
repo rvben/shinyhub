@@ -138,12 +138,16 @@ export function readAutoscaleForm(doc) {
   const enabled = !!doc.getElementById('autoscale-enabled').checked;
   const minRaw = doc.getElementById('autoscale-min').value.trim();
   const maxRaw = doc.getElementById('autoscale-max').value.trim();
-  const min = parseInt(minRaw, 10);
-  const max = parseInt(maxRaw, 10);
-  if (!Number.isFinite(min) || min < 0 || min > 1000) {
+  // Strict integer parse: parseInt would silently truncate "1.5" to 1 and
+  // "1e2" to 1, sending a different bound than the operator typed. Number()
+  // + Number.isInteger refuses both, so the user sees the typo instead of a
+  // surprise off-by-orders-of-magnitude rollout.
+  const min = Number(minRaw);
+  const max = Number(maxRaw);
+  if (minRaw === '' || !Number.isInteger(min) || min < 0 || min > 1000) {
     return { payload: null, error: 'Min replicas must be a whole number between 0 and 1000.' };
   }
-  if (!Number.isFinite(max) || max < 0 || max > 1000) {
+  if (maxRaw === '' || !Number.isInteger(max) || max < 0 || max > 1000) {
     return { payload: null, error: 'Max replicas must be a whole number between 0 and 1000.' };
   }
   if (enabled) {
