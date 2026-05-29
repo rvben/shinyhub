@@ -32,6 +32,7 @@ package fargate
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -307,12 +308,17 @@ func (r *Runtime) tags(p process.StartParams) []ecstypes.Tag {
 }
 
 func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
+	if p.Slug == "" {
+		r.log.Warn("fargate: runTaskInput called with empty slug; ClientToken will not be slug-scoped")
+	}
+	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix())
 	return &ecs.RunTaskInput{
 		Cluster:        aws.String(r.cfg.Cluster),
 		TaskDefinition: aws.String(r.cfg.TaskDefinition),
 		LaunchType:     ecstypes.LaunchTypeFargate,
 		Count:          aws.Int32(1),
 		StartedBy:      aws.String(startedBy),
+		ClientToken:    aws.String(ct),
 		// The explicit Tags below are the sole source of truth for reconciliation.
 		// EnableECSManagedTags adds the cluster's aws:-prefixed managed tags, which
 		// never collide with our shinyhub.* keys. Task-definition tag propagation is
@@ -730,6 +736,35 @@ func optString(s string) *string {
 		return nil
 	}
 	return aws.String(s)
+}
+
+// clientToken derives a stable ECS RunTask ClientToken from the replica's
+// identity and a coarse time bucket. ECS deduplicates RunTask calls with the
+// same ClientToken within a 10-minute window: a control-plane retry during that
+// window returns the already-running task instead of launching a duplicate.
+// The time bucket (unix seconds / 600) advances every 10 minutes, so a
+// deliberate re-launch after a STOPPED task in the prior window still works.
+//
+// Formula: SHA-256(cluster + "|" + slug + "|" + index + "|" + deploymentID + "|" + bucket)
+// truncated to 64 hex characters (ECS ClientToken max length is 64 chars).
+// When deploymentID is 0 (legacy/pre-deploy rows) the field is omitted so the
+// token still differentiates across time buckets.
+func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix int64) string {
+	bucket := strconv.FormatInt(nowUnix/600, 10)
+	var b strings.Builder
+	b.WriteString(cluster)
+	b.WriteByte('|')
+	b.WriteString(slug)
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(index))
+	b.WriteByte('|')
+	if deploymentID > 0 {
+		b.WriteString(strconv.FormatInt(deploymentID, 10))
+	}
+	b.WriteByte('|')
+	b.WriteString(bucket)
+	sum := sha256.Sum256([]byte(b.String()))
+	return fmt.Sprintf("%x", sum)[:64]
 }
 
 var (
