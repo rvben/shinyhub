@@ -70,7 +70,11 @@ const (
 	tagDeploymentID = "shinyhub.deployment_id"
 	tagTier         = "shinyhub.tier"
 	tagAppVersion   = "shinyhub.app_version"
-	tagManagedBy    = "shinyhub.managed_by"
+	// tagManaged marks every task launched by this control plane so operators
+	// can filter ShinyHub-managed tasks in the ECS console by tag value.
+	// Recovery and sweep filter by StartedBy="shinyhub" (not this tag), so
+	// tasks started before this rename are still swept correctly.
+	tagManaged = "shinyhub.managed"
 	// tagPort records the port the app binds inside the task so recovery can
 	// rebuild the full route URL (http://<eni-ip>:<port>) from the task alone.
 	// Start has the port directly; Inventory recovers it only from this tag.
@@ -342,7 +346,7 @@ func containerOverride(name string, p process.StartParams) ecstypes.ContainerOve
 
 func (r *Runtime) tags(p process.StartParams) []ecstypes.Tag {
 	tags := []ecstypes.Tag{
-		{Key: aws.String(tagManagedBy), Value: aws.String(startedBy)},
+		{Key: aws.String(tagManaged), Value: aws.String("true")},
 		{Key: aws.String(tagSlug), Value: aws.String(p.Slug)},
 		{Key: aws.String(tagReplicaIndex), Value: aws.String(strconv.Itoa(p.Index))},
 		{Key: aws.String(tagTier), Value: aws.String(p.Tier)},

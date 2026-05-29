@@ -1625,3 +1625,33 @@ func TestRunTaskReceivesClientToken(t *testing.T) {
 		t.Errorf("RunTask ClientToken length = %d, want 64", len(ct))
 	}
 }
+
+func TestTagsManagedIsTrue(t *testing.T) {
+	// Tags on a Fargate task must include shinyhub.managed=true to align with
+	// Docker's label convention (shinyhub.managed=true). The key must NOT be
+	// shinyhub.managed_by (the old value before this fix).
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.1", "RUNNING")}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	if _, err := r.Start(context.Background(), startParams(), io.Discard); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(f.runInputs) == 0 {
+		t.Fatal("RunTask not called")
+	}
+	tags := map[string]string{}
+	for _, tg := range f.runInputs[0].Tags {
+		tags[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
+	}
+	// New: key must be "shinyhub.managed", value must be "true".
+	if v, ok := tags["shinyhub.managed"]; !ok || v != "true" {
+		t.Errorf("tags[shinyhub.managed] = %q (ok=%v), want \"true\"", v, ok)
+	}
+	// Old key must NOT be present.
+	if _, ok := tags["shinyhub.managed_by"]; ok {
+		t.Errorf("tags[shinyhub.managed_by] is present; old key must be removed")
+	}
+}
