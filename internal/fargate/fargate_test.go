@@ -1627,12 +1627,11 @@ func TestRunTaskReceivesClientToken(t *testing.T) {
 }
 
 func TestTagsManagedIsTrue(t *testing.T) {
-	// Tags on a Fargate task must include shinyhub.managed=true to align with
-	// Docker's label convention (shinyhub.managed=true). The key must NOT be
-	// shinyhub.managed_by (the old value before this fix).
+	// Tags use shinyhub.managed (matching the Docker runtime's label key) so
+	// lifecycle code can filter by a single known key.
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.1", "RUNNING")}}, nil
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.1", "RUNNING")}}, nil
 		},
 	}
 	r := fastRuntime(f)
@@ -1646,12 +1645,12 @@ func TestTagsManagedIsTrue(t *testing.T) {
 	for _, tg := range f.runInputs[0].Tags {
 		tags[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
 	}
-	// New: key must be "shinyhub.managed", value must be "true".
+	// Key must be "shinyhub.managed" with value "true".
 	if v, ok := tags["shinyhub.managed"]; !ok || v != "true" {
 		t.Errorf("tags[shinyhub.managed] = %q (ok=%v), want \"true\"", v, ok)
 	}
-	// Old key must NOT be present.
+	// The key "shinyhub.managed_by" must not appear; shinyhub.managed is the canonical key.
 	if _, ok := tags["shinyhub.managed_by"]; ok {
-		t.Errorf("tags[shinyhub.managed_by] is present; old key must be removed")
+		t.Errorf("tags[shinyhub.managed_by] is present; shinyhub.managed is the canonical key")
 	}
 }

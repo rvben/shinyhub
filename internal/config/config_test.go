@@ -1423,4 +1423,21 @@ func TestApplyEnvNumericErrorsAreFatal(t *testing.T) {
 			}
 		})
 	}
+
+	// SHINYHUB_RUNTIME_DEFAULT_REPLICAS intentionally ignores n<=0 values (the
+	// n>0 guard keeps the compiled default of 1). A valid integer that fails the
+	// guard must not be an error; Load must succeed and the field must keep its
+	// compiled default.
+	t.Run("default replicas zero uses compiled default", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		t.Setenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS", "0")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load with SHINYHUB_RUNTIME_DEFAULT_REPLICAS=0: expected success, got %v", err)
+		}
+		// The compiled default is 1; zero is parsed but silently ignored by the n>0 guard.
+		if cfg.Runtime.DefaultReplicas != 1 {
+			t.Errorf("DefaultReplicas = %d, want 1 (compiled default when env value fails the n>0 guard)", cfg.Runtime.DefaultReplicas)
+		}
+	})
 }

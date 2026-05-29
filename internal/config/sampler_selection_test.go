@@ -39,10 +39,12 @@ runtime:
 		if mode != "docker" {
 			t.Errorf("RuntimeForTier(%q) = %q, want docker", defaultTier, mode)
 		}
-		// Sampler selection must use mode, not cfg.Runtime.Mode.
-		// cfg.Runtime.Mode is the legacy field; it defaults to "native" here.
-		if cfg.Runtime.Mode == "docker" {
-			t.Errorf("cfg.Runtime.Mode = %q; sampler selection bug: comparing Mode would be wrong when tiers override it", cfg.Runtime.Mode)
+		// The two fields must diverge: RuntimeForTier returns "docker" while
+		// cfg.Runtime.Mode does not. This is exactly the condition that proves
+		// reading the legacy Mode field would select the wrong sampler for this
+		// config.
+		if cfg.Runtime.Mode == mode {
+			t.Errorf("cfg.Runtime.Mode = %q equals the resolved mode; fields no longer diverge, so the test no longer guards the sampler-selection bug", cfg.Runtime.Mode)
 		}
 	})
 
@@ -72,11 +74,11 @@ runtime:
 		if mode != "fargate" {
 			t.Errorf("mode = %q, want fargate", mode)
 		}
-		// Fargate default tier must NOT pick the docker RuntimeSampler;
-		// it must pick hostSampler (which reports zero for PID-less handles).
-		// This assertion guards the sampler-selection logic in main.go.
-		if cfg.Runtime.Mode == "docker" {
-			t.Errorf("cfg.Runtime.Mode = %q; fargate tier would get docker sampler if main.go reads Mode", cfg.Runtime.Mode)
+		// cfg.Runtime.Mode must not equal the resolved mode: the legacy field
+		// does not reflect the tier's runtime, so sampler selection must read
+		// the resolved mode, not cfg.Runtime.Mode.
+		if cfg.Runtime.Mode == mode {
+			t.Errorf("cfg.Runtime.Mode = %q equals the resolved mode; fields no longer diverge, so the test no longer guards the sampler-selection bug", cfg.Runtime.Mode)
 		}
 	})
 }
