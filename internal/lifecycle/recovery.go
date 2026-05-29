@@ -15,6 +15,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/fargate"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -292,6 +293,12 @@ func markReplicaLostPreservingIdentity(store *db.Store, app *db.App, r *db.Repli
 func workerDeclaredGone(store *db.Store, workerID string) bool {
 	if workerID == "" {
 		return true
+	}
+	// Fargate replicas use a synthetic constant worker identity (fargate.WorkerID)
+	// that never corresponds to a DB worker row. Treat it as never-gone so ECS
+	// inventory blips do not permanently strand Fargate replicas.
+	if workerID == fargate.WorkerID {
+		return false
 	}
 	w, err := store.GetWorker(workerID)
 	if err != nil {
