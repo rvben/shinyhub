@@ -3,6 +3,7 @@ package fargate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"syscall"
@@ -742,6 +743,129 @@ func TestInventoryPaginatesListTasks(t *testing.T) {
 	}
 	if page != 2 {
 		t.Errorf("ListTasks called %d times, want 2", page)
+	}
+}
+
+// TestRunOnceCancelsViaDescribeError asserts that when ctx is cancelled during
+// the describeTask poll (describe returns ctx.Err), RunOnce stops the task and
+// returns a signalled exit - not an error.
+func TestRunOnceCancelsViaDescribeError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			cancel() // trigger cancellation on first describe
+			return nil, context.Canceled
+		},
+	}
+	r := fastRuntime(f)
+	info, err := r.RunOnce(ctx, startParams(), io.Discard)
+	if err != nil {
+		t.Fatalf("RunOnce on ctx cancel: unexpected error %v", err)
+	}
+	if info.Code != -1 || !info.Signaled {
+		t.Errorf("ExitInfo = %+v, want {Code:-1, Signaled:true}", info)
+	}
+	// stop() must have been called to clean up the task.
+	if len(f.stopInputs) != 1 {
+		t.Errorf("expected 1 StopTask on cancellation, got %d", len(f.stopInputs))
+	}
+}
+
+// TestRunOnceCancelsViaSleepError asserts that when ctx is cancelled during the
+// sleep between polls (sleep returns ctx.Err), RunOnce stops the task and
+// returns a signalled exit.
+func TestRunOnceCancelsViaSleepError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	polls := 0
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			polls++
+			// Return RUNNING so RunOnce sleeps between polls.
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{{
+				TaskArn:    aws.String("task-arn"),
+				LastStatus: aws.String("RUNNING"),
+			}}}, nil
+		},
+	}
+	// Use a long poll interval so sleep() will be waiting when we cancel.
+	r := New(f, testCfg(), nil, WithPollInterval(time.Hour))
+	type result struct {
+		info process.ExitInfo
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		info, err := r.RunOnce(ctx, startParams(), io.Discard)
+		done <- result{info, err}
+	}()
+	// Let at least one describe poll happen, then cancel.
+	for polls == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("RunOnce on sleep cancel: unexpected error %v", res.err)
+	}
+	if res.info.Code != -1 || !res.info.Signaled {
+		t.Errorf("ExitInfo = %+v, want {Code:-1, Signaled:true}", res.info)
+	}
+	if len(f.stopInputs) != 1 {
+		t.Errorf("expected 1 StopTask on sleep cancellation, got %d", len(f.stopInputs))
+	}
+}
+
+// TestInventoryBatches101Tasks asserts that Inventory correctly handles 101
+// tasks (splits into two DescribeTasks calls: one for 100 and one for 1).
+// A regression here would silently drop the 101st task from recovery.
+func TestInventoryBatches101Tasks(t *testing.T) {
+	// Build 101 task ARNs.
+	arns := make([]string, 101)
+	for i := range arns {
+		arns[i] = fmt.Sprintf("arn-%03d", i)
+	}
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: arns}, nil
+		},
+		describeTasksFn: func(in *ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			// Return each ARN as a task with a slug tag so it passes the slug filter.
+			tasks := make([]ecstypes.Task, len(in.Tasks))
+			for i, arn := range in.Tasks {
+				tasks[i] = ecstypes.Task{
+					TaskArn:    aws.String(arn),
+					LastStatus: aws.String("RUNNING"),
+					Containers: []ecstypes.Container{{
+						NetworkInterfaces: []ecstypes.NetworkInterface{{
+							PrivateIpv4Address: aws.String("10.0.0.1"),
+						}},
+					}},
+					Tags: []ecstypes.Tag{
+						{Key: aws.String(tagSlug), Value: aws.String("demo")},
+						{Key: aws.String(tagPort), Value: aws.String("8000")},
+					},
+				}
+			}
+			return &ecs.DescribeTasksOutput{Tasks: tasks}, nil
+		},
+	}
+	r := fastRuntime(f)
+	items, err := r.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(items) != 101 {
+		t.Errorf("Inventory returned %d items, want 101", len(items))
+	}
+	// Verify two DescribeTasks calls: one for 100, one for 1.
+	if len(f.describeInputs) != 2 {
+		t.Errorf("DescribeTasks called %d times, want 2 (batched at 100)", len(f.describeInputs))
+	}
+	if len(f.describeInputs[0].Tasks) != 100 {
+		t.Errorf("first batch = %d tasks, want 100", len(f.describeInputs[0].Tasks))
+	}
+	if len(f.describeInputs[1].Tasks) != 1 {
+		t.Errorf("second batch = %d tasks, want 1", len(f.describeInputs[1].Tasks))
 	}
 }
 
