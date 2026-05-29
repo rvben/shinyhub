@@ -1654,3 +1654,69 @@ func TestTagsManagedIsTrue(t *testing.T) {
 		t.Errorf("tags[shinyhub.managed_by] is present; shinyhub.managed is the canonical key")
 	}
 }
+
+func TestInventoryReportsPendingTaskAsRunning(t *testing.T) {
+	// A PROVISIONING/PENDING task has no IP yet but is NOT stopped.
+	// Inventory must report Running=true so recovery does not treat it as gone.
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-pending"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			task := ecstypes.Task{
+				TaskArn:    aws.String("arn-pending"),
+				LastStatus: aws.String("PROVISIONING"),
+				Tags: []ecstypes.Tag{
+					{Key: aws.String(tagSlug), Value: aws.String("demo")},
+					{Key: aws.String(tagReplicaIndex), Value: aws.String("0")},
+					{Key: aws.String(tagPort), Value: aws.String("8000")},
+				},
+			}
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{task}}, nil
+		},
+	}
+	items, err := fastRuntime(f).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	it := items[0]
+	if !it.Running {
+		t.Errorf("PROVISIONING task: Running = false, want true (not-stopped semantics)")
+	}
+	if it.URL != "" {
+		t.Errorf("PROVISIONING task: URL = %q, want empty (no IP yet)", it.URL)
+	}
+}
+
+func TestInventoryReportsStoppedTaskAsNotRunning(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-stopped"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			task := ecstypes.Task{
+				TaskArn:    aws.String("arn-stopped"),
+				LastStatus: aws.String("STOPPED"),
+				Tags: []ecstypes.Tag{
+					{Key: aws.String(tagSlug), Value: aws.String("demo")},
+					{Key: aws.String(tagReplicaIndex), Value: aws.String("0")},
+					{Key: aws.String(tagPort), Value: aws.String("8000")},
+				},
+			}
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{task}}, nil
+		},
+	}
+	items, err := fastRuntime(f).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Running {
+		t.Errorf("STOPPED task: Running = true, want false")
+	}
+}

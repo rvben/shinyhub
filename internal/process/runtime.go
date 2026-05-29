@@ -97,12 +97,22 @@ type ReplicaTransporter interface {
 // replica row to its owning worker's container, so a same-labeled container on
 // another worker is not adopted with the wrong worker's URL, handle, and
 // transport.
+//
+// Running means "not stopped": for the Fargate runtime a task in PROVISIONING,
+// PENDING, or RUNNING state is reported as Running=true. Only STOPPED tasks
+// are Running=false. This is intentional: a Fargate task that has not yet
+// acquired an IP is not yet routable, but it is NOT gone and must not trigger
+// re-placement. Consumers that need "routable now" must check URL != "" in
+// addition to Running.
 type InventoryItem struct {
 	ContainerID string
 	Labels      map[string]string
-	Running     bool
-	URL         string
-	WorkerID    string
+	// Running is true for any task not in STOPPED state (PROVISIONING, PENDING,
+	// or RUNNING). It is false only when the task has terminated. Consumers
+	// that need a routable URL must additionally check URL != "".
+	Running  bool
+	URL      string
+	WorkerID string
 }
 
 // ReplicaInventory is an optional capability for runtimes that can enumerate
