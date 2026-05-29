@@ -1526,6 +1526,28 @@ func TestSlog_InventoryLogsCount(t *testing.T) {
 	}
 }
 
+func TestNew_WarnOnRouteViaPublicIP(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	cfg := testCfg()
+	cfg.RouteViaPublicIP = true
+	cfg.AssignPublicIP = true
+	_ = New(&fakeECS{}, cfg, logger)
+	logs := buf.String()
+	if !strings.Contains(logs, "route_via_public_ip") {
+		t.Errorf("expected route_via_public_ip warning at startup, got:\n%s", logs)
+	}
+}
+
+func TestNew_NoWarnOnPrivateIPRouting(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	_ = New(&fakeECS{}, testCfg(), logger)
+	if buf.Len() > 0 {
+		t.Errorf("expected no startup warning for private-IP routing, got:\n%s", buf.String())
+	}
+}
+
 func TestSetMetrics_NilResetToNoop(t *testing.T) {
 	r := fastRuntime(&fakeECS{})
 	fm := &fakeFargateMetrics{}

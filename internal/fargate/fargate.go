@@ -211,6 +211,11 @@ func New(client ECSClient, cfg Config, log *slog.Logger, opts ...Option) *Runtim
 	for _, o := range opts {
 		o(r)
 	}
+	if r.cfg.RouteViaPublicIP {
+		r.log.Warn("fargate: route_via_public_ip is enabled - app traffic is routed over the public internet without transport security; ensure control_plane_url uses https:// so bundle tokens are not transmitted in plaintext",
+			"cluster", r.cfg.Cluster,
+		)
+	}
 	return r
 }
 
