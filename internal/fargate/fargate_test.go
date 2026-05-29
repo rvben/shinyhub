@@ -1459,17 +1459,6 @@ func TestMetrics_InventoryDescribeErrorIncremented(t *testing.T) {
 	}
 }
 
-// captureLog swaps the default slog logger for one writing JSON at Debug+ level
-// to a buffer, returning the buffer and a restore func. Used to assert log output
-// in tests without relying on slog.Default() across goroutines.
-func captureLog(t *testing.T) (*bytes.Buffer, func()) {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	return &buf, func() { slog.SetDefault(prev) }
-}
-
 func TestSlog_StartLogsRunTask(t *testing.T) {
 	f := &fakeECS{
 		runTaskFn: func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
