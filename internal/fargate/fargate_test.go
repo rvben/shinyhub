@@ -842,6 +842,27 @@ func TestTaskPrivateIPFallsBackToAttachment(t *testing.T) {
 	}
 }
 
+// TestCPURounding asserts the CPU unit conversion rounds (not truncates) so that
+// non-multiples of 100 produce the closest representable ECS value.
+func TestCPURounding(t *testing.T) {
+	cases := []struct {
+		pct  int
+		want int32
+	}{
+		{10, 102}, // (10*1024+50)/100 = 10290/100 = 102
+		{50, 512}, // (50*1024+50)/100 = 51250/100 = 512
+		{75, 768}, // (75*1024+50)/100 = 76850/100 = 768
+		{33, 338}, // (33*1024+50)/100 = 33842/100 = 338 (truncation gives 337)
+	}
+	for _, tc := range cases {
+		p := process.StartParams{CPUQuotaPercent: tc.pct}
+		ov := containerOverride("app", p)
+		if got := aws.ToInt32(ov.Cpu); got != tc.want {
+			t.Errorf("CPUQuotaPercent=%d: Cpu=%d, want %d", tc.pct, got, tc.want)
+		}
+	}
+}
+
 // TestClientTokenIsSameWithinTimeBucket asserts that two calls with the same
 // inputs but the same time bucket produce identical tokens (idempotency: a
 // control-plane retry within the 10-min ECS window re-uses the same token).

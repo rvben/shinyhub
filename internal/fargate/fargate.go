@@ -285,7 +285,11 @@ func containerOverride(name string, p process.StartParams) ecstypes.ContainerOve
 		ov.Memory = aws.Int32(int32(p.MemoryLimitMB))
 	}
 	if p.CPUQuotaPercent > 0 {
-		ov.Cpu = aws.Int32(int32(p.CPUQuotaPercent) * 1024 / 100)
+		// Round to nearest ECS CPU unit: (pct*1024 + 50) / 100.
+		// Integer truncation without rounding would cause WS4's task-ceiling
+		// clamp to misfire on non-multiples of 100 (e.g. 33% -> 337 instead
+		// of the nearest 338).
+		ov.Cpu = aws.Int32((int32(p.CPUQuotaPercent)*1024 + 50) / 100)
 	}
 	return ov
 }
