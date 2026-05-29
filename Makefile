@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e lint run dev goreleaser-check
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint run dev goreleaser-check
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -25,6 +25,16 @@ test-js:
 # lost-replica handling). Requires a working Docker daemon.
 test-remote-e2e:
 	./scripts/remote-e2e.sh
+
+# test-fargate-it runs the Fargate runtime's real-cluster smoke test (launch a
+# task, assert routing + inventory, stop it). It is gated behind the `integration`
+# build tag and skips unless SHINYHUB_FARGATE_IT_CLUSTER (and the related
+# SHINYHUB_FARGATE_IT_* vars documented in internal/fargate/integration_test.go)
+# are set. There is no open-source ECS emulator that supports the Fargate awsvpc
+# RunTask path, so this requires a real ECS cluster and AWS credentials; running
+# it launches a billed Fargate task and then stops it.
+test-fargate-it:
+	go test -tags=integration -run TestIntegration -count=1 -v ./internal/fargate/...
 
 lint:
 	go vet ./...

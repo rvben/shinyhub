@@ -315,6 +315,44 @@ type RuntimeConfig struct {
 	// controller only ever acts on apps that have opted in (per-app
 	// autoscale_enabled); these values govern how it behaves for those apps.
 	Autoscale AutoscaleConfig
+	// Fargate holds the AWS ECS/Fargate runtime settings. They are required when
+	// any tier declares runtime "fargate"; otherwise the zero value is unused.
+	Fargate FargateRuntimeConfig
+}
+
+// FargateRuntimeConfig holds the AWS ECS/Fargate runtime settings shared by every
+// tier whose runtime is "fargate". Each replica on such a tier runs as one
+// Fargate task launched from TaskDefinition, with the app command, env, and
+// resource limits applied as container overrides. The proxy routes to the task's
+// awsvpc private IP, so the control plane must run inside or peered with the
+// task's VPC.
+type FargateRuntimeConfig struct {
+	// Cluster is the ECS cluster short name or full ARN tasks run on.
+	Cluster string
+	// TaskDefinition is the family, family:revision, or full ARN of the task
+	// definition to run. It must declare a container named ContainerName.
+	TaskDefinition string
+	// ContainerName is the container within TaskDefinition that per-replica
+	// command/env/limit overrides target.
+	ContainerName string
+	// Subnets are the awsvpc subnet IDs tasks attach to (at least one required).
+	Subnets []string
+	// SecurityGroups are the awsvpc security group IDs applied to each task ENI.
+	SecurityGroups []string
+	// AssignPublicIP maps to the awsvpc assignPublicIp setting. Set it for tasks
+	// in public subnets without a NAT gateway.
+	AssignPublicIP bool
+	// PlatformVersion pins the Fargate platform version (e.g. "1.4.0"). Empty
+	// uses the ECS default.
+	PlatformVersion string
+	// Region is the AWS region the ECS client targets. Empty falls back to the
+	// SDK's default chain (AWS_REGION, profile, instance metadata).
+	Region string
+	// RouteViaPublicIP routes to each task's public IP instead of its private IP,
+	// for a control plane running outside the task VPC (development/testing only).
+	// Requires AssignPublicIP. Production runs the control plane in-VPC and routes
+	// over private IPs (default false).
+	RouteViaPublicIP bool
 }
 
 // AutoscaleConfig holds the global settings for the replica autoscale
@@ -448,9 +486,22 @@ type rawRuntimeConfig struct {
 	MaxReplicas     int                    `yaml:"max_replicas"`
 	// Pointer so an explicit 0 (documented as "unlimited") is
 	// distinguishable from the key being absent (apply the safe default).
-	DefaultMaxSessionsPerReplica *int               `yaml:"default_max_sessions_per_replica"`
-	Tiers                        []rawTierConfig    `yaml:"tiers"`
-	Autoscale                    rawAutoscaleConfig `yaml:"autoscale"`
+	DefaultMaxSessionsPerReplica *int                    `yaml:"default_max_sessions_per_replica"`
+	Tiers                        []rawTierConfig         `yaml:"tiers"`
+	Autoscale                    rawAutoscaleConfig      `yaml:"autoscale"`
+	Fargate                      rawFargateRuntimeConfig `yaml:"fargate"`
+}
+
+type rawFargateRuntimeConfig struct {
+	Cluster          string   `yaml:"cluster"`
+	TaskDefinition   string   `yaml:"task_definition"`
+	ContainerName    string   `yaml:"container_name"`
+	Subnets          []string `yaml:"subnets"`
+	SecurityGroups   []string `yaml:"security_groups"`
+	AssignPublicIP   bool     `yaml:"assign_public_ip"`
+	PlatformVersion  string   `yaml:"platform_version"`
+	Region           string   `yaml:"region"`
+	RouteViaPublicIP bool     `yaml:"route_via_public_ip"`
 }
 
 type rawAutoscaleConfig struct {
@@ -642,6 +693,7 @@ func Load(path string) (*Config, error) {
 		cfg.Runtime.Tiers = []TierConfig{{Name: "local", Runtime: cfg.Runtime.Mode}}
 	} else {
 		seen := map[string]bool{}
+		hasFargate := false
 		for _, t := range raw.Runtime.Tiers {
 			if t.Name == "" {
 				return nil, fmt.Errorf("runtime.tiers: tier name must not be empty")
@@ -655,10 +707,18 @@ func Load(path string) (*Config, error) {
 				// supported this phase
 			case "remote_docker":
 				// accepted: a remoteRuntime is registered for this tier at startup
+			case "fargate":
+				// accepted: a fargate runtime is registered for this tier at startup
+				hasFargate = true
 			default:
-				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, or remote_docker)", t.Name, t.Runtime)
+				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, remote_docker, or fargate)", t.Name, t.Runtime)
 			}
 			cfg.Runtime.Tiers = append(cfg.Runtime.Tiers, TierConfig{Name: t.Name, Runtime: t.Runtime})
+		}
+		if hasFargate {
+			if err := validateFargate(cfg.Runtime.Fargate); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := normalizeTracing(&cfg.Tracing); err != nil {
@@ -774,6 +834,18 @@ func parseBoolEnv(v string) (bool, error) {
 	}
 }
 
+// splitCSV splits a comma-separated env value into trimmed, non-empty entries.
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 	lc := LifecycleConfig{
 		WatchInterval:      15 * time.Second,
@@ -809,6 +881,28 @@ const (
 	DefaultRImage       = "rocker/r-base"
 	DefaultNetworkMode  = "bridge"
 )
+
+// validateFargate enforces the settings a fargate tier cannot run without. It is
+// only called when at least one tier declares runtime "fargate", so a config
+// with no fargate tier never needs the block populated.
+func validateFargate(f FargateRuntimeConfig) error {
+	if f.Cluster == "" {
+		return fmt.Errorf("runtime.fargate.cluster is required when a tier uses runtime \"fargate\"")
+	}
+	if f.TaskDefinition == "" {
+		return fmt.Errorf("runtime.fargate.task_definition is required when a tier uses runtime \"fargate\"")
+	}
+	if f.ContainerName == "" {
+		return fmt.Errorf("runtime.fargate.container_name is required when a tier uses runtime \"fargate\"")
+	}
+	if len(f.Subnets) == 0 {
+		return fmt.Errorf("runtime.fargate.subnets must list at least one subnet when a tier uses runtime \"fargate\"")
+	}
+	if f.RouteViaPublicIP && !f.AssignPublicIP {
+		return fmt.Errorf("runtime.fargate.route_via_public_ip requires assign_public_ip: true")
+	}
+	return nil
+}
 
 func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	rc := RuntimeConfig{
@@ -872,6 +966,18 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		rc.DefaultMaxSessionsPerReplica = 0
 	default:
 		rc.DefaultMaxSessionsPerReplica = *r.DefaultMaxSessionsPerReplica
+	}
+
+	rc.Fargate = FargateRuntimeConfig{
+		Cluster:          r.Fargate.Cluster,
+		TaskDefinition:   r.Fargate.TaskDefinition,
+		ContainerName:    r.Fargate.ContainerName,
+		Subnets:          r.Fargate.Subnets,
+		SecurityGroups:   r.Fargate.SecurityGroups,
+		AssignPublicIP:   r.Fargate.AssignPublicIP,
+		PlatformVersion:  r.Fargate.PlatformVersion,
+		Region:           r.Fargate.Region,
+		RouteViaPublicIP: r.Fargate.RouteViaPublicIP,
 	}
 
 	rc.Autoscale.Enabled = r.Autoscale.Enabled
@@ -1008,6 +1114,41 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_R"); v != "" {
 		cfg.Runtime.Docker.Images.R = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_CLUSTER"); v != "" {
+		cfg.Runtime.Fargate.Cluster = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_DEFINITION"); v != "" {
+		cfg.Runtime.Fargate.TaskDefinition = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_CONTAINER_NAME"); v != "" {
+		cfg.Runtime.Fargate.ContainerName = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_SUBNETS"); v != "" {
+		cfg.Runtime.Fargate.Subnets = splitCSV(v)
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_SECURITY_GROUPS"); v != "" {
+		cfg.Runtime.Fargate.SecurityGroups = splitCSV(v)
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_ASSIGN_PUBLIC_IP"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_ASSIGN_PUBLIC_IP: %w", err)
+		}
+		cfg.Runtime.Fargate.AssignPublicIP = b
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_PLATFORM_VERSION"); v != "" {
+		cfg.Runtime.Fargate.PlatformVersion = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_REGION"); v != "" {
+		cfg.Runtime.Fargate.Region = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_ROUTE_VIA_PUBLIC_IP"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_ROUTE_VIA_PUBLIC_IP: %w", err)
+		}
+		cfg.Runtime.Fargate.RouteViaPublicIP = b
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

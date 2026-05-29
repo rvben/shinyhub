@@ -1238,3 +1238,163 @@ func TestRuntimeTiers_RejectsDuplicateAndUnknownRuntime(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntime_Fargate_TierLoadsWithValidConfig(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:7
+    container_name: app
+    subnets: [subnet-a, subnet-b]
+    security_groups: [sg-1]
+    assign_public_ip: true
+    region: eu-west-1
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, ok := cfg.Runtime.RuntimeForTier("cloud"); !ok || got != "fargate" {
+		t.Fatalf("tier cloud runtime = %q (ok=%v), want fargate", got, ok)
+	}
+	f := cfg.Runtime.Fargate
+	if f.Cluster != "shiny-cluster" || f.TaskDefinition != "shiny-app:7" || f.ContainerName != "app" {
+		t.Errorf("fargate core fields = %+v", f)
+	}
+	if len(f.Subnets) != 2 || f.Subnets[0] != "subnet-a" {
+		t.Errorf("fargate subnets = %v", f.Subnets)
+	}
+	if len(f.SecurityGroups) != 1 || f.SecurityGroups[0] != "sg-1" {
+		t.Errorf("fargate security_groups = %v", f.SecurityGroups)
+	}
+	if !f.AssignPublicIP {
+		t.Error("fargate assign_public_ip = false, want true")
+	}
+	if f.Region != "eu-west-1" {
+		t.Errorf("fargate region = %q", f.Region)
+	}
+}
+
+func TestRuntime_Fargate_TierRejectsMissingFields(t *testing.T) {
+	cases := map[string]string{
+		"cluster": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    task_definition: shiny-app:7
+    container_name: app
+    subnets: [subnet-a]
+`,
+		"task_definition": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    container_name: app
+    subnets: [subnet-a]
+`,
+		"container_name": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:7
+    subnets: [subnet-a]
+`,
+		"subnets": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:7
+    container_name: app
+`,
+	}
+	for field, yaml := range cases {
+		t.Run(field, func(t *testing.T) {
+			_, err := config.Load(writeYAML(t, yaml))
+			if err == nil {
+				t.Fatalf("expected validation error for missing %s", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Fatalf("error %q should mention %q", err, field)
+			}
+		})
+	}
+}
+
+func TestRuntime_Fargate_NoTierDoesNotRequireConfig(t *testing.T) {
+	// A fargate config block without any fargate tier must not be validated:
+	// native/docker-only deployments leave it empty.
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: local
+      runtime: native
+`)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestRuntime_Fargate_EnvOverrides(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_CLUSTER", "env-cluster")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_SUBNETS", "subnet-x, subnet-y")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_ASSIGN_PUBLIC_IP", "true")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.Cluster != "env-cluster" {
+		t.Errorf("cluster from env = %q", cfg.Runtime.Fargate.Cluster)
+	}
+	if len(cfg.Runtime.Fargate.Subnets) != 2 || cfg.Runtime.Fargate.Subnets[1] != "subnet-y" {
+		t.Errorf("subnets from env = %v (want trimmed [subnet-x subnet-y])", cfg.Runtime.Fargate.Subnets)
+	}
+	if !cfg.Runtime.Fargate.AssignPublicIP {
+		t.Error("assign_public_ip from env = false, want true")
+	}
+}
+
+func TestRuntime_Tier_RejectsUnknownRuntimeMentionsFargate(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: kubernetes
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown tier runtime")
+	}
+	if !strings.Contains(err.Error(), "fargate") {
+		t.Fatalf("error should list fargate as an option, got %v", err)
+	}
+}
