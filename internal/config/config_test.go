@@ -1398,3 +1398,29 @@ runtime:
 		t.Fatalf("error should list fargate as an option, got %v", err)
 	}
 }
+
+func TestApplyEnvNumericErrorsAreFatal(t *testing.T) {
+	cases := []struct {
+		name   string
+		envKey string
+		badVal string
+	}{
+		{"docker default memory", "SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB", "512m"},
+		{"docker default cpu", "SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT", "50pct"},
+		{"version retention", "SHINYHUB_STORAGE_VERSION_RETENTION", "five"},
+		{"app quota", "SHINYHUB_APP_QUOTA_MB", "1G"},
+		{"max bundle mb", "SHINYHUB_MAX_BUNDLE_MB", "128mb"},
+		{"default replicas", "SHINYHUB_RUNTIME_DEFAULT_REPLICAS", "two"},
+		{"max replicas", "SHINYHUB_RUNTIME_MAX_REPLICAS", "100x"},
+		{"default max sessions", "SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA", "ten"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+			t.Setenv(tc.envKey, tc.badVal)
+			if _, err := config.Load(""); err == nil {
+				t.Errorf("Load with %s=%q: expected error for non-integer value, got nil", tc.envKey, tc.badVal)
+			}
+		})
+	}
+}

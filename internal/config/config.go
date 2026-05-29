@@ -1031,22 +1031,28 @@ func applyEnv(cfg *Config) error {
 		cfg.Storage.AppsDir = v
 	}
 	if v := os.Getenv("SHINYHUB_STORAGE_VERSION_RETENTION"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Storage.VersionRetention = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_STORAGE_VERSION_RETENTION: %q is not an integer: %w", v, err)
 		}
+		cfg.Storage.VersionRetention = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Storage.AppQuotaMB = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_APP_QUOTA_MB: %q is not an integer: %w", v, err)
 		}
+		cfg.Storage.AppQuotaMB = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_DATA_DIR"); v != "" {
 		cfg.Storage.AppDataDir = v
 	}
 	if v := os.Getenv("SHINYHUB_MAX_BUNDLE_MB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Storage.MaxBundleMB = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_MAX_BUNDLE_MB: %q is not an integer: %w", v, err)
 		}
+		cfg.Storage.MaxBundleMB = n
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
@@ -1100,14 +1106,18 @@ func applyEnv(cfg *Config) error {
 		cfg.Runtime.Docker.NetworkMode = v
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Runtime.Docker.DefaultMemoryMB = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB: %q is not an integer: %w", v, err)
 		}
+		cfg.Runtime.Docker.DefaultMemoryMB = n
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Runtime.Docker.DefaultCPUPercent = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT: %q is not an integer: %w", v, err)
 		}
+		cfg.Runtime.Docker.DefaultCPUPercent = n
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON"); v != "" {
 		cfg.Runtime.Docker.Images.Python = v
@@ -1151,17 +1161,29 @@ func applyEnv(cfg *Config) error {
 		cfg.Runtime.Fargate.RouteViaPublicIP = b
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DEFAULT_REPLICAS: %q is not an integer: %w", v, err)
+		}
+		if n > 0 {
 			cfg.Runtime.DefaultReplicas = n
 		}
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_MAX_REPLICAS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_MAX_REPLICAS: %q is not an integer: %w", v, err)
+		}
+		if n > 0 {
 			cfg.Runtime.MaxReplicas = n
 		}
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA: %q is not an integer: %w", v, err)
+		}
+		if n >= 0 {
 			cfg.Runtime.DefaultMaxSessionsPerReplica = n
 		}
 	}
