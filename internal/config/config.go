@@ -1312,6 +1312,9 @@ func applyEnv(cfg *Config) error {
 		if err != nil {
 			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL: %q is not a duration: %w", v, err)
 		}
+		if d <= 0 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL: %q must be a positive duration", v)
+		}
 		cfg.Runtime.Fargate.BundleTokenTTL = d
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS"); v != "" {

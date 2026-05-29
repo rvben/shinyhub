@@ -1910,3 +1910,30 @@ runtime:
 		t.Fatalf("error must name the env var, got: %v", err)
 	}
 }
+
+func TestFargateConfig_BundleTokenTTLEnvNegative(t *testing.T) {
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL", "-1m")
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for negative bundle_token_ttl, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL") {
+		t.Fatalf("error must name the env var, got: %v", err)
+	}
+}

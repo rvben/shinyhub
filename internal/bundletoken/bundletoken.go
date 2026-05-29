@@ -7,6 +7,10 @@
 // via secrets.DeriveKey (same HKDF helper used by the env-secrets package).
 // Token format: "v1.<exp-unix>.<base64url(HMAC-SHA256(k, "v1|<exp>|<digest>"))>"
 //
+// Digest binding is enforced via the HMAC: the digest is baked into the signed
+// message, so presenting a token for digest A against digest B will fail with
+// ErrTokenInvalidHMAC. There is no separate digest-equality check.
+//
 // A leaked token grants any holder the ability to fetch the bundle for that
 // digest within the TTL. Short TTL + https transport is the required mitigation.
 // Tokens are verified statelessly; there is no revocation.
@@ -18,7 +22,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -29,7 +32,6 @@ var (
 	ErrTokenExpired     = errors.New("bundletoken: token expired")
 	ErrTokenMalformed   = errors.New("bundletoken: malformed token")
 	ErrTokenInvalidHMAC = errors.New("bundletoken: invalid HMAC")
-	ErrDigestMismatch   = errors.New("bundletoken: digest mismatch")
 )
 
 // Mint creates a v1 capability token bound to digest, expiring at nowUnix+ttl.
@@ -67,8 +69,6 @@ func Verify(secret []byte, digest, token string, nowUnix int64) error {
 	if subtle.ConstantTimeCompare(want, got) != 1 {
 		return ErrTokenInvalidHMAC
 	}
-	// Digest is already baked into the HMAC; this line documents the invariant.
-	_ = digest
 	return nil
 }
 
@@ -79,6 +79,3 @@ func sign(key []byte, version, exp, digest string) []byte {
 	h.Write([]byte(msg))
 	return h.Sum(nil)
 }
-
-// compile-time guard: Mint must return a non-empty string.
-var _ = fmt.Sprintf
