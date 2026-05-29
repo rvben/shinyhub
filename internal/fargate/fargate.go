@@ -701,6 +701,27 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 	return items, nil
 }
 
+// ListManagedTasks returns a TaskRef for each ShinyHub-managed task on the
+// cluster (StartedBy="shinyhub"). It satisfies lifecycle.FargateTaskSweeper.
+func (r *Runtime) ListManagedTasks(ctx context.Context) ([]process.TaskRef, error) {
+	arns, err := r.listManagedTaskARNs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]process.TaskRef, len(arns))
+	for i, arn := range arns {
+		out[i] = process.TaskRef{ARN: arn}
+	}
+	return out, nil
+}
+
+// StopTask stops the Fargate task with the given ARN. It satisfies
+// lifecycle.FargateTaskSweeper; callers supply the raw task ARN (not an
+// encoded handle).
+func (r *Runtime) StopTask(ctx context.Context, arn string) error {
+	return r.stop(ctx, arn, "shinyhub: orphan sweep")
+}
+
 func (r *Runtime) listManagedTaskARNs(ctx context.Context) ([]string, error) {
 	var arns []string
 	var next *string

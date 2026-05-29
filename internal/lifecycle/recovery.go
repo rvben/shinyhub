@@ -421,6 +421,50 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 	return true
 }
 
+// FargateTaskSweeper is implemented by fargate.Runtime to support the orphan
+// sweep. It lists all ShinyHub-managed tasks on the cluster (StartedBy="shinyhub")
+// and stops individual tasks by ARN. fargate.Runtime satisfies this interface;
+// it must NOT be implemented as the Docker-label-specific ContainerSweeper.
+type FargateTaskSweeper interface {
+	ListManagedTasks(ctx context.Context) ([]process.TaskRef, error)
+	StopTask(ctx context.Context, arn string) error
+}
+
+// SweepOrphanFargateTasks stops Fargate tasks not currently owned by any live
+// replica in the Manager. It must run AFTER RecoverProcesses so tasks the
+// Manager re-adopted are protected. A nil sweeper is a no-op.
+//
+// "fargate" is the synthetic worker identity (fargate.WorkerID); tasks are
+// identified by a handle of the form "fargate/<task-arn>" in the Manager's
+// running-container-ID set.
+func SweepOrphanFargateTasks(ctx context.Context, mgr *process.Manager, sweeper FargateTaskSweeper) {
+	if sweeper == nil {
+		return
+	}
+	tasks, err := sweeper.ListManagedTasks(ctx)
+	if err != nil {
+		slog.Error("fargate sweep: list managed tasks", "err", err)
+		return
+	}
+	live := mgr.RunningContainerIDs()
+	removed := 0
+	for _, t := range tasks {
+		handle := fargate.WorkerID + "/" + t.ARN
+		if live[handle] {
+			continue
+		}
+		if err := sweeper.StopTask(ctx, t.ARN); err != nil {
+			slog.Warn("fargate sweep: stop orphan task", "arn", t.ARN, "err", err)
+			continue
+		}
+		removed++
+		slog.Info("fargate sweep: stopped orphan task", "arn", t.ARN)
+	}
+	if removed > 0 {
+		slog.Info("fargate sweep: complete", "removed", removed)
+	}
+}
+
 // ContainerSweeper is implemented by DockerRuntime so the startup sweep can
 // enumerate and delete ShinyHub-managed containers. Native runtime does not
 // implement it; callers pass nil and the sweep is skipped.

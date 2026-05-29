@@ -1655,6 +1655,45 @@ func TestTagsManagedIsTrue(t *testing.T) {
 	}
 }
 
+func TestListManagedTasksReturnsARNs(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(in *ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			if aws.ToString(in.StartedBy) != "shinyhub" {
+				t.Errorf("ListTasks StartedBy = %q, want shinyhub", aws.ToString(in.StartedBy))
+			}
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1", "arn-2"}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	tasks, err := r.ListManagedTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListManagedTasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("got %d tasks, want 2", len(tasks))
+	}
+	if tasks[0].ARN != "arn-1" || tasks[1].ARN != "arn-2" {
+		t.Errorf("ARNs = %v", tasks)
+	}
+}
+
+func TestPublicStopTaskForwardsToECS(t *testing.T) {
+	var stopped string
+	f := &fakeECS{
+		stopTaskFn: func(in *ecs.StopTaskInput) (*ecs.StopTaskOutput, error) {
+			stopped = aws.ToString(in.Task)
+			return &ecs.StopTaskOutput{}, nil
+		},
+	}
+	r := fastRuntime(f)
+	if err := r.StopTask(context.Background(), "arn-to-stop"); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+	if stopped != "arn-to-stop" {
+		t.Errorf("stopped task = %q, want arn-to-stop", stopped)
+	}
+}
+
 func TestInventoryReportsPendingTaskAsRunning(t *testing.T) {
 	// A PROVISIONING/PENDING task has no IP yet but is NOT stopped.
 	// Inventory must report Running=true so recovery does not treat it as gone.

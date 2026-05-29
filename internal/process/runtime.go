@@ -161,3 +161,12 @@ type ContainerInfo struct {
 	ID     string
 	Labels map[string]string
 }
+
+// TaskRef identifies one Fargate task returned by a FargateTaskSweeper. It
+// lives in the process package so both fargate.Runtime and lifecycle can use
+// it without an import cycle (fargate imports process; lifecycle imports both
+// fargate and process; placing TaskRef here breaks the fargate->lifecycle
+// direction that would otherwise form a cycle).
+type TaskRef struct {
+	ARN string
+}
