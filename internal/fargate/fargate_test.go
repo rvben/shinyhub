@@ -162,7 +162,7 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 				}}}, nil
 			}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
-				taskWithIP("arn:aws:ecs:eu-west-1:111122223333:task/shiny-cluster/abc123", "10.1.2.3", "RUNNING"),
+				taskWithIP("arn:aws:ecs:eu-west-1:111122223333:task/shiny-cluster/abc123", "192.0.2.1", "RUNNING"),
 			}}, nil
 		},
 	}
@@ -172,8 +172,8 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if ep.URL != "http://10.1.2.3:8000" {
-		t.Errorf("URL = %q, want http://10.1.2.3:8000", ep.URL)
+	if ep.URL != "http://192.0.2.1:8000" {
+		t.Errorf("URL = %q, want http://192.0.2.1:8000", ep.URL)
 	}
 	if ep.Provider != Provider {
 		t.Errorf("Provider = %q, want %q", ep.Provider, Provider)
@@ -286,7 +286,7 @@ func TestInventoryFallsBackToPortlessURLWithoutPortTag(t *testing.T) {
 			return &ecs.ListTasksOutput{TaskArns: []string{"arn-legacy"}}, nil
 		},
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			task := taskWithIP("arn-legacy", "10.9.9.9", "RUNNING")
+			task := taskWithIP("arn-legacy", "192.0.2.9", "RUNNING")
 			task.Tags = []ecstypes.Tag{
 				{Key: aws.String(tagSlug), Value: aws.String("demo")},
 				{Key: aws.String(tagReplicaIndex), Value: aws.String("0")},
@@ -298,8 +298,8 @@ func TestInventoryFallsBackToPortlessURLWithoutPortTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inventory: %v", err)
 	}
-	if len(items) != 1 || items[0].URL != "http://10.9.9.9" {
-		t.Fatalf("URL = %q, want portless fallback http://10.9.9.9", items[0].URL)
+	if len(items) != 1 || items[0].URL != "http://192.0.2.9" {
+		t.Fatalf("URL = %q, want portless fallback http://192.0.2.9", items[0].URL)
 	}
 }
 
@@ -330,7 +330,7 @@ func TestStartToleratesEventuallyConsistentDescribe(t *testing.T) {
 			if calls < 2 {
 				return &ecs.DescribeTasksOutput{}, nil // not visible yet
 			}
-			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.2.2.2", "RUNNING")}}, nil
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.2", "RUNNING")}}, nil
 		},
 	}
 	r := fastRuntime(f)
@@ -338,8 +338,8 @@ func TestStartToleratesEventuallyConsistentDescribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if ep.URL != "http://10.2.2.2:8000" {
-		t.Errorf("URL = %q, want http://10.2.2.2:8000", ep.URL)
+	if ep.URL != "http://192.0.2.2:8000" {
+		t.Errorf("URL = %q, want http://192.0.2.2:8000", ep.URL)
 	}
 	if len(f.stopInputs) != 0 {
 		t.Errorf("a transiently-invisible task must not be stopped; got %d StopTask calls", len(f.stopInputs))
@@ -681,7 +681,7 @@ func TestInventoryReconcilesManagedTasks(t *testing.T) {
 			if !hasTags {
 				t.Error("DescribeTasks for inventory must include TAGS")
 			}
-			running := taskWithIP("arn-running", "10.4.5.6", "RUNNING")
+			running := taskWithIP("arn-running", "192.0.2.45", "RUNNING")
 			running.Tags = []ecstypes.Tag{
 				{Key: aws.String(tagSlug), Value: aws.String("demo")},
 				{Key: aws.String(tagReplicaIndex), Value: aws.String("1")},
@@ -707,8 +707,8 @@ func TestInventoryReconcilesManagedTasks(t *testing.T) {
 	if !it.Running {
 		t.Error("Running = false, want true")
 	}
-	if it.URL != "http://10.4.5.6:8000" {
-		t.Errorf("URL = %q, want http://10.4.5.6:8000 (recovered route must keep the app port)", it.URL)
+	if it.URL != "http://192.0.2.45:8000" {
+		t.Errorf("URL = %q, want http://192.0.2.45:8000 (recovered route must keep the app port)", it.URL)
 	}
 	if it.WorkerID != WorkerID {
 		t.Errorf("WorkerID = %q, want %q", it.WorkerID, WorkerID)
@@ -1044,12 +1044,12 @@ func TestTaskPrivateIPFallsBackToAttachment(t *testing.T) {
 			Type: aws.String("ElasticNetworkInterface"),
 			Details: []ecstypes.KeyValuePair{
 				{Name: aws.String("networkInterfaceId"), Value: aws.String("eni-1")},
-				{Name: aws.String("privateIPv4Address"), Value: aws.String("172.31.0.5")},
+				{Name: aws.String("privateIPv4Address"), Value: aws.String("192.0.2.31")},
 			},
 		}},
 	}
-	if got := taskPrivateIP(task); got != "172.31.0.5" {
-		t.Errorf("taskPrivateIP = %q, want 172.31.0.5", got)
+	if got := taskPrivateIP(task); got != "192.0.2.31" {
+		t.Errorf("taskPrivateIP = %q, want 192.0.2.31", got)
 	}
 }
 
