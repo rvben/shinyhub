@@ -1477,3 +1477,52 @@ runtime:
 		t.Errorf("DefaultCPUPercent: got %d, want 50", cfg.Runtime.Fargate.DefaultCPUPercent)
 	}
 }
+
+func TestFargateConfig_NewFields_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS", "2048")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB", "4096")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB", "1024")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT", "75")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.TaskCPUUnits != 2048 {
+		t.Errorf("TaskCPUUnits from env: got %d, want 2048", cfg.Runtime.Fargate.TaskCPUUnits)
+	}
+	if cfg.Runtime.Fargate.TaskMemoryMB != 4096 {
+		t.Errorf("TaskMemoryMB from env: got %d, want 4096", cfg.Runtime.Fargate.TaskMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultMemoryMB != 1024 {
+		t.Errorf("DefaultMemoryMB from env: got %d, want 1024", cfg.Runtime.Fargate.DefaultMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultCPUPercent != 75 {
+		t.Errorf("DefaultCPUPercent from env: got %d, want 75", cfg.Runtime.Fargate.DefaultCPUPercent)
+	}
+}
+
+func TestFargateConfig_EnvBadInteger_ReturnsError(t *testing.T) {
+	cases := []struct {
+		env string
+		val string
+	}{
+		{"SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS", "not-a-number"},
+		{"SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB", "12.5"},
+		{"SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB", "abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+			t.Setenv(tc.env, tc.val)
+			_, err := config.Load("")
+			if err == nil {
+				t.Errorf("Load with %s=%q: want error, got nil", tc.env, tc.val)
+			}
+			if !strings.Contains(err.Error(), tc.env) {
+				t.Errorf("error %q does not mention env var %s", err.Error(), tc.env)
+			}
+		})
+	}
+}

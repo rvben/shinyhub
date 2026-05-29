@@ -1188,6 +1188,34 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Runtime.Fargate.RouteViaPublicIP = b
 	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.TaskCPUUnits = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.TaskMemoryMB = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.DefaultMemoryMB = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.DefaultCPUPercent = n
+	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
