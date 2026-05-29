@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -18,6 +20,8 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/hkdf"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -202,6 +206,20 @@ func buildRuntime(ctx context.Context, mode string, cfg *config.Config) (process
 	}
 }
 
+// deriveBundleTokenKey derives the 32-byte key used to mint and verify Fargate
+// bundle tokens. Key material comes from the same auth secret as all other
+// HKDF derivations, but with a distinct info string so the bundle key is
+// independent of the secrets-encryption key. Panics on failure (HKDF read of
+// 32 bytes is infallible).
+func deriveBundleTokenKey(authSecret string) []byte {
+	r := hkdf.New(sha256.New, []byte(authSecret), nil, []byte("shinyhub-fargate-bundle-v1"))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(r, key); err != nil {
+		panic(err)
+	}
+	return key
+}
+
 // buildFargateRuntime constructs the ECS/Fargate runtime from cfg.Runtime.Fargate,
 // resolving AWS credentials and region from the SDK default chain (and the
 // explicit region override when set). config.Load has already validated that the
@@ -315,6 +333,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
+	bundleTokenKey := deriveBundleTokenKey(cfg.Auth.Secret)
 
 	// readyCh is closed once HTTP listener is live. /readyz returns 503 until then.
 	readyCh := make(chan struct{})
@@ -863,6 +882,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		w.Write([]byte(`{"ready":true}`))
 	})
 	mux.Handle("/static/", ui.Handler())
+
+	// GET /internal/fargate-bundle/{digest} - streams the bundle zip to a Fargate
+	// task that presents a short-lived HMAC capability token as a bearer credential.
+	// Mounted directly on the main mux (not under /api/) so large bundle streams
+	// are not subject to apiTimeoutHandler's 30-second cap.
+	fargateBundleHandler := api.NewFargateBundleHandler(store, cfg.Storage.AppsDir, bundleTokenKey)
+	internalMux := chi.NewRouter()
+	internalMux.Get("/fargate-bundle/{digest}", fargateBundleHandler.Handle)
+	mux.Handle("/internal/", http.StripPrefix("/internal", internalMux))
 
 	registerBrandingRoutes(mux, cfg, srv, store, appUserLookup)
 

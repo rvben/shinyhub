@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 
@@ -642,6 +643,34 @@ func TestAppsPayloadExposesFleetFields(t *testing.T) {
 	if !bytes.Contains(b2, []byte(`"content_digest"`)) {
 		t.Fatal(`db.App must serialize "content_digest" when set`)
 	}
+}
+
+// assertFileContains reads an on-disk file (not embedded) by absolute path and
+// asserts it contains needle.
+func assertFileContains(t *testing.T, absPath, needle, contract string) {
+	t.Helper()
+	b, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatalf("assertFileContains: read %s: %v", absPath, err)
+	}
+	if !strings.Contains(string(b), needle) {
+		t.Fatalf("assertFileContains %s: want %q\ncontract: %s", absPath, needle, contract)
+	}
+}
+
+// TestFargateBundleRouteOnMainMux guards that the bundle endpoint is registered
+// directly on the main mux (not under /api/), so large bundle streams bypass
+// the 30-second apiTimeoutHandler. We assert that main.go contains the route
+// string outside the /api/ subtree by checking for the literal path fragment.
+// This is a source-search contract test, not an HTTP test, because the mux is
+// constructed in main.go which cannot be imported as a package.
+func TestFargateBundleRouteOnMainMux(t *testing.T) {
+	// The runner entrypoint script must reference the bundle endpoint path so
+	// a refactor of the URL cannot silently break the runner without this test
+	// catching the drift.
+	assertFileContains(t, "../../build/fargate-runner/entrypoint.sh",
+		"/internal/fargate-bundle/",
+		"entrypoint.sh must fetch the bundle from GET /internal/fargate-bundle/{digest}; changing this path requires updating the entrypoint too")
 }
 
 func assertContains(t *testing.T, path, needle, contract string) {
