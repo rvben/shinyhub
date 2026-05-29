@@ -50,3 +50,20 @@ func TestResourceDefaults_MainGoDeployFn(t *testing.T) {
 		t.Error("main.go deployFn: still contains cfg.Runtime.Docker.DefaultCPUPercent; use DefaultResourcesForTier")
 	}
 }
+
+func TestPatchApp_FargateRejection_ContractExists(t *testing.T) {
+	// Assert that handlePatchApp contains a write-time rejection for single-tier Fargate.
+	// This guards against someone silently removing the check.
+	path := filepath.Join(".", "apps.go")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read apps.go: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "DefaultTierName") {
+		t.Error("apps.go handlePatchApp: missing DefaultTierName call (write-time Fargate rejection)")
+	}
+	if !strings.Contains(src, "TaskMemoryMB") {
+		t.Error("apps.go handlePatchApp: missing TaskMemoryMB ceiling check")
+	}
+}

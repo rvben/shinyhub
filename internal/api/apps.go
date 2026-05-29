@@ -547,6 +547,38 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Write-time rejection for single-tier Fargate deployments: a per-app
+	// memory or CPU limit that exceeds the task-definition ceiling would cause
+	// a cryptic RunTask error. Reject it here when every declared tier uses the
+	// fargate runtime so the operator gets a clear message. For mixed-tier
+	// deployments (some tiers are docker/native), the RunTask clamp in
+	// fargate.buildContainerOverride handles the enforcement silently because a
+	// single ceiling answer does not exist at the API layer.
+	if s.allTiersFargate() {
+		fargateCfg := s.cfg.Runtime.Fargate
+		if setMemoryLimitMB && memoryLimitMB != nil && *memoryLimitMB > 0 &&
+			fargateCfg.TaskMemoryMB > 0 && *memoryLimitMB > fargateCfg.TaskMemoryMB {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("memory_limit_mb %d exceeds the Fargate task ceiling of %d MiB (runtime.fargate.task_memory_mb); reduce the limit or raise the task definition",
+					*memoryLimitMB, fargateCfg.TaskMemoryMB))
+			return
+		}
+		// CPU: convert quota percent to ECS units for the ceiling comparison using
+		// integer division (conservative: rejects only when the truncated units
+		// clearly exceed the ceiling; the clamp in buildContainerOverride rounds
+		// so the write-time check is never more restrictive than the actual cap).
+		if setCPUQuotaPercent && cpuQuotaPercent != nil && *cpuQuotaPercent > 0 &&
+			fargateCfg.TaskCPUUnits > 0 {
+			cpuUnits := (*cpuQuotaPercent * 1024) / 100
+			if cpuUnits > fargateCfg.TaskCPUUnits {
+				writeError(w, http.StatusBadRequest,
+					fmt.Sprintf("cpu_quota_percent %d%% (%d units) exceeds the Fargate task ceiling of %d units (runtime.fargate.task_cpu_units)",
+						*cpuQuotaPercent, cpuUnits, fargateCfg.TaskCPUUnits))
+				return
+			}
+		}
+	}
+
 	if checkAppPreconditions(w, r, app) {
 		return
 	}
@@ -1898,4 +1930,22 @@ func parsePagination(r *http.Request) (limit, offset int) {
 		}
 	}
 	return limit, offset
+}
+
+// allTiersFargate reports true when every declared runtime tier uses the
+// "fargate" runtime. Used to scope write-time resource-ceiling enforcement to
+// single-tier Fargate deployments where a single task-level ceiling applies to
+// all replicas; mixed-tier deployments are guarded at RunTask time instead.
+func (s *Server) allTiersFargate() bool {
+	tiers := s.cfg.Runtime.TierOrder()
+	if len(tiers) == 0 {
+		return false
+	}
+	for _, t := range tiers {
+		rt, _ := s.cfg.Runtime.RuntimeForTier(t)
+		if rt != "fargate" {
+			return false
+		}
+	}
+	return true
 }
