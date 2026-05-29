@@ -583,19 +583,28 @@ func (r *Runtime) RunOnce(ctx context.Context, p process.StartParams, logWriter 
 	if p.Slug == "" {
 		return process.ExitInfo{}, fmt.Errorf("fargate: RunOnce requires a non-empty slug")
 	}
+	startTime := time.Now()
 	out, err := r.client.RunTask(ctx, r.runTaskInput(p))
 	if err != nil {
+		r.metrics.RecordRunTask("error")
+		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 		return process.ExitInfo{}, fmt.Errorf("fargate: run task: %w", err)
 	}
 	if len(out.Failures) > 0 {
 		f := out.Failures[0]
+		r.metrics.RecordRunTask("error")
+		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 		return process.ExitInfo{}, fmt.Errorf("fargate: run task failed: %s: %s",
 			aws.ToString(f.Reason), aws.ToString(f.Detail))
 	}
 	if len(out.Tasks) == 0 || out.Tasks[0].TaskArn == nil {
+		r.metrics.RecordRunTask("error")
+		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 		return process.ExitInfo{}, fmt.Errorf("fargate: run task returned no task")
 	}
 	taskARN := aws.ToString(out.Tasks[0].TaskArn)
+	r.metrics.RecordRunTask("ok")
+	r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 
 	for {
 		task, err := r.describeTask(ctx, taskARN)

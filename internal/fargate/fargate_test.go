@@ -1414,6 +1414,56 @@ func TestMetrics_StopTaskError(t *testing.T) {
 	}
 }
 
+func TestMetrics_RunOnceRecordsRunTaskOk(t *testing.T) {
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{{
+				TaskArn:    aws.String("task-arn"),
+				LastStatus: aws.String("STOPPED"),
+				Containers: []ecstypes.Container{{ExitCode: aws.Int32(0)}},
+			}}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	if _, err := r.RunOnce(context.Background(), startParams(), io.Discard); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.runTaskResults) != 1 || fm.runTaskResults[0] != "ok" {
+		t.Errorf("RecordRunTask results = %v, want [ok]", fm.runTaskResults)
+	}
+	if len(fm.runTaskLatencies) != 1 || fm.runTaskLatencies[0] <= 0 {
+		t.Errorf("ObserveRunTaskLatency = %v, want one positive value", fm.runTaskLatencies)
+	}
+}
+
+func TestMetrics_RunOnceRecordsRunTaskError(t *testing.T) {
+	f := &fakeECS{
+		runTaskFn: func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
+			return nil, errors.New("iam forbidden")
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	if _, err := r.RunOnce(context.Background(), startParams(), io.Discard); err == nil {
+		t.Fatal("expected error")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.runTaskResults) != 1 || fm.runTaskResults[0] != "error" {
+		t.Errorf("RecordRunTask results = %v, want [error]", fm.runTaskResults)
+	}
+	if len(fm.runTaskLatencies) != 1 {
+		t.Errorf("ObserveRunTaskLatency calls = %d, want 1 (even on error)", len(fm.runTaskLatencies))
+	}
+}
+
 func TestMetrics_InventoryErrorIncremented(t *testing.T) {
 	f := &fakeECS{
 		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
