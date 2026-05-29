@@ -230,6 +230,8 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config) (process.Runti
 		AssignPublicIP:   fc.AssignPublicIP,
 		PlatformVersion:  fc.PlatformVersion,
 		RouteViaPublicIP: fc.RouteViaPublicIP,
+		TaskCPUUnits:     int32(fc.TaskCPUUnits),  // operator-configured task ceiling
+		TaskMemoryMB:     int32(fc.TaskMemoryMB),  // operator-configured task ceiling
 	}, slog.Default(), opts...), nil
 }
 
