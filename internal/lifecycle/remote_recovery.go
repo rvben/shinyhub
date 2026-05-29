@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/fargate"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -65,9 +66,45 @@ func recoverRemoteReplica(
 		depID = strconv.FormatInt(*r.DeploymentID, 10)
 	}
 	item := matchInventoryItem(items, app.Slug, r.Index, depID, r.WorkerID)
-	if item == nil || !item.Running || item.URL == "" {
+
+	// item == nil: no matching task in inventory; do not adopt.
+	if item == nil {
 		return false
 	}
+
+	// item.Running is false only when the task is STOPPED (see process.InventoryItem
+	// godoc). A STOPPED task is genuinely gone; do not adopt.
+	if !item.Running {
+		return false
+	}
+
+	// Phase 1: task is running but not yet routable (no URL). This is normal for
+	// Fargate tasks in PROVISIONING/PENDING state. Adopt into the Manager to claim
+	// the slot and prevent a duplicate RunTask, but skip proxy registration. A
+	// later recovery scan or the watcher will complete full adoption once the task
+	// acquires an IP. Gate strictly on fargate.WorkerID so the remote_docker path
+	// (where an empty URL is a genuine worker error) is unchanged.
+	if item.URL == "" && item.WorkerID == fargate.WorkerID {
+		mgr.Adopt(app.Slug, process.ProcessInfo{
+			Slug:        app.Slug,
+			Index:       r.Index,
+			Status:      process.StatusRunning,
+			Tier:        r.Tier,
+			Provider:    r.Provider,
+			EndpointURL: r.EndpointURL, // preserve DB value if present
+			WorkerID:    r.WorkerID,
+		}, process.RunHandle{ContainerID: r.WorkerID + "/" + item.ContainerID})
+		slog.Info("recovery: partial-adopt fargate replica (no ip yet)",
+			"slug", app.Slug, "idx", r.Index, "container", item.ContainerID)
+		return true // slot is claimed; caller sets anyAlive=true
+	}
+
+	// item.URL == "" for a non-Fargate remote runtime: genuine worker error.
+	if item.URL == "" {
+		return false
+	}
+
+	// Phase 2: full adoption with proxy registration (task is routable).
 	mgr.Adopt(app.Slug, process.ProcessInfo{
 		Slug:        app.Slug,
 		Index:       r.Index,
