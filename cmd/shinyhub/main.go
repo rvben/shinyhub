@@ -639,6 +639,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if metricsReg != nil {
 		watcher.SetMetrics(metricsReg)
 	}
+	// Wire Fargate operation metrics for every tier that uses a Fargate runtime.
+	// metricsReg satisfies fargate.FargateMetrics via the methods added to Registry.
+	if metricsReg != nil {
+		for _, tierName := range cfg.Runtime.TierOrder() {
+			tierRT := mgr.RuntimeForTier(tierName)
+			if frt, ok := tierRT.(*fargate.Runtime); ok {
+				frt.SetMetrics(metricsReg)
+			}
+		}
+	}
 	// Emit spans for background wake/restart/hibernate operations into the same
 	// provider the API server uses, so cold-start latency and restart storms are
 	// visible in the trace backend.

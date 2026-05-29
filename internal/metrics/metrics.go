@@ -27,6 +27,13 @@ type Registry struct {
 	deploys          *prometheus.CounterVec
 	stateTransitions *prometheus.CounterVec
 	replicaRestarts  prometheus.Counter
+
+	// Fargate AWS operation metrics.
+	fargateRunTaskTotal         *prometheus.CounterVec
+	fargateWaitIPTimeoutTotal   prometheus.Counter
+	fargateStopTaskTotal        *prometheus.CounterVec
+	fargateInventoryErrorsTotal prometheus.Counter
+	fargateRunTaskDuration      prometheus.Observer
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -89,6 +96,37 @@ func New(version string) *Registry {
 	})
 	reg.MustRegister(replicaRestarts)
 
+	fargateRunTaskTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_run_task_total",
+		Help: "Total ECS RunTask calls by result (ok or error).",
+	}, []string{"result"})
+	reg.MustRegister(fargateRunTaskTotal)
+
+	fargateWaitIPTimeoutTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_wait_ip_timeout_total",
+		Help: "Total Fargate tasks that did not acquire an IP within the start timeout.",
+	})
+	reg.MustRegister(fargateWaitIPTimeoutTotal)
+
+	fargateStopTaskTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_stop_task_total",
+		Help: "Total ECS StopTask calls by result (ok or error).",
+	}, []string{"result"})
+	reg.MustRegister(fargateStopTaskTotal)
+
+	fargateInventoryErrorsTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_inventory_errors_total",
+		Help: "Total errors returned by the Fargate Inventory call (ListTasks or DescribeTasks failures).",
+	})
+	reg.MustRegister(fargateInventoryErrorsTotal)
+
+	fargateRunTaskDurationVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "shinyhub_fargate_run_task_duration_seconds",
+		Help:    "Latency of ECS RunTask calls from issue to response (not including IP-wait).",
+		Buckets: []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+	}, []string{})
+	reg.MustRegister(fargateRunTaskDurationVec)
+
 	return &Registry{
 		reg:              reg,
 		httpRequests:     httpRequests,
@@ -97,6 +135,12 @@ func New(version string) *Registry {
 		deploys:          deploys,
 		stateTransitions: stateTransitions,
 		replicaRestarts:  replicaRestarts,
+
+		fargateRunTaskTotal:         fargateRunTaskTotal,
+		fargateWaitIPTimeoutTotal:   fargateWaitIPTimeoutTotal,
+		fargateStopTaskTotal:        fargateStopTaskTotal,
+		fargateInventoryErrorsTotal: fargateInventoryErrorsTotal,
+		fargateRunTaskDuration:      fargateRunTaskDurationVec.WithLabelValues(),
 	}
 }
 
@@ -141,6 +185,32 @@ func (r *Registry) Handler() http.Handler {
 // importing Prometheus. slug is the caller's cardinality-guarded key.
 func (r *Registry) RecordReject(slug, reason string) {
 	r.admissionRejects.WithLabelValues(slug, reason).Inc()
+}
+
+// RecordRunTask satisfies fargate.FargateMetrics. result is "ok" or "error".
+func (r *Registry) RecordRunTask(result string) {
+	r.fargateRunTaskTotal.WithLabelValues(result).Inc()
+}
+
+// RecordWaitIPTimeout satisfies fargate.FargateMetrics.
+func (r *Registry) RecordWaitIPTimeout() {
+	r.fargateWaitIPTimeoutTotal.Inc()
+}
+
+// RecordStopTask satisfies fargate.FargateMetrics. result is "ok" or "error".
+func (r *Registry) RecordStopTask(result string) {
+	r.fargateStopTaskTotal.WithLabelValues(result).Inc()
+}
+
+// RecordInventoryError satisfies fargate.FargateMetrics.
+func (r *Registry) RecordInventoryError() {
+	r.fargateInventoryErrorsTotal.Inc()
+}
+
+// ObserveRunTaskLatency satisfies fargate.FargateMetrics. seconds is the
+// duration from RunTask issue to response (not including IP-wait).
+func (r *Registry) ObserveRunTaskLatency(seconds float64) {
+	r.fargateRunTaskDuration.Observe(seconds)
 }
 
 // Middleware records a request count and latency observation for every request,
