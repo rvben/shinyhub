@@ -33,7 +33,7 @@ type Registry struct {
 	fargateWaitIPTimeoutTotal   prometheus.Counter
 	fargateStopTaskTotal        *prometheus.CounterVec
 	fargateInventoryErrorsTotal prometheus.Counter
-	fargateRunTaskDuration      prometheus.Observer
+	fargateRunTaskDuration      prometheus.Histogram
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -120,12 +120,12 @@ func New(version string) *Registry {
 	})
 	reg.MustRegister(fargateInventoryErrorsTotal)
 
-	fargateRunTaskDurationVec := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	fargateRunTaskDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "shinyhub_fargate_run_task_duration_seconds",
 		Help:    "Latency of ECS RunTask calls from issue to response (not including IP-wait).",
 		Buckets: []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
-	}, []string{})
-	reg.MustRegister(fargateRunTaskDurationVec)
+	})
+	reg.MustRegister(fargateRunTaskDuration)
 
 	return &Registry{
 		reg:              reg,
@@ -140,7 +140,7 @@ func New(version string) *Registry {
 		fargateWaitIPTimeoutTotal:   fargateWaitIPTimeoutTotal,
 		fargateStopTaskTotal:        fargateStopTaskTotal,
 		fargateInventoryErrorsTotal: fargateInventoryErrorsTotal,
-		fargateRunTaskDuration:      fargateRunTaskDurationVec.WithLabelValues(),
+		fargateRunTaskDuration:      fargateRunTaskDuration,
 	}
 }
 

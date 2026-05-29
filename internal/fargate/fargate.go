@@ -528,7 +528,7 @@ func (r *Runtime) Signal(handle process.RunHandle, sig syscall.Signal) error {
 }
 
 func (r *Runtime) stop(ctx context.Context, taskARN, reason string) error {
-	r.log.Info("fargate stop task", "task_arn", taskARN, "reason", reason)
+	r.log.Debug("fargate stop task", "task_arn", taskARN, "reason", reason)
 	_, err := r.client.StopTask(ctx, &ecs.StopTaskInput{
 		Cluster: aws.String(r.cfg.Cluster),
 		Task:    aws.String(taskARN),
