@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1226,6 +1227,68 @@ func TestClientTokenZeroDeploymentID(t *testing.T) {
 	if tok1 == tok2 {
 		t.Errorf("zero-deploymentID tokens should differ across time buckets")
 	}
+}
+
+// fakeFargateMetrics records every call for assertion in tests.
+type fakeFargateMetrics struct {
+	mu               sync.Mutex
+	runTaskResults   []string
+	waitIPTimeouts   int
+	stopTaskResults  []string
+	inventoryErrors  int
+	runTaskLatencies []float64
+}
+
+func (f *fakeFargateMetrics) RecordRunTask(result string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runTaskResults = append(f.runTaskResults, result)
+}
+func (f *fakeFargateMetrics) RecordWaitIPTimeout() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.waitIPTimeouts++
+}
+func (f *fakeFargateMetrics) RecordStopTask(result string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopTaskResults = append(f.stopTaskResults, result)
+}
+func (f *fakeFargateMetrics) RecordInventoryError() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inventoryErrors++
+}
+func (f *fakeFargateMetrics) ObserveRunTaskLatency(seconds float64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runTaskLatencies = append(f.runTaskLatencies, seconds)
+}
+
+func TestSetMetrics_DefaultIsNoop(t *testing.T) {
+	r := fastRuntime(&fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.1", "RUNNING")}}, nil
+		},
+	})
+	// No SetMetrics call: must not panic on any operation.
+	_, err := r.Start(context.Background(), startParams(), io.Discard)
+	if err != nil {
+		t.Fatalf("Start with no-op metrics: %v", err)
+	}
+}
+
+func TestSetMetrics_NilResetToNoop(t *testing.T) {
+	r := fastRuntime(&fakeECS{})
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+	r.SetMetrics(nil) // reset to no-op
+	// Calling Start (which will fail via RunTask) should not panic.
+	r.client.(*fakeECS).runTaskFn = func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
+		return nil, errors.New("aws down")
+	}
+	_, _ = r.Start(context.Background(), startParams(), io.Discard)
+	// No assertion needed: test passes as long as no panic occurs.
 }
 
 // TestRunTaskReceivesClientToken asserts that Start passes a non-empty

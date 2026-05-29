@@ -139,6 +139,9 @@ type Runtime struct {
 	ec2    EC2Client // non-nil only when cfg.RouteViaPublicIP
 	cfg    Config
 	log    *slog.Logger
+	// metrics records AWS operation outcomes. Never nil after New(); defaults to
+	// noopFargateMetrics{} so callers need no nil guard.
+	metrics FargateMetrics
 
 	// pollInterval is the delay between DescribeTasks polls while waiting for a
 	// task's network interface (Start) or terminal state (Wait/RunOnce).
@@ -147,6 +150,27 @@ type Runtime struct {
 	// private IP before giving up and stopping the half-started task.
 	startTimeout time.Duration
 }
+
+// FargateMetrics records AWS operation outcomes for the Fargate runtime. A nil
+// recorder is a no-op; the no-op default (noopFargateMetrics) satisfies the
+// interface so callers need no nil guard. Wire to the Prometheus registry via
+// SetMetrics (mirrors lifecycle.Watcher.SetMetrics / lifecycle.MetricsRecorder).
+type FargateMetrics interface {
+	RecordRunTask(result string)          // result: "ok" | "error"
+	RecordWaitIPTimeout()
+	RecordStopTask(result string)         // result: "ok" | "error"
+	RecordInventoryError()
+	ObserveRunTaskLatency(seconds float64)
+}
+
+// noopFargateMetrics is the zero-value no-op implementation.
+type noopFargateMetrics struct{}
+
+func (noopFargateMetrics) RecordRunTask(_ string)          {}
+func (noopFargateMetrics) RecordWaitIPTimeout()            {}
+func (noopFargateMetrics) RecordStopTask(_ string)         {}
+func (noopFargateMetrics) RecordInventoryError()           {}
+func (noopFargateMetrics) ObserveRunTaskLatency(_ float64) {}
 
 // Option customizes a Runtime. Defaults suit production; tests shrink the poll
 // timings.
@@ -180,6 +204,7 @@ func New(client ECSClient, cfg Config, log *slog.Logger, opts ...Option) *Runtim
 		client:       client,
 		cfg:          cfg,
 		log:          log,
+		metrics:      noopFargateMetrics{},
 		pollInterval: 2 * time.Second,
 		startTimeout: 90 * time.Second,
 	}
@@ -187,6 +212,16 @@ func New(client ECSClient, cfg Config, log *slog.Logger, opts ...Option) *Runtim
 		o(r)
 	}
 	return r
+}
+
+// SetMetrics wires a recorder for Fargate AWS operation metrics. Called once at
+// startup before Start; nil resets to the no-op default.
+func (r *Runtime) SetMetrics(m FargateMetrics) {
+	if m == nil {
+		r.metrics = noopFargateMetrics{}
+		return
+	}
+	r.metrics = m
 }
 
 // HostPreparesDeps reports false: the task image prepares its own dependencies;
