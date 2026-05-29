@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -1255,6 +1256,8 @@ runtime:
     security_groups: [sg-1]
     assign_public_ip: true
     region: eu-west-1
+    task_cpu_units: 1024
+    task_memory_mb: 2048
 `)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -1294,6 +1297,8 @@ runtime:
     task_definition: shiny-app:7
     container_name: app
     subnets: [subnet-a]
+    task_cpu_units: 256
+    task_memory_mb: 512
 `,
 		"task_definition": `
 auth:
@@ -1306,6 +1311,8 @@ runtime:
     cluster: shiny-cluster
     container_name: app
     subnets: [subnet-a]
+    task_cpu_units: 256
+    task_memory_mb: 512
 `,
 		"container_name": `
 auth:
@@ -1318,6 +1325,8 @@ runtime:
     cluster: shiny-cluster
     task_definition: shiny-app:7
     subnets: [subnet-a]
+    task_cpu_units: 256
+    task_memory_mb: 512
 `,
 		"subnets": `
 auth:
@@ -1330,6 +1339,8 @@ runtime:
     cluster: shiny-cluster
     task_definition: shiny-app:7
     container_name: app
+    task_cpu_units: 256
+    task_memory_mb: 512
 `,
 	}
 	for field, yaml := range cases {
@@ -1524,5 +1535,128 @@ func TestFargateConfig_EnvBadInteger_ReturnsError(t *testing.T) {
 				t.Errorf("error %q does not mention env var %s", err.Error(), tc.env)
 			}
 		})
+	}
+}
+
+// minimalFargateYAML returns a YAML string with a valid fargate tier and the
+// given cpu/mem values so matrix tests don't repeat the boilerplate.
+func minimalFargateYAML(cpuUnits, memMB int) string {
+	return fmt.Sprintf(`
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    task_cpu_units: %d
+    task_memory_mb: %d
+`, cpuUnits, memMB)
+}
+
+func TestValidateFargate_Matrix(t *testing.T) {
+	valid := []struct {
+		cpu int
+		mem int
+	}{
+		{256, 512},
+		{256, 1024},
+		{256, 2048},
+		{512, 1024},
+		{512, 4096},
+		{1024, 2048},
+		{1024, 8192},
+		{2048, 4096},
+		{2048, 16384},
+		{4096, 8192},
+		{4096, 30720},
+		{8192, 16384},
+		{8192, 61440},
+		{16384, 32768},
+		{16384, 122880},
+	}
+	for _, tc := range valid {
+		t.Run(fmt.Sprintf("valid_%d_%d", tc.cpu, tc.mem), func(t *testing.T) {
+			path := writeYAML(t, minimalFargateYAML(tc.cpu, tc.mem))
+			if _, err := config.Load(path); err != nil {
+				t.Errorf("expected valid matrix entry cpu=%d mem=%d to load without error, got: %v", tc.cpu, tc.mem, err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		cpu int
+		mem int
+		msg string
+	}{
+		// cpu not in allowed set
+		{300, 512, "unsupported cpu"},
+		// mem below minimum
+		{512, 512, "below minimum"},
+		// mem above maximum
+		{512, 8192, "above maximum"},
+		// increment violation: 8192 cpu must be multiple of 4096 above base 16384
+		// 17000 is 16384 + 616; 616 % 4096 != 0
+		{8192, 17000, "increment violation"},
+		// increment violation: 16384 cpu must be multiple of 8192 above base 32768
+		// 33000 is 32768 + 232; 232 % 8192 != 0
+		{16384, 33000, "increment violation"},
+		// 256 cpu discrete set: 1536 is not in {512,1024,2048}
+		{256, 1536, "not in discrete set"},
+		// 2048 cpu: 5000 is 4096+904; 904 % 1024 != 0
+		{2048, 5000, "increment violation"},
+	}
+	for _, tc := range invalid {
+		t.Run(fmt.Sprintf("invalid_%d_%d_%s", tc.cpu, tc.mem, tc.msg), func(t *testing.T) {
+			path := writeYAML(t, minimalFargateYAML(tc.cpu, tc.mem))
+			_, err := config.Load(path)
+			if err == nil {
+				t.Errorf("expected invalid matrix entry cpu=%d mem=%d (%s) to fail, but Load succeeded", tc.cpu, tc.mem, tc.msg)
+			}
+		})
+	}
+}
+
+func TestValidateFargate_RequiresTaskCPUAndMemory(t *testing.T) {
+	// task_cpu_units present but task_memory_mb absent
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    task_cpu_units: 1024
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error when task_memory_mb is 0 (absent), got nil")
+	}
+
+	// task_memory_mb present but task_cpu_units absent
+	path2 := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    task_memory_mb: 2048
+`)
+	if _, err := config.Load(path2); err == nil {
+		t.Error("expected error when task_cpu_units is 0 (absent), got nil")
 	}
 }

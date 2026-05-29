@@ -62,6 +62,8 @@ runtime:
     container_name: app
     subnets:
       - subnet-aaa
+    task_cpu_units: 256
+    task_memory_mb: 512
 `)
 		cfg, err := config.Load(path)
 		if err != nil {

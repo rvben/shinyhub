@@ -906,6 +906,28 @@ const (
 	DefaultNetworkMode  = "bridge"
 )
 
+// fargateMatrixEntry defines the valid memory range for a given Fargate CPU
+// tier. For the 256-unit tier, allowedMem is the exhaustive discrete set
+// {512, 1024, 2048}. For all other tiers, memMin/memMax/memInc define the valid
+// range and increment: valid when memMin <= mem <= memMax AND
+// (mem - memMin) % memInc == 0.
+type fargateMatrixEntry struct {
+	allowedMem []int // non-nil: discrete set (256 CPU only)
+	memMin     int
+	memMax     int
+	memInc     int
+}
+
+var fargateMatrix = map[int]fargateMatrixEntry{
+	256:   {allowedMem: []int{512, 1024, 2048}},
+	512:   {memMin: 1024, memMax: 4096, memInc: 1024},
+	1024:  {memMin: 2048, memMax: 8192, memInc: 1024},
+	2048:  {memMin: 4096, memMax: 16384, memInc: 1024},
+	4096:  {memMin: 8192, memMax: 30720, memInc: 1024},
+	8192:  {memMin: 16384, memMax: 61440, memInc: 4096},
+	16384: {memMin: 32768, memMax: 122880, memInc: 8192},
+}
+
 // validateFargate enforces the settings a fargate tier cannot run without. It is
 // only called when at least one tier declares runtime "fargate", so a config
 // with no fargate tier never needs the block populated.
@@ -924,6 +946,38 @@ func validateFargate(f FargateRuntimeConfig) error {
 	}
 	if f.RouteViaPublicIP && !f.AssignPublicIP {
 		return fmt.Errorf("runtime.fargate.route_via_public_ip requires assign_public_ip: true")
+	}
+	if f.TaskCPUUnits == 0 {
+		return fmt.Errorf("runtime.fargate.task_cpu_units is required when a tier uses runtime \"fargate\"")
+	}
+	if f.TaskMemoryMB == 0 {
+		return fmt.Errorf("runtime.fargate.task_memory_mb is required when a tier uses runtime \"fargate\"")
+	}
+	entry, ok := fargateMatrix[f.TaskCPUUnits]
+	if !ok {
+		return fmt.Errorf("runtime.fargate.task_cpu_units: %d is not a valid Fargate CPU value; must be one of 256, 512, 1024, 2048, 4096, 8192, 16384", f.TaskCPUUnits)
+	}
+	if entry.allowedMem != nil {
+		// Discrete set (256-unit tier).
+		valid := false
+		for _, m := range entry.allowedMem {
+			if f.TaskMemoryMB == m {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not valid for cpu_units=256; must be one of 512, 1024, 2048", f.TaskMemoryMB)
+		}
+	} else {
+		if f.TaskMemoryMB < entry.memMin || f.TaskMemoryMB > entry.memMax {
+			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is out of range for cpu_units=%d; must be between %d and %d",
+				f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memMax)
+		}
+		if (f.TaskMemoryMB-entry.memMin)%entry.memInc != 0 {
+			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not a valid increment for cpu_units=%d; must be %d + n*%d (n>=0)",
+				f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memInc)
+		}
 	}
 	return nil
 }
