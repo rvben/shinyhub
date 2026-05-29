@@ -1278,6 +1278,76 @@ func TestSetMetrics_DefaultIsNoop(t *testing.T) {
 	}
 }
 
+func TestMetrics_StartRecordsRunTaskOk(t *testing.T) {
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.5", "RUNNING")}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	if _, err := r.Start(context.Background(), startParams(), io.Discard); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.runTaskResults) != 1 || fm.runTaskResults[0] != "ok" {
+		t.Errorf("RecordRunTask results = %v, want [ok]", fm.runTaskResults)
+	}
+	if len(fm.runTaskLatencies) != 1 || fm.runTaskLatencies[0] <= 0 {
+		t.Errorf("ObserveRunTaskLatency = %v, want one positive value", fm.runTaskLatencies)
+	}
+}
+
+func TestMetrics_StartRecordsRunTaskError(t *testing.T) {
+	f := &fakeECS{
+		runTaskFn: func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
+			return nil, errors.New("iam forbidden")
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	if _, err := r.Start(context.Background(), startParams(), io.Discard); err == nil {
+		t.Fatal("expected error")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.runTaskResults) != 1 || fm.runTaskResults[0] != "error" {
+		t.Errorf("RecordRunTask results = %v, want [error]", fm.runTaskResults)
+	}
+	if len(fm.runTaskLatencies) != 1 {
+		t.Errorf("ObserveRunTaskLatency calls = %d, want 1 (even on error)", len(fm.runTaskLatencies))
+	}
+}
+
+func TestMetrics_StartRecordsRunTaskFailureEntry(t *testing.T) {
+	// RunTask returns HTTP 200 but with a Failures entry (ECS scheduling failure).
+	f := &fakeECS{
+		runTaskFn: func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
+			return &ecs.RunTaskOutput{Failures: []ecstypes.Failure{{
+				Reason: aws.String("RESOURCE:MEMORY"),
+				Detail: aws.String("no capacity"),
+			}}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	if _, err := r.Start(context.Background(), startParams(), io.Discard); err == nil {
+		t.Fatal("expected error")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.runTaskResults) != 1 || fm.runTaskResults[0] != "error" {
+		t.Errorf("RecordRunTask results = %v, want [error] for Failures entry", fm.runTaskResults)
+	}
+}
+
 func TestSetMetrics_NilResetToNoop(t *testing.T) {
 	r := fastRuntime(&fakeECS{})
 	fm := &fakeFargateMetrics{}

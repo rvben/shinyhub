@@ -388,19 +388,29 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io
 	if p.Slug == "" {
 		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: Start requires a non-empty slug")
 	}
+	startTime := time.Now()
 	out, err := r.client.RunTask(ctx, r.runTaskInput(p))
 	if err != nil {
+		r.metrics.RecordRunTask("error")
+		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: run task: %w", err)
 	}
 	if len(out.Failures) > 0 {
 		f := out.Failures[0]
+		r.metrics.RecordRunTask("error")
+		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: run task failed: %s: %s",
 			aws.ToString(f.Reason), aws.ToString(f.Detail))
 	}
 	if len(out.Tasks) == 0 || out.Tasks[0].TaskArn == nil {
+		r.metrics.RecordRunTask("error")
+		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: run task returned no task")
 	}
 	taskARN := aws.ToString(out.Tasks[0].TaskArn)
+	r.metrics.RecordRunTask("ok")
+	r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
+	r.log.Info("fargate run task issued", "slug", p.Slug, "index", p.Index, "task_arn", taskARN)
 
 	ip, err := r.waitForIP(ctx, taskARN)
 	if err != nil {
@@ -408,6 +418,7 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io
 		r.stop(context.WithoutCancel(ctx), taskARN, "shinyhub: start failed to acquire ip")
 		return process.ReplicaEndpoint{}, err
 	}
+	r.log.Info("fargate task routable", "slug", p.Slug, "index", p.Index, "task_arn", taskARN, "ip", ip)
 	return process.ReplicaEndpoint{
 		URL:      fmt.Sprintf("http://%s:%d", ip, p.Port),
 		Provider: Provider,
