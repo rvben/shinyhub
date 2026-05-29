@@ -79,6 +79,50 @@ func TestSweepOrphanFargateTasks_NilSweeperIsNoOp(t *testing.T) {
 	lifecycle.SweepOrphanFargateTasks(context.Background(), mgr, nil)
 }
 
+func TestSweepOrphanFargateTasks_StopErrorContinuesToNextOrphan(t *testing.T) {
+	// Two orphan tasks: StopTask fails for the first.
+	// The sweep must still attempt to stop the second (skip-and-continue).
+	mgr := process.NewManager(".", noopRuntime{})
+	sweeper := &errFirstSweeper{
+		tasks: []process.TaskRef{
+			{ARN: "arn-orphan-1"},
+			{ARN: "arn-orphan-2"},
+		},
+		failARN: "arn-orphan-1",
+	}
+	lifecycle.SweepOrphanFargateTasks(context.Background(), mgr, sweeper)
+
+	// Both ARNs must have been attempted; only the non-failing one is "stopped".
+	if len(sweeper.stopped) != 2 {
+		t.Fatalf("StopTask called %d time(s), want 2: error on first orphan must not abort sweep", len(sweeper.stopped))
+	}
+	if sweeper.stopped[0] != "arn-orphan-1" || sweeper.stopped[1] != "arn-orphan-2" {
+		t.Errorf("stopped order = %v, want [arn-orphan-1 arn-orphan-2]", sweeper.stopped)
+	}
+}
+
+// errFirstSweeper is a FargateTaskSweeper whose StopTask returns an error for
+// failARN and succeeds for all others. It records every ARN that StopTask is
+// called with (including the failing one) so tests can assert both continuity
+// and the attempt on the failing task.
+type errFirstSweeper struct {
+	tasks   []process.TaskRef
+	failARN string
+	stopped []string
+}
+
+func (e *errFirstSweeper) ListManagedTasks(_ context.Context) ([]process.TaskRef, error) {
+	return e.tasks, nil
+}
+
+func (e *errFirstSweeper) StopTask(_ context.Context, arn string) error {
+	e.stopped = append(e.stopped, arn)
+	if arn == e.failARN {
+		return fmt.Errorf("ECS: stop task %s: throttled", arn)
+	}
+	return nil
+}
+
 func TestSweepOrphanFargateTasks_ListErrorSkipsSweep(t *testing.T) {
 	mgr := process.NewManager(".", noopRuntime{})
 	sweeper := &fakeFargateTaskSweeper{

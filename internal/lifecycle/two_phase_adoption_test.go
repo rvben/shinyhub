@@ -89,6 +89,18 @@ func TestRecoverRemoteReplica_FargatePartialAdoptWhenNoURL(t *testing.T) {
 	if info.WorkerID != fargate.WorkerID {
 		t.Errorf("WorkerID = %q, want %q", info.WorkerID, fargate.WorkerID)
 	}
+	// The stored RunHandle must encode the ARN as "fargate/<arn>" - this is the
+	// exact key SweepOrphanFargateTasks uses to determine ownership via
+	// mgr.RunningContainerIDs(). A regression here would cause the sweeper to
+	// treat a partially-adopted (PROVISIONING) task as orphaned and stop it.
+	wantContainerID := fargate.WorkerID + "/arn-pending"
+	handle, hasHandle := mgr.HandleReplica("demo", 0)
+	if !hasHandle {
+		t.Fatal("HandleReplica returned false after partial adopt")
+	}
+	if handle.ContainerID != wantContainerID {
+		t.Errorf("handle.ContainerID = %q, want %q", handle.ContainerID, wantContainerID)
+	}
 }
 
 func TestRecoverRemoteReplica_FargateFullAdoptWhenURLPresent(t *testing.T) {
