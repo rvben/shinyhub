@@ -353,6 +353,26 @@ type FargateRuntimeConfig struct {
 	// Requires AssignPublicIP. Production runs the control plane in-VPC and routes
 	// over private IPs (default false).
 	RouteViaPublicIP bool
+
+	// TaskCPUUnits is the ECS task-level CPU allocation in CPU units (1 vCPU =
+	// 1024 units). Must be one of the Fargate-supported values: 256, 512, 1024,
+	// 2048, 4096, 8192, 16384. Required when any tier uses runtime "fargate".
+	TaskCPUUnits int
+
+	// TaskMemoryMB is the ECS task-level memory allocation in MiB. Must satisfy
+	// the Fargate CPU/memory matrix (see validateFargate). Required when any
+	// tier uses runtime "fargate".
+	TaskMemoryMB int
+
+	// DefaultMemoryMB is the per-container memory limit applied when an app has
+	// no explicit memory_limit_mb. 0 means no override (the task definition's
+	// container limit applies). Mirrors DockerRuntimeConfig.DefaultMemoryMB.
+	DefaultMemoryMB int
+
+	// DefaultCPUPercent is the per-container CPU quota applied when an app has
+	// no explicit cpu_quota_percent. 0 means no override. Mirrors
+	// DockerRuntimeConfig.DefaultCPUPercent.
+	DefaultCPUPercent int
 }
 
 // AutoscaleConfig holds the global settings for the replica autoscale
@@ -493,15 +513,19 @@ type rawRuntimeConfig struct {
 }
 
 type rawFargateRuntimeConfig struct {
-	Cluster          string   `yaml:"cluster"`
-	TaskDefinition   string   `yaml:"task_definition"`
-	ContainerName    string   `yaml:"container_name"`
-	Subnets          []string `yaml:"subnets"`
-	SecurityGroups   []string `yaml:"security_groups"`
-	AssignPublicIP   bool     `yaml:"assign_public_ip"`
-	PlatformVersion  string   `yaml:"platform_version"`
-	Region           string   `yaml:"region"`
-	RouteViaPublicIP bool     `yaml:"route_via_public_ip"`
+	Cluster           string   `yaml:"cluster"`
+	TaskDefinition    string   `yaml:"task_definition"`
+	ContainerName     string   `yaml:"container_name"`
+	Subnets           []string `yaml:"subnets"`
+	SecurityGroups    []string `yaml:"security_groups"`
+	AssignPublicIP    bool     `yaml:"assign_public_ip"`
+	PlatformVersion   string   `yaml:"platform_version"`
+	Region            string   `yaml:"region"`
+	RouteViaPublicIP  bool     `yaml:"route_via_public_ip"`
+	TaskCPUUnits      int      `yaml:"task_cpu_units"`
+	TaskMemoryMB      int      `yaml:"task_memory_mb"`
+	DefaultMemoryMB   int      `yaml:"default_memory_mb"`
+	DefaultCPUPercent int      `yaml:"default_cpu_percent"`
 }
 
 type rawAutoscaleConfig struct {
@@ -969,15 +993,19 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	}
 
 	rc.Fargate = FargateRuntimeConfig{
-		Cluster:          r.Fargate.Cluster,
-		TaskDefinition:   r.Fargate.TaskDefinition,
-		ContainerName:    r.Fargate.ContainerName,
-		Subnets:          r.Fargate.Subnets,
-		SecurityGroups:   r.Fargate.SecurityGroups,
-		AssignPublicIP:   r.Fargate.AssignPublicIP,
-		PlatformVersion:  r.Fargate.PlatformVersion,
-		Region:           r.Fargate.Region,
-		RouteViaPublicIP: r.Fargate.RouteViaPublicIP,
+		Cluster:           r.Fargate.Cluster,
+		TaskDefinition:    r.Fargate.TaskDefinition,
+		ContainerName:     r.Fargate.ContainerName,
+		Subnets:           r.Fargate.Subnets,
+		SecurityGroups:    r.Fargate.SecurityGroups,
+		AssignPublicIP:    r.Fargate.AssignPublicIP,
+		PlatformVersion:   r.Fargate.PlatformVersion,
+		Region:            r.Fargate.Region,
+		RouteViaPublicIP:  r.Fargate.RouteViaPublicIP,
+		TaskCPUUnits:      r.Fargate.TaskCPUUnits,
+		TaskMemoryMB:      r.Fargate.TaskMemoryMB,
+		DefaultMemoryMB:   r.Fargate.DefaultMemoryMB,
+		DefaultCPUPercent: r.Fargate.DefaultCPUPercent,
 	}
 
 	rc.Autoscale.Enabled = r.Autoscale.Enabled

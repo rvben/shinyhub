@@ -1441,3 +1441,39 @@ func TestApplyEnvNumericErrorsAreFatal(t *testing.T) {
 		}
 	})
 }
+
+func TestFargateConfig_NewFields_YAMLRoundTrip(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+    default_memory_mb: 512
+    default_cpu_percent: 50
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.TaskCPUUnits != 1024 {
+		t.Errorf("TaskCPUUnits: got %d, want 1024", cfg.Runtime.Fargate.TaskCPUUnits)
+	}
+	if cfg.Runtime.Fargate.TaskMemoryMB != 2048 {
+		t.Errorf("TaskMemoryMB: got %d, want 2048", cfg.Runtime.Fargate.TaskMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultMemoryMB != 512 {
+		t.Errorf("DefaultMemoryMB: got %d, want 512", cfg.Runtime.Fargate.DefaultMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultCPUPercent != 50 {
+		t.Errorf("DefaultCPUPercent: got %d, want 50", cfg.Runtime.Fargate.DefaultCPUPercent)
+	}
+}
