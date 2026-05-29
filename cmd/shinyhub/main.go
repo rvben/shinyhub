@@ -570,10 +570,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Choose the metrics sampler. A docker default tier samples container stats
 	// through the Runtime API. Otherwise use the host sampler, which reads host
 	// PIDs for native replicas and reports PID-less replicas (fargate/remote
-	// container handles, including a fargate tier sitting beside a native default)
-	// as zero usage without error, so a running replica on such a tier is never
-	// misreported as stopped by a failed PID probe.
-	if cfg.Runtime.Mode == "docker" {
+	// container handles) as zero usage without error, so a running replica on
+	// such a tier is never misreported as stopped by a failed PID probe.
+	// Compare defaultMode (the resolved tier runtime) rather than
+	// cfg.Runtime.Mode (the legacy field): a config that declares
+	// tiers:[{runtime:docker}] without setting runtime.mode must still pick
+	// the RuntimeSampler, not the host sampler.
+	if defaultMode == "docker" {
 		srv.SetSampler(&process.RuntimeSampler{Runtime: rt})
 	} else {
 		srv.SetSampler(&hostSampler{})
