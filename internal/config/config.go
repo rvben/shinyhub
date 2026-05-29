@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -435,6 +436,14 @@ func (r RuntimeConfig) RuntimeForTier(name string) (string, bool) {
 // (runtime.docker.default_memory_mb / default_cpu_percent), preserving
 // existing behaviour for native and docker tiers. A zero value for either
 // field means "no limit" as documented.
+//
+// Scope note: all eight deploy-path call sites resolve the tier by calling
+// DefaultTierName(), which returns the first declared tier. In a mixed-tier
+// deployment where apps may be placed on a non-default fargate tier, those
+// replicas receive the default tier's defaults (e.g. Docker zeros), not the
+// fargate-tier defaults. Single-tier fargate deployments are fully supported.
+// Mixed-tier fargate is guarded at RunTask time by the container clamp in
+// fargate.buildContainerOverride.
 func (r RuntimeConfig) DefaultResourcesForTier(tier string) (memMB, cpuPct int) {
 	rt, _ := r.RuntimeForTier(tier)
 	if rt == "fargate" {
@@ -970,7 +979,13 @@ func validateFargate(f FargateRuntimeConfig) error {
 	}
 	entry, ok := fargateMatrix[f.TaskCPUUnits]
 	if !ok {
-		return fmt.Errorf("runtime.fargate.task_cpu_units: %d is not a valid Fargate CPU value; must be one of 256, 512, 1024, 2048, 4096, 8192, 16384", f.TaskCPUUnits)
+		allowed := slices.Sorted(maps.Keys(fargateMatrix))
+		parts := make([]string, len(allowed))
+		for i, v := range allowed {
+			parts[i] = strconv.Itoa(v)
+		}
+		return fmt.Errorf("runtime.fargate.task_cpu_units: %d is not a valid Fargate CPU value; must be one of %s",
+			f.TaskCPUUnits, strings.Join(parts, ", "))
 	}
 	if entry.allowedMem != nil {
 		// Discrete set (256-unit tier).

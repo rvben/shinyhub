@@ -1609,6 +1609,10 @@ func TestValidateFargate_Matrix(t *testing.T) {
 		{256, 1536, "not in discrete set"},
 		// 2048 cpu: 5000 is 4096+904; 904 % 1024 != 0
 		{2048, 5000, "increment violation"},
+		// 512 cpu (1024-step tier): 1536 is 1024+512; 512 % 1024 != 0
+		{512, 1536, "increment violation"},
+		// 1024 cpu (1024-step tier): 2560 is 2048+512; 512 % 1024 != 0
+		{1024, 2560, "increment violation"},
 	}
 	for _, tc := range invalid {
 		t.Run(fmt.Sprintf("invalid_%d_%d_%s", tc.cpu, tc.mem, tc.msg), func(t *testing.T) {
