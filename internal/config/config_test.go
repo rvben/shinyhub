@@ -1660,3 +1660,92 @@ runtime:
 		t.Error("expected error when task_cpu_units is 0 (absent), got nil")
 	}
 }
+
+func TestDefaultResourcesForTier(t *testing.T) {
+	t.Run("native_tier_returns_docker_defaults", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		// synthesized single "local" tier with runtime=native
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("local")
+		if mem != cfg.Runtime.Docker.DefaultMemoryMB {
+			t.Errorf("mem: got %d, want %d", mem, cfg.Runtime.Docker.DefaultMemoryMB)
+		}
+		if cpu != cfg.Runtime.Docker.DefaultCPUPercent {
+			t.Errorf("cpu: got %d, want %d", cpu, cfg.Runtime.Docker.DefaultCPUPercent)
+		}
+	})
+
+	t.Run("docker_tier_returns_docker_defaults", func(t *testing.T) {
+		path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: workers
+      runtime: docker
+  docker:
+    default_memory_mb: 256
+    default_cpu_percent: 25
+`)
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("workers")
+		if mem != 256 {
+			t.Errorf("mem: got %d, want 256", mem)
+		}
+		if cpu != 25 {
+			t.Errorf("cpu: got %d, want 25", cpu)
+		}
+	})
+
+	t.Run("fargate_tier_returns_fargate_defaults", func(t *testing.T) {
+		path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+    default_memory_mb: 512
+    default_cpu_percent: 50
+`)
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("burst")
+		if mem != 512 {
+			t.Errorf("mem: got %d, want 512", mem)
+		}
+		if cpu != 50 {
+			t.Errorf("cpu: got %d, want 50", cpu)
+		}
+	})
+
+	t.Run("unknown_tier_returns_docker_defaults", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("nonexistent")
+		if mem != cfg.Runtime.Docker.DefaultMemoryMB {
+			t.Errorf("mem: got %d, want Docker default %d", mem, cfg.Runtime.Docker.DefaultMemoryMB)
+		}
+		if cpu != cfg.Runtime.Docker.DefaultCPUPercent {
+			t.Errorf("cpu: got %d, want Docker default %d", cpu, cfg.Runtime.Docker.DefaultCPUPercent)
+		}
+	})
+}

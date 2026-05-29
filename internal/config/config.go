@@ -428,6 +428,21 @@ func (r RuntimeConfig) RuntimeForTier(name string) (string, bool) {
 	return "", false
 }
 
+// DefaultResourcesForTier returns the platform-default memory limit and CPU
+// quota for a replica placed on the named tier. For a "fargate" tier it returns
+// the Fargate-specific defaults (runtime.fargate.default_memory_mb /
+// default_cpu_percent). For any other runtime it returns the Docker defaults
+// (runtime.docker.default_memory_mb / default_cpu_percent), preserving
+// existing behaviour for native and docker tiers. A zero value for either
+// field means "no limit" as documented.
+func (r RuntimeConfig) DefaultResourcesForTier(tier string) (memMB, cpuPct int) {
+	rt, _ := r.RuntimeForTier(tier)
+	if rt == "fargate" {
+		return r.Fargate.DefaultMemoryMB, r.Fargate.DefaultCPUPercent
+	}
+	return r.Docker.DefaultMemoryMB, r.Docker.DefaultCPUPercent
+}
+
 // DockerRuntimeConfig holds Docker-specific runtime settings.
 type DockerRuntimeConfig struct {
 	Socket            string
