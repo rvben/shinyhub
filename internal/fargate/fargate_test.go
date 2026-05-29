@@ -940,6 +940,37 @@ func TestCPURounding(t *testing.T) {
 	}
 }
 
+// TestStartRejectsEmptySlug asserts that Start returns an error immediately when
+// StartParams.Slug is empty, rather than launching a task that cannot self-
+// identify. SHINYHUB_SLUG must always be present in the task env.
+func TestStartRejectsEmptySlug(t *testing.T) {
+	f := &fakeECS{}
+	r := fastRuntime(f)
+	p := startParams()
+	p.Slug = ""
+	_, err := r.Start(context.Background(), p, io.Discard)
+	if err == nil {
+		t.Fatal("Start with empty slug must return an error")
+	}
+	if len(f.runInputs) != 0 {
+		t.Error("RunTask must not be called when slug is empty")
+	}
+}
+
+// TestReplicaEnvAlwaysEmitsSHINYHUBSLUG asserts that SHINYHUB_SLUG is always
+// present in the container environment. The runner image requires this variable
+// to identify the app; it must never be silently omitted.
+func TestReplicaEnvAlwaysEmitsSHINYHUBSLUG(t *testing.T) {
+	p := process.StartParams{Slug: "myapp", Index: 0}
+	env := map[string]string{}
+	for _, kv := range replicaEnv(p) {
+		env[aws.ToString(kv.Name)] = aws.ToString(kv.Value)
+	}
+	if env["SHINYHUB_SLUG"] != "myapp" {
+		t.Errorf("SHINYHUB_SLUG = %q, want myapp", env["SHINYHUB_SLUG"])
+	}
+}
+
 // TestClientTokenIsSameWithinTimeBucket asserts that two calls with the same
 // inputs but the same time bucket produce identical tokens (idempotency: a
 // control-plane retry within the 10-min ECS window re-uses the same token).

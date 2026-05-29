@@ -262,7 +262,13 @@ func replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
 			env = append(env, ecstypes.KeyValuePair{Name: aws.String(k), Value: aws.String(v)})
 		}
 	}
-	add("SHINYHUB_SLUG", p.Slug)
+	// SHINYHUB_SLUG is always emitted even when empty: the runner image requires
+	// this variable to identify the app. Start validates that slug is non-empty
+	// before calling replicaEnv, so this path is belt-and-suspenders.
+	env = append(env, ecstypes.KeyValuePair{
+		Name:  aws.String("SHINYHUB_SLUG"),
+		Value: aws.String(p.Slug),
+	})
 	add("SHINYHUB_REPLICA_INDEX", strconv.Itoa(p.Index))
 	add("SHINYHUB_CONTENT_DIGEST", p.ContentDigest)
 	if p.DeploymentID > 0 {
@@ -344,6 +350,9 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 // becomes routable within startTimeout is stopped before returning the error, so
 // a failed Start never leaks a running task.
 func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io.Writer) (process.ReplicaEndpoint, error) {
+	if p.Slug == "" {
+		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: Start requires a non-empty slug")
+	}
 	out, err := r.client.RunTask(ctx, r.runTaskInput(p))
 	if err != nil {
 		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: run task: %w", err)
