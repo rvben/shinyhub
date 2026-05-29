@@ -13,7 +13,7 @@
 #
 # R runner is a fast-follow (out of scope for this initial image).
 
-set -e
+set -eu
 
 : "${SHINYHUB_CONTROL_PLANE_URL:?SHINYHUB_CONTROL_PLANE_URL is required}"
 : "${SHINYHUB_BUNDLE_TOKEN:?SHINYHUB_BUNDLE_TOKEN is required}"
@@ -39,7 +39,11 @@ if [ "${EXPECTED_HEX}" = "${SHINYHUB_CONTENT_DIGEST}" ]; then
     echo "[shinyhub-runner] ERROR: SHINYHUB_CONTENT_DIGEST must have sha256: prefix, got: ${SHINYHUB_CONTENT_DIGEST}" >&2
     exit 1
 fi
-ACTUAL_HEX=$(sha256sum "${BUNDLE_ZIP}" | cut -d' ' -f1)
+if ! sha_out=$(sha256sum "${BUNDLE_ZIP}"); then
+    echo "[shinyhub-runner] ERROR: sha256sum failed" >&2
+    exit 1
+fi
+ACTUAL_HEX=$(printf '%s' "$sha_out" | cut -d' ' -f1)
 if [ "${ACTUAL_HEX}" != "${EXPECTED_HEX}" ]; then
     echo "[shinyhub-runner] ERROR: digest mismatch: expected ${EXPECTED_HEX}, got ${ACTUAL_HEX}" >&2
     exit 1

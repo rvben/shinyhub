@@ -11,9 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Create a non-root user for defense-in-depth. uv needs a writable home for
+# its cache; useradd -m creates /home/runner automatically.
+RUN useradd -m -u 1001 runner && mkdir -p /app && chown -R runner:runner /app
+
 WORKDIR /app
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER runner:runner
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
