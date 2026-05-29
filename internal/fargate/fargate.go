@@ -456,6 +456,7 @@ func (r *Runtime) waitForIP(ctx context.Context, taskARN string) (string, error)
 			}
 		}
 		if !time.Now().Before(deadline) {
+			r.metrics.RecordWaitIPTimeout()
 			return "", fmt.Errorf("fargate: task %s did not acquire an ip within %s", taskARN, r.startTimeout)
 		}
 		if err := r.sleep(ctx); err != nil {
@@ -521,14 +522,17 @@ func (r *Runtime) Signal(handle process.RunHandle, sig syscall.Signal) error {
 }
 
 func (r *Runtime) stop(ctx context.Context, taskARN, reason string) error {
+	r.log.Info("fargate stop task", "task_arn", taskARN, "reason", reason)
 	_, err := r.client.StopTask(ctx, &ecs.StopTaskInput{
 		Cluster: aws.String(r.cfg.Cluster),
 		Task:    aws.String(taskARN),
 		Reason:  aws.String(reason),
 	})
 	if err != nil {
+		r.metrics.RecordStopTask("error")
 		return fmt.Errorf("fargate: stop task %s: %w", taskARN, err)
 	}
+	r.metrics.RecordStopTask("ok")
 	return nil
 }
 

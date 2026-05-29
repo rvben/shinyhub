@@ -1348,6 +1348,70 @@ func TestMetrics_StartRecordsRunTaskFailureEntry(t *testing.T) {
 	}
 }
 
+func TestMetrics_WaitIPTimeoutIncremented(t *testing.T) {
+	// Task stays PENDING forever -> waitForIP times out.
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{{
+				TaskArn:    aws.String("task-arn"),
+				LastStatus: aws.String("PENDING"),
+			}}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	_, err := r.Start(context.Background(), startParams(), io.Discard)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if fm.waitIPTimeouts != 1 {
+		t.Errorf("RecordWaitIPTimeout count = %d, want 1", fm.waitIPTimeouts)
+	}
+}
+
+func TestMetrics_StopTaskOk(t *testing.T) {
+	f := &fakeECS{}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/xyz")}
+	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.stopTaskResults) != 1 || fm.stopTaskResults[0] != "ok" {
+		t.Errorf("RecordStopTask results = %v, want [ok]", fm.stopTaskResults)
+	}
+}
+
+func TestMetrics_StopTaskError(t *testing.T) {
+	f := &fakeECS{
+		stopTaskFn: func(*ecs.StopTaskInput) (*ecs.StopTaskOutput, error) {
+			return nil, errors.New("ecs: task not found")
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/abc")}
+	err := r.Signal(handle, syscall.SIGTERM)
+	if err == nil {
+		t.Fatal("expected error from StopTask")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.stopTaskResults) != 1 || fm.stopTaskResults[0] != "error" {
+		t.Errorf("RecordStopTask results = %v, want [error]", fm.stopTaskResults)
+	}
+}
+
 func TestSetMetrics_NilResetToNoop(t *testing.T) {
 	r := fastRuntime(&fakeECS{})
 	fm := &fakeFargateMetrics{}
