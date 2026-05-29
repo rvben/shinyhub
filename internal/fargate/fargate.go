@@ -616,6 +616,12 @@ func (r *Runtime) listManagedTaskARNs(ctx context.Context) ([]string, error) {
 	}
 }
 
+// describeTask fetches the current state of one task. It returns nil (no error)
+// when the task is not yet visible (ECS eventual consistency: a MISSING failure
+// or an empty Tasks list on a freshly created ARN); callers keep polling in that
+// case. Any other non-nil Failure reason is a permanent scheduling error and is
+// returned as a hard wrapped error so waitForIP/Wait/RunOnce fail fast instead
+// of polling to timeout.
 func (r *Runtime) describeTask(ctx context.Context, taskARN string) (*ecstypes.Task, error) {
 	out, err := r.client.DescribeTasks(ctx, &ecs.DescribeTasksInput{
 		Cluster: aws.String(r.cfg.Cluster),
@@ -623,6 +629,20 @@ func (r *Runtime) describeTask(ctx context.Context, taskARN string) (*ecstypes.T
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fargate: describe task %s: %w", taskARN, err)
+	}
+	// Check for scheduling failures before checking Tasks. ECS returns Failures
+	// instead of (or alongside) Tasks when it cannot place or locate the task.
+	for _, f := range out.Failures {
+		if aws.ToString(f.Reason) == "MISSING" {
+			// MISSING means the task record is not yet visible due to eventual
+			// consistency immediately after RunTask. Treat it as "not visible yet":
+			// return nil so the caller keeps polling.
+			return nil, nil
+		}
+		// Any other Reason (RESOURCE, ATTRIBUTE, ACCESS_DENIED, ...) is a
+		// permanent failure that will not resolve by polling.
+		return nil, fmt.Errorf("fargate: task %s failed: reason=%s detail=%s",
+			taskARN, aws.ToString(f.Reason), aws.ToString(f.Detail))
 	}
 	if len(out.Tasks) == 0 {
 		return nil, nil

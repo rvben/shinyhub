@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -757,6 +758,72 @@ func TestDecodeHandleAcceptsBareARN(t *testing.T) {
 func TestDecodeHandleRejectsEmpty(t *testing.T) {
 	if _, err := decodeHandle(""); err == nil {
 		t.Fatal("expected error on empty handle")
+	}
+}
+
+// TestDescribeTaskMISSINGKeepsPolling asserts that a MISSING failure in
+// out.Failures is treated as eventual consistency (not visible yet) and does
+// NOT cause waitForIP to fail immediately. A subsequent poll returns the task
+// with an IP, so Start succeeds.
+func TestDescribeTaskMISSINGKeepsPolling(t *testing.T) {
+	calls := 0
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			calls++
+			if calls == 1 {
+				// First poll: ECS returns a MISSING failure (eventual consistency).
+				return &ecs.DescribeTasksOutput{
+					Failures: []ecstypes.Failure{{
+						Arn:    aws.String("task-arn"),
+						Reason: aws.String("MISSING"),
+					}},
+				}, nil
+			}
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
+				taskWithIP("task-arn", "10.0.0.5", "RUNNING"),
+			}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	ep, err := r.Start(context.Background(), startParams(), io.Discard)
+	if err != nil {
+		t.Fatalf("Start: unexpected error on MISSING failure: %v", err)
+	}
+	if ep.URL != "http://10.0.0.5:8000" {
+		t.Errorf("URL = %q, want http://10.0.0.5:8000", ep.URL)
+	}
+	if calls < 2 {
+		t.Errorf("expected at least 2 describe calls (MISSING then success), got %d", calls)
+	}
+}
+
+// TestDescribeTaskHardFailureReturnsFastError asserts that a non-MISSING failure
+// reason in out.Failures causes describeTask to return a wrapped hard error
+// immediately (not nil). This causes waitForIP/Wait/RunOnce to fail fast instead
+// of polling to timeout.
+func TestDescribeTaskHardFailureReturnsFastError(t *testing.T) {
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{
+				Failures: []ecstypes.Failure{{
+					Arn:    aws.String("task-arn"),
+					Reason: aws.String("RESOURCE:MEMORY"),
+					Detail: aws.String("no capacity in us-east-1a"),
+				}},
+			}, nil
+		},
+	}
+	r := fastRuntime(f)
+	_, err := r.Start(context.Background(), startParams(), io.Discard)
+	if err == nil {
+		t.Fatal("expected hard error on RESOURCE:MEMORY failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "RESOURCE:MEMORY") {
+		t.Errorf("error %q should contain the Reason code RESOURCE:MEMORY", err.Error())
+	}
+	// At most one describe call: fail fast, do not poll.
+	if len(f.describeInputs) > 1 {
+		t.Errorf("expected 1 describe call on hard failure, got %d", len(f.describeInputs))
 	}
 }
 
