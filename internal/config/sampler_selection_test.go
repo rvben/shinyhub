@@ -64,6 +64,7 @@ runtime:
       - subnet-aaa
     task_cpu_units: 256
     task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
 `)
 		cfg, err := config.Load(path)
 		if err != nil {

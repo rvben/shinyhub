@@ -374,6 +374,19 @@ type FargateRuntimeConfig struct {
 	// no explicit cpu_quota_percent. 0 means no override. Mirrors
 	// DockerRuntimeConfig.DefaultCPUPercent.
 	DefaultCPUPercent int
+
+	// ControlPlaneURL is the URL tasks use to fetch their bundle from the control
+	// plane. It must be reachable from inside the task's VPC (or subnet, for
+	// public-IP mode). Required when any tier uses runtime "fargate".
+	// When RouteViaPublicIP is true this must use https:// to prevent the
+	// bearer bundle token from travelling in plaintext over the public internet.
+	ControlPlaneURL string
+
+	// BundleTokenTTL is how long a minted bundle capability token remains valid.
+	// Default 10 minutes. Tasks that take longer than this to start will fail
+	// to fetch the bundle; increase if your task cold-start (including image
+	// pull) regularly exceeds 10 minutes.
+	BundleTokenTTL time.Duration
 }
 
 // AutoscaleConfig holds the global settings for the replica autoscale
@@ -550,6 +563,8 @@ type rawFargateRuntimeConfig struct {
 	TaskMemoryMB      int      `yaml:"task_memory_mb"`
 	DefaultMemoryMB   int      `yaml:"default_memory_mb"`
 	DefaultCPUPercent int      `yaml:"default_cpu_percent"`
+	ControlPlaneURL   string   `yaml:"control_plane_url"`
+	BundleTokenTTL    string   `yaml:"bundle_token_ttl"` // parsed as time.Duration
 }
 
 type rawAutoscaleConfig struct {
@@ -971,6 +986,12 @@ func validateFargate(f FargateRuntimeConfig) error {
 	if f.RouteViaPublicIP && !f.AssignPublicIP {
 		return fmt.Errorf("runtime.fargate.route_via_public_ip requires assign_public_ip: true")
 	}
+	if f.ControlPlaneURL == "" {
+		return fmt.Errorf("runtime.fargate.control_plane_url is required when a tier uses runtime \"fargate\"")
+	}
+	if f.RouteViaPublicIP && !strings.HasPrefix(f.ControlPlaneURL, "https://") {
+		return fmt.Errorf("runtime.fargate.control_plane_url must use https:// when route_via_public_ip is true (a plaintext bundle token over a public channel is replayable within the TTL)")
+	}
 	if f.TaskCPUUnits == 0 {
 		return fmt.Errorf("runtime.fargate.task_cpu_units is required when a tier uses runtime \"fargate\"")
 	}
@@ -1090,6 +1111,17 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		TaskMemoryMB:      r.Fargate.TaskMemoryMB,
 		DefaultMemoryMB:   r.Fargate.DefaultMemoryMB,
 		DefaultCPUPercent: r.Fargate.DefaultCPUPercent,
+		ControlPlaneURL:   r.Fargate.ControlPlaneURL,
+	}
+	if r.Fargate.BundleTokenTTL != "" {
+		d, err := time.ParseDuration(r.Fargate.BundleTokenTTL)
+		if err != nil {
+			return rc, fmt.Errorf("runtime.fargate.bundle_token_ttl: %w", err)
+		}
+		rc.Fargate.BundleTokenTTL = d
+	}
+	if rc.Fargate.BundleTokenTTL <= 0 {
+		rc.Fargate.BundleTokenTTL = 10 * time.Minute
 	}
 
 	rc.Autoscale.Enabled = r.Autoscale.Enabled
@@ -1271,6 +1303,16 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_ROUTE_VIA_PUBLIC_IP: %w", err)
 		}
 		cfg.Runtime.Fargate.RouteViaPublicIP = b
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_CONTROL_PLANE_URL"); v != "" {
+		cfg.Runtime.Fargate.ControlPlaneURL = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL: %q is not a duration: %w", v, err)
+		}
+		cfg.Runtime.Fargate.BundleTokenTTL = d
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS"); v != "" {
 		n, err := strconv.Atoi(v)

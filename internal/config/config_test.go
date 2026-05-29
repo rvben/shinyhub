@@ -1258,6 +1258,7 @@ runtime:
     region: eu-west-1
     task_cpu_units: 1024
     task_memory_mb: 2048
+    control_plane_url: "https://cp.example.com"
 `)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -1299,6 +1300,7 @@ runtime:
     subnets: [subnet-a]
     task_cpu_units: 256
     task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
 `,
 		"task_definition": `
 auth:
@@ -1313,6 +1315,7 @@ runtime:
     subnets: [subnet-a]
     task_cpu_units: 256
     task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
 `,
 		"container_name": `
 auth:
@@ -1327,6 +1330,7 @@ runtime:
     subnets: [subnet-a]
     task_cpu_units: 256
     task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
 `,
 		"subnets": `
 auth:
@@ -1341,6 +1345,7 @@ runtime:
     container_name: app
     task_cpu_units: 256
     task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
 `,
 	}
 	for field, yaml := range cases {
@@ -1470,6 +1475,7 @@ runtime:
     task_memory_mb: 2048
     default_memory_mb: 512
     default_cpu_percent: 50
+    control_plane_url: "https://cp.example.com"
 `)
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -1553,6 +1559,7 @@ runtime:
     task_definition: td
     container_name: app
     subnets: [s-1]
+    control_plane_url: "https://cp.example.com"
     task_cpu_units: %d
     task_memory_mb: %d
 `, cpuUnits, memMB)
@@ -1639,6 +1646,7 @@ runtime:
     task_definition: td
     container_name: app
     subnets: [s-1]
+    control_plane_url: "https://cp.example.com"
     task_cpu_units: 1024
 `)
 	if _, err := config.Load(path); err == nil {
@@ -1658,6 +1666,7 @@ runtime:
     task_definition: td
     container_name: app
     subnets: [s-1]
+    control_plane_url: "https://cp.example.com"
     task_memory_mb: 2048
 `)
 	if _, err := config.Load(path2); err == nil {
@@ -1724,6 +1733,7 @@ runtime:
     task_memory_mb: 2048
     default_memory_mb: 512
     default_cpu_percent: 50
+    control_plane_url: "https://cp.example.com"
 `)
 		cfg, err := config.Load(path)
 		if err != nil {
@@ -1752,4 +1762,151 @@ runtime:
 			t.Errorf("cpu: got %d, want Docker default %d", cpu, cfg.Runtime.Docker.DefaultCPUPercent)
 		}
 	})
+}
+
+// loadFromString writes yaml to a temp file and calls config.Load.
+func loadFromString(t *testing.T, yaml string) (*config.Config, error) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(yaml)
+	f.Close()
+	return config.Load(f.Name())
+}
+
+func TestFargateConfig_ControlPlaneURLRequired(t *testing.T) {
+	// A fargate tier with no control_plane_url must fail Load.
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for missing control_plane_url, got nil")
+	}
+	if !strings.Contains(err.Error(), "control_plane_url") {
+		t.Fatalf("error message must mention control_plane_url, got: %v", err)
+	}
+}
+
+func TestFargateConfig_RouteViaPublicIPRequiresHTTPS(t *testing.T) {
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    assign_public_ip: true
+    route_via_public_ip: true
+    control_plane_url: "http://1.2.3.4:8080"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for http:// with route_via_public_ip, got nil")
+	}
+	if !strings.Contains(err.Error(), "https") {
+		t.Fatalf("error message must mention https, got: %v", err)
+	}
+}
+
+func TestFargateConfig_RouteViaPublicIPAcceptsHTTPS(t *testing.T) {
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    assign_public_ip: true
+    route_via_public_ip: true
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Runtime.Fargate.ControlPlaneURL != "https://example.com" {
+		t.Fatalf("ControlPlaneURL not parsed, got %q", cfg.Runtime.Fargate.ControlPlaneURL)
+	}
+}
+
+func TestFargateConfig_BundleTokenTTLDefault(t *testing.T) {
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Runtime.Fargate.BundleTokenTTL != 10*time.Minute {
+		t.Fatalf("want default BundleTokenTTL=10m, got %v", cfg.Runtime.Fargate.BundleTokenTTL)
+	}
+}
+
+func TestFargateConfig_BundleTokenTTLEnvBadValue(t *testing.T) {
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL", "notaduration")
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for bad duration env var, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL") {
+		t.Fatalf("error must name the env var, got: %v", err)
+	}
 }
