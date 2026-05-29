@@ -523,6 +523,9 @@ func (r *Runtime) Stats(ctx context.Context, handle process.RunHandle) (float64,
 // the Runtime contract's SIGTERM-then-kill expectation (ECS StopTask performs the
 // term/kill escalation itself).
 func (r *Runtime) RunOnce(ctx context.Context, p process.StartParams, logWriter io.Writer) (process.ExitInfo, error) {
+	if p.Slug == "" {
+		return process.ExitInfo{}, fmt.Errorf("fargate: RunOnce requires a non-empty slug")
+	}
 	out, err := r.client.RunTask(ctx, r.runTaskInput(p))
 	if err != nil {
 		return process.ExitInfo{}, fmt.Errorf("fargate: run task: %w", err)
@@ -768,7 +771,8 @@ func optString(s string) *string {
 // deliberate re-launch after a STOPPED task in the prior window still works.
 //
 // Formula: SHA-256(cluster + "|" + slug + "|" + index + "|" + deploymentID + "|" + bucket)
-// truncated to 64 hex characters (ECS ClientToken max length is 64 chars).
+// as a lowercase hex string. SHA-256 hex is always exactly 64 characters, which
+// fits the ECS ClientToken maximum length of 64 exactly.
 // When deploymentID is 0 (legacy/pre-deploy rows) the field is omitted so the
 // token still differentiates across time buckets.
 func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix int64) string {
@@ -786,7 +790,7 @@ func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix in
 	b.WriteByte('|')
 	b.WriteString(bucket)
 	sum := sha256.Sum256([]byte(b.String()))
-	return fmt.Sprintf("%x", sum)[:64]
+	return fmt.Sprintf("%x", sum)
 }
 
 var (
