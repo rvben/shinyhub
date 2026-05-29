@@ -53,15 +53,16 @@ func TestResourceDefaults_MainGoDeployFn(t *testing.T) {
 
 func TestPatchApp_FargateRejection_ContractExists(t *testing.T) {
 	// Assert that handlePatchApp contains a write-time rejection for single-tier Fargate.
-	// This guards against someone silently removing the check.
+	// allTiersFargate is the actual gate function; it has no other call site in
+	// apps.go, so its absence means the rejection block was removed.
 	path := filepath.Join(".", "apps.go")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read apps.go: %v", err)
 	}
 	src := string(b)
-	if !strings.Contains(src, "DefaultTierName") {
-		t.Error("apps.go handlePatchApp: missing DefaultTierName call (write-time Fargate rejection)")
+	if !strings.Contains(src, "allTiersFargate") {
+		t.Error("apps.go handlePatchApp: missing allTiersFargate gate (write-time Fargate rejection)")
 	}
 	if !strings.Contains(src, "TaskMemoryMB") {
 		t.Error("apps.go handlePatchApp: missing TaskMemoryMB ceiling check")
