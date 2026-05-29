@@ -127,6 +127,16 @@ type Config struct {
 	// public internet has no transport security, so restrict task security groups
 	// to the control plane's address.
 	RouteViaPublicIP bool
+
+	// TaskCPUUnits is the ECS task-level CPU allocation in CPU units (1024 = 1 vCPU).
+	// When non-zero, buildContainerOverride clamps per-app CPUQuotaPercent so the
+	// container CPU units never exceed the task ceiling.
+	TaskCPUUnits int32
+
+	// TaskMemoryMB is the ECS task-level memory allocation in MiB. When non-zero,
+	// buildContainerOverride clamps per-app MemoryLimitMB so the container memory
+	// never exceeds the task ceiling.
+	TaskMemoryMB int32
 }
 
 // EC2Client is the subset of the AWS EC2 API needed to resolve a task ENI's
@@ -322,24 +332,40 @@ func replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
 	return env
 }
 
-// containerOverride builds the per-replica override: the launch command, the
-// resolved environment, and the optional CPU/memory limits. CPUQuotaPercent is
-// expressed in ECS CPU units (1024 = one vCPU), so 100% maps to 1024 units.
-func containerOverride(name string, p process.StartParams) ecstypes.ContainerOverride {
+// buildContainerOverride builds the per-replica override: the launch command,
+// the resolved environment, and the optional CPU/memory limits. CPUQuotaPercent
+// is converted to ECS CPU units (1024 = one vCPU), so 100% maps to 1024 units.
+// When TaskCPUUnits or TaskMemoryMB are configured, values that exceed the
+// task-level ceiling are clamped and a Warn is logged so operators notice
+// misconfigured per-app limits without a cryptic RunTask error.
+func (r *Runtime) buildContainerOverride(p process.StartParams) ecstypes.ContainerOverride {
 	ov := ecstypes.ContainerOverride{
-		Name:        aws.String(name),
+		Name:        aws.String(r.cfg.ContainerName),
 		Command:     p.Command,
 		Environment: replicaEnv(p),
 	}
 	if p.MemoryLimitMB > 0 {
-		ov.Memory = aws.Int32(int32(p.MemoryLimitMB))
+		mem := int32(p.MemoryLimitMB)
+		if r.cfg.TaskMemoryMB > 0 && mem > r.cfg.TaskMemoryMB {
+			r.log.Warn("fargate: container memory exceeds task ceiling; clamping",
+				"slug", p.Slug, "index", p.Index,
+				"requested_mb", mem, "task_ceiling_mb", r.cfg.TaskMemoryMB)
+			mem = r.cfg.TaskMemoryMB
+		}
+		ov.Memory = aws.Int32(mem)
 	}
 	if p.CPUQuotaPercent > 0 {
 		// Round to nearest ECS CPU unit: (pct*1024 + 50) / 100.
-		// Integer truncation without rounding would cause WS4's task-ceiling
-		// clamp to misfire on non-multiples of 100 (e.g. 33% -> 337 instead
-		// of the nearest 338).
-		ov.Cpu = aws.Int32((int32(p.CPUQuotaPercent)*1024 + 50) / 100)
+		// Integer rounding prevents the task-ceiling clamp from misfiring on
+		// non-multiples of 100 (e.g. 33% -> 338, not 337).
+		cpuUnits := (int32(p.CPUQuotaPercent)*1024 + 50) / 100
+		if r.cfg.TaskCPUUnits > 0 && cpuUnits > r.cfg.TaskCPUUnits {
+			r.log.Warn("fargate: container CPU exceeds task ceiling; clamping",
+				"slug", p.Slug, "index", p.Index,
+				"requested_units", cpuUnits, "task_ceiling_units", r.cfg.TaskCPUUnits)
+			cpuUnits = r.cfg.TaskCPUUnits
+		}
+		ov.Cpu = aws.Int32(cpuUnits)
 	}
 	return ov
 }
@@ -382,7 +408,7 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 		PlatformVersion:      optString(r.cfg.PlatformVersion),
 		NetworkConfiguration: r.networkConfig(),
 		Overrides: &ecstypes.TaskOverride{
-			ContainerOverrides: []ecstypes.ContainerOverride{containerOverride(r.cfg.ContainerName, p)},
+			ContainerOverrides: []ecstypes.ContainerOverride{r.buildContainerOverride(p)},
 		},
 		Tags: r.tags(p),
 	}

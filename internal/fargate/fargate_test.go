@@ -1132,9 +1132,16 @@ func TestCPURounding(t *testing.T) {
 		{75, 768}, // (75*1024+50)/100 = 76850/100 = 768
 		{33, 338}, // (33*1024+50)/100 = 33842/100 = 338 (truncation gives 337)
 	}
+	// Use a runtime with no task ceiling so the rounding test is not affected by clamping.
+	rt := New(&fakeECS{}, Config{
+		Cluster:       "c",
+		TaskDefinition: "td",
+		ContainerName: "app",
+		Subnets:       []string{"s-1"},
+	}, nil)
 	for _, tc := range cases {
 		p := process.StartParams{CPUQuotaPercent: tc.pct}
-		ov := containerOverride("app", p)
+		ov := rt.buildContainerOverride(p)
 		if got := aws.ToInt32(ov.Cpu); got != tc.want {
 			t.Errorf("CPUQuotaPercent=%d: Cpu=%d, want %d", tc.pct, got, tc.want)
 		}
@@ -1782,5 +1789,69 @@ func TestInventoryReportsStoppedTaskAsNotRunning(t *testing.T) {
 	}
 	if items[0].Running {
 		t.Errorf("STOPPED task: Running = true, want false")
+	}
+}
+
+func TestContainerOverride_ClampsToTaskCeiling(t *testing.T) {
+	// Task has 1024 CPU units (1 vCPU = 100%) and 2048 MB.
+	// App requests 200% CPU and 4096 MB - both exceed the task ceiling.
+	// Expect values clamped to task ceiling, with a Warn log.
+	var logBuf strings.Builder
+	h := slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	log := slog.New(h)
+
+	rt := New(&fakeECS{}, Config{
+		Cluster:        "c",
+		TaskDefinition: "td",
+		ContainerName:  "app",
+		Subnets:        []string{"s-1"},
+		TaskCPUUnits:   1024,
+		TaskMemoryMB:   2048,
+	}, log)
+
+	p := process.StartParams{
+		Slug:            "myapp",
+		Index:           0,
+		CPUQuotaPercent: 200, // over the 1-vCPU ceiling (100%)
+		MemoryLimitMB:   4096, // over 2048 MB ceiling
+	}
+	ov := rt.buildContainerOverride(p)
+
+	// CPU: 200% of 1024 units = 2048; task ceiling = 1024 -> clamped to 1024
+	if ov.Cpu == nil || *ov.Cpu != 1024 {
+		t.Errorf("CPU: want 1024 (clamped), got %v", ov.Cpu)
+	}
+	// Memory: 4096 MB exceeds task 2048 -> clamped to 2048
+	if ov.Memory == nil || *ov.Memory != 2048 {
+		t.Errorf("Memory: want 2048 (clamped), got %v", ov.Memory)
+	}
+	if !strings.Contains(logBuf.String(), "clamp") {
+		t.Errorf("expected a 'clamp' warn log; got: %s", logBuf.String())
+	}
+}
+
+func TestContainerOverride_NoClampsWhenUnderCeiling(t *testing.T) {
+	rt := New(&fakeECS{}, Config{
+		Cluster:        "c",
+		TaskDefinition: "td",
+		ContainerName:  "app",
+		Subnets:        []string{"s-1"},
+		TaskCPUUnits:   2048,
+		TaskMemoryMB:   4096,
+	}, nil)
+
+	p := process.StartParams{
+		Slug:            "myapp",
+		Index:           0,
+		CPUQuotaPercent: 100, // 1024 units; task has 2048
+		MemoryLimitMB:   2048, // task has 4096
+	}
+	ov := rt.buildContainerOverride(p)
+
+	if ov.Cpu == nil || *ov.Cpu != 1024 {
+		t.Errorf("CPU: want 1024 (no clamp), got %v", ov.Cpu)
+	}
+	if ov.Memory == nil || *ov.Memory != 2048 {
+		t.Errorf("Memory: want 2048 (no clamp), got %v", ov.Memory)
 	}
 }
