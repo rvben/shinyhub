@@ -660,7 +660,13 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 		})
 		if err != nil {
 			r.metrics.RecordInventoryError()
-			return nil, fmt.Errorf("fargate: describe tasks: %w", err)
+			// A per-batch DescribeTasks error means the Fargate runtime is
+			// partially reachable. Return PartialInventoryError so recovery marks
+			// Fargate replicas indeterminate (ti.unreachable["fargate"]) instead of
+			// allDown. The synthetic worker sentinel WorkerID ("fargate") is not a
+			// real node id; it is a stable constant used by the recovery path to
+			// identify all Fargate replicas on this cluster.
+			return items, &process.PartialInventoryError{Workers: []string{WorkerID}}
 		}
 		for _, task := range out.Tasks {
 			labels := tagsToLabels(task.Tags)

@@ -1694,6 +1694,31 @@ func TestPublicStopTaskForwardsToECS(t *testing.T) {
 	}
 }
 
+func TestInventoryReturnsPendingPartialOnBatchError(t *testing.T) {
+	// When DescribeTasks fails for a batch, Inventory must return
+	// PartialInventoryError so recovery treats Fargate replicas as indeterminate
+	// rather than driving the app to stopped.
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1", "arn-2"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return nil, fmt.Errorf("RequestError: throttled")
+		},
+	}
+	_, err := fastRuntime(f).Inventory(context.Background())
+	if err == nil {
+		t.Fatal("expected error from Inventory on DescribeTasks failure")
+	}
+	var partial *process.PartialInventoryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected PartialInventoryError, got %T: %v", err, err)
+	}
+	if len(partial.Workers) != 1 || partial.Workers[0] != WorkerID {
+		t.Errorf("PartialInventoryError.Workers = %v, want [%q]", partial.Workers, WorkerID)
+	}
+}
+
 func TestInventoryReportsPendingTaskAsRunning(t *testing.T) {
 	// A PROVISIONING/PENDING task has no IP yet but is NOT stopped.
 	// Inventory must report Running=true so recovery does not treat it as gone.
