@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 
+	"github.com/rvben/shinyhub/internal/bundletoken"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -348,8 +349,9 @@ func TestStartToleratesEventuallyConsistentDescribe(t *testing.T) {
 
 func TestReplicaEnvOmitsUnsetIdentity(t *testing.T) {
 	p := process.StartParams{Slug: "demo", Index: 0} // no digest, deployment, version
+	r := New(&fakeECS{}, testCfg(), nil)
 	env := map[string]string{}
-	for _, kv := range replicaEnv(p) {
+	for _, kv := range r.replicaEnv(p) {
 		env[aws.ToString(kv.Name)] = aws.ToString(kv.Value)
 	}
 	if _, ok := env["SHINYHUB_CONTENT_DIGEST"]; ok {
@@ -1170,8 +1172,9 @@ func TestStartRejectsEmptySlug(t *testing.T) {
 // to identify the app; it must never be silently omitted.
 func TestReplicaEnvAlwaysEmitsSHINYHUBSLUG(t *testing.T) {
 	p := process.StartParams{Slug: "myapp", Index: 0}
+	r := New(&fakeECS{}, testCfg(), nil)
 	env := map[string]string{}
-	for _, kv := range replicaEnv(p) {
+	for _, kv := range r.replicaEnv(p) {
 		env[aws.ToString(kv.Name)] = aws.ToString(kv.Value)
 	}
 	if env["SHINYHUB_SLUG"] != "myapp" {
@@ -1853,5 +1856,54 @@ func TestContainerOverride_NoClampsWhenUnderCeiling(t *testing.T) {
 	}
 	if ov.Memory == nil || *ov.Memory != 2048 {
 		t.Errorf("Memory: want 2048 (no clamp), got %v", ov.Memory)
+	}
+}
+
+func TestReplicaEnv_InjectsBundleToken(t *testing.T) {
+	secret := []byte("aaaabbbbccccddddeeeeffffgggghhhh")
+	cfg := testCfg()
+	cfg.ControlPlaneURL = "https://shinyhub.example.com"
+	cfg.BundleTokenKey = secret
+	cfg.BundleTokenTTL = 10 * time.Minute
+	r := New(&fakeECS{}, cfg, nil)
+	p := process.StartParams{
+		Slug:          "myapp",
+		Index:         0,
+		ContentDigest: "sha256:abc",
+	}
+	env := r.replicaEnv(p)
+	get := func(key string) string {
+		for _, kv := range env {
+			if *kv.Name == key {
+				return *kv.Value
+			}
+		}
+		return ""
+	}
+	if v := get("SHINYHUB_CONTROL_PLANE_URL"); v != "https://shinyhub.example.com" {
+		t.Fatalf("SHINYHUB_CONTROL_PLANE_URL = %q, want https://shinyhub.example.com", v)
+	}
+	bundleToken := get("SHINYHUB_BUNDLE_TOKEN")
+	if bundleToken == "" {
+		t.Fatal("SHINYHUB_BUNDLE_TOKEN must be set in the env")
+	}
+	// Verify the minted token is valid for the digest.
+	if err := bundletoken.Verify(secret, "sha256:abc", bundleToken, time.Now().Unix()); err != nil {
+		t.Fatalf("minted token failed verification: %v", err)
+	}
+}
+
+func TestReplicaEnv_EmptySlugGuard(t *testing.T) {
+	// Start must reject an empty slug rather than silently sending a malformed env.
+	r := New(&fakeECS{runTaskFn: func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
+		return &ecs.RunTaskOutput{Tasks: []ecstypes.Task{{TaskArn: aws.String("arn:aws:ecs:us-east-1:123456789012:task/abc")}}}, nil
+	}}, testCfg(), nil, WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond))
+	_, err := r.Start(context.Background(), process.StartParams{
+		Slug:  "",
+		Index: 0,
+		Port:  3838,
+	}, io.Discard)
+	if err == nil {
+		t.Fatal("Start with empty slug must return an error")
 	}
 }

@@ -180,7 +180,7 @@ func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net
 // under a distinct tier name. Fargate tiers share cfg.Runtime.Fargate (one ECS
 // cluster). config.Load validates tier modes, so the default case is
 // unreachable in production.
-func buildRuntime(ctx context.Context, mode string, cfg *config.Config) (process.Runtime, error) {
+func buildRuntime(ctx context.Context, mode string, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
 	switch mode {
 	case "docker":
 		dockerRT, err := process.NewDockerRuntime(
@@ -196,7 +196,7 @@ func buildRuntime(ctx context.Context, mode string, cfg *config.Config) (process
 	case "native":
 		return process.NewNativeRuntime(), nil
 	case "fargate":
-		return buildFargateRuntime(ctx, cfg)
+		return buildFargateRuntime(ctx, cfg, bundleTokenKey)
 	case "remote_docker":
 		// Handled upstream: remote tiers are registered via NewRemoteRuntime before
 		// RegisterRuntime; buildRuntime is not called for remote_docker tiers.
@@ -224,7 +224,7 @@ func deriveBundleTokenKey(authSecret string) []byte {
 // resolving AWS credentials and region from the SDK default chain (and the
 // explicit region override when set). config.Load has already validated that the
 // required Fargate fields are present whenever a tier uses this runtime.
-func buildFargateRuntime(ctx context.Context, cfg *config.Config) (process.Runtime, error) {
+func buildFargateRuntime(ctx context.Context, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
 	fc := cfg.Runtime.Fargate
 	var optFns []func(*awsconfig.LoadOptions) error
 	if fc.Region != "" {
@@ -248,8 +248,11 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config) (process.Runti
 		AssignPublicIP:   fc.AssignPublicIP,
 		PlatformVersion:  fc.PlatformVersion,
 		RouteViaPublicIP: fc.RouteViaPublicIP,
-		TaskCPUUnits:     int32(fc.TaskCPUUnits),  // operator-configured task ceiling
-		TaskMemoryMB:     int32(fc.TaskMemoryMB),  // operator-configured task ceiling
+		TaskCPUUnits:     int32(fc.TaskCPUUnits),   // operator-configured task ceiling
+		TaskMemoryMB:     int32(fc.TaskMemoryMB),   // operator-configured task ceiling
+		ControlPlaneURL:  fc.ControlPlaneURL,
+		BundleTokenTTL:   fc.BundleTokenTTL,
+		BundleTokenKey:   bundleTokenKey,
 	}, slog.Default(), opts...), nil
 }
 
@@ -391,7 +394,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// placement can route replicas to them.
 	defaultTier := cfg.Runtime.DefaultTierName()
 	defaultMode, _ := cfg.Runtime.RuntimeForTier(defaultTier)
-	rt, err := buildRuntime(ctx, defaultMode, cfg)
+	rt, err := buildRuntime(ctx, defaultMode, cfg, bundleTokenKey)
 	if err != nil {
 		return err
 	}
@@ -411,7 +414,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			slog.Info("remote runtime tier registered", "tier", name, "mode", mode)
 			continue
 		}
-		tierRT, err := buildRuntime(ctx, mode, cfg)
+		tierRT, err := buildRuntime(ctx, mode, cfg, bundleTokenKey)
 		if err != nil {
 			return err
 		}

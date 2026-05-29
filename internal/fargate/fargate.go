@@ -47,6 +47,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 
+	"github.com/rvben/shinyhub/internal/bundletoken"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -137,6 +138,19 @@ type Config struct {
 	// buildContainerOverride clamps per-app MemoryLimitMB so the container memory
 	// never exceeds the task ceiling.
 	TaskMemoryMB int32
+
+	// ControlPlaneURL is the URL tasks use to fetch their bundle. Set to the
+	// value of runtime.fargate.control_plane_url.
+	ControlPlaneURL string
+
+	// BundleTokenTTL is the TTL for minted bundle capability tokens. Set from
+	// runtime.fargate.bundle_token_ttl (default 10 minutes).
+	BundleTokenTTL time.Duration
+
+	// BundleTokenKey is the 32-byte HKDF-derived key used to mint bundle tokens.
+	// Derived once at startup with deriveBundleTokenKey(authSecret) and injected
+	// by buildFargateRuntime. Must not be nil when ControlPlaneURL is set.
+	BundleTokenKey []byte
 }
 
 // EC2Client is the subset of the AWS EC2 API needed to resolve a task ENI's
@@ -301,8 +315,11 @@ func (r *Runtime) networkConfig() *ecstypes.NetworkConfiguration {
 // SHINYHUB_CONTENT_DIGEST; the control plane only supplies the identity, never
 // the bytes. Platform vars are appended last so they are authoritative for their
 // reserved SHINYHUB_ prefix even if an app env var collides.
-func replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
-	env := make([]ecstypes.KeyValuePair, 0, len(p.Env)+5)
+// When cfg.ControlPlaneURL is set, SHINYHUB_CONTROL_PLANE_URL and
+// SHINYHUB_BUNDLE_TOKEN are included so the runner image can fetch the bundle
+// by token without performing mTLS certificate setup.
+func (r *Runtime) replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
+	env := make([]ecstypes.KeyValuePair, 0, len(p.Env)+7)
 	for _, kv := range p.Env {
 		if idx := strings.IndexByte(kv, '='); idx > 0 {
 			env = append(env, ecstypes.KeyValuePair{
@@ -329,6 +346,17 @@ func replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
 		add("SHINYHUB_DEPLOYMENT_ID", strconv.FormatInt(p.DeploymentID, 10))
 	}
 	add("SHINYHUB_APP_VERSION", p.AppVersion)
+	if r.cfg.ControlPlaneURL != "" {
+		add("SHINYHUB_CONTROL_PLANE_URL", r.cfg.ControlPlaneURL)
+	}
+	if len(r.cfg.BundleTokenKey) > 0 && p.ContentDigest != "" {
+		ttl := r.cfg.BundleTokenTTL
+		if ttl <= 0 {
+			ttl = 10 * time.Minute
+		}
+		tok := bundletoken.Mint(r.cfg.BundleTokenKey, p.ContentDigest, ttl, time.Now().Unix())
+		add("SHINYHUB_BUNDLE_TOKEN", tok)
+	}
 	return env
 }
 
@@ -342,7 +370,7 @@ func (r *Runtime) buildContainerOverride(p process.StartParams) ecstypes.Contain
 	ov := ecstypes.ContainerOverride{
 		Name:        aws.String(r.cfg.ContainerName),
 		Command:     p.Command,
-		Environment: replicaEnv(p),
+		Environment: r.replicaEnv(p),
 	}
 	if p.MemoryLimitMB > 0 {
 		mem := int32(p.MemoryLimitMB)
