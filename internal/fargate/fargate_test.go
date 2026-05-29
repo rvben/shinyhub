@@ -199,7 +199,7 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 func TestStartBuildsCorrectRunTaskInput(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.9", "RUNNING")}}, nil
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.9", "RUNNING")}}, nil
 		},
 	}
 	r := fastRuntime(f)
@@ -306,7 +306,7 @@ func TestInventoryFallsBackToPortlessURLWithoutPortTag(t *testing.T) {
 func TestStartAssignsPublicIPWhenConfigured(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.9", "RUNNING")}}, nil
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.9", "RUNNING")}}, nil
 		},
 	}
 	cfg := testCfg()
@@ -376,7 +376,7 @@ func TestStartRoutesViaPublicIPWhenConfigured(t *testing.T) {
 				}}}, nil
 			}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
-				taskWithENI("task-arn", eni, "10.0.0.5", "RUNNING"),
+				taskWithENI("task-arn", eni, "192.0.2.5", "RUNNING"),
 			}}, nil
 		},
 	}
@@ -413,7 +413,7 @@ func TestStartPublicIPWaitsForAssociation(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
-				taskWithENI("task-arn", "eni-x", "10.0.0.5", "RUNNING"),
+				taskWithENI("task-arn", "eni-x", "192.0.2.5", "RUNNING"),
 			}}, nil
 		},
 	}
@@ -450,7 +450,7 @@ func TestRouteViaPublicIPWithoutEC2ClientErrors(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
-				taskWithENI("task-arn", "eni-x", "10.0.0.5", "RUNNING"),
+				taskWithENI("task-arn", "eni-x", "192.0.2.5", "RUNNING"),
 			}}, nil
 		},
 	}
@@ -924,7 +924,7 @@ func TestInventoryBatches101Tasks(t *testing.T) {
 					LastStatus: aws.String("RUNNING"),
 					Containers: []ecstypes.Container{{
 						NetworkInterfaces: []ecstypes.NetworkInterface{{
-							PrivateIpv4Address: aws.String("10.0.0.1"),
+							PrivateIpv4Address: aws.String("192.0.2.1"),
 						}},
 					}},
 					Tags: []ecstypes.Tag{
@@ -991,7 +991,7 @@ func TestDescribeTaskMISSINGKeepsPolling(t *testing.T) {
 				}, nil
 			}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
-				taskWithIP("task-arn", "10.0.0.5", "RUNNING"),
+				taskWithIP("task-arn", "192.0.2.5", "RUNNING"),
 			}}, nil
 		},
 	}
@@ -1000,8 +1000,8 @@ func TestDescribeTaskMISSINGKeepsPolling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: unexpected error on MISSING failure: %v", err)
 	}
-	if ep.URL != "http://10.0.0.5:8000" {
-		t.Errorf("URL = %q, want http://10.0.0.5:8000", ep.URL)
+	if ep.URL != "http://192.0.2.5:8000" {
+		t.Errorf("URL = %q, want http://192.0.2.5:8000", ep.URL)
 	}
 	if calls < 2 {
 		t.Errorf("expected at least 2 describe calls (MISSING then success), got %d", calls)
@@ -1270,7 +1270,7 @@ func (f *fakeFargateMetrics) ObserveRunTaskLatency(seconds float64) {
 func TestSetMetrics_DefaultIsNoop(t *testing.T) {
 	r := fastRuntime(&fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.1", "RUNNING")}}, nil
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.1", "RUNNING")}}, nil
 		},
 	})
 	// No SetMetrics call: must not panic on any operation.
@@ -1283,7 +1283,7 @@ func TestSetMetrics_DefaultIsNoop(t *testing.T) {
 func TestMetrics_StartRecordsRunTaskOk(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "10.0.0.5", "RUNNING")}}, nil
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.5", "RUNNING")}}, nil
 		},
 	}
 	r := fastRuntime(f)
@@ -1515,7 +1515,7 @@ func TestSlog_StartLogsRunTask(t *testing.T) {
 			return &ecs.RunTaskOutput{Tasks: []ecstypes.Task{{TaskArn: aws.String("arn-abc")}}}, nil
 		},
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("arn-abc", "10.0.0.1", "RUNNING")}}, nil
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("arn-abc", "192.0.2.1", "RUNNING")}}, nil
 		},
 	}
 	// Swap the runtime's logger to write to buf.
@@ -1539,7 +1539,7 @@ func TestSlog_InventoryLogsCount(t *testing.T) {
 			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1", "arn-2"}}, nil
 		},
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			t1 := taskWithIP("arn-1", "10.0.0.1", "RUNNING")
+			t1 := taskWithIP("arn-1", "192.0.2.1", "RUNNING")
 			t1.Tags = []ecstypes.Tag{
 				{Key: aws.String(tagSlug), Value: aws.String("demo")},
 				{Key: aws.String(tagPort), Value: aws.String("8000")},
@@ -1606,7 +1606,7 @@ func TestRunTaskReceivesClientToken(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
-				taskWithIP("task-arn", "10.0.0.1", "RUNNING"),
+				taskWithIP("task-arn", "192.0.2.1", "RUNNING"),
 			}}, nil
 		},
 	}
