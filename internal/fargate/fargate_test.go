@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -812,6 +813,23 @@ func TestInventoryReportsSTOPPEDTaskAsNotRunning(t *testing.T) {
 	}
 }
 
+// TestRunOnceRejectsEmptySlug asserts that RunOnce returns an error immediately
+// when StartParams.Slug is empty, matching the same guard in Start. RunTask must
+// not be called when slug validation fails.
+func TestRunOnceRejectsEmptySlug(t *testing.T) {
+	f := &fakeECS{}
+	r := fastRuntime(f)
+	p := startParams()
+	p.Slug = ""
+	_, err := r.RunOnce(context.Background(), p, io.Discard)
+	if err == nil {
+		t.Fatal("RunOnce with empty slug must return an error")
+	}
+	if len(f.runInputs) != 0 {
+		t.Error("RunTask must not be called when slug is empty")
+	}
+}
+
 // TestRunOnceCancelsViaDescribeError asserts that when ctx is cancelled during
 // the describeTask poll (describe returns ctx.Err), RunOnce stops the task and
 // returns a signalled exit - not an error.
@@ -842,10 +860,10 @@ func TestRunOnceCancelsViaDescribeError(t *testing.T) {
 // returns a signalled exit.
 func TestRunOnceCancelsViaSleepError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	polls := 0
+	var polls atomic.Int32
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
-			polls++
+			polls.Add(1)
 			// Return RUNNING so RunOnce sleeps between polls.
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{{
 				TaskArn:    aws.String("task-arn"),
@@ -865,7 +883,7 @@ func TestRunOnceCancelsViaSleepError(t *testing.T) {
 		done <- result{info, err}
 	}()
 	// Let at least one describe poll happen, then cancel.
-	for polls == 0 {
+	for polls.Load() == 0 {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
@@ -1045,32 +1063,22 @@ func (c *contextCapturingECS) StopTask(ctx context.Context, in *ecs.StopTaskInpu
 	return &ecs.StopTaskOutput{}, nil
 }
 
-// TestSignalRespectsTimeout asserts that Signal does not block indefinitely when
-// StopTask hangs. The test verifies that Signal returns within a bounded wall
-// time, confirming the internal timeout is in effect.
-func TestSignalRespectsTimeout(t *testing.T) {
-	blocked := make(chan struct{})
-	ctxHasDeadline := false
+// TestSignalCallsStopTask asserts that Signal(SIGTERM) invokes StopTask and
+// returns without error. The deadline invariant on the stop context is
+// separately pinned by TestSignalStopContextHasDeadline.
+func TestSignalCallsStopTask(t *testing.T) {
+	stopCalled := false
 	f := &fakeECS{}
 	f.stopTaskFn = func(_ *ecs.StopTaskInput) (*ecs.StopTaskOutput, error) {
-		ctxHasDeadline = true
-		close(blocked)
+		stopCalled = true
 		return &ecs.StopTaskOutput{}, nil
 	}
-
 	r := fastRuntime(f)
 	handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/sigtest")}
-	done := make(chan error, 1)
-	go func() { done <- r.Signal(handle, syscall.SIGTERM) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Signal: unexpected error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Signal did not return within 5s")
+	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: unexpected error: %v", err)
 	}
-	if !ctxHasDeadline {
+	if !stopCalled {
 		t.Error("StopTask was never called")
 	}
 }
