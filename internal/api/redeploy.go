@@ -119,14 +119,15 @@ func (s *Server) redeployApp(slug string) {
 		s.proxy.Deregister(slug)
 	}
 
+	redeployDefaultMem, redeployDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, redeployDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, redeployDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,

@@ -681,14 +681,15 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		}
 		return
 	}
+	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          prev.ID,
@@ -945,14 +946,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	deployDefaultMem, deployDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, deployDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         digest,
 		DeploymentID:          pendingDep.ID,
@@ -1209,14 +1211,15 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
+	rollbackDefaultMem, rollbackDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, rollbackDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, rollbackDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          pendingDep.ID,
@@ -1339,14 +1342,15 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
+	restartDefaultMem, restartDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, restartDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, restartDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,

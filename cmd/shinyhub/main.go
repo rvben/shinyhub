@@ -606,6 +606,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
+		deployDefaultMem, deployDefaultCPU := cfg.Runtime.DefaultResourcesForTier(cfg.Runtime.DefaultTierName())
 		p := deploy.Params{
 			Slug:                  slug,
 			BundleDir:             bundleDir,
@@ -615,8 +616,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			Placement:             app.PlacementMap(),
 			TierOrder:             cfg.Runtime.TierOrder(),
 			DefaultTier:           cfg.Runtime.DefaultTierName(),
-			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
-			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
+			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, deployDefaultMem),
+			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
 			// Pin a shared-mount consumer's restarted replica to the worker set
 			// hosting its source data, matching the full-deploy placement so a

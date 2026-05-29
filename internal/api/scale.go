@@ -92,14 +92,15 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		s.proxy.SetPoolCap(slug, sessionCap)
 	}
 
+	scaleDefaultMem, scaleDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
 	p := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              total,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, scaleDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, scaleDefaultCPU),
 		MaxSessionsPerReplica: sessionCap,
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
