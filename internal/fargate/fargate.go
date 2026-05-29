@@ -516,6 +516,7 @@ func (r *Runtime) Signal(handle process.RunHandle, sig syscall.Signal) error {
 	if sig == syscall.SIGKILL {
 		reason = "shinyhub: replica kill"
 	}
+	r.log.Info("fargate signal", "task_arn", taskARN, "signal", sig)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return r.stop(ctx, taskARN, reason)
@@ -549,6 +550,7 @@ func (r *Runtime) Wait(ctx context.Context, handle process.RunHandle) error {
 			return err
 		}
 		if task == nil || aws.ToString(task.LastStatus) == "STOPPED" {
+			r.log.Debug("fargate task terminal", "task_arn", taskARN)
 			return nil
 		}
 		if err := r.sleep(ctx); err != nil {
@@ -620,6 +622,7 @@ func (r *Runtime) RunOnce(ctx context.Context, p process.StartParams, logWriter 
 func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error) {
 	arns, err := r.listManagedTaskARNs(ctx)
 	if err != nil {
+		r.metrics.RecordInventoryError()
 		return nil, err
 	}
 	if len(arns) == 0 {
@@ -638,6 +641,7 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 			Include: []ecstypes.TaskField{ecstypes.TaskFieldTags},
 		})
 		if err != nil {
+			r.metrics.RecordInventoryError()
 			return nil, fmt.Errorf("fargate: describe tasks: %w", err)
 		}
 		for _, task := range out.Tasks {
@@ -652,6 +656,7 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 			url := ""
 			ip, err := r.routeIP(ctx, task)
 			if err != nil {
+				r.metrics.RecordInventoryError()
 				return nil, err
 			}
 			if ip != "" {
@@ -674,6 +679,7 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 			})
 		}
 	}
+	r.log.Debug("fargate inventory", "count", len(items), "total_arns", len(arns))
 	return items, nil
 }
 

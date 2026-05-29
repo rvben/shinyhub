@@ -1,10 +1,12 @@
 package fargate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1409,6 +1411,118 @@ func TestMetrics_StopTaskError(t *testing.T) {
 	defer fm.mu.Unlock()
 	if len(fm.stopTaskResults) != 1 || fm.stopTaskResults[0] != "error" {
 		t.Errorf("RecordStopTask results = %v, want [error]", fm.stopTaskResults)
+	}
+}
+
+func TestMetrics_InventoryErrorIncremented(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return nil, errors.New("ecs: throttled")
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	_, err := r.Inventory(context.Background())
+	if err == nil {
+		t.Fatal("expected error from ListTasks")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if fm.inventoryErrors != 1 {
+		t.Errorf("RecordInventoryError count = %d, want 1", fm.inventoryErrors)
+	}
+}
+
+func TestMetrics_InventoryDescribeErrorIncremented(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return nil, errors.New("ecs: describe failed")
+		},
+	}
+	r := fastRuntime(f)
+	fm := &fakeFargateMetrics{}
+	r.SetMetrics(fm)
+
+	_, err := r.Inventory(context.Background())
+	if err == nil {
+		t.Fatal("expected error from DescribeTasks")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if fm.inventoryErrors != 1 {
+		t.Errorf("RecordInventoryError count = %d, want 1", fm.inventoryErrors)
+	}
+}
+
+// captureLog swaps the default slog logger for one writing JSON at Debug+ level
+// to a buffer, returning the buffer and a restore func. Used to assert log output
+// in tests without relying on slog.Default() across goroutines.
+func captureLog(t *testing.T) (*bytes.Buffer, func()) {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return &buf, func() { slog.SetDefault(prev) }
+}
+
+func TestSlog_StartLogsRunTask(t *testing.T) {
+	f := &fakeECS{
+		runTaskFn: func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
+			return &ecs.RunTaskOutput{Tasks: []ecstypes.Task{{TaskArn: aws.String("arn-abc")}}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("arn-abc", "10.0.0.1", "RUNNING")}}, nil
+		},
+	}
+	// Swap the runtime's logger to write to buf.
+	var buf bytes.Buffer
+	r := New(f, testCfg(), slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond))
+
+	_, err := r.Start(context.Background(), startParams(), io.Discard)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "arn-abc") {
+		t.Errorf("expected task ARN in Start log, got:\n%s", logs)
+	}
+}
+
+func TestSlog_InventoryLogsCount(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1", "arn-2"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			t1 := taskWithIP("arn-1", "10.0.0.1", "RUNNING")
+			t1.Tags = []ecstypes.Tag{
+				{Key: aws.String(tagSlug), Value: aws.String("demo")},
+				{Key: aws.String(tagPort), Value: aws.String("8000")},
+			}
+			t2 := ecstypes.Task{TaskArn: aws.String("arn-2"), LastStatus: aws.String("RUNNING")}
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{t1, t2}}, nil
+		},
+	}
+	var buf bytes.Buffer
+	r := New(f, testCfg(), slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		WithPollInterval(time.Millisecond))
+
+	items, err := r.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected at least one inventory item")
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "inventory") {
+		t.Errorf("expected inventory log entry, got:\n%s", logs)
 	}
 }
 
