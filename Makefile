@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint run dev goreleaser-check
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint run dev goreleaser-check build-runner-image
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -51,6 +51,12 @@ dev:
 
 goreleaser-check:
 	goreleaser check
+
+# build-runner-image builds the reference Python Fargate runner image. The
+# image is not required for local development but is needed for ECS-based
+# deployments. Requires Docker.
+build-runner-image:
+	docker build -t shinyhub-fargate-runner:latest build/fargate-runner/
 
 # Release workflow:
 #   make release-patch   (or release-minor / release-major)
