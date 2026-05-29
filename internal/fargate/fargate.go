@@ -611,9 +611,13 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 			items = append(items, process.InventoryItem{
 				ContainerID: aws.ToString(task.TaskArn),
 				Labels:      labels,
-				Running:     aws.ToString(task.LastStatus) == "RUNNING",
-				URL:         url,
-				WorkerID:    WorkerID,
+				// Running is true for any task not in STOPPED state (PROVISIONING, PENDING,
+				// or RUNNING). Only STOPPED tasks are Running=false. This matches the
+				// InventoryItem.Running semantics: "not stopped" rather than "routable now".
+				// Consumers that need a routable URL must additionally check URL != "".
+				Running:  aws.ToString(task.LastStatus) != "STOPPED",
+				URL:      url,
+				WorkerID: WorkerID,
 			})
 		}
 	}

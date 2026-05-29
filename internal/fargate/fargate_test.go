@@ -746,6 +746,72 @@ func TestInventoryPaginatesListTasks(t *testing.T) {
 	}
 }
 
+// TestInventoryReportsPROVISIONINGTaskAsRunning asserts that a task in
+// PROVISIONING or PENDING state is reported as Running=true, not Running=false.
+// A Running=false item in recovery is treated as "gone" and triggers re-placement,
+// which would launch a duplicate Fargate task. PROVISIONING/PENDING tasks are
+// live; only STOPPED tasks are "gone".
+func TestInventoryReportsPROVISIONINGTaskAsRunning(t *testing.T) {
+	for _, status := range []string{"PROVISIONING", "PENDING"} {
+		status := status
+		t.Run(status, func(t *testing.T) {
+			f := &fakeECS{
+				listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+					return &ecs.ListTasksOutput{TaskArns: []string{"arn-1"}}, nil
+				},
+				describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+					return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{{
+						TaskArn:    aws.String("arn-1"),
+						LastStatus: aws.String(status),
+						Tags: []ecstypes.Tag{
+							{Key: aws.String(tagSlug), Value: aws.String("demo")},
+						},
+					}}}, nil
+				},
+			}
+			items, err := fastRuntime(f).Inventory(context.Background())
+			if err != nil {
+				t.Fatalf("Inventory: %v", err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("got %d items, want 1", len(items))
+			}
+			if !items[0].Running {
+				t.Errorf("status %s: Running=false, want true (not STOPPED = still alive)", status)
+			}
+		})
+	}
+}
+
+// TestInventoryReportsSTOPPEDTaskAsNotRunning asserts that only STOPPED tasks
+// report Running=false, documenting the "not stopped" semantics.
+func TestInventoryReportsSTOPPEDTaskAsNotRunning(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-stopped"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{{
+				TaskArn:    aws.String("arn-stopped"),
+				LastStatus: aws.String("STOPPED"),
+				Tags: []ecstypes.Tag{
+					{Key: aws.String(tagSlug), Value: aws.String("demo")},
+				},
+			}}}, nil
+		},
+	}
+	items, err := fastRuntime(f).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Running {
+		t.Error("STOPPED task must report Running=false")
+	}
+}
+
 // TestRunOnceCancelsViaDescribeError asserts that when ctx is cancelled during
 // the describeTask poll (describe returns ctx.Err), RunOnce stops the task and
 // returns a signalled exit - not an error.
