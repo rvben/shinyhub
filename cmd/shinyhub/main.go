@@ -659,14 +659,34 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		watcher.SetTracer(tracer.Tracer())
 	}
 
-	// When worker hosting is enabled, let the watchdog re-place replicas lost to
-	// a dead worker onto a healthy worker for the tier. The gate keeps a
-	// no-worker replica lost at zero cost (no restart-budget burn) and lets it
-	// auto-heal once a replacement worker joins.
-	if workerReg != nil {
+	// Wire lost-replica healing. For fargate tiers, ECS reachability is
+	// validated at startup so the gate is always-true (fargate tasks are
+	// never placed via a worker registry). For worker tiers, delegate to
+	// the registry. Mixed deployments (fargate burst + worker tiers) are
+	// handled by the combined predicate.
+	//
+	// Note: persistent RunTask failures still consume the normal crash-restart
+	// budget, so always-true for fargate tiers cannot cause runaway
+	// re-placement.
+	hasFargateTier := false
+	for _, name := range cfg.Runtime.TierOrder() {
+		mode, _ := cfg.Runtime.RuntimeForTier(name)
+		if mode == "fargate" {
+			hasFargateTier = true
+			break
+		}
+	}
+	if workerReg != nil || hasFargateTier {
 		watcher.EnableLostReplicaHealing(func(tier string) bool {
-			_, ok := workerReg.WorkerForTier(tier)
-			return ok
+			mode, _ := cfg.Runtime.RuntimeForTier(tier)
+			if mode == "fargate" {
+				return true // ECS is always-reachable as a startup precondition
+			}
+			if workerReg != nil {
+				_, ok := workerReg.WorkerForTier(tier)
+				return ok
+			}
+			return false
 		})
 	}
 
@@ -689,6 +709,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// stopped containers from prior runs do not accumulate.
 	if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
 		lifecycle.SweepOrphanContainers(mgr, sweeper)
+	}
+
+	// Sweep orphan Fargate tasks across ALL registered tiers.
+	// The existing SweepOrphanContainers only covers the default-tier runtime;
+	// a Fargate burst tier declared via runtime.tiers[] would never be swept
+	// without this loop.
+	{
+		sweepCtx, cancelSweep := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancelSweep()
+		for _, tierName := range cfg.Runtime.TierOrder() {
+			tierRT := mgr.RuntimeForTier(tierName)
+			if fts, ok := tierRT.(lifecycle.FargateTaskSweeper); ok {
+				lifecycle.SweepOrphanFargateTasks(sweepCtx, mgr, fts)
+			}
+		}
 	}
 
 	// Start the worker-down monitor: when a worker's heartbeat goes stale it is
