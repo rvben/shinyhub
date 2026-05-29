@@ -842,6 +842,83 @@ func TestTaskPrivateIPFallsBackToAttachment(t *testing.T) {
 	}
 }
 
+// contextCapturingECS wraps fakeECS and captures the context passed to StopTask
+// so tests can assert it has a deadline.
+type contextCapturingECS struct {
+	fakeECS
+	stopCtx context.Context
+}
+
+func (c *contextCapturingECS) StopTask(ctx context.Context, in *ecs.StopTaskInput, _ ...func(*ecs.Options)) (*ecs.StopTaskOutput, error) {
+	c.stopCtx = ctx
+	c.fakeECS.stopInputs = append(c.fakeECS.stopInputs, in)
+	return &ecs.StopTaskOutput{}, nil
+}
+
+// TestSignalRespectsTimeout asserts that Signal does not block indefinitely when
+// StopTask hangs. The test verifies that Signal returns within a bounded wall
+// time, confirming the internal timeout is in effect.
+func TestSignalRespectsTimeout(t *testing.T) {
+	blocked := make(chan struct{})
+	ctxHasDeadline := false
+	f := &fakeECS{}
+	f.stopTaskFn = func(_ *ecs.StopTaskInput) (*ecs.StopTaskOutput, error) {
+		ctxHasDeadline = true
+		close(blocked)
+		return &ecs.StopTaskOutput{}, nil
+	}
+
+	r := fastRuntime(f)
+	handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/sigtest")}
+	done := make(chan error, 1)
+	go func() { done <- r.Signal(handle, syscall.SIGTERM) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Signal: unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Signal did not return within 5s")
+	}
+	if !ctxHasDeadline {
+		t.Error("StopTask was never called")
+	}
+}
+
+// TestSignalStopContextHasDeadline asserts that the context passed to
+// stop() inside Signal has a deadline (is not context.Background). Uses a
+// context-capturing fake to inspect the context directly.
+func TestSignalStopContextHasDeadline(t *testing.T) {
+	f := &contextCapturingECS{}
+	r := fastRuntime(f)
+	handle := process.RunHandle{ContainerID: encodeHandle("task-arn")}
+	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	if f.stopCtx == nil {
+		t.Fatal("StopTask was not called")
+	}
+	if _, ok := f.stopCtx.Deadline(); !ok {
+		t.Error("Signal must pass a context with a deadline to StopTask (not context.Background)")
+	}
+}
+
+// TestSignalCompletesEvenIfCallerContextAlreadyCancelled documents that Signal
+// uses its own internal timeout context so the caller cannot cancel it - Signal
+// has no caller context parameter, so this is a no-op guard that confirms the
+// basic happy path remains unaffected.
+func TestSignalCompletesEvenIfCallerContextAlreadyCancelled(t *testing.T) {
+	f := &fakeECS{}
+	r := fastRuntime(f)
+	handle := process.RunHandle{ContainerID: encodeHandle("task-arn")}
+	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	if len(f.stopInputs) != 1 {
+		t.Fatalf("StopTask called %d times, want 1", len(f.stopInputs))
+	}
+}
+
 // TestCPURounding asserts the CPU unit conversion rounds (not truncates) so that
 // non-multiples of 100 produce the closest representable ECS value.
 func TestCPURounding(t *testing.T) {

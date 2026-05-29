@@ -440,11 +440,14 @@ func (r *Runtime) routeIP(ctx context.Context, task ecstypes.Task) (string, erro
 	return "", nil // public IP not associated yet
 }
 
-// Signal maps a stop-intent signal to ECS StopTask. ECS has no API to deliver an
-// arbitrary signal to a Fargate container, so SIGTERM and SIGKILL both request a
-// graceful StopTask (which itself sends SIGTERM then SIGKILL after the task's
-// stopTimeout); any other signal is a no-op the Manager never relies on for
-// Fargate.
+// Signal maps a stop-intent signal to ECS StopTask. ECS has no API to deliver
+// an arbitrary signal to a Fargate container, so SIGTERM and SIGKILL both
+// request a graceful StopTask (which itself sends SIGTERM then SIGKILL after
+// the task's stopTimeout); any other signal is a no-op the Manager never relies
+// on for Fargate.
+//
+// Signal uses a 30-second internal timeout so a hung StopTask call does not
+// consume the entire graceful-shutdown budget.
 func (r *Runtime) Signal(handle process.RunHandle, sig syscall.Signal) error {
 	if sig != syscall.SIGTERM && sig != syscall.SIGKILL {
 		return nil
@@ -457,7 +460,9 @@ func (r *Runtime) Signal(handle process.RunHandle, sig syscall.Signal) error {
 	if sig == syscall.SIGKILL {
 		reason = "shinyhub: replica kill"
 	}
-	return r.stop(context.Background(), taskARN, reason)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return r.stop(ctx, taskARN, reason)
 }
 
 func (r *Runtime) stop(ctx context.Context, taskARN, reason string) error {
