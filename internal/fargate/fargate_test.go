@@ -1669,6 +1669,12 @@ func TestListManagedTasksReturnsARNs(t *testing.T) {
 			}
 			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1", "arn-2"}}, nil
 		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
+				{TaskArn: aws.String("arn-1"), LaunchType: ecstypes.LaunchTypeFargate},
+				{TaskArn: aws.String("arn-2"), LaunchType: ecstypes.LaunchTypeFargate},
+			}}, nil
+		},
 	}
 	r := fastRuntime(f)
 	tasks, err := r.ListManagedTasks(context.Background())
@@ -1886,6 +1892,132 @@ func TestReplicaEnv_InjectsBundleToken(t *testing.T) {
 	// Verify the minted token is valid for the digest.
 	if err := bundletoken.Verify(secret, "sha256:abc", bundleToken, time.Now().Unix()); err != nil {
 		t.Fatalf("minted token failed verification: %v", err)
+	}
+}
+
+// TestInventoryFiltersToOwnLaunchType asserts that an EC2 runtime discards
+// Fargate tasks returned by DescribeTasks (client-side filter), and a Fargate
+// runtime discards EC2 tasks. The AWS SDK forbids combining StartedBy with
+// LaunchType on ListTasksInput, so isolation is done here in DescribeTasks.
+func TestInventoryFiltersToOwnLaunchType(t *testing.T) {
+	// Build a fake that returns two tasks: one FARGATE, one EC2.
+	makeFake := func() *fakeECS {
+		return &fakeECS{
+			listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+				return &ecs.ListTasksOutput{TaskArns: []string{"arn-fargate", "arn-ec2"}}, nil
+			},
+			describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+				fgTask := taskWithIP("arn-fargate", "192.0.2.1", "RUNNING")
+				fgTask.LaunchType = ecstypes.LaunchTypeFargate
+				fgTask.Tags = []ecstypes.Tag{
+					{Key: aws.String(tagSlug), Value: aws.String("fg-app")},
+					{Key: aws.String(tagPort), Value: aws.String("8000")},
+				}
+				ec2Task := taskWithIP("arn-ec2", "192.0.2.2", "RUNNING")
+				ec2Task.LaunchType = ecstypes.LaunchTypeEc2
+				ec2Task.Tags = []ecstypes.Tag{
+					{Key: aws.String(tagSlug), Value: aws.String("ec2-app")},
+					{Key: aws.String(tagPort), Value: aws.String("8000")},
+				}
+				return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{fgTask, ec2Task}}, nil
+			},
+		}
+	}
+
+	t.Run("fargate_runtime_sees_only_fargate_tasks", func(t *testing.T) {
+		cfg := testCfg()
+		cfg.LaunchType = ecstypes.LaunchTypeFargate
+		rt := New(makeFake(), cfg, nil, WithPollInterval(time.Millisecond))
+		items, err := rt.Inventory(context.Background())
+		if err != nil {
+			t.Fatalf("Inventory: %v", err)
+		}
+		if len(items) != 1 || items[0].Labels[tagSlug] != "fg-app" {
+			t.Errorf("Fargate Inventory: got %d items with slugs %v, want 1 item [fg-app]",
+				len(items), slugsOf(items))
+		}
+		if items[0].WorkerID != WorkerID {
+			t.Errorf("WorkerID = %q, want %q", items[0].WorkerID, WorkerID)
+		}
+	})
+
+	t.Run("ec2_runtime_sees_only_ec2_tasks", func(t *testing.T) {
+		cfg := testCfg()
+		cfg.LaunchType = ecstypes.LaunchTypeEc2
+		rt := New(makeFake(), cfg, nil, WithPollInterval(time.Millisecond))
+		items, err := rt.Inventory(context.Background())
+		if err != nil {
+			t.Fatalf("Inventory: %v", err)
+		}
+		if len(items) != 1 || items[0].Labels[tagSlug] != "ec2-app" {
+			t.Errorf("EC2 Inventory: got %d items with slugs %v, want 1 item [ec2-app]",
+				len(items), slugsOf(items))
+		}
+		if items[0].WorkerID != EC2WorkerID {
+			t.Errorf("WorkerID = %q, want %q", items[0].WorkerID, EC2WorkerID)
+		}
+	})
+}
+
+// slugsOf is a test helper extracting slug labels from inventory items.
+func slugsOf(items []process.InventoryItem) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.Labels[tagSlug]
+	}
+	return out
+}
+
+// TestInventoryPartialErrorNamesRuntimeWorkerID asserts that PartialInventoryError
+// names r.workerID so recovery marks the right runtime's replicas indeterminate.
+func TestInventoryPartialErrorNamesRuntimeWorkerID(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return nil, fmt.Errorf("throttled")
+		},
+	}
+	cfg := testCfg()
+	cfg.LaunchType = ecstypes.LaunchTypeEc2
+	rt := New(f, cfg, nil, WithPollInterval(time.Millisecond))
+	_, err := rt.Inventory(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var partial *process.PartialInventoryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected PartialInventoryError, got %T: %v", err, err)
+	}
+	if len(partial.Workers) != 1 || partial.Workers[0] != EC2WorkerID {
+		t.Errorf("Workers = %v, want [%q]", partial.Workers, EC2WorkerID)
+	}
+}
+
+// TestListManagedTasksFiltersToOwnLaunchType asserts that ListManagedTasks
+// returns only ARNs whose task.LaunchType matches the runtime's launch type.
+func TestListManagedTasksFiltersToOwnLaunchType(t *testing.T) {
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-fg", "arn-ec2"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
+				{TaskArn: aws.String("arn-fg"), LaunchType: ecstypes.LaunchTypeFargate},
+				{TaskArn: aws.String("arn-ec2"), LaunchType: ecstypes.LaunchTypeEc2},
+			}}, nil
+		},
+	}
+	cfg := testCfg()
+	cfg.LaunchType = ecstypes.LaunchTypeEc2
+	rt := New(f, cfg, nil, WithPollInterval(time.Millisecond))
+	tasks, err := rt.ListManagedTasks(context.Background())
+	if err != nil {
+		t.Fatalf("ListManagedTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ARN != "arn-ec2" {
+		t.Errorf("ListManagedTasks: got %v, want [arn-ec2]", tasks)
 	}
 }
 

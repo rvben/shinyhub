@@ -761,15 +761,24 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 		})
 		if err != nil {
 			r.metrics.RecordInventoryError()
-			// A per-batch DescribeTasks error means the Fargate runtime is
-			// partially reachable. Return PartialInventoryError so recovery marks
-			// Fargate replicas indeterminate (ti.unreachable["fargate"]) instead of
-			// allDown. The synthetic worker sentinel WorkerID ("fargate") is not a
-			// real node id; it is a stable constant used by the recovery path to
-			// identify all Fargate replicas on this cluster.
-			return items, &process.PartialInventoryError{Workers: []string{WorkerID}}
+			// A per-batch DescribeTasks error means the ECS runtime is partially
+			// reachable. Return PartialInventoryError so recovery marks the runtime's
+			// replicas indeterminate (ti.unreachable[r.workerID]) instead of allDown.
+			// r.workerID is "fargate" or "ecs-ec2" depending on the launch type.
+			return items, &process.PartialInventoryError{Workers: []string{r.workerID}}
 		}
 		for _, task := range out.Tasks {
+			// Client-side launch-type filter: the AWS SDK forbids combining StartedBy
+			// with LaunchType on ListTasksInput, so we filter here by inspecting
+			// task.LaunchType from DescribeTasks. A task whose LaunchType is empty
+			// (an older task that predates the field) defaults to Fargate.
+			lt := task.LaunchType
+			if lt == "" {
+				lt = ecstypes.LaunchTypeFargate
+			}
+			if lt != r.cfg.LaunchType {
+				continue
+			}
 			labels := tagsToLabels(task.Tags)
 			if labels[tagSlug] == "" {
 				continue
@@ -800,7 +809,7 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 				// Consumers that need a routable URL must additionally check URL != "".
 				Running:  aws.ToString(task.LastStatus) != "STOPPED",
 				URL:      url,
-				WorkerID: WorkerID,
+				WorkerID: r.workerID,
 			})
 		}
 	}
@@ -809,15 +818,44 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 }
 
 // ListManagedTasks returns a TaskRef for each ShinyHub-managed task on the
-// cluster (StartedBy="shinyhub"). It satisfies lifecycle.FargateTaskSweeper.
+// cluster (StartedBy="shinyhub") whose launch type matches this runtime's
+// configured launch type. It satisfies lifecycle.FargateTaskSweeper.
 func (r *Runtime) ListManagedTasks(ctx context.Context) ([]process.TaskRef, error) {
 	arns, err := r.listManagedTaskARNs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]process.TaskRef, len(arns))
-	for i, arn := range arns {
-		out[i] = process.TaskRef{ARN: arn}
+	if len(arns) == 0 {
+		return nil, nil
+	}
+	// Describe to filter by launch type. The AWS SDK forbids combining
+	// StartedBy with LaunchType on ListTasksInput, so filtering is done
+	// client-side here by inspecting task.LaunchType from DescribeTasks.
+	var out []process.TaskRef
+	for start := 0; start < len(arns); start += 100 {
+		end := start + 100
+		if end > len(arns) {
+			end = len(arns)
+		}
+		desc, err := r.client.DescribeTasks(ctx, &ecs.DescribeTasksInput{
+			Cluster: aws.String(r.cfg.Cluster),
+			Tasks:   arns[start:end],
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fargate: list managed tasks describe: %w", err)
+		}
+		for _, t := range desc.Tasks {
+			lt := t.LaunchType
+			if lt == "" {
+				lt = ecstypes.LaunchTypeFargate
+			}
+			if lt != r.cfg.LaunchType {
+				continue
+			}
+			if t.TaskArn != nil {
+				out = append(out, process.TaskRef{ARN: aws.ToString(t.TaskArn)})
+			}
+		}
 	}
 	return out, nil
 }
