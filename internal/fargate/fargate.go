@@ -419,7 +419,7 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 	if p.Slug == "" {
 		r.log.Warn("fargate: runTaskInput called with empty slug; ClientToken will not be slug-scoped")
 	}
-	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix())
+	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix(), WorkerID)
 	return &ecs.RunTaskInput{
 		Cluster:        aws.String(r.cfg.Cluster),
 		TaskDefinition: aws.String(r.cfg.TaskDefinition),
@@ -923,14 +923,18 @@ func optString(s string) *string {
 // same ClientToken within a 10-minute window: a control-plane retry during that
 // window returns the already-running task instead of launching a duplicate.
 // The time bucket (unix seconds / 600) advances every 10 minutes, so a
-// deliberate re-launch after a STOPPED task in the prior window still works.
+// deliberate re-launch after a STOPPED task in the prior window still issues a
+// fresh RunTask.
 //
-// Formula: SHA-256(cluster + "|" + slug + "|" + index + "|" + deploymentID + "|" + bucket)
+// Formula: SHA-256(cluster | slug | index | deploymentID | workerID | bucket)
 // as a lowercase hex string. SHA-256 hex is always exactly 64 characters, which
 // fits the ECS ClientToken maximum length of 64 exactly.
+// The workerID segment differentiates a Fargate and an EC2 RunTask for the same
+// replica in the same 10-min window, preventing ECS from deduplicating the EC2
+// launch into a running Fargate task (silent cross-contamination).
 // When deploymentID is 0 (legacy/pre-deploy rows) the field is omitted so the
 // token still differentiates across time buckets.
-func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix int64) string {
+func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix int64, workerID string) string {
 	bucket := strconv.FormatInt(nowUnix/600, 10)
 	var b strings.Builder
 	b.WriteString(cluster)
@@ -942,6 +946,8 @@ func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix in
 	if deploymentID > 0 {
 		b.WriteString(strconv.FormatInt(deploymentID, 10))
 	}
+	b.WriteByte('|')
+	b.WriteString(workerID)
 	b.WriteByte('|')
 	b.WriteString(bucket)
 	sum := sha256.Sum256([]byte(b.String()))

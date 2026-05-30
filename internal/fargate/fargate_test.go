@@ -1188,8 +1188,8 @@ func TestReplicaEnvAlwaysEmitsSHINYHUBSLUG(t *testing.T) {
 func TestClientTokenIsSameWithinTimeBucket(t *testing.T) {
 	// unix/600 == 2 for these two values (1200 and 1199 are in different buckets;
 	// use 1201 and 1250 which are both in bucket 2).
-	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201)
-	tok2 := clientToken("my-cluster", "demo", 1, 42, 1250)
+	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
+	tok2 := clientToken("my-cluster", "demo", 1, 42, 1250, "fargate")
 	if tok1 != tok2 {
 		t.Errorf("tokens differ within the same 10-min bucket: %q != %q", tok1, tok2)
 	}
@@ -1200,8 +1200,8 @@ func TestClientTokenIsSameWithinTimeBucket(t *testing.T) {
 // in the prior window still issues a fresh RunTask instead of being deduplicated.
 func TestClientTokenDiffersAcrossTimeBucket(t *testing.T) {
 	// bucket 2 (unix 1200-1799) vs bucket 3 (unix 1800-2399)
-	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201)
-	tok2 := clientToken("my-cluster", "demo", 1, 42, 1801)
+	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
+	tok2 := clientToken("my-cluster", "demo", 1, 42, 1801, "fargate")
 	if tok1 == tok2 {
 		t.Errorf("tokens should differ across time buckets, but both = %q", tok1)
 	}
@@ -1211,8 +1211,8 @@ func TestClientTokenDiffersAcrossTimeBucket(t *testing.T) {
 // produce different tokens even in the same time bucket, so concurrent replica
 // launches produce independent idempotency keys.
 func TestClientTokenDiffersAcrossReplicas(t *testing.T) {
-	tok0 := clientToken("my-cluster", "demo", 0, 42, 1201)
-	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201)
+	tok0 := clientToken("my-cluster", "demo", 0, 42, 1201, "fargate")
+	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
 	if tok0 == tok1 {
 		t.Errorf("replica 0 and replica 1 have same token: %q", tok0)
 	}
@@ -1221,7 +1221,7 @@ func TestClientTokenDiffersAcrossReplicas(t *testing.T) {
 // TestClientTokenLengthIs64Chars asserts the token fits the ECS ClientToken
 // maximum length of 64 characters.
 func TestClientTokenLengthIs64Chars(t *testing.T) {
-	tok := clientToken("cluster", "slug", 0, 1, 1000)
+	tok := clientToken("cluster", "slug", 0, 1, 1000, "fargate")
 	if len(tok) != 64 {
 		t.Errorf("clientToken length = %d, want 64", len(tok))
 	}
@@ -1231,8 +1231,8 @@ func TestClientTokenLengthIs64Chars(t *testing.T) {
 // deploy edge) still produces a valid 64-char token that differs across time
 // buckets, so distinct starts are not conflated.
 func TestClientTokenZeroDeploymentID(t *testing.T) {
-	tok1 := clientToken("cluster", "slug", 0, 0, 1201)
-	tok2 := clientToken("cluster", "slug", 0, 0, 1801)
+	tok1 := clientToken("cluster", "slug", 0, 0, 1201, "fargate")
+	tok2 := clientToken("cluster", "slug", 0, 0, 1801, "fargate")
 	if len(tok1) != 64 {
 		t.Errorf("zero-deploymentID token length = %d, want 64", len(tok1))
 	}
@@ -1890,6 +1890,25 @@ func TestReplicaEnv_InjectsBundleToken(t *testing.T) {
 	// Verify the minted token is valid for the digest.
 	if err := bundletoken.Verify(secret, "sha256:abc", bundleToken, time.Now().Unix()); err != nil {
 		t.Fatalf("minted token failed verification: %v", err)
+	}
+}
+
+// TestClientTokenDiffersBetweenLaunchTypes asserts that the same replica
+// identity (cluster, slug, index, deploymentID, time bucket) produces a
+// different token when the workerID changes. Without this guard an EC2 and
+// a Fargate RunTask in the same 10-min window share a ClientToken and ECS
+// silently deduplicates the EC2 launch into the already-running Fargate task.
+func TestClientTokenDiffersBetweenLaunchTypes(t *testing.T) {
+	fargateToken := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
+	ec2Token := clientToken("my-cluster", "demo", 1, 42, 1201, "ecs-ec2")
+	if fargateToken == ec2Token {
+		t.Errorf("clientToken must differ by workerID: fargate=%q ec2=%q", fargateToken, ec2Token)
+	}
+	if len(fargateToken) != 64 {
+		t.Errorf("fargate token length = %d, want 64", len(fargateToken))
+	}
+	if len(ec2Token) != 64 {
+		t.Errorf("ec2 token length = %d, want 64", len(ec2Token))
 	}
 }
 
