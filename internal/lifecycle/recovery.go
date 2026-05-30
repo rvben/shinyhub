@@ -422,21 +422,24 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 }
 
 // FargateTaskSweeper is implemented by fargate.Runtime to support the orphan
-// sweep. It lists all ShinyHub-managed tasks on the cluster (StartedBy="shinyhub")
-// and stops individual tasks by ARN. fargate.Runtime satisfies this interface;
-// it must NOT be implemented as the Docker-label-specific ContainerSweeper.
+// sweep. It lists all ShinyHub-managed tasks on the cluster (StartedBy="shinyhub"),
+// stops individual tasks by ARN, and reports the runtime's own worker identity
+// so the sweep builds the correct handle prefix for live-set lookup.
+// fargate.Runtime satisfies this interface.
 type FargateTaskSweeper interface {
 	ListManagedTasks(ctx context.Context) ([]process.TaskRef, error)
 	StopTask(ctx context.Context, arn string) error
+	WorkerID() string
 }
 
-// SweepOrphanFargateTasks stops Fargate tasks not currently owned by any live
+// SweepOrphanFargateTasks stops ECS tasks not currently owned by any live
 // replica in the Manager. It must run AFTER RecoverProcesses so tasks the
 // Manager re-adopted are protected. A nil sweeper is a no-op.
 //
-// "fargate" is the synthetic worker identity (fargate.WorkerID); tasks are
-// identified by a handle of the form "fargate/<task-arn>" in the Manager's
-// running-container-ID set.
+// Tasks are identified by a handle of the form "<workerID>/<task-arn>" in the
+// Manager's running-container-ID set. The workerID is obtained from the sweeper
+// so both Fargate ("fargate/<arn>") and EC2 ("ecs-ec2/<arn>") handles are
+// correctly matched against live replicas.
 func SweepOrphanFargateTasks(ctx context.Context, mgr *process.Manager, sweeper FargateTaskSweeper) {
 	if sweeper == nil {
 		return
@@ -447,9 +450,10 @@ func SweepOrphanFargateTasks(ctx context.Context, mgr *process.Manager, sweeper 
 		return
 	}
 	live := mgr.RunningContainerIDs()
+	workerID := sweeper.WorkerID()
 	removed := 0
 	for _, t := range tasks {
-		handle := fargate.WorkerID + "/" + t.ARN
+		handle := workerID + "/" + t.ARN
 		if live[handle] {
 			continue
 		}
