@@ -128,6 +128,12 @@ func taskWithIP(arn, ip, status string) ecstypes.Task {
 	}
 }
 
+// fgHandle builds a "fargate/<arn>" handle for Fargate runtime tests. This
+// helper replaces the old package-level encodeHandle function that is now a
+// method on *Runtime. Tests that construct Fargate handles use this constant
+// prefix; tests for EC2 handles build them explicitly.
+func fgHandle(arn string) string { return WorkerID + "/" + arn }
+
 func startParams() process.StartParams {
 	return process.StartParams{
 		Slug:            "demo",
@@ -188,7 +194,7 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 	}
 
 	// The handle round-trips back to the bare task ARN for later signal/wait.
-	gotARN, err := decodeHandle(ep.Handle.ContainerID)
+	gotARN, err := r.decodeHandle(ep.Handle.ContainerID)
 	if err != nil {
 		t.Fatalf("decodeHandle: %v", err)
 	}
@@ -525,7 +531,7 @@ func TestSignalStopsTask(t *testing.T) {
 	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
 		f := &fakeECS{}
 		r := fastRuntime(f)
-		handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/xyz")}
+		handle := process.RunHandle{ContainerID: fgHandle("arn:aws:ecs:r:a:task/c/xyz")}
 		if err := r.Signal(handle, sig); err != nil {
 			t.Fatalf("Signal(%v): %v", sig, err)
 		}
@@ -541,7 +547,7 @@ func TestSignalStopsTask(t *testing.T) {
 func TestSignalIgnoresNonStopSignals(t *testing.T) {
 	f := &fakeECS{}
 	r := fastRuntime(f)
-	handle := process.RunHandle{ContainerID: encodeHandle("task-arn")}
+	handle := process.RunHandle{ContainerID: fgHandle("task-arn")}
 	if err := r.Signal(handle, syscall.SIGHUP); err != nil {
 		t.Fatalf("Signal(SIGHUP): %v", err)
 	}
@@ -566,7 +572,7 @@ func TestWaitBlocksUntilStopped(t *testing.T) {
 		},
 	}
 	r := fastRuntime(f)
-	handle := process.RunHandle{ContainerID: encodeHandle("task-arn")}
+	handle := process.RunHandle{ContainerID: fgHandle("task-arn")}
 	if err := r.Wait(context.Background(), handle); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
@@ -582,7 +588,7 @@ func TestWaitTreatsMissingTaskAsStopped(t *testing.T) {
 		},
 	}
 	r := fastRuntime(f)
-	if err := r.Wait(context.Background(), process.RunHandle{ContainerID: encodeHandle("task-arn")}); err != nil {
+	if err := r.Wait(context.Background(), process.RunHandle{ContainerID: fgHandle("task-arn")}); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
 }
@@ -598,7 +604,7 @@ func TestWaitRespectsContextCancel(t *testing.T) {
 	r := New(f, testCfg(), nil, WithPollInterval(time.Hour))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := r.Wait(ctx, process.RunHandle{ContainerID: encodeHandle("task-arn")})
+	err := r.Wait(ctx, process.RunHandle{ContainerID: fgHandle("task-arn")})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Wait err = %v, want context.Canceled", err)
 	}
@@ -609,7 +615,7 @@ func TestStatsReturnsZeroWithoutError(t *testing.T) {
 	// dead replica, so erroring here would misreport a live Fargate task as
 	// stopped. Stats reports zero usage instead.
 	r := fastRuntime(&fakeECS{})
-	cpu, rss, err := r.Stats(context.Background(), process.RunHandle{ContainerID: encodeHandle("task-arn")})
+	cpu, rss, err := r.Stats(context.Background(), process.RunHandle{ContainerID: fgHandle("task-arn")})
 	if err != nil {
 		t.Fatalf("Stats err = %v, want nil", err)
 	}
@@ -958,18 +964,8 @@ func TestInventoryBatches101Tasks(t *testing.T) {
 	}
 }
 
-func TestDecodeHandleAcceptsBareARN(t *testing.T) {
-	arn, err := decodeHandle("arn:aws:ecs:r:a:task/c/raw")
-	if err != nil {
-		t.Fatalf("decodeHandle: %v", err)
-	}
-	if arn != "arn:aws:ecs:r:a:task/c/raw" {
-		t.Errorf("arn = %q", arn)
-	}
-}
-
 func TestDecodeHandleRejectsEmpty(t *testing.T) {
-	if _, err := decodeHandle(""); err == nil {
+	if _, err := fastRuntime(&fakeECS{}).decodeHandle(""); err == nil {
 		t.Fatal("expected error on empty handle")
 	}
 }
@@ -1079,7 +1075,7 @@ func TestSignalCallsStopTask(t *testing.T) {
 		return &ecs.StopTaskOutput{}, nil
 	}
 	r := fastRuntime(f)
-	handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/sigtest")}
+	handle := process.RunHandle{ContainerID: fgHandle("arn:aws:ecs:r:a:task/c/sigtest")}
 	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
 		t.Fatalf("Signal: unexpected error: %v", err)
 	}
@@ -1094,7 +1090,7 @@ func TestSignalCallsStopTask(t *testing.T) {
 func TestSignalStopContextHasDeadline(t *testing.T) {
 	f := &contextCapturingECS{}
 	r := fastRuntime(f)
-	handle := process.RunHandle{ContainerID: encodeHandle("task-arn")}
+	handle := process.RunHandle{ContainerID: fgHandle("task-arn")}
 	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
 		t.Fatalf("Signal: %v", err)
 	}
@@ -1113,7 +1109,7 @@ func TestSignalStopContextHasDeadline(t *testing.T) {
 func TestSignalCompletesEvenIfCallerContextAlreadyCancelled(t *testing.T) {
 	f := &fakeECS{}
 	r := fastRuntime(f)
-	handle := process.RunHandle{ContainerID: encodeHandle("task-arn")}
+	handle := process.RunHandle{ContainerID: fgHandle("task-arn")}
 	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
 		t.Fatalf("Signal: %v", err)
 	}
@@ -1391,7 +1387,7 @@ func TestMetrics_StopTaskOk(t *testing.T) {
 	fm := &fakeFargateMetrics{}
 	r.SetMetrics(fm)
 
-	handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/xyz")}
+	handle := process.RunHandle{ContainerID: fgHandle("arn:aws:ecs:r:a:task/c/xyz")}
 	if err := r.Signal(handle, syscall.SIGTERM); err != nil {
 		t.Fatalf("Signal: %v", err)
 	}
@@ -1412,7 +1408,7 @@ func TestMetrics_StopTaskError(t *testing.T) {
 	fm := &fakeFargateMetrics{}
 	r.SetMetrics(fm)
 
-	handle := process.RunHandle{ContainerID: encodeHandle("arn:aws:ecs:r:a:task/c/abc")}
+	handle := process.RunHandle{ContainerID: fgHandle("arn:aws:ecs:r:a:task/c/abc")}
 	err := r.Signal(handle, syscall.SIGTERM)
 	if err == nil {
 		t.Fatal("expected error from StopTask")
@@ -1890,6 +1886,119 @@ func TestReplicaEnv_InjectsBundleToken(t *testing.T) {
 	// Verify the minted token is valid for the digest.
 	if err := bundletoken.Verify(secret, "sha256:abc", bundleToken, time.Now().Unix()); err != nil {
 		t.Fatalf("minted token failed verification: %v", err)
+	}
+}
+
+// TestEC2WorkerIDConstant asserts the EC2 worker identity constant value.
+func TestEC2WorkerIDConstant(t *testing.T) {
+	if EC2WorkerID != "ecs-ec2" {
+		t.Errorf("EC2WorkerID = %q, want ecs-ec2", EC2WorkerID)
+	}
+}
+
+// TestIsECSManagedWorkerID asserts the helper correctly identifies both
+// ECS-managed worker identities and rejects unrelated strings.
+func TestIsECSManagedWorkerID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"fargate", true},
+		{"ecs-ec2", true},
+		{"", false},
+		{"worker-abc", false},
+		{"native", false},
+	}
+	for _, tc := range cases {
+		if got := IsECSManagedWorkerID(tc.id); got != tc.want {
+			t.Errorf("IsECSManagedWorkerID(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestWorkerIDIsSetFromLaunchType asserts that New sets workerID to
+// "fargate" for a zero-value Config (defaulting to FARGATE launch type)
+// and "ecs-ec2" for an EC2 Config.
+func TestWorkerIDIsSetFromLaunchType(t *testing.T) {
+	fgCfg := testCfg()
+	fgCfg.LaunchType = ecstypes.LaunchTypeFargate
+	fgRT := New(&fakeECS{}, fgCfg, nil)
+	if fgRT.workerID != WorkerID {
+		t.Errorf("Fargate runtime workerID = %q, want %q", fgRT.workerID, WorkerID)
+	}
+
+	ec2Cfg := testCfg()
+	ec2Cfg.LaunchType = ecstypes.LaunchTypeEc2
+	ec2RT := New(&fakeECS{}, ec2Cfg, nil)
+	if ec2RT.workerID != EC2WorkerID {
+		t.Errorf("EC2 runtime workerID = %q, want %q", ec2RT.workerID, EC2WorkerID)
+	}
+}
+
+// TestEncodeDecodeHandleRoundTrip asserts that encodeHandle and decodeHandle
+// round-trip for both Fargate and EC2 runtimes.
+func TestEncodeDecodeHandleRoundTrip(t *testing.T) {
+	const arn = "arn:aws:ecs:eu-west-1:123456789012:task/my-cluster/abc123"
+
+	for _, tc := range []struct {
+		lt      ecstypes.LaunchType
+		wantPfx string
+	}{
+		{ecstypes.LaunchTypeFargate, "fargate/" + arn},
+		{ecstypes.LaunchTypeEc2, "ecs-ec2/" + arn},
+	} {
+		cfg := testCfg()
+		cfg.LaunchType = tc.lt
+		rt := New(&fakeECS{}, cfg, nil)
+		handle := rt.encodeHandle(arn)
+		if handle != tc.wantPfx {
+			t.Errorf("lt=%s: encodeHandle = %q, want %q", tc.lt, handle, tc.wantPfx)
+		}
+		got, err := rt.decodeHandle(handle)
+		if err != nil {
+			t.Fatalf("lt=%s: decodeHandle(%q): %v", tc.lt, handle, err)
+		}
+		if got != arn {
+			t.Errorf("lt=%s: decoded ARN = %q, want %q", tc.lt, got, arn)
+		}
+	}
+}
+
+// TestDecodeHandleCrossRuntimeGuard asserts that decodeHandle returns an
+// explicit error when a handle carries a different ECS-managed workerID
+// prefix, preventing silent misdirection.
+func TestDecodeHandleCrossRuntimeGuard(t *testing.T) {
+	const arn = "arn:aws:ecs:eu-west-1:123456789012:task/my-cluster/abc123"
+
+	// An EC2 runtime must reject a handle encoded by a Fargate runtime.
+	ec2Cfg := testCfg()
+	ec2Cfg.LaunchType = ecstypes.LaunchTypeEc2
+	ec2RT := New(&fakeECS{}, ec2Cfg, nil)
+	fargateHandle := "fargate/" + arn
+	if _, err := ec2RT.decodeHandle(fargateHandle); err == nil {
+		t.Error("EC2 runtime must reject a handle with fargate/ prefix")
+	}
+
+	// A Fargate runtime must reject a handle encoded by an EC2 runtime.
+	fgCfg := testCfg()
+	fgCfg.LaunchType = ecstypes.LaunchTypeFargate
+	fgRT := New(&fakeECS{}, fgCfg, nil)
+	ec2Handle := "ecs-ec2/" + arn
+	if _, err := fgRT.decodeHandle(ec2Handle); err == nil {
+		t.Error("Fargate runtime must reject a handle with ecs-ec2/ prefix")
+	}
+}
+
+// TestDecodeHandleAcceptsBareARN_Method asserts the method form still accepts
+// bare ARNs (backward-compat path).
+func TestDecodeHandleAcceptsBareARN_Method(t *testing.T) {
+	rt := fastRuntime(&fakeECS{})
+	arn, err := rt.decodeHandle("arn:aws:ecs:r:a:task/c/raw")
+	if err != nil {
+		t.Fatalf("decodeHandle bare ARN: %v", err)
+	}
+	if arn != "arn:aws:ecs:r:a:task/c/raw" {
+		t.Errorf("arn = %q", arn)
 	}
 }
 
