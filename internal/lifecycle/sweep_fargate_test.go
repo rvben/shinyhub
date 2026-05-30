@@ -50,6 +50,8 @@ func (f *fakeFargateTaskSweeper) StopTask(_ context.Context, arn string) error {
 	return f.stopErr
 }
 
+func (f *fakeFargateTaskSweeper) WorkerID() string { return fargate.WorkerID }
+
 func TestSweepOrphanFargateTasks_StopsUnownedTask(t *testing.T) {
 	// Two tasks: one owned by a live replica, one orphaned.
 	// Only the orphan should be stopped.
@@ -121,6 +123,62 @@ func (e *errFirstSweeper) StopTask(_ context.Context, arn string) error {
 		return fmt.Errorf("ECS: stop task %s: throttled", arn)
 	}
 	return nil
+}
+
+func (e *errFirstSweeper) WorkerID() string { return fargate.WorkerID }
+
+// TestSweepOrphanFargateTasks_EC2RuntimeProtectsOwnTasks asserts that an EC2
+// sweeper does not stop its own live EC2 tasks (the data-loss regression guard).
+// The live set is keyed by "ecs-ec2/<arn>" handles; the sweep must build the
+// handle using sweeper.WorkerID() not the fargate.WorkerID constant.
+func TestSweepOrphanFargateTasks_EC2RuntimeProtectsOwnTasks(t *testing.T) {
+	mgr := process.NewManager(".", noopRuntime{})
+	// Register an EC2 task as live.
+	mgr.Adopt("myapp", process.ProcessInfo{
+		Slug:   "myapp",
+		Index:  0,
+		Status: process.StatusRunning,
+	}, process.RunHandle{ContainerID: fargate.EC2WorkerID + "/arn-ec2-live"})
+
+	sweeper := &ec2Sweeper{
+		tasks: []process.TaskRef{
+			{ARN: "arn-ec2-live"},
+			{ARN: "arn-ec2-orphan"},
+		},
+	}
+	lifecycle.SweepOrphanFargateTasks(context.Background(), mgr, sweeper)
+
+	// Only the orphan must be stopped; the live task must be protected.
+	if len(sweeper.stopped) != 1 || sweeper.stopped[0] != "arn-ec2-orphan" {
+		t.Errorf("stopped = %v, want [arn-ec2-orphan]", sweeper.stopped)
+	}
+}
+
+// ec2Sweeper is a FargateTaskSweeper that reports WorkerID "ecs-ec2".
+type ec2Sweeper struct {
+	tasks   []process.TaskRef
+	stopped []string
+}
+
+func (e *ec2Sweeper) ListManagedTasks(_ context.Context) ([]process.TaskRef, error) {
+	return e.tasks, nil
+}
+
+func (e *ec2Sweeper) StopTask(_ context.Context, arn string) error {
+	e.stopped = append(e.stopped, arn)
+	return nil
+}
+
+func (e *ec2Sweeper) WorkerID() string { return fargate.EC2WorkerID }
+
+// TestIsECSManagedWorkerID_EC2IsGated documents the requirement that
+// fargate.IsECSManagedWorkerID returns true for EC2WorkerID, which is the
+// gate condition used in recoverRemoteReplica for partial-adoption of
+// PROVISIONING tasks (preventing duplicate RunTask calls).
+func TestIsECSManagedWorkerID_EC2IsGated(t *testing.T) {
+	if !fargate.IsECSManagedWorkerID(fargate.EC2WorkerID) {
+		t.Errorf("IsECSManagedWorkerID(%q) = false; EC2 replicas must be partial-adopted at PROVISIONING", fargate.EC2WorkerID)
+	}
 }
 
 func TestSweepOrphanFargateTasks_ListErrorSkipsSweep(t *testing.T) {

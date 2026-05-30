@@ -62,6 +62,20 @@ const Provider = "fargate"
 // scoped per tier, so a single constant is unambiguous across clusters.
 const WorkerID = "fargate"
 
+// EC2WorkerID is the stable worker identity stamped on every ECS EC2 replica.
+// It is slash-free for the same reason as WorkerID. Existing Fargate handles
+// remain "fargate/<arn>"; EC2 handles are "ecs-ec2/<arn>".
+const EC2WorkerID = "ecs-ec2"
+
+// IsECSManagedWorkerID reports whether id is one of the synthetic constant
+// worker identities used for ECS-managed replicas (either Fargate or EC2
+// launch type). These identities never correspond to a DB worker row, so
+// callers that need to distinguish ECS replicas from remote-docker-agent
+// replicas use this rather than comparing against WorkerID alone.
+func IsECSManagedWorkerID(id string) bool {
+	return id == WorkerID || id == EC2WorkerID
+}
+
 // Label keys stamped as ECS task tags so recovery can reconcile a replica row
 // against a live task without any local handle. They mirror the docker/remote
 // label scheme so the lifecycle reconciler treats every backend identically.
@@ -151,6 +165,12 @@ type Config struct {
 	// Derived once at startup with deriveBundleTokenKey(authSecret) and injected
 	// by buildFargateRuntime. Must not be nil when ControlPlaneURL is set.
 	BundleTokenKey []byte
+
+	// LaunchType is the ECS launch type for tasks on this tier. Use
+	// ecstypes.LaunchTypeFargate (default) for Fargate tasks or
+	// ecstypes.LaunchTypeEc2 for EC2 tasks. The zero value defaults to
+	// LaunchTypeFargate in New.
+	LaunchType ecstypes.LaunchType
 }
 
 // EC2Client is the subset of the AWS EC2 API needed to resolve a task ENI's
@@ -170,6 +190,12 @@ type Runtime struct {
 	// metrics records AWS operation outcomes. Never nil after New(); defaults to
 	// noopFargateMetrics{} so callers need no nil guard.
 	metrics FargateMetrics
+
+	// workerID is the stable synthetic worker identity for this runtime instance.
+	// It is "fargate" for Fargate launch type and "ecs-ec2" for EC2, derived once
+	// in New from cfg.LaunchType so every handle, inventory item, and sweep
+	// operation uses a consistent value.
+	workerID string
 
 	// pollInterval is the delay between DescribeTasks polls while waiting for a
 	// task's network interface (Start) or terminal state (Wait/RunOnce).
@@ -239,6 +265,14 @@ func New(client ECSClient, cfg Config, log *slog.Logger, opts ...Option) *Runtim
 	for _, o := range opts {
 		o(r)
 	}
+	if r.cfg.LaunchType == "" {
+		r.cfg.LaunchType = ecstypes.LaunchTypeFargate
+	}
+	if r.cfg.LaunchType == ecstypes.LaunchTypeEc2 {
+		r.workerID = EC2WorkerID
+	} else {
+		r.workerID = WorkerID
+	}
 	if r.cfg.RouteViaPublicIP {
 		r.log.Warn("fargate: route_via_public_ip is enabled - app traffic is routed over the public internet without transport security; ensure control_plane_url uses https:// so bundle tokens are not transmitted in plaintext",
 			"cluster", r.cfg.Cluster,
@@ -269,30 +303,43 @@ func (r *Runtime) AppBindHost() string { return "0.0.0.0" }
 // control-plane host must not create directories or strip-then-dispatch paths.
 func (r *Runtime) HostProvidesAppData() bool { return false }
 
-// encodeHandle joins the constant worker identity and the task ARN into the
-// "<workerID>/<task-arn>" form the recovery path also produces, so a handle
-// minted by Start and one reconstructed during recovery are interchangeable.
-func encodeHandle(taskARN string) string {
-	return WorkerID + "/" + taskARN
+// encodeHandle joins the runtime's worker identity and the task ARN into the
+// "<workerID>/<task-arn>" form that recovery also produces, so a handle minted
+// by Start and one reconstructed during recovery are interchangeable.
+func (r *Runtime) encodeHandle(taskARN string) string {
+	return r.workerID + "/" + taskARN
 }
 
-// decodeHandle extracts the task ARN from an opaque handle. It accepts both the
-// "<workerID>/<task-arn>" form and a bare task ARN, so a handle minted by Start,
-// rebuilt by recovery, or (defensively) passed raw all resolve correctly. The
+// decodeHandle extracts the task ARN from an opaque handle. It accepts the
+// "<workerID>/<task-arn>" form, a bare task ARN, and rejects handles that
+// carry a different ECS-managed workerID prefix (cross-runtime guard). The
 // split keeps the task ARN intact even though it contains slashes.
-func decodeHandle(h string) (string, error) {
+func (r *Runtime) decodeHandle(h string) (string, error) {
 	if h == "" {
 		return "", fmt.Errorf("fargate: empty run handle")
 	}
-	if prefix := WorkerID + "/"; strings.HasPrefix(h, prefix) {
-		arn := strings.TrimPrefix(h, prefix)
+	ownPrefix := r.workerID + "/"
+	if strings.HasPrefix(h, ownPrefix) {
+		arn := strings.TrimPrefix(h, ownPrefix)
 		if arn == "" {
 			return "", fmt.Errorf("fargate: handle %q has no task arn", h)
 		}
 		return arn, nil
 	}
+	// Cross-runtime guard: a handle prefixed with a different ECS-managed
+	// workerID would silently pass a malformed ARN to ECS; reject it.
+	for _, other := range []string{WorkerID, EC2WorkerID} {
+		if other != r.workerID && strings.HasPrefix(h, other+"/") {
+			return "", fmt.Errorf("fargate: handle %q belongs to runtime %q, not %q", h, other, r.workerID)
+		}
+	}
 	return h, nil
 }
+
+// WorkerID returns the runtime's synthetic worker identity. It is "fargate"
+// for Fargate launch type and "ecs-ec2" for EC2 launch type. Satisfies
+// lifecycle.FargateTaskSweeper.
+func (r *Runtime) WorkerID() string { return r.workerID }
 
 func (r *Runtime) networkConfig() *ecstypes.NetworkConfiguration {
 	assign := ecstypes.AssignPublicIpDisabled
@@ -419,11 +466,11 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 	if p.Slug == "" {
 		r.log.Warn("fargate: runTaskInput called with empty slug; ClientToken will not be slug-scoped")
 	}
-	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix())
-	return &ecs.RunTaskInput{
+	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix(), r.workerID)
+	in := &ecs.RunTaskInput{
 		Cluster:        aws.String(r.cfg.Cluster),
 		TaskDefinition: aws.String(r.cfg.TaskDefinition),
-		LaunchType:     ecstypes.LaunchTypeFargate,
+		LaunchType:     r.cfg.LaunchType,
 		Count:          aws.Int32(1),
 		StartedBy:      aws.String(startedBy),
 		ClientToken:    aws.String(ct),
@@ -433,13 +480,17 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 		// deliberately not enabled: a task definition that happened to carry a
 		// shinyhub.* tag would make RunTask fail with a duplicate-key error.
 		EnableECSManagedTags: true,
-		PlatformVersion:      optString(r.cfg.PlatformVersion),
 		NetworkConfiguration: r.networkConfig(),
 		Overrides: &ecstypes.TaskOverride{
 			ContainerOverrides: []ecstypes.ContainerOverride{r.buildContainerOverride(p)},
 		},
 		Tags: r.tags(p),
 	}
+	// PlatformVersion is Fargate-only; ECS rejects it when LaunchType=EC2.
+	if r.cfg.LaunchType != ecstypes.LaunchTypeEc2 {
+		in.PlatformVersion = optString(r.cfg.PlatformVersion)
+	}
+	return in
 }
 
 // Start launches one Fargate task for the replica and waits until it acquires a
@@ -485,8 +536,8 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io
 	return process.ReplicaEndpoint{
 		URL:      fmt.Sprintf("http://%s:%d", ip, p.Port),
 		Provider: Provider,
-		WorkerID: WorkerID,
-		Handle:   process.RunHandle{ContainerID: encodeHandle(taskARN)},
+		WorkerID: r.workerID,
+		Handle:   process.RunHandle{ContainerID: r.encodeHandle(taskARN)},
 	}, nil
 }
 
@@ -571,7 +622,7 @@ func (r *Runtime) Signal(handle process.RunHandle, sig syscall.Signal) error {
 	if sig != syscall.SIGTERM && sig != syscall.SIGKILL {
 		return nil
 	}
-	taskARN, err := decodeHandle(handle.ContainerID)
+	taskARN, err := r.decodeHandle(handle.ContainerID)
 	if err != nil {
 		return err
 	}
@@ -603,7 +654,7 @@ func (r *Runtime) stop(ctx context.Context, taskARN, reason string) error {
 // Wait blocks until the task reaches STOPPED or ctx is cancelled. It reports only
 // liveness; exit codes are surfaced by RunOnce, not here.
 func (r *Runtime) Wait(ctx context.Context, handle process.RunHandle) error {
-	taskARN, err := decodeHandle(handle.ContainerID)
+	taskARN, err := r.decodeHandle(handle.ContainerID)
 	if err != nil {
 		return err
 	}
@@ -714,15 +765,24 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 		})
 		if err != nil {
 			r.metrics.RecordInventoryError()
-			// A per-batch DescribeTasks error means the Fargate runtime is
-			// partially reachable. Return PartialInventoryError so recovery marks
-			// Fargate replicas indeterminate (ti.unreachable["fargate"]) instead of
-			// allDown. The synthetic worker sentinel WorkerID ("fargate") is not a
-			// real node id; it is a stable constant used by the recovery path to
-			// identify all Fargate replicas on this cluster.
-			return items, &process.PartialInventoryError{Workers: []string{WorkerID}}
+			// A per-batch DescribeTasks error means the ECS runtime is partially
+			// reachable. Return PartialInventoryError so recovery marks the runtime's
+			// replicas indeterminate (ti.unreachable[r.workerID]) instead of allDown.
+			// r.workerID is "fargate" or "ecs-ec2" depending on the launch type.
+			return items, &process.PartialInventoryError{Workers: []string{r.workerID}}
 		}
 		for _, task := range out.Tasks {
+			// Client-side launch-type filter: the AWS SDK forbids combining StartedBy
+			// with LaunchType on ListTasksInput, so we filter here by inspecting
+			// task.LaunchType from DescribeTasks. A task whose LaunchType is empty
+			// (an older task that predates the field) defaults to Fargate.
+			lt := task.LaunchType
+			if lt == "" {
+				lt = ecstypes.LaunchTypeFargate
+			}
+			if lt != r.cfg.LaunchType {
+				continue
+			}
 			labels := tagsToLabels(task.Tags)
 			if labels[tagSlug] == "" {
 				continue
@@ -753,7 +813,7 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 				// Consumers that need a routable URL must additionally check URL != "".
 				Running:  aws.ToString(task.LastStatus) != "STOPPED",
 				URL:      url,
-				WorkerID: WorkerID,
+				WorkerID: r.workerID,
 			})
 		}
 	}
@@ -762,15 +822,47 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 }
 
 // ListManagedTasks returns a TaskRef for each ShinyHub-managed task on the
-// cluster (StartedBy="shinyhub"). It satisfies lifecycle.FargateTaskSweeper.
+// cluster (StartedBy="shinyhub") whose launch type matches this runtime's
+// configured launch type. It satisfies lifecycle.FargateTaskSweeper.
 func (r *Runtime) ListManagedTasks(ctx context.Context) ([]process.TaskRef, error) {
 	arns, err := r.listManagedTaskARNs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]process.TaskRef, len(arns))
-	for i, arn := range arns {
-		out[i] = process.TaskRef{ARN: arn}
+	if len(arns) == 0 {
+		return nil, nil
+	}
+	// Describe to filter by launch type. The AWS SDK forbids combining
+	// StartedBy with LaunchType on ListTasksInput, so filtering is done
+	// client-side here by inspecting task.LaunchType from DescribeTasks.
+	var out []process.TaskRef
+	for start := 0; start < len(arns); start += 100 {
+		end := start + 100
+		if end > len(arns) {
+			end = len(arns)
+		}
+		// Tags are intentionally not requested (no Include: TaskFieldTags):
+		// this call only needs task.LaunchType and task.TaskArn, both base
+		// response fields, so omitting the tags include keeps the call cheap.
+		desc, err := r.client.DescribeTasks(ctx, &ecs.DescribeTasksInput{
+			Cluster: aws.String(r.cfg.Cluster),
+			Tasks:   arns[start:end],
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fargate: list managed tasks describe: %w", err)
+		}
+		for _, t := range desc.Tasks {
+			lt := t.LaunchType
+			if lt == "" {
+				lt = ecstypes.LaunchTypeFargate
+			}
+			if lt != r.cfg.LaunchType {
+				continue
+			}
+			if t.TaskArn != nil {
+				out = append(out, process.TaskRef{ARN: aws.ToString(t.TaskArn)})
+			}
+		}
 	}
 	return out, nil
 }
@@ -923,14 +1015,18 @@ func optString(s string) *string {
 // same ClientToken within a 10-minute window: a control-plane retry during that
 // window returns the already-running task instead of launching a duplicate.
 // The time bucket (unix seconds / 600) advances every 10 minutes, so a
-// deliberate re-launch after a STOPPED task in the prior window still works.
+// deliberate re-launch after a STOPPED task in the prior window still issues a
+// fresh RunTask.
 //
-// Formula: SHA-256(cluster + "|" + slug + "|" + index + "|" + deploymentID + "|" + bucket)
+// Formula: SHA-256(cluster | slug | index | deploymentID | workerID | bucket)
 // as a lowercase hex string. SHA-256 hex is always exactly 64 characters, which
 // fits the ECS ClientToken maximum length of 64 exactly.
+// The workerID segment differentiates a Fargate and an EC2 RunTask for the same
+// replica in the same 10-min window, preventing ECS from deduplicating the EC2
+// launch into a running Fargate task (silent cross-contamination).
 // When deploymentID is 0 (legacy/pre-deploy rows) the field is omitted so the
 // token still differentiates across time buckets.
-func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix int64) string {
+func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix int64, workerID string) string {
 	bucket := strconv.FormatInt(nowUnix/600, 10)
 	var b strings.Builder
 	b.WriteString(cluster)
@@ -942,6 +1038,8 @@ func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix in
 	if deploymentID > 0 {
 		b.WriteString(strconv.FormatInt(deploymentID, 10))
 	}
+	b.WriteByte('|')
+	b.WriteString(workerID)
 	b.WriteByte('|')
 	b.WriteString(bucket)
 	sum := sha256.Sum256([]byte(b.String()))
