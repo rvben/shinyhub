@@ -855,3 +855,104 @@ func TestFargateYamlExampleHasFargateBlock(t *testing.T) {
 		"shinyhub.yaml.example runtime.fargate block must document bundle_token_ttl (Fargate bundle fetch token TTL)",
 	)
 }
+
+// TestReplicaDisplayWiring pins the import and call sites for replica-display.js.
+// The helper is testable under jsdom (Task 1); the wiring inside app.js and
+// app-detail.js (which jsdom cannot import) is pinned here so a refactor that
+// drops the import or the call site fails the build instead of silently
+// breaking the panel.
+func TestReplicaDisplayWiring(t *testing.T) {
+	// app.js imports the helper (grid card path + renderReplicasPanel).
+	assertContains(t, "app.js", `'/static/views/replica-display.js'`,
+		"app.js must import replica-display.js for grid-card and panel backend/metrics rendering")
+	assertContains(t, "app.js", "backendLabel",
+		"app.js renderReplicasPanel and grid card must call backendLabel to show the backend/tier label")
+	assertContains(t, "app.js", "metricsText",
+		"app.js renderReplicasPanel and grid card must call metricsText for honest CPU/RAM rendering")
+
+	// app-detail.js imports the helper (seedReplicasFromStatus).
+	assertContains(t, "views/app-detail.js", `'/static/views/replica-display.js'`,
+		"app-detail.js must import replica-display.js so seedReplicasFromStatus can show tier/provider and n/a metrics")
+	assertContains(t, "views/app-detail.js", "backendLabel",
+		"seedReplicasFromStatus must call backendLabel to render the initial backend/tier label per replica")
+	assertContains(t, "views/app-detail.js", "metricsText",
+		"seedReplicasFromStatus must call metricsText so the initial panel state is honest for PID-less replicas")
+}
+
+// TestMetricsAvailableWiring pins the top-level metrics_available field
+// consumed by the grid card path. The grid card reads m.cpu_percent /
+// m.rss_bytes from the legacy top-level scalars (not m.replicas), so the
+// PID-less signal for the grid path is the top-level m.metrics_available flag
+// added in plan 01 (Contract 5). Without this pin a refactor could silently
+// revert to showing "0.0% CPU / 0 KB RAM" for Fargate apps on the grid.
+func TestMetricsAvailableWiring(t *testing.T) {
+	assertContains(t, "app.js", "m.metrics_available",
+		"app.js onMetrics grid card must read m.metrics_available to gate CPU/RAM display; see plan-01 Contract 5")
+}
+
+// TestAutoscaleStatusWiring pins the autoscale_status and global_autoscale_enabled
+// consumption in app-detail.js. The detail view passes both to summariseAutoscale
+// via the envelope object; the poll path (onMetrics) must also update the summary
+// so the cooldown indicator refreshes without a full page re-fetch.
+func TestAutoscaleStatusWiring(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "autoscale_status",
+		"app-detail.js renderOverview must pass body.autoscale_status to summariseAutoscale via the envelope")
+	assertContains(t, "views/app-detail.js", "global_autoscale_enabled",
+		"app-detail.js renderOverview must pass body.global_autoscale_enabled to summariseAutoscale via the envelope")
+	assertContains(t, "app.js", "autoscale_status",
+		"app.js onMetrics must update autoscale_status on the stored envelope so the cooldown row refreshes on each 10s poll")
+}
+
+// TestSeedReplicasConsumesNewFields pins that seedReplicasFromStatus reads the
+// tier and provider fields already present on replicas_status entries
+// (db.Replica carries them; handleGetApp includes them in the envelope).
+func TestSeedReplicasConsumesNewFields(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "r.tier",
+		"seedReplicasFromStatus must read r.tier from replicas_status entries (already present in db.Replica / handleGetApp envelope)")
+	assertContains(t, "views/app-detail.js", "r.provider",
+		"seedReplicasFromStatus must read r.provider from replicas_status entries (already present in db.Replica / handleGetApp envelope)")
+	assertContains(t, "views/app-detail.js", "r.metrics_available",
+		"seedReplicasFromStatus must read r.metrics_available to show n/a for PID-less replicas on initial load; see plan-01 Contract 5")
+}
+
+// TestKnownActionsAutoscale pins the knownActions array in app.js to include
+// the two new autoscale audit actions and to not duplicate create_user.
+func TestKnownActionsAutoscale(t *testing.T) {
+	assertContains(t, "app.js", "'autoscale_scale_up'",
+		"knownActions in app.js renderAuditEvents must include autoscale_scale_up; see Contract 8")
+	assertContains(t, "app.js", "'autoscale_scale_down'",
+		"knownActions in app.js renderAuditEvents must include autoscale_scale_down; see Contract 8")
+
+	// Assert no duplicate create_user: count occurrences inside knownActions.
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	// Locate knownActions array by finding the renderAuditEvents function
+	// and extracting the array body up to its closing bracket.
+	start := strings.Index(src, "const knownActions = [")
+	if start < 0 {
+		t.Fatal("app.js: cannot find `const knownActions = [` inside renderAuditEvents")
+	}
+	end := strings.Index(src[start:], "];")
+	if end < 0 {
+		t.Fatal("app.js: cannot find closing `];` for knownActions array")
+	}
+	arrayBody := src[start : start+end+2]
+	count := strings.Count(arrayBody, "'create_user'")
+	if count != 1 {
+		t.Fatalf("app.js knownActions: 'create_user' appears %d time(s); want exactly 1 (remove the duplicate OAuth comment block; see Contract 8)", count)
+	}
+}
+
+// TestGridAutoscaleBadge pins the autoscale badge on the grid card.
+// app.autoscale_enabled is already in the apps-list payload (no server change).
+// The badge renders a small "auto" indicator when true so operators can see
+// at a glance which apps have autoscale active.
+func TestGridAutoscaleBadge(t *testing.T) {
+	assertContains(t, "app.js", "autoscale_enabled",
+		"app.js renderGridVerbatim must read app.autoscale_enabled to conditionally render the autoscale badge on grid cards")
+	assertContains(t, "app.js", "badge-autoscale",
+		"app.js grid card must apply badge-autoscale class (or similar) to the autoscale indicator badge")
+}
