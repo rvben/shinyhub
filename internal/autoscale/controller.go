@@ -217,6 +217,9 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 		if desired < a.Replicas {
 			action = ActionScaleDown
 		}
+		// "to" is the convergence target (desired replica count). For scale-down
+		// the controller removes one replica per tick, so "to" may not be reached
+		// in a single action; the log message above uses "toward" for the same reason.
 		detail, _ := json.Marshal(map[string]any{
 			"from":     a.Replicas,
 			"to":       desired,

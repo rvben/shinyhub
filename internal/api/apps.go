@@ -1816,7 +1816,7 @@ type metricsResponse struct {
 	SessionsCap      int              `json:"sessions_cap"`
 	Replicas         []replicaMetrics `json:"replicas"`
 	MetricsAvailable bool             `json:"metrics_available"`
-	AutoscaleStatus  *autoscaleStatus `json:"autoscale_status,omitempty"`
+	AutoscaleStatus  *autoscaleStatus `json:"autoscale_status"`
 	// Legacy fields preserved so existing clients (dashboard card poller)
 	// keep working while they adopt the per-replica view. These mirror the
 	// first running replica.
@@ -1895,10 +1895,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		rm.Provider = info.Provider
 		if info.Status == process.StatusRunning {
 			if handle, ok := s.manager.HandleReplica(slug, i); ok {
-				rm.MetricsAvailable = handle.PID != 0
 				if stats, err := s.sampler.Sample(handle); err == nil {
 					rm.CPUPercent = stats.CPUPercent
 					rm.RSSBytes = stats.RSSBytes
+					// MetricsAvailable is true only when the sample succeeded for a
+					// PID-backed handle; a zero PID (Fargate/remote_docker) or a
+					// failed sample both mean live CPU/RAM are not available.
+					rm.MetricsAvailable = handle.PID != 0
 				} else {
 					rm.Status = string(process.StatusStopped)
 				}

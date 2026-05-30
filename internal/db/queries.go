@@ -1450,6 +1450,11 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 // LatestAutoscaleEvent returns the most-recent autoscale_scale_up or
 // autoscale_scale_down audit event for the named app slug, or a zero-value
 // AuditEvent and false if no such event exists.
+//
+// The ORDER BY created_at DESC, id DESC with LIMIT 1 relies on SQLite's
+// backward scan of the default created_at ordering and is fine at typical
+// audit-table sizes. A composite index on (resource_id, action, created_at DESC)
+// would speed this up if the audit_events table grows very large.
 func (s *Store) LatestAutoscaleEvent(slug string) (AuditEvent, bool, error) {
 	row := s.db.QueryRow(`
 		SELECT ae.id, ae.user_id, u.username,
