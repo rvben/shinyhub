@@ -2021,6 +2021,67 @@ func TestListManagedTasksFiltersToOwnLaunchType(t *testing.T) {
 	}
 }
 
+// testEC2Cfg returns a Config for EC2 launch type, usable in runTaskInput tests.
+func testEC2Cfg() Config {
+	cfg := testCfg()
+	cfg.LaunchType = ecstypes.LaunchTypeEc2
+	return cfg
+}
+
+// TestRunTaskInputEC2LaunchType asserts that runTaskInput sets LaunchType=EC2
+// and omits PlatformVersion for an EC2 runtime.
+func TestRunTaskInputEC2LaunchType(t *testing.T) {
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
+				taskWithIP("task-arn", "192.0.2.10", "RUNNING"),
+			}}, nil
+		},
+	}
+	cfg := testEC2Cfg()
+	cfg.PlatformVersion = "1.4.0" // must be ignored/omitted for EC2
+	rt := New(f, cfg, nil, WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond))
+	if _, err := rt.Start(context.Background(), startParams(), io.Discard); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(f.runInputs) != 1 {
+		t.Fatalf("RunTask called %d times, want 1", len(f.runInputs))
+	}
+	in := f.runInputs[0]
+	if in.LaunchType != ecstypes.LaunchTypeEc2 {
+		t.Errorf("LaunchType = %q, want EC2", in.LaunchType)
+	}
+	if in.PlatformVersion != nil {
+		t.Errorf("PlatformVersion must be nil for EC2, got %q", aws.ToString(in.PlatformVersion))
+	}
+}
+
+// TestRunTaskInputFargatePreservesLaunchType asserts (regression) that a
+// Fargate runtime still sets LaunchType=FARGATE and includes PlatformVersion.
+func TestRunTaskInputFargatePreservesLaunchType(t *testing.T) {
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
+				taskWithIP("task-arn", "192.0.2.11", "RUNNING"),
+			}}, nil
+		},
+	}
+	cfg := testCfg()
+	cfg.LaunchType = ecstypes.LaunchTypeFargate
+	cfg.PlatformVersion = "1.4.0"
+	rt := New(f, cfg, nil, WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond))
+	if _, err := rt.Start(context.Background(), startParams(), io.Discard); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	in := f.runInputs[0]
+	if in.LaunchType != ecstypes.LaunchTypeFargate {
+		t.Errorf("LaunchType = %q, want FARGATE", in.LaunchType)
+	}
+	if aws.ToString(in.PlatformVersion) != "1.4.0" {
+		t.Errorf("PlatformVersion = %q, want 1.4.0", aws.ToString(in.PlatformVersion))
+	}
+}
+
 // TestEC2WorkerIDConstant asserts the EC2 worker identity constant value.
 func TestEC2WorkerIDConstant(t *testing.T) {
 	if EC2WorkerID != "ecs-ec2" {

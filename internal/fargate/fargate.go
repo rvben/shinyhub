@@ -467,10 +467,10 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 		r.log.Warn("fargate: runTaskInput called with empty slug; ClientToken will not be slug-scoped")
 	}
 	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix(), r.workerID)
-	return &ecs.RunTaskInput{
+	in := &ecs.RunTaskInput{
 		Cluster:        aws.String(r.cfg.Cluster),
 		TaskDefinition: aws.String(r.cfg.TaskDefinition),
-		LaunchType:     ecstypes.LaunchTypeFargate,
+		LaunchType:     r.cfg.LaunchType,
 		Count:          aws.Int32(1),
 		StartedBy:      aws.String(startedBy),
 		ClientToken:    aws.String(ct),
@@ -480,13 +480,17 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 		// deliberately not enabled: a task definition that happened to carry a
 		// shinyhub.* tag would make RunTask fail with a duplicate-key error.
 		EnableECSManagedTags: true,
-		PlatformVersion:      optString(r.cfg.PlatformVersion),
 		NetworkConfiguration: r.networkConfig(),
 		Overrides: &ecstypes.TaskOverride{
 			ContainerOverrides: []ecstypes.ContainerOverride{r.buildContainerOverride(p)},
 		},
 		Tags: r.tags(p),
 	}
+	// PlatformVersion is Fargate-only; ECS rejects it when LaunchType=EC2.
+	if r.cfg.LaunchType != ecstypes.LaunchTypeEc2 {
+		in.PlatformVersion = optString(r.cfg.PlatformVersion)
+	}
+	return in
 }
 
 // Start launches one Fargate task for the replica and waits until it acquires a
