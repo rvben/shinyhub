@@ -389,14 +389,17 @@ function seedReplicasFromStatus(app, replicasStatus) {
     });
     const cpuDisplay = status === 'running' ? cpuInit : '—';
     const ramDisplay = status === 'running' ? ramInit : '—';
+    // Build the li via innerHTML for fixed strings, but set backend via
+    // textContent to avoid XSS from operator-controlled r.tier/r.provider values.
     li.innerHTML = `
       <span class="replica-index">#${r.index}</span>
       <span class="badge badge-${status}">${formatStatus(status)}</span>
-      <span class="replica-backend" title="Backend/tier">${backend}</span>
+      <span class="replica-backend" title="Backend/tier"></span>
       <span class="replica-sessions">— sessions</span>
       <span class="replica-cpu">CPU ${cpuDisplay}</span>
       <span class="replica-ram"${note ? ` title="${note}"` : ''}>RAM ${ramDisplay}</span>
     `;
+    li.querySelector('.replica-backend').textContent = backend;
     listEl.appendChild(li);
   }
 }

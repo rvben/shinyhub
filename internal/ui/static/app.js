@@ -2694,7 +2694,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const { cpuText, ramText, note } = metricsText(r);
       const cpuDisplay = (status === 'running') ? cpuText : '—';
       const ramDisplay = (status === 'running') ? ramText : '—';
-      const backend = backendLabel(r);
+      // Escape the backend label: r.tier/r.provider come from operator YAML config
+      // and could contain HTML metacharacters if misconfigured.
+      const backend = escapeHtml(backendLabel(r));
       li.innerHTML = `
         <span class="replica-index">#${r.index}</span>
         <span class="badge badge-${status}">${formatStatus(status)}</span>
