@@ -1039,17 +1039,21 @@ func validateFargate(f FargateRuntimeConfig, tiers []TierConfig) error {
 	}
 
 	// Determine which fargate tiers use FARGATE vs EC2 launch type.
+	// allEC2 requires at least one fargate tier to be present so an empty
+	// tiers slice (or a slice with no fargate tiers) does not spuriously
+	// reject platform_version.
 	hasFargateLT := false
-	allEC2 := true
+	fargateTierCount := 0
 	for _, t := range tiers {
 		if t.Runtime != "fargate" {
 			continue
 		}
+		fargateTierCount++
 		if t.LaunchType != "EC2" {
 			hasFargateLT = true
-			allEC2 = false
 		}
 	}
+	allEC2 := fargateTierCount > 0 && !hasFargateLT
 
 	// platform_version is Fargate-only; ECS rejects it for EC2 tasks.
 	if allEC2 && f.PlatformVersion != "" {

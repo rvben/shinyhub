@@ -841,6 +841,9 @@ func (r *Runtime) ListManagedTasks(ctx context.Context) ([]process.TaskRef, erro
 		if end > len(arns) {
 			end = len(arns)
 		}
+		// Tags are intentionally not requested (no Include: TaskFieldTags):
+		// this call only needs task.LaunchType and task.TaskArn, both base
+		// response fields, so omitting the tags include keeps the call cheap.
 		desc, err := r.client.DescribeTasks(ctx, &ecs.DescribeTasksInput{
 			Cluster: aws.String(r.cfg.Cluster),
 			Tasks:   arns[start:end],

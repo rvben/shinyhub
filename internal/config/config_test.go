@@ -2287,3 +2287,33 @@ runtime:
 		t.Fatal("bad launch_type must return a config error")
 	}
 }
+
+// TestValidateFargate_NoFargateTiersDoesNotRejectPlatformVersion guards the
+// allEC2 logic: a tiers slice that contains no fargate tiers must not
+// spuriously reject platform_version (allEC2 must be false when
+// fargateTierCount == 0). This prevents a regression where an empty or
+// fargate-free tier list incorrectly set allEC2 = true and caused valid
+// configs to fail validation.
+//
+// Tested via Load with no fargate tier declared, so validateFargate is never
+// called and the fargate block with platform_version is simply unused. This
+// documents the contract: platform_version is only rejected when ALL fargate
+// tiers are EC2.
+func TestValidateFargate_NoFargateTiersDoesNotRejectPlatformVersion(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  mode: native
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+    platform_version: "1.4.0"
+`)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("platform_version on an unused fargate block must not fail validation: %v", err)
+	}
+}

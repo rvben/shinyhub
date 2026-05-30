@@ -2195,6 +2195,22 @@ func TestDecodeHandleAcceptsBareARN_Method(t *testing.T) {
 	}
 }
 
+// TestDecodeHandleAcceptsBareARN_EC2 asserts that an EC2 runtime also accepts
+// bare ARNs (backward-compat path), mirroring the Fargate test. This covers
+// the cross-runtime guard's bare-ARN fallback for both launch types.
+func TestDecodeHandleAcceptsBareARN_EC2(t *testing.T) {
+	cfg := testCfg()
+	cfg.LaunchType = ecstypes.LaunchTypeEc2
+	rt := New(&fakeECS{}, cfg, nil)
+	arn, err := rt.decodeHandle("arn:aws:ecs:eu-west-1:123456789012:task/cluster/raw")
+	if err != nil {
+		t.Fatalf("EC2 decodeHandle bare ARN: %v", err)
+	}
+	if arn != "arn:aws:ecs:eu-west-1:123456789012:task/cluster/raw" {
+		t.Errorf("arn = %q", arn)
+	}
+}
+
 // TestClientTokenDiffersBetweenLaunchTypes asserts that the same replica
 // identity (cluster, slug, index, deploymentID, time bucket) produces a
 // different token when the workerID changes. Without this guard an EC2 and
