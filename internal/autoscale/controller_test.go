@@ -1,6 +1,7 @@
 package autoscale
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"testing"
@@ -43,16 +44,20 @@ func (f *fakeScaler) ScaleDown(slug string, _ time.Duration) (bool, error) {
 	return !f.downNoOp, nil
 }
 
-func testController(lister Lister, signal Signal, scaler Scaler) *Controller {
+func newTestController(lister Lister, signal Signal, scaler Scaler, rec AuditRecorder) *Controller {
 	return New(Config{
 		ScanInterval:  30 * time.Second,
 		Cooldown:      3 * time.Minute,
 		DrainGrace:    30 * time.Second,
 		RejectWindow:  time.Minute,
-		DefaultTarget: 0.8, // perReplica = 8 at cap 10
+		DefaultTarget: 0.8,
 		DefaultCap:    10,
 		RuntimeMax:    32,
-	}, lister, signal, scaler, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, lister, signal, scaler, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func testController(lister Lister, signal Signal, scaler Scaler) *Controller {
+	return newTestController(lister, signal, scaler, &fakeAuditor{})
 }
 
 func app(slug string, replicas, min, max int) *db.App {
@@ -270,5 +275,100 @@ func TestController_SaturationBiasesScaleUp(t *testing.T) {
 
 	if scaler.ups["demo"] != 1 {
 		t.Fatalf("saturation should force one scale-up, got %d", scaler.ups["demo"])
+	}
+}
+
+type fakeAuditor struct {
+	events []db.AuditEventParams
+}
+
+func (f *fakeAuditor) LogAuditEvent(p db.AuditEventParams) {
+	f.events = append(f.events, p)
+}
+
+func TestController_RecordsAuditEventOnScaleUp(t *testing.T) {
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	// ceil(40/8)=5; desired 5 > current 2 -> scale up.
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}}
+	scaler := newFakeScaler()
+	auditor := &fakeAuditor{}
+	c := newTestController(lister, signal, scaler, auditor)
+
+	c.reconcile(time.Now())
+
+	if len(auditor.events) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(auditor.events))
+	}
+	ev := auditor.events[0]
+	if ev.Action != ActionScaleUp {
+		t.Fatalf("action = %q, want %q", ev.Action, ActionScaleUp)
+	}
+	if ev.ResourceType != "app" || ev.ResourceID != "demo" {
+		t.Fatalf("resource = %q/%q, want app/demo", ev.ResourceType, ev.ResourceID)
+	}
+	if ev.UserID != nil {
+		t.Fatalf("UserID = %v, want nil (system actor)", ev.UserID)
+	}
+	// Detail must be valid JSON with from/to/reason/sessions/target fields.
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(ev.Detail), &detail); err != nil {
+		t.Fatalf("detail JSON: %v", err)
+	}
+	if int(detail["from"].(float64)) != 2 {
+		t.Fatalf("detail.from = %v, want 2", detail["from"])
+	}
+	if int(detail["to"].(float64)) != 5 {
+		t.Fatalf("detail.to = %v, want 5", detail["to"])
+	}
+	if detail["reason"].(string) != "session_load" {
+		t.Fatalf("detail.reason = %q, want session_load", detail["reason"])
+	}
+}
+
+func TestController_RecordsAuditEventOnScaleDown(t *testing.T) {
+	lister := &fakeLister{apps: []*db.App{app("demo", 3, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {1, 1, 1}}} // total 3 -> desired 1
+	scaler := newFakeScaler()
+	auditor := &fakeAuditor{}
+	c := newTestController(lister, signal, scaler, auditor)
+
+	c.reconcile(time.Now())
+
+	if len(auditor.events) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(auditor.events))
+	}
+	ev := auditor.events[0]
+	if ev.Action != ActionScaleDown {
+		t.Fatalf("action = %q, want %q", ev.Action, ActionScaleDown)
+	}
+}
+
+func TestController_NoAuditEventOnNoOp(t *testing.T) {
+	lister := &fakeLister{apps: []*db.App{app("demo", 3, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {8, 8, 1}}} // desired=3==current
+	scaler := newFakeScaler()
+	auditor := &fakeAuditor{}
+	c := newTestController(lister, signal, scaler, auditor)
+
+	c.reconcile(time.Now())
+
+	if len(auditor.events) != 0 {
+		t.Fatalf("audit events = %d, want 0 for no-op", len(auditor.events))
+	}
+}
+
+func TestController_NoAuditEventWhenScalePrimitiveRefuses(t *testing.T) {
+	// ScaleDown no-op (returns false): no audit event should fire.
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {1, 1}}} // desired 1 < 2
+	scaler := newFakeScaler()
+	scaler.downNoOp = true
+	auditor := &fakeAuditor{}
+	c := newTestController(lister, signal, scaler, auditor)
+
+	c.reconcile(time.Now())
+
+	if len(auditor.events) != 0 {
+		t.Fatalf("audit events = %d, want 0 when scale primitive refuses", len(auditor.events))
 	}
 }

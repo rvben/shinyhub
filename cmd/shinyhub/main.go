@@ -824,7 +824,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
 			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
 			RuntimeMax:    runtimeMax,
-		}, store, prx, srv, slog.Default())
+		}, store, prx, srv, store, slog.Default())
 		autoscaleDone = make(chan struct{})
 		go func() {
 			controller.Run(asCtx)

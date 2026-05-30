@@ -8,6 +8,7 @@ package autoscale
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -56,11 +57,13 @@ type Config struct {
 // Controller evaluates and converges replica counts. Its internal state
 // (lastAction) is owned solely by the Run loop goroutine, so it needs no lock.
 type Controller struct {
-	cfg    Config
-	lister Lister
-	signal Signal
-	scaler Scaler
-	log    *slog.Logger
+	cfg      Config
+	lister   Lister
+	signal   Signal
+	scaler   Scaler
+	recorder AuditRecorder  // records scale events to the audit log
+	log      *slog.Logger
+	metrics  AutoscaleMetrics // nil until SetMetrics is called
 
 	// lastAction records when the controller last scaled each slug, for the
 	// per-app cooldown. Pruned each tick to the current app set.
@@ -69,7 +72,7 @@ type Controller struct {
 
 // New builds a controller. log may be nil, in which case the default logger is
 // used.
-func New(cfg Config, lister Lister, signal Signal, scaler Scaler, log *slog.Logger) *Controller {
+func New(cfg Config, lister Lister, signal Signal, scaler Scaler, recorder AuditRecorder, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -78,6 +81,7 @@ func New(cfg Config, lister Lister, signal Signal, scaler Scaler, log *slog.Logg
 		lister:     lister,
 		signal:     signal,
 		scaler:     scaler,
+		recorder:   recorder,
 		log:        log,
 		lastAction: make(map[string]time.Time),
 	}
@@ -160,7 +164,7 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	}
 	saturated := c.signal.RejectsByReason(a.Slug, c.cfg.RejectWindow)[proxy.ReasonPoolSaturated] > 0
 
-	desired, _ := desiredReplicas(scaleInput{
+	desired, reason := desiredReplicas(scaleInput{
 		activeSessions: total,
 		// a.Replicas is a best-effort snapshot from the list query and is not
 		// held under the per-slug scale lock. The scale primitives re-read the
@@ -209,6 +213,30 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	}
 	if acted {
 		c.lastAction[a.Slug] = now
+		action := ActionScaleUp
+		if desired < a.Replicas {
+			action = ActionScaleDown
+		}
+		detail, _ := json.Marshal(map[string]any{
+			"from":     a.Replicas,
+			"to":       desired,
+			"reason":   reason,
+			"sessions": total,
+			"target":   target,
+		})
+		c.recorder.LogAuditEvent(db.AuditEventParams{
+			Action:       action,
+			ResourceType: "app",
+			ResourceID:   a.Slug,
+			Detail:       string(detail),
+		})
+		if c.metrics != nil {
+			dir := "up"
+			if desired < a.Replicas {
+				dir = "down"
+			}
+			c.metrics.RecordAutoscaleScale(dir)
+		}
 	}
 }
 
