@@ -60,12 +60,38 @@ test('metricsText returns KB when rss_bytes < 1MB', () => {
   assert.equal(got.note, null);
 });
 
-test('metricsText defaults metrics_available to false for undefined', () => {
-  // A response that predates plan 01 omits metrics_available; treat as PID-less
-  // so stale consumers do not mislead with "0.0% CPU".
+test('metricsText returns neutral placeholder when metrics_available is undefined (seed/not-yet-polled)', () => {
+  // The GET replicas_status payload has no metrics_available field (db.Replica
+  // does not carry it), so seedReplicasFromStatus passes undefined. This is
+  // distinct from metrics_available===false (confirmed PID-less): availability
+  // is simply not yet known. Return neutral dashes rather than "n/a" so the
+  // seed state does not falsely advertise that metrics are unavailable for what
+  // may turn out to be a native (PID-backed) replica.
   const got = metricsText({ cpu_percent: 0, rss_bytes: 0 });
-  assert.equal(got.cpuText, 'n/a');
-  assert.equal(got.ramText, 'n/a');
+  assert.equal(got.cpuText, '—', 'undefined metrics_available must return neutral dash, not n/a');
+  assert.equal(got.ramText, '—', 'undefined metrics_available must return neutral dash, not n/a');
+  assert.equal(got.note, '', 'undefined metrics_available must return empty note, not the CloudWatch message');
+});
+
+test('metricsText three-state contract: false=n/a, true=real, undefined=pending dash', () => {
+  // State 1: confirmed PID-less (Fargate/remote_docker) - show n/a with note
+  const pidless = metricsText({ metrics_available: false });
+  assert.equal(pidless.cpuText, 'n/a');
+  assert.equal(pidless.ramText, 'n/a');
+  assert.ok(pidless.note, 'PID-less must carry the CloudWatch note');
+
+  // State 2: PID-backed (native) - show real numbers
+  const native = metricsText({ metrics_available: true, cpu_percent: 5.0, rss_bytes: 1 << 20 });
+  assert.equal(native.cpuText, '5.0%');
+  assert.equal(native.ramText, '1 MB');
+  assert.equal(native.note, null);
+
+  // State 3: not yet polled (seed from GET replicas_status which lacks the field)
+  // - show neutral dashes, not n/a, since availability is not yet known.
+  const pending = metricsText({ cpu_percent: 0, rss_bytes: 0 }); // metrics_available omitted
+  assert.equal(pending.cpuText, '—');
+  assert.equal(pending.ramText, '—');
+  assert.equal(pending.note, '');
 });
 
 // Mixed-tier replica set

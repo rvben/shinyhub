@@ -24,14 +24,31 @@ const METRICS_NA_NOTE =
 
 /**
  * metricsText returns display text for a replica's resource metrics.
- * When metrics_available is false or absent, both CPU and RAM return "n/a"
- * with a note. When true, returns formatted numbers or a dash for zero RAM.
+ * Three states are distinguished:
+ *
+ *   metrics_available === true   - PID-backed; return real CPU/RAM numbers.
+ *   metrics_available === false  - Confirmed PID-less (Fargate/remote_docker);
+ *                                  return "n/a" with the CloudWatch note.
+ *   metrics_available === undefined (or absent) - Not yet known; the seed
+ *                                  payload from GET replicas_status does not
+ *                                  carry this field. Return neutral dashes so
+ *                                  the initial panel state does not falsely
+ *                                  advertise unavailability for a replica that
+ *                                  may turn out to be PID-backed.
  *
  * @param {{ metrics_available?: boolean, cpu_percent?: number, rss_bytes?: number }} replica
  * @returns {{ cpuText: string, ramText: string, note: string|null }}
  */
 export function metricsText(replica) {
-  if (!replica || replica.metrics_available !== true) {
+  if (!replica) {
+    return { cpuText: 'n/a', ramText: 'n/a', note: METRICS_NA_NOTE };
+  }
+  // Pending / not-yet-polled: availability unknown, show neutral dashes.
+  if (replica.metrics_available === undefined) {
+    return { cpuText: '—', ramText: '—', note: '' };
+  }
+  // Confirmed PID-less: show n/a with the monitoring hint.
+  if (replica.metrics_available !== true) {
     return { cpuText: 'n/a', ramText: 'n/a', note: METRICS_NA_NOTE };
   }
   const cpu = typeof replica.cpu_percent === 'number' ? replica.cpu_percent : 0;
