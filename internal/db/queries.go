@@ -1447,6 +1447,36 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 	return result, rows.Err()
 }
 
+// LatestAutoscaleEvent returns the most-recent autoscale_scale_up or
+// autoscale_scale_down audit event for the named app slug, or a zero-value
+// AuditEvent and false if no such event exists.
+func (s *Store) LatestAutoscaleEvent(slug string) (AuditEvent, bool, error) {
+	row := s.db.QueryRow(`
+		SELECT ae.id, ae.user_id, u.username,
+		       ae.action, ae.resource_type, ae.resource_id,
+		       ae.detail, ae.ip_address, ae.created_at
+		FROM audit_events ae
+		LEFT JOIN users u ON u.id = ae.user_id
+		WHERE ae.resource_type = 'app'
+		  AND ae.resource_id   = ?
+		  AND ae.action IN ('autoscale_scale_up', 'autoscale_scale_down')
+		ORDER BY ae.created_at DESC, ae.id DESC
+		LIMIT 1`, slug)
+	var ev AuditEvent
+	err := row.Scan(
+		&ev.ID, &ev.UserID, &ev.Username,
+		&ev.Action, &ev.ResourceType, &ev.ResourceID,
+		&ev.Detail, &ev.IPAddress, &ev.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return AuditEvent{}, false, nil
+	}
+	if err != nil {
+		return AuditEvent{}, false, fmt.Errorf("latest autoscale event: %w", err)
+	}
+	return ev, true, nil
+}
+
 // --- App Environment Variables ---
 
 // AppEnvVar represents a per-app environment variable row.
