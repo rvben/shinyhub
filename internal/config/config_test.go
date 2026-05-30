@@ -2101,3 +2101,189 @@ runtime:
 		t.Errorf("cpu: got %d, want 25", cpu)
 	}
 }
+
+// TestTierConfig_LaunchTypeEC2 asserts that a tier with launch_type: EC2 parses
+// correctly and the TierConfig carries the EC2 value.
+func TestTierConfig_LaunchTypeEC2(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+      launch_type: EC2
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Runtime.Tiers) != 1 {
+		t.Fatalf("got %d tiers, want 1", len(cfg.Runtime.Tiers))
+	}
+	if cfg.Runtime.Tiers[0].LaunchType != "EC2" {
+		t.Errorf("LaunchType = %q, want EC2", cfg.Runtime.Tiers[0].LaunchType)
+	}
+}
+
+// TestValidateFargate_EC2TierDoesNotRequireMatrix asserts that an EC2 tier
+// validates without task_cpu_units/task_memory_mb (they are optional for EC2).
+func TestValidateFargate_EC2TierDoesNotRequireMatrix(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: gpu
+      runtime: fargate
+      launch_type: EC2
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+`)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("EC2 tier without task_cpu_units/task_memory_mb must be valid; got: %v", err)
+	}
+}
+
+// TestValidateFargate_FargateTierStillEnforcesMatrix asserts (regression) that
+// a FARGATE tier still requires task_cpu_units and task_memory_mb and they must
+// satisfy the Fargate CPU/memory matrix.
+func TestValidateFargate_FargateTierStillEnforcesMatrix(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+      launch_type: FARGATE
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+    task_cpu_units: 256
+    task_memory_mb: 99999
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("FARGATE tier with invalid memory must fail validation")
+	}
+}
+
+// TestValidateFargate_PlatformVersionRejectedWhenAllEC2 asserts that
+// platform_version is rejected when all fargate tiers are EC2 launch type.
+func TestValidateFargate_PlatformVersionRejectedWhenAllEC2(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: gpu
+      runtime: fargate
+      launch_type: EC2
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+    platform_version: "1.4.0"
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("platform_version must be rejected when all tiers are EC2")
+	}
+}
+
+// TestValidateFargate_MixedFargateAndEC2Valid asserts that a config with one
+// FARGATE tier and one EC2 tier on the same shared fargate block validates:
+// matrix applies only to FARGATE tiers; EC2 tiers are exempt.
+func TestValidateFargate_MixedFargateAndEC2Valid(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+      launch_type: FARGATE
+    - name: gpu
+      runtime: fargate
+      launch_type: EC2
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+`)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("mixed FARGATE+EC2 config must be valid: %v", err)
+	}
+}
+
+// TestApplyEnv_FargateLaunchTypeDefault asserts that
+// SHINYHUB_RUNTIME_FARGATE_LAUNCH_TYPE sets the default launch type for tiers
+// that do not specify launch_type explicitly.
+func TestApplyEnv_FargateLaunchTypeDefault(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_LAUNCH_TYPE", "EC2")
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: gpu
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Tiers[0].LaunchType != "EC2" {
+		t.Errorf("LaunchType = %q, want EC2 (from env default)", cfg.Runtime.Tiers[0].LaunchType)
+	}
+}
+
+// TestTierConfig_BadLaunchTypeReturnsError asserts that an unrecognised
+// launch_type value returns a config error.
+func TestTierConfig_BadLaunchTypeReturnsError(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+      launch_type: INVALID
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    control_plane_url: https://example.com
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("bad launch_type must return a config error")
+	}
+}

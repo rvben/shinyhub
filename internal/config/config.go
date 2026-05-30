@@ -411,8 +411,9 @@ type AutoscaleConfig struct {
 // Runtime is one of "native" or "docker" in this phase ("remote_docker"
 // arrives with the remote provider).
 type TierConfig struct {
-	Name    string
-	Runtime string
+	Name       string
+	Runtime    string
+	LaunchType string // "FARGATE" (default) or "EC2"; only meaningful for fargate tiers
 }
 
 // TierOrder returns the tier names in declaration order.
@@ -592,8 +593,9 @@ type rawAutoscaleConfig struct {
 }
 
 type rawTierConfig struct {
-	Name    string `yaml:"name"`
-	Runtime string `yaml:"runtime"`
+	Name       string `yaml:"name"`
+	Runtime    string `yaml:"runtime"`
+	LaunchType string `yaml:"launch_type"`
 }
 
 type rawDockerRuntimeConfig struct {
@@ -792,10 +794,35 @@ func Load(path string) (*Config, error) {
 			default:
 				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, remote_docker, or fargate)", t.Name, t.Runtime)
 			}
-			cfg.Runtime.Tiers = append(cfg.Runtime.Tiers, TierConfig{Name: t.Name, Runtime: t.Runtime})
+			lt := strings.ToUpper(strings.TrimSpace(t.LaunchType))
+			switch lt {
+			case "", "FARGATE", "EC2":
+				// valid; empty is resolved after applyEnv below
+			default:
+				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown launch_type %q (want FARGATE or EC2)", t.Name, lt)
+			}
+			cfg.Runtime.Tiers = append(cfg.Runtime.Tiers, TierConfig{Name: t.Name, Runtime: t.Runtime, LaunchType: lt})
 		}
 		if hasFargate {
-			if err := validateFargate(cfg.Runtime.Fargate); err != nil {
+			// Apply the default launch type from env or "FARGATE" to fargate tiers
+			// that did not specify one. This must happen before validateFargate so
+			// the matrix and platform_version checks see the resolved launch types.
+			defaultLaunchType := "FARGATE"
+			if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_LAUNCH_TYPE"); v != "" {
+				u := strings.ToUpper(strings.TrimSpace(v))
+				switch u {
+				case "FARGATE", "EC2":
+					defaultLaunchType = u
+				default:
+					return nil, fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_LAUNCH_TYPE: %q is not valid (want FARGATE or EC2)", v)
+				}
+			}
+			for i := range cfg.Runtime.Tiers {
+				if cfg.Runtime.Tiers[i].Runtime == "fargate" && cfg.Runtime.Tiers[i].LaunchType == "" {
+					cfg.Runtime.Tiers[i].LaunchType = defaultLaunchType
+				}
+			}
+			if err := validateFargate(cfg.Runtime.Fargate, cfg.Runtime.Tiers); err != nil {
 				return nil, err
 			}
 		}
@@ -985,8 +1012,10 @@ var fargateMatrix = map[int]fargateMatrixEntry{
 
 // validateFargate enforces the settings a fargate tier cannot run without. It is
 // only called when at least one tier declares runtime "fargate", so a config
-// with no fargate tier never needs the block populated.
-func validateFargate(f FargateRuntimeConfig) error {
+// with no fargate tier never needs the block populated. The tiers slice is used
+// to determine which checks apply: the Fargate CPU/memory matrix check only
+// applies to FARGATE launch-type tiers; EC2 tiers are not matrix-constrained.
+func validateFargate(f FargateRuntimeConfig, tiers []TierConfig) error {
 	if f.Cluster == "" {
 		return fmt.Errorf("runtime.fargate.cluster is required when a tier uses runtime \"fargate\"")
 	}
@@ -1008,42 +1037,65 @@ func validateFargate(f FargateRuntimeConfig) error {
 	if f.RouteViaPublicIP && !strings.HasPrefix(f.ControlPlaneURL, "https://") {
 		return fmt.Errorf("runtime.fargate.control_plane_url must use https:// when route_via_public_ip is true (a plaintext bundle token over a public channel is replayable within the TTL)")
 	}
-	if f.TaskCPUUnits == 0 {
-		return fmt.Errorf("runtime.fargate.task_cpu_units is required when a tier uses runtime \"fargate\"")
-	}
-	if f.TaskMemoryMB == 0 {
-		return fmt.Errorf("runtime.fargate.task_memory_mb is required when a tier uses runtime \"fargate\"")
-	}
-	entry, ok := fargateMatrix[f.TaskCPUUnits]
-	if !ok {
-		allowed := slices.Sorted(maps.Keys(fargateMatrix))
-		parts := make([]string, len(allowed))
-		for i, v := range allowed {
-			parts[i] = strconv.Itoa(v)
+
+	// Determine which fargate tiers use FARGATE vs EC2 launch type.
+	hasFargateLT := false
+	allEC2 := true
+	for _, t := range tiers {
+		if t.Runtime != "fargate" {
+			continue
 		}
-		return fmt.Errorf("runtime.fargate.task_cpu_units: %d is not a valid Fargate CPU value; must be one of %s",
-			f.TaskCPUUnits, strings.Join(parts, ", "))
+		if t.LaunchType != "EC2" {
+			hasFargateLT = true
+			allEC2 = false
+		}
 	}
-	if entry.allowedMem != nil {
-		// Discrete set (256-unit tier).
-		valid := false
-		for _, m := range entry.allowedMem {
-			if f.TaskMemoryMB == m {
-				valid = true
-				break
+
+	// platform_version is Fargate-only; ECS rejects it for EC2 tasks.
+	if allEC2 && f.PlatformVersion != "" {
+		return fmt.Errorf("runtime.fargate.platform_version must not be set when all fargate tiers use launch_type EC2 (ECS rejects PlatformVersion for EC2 tasks)")
+	}
+
+	// The Fargate CPU/memory matrix only applies when at least one FARGATE-
+	// launch-type tier exists. EC2 tiers are not matrix-constrained.
+	if hasFargateLT {
+		if f.TaskCPUUnits == 0 {
+			return fmt.Errorf("runtime.fargate.task_cpu_units is required when a tier uses runtime \"fargate\" with FARGATE launch type")
+		}
+		if f.TaskMemoryMB == 0 {
+			return fmt.Errorf("runtime.fargate.task_memory_mb is required when a tier uses runtime \"fargate\" with FARGATE launch type")
+		}
+		entry, ok := fargateMatrix[f.TaskCPUUnits]
+		if !ok {
+			allowed := slices.Sorted(maps.Keys(fargateMatrix))
+			parts := make([]string, len(allowed))
+			for i, v := range allowed {
+				parts[i] = strconv.Itoa(v)
 			}
+			return fmt.Errorf("runtime.fargate.task_cpu_units: %d is not a valid Fargate CPU value; must be one of %s",
+				f.TaskCPUUnits, strings.Join(parts, ", "))
 		}
-		if !valid {
-			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not valid for cpu_units=256; must be one of 512, 1024, 2048", f.TaskMemoryMB)
-		}
-	} else {
-		if f.TaskMemoryMB < entry.memMin || f.TaskMemoryMB > entry.memMax {
-			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is out of range for cpu_units=%d; must be between %d and %d",
-				f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memMax)
-		}
-		if (f.TaskMemoryMB-entry.memMin)%entry.memInc != 0 {
-			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not a valid increment for cpu_units=%d; must be %d + n*%d (n>=0)",
-				f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memInc)
+		if entry.allowedMem != nil {
+			// Discrete set (256-unit tier).
+			valid := false
+			for _, m := range entry.allowedMem {
+				if f.TaskMemoryMB == m {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not valid for cpu_units=256; must be one of 512, 1024, 2048", f.TaskMemoryMB)
+			}
+		} else {
+			if f.TaskMemoryMB < entry.memMin || f.TaskMemoryMB > entry.memMax {
+				return fmt.Errorf("runtime.fargate.task_memory_mb: %d is out of range for cpu_units=%d; must be between %d and %d",
+					f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memMax)
+			}
+			if (f.TaskMemoryMB-entry.memMin)%entry.memInc != 0 {
+				return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not a valid increment for cpu_units=%d; must be %d + n*%d (n>=0)",
+					f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memInc)
+			}
 		}
 	}
 	return nil
