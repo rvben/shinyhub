@@ -372,3 +372,59 @@ func TestController_NoAuditEventWhenScalePrimitiveRefuses(t *testing.T) {
 		t.Fatalf("audit events = %d, want 0 when scale primitive refuses", len(auditor.events))
 	}
 }
+
+type fakeMetrics struct {
+	scales map[string]int
+}
+
+func (f *fakeMetrics) RecordAutoscaleScale(dir string) {
+	if f.scales == nil {
+		f.scales = make(map[string]int)
+	}
+	f.scales[dir]++
+}
+
+func TestController_RecordsMetricOnScaleUp(t *testing.T) {
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}} // desired 5 -> scale up
+	scaler := newFakeScaler()
+	auditor := &fakeAuditor{}
+	fm := &fakeMetrics{}
+	c := newTestController(lister, signal, scaler, auditor)
+	c.SetMetrics(fm)
+
+	c.reconcile(time.Now())
+
+	if fm.scales["up"] != 1 {
+		t.Fatalf("RecordAutoscaleScale(up) calls = %d, want 1", fm.scales["up"])
+	}
+	if fm.scales["down"] != 0 {
+		t.Fatalf("unexpected down metric: %d", fm.scales["down"])
+	}
+}
+
+func TestController_RecordsMetricOnScaleDown(t *testing.T) {
+	lister := &fakeLister{apps: []*db.App{app("demo", 3, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {1, 1, 1}}} // desired 1 -> scale down
+	scaler := newFakeScaler()
+	auditor := &fakeAuditor{}
+	fm := &fakeMetrics{}
+	c := newTestController(lister, signal, scaler, auditor)
+	c.SetMetrics(fm)
+
+	c.reconcile(time.Now())
+
+	if fm.scales["down"] != 1 {
+		t.Fatalf("RecordAutoscaleScale(down) calls = %d, want 1", fm.scales["down"])
+	}
+}
+
+func TestController_NoMetricWhenMetricsNotSet(t *testing.T) {
+	// SetMetrics never called; must not panic.
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}}
+	scaler := newFakeScaler()
+	c := newTestController(lister, signal, scaler, &fakeAuditor{})
+	// No SetMetrics call.
+	c.reconcile(time.Now()) // must not panic
+}

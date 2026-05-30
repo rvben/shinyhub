@@ -825,6 +825,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
 			RuntimeMax:    runtimeMax,
 		}, store, prx, srv, store, slog.Default())
+		if metricsReg != nil {
+			controller.SetMetrics(metricsReg)
+		}
 		autoscaleDone = make(chan struct{})
 		go func() {
 			controller.Run(asCtx)

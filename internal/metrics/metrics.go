@@ -34,6 +34,8 @@ type Registry struct {
 	fargateStopTaskTotal        *prometheus.CounterVec
 	fargateInventoryErrorsTotal prometheus.Counter
 	fargateRunTaskDuration      prometheus.Histogram
+
+	autoscaleScales *prometheus.CounterVec
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -127,6 +129,12 @@ func New(version string) *Registry {
 	})
 	reg.MustRegister(fargateRunTaskDuration)
 
+	autoscaleScales := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_autoscale_scale_total",
+		Help: "Total autoscale replica scaling actions by direction (up or down).",
+	}, []string{"direction"})
+	reg.MustRegister(autoscaleScales)
+
 	return &Registry{
 		reg:              reg,
 		httpRequests:     httpRequests,
@@ -141,6 +149,8 @@ func New(version string) *Registry {
 		fargateStopTaskTotal:        fargateStopTaskTotal,
 		fargateInventoryErrorsTotal: fargateInventoryErrorsTotal,
 		fargateRunTaskDuration:      fargateRunTaskDuration,
+
+		autoscaleScales: autoscaleScales,
 	}
 }
 
@@ -211,6 +221,12 @@ func (r *Registry) RecordInventoryError() {
 // duration from RunTask issue to response (not including IP-wait).
 func (r *Registry) ObserveRunTaskLatency(seconds float64) {
 	r.fargateRunTaskDuration.Observe(seconds)
+}
+
+// RecordAutoscaleScale satisfies autoscale.AutoscaleMetrics.
+// direction is "up" or "down".
+func (r *Registry) RecordAutoscaleScale(direction string) {
+	r.autoscaleScales.WithLabelValues(direction).Inc()
 }
 
 // Middleware records a request count and latency observation for every request,
