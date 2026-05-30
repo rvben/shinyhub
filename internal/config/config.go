@@ -469,6 +469,9 @@ func (r RuntimeConfig) DefaultResourcesForTier(tier string) (memMB, cpuPct int) 
 // apps retain the documented limitation that a single set of defaults cannot
 // serve divergent per-tier requirements.
 func (r RuntimeConfig) DefaultResourcesForApp(app *db.App) (memMB, cpuPct int) {
+	if app == nil {
+		return r.DefaultResourcesForTier(r.DefaultTierName())
+	}
 	tier := r.DefaultTierName()
 	if pm := app.PlacementMap(); len(pm) == 1 {
 		for t := range pm {

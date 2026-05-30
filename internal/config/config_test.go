@@ -2051,6 +2051,16 @@ runtime:
 			t.Errorf("cpu: got %d, want 0 (default tier fallback on malformed JSON)", cpu)
 		}
 	})
+
+	t.Run("nil app falls back to default tier (native, zeros)", func(t *testing.T) {
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(nil)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native default tier on nil app)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native default tier on nil app)", cpu)
+		}
+	})
 }
 
 // TestDefaultResourcesForApp_SingleTierFargate verifies the common single-tier
