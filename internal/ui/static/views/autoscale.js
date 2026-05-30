@@ -87,6 +87,9 @@ export function formatRejectsByReason(rollup) {
 export function formatRelative(nowMs, tsMs) {
   if (!tsMs) return '';
   const diffMs = nowMs - tsMs;
+  // Clamp negative diffs (future timestamp, clock skew) to "just now" so we
+  // never produce nonsense like "-1 days ago".
+  if (diffMs < 0) return 'just now';
   const diffS  = Math.floor(diffMs / 1000);
   if (diffS < 60)  return 'just now';
   const diffM = Math.floor(diffS / 60);
@@ -180,6 +183,12 @@ export function renderAutoscaleSummary(dl, s) {
 
     // Kill-switch warning: app has autoscale enabled but the global controller
     // is disabled, so no scaling will occur.
+    // Remove any previously-appended warning first so repeated calls (e.g. the
+    // 10s metrics poll) do not accumulate stale nodes and so flipping
+    // globalEnabled back to true cleans up the warning immediately.
+    if (dl.parentNode) {
+      dl.parentNode.querySelectorAll('.autoscale-killswitch-warning').forEach(el => el.remove());
+    }
     if (!s.globalEnabled) {
       const warn = doc.createElement('p');
       warn.className = 'autoscale-killswitch-warning';

@@ -669,3 +669,57 @@ test('renderAutoscaleSummary does NOT show kill-switch warning when autoscale is
     'kill-switch warning must not appear when app autoscale is disabled',
   );
 });
+
+// ---- Kill-switch warning accumulation regression ----
+
+test('renderAutoscaleSummary: kill-switch warning does not accumulate across repeated calls', () => {
+  // Regression: the warning <p> was appended to dl.parentNode on every call but
+  // dl.innerHTML='' only clears dl itself, so each 10s poll added another warning.
+  const dom = new JSDOM('<section><dl id="dl"></dl></section>');
+  const dl = dom.window.document.getElementById('dl');
+  const s = {
+    enabled: true, current: 2, min: 1, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false, cooldownUntil: null,
+    globalEnabled: false,
+  };
+
+  renderAutoscaleSummary(dl, s);
+  renderAutoscaleSummary(dl, s);
+  const warnings = dl.parentNode.querySelectorAll('.autoscale-killswitch-warning');
+  assert.equal(warnings.length, 1,
+    `want exactly 1 kill-switch warning after 2 renders; got ${warnings.length}`);
+});
+
+test('renderAutoscaleSummary: kill-switch warning is removed when globalEnabled flips back to true', () => {
+  const dom = new JSDOM('<section><dl id="dl"></dl></section>');
+  const dl = dom.window.document.getElementById('dl');
+  const sKilled = {
+    enabled: true, current: 2, min: 1, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false, cooldownUntil: null,
+    globalEnabled: false,
+  };
+  const sOk = { ...sKilled, globalEnabled: true };
+
+  renderAutoscaleSummary(dl, sKilled);
+  assert.equal(dl.parentNode.querySelectorAll('.autoscale-killswitch-warning').length, 1,
+    'warning must appear when globalEnabled=false');
+
+  renderAutoscaleSummary(dl, sOk);
+  assert.equal(dl.parentNode.querySelectorAll('.autoscale-killswitch-warning').length, 0,
+    'warning must be removed when globalEnabled flips back to true');
+});
+
+// ---- formatRelative future timestamp (clock skew) ----
+
+test('formatRelative returns "just now" for a future timestamp (clock skew)', () => {
+  // A timestamp in the future (server clock ahead of client) must not produce
+  // "-N days ago". The guard clamps any negative diff to "just now".
+  const now = Date.now();
+  // Small skew: sub-minute; the < 60 branch catches this without the guard.
+  assert.equal(formatRelative(now, now + 5_000), 'just now');
+  // Large skew: server 25 h ahead; without the guard this falls through to the
+  // days branch and produces "-1 days ago".
+  assert.equal(formatRelative(now, now + 25 * 3600_000), 'just now');
+});
