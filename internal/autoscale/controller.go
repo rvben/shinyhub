@@ -160,7 +160,7 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	}
 	saturated := c.signal.RejectsByReason(a.Slug, c.cfg.RejectWindow)[proxy.ReasonPoolSaturated] > 0
 
-	desired := desiredReplicas(scaleInput{
+	desired, _ := desiredReplicas(scaleInput{
 		activeSessions: total,
 		// a.Replicas is a best-effort snapshot from the list query and is not
 		// held under the per-slug scale lock. The scale primitives re-read the
