@@ -20,6 +20,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
@@ -174,14 +175,13 @@ func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net
 	return srv, ln, nil
 }
 
-// buildRuntime constructs a process.Runtime for a single tier from its mode
-// ("native", "docker", or "fargate"). Docker tiers share the daemon settings
-// from cfg.Runtime.Docker; a burst tier may therefore point at the same daemon
-// under a distinct tier name. Fargate tiers share cfg.Runtime.Fargate (one ECS
-// cluster). config.Load validates tier modes, so the default case is
-// unreachable in production.
-func buildRuntime(ctx context.Context, mode string, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
-	switch mode {
+// buildRuntime constructs a process.Runtime for a single tier from its TierConfig.
+// Docker tiers share the daemon settings from cfg.Runtime.Docker; a burst tier
+// may therefore point at the same daemon under a distinct tier name. Fargate tiers
+// share cfg.Runtime.Fargate (one ECS cluster) but may use different launch types.
+// config.Load validates tier modes, so the default case is unreachable in production.
+func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
+	switch tier.Runtime {
 	case "docker":
 		dockerRT, err := process.NewDockerRuntime(
 			cfg.Runtime.Docker.Socket,
@@ -196,13 +196,13 @@ func buildRuntime(ctx context.Context, mode string, cfg *config.Config, bundleTo
 	case "native":
 		return process.NewNativeRuntime(), nil
 	case "fargate":
-		return buildFargateRuntime(ctx, cfg, bundleTokenKey)
+		return buildFargateRuntime(ctx, cfg, tier, bundleTokenKey)
 	case "remote_docker":
 		// Handled upstream: remote tiers are registered via NewRemoteRuntime before
 		// RegisterRuntime; buildRuntime is not called for remote_docker tiers.
 		return nil, fmt.Errorf("buildRuntime called for remote_docker tier; wire via NewRemoteRuntime instead")
 	default:
-		return nil, fmt.Errorf("unsupported runtime mode: %s", mode)
+		return nil, fmt.Errorf("unsupported runtime mode: %s", tier.Runtime)
 	}
 }
 
@@ -220,11 +220,12 @@ func deriveBundleTokenKey(authSecret string) []byte {
 	return key
 }
 
-// buildFargateRuntime constructs the ECS/Fargate runtime from cfg.Runtime.Fargate,
-// resolving AWS credentials and region from the SDK default chain (and the
-// explicit region override when set). config.Load has already validated that the
-// required Fargate fields are present whenever a tier uses this runtime.
-func buildFargateRuntime(ctx context.Context, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
+// buildFargateRuntime constructs the ECS runtime for one fargate tier from the
+// shared cfg.Runtime.Fargate settings and the tier's per-entry launch type.
+// The launch type determines the workerID ("fargate" or "ecs-ec2") and whether
+// PlatformVersion is set on RunTask. config.Load has already validated the
+// required Fargate fields.
+func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.TierConfig, bundleTokenKey []byte) (process.Runtime, error) {
 	fc := cfg.Runtime.Fargate
 	var optFns []func(*awsconfig.LoadOptions) error
 	if fc.Region != "" {
@@ -234,6 +235,13 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, bundleTokenKey
 	if err != nil {
 		return nil, fmt.Errorf("load aws config for fargate: %w", err)
 	}
+
+	// Resolve the SDK launch type from the tier's string value.
+	lt := ecstypes.LaunchTypeFargate
+	if tier.LaunchType == "EC2" {
+		lt = ecstypes.LaunchTypeEc2
+	}
+
 	var opts []fargate.Option
 	if fc.RouteViaPublicIP {
 		// Out-of-VPC control plane: resolve task public IPs via EC2.
@@ -253,6 +261,7 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, bundleTokenKey
 		ControlPlaneURL:  fc.ControlPlaneURL,
 		BundleTokenTTL:   fc.BundleTokenTTL,
 		BundleTokenKey:   bundleTokenKey,
+		LaunchType:       lt,
 	}, slog.Default(), opts...), nil
 }
 
@@ -393,33 +402,39 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// jobs, recovery lister, sweeper); additional tiers are registered so
 	// placement can route replicas to them.
 	defaultTier := cfg.Runtime.DefaultTierName()
-	defaultMode, _ := cfg.Runtime.RuntimeForTier(defaultTier)
-	rt, err := buildRuntime(ctx, defaultMode, cfg, bundleTokenKey)
+	// Find the full TierConfig for the default tier so LaunchType is carried through.
+	defaultTierCfg := config.TierConfig{Name: defaultTier, Runtime: cfg.Runtime.Mode}
+	for _, t := range cfg.Runtime.Tiers {
+		if t.Name == defaultTier {
+			defaultTierCfg = t
+			break
+		}
+	}
+	rt, err := buildRuntime(ctx, defaultTierCfg, cfg, bundleTokenKey)
 	if err != nil {
 		return err
 	}
-	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultMode)
+	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	mgr.SetDefaultTier(defaultTier)
-	for _, name := range cfg.Runtime.TierOrder() {
-		if name == defaultTier {
+	for _, tierCfg := range cfg.Runtime.Tiers {
+		if tierCfg.Name == defaultTier {
 			continue
 		}
-		mode, _ := cfg.Runtime.RuntimeForTier(name)
-		if mode == "remote_docker" {
+		if tierCfg.Runtime == "remote_docker" {
 			if workerReg == nil || dialer == nil {
-				return fmt.Errorf("tier %q requires worker hosting to be enabled", name)
+				return fmt.Errorf("tier %q requires worker hosting to be enabled", tierCfg.Name)
 			}
-			mgr.RegisterRuntime(name, worker.NewRemoteRuntime(workerReg, name, dialer))
-			slog.Info("remote runtime tier registered", "tier", name, "mode", mode)
+			mgr.RegisterRuntime(tierCfg.Name, worker.NewRemoteRuntime(workerReg, tierCfg.Name, dialer))
+			slog.Info("remote runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
 			continue
 		}
-		tierRT, err := buildRuntime(ctx, mode, cfg, bundleTokenKey)
+		tierRT, err := buildRuntime(ctx, tierCfg, cfg, bundleTokenKey)
 		if err != nil {
 			return err
 		}
-		mgr.RegisterRuntime(name, tierRT)
-		slog.Info("runtime tier registered", "tier", name, "mode", mode)
+		mgr.RegisterRuntime(tierCfg.Name, tierRT)
+		slog.Info("runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
 	}
 	mgr.SetEnvResolver(func(slug string) ([]string, error) {
 		app, err := store.GetApp(slug)
@@ -596,11 +611,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// PIDs for native replicas and reports PID-less replicas (fargate/remote
 	// container handles) as zero usage without error, so a running replica on
 	// such a tier is never misreported as stopped by a failed PID probe.
-	// Compare defaultMode (the resolved tier runtime) rather than
-	// cfg.Runtime.Mode (the legacy field): a config that declares
-	// tiers:[{runtime:docker}] without setting runtime.mode must still pick
-	// the RuntimeSampler, not the host sampler.
-	if defaultMode == "docker" {
+	// Compare the default tier's resolved runtime rather than cfg.Runtime.Mode
+	// (the legacy field): a config that declares tiers:[{runtime:docker}]
+	// without setting runtime.mode must still pick the RuntimeSampler, not the
+	// host sampler.
+	if defaultTierCfg.Runtime == "docker" {
 		srv.SetSampler(&process.RuntimeSampler{Runtime: rt})
 	} else {
 		srv.SetSampler(&hostSampler{})
