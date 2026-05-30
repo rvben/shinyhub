@@ -833,3 +833,25 @@ func TestTracesSurfaceWiring(t *testing.T) {
 	assertContains(t, "views/traces-ui.js", "started_at",
 		"the When column derives from the span.started_at API field")
 }
+
+// TestFargateYamlExampleHasFargateBlock asserts that shinyhub.yaml.example
+// contains a runtime.fargate config block. If this fails, the operator config
+// docs are missing and a Fargate tier cannot be correctly configured without
+// reading the source code.
+func TestFargateYamlExampleHasFargateBlock(t *testing.T) {
+	assertFileContains(t,
+		"../../shinyhub.yaml.example",
+		"  fargate:",
+		"shinyhub.yaml.example must contain a runtime.fargate block documenting all Fargate config fields",
+	)
+	assertFileContains(t,
+		"../../shinyhub.yaml.example",
+		"control_plane_url",
+		"shinyhub.yaml.example runtime.fargate block must document control_plane_url (required Fargate field)",
+	)
+	assertFileContains(t,
+		"../../shinyhub.yaml.example",
+		"bundle_token_ttl",
+		"shinyhub.yaml.example runtime.fargate block must document bundle_token_ttl (Fargate bundle fetch token TTL)",
+	)
+}
