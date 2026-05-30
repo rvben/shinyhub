@@ -171,6 +171,16 @@ func (e *ec2Sweeper) StopTask(_ context.Context, arn string) error {
 
 func (e *ec2Sweeper) WorkerID() string { return fargate.EC2WorkerID }
 
+// TestIsECSManagedWorkerID_EC2IsGated documents the requirement that
+// fargate.IsECSManagedWorkerID returns true for EC2WorkerID, which is the
+// gate condition used in recoverRemoteReplica for partial-adoption of
+// PROVISIONING tasks (preventing duplicate RunTask calls).
+func TestIsECSManagedWorkerID_EC2IsGated(t *testing.T) {
+	if !fargate.IsECSManagedWorkerID(fargate.EC2WorkerID) {
+		t.Errorf("IsECSManagedWorkerID(%q) = false; EC2 replicas must be partial-adopted at PROVISIONING", fargate.EC2WorkerID)
+	}
+}
+
 func TestSweepOrphanFargateTasks_ListErrorSkipsSweep(t *testing.T) {
 	mgr := process.NewManager(".", noopRuntime{})
 	sweeper := &fakeFargateTaskSweeper{

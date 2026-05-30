@@ -78,13 +78,12 @@ func recoverRemoteReplica(
 		return false
 	}
 
-	// Phase 1: task is running but not yet routable (no URL). This is normal for
-	// Fargate tasks in PROVISIONING/PENDING state. Adopt into the Manager to claim
-	// the slot and prevent a duplicate RunTask, but skip proxy registration. A
-	// later recovery scan or the watcher will complete full adoption once the task
-	// acquires an IP. Gate strictly on fargate.WorkerID so the remote_docker path
-	// (where an empty URL is a genuine worker error) is unchanged.
-	if item.URL == "" && item.WorkerID == fargate.WorkerID {
+	// Phase 1: task is running but not yet routable (no URL). Normal for ECS tasks
+	// in PROVISIONING/PENDING state (both Fargate and EC2 launch types). Adopt into
+	// the Manager to claim the slot and prevent a duplicate RunTask, but skip proxy
+	// registration. A later recovery scan or the watcher completes full adoption
+	// once the task acquires an IP.
+	if item.URL == "" && fargate.IsECSManagedWorkerID(item.WorkerID) {
 		mgr.Adopt(app.Slug, process.ProcessInfo{
 			Slug:        app.Slug,
 			Index:       r.Index,
@@ -94,8 +93,9 @@ func recoverRemoteReplica(
 			EndpointURL: r.EndpointURL, // preserve DB value if present
 			WorkerID:    r.WorkerID,
 		}, process.RunHandle{ContainerID: r.WorkerID + "/" + item.ContainerID})
-		slog.Info("recovery: partial-adopt fargate replica (no ip yet)",
-			"slug", app.Slug, "idx", r.Index, "container", item.ContainerID)
+		slog.Info("recovery: partial-adopt ecs replica (no ip yet)",
+			"slug", app.Slug, "idx", r.Index, "container", item.ContainerID,
+			"launch_type", item.WorkerID)
 		return true // slot is claimed; caller sets anyAlive=true
 	}
 
