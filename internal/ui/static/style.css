@@ -665,8 +665,8 @@ main {
 .badge-action-revoke_access       { background: var(--yellow-bg);  color: var(--yellow); }
 .badge-action-shared_data_grant   { background: var(--accent-dim); color: var(--electric); }
 .badge-action-shared_data_revoke  { background: var(--red-bg);     color: var(--red); }
-.badge-action-autoscale-scale-up   { background: var(--accent-dim); color: var(--electric); }
-.badge-action-autoscale-scale-down { background: var(--accent-dim); color: var(--electric); }
+.badge-action-autoscale_scale_up   { background: var(--accent-dim); color: var(--electric); }
+.badge-action-autoscale_scale_down { background: var(--accent-dim); color: var(--electric); }
 .badge-action-deploy_rejected_quota { background: var(--red-bg);   color: var(--red); }
 .badge-action-default             { background: var(--gray-bg);    color: var(--text-soft); }
 

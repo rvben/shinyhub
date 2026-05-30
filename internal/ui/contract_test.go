@@ -961,9 +961,23 @@ func TestGridAutoscaleBadge(t *testing.T) {
 // badges are styled with the blue config color, consistent with create_app /
 // update_app / env.set. Without this the badges fall back to badge-action-default
 // (gray) which is visually inconsistent with other config-change actions.
+//
+// The CSS selector MUST match the class the badge renderer actually generates.
+// app.js builds the class via `badge-action-${e.action.replace(/\./g, '-')}`,
+// which only replaces dots; underscores in the action name are preserved. So
+// "autoscale_scale_up" -> class "badge-action-autoscale_scale_up" (underscores).
+// A CSS selector with hyphens (.badge-action-autoscale-scale-up) would never
+// match that class and the badge would fall back to the default gray color.
 func TestAutoscaleActionBadgeCSS(t *testing.T) {
-	assertContains(t, "style.css", ".badge-action-autoscale-scale-up",
-		"style.css must define .badge-action-autoscale-scale-up using the blue config color (--accent-dim / --electric)")
-	assertContains(t, "style.css", ".badge-action-autoscale-scale-down",
-		"style.css must define .badge-action-autoscale-scale-down using the blue config color (--accent-dim / --electric)")
+	// Compute the exact class names the JS badge renderer will produce for each
+	// autoscale action, then assert those exact strings appear in style.css.
+	// This makes hyphen/underscore drift a build failure rather than a visual bug.
+	for _, action := range []string{"autoscale_scale_up", "autoscale_scale_down"} {
+		// Mirrors: badge-action-${e.action.replace(/\./g, '-')}
+		// (dots replaced with hyphens; underscores kept as-is)
+		class := "." + "badge-action-" + strings.ReplaceAll(action, ".", "-")
+		assertContains(t, "style.css", class,
+			"style.css must define "+class+" matching the class app.js generates for action "+action+
+				"; use underscores not hyphens (JS replace only converts dots)")
+	}
 }
