@@ -956,3 +956,14 @@ func TestGridAutoscaleBadge(t *testing.T) {
 	assertContains(t, "app.js", "badge-autoscale",
 		"app.js grid card must apply badge-autoscale class (or similar) to the autoscale indicator badge")
 }
+
+// TestAutoscaleActionBadgeCSS guards that the two new autoscale audit action
+// badges are styled with the blue config color, consistent with create_app /
+// update_app / env.set. Without this the badges fall back to badge-action-default
+// (gray) which is visually inconsistent with other config-change actions.
+func TestAutoscaleActionBadgeCSS(t *testing.T) {
+	assertContains(t, "style.css", ".badge-action-autoscale-scale-up",
+		"style.css must define .badge-action-autoscale-scale-up using the blue config color (--accent-dim / --electric)")
+	assertContains(t, "style.css", ".badge-action-autoscale-scale-down",
+		"style.css must define .badge-action-autoscale-scale-down using the blue config color (--accent-dim / --electric)")
+}
