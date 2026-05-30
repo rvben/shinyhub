@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -15,6 +17,10 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -25,6 +31,7 @@ import (
 	"github.com/rvben/shinyhub/internal/data"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/fargate"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
@@ -39,6 +46,7 @@ import (
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/hkdf"
 )
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z".
@@ -167,11 +175,12 @@ func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net
 }
 
 // buildRuntime constructs a process.Runtime for a single tier from its mode
-// ("native" or "docker"). Docker tiers share the daemon settings from
-// cfg.Runtime.Docker; a burst tier may therefore point at the same daemon
-// under a distinct tier name. config.Load validates tier modes, so the
-// default case is unreachable in production.
-func buildRuntime(mode string, cfg *config.Config) (process.Runtime, error) {
+// ("native", "docker", or "fargate"). Docker tiers share the daemon settings
+// from cfg.Runtime.Docker; a burst tier may therefore point at the same daemon
+// under a distinct tier name. Fargate tiers share cfg.Runtime.Fargate (one ECS
+// cluster). config.Load validates tier modes, so the default case is
+// unreachable in production.
+func buildRuntime(ctx context.Context, mode string, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
 	switch mode {
 	case "docker":
 		dockerRT, err := process.NewDockerRuntime(
@@ -186,6 +195,8 @@ func buildRuntime(mode string, cfg *config.Config) (process.Runtime, error) {
 		return dockerRT, nil
 	case "native":
 		return process.NewNativeRuntime(), nil
+	case "fargate":
+		return buildFargateRuntime(ctx, cfg, bundleTokenKey)
 	case "remote_docker":
 		// Handled upstream: remote tiers are registered via NewRemoteRuntime before
 		// RegisterRuntime; buildRuntime is not called for remote_docker tiers.
@@ -193,6 +204,71 @@ func buildRuntime(mode string, cfg *config.Config) (process.Runtime, error) {
 	default:
 		return nil, fmt.Errorf("unsupported runtime mode: %s", mode)
 	}
+}
+
+// deriveBundleTokenKey derives the 32-byte key used to mint and verify Fargate
+// bundle tokens. Key material comes from the same auth secret as all other
+// HKDF derivations, but with a distinct info string so the bundle key is
+// independent of the secrets-encryption key. Panics on failure (HKDF read of
+// 32 bytes is infallible).
+func deriveBundleTokenKey(authSecret string) []byte {
+	r := hkdf.New(sha256.New, []byte(authSecret), nil, []byte("shinyhub-fargate-bundle-v1"))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(r, key); err != nil {
+		panic(err)
+	}
+	return key
+}
+
+// buildFargateRuntime constructs the ECS/Fargate runtime from cfg.Runtime.Fargate,
+// resolving AWS credentials and region from the SDK default chain (and the
+// explicit region override when set). config.Load has already validated that the
+// required Fargate fields are present whenever a tier uses this runtime.
+func buildFargateRuntime(ctx context.Context, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
+	fc := cfg.Runtime.Fargate
+	var optFns []func(*awsconfig.LoadOptions) error
+	if fc.Region != "" {
+		optFns = append(optFns, awsconfig.WithRegion(fc.Region))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, optFns...)
+	if err != nil {
+		return nil, fmt.Errorf("load aws config for fargate: %w", err)
+	}
+	var opts []fargate.Option
+	if fc.RouteViaPublicIP {
+		// Out-of-VPC control plane: resolve task public IPs via EC2.
+		opts = append(opts, fargate.WithEC2Client(ec2.NewFromConfig(awsCfg)))
+	}
+	return fargate.New(ecs.NewFromConfig(awsCfg), fargate.Config{
+		Cluster:          fc.Cluster,
+		TaskDefinition:   fc.TaskDefinition,
+		ContainerName:    fc.ContainerName,
+		Subnets:          fc.Subnets,
+		SecurityGroups:   fc.SecurityGroups,
+		AssignPublicIP:   fc.AssignPublicIP,
+		PlatformVersion:  fc.PlatformVersion,
+		RouteViaPublicIP: fc.RouteViaPublicIP,
+		TaskCPUUnits:     int32(fc.TaskCPUUnits), // operator-configured task ceiling
+		TaskMemoryMB:     int32(fc.TaskMemoryMB), // operator-configured task ceiling
+		ControlPlaneURL:  fc.ControlPlaneURL,
+		BundleTokenTTL:   fc.BundleTokenTTL,
+		BundleTokenKey:   bundleTokenKey,
+	}, slog.Default(), opts...), nil
+}
+
+// hostSampler samples PID-backed replicas (native) via gopsutil and reports
+// PID-less replicas (docker/remote/fargate handles, whose RunHandle carries a
+// ContainerID rather than a PID) as zero usage without error. Returning no error
+// for the PID-less case is deliberate: the status endpoint treats a sampler error
+// as a dead replica, so a running replica on a container/fargate tier must not be
+// probed by PID (PID 0) and misreported as stopped.
+type hostSampler struct{ gops process.GopsutilSampler }
+
+func (h *hostSampler) Sample(handle process.RunHandle) (process.Stats, error) {
+	if handle.PID == 0 {
+		return process.Stats{}, nil
+	}
+	return h.gops.Sample(handle)
 }
 
 func runServe(ctx context.Context, logger *slog.Logger) error {
@@ -260,6 +336,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	secretsKey := secrets.DeriveKey(cfg.Auth.Secret)
+	bundleTokenKey := deriveBundleTokenKey(cfg.Auth.Secret)
 
 	// readyCh is closed once HTTP listener is live. /readyz returns 503 until then.
 	readyCh := make(chan struct{})
@@ -317,7 +394,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// placement can route replicas to them.
 	defaultTier := cfg.Runtime.DefaultTierName()
 	defaultMode, _ := cfg.Runtime.RuntimeForTier(defaultTier)
-	rt, err := buildRuntime(defaultMode, cfg)
+	rt, err := buildRuntime(ctx, defaultMode, cfg, bundleTokenKey)
 	if err != nil {
 		return err
 	}
@@ -337,7 +414,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			slog.Info("remote runtime tier registered", "tier", name, "mode", mode)
 			continue
 		}
-		tierRT, err := buildRuntime(mode, cfg)
+		tierRT, err := buildRuntime(ctx, mode, cfg, bundleTokenKey)
 		if err != nil {
 			return err
 		}
@@ -514,8 +591,19 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		slog.Info("proxy_access", attrs...)
 	})
 
-	if cfg.Runtime.Mode == "docker" {
+	// Choose the metrics sampler. A docker default tier samples container stats
+	// through the Runtime API. Otherwise use the host sampler, which reads host
+	// PIDs for native replicas and reports PID-less replicas (fargate/remote
+	// container handles) as zero usage without error, so a running replica on
+	// such a tier is never misreported as stopped by a failed PID probe.
+	// Compare defaultMode (the resolved tier runtime) rather than
+	// cfg.Runtime.Mode (the legacy field): a config that declares
+	// tiers:[{runtime:docker}] without setting runtime.mode must still pick
+	// the RuntimeSampler, not the host sampler.
+	if defaultMode == "docker" {
 		srv.SetSampler(&process.RuntimeSampler{Runtime: rt})
+	} else {
+		srv.SetSampler(&hostSampler{})
 	}
 
 	if cfg.OAuth.OIDC.IssuerURL != "" {
@@ -540,6 +628,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
+		deployDefaultMem, deployDefaultCPU := cfg.Runtime.DefaultResourcesForApp(app)
 		p := deploy.Params{
 			Slug:                  slug,
 			BundleDir:             bundleDir,
@@ -549,8 +638,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			Placement:             app.PlacementMap(),
 			TierOrder:             cfg.Runtime.TierOrder(),
 			DefaultTier:           cfg.Runtime.DefaultTierName(),
-			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, cfg.Runtime.Docker.DefaultMemoryMB),
-			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, cfg.Runtime.Docker.DefaultCPUPercent),
+			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, deployDefaultMem),
+			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
 			// Pin a shared-mount consumer's restarted replica to the worker set
 			// hosting its source data, matching the full-deploy placement so a
@@ -578,6 +667,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if metricsReg != nil {
 		watcher.SetMetrics(metricsReg)
 	}
+	// Wire Fargate operation metrics for every tier that uses a Fargate runtime.
+	// metricsReg satisfies fargate.FargateMetrics via the methods added to Registry.
+	if metricsReg != nil {
+		for _, tierName := range cfg.Runtime.TierOrder() {
+			tierRT := mgr.RuntimeForTier(tierName)
+			if frt, ok := tierRT.(*fargate.Runtime); ok {
+				frt.SetMetrics(metricsReg)
+			}
+		}
+	}
 	// Emit spans for background wake/restart/hibernate operations into the same
 	// provider the API server uses, so cold-start latency and restart storms are
 	// visible in the trace backend.
@@ -585,14 +684,34 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		watcher.SetTracer(tracer.Tracer())
 	}
 
-	// When worker hosting is enabled, let the watchdog re-place replicas lost to
-	// a dead worker onto a healthy worker for the tier. The gate keeps a
-	// no-worker replica lost at zero cost (no restart-budget burn) and lets it
-	// auto-heal once a replacement worker joins.
-	if workerReg != nil {
+	// Wire lost-replica healing. For fargate tiers, ECS reachability is
+	// validated at startup so the gate is always-true (fargate tasks are
+	// never placed via a worker registry). For worker tiers, delegate to
+	// the registry. Mixed deployments (fargate burst + worker tiers) are
+	// handled by the combined predicate.
+	//
+	// Note: persistent RunTask failures still consume the normal crash-restart
+	// budget, so always-true for fargate tiers cannot cause runaway
+	// re-placement.
+	hasFargateTier := false
+	for _, name := range cfg.Runtime.TierOrder() {
+		mode, _ := cfg.Runtime.RuntimeForTier(name)
+		if mode == "fargate" {
+			hasFargateTier = true
+			break
+		}
+	}
+	if workerReg != nil || hasFargateTier {
 		watcher.EnableLostReplicaHealing(func(tier string) bool {
-			_, ok := workerReg.WorkerForTier(tier)
-			return ok
+			mode, _ := cfg.Runtime.RuntimeForTier(tier)
+			if mode == "fargate" {
+				return true // ECS is always-reachable as a startup precondition
+			}
+			if workerReg != nil {
+				_, ok := workerReg.WorkerForTier(tier)
+				return ok
+			}
+			return false
 		})
 	}
 
@@ -615,6 +734,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// stopped containers from prior runs do not accumulate.
 	if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
 		lifecycle.SweepOrphanContainers(mgr, sweeper)
+	}
+
+	// Sweep orphan Fargate tasks across ALL registered tiers.
+	// The existing SweepOrphanContainers only covers the default-tier runtime;
+	// a Fargate burst tier declared via runtime.tiers[] would never be swept
+	// without this loop.
+	{
+		sweepCtx, cancelSweep := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancelSweep()
+		for _, tierName := range cfg.Runtime.TierOrder() {
+			tierRT := mgr.RuntimeForTier(tierName)
+			if fts, ok := tierRT.(lifecycle.FargateTaskSweeper); ok {
+				lifecycle.SweepOrphanFargateTasks(sweepCtx, mgr, fts)
+			}
+		}
 	}
 
 	// Start the worker-down monitor: when a worker's heartbeat goes stale it is
@@ -690,7 +824,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
 			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
 			RuntimeMax:    runtimeMax,
-		}, store, prx, srv, slog.Default())
+		}, store, prx, srv, store, slog.Default())
+		if metricsReg != nil {
+			controller.SetMetrics(metricsReg)
+		}
 		autoscaleDone = make(chan struct{})
 		go func() {
 			controller.Run(asCtx)
@@ -751,6 +888,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		w.Write([]byte(`{"ready":true}`))
 	})
 	mux.Handle("/static/", ui.Handler())
+
+	// GET /internal/fargate-bundle/{digest} - streams the bundle zip to a Fargate
+	// task that presents a short-lived HMAC capability token as a bearer credential.
+	// Mounted directly on the main mux (not under /api/) so large bundle streams
+	// are not subject to apiTimeoutHandler's 30-second cap.
+	fargateBundleHandler := api.NewFargateBundleHandler(store, cfg.Storage.AppsDir, bundleTokenKey)
+	internalMux := chi.NewRouter()
+	internalMux.Get("/fargate-bundle/{digest}", fargateBundleHandler.Handle)
+	mux.Handle("/internal/", http.StripPrefix("/internal", internalMux))
 
 	registerBrandingRoutes(mux, cfg, srv, store, appUserLookup)
 

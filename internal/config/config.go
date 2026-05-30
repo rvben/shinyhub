@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -315,6 +316,77 @@ type RuntimeConfig struct {
 	// controller only ever acts on apps that have opted in (per-app
 	// autoscale_enabled); these values govern how it behaves for those apps.
 	Autoscale AutoscaleConfig
+	// Fargate holds the AWS ECS/Fargate runtime settings. They are required when
+	// any tier declares runtime "fargate"; otherwise the zero value is unused.
+	Fargate FargateRuntimeConfig
+}
+
+// FargateRuntimeConfig holds the AWS ECS/Fargate runtime settings shared by every
+// tier whose runtime is "fargate". Each replica on such a tier runs as one
+// Fargate task launched from TaskDefinition, with the app command, env, and
+// resource limits applied as container overrides. The proxy routes to the task's
+// awsvpc private IP, so the control plane must run inside or peered with the
+// task's VPC.
+type FargateRuntimeConfig struct {
+	// Cluster is the ECS cluster short name or full ARN tasks run on.
+	Cluster string
+	// TaskDefinition is the family, family:revision, or full ARN of the task
+	// definition to run. It must declare a container named ContainerName.
+	TaskDefinition string
+	// ContainerName is the container within TaskDefinition that per-replica
+	// command/env/limit overrides target.
+	ContainerName string
+	// Subnets are the awsvpc subnet IDs tasks attach to (at least one required).
+	Subnets []string
+	// SecurityGroups are the awsvpc security group IDs applied to each task ENI.
+	SecurityGroups []string
+	// AssignPublicIP maps to the awsvpc assignPublicIp setting. Set it for tasks
+	// in public subnets without a NAT gateway.
+	AssignPublicIP bool
+	// PlatformVersion pins the Fargate platform version (e.g. "1.4.0"). Empty
+	// uses the ECS default.
+	PlatformVersion string
+	// Region is the AWS region the ECS client targets. Empty falls back to the
+	// SDK's default chain (AWS_REGION, profile, instance metadata).
+	Region string
+	// RouteViaPublicIP routes to each task's public IP instead of its private IP,
+	// for a control plane running outside the task VPC (development/testing only).
+	// Requires AssignPublicIP. Production runs the control plane in-VPC and routes
+	// over private IPs (default false).
+	RouteViaPublicIP bool
+
+	// TaskCPUUnits is the ECS task-level CPU allocation in CPU units (1 vCPU =
+	// 1024 units). Must be one of the Fargate-supported values: 256, 512, 1024,
+	// 2048, 4096, 8192, 16384. Required when any tier uses runtime "fargate".
+	TaskCPUUnits int
+
+	// TaskMemoryMB is the ECS task-level memory allocation in MiB. Must satisfy
+	// the Fargate CPU/memory matrix (see validateFargate). Required when any
+	// tier uses runtime "fargate".
+	TaskMemoryMB int
+
+	// DefaultMemoryMB is the per-container memory limit applied when an app has
+	// no explicit memory_limit_mb. 0 means no override (the task definition's
+	// container limit applies). Mirrors DockerRuntimeConfig.DefaultMemoryMB.
+	DefaultMemoryMB int
+
+	// DefaultCPUPercent is the per-container CPU quota applied when an app has
+	// no explicit cpu_quota_percent. 0 means no override. Mirrors
+	// DockerRuntimeConfig.DefaultCPUPercent.
+	DefaultCPUPercent int
+
+	// ControlPlaneURL is the URL tasks use to fetch their bundle from the control
+	// plane. It must be reachable from inside the task's VPC (or subnet, for
+	// public-IP mode). Required when any tier uses runtime "fargate".
+	// When RouteViaPublicIP is true this must use https:// to prevent the
+	// bearer bundle token from travelling in plaintext over the public internet.
+	ControlPlaneURL string
+
+	// BundleTokenTTL is how long a minted bundle capability token remains valid.
+	// Default 10 minutes. Tasks that take longer than this to start will fail
+	// to fetch the bundle; increase if your task cold-start (including image
+	// pull) regularly exceeds 10 minutes.
+	BundleTokenTTL time.Duration
 }
 
 // AutoscaleConfig holds the global settings for the replica autoscale
@@ -368,6 +440,45 @@ func (r RuntimeConfig) RuntimeForTier(name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// DefaultResourcesForTier returns the platform-default memory limit and CPU
+// quota for a replica placed on the named tier. For a "fargate" tier it returns
+// the Fargate-specific defaults (runtime.fargate.default_memory_mb /
+// default_cpu_percent). For any other runtime it returns the Docker defaults
+// (runtime.docker.default_memory_mb / default_cpu_percent), preserving
+// existing behaviour for native and docker tiers. A zero value for either
+// field means "no limit" as documented.
+func (r RuntimeConfig) DefaultResourcesForTier(tier string) (memMB, cpuPct int) {
+	rt, _ := r.RuntimeForTier(tier)
+	if rt == "fargate" {
+		return r.Fargate.DefaultMemoryMB, r.Fargate.DefaultCPUPercent
+	}
+	return r.Docker.DefaultMemoryMB, r.Docker.DefaultCPUPercent
+}
+
+// DefaultResourcesForApp returns the platform-default memory limit and CPU
+// quota appropriate for the given app's placement.
+//
+// When the app is placed on exactly one tier (len(PlacementMap) == 1), that
+// tier's defaults are used - this ensures an app placed exclusively on a
+// fargate tier receives fargate defaults, not the global default tier's
+// defaults. When the app has no recorded placement or is spread across
+// multiple tiers, DefaultTierName() is used (first declared tier), preserving
+// the existing behaviour for no-placement and multi-tier cases. Multi-tier
+// apps retain the documented limitation that a single set of defaults cannot
+// serve divergent per-tier requirements.
+func (r RuntimeConfig) DefaultResourcesForApp(app *db.App) (memMB, cpuPct int) {
+	if app == nil {
+		return r.DefaultResourcesForTier(r.DefaultTierName())
+	}
+	tier := r.DefaultTierName()
+	if pm := app.PlacementMap(); len(pm) == 1 {
+		for t := range pm {
+			tier = t
+		}
+	}
+	return r.DefaultResourcesForTier(tier)
 }
 
 // DockerRuntimeConfig holds Docker-specific runtime settings.
@@ -448,9 +559,28 @@ type rawRuntimeConfig struct {
 	MaxReplicas     int                    `yaml:"max_replicas"`
 	// Pointer so an explicit 0 (documented as "unlimited") is
 	// distinguishable from the key being absent (apply the safe default).
-	DefaultMaxSessionsPerReplica *int               `yaml:"default_max_sessions_per_replica"`
-	Tiers                        []rawTierConfig    `yaml:"tiers"`
-	Autoscale                    rawAutoscaleConfig `yaml:"autoscale"`
+	DefaultMaxSessionsPerReplica *int                    `yaml:"default_max_sessions_per_replica"`
+	Tiers                        []rawTierConfig         `yaml:"tiers"`
+	Autoscale                    rawAutoscaleConfig      `yaml:"autoscale"`
+	Fargate                      rawFargateRuntimeConfig `yaml:"fargate"`
+}
+
+type rawFargateRuntimeConfig struct {
+	Cluster           string   `yaml:"cluster"`
+	TaskDefinition    string   `yaml:"task_definition"`
+	ContainerName     string   `yaml:"container_name"`
+	Subnets           []string `yaml:"subnets"`
+	SecurityGroups    []string `yaml:"security_groups"`
+	AssignPublicIP    bool     `yaml:"assign_public_ip"`
+	PlatformVersion   string   `yaml:"platform_version"`
+	Region            string   `yaml:"region"`
+	RouteViaPublicIP  bool     `yaml:"route_via_public_ip"`
+	TaskCPUUnits      int      `yaml:"task_cpu_units"`
+	TaskMemoryMB      int      `yaml:"task_memory_mb"`
+	DefaultMemoryMB   int      `yaml:"default_memory_mb"`
+	DefaultCPUPercent int      `yaml:"default_cpu_percent"`
+	ControlPlaneURL   string   `yaml:"control_plane_url"`
+	BundleTokenTTL    string   `yaml:"bundle_token_ttl"` // parsed as time.Duration
 }
 
 type rawAutoscaleConfig struct {
@@ -642,6 +772,7 @@ func Load(path string) (*Config, error) {
 		cfg.Runtime.Tiers = []TierConfig{{Name: "local", Runtime: cfg.Runtime.Mode}}
 	} else {
 		seen := map[string]bool{}
+		hasFargate := false
 		for _, t := range raw.Runtime.Tiers {
 			if t.Name == "" {
 				return nil, fmt.Errorf("runtime.tiers: tier name must not be empty")
@@ -655,10 +786,18 @@ func Load(path string) (*Config, error) {
 				// supported this phase
 			case "remote_docker":
 				// accepted: a remoteRuntime is registered for this tier at startup
+			case "fargate":
+				// accepted: a fargate runtime is registered for this tier at startup
+				hasFargate = true
 			default:
-				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, or remote_docker)", t.Name, t.Runtime)
+				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, remote_docker, or fargate)", t.Name, t.Runtime)
 			}
 			cfg.Runtime.Tiers = append(cfg.Runtime.Tiers, TierConfig{Name: t.Name, Runtime: t.Runtime})
+		}
+		if hasFargate {
+			if err := validateFargate(cfg.Runtime.Fargate); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := normalizeTracing(&cfg.Tracing); err != nil {
@@ -774,6 +913,18 @@ func parseBoolEnv(v string) (bool, error) {
 	}
 }
 
+// splitCSV splits a comma-separated env value into trimmed, non-empty entries.
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 	lc := LifecycleConfig{
 		WatchInterval:      15 * time.Second,
@@ -809,6 +960,94 @@ const (
 	DefaultRImage       = "rocker/r-base"
 	DefaultNetworkMode  = "bridge"
 )
+
+// fargateMatrixEntry defines the valid memory range for a given Fargate CPU
+// tier. For the 256-unit tier, allowedMem is the exhaustive discrete set
+// {512, 1024, 2048}. For all other tiers, memMin/memMax/memInc define the valid
+// range and increment: valid when memMin <= mem <= memMax AND
+// (mem - memMin) % memInc == 0.
+type fargateMatrixEntry struct {
+	allowedMem []int // non-nil: discrete set (256 CPU only)
+	memMin     int
+	memMax     int
+	memInc     int
+}
+
+var fargateMatrix = map[int]fargateMatrixEntry{
+	256:   {allowedMem: []int{512, 1024, 2048}},
+	512:   {memMin: 1024, memMax: 4096, memInc: 1024},
+	1024:  {memMin: 2048, memMax: 8192, memInc: 1024},
+	2048:  {memMin: 4096, memMax: 16384, memInc: 1024},
+	4096:  {memMin: 8192, memMax: 30720, memInc: 1024},
+	8192:  {memMin: 16384, memMax: 61440, memInc: 4096},
+	16384: {memMin: 32768, memMax: 122880, memInc: 8192},
+}
+
+// validateFargate enforces the settings a fargate tier cannot run without. It is
+// only called when at least one tier declares runtime "fargate", so a config
+// with no fargate tier never needs the block populated.
+func validateFargate(f FargateRuntimeConfig) error {
+	if f.Cluster == "" {
+		return fmt.Errorf("runtime.fargate.cluster is required when a tier uses runtime \"fargate\"")
+	}
+	if f.TaskDefinition == "" {
+		return fmt.Errorf("runtime.fargate.task_definition is required when a tier uses runtime \"fargate\"")
+	}
+	if f.ContainerName == "" {
+		return fmt.Errorf("runtime.fargate.container_name is required when a tier uses runtime \"fargate\"")
+	}
+	if len(f.Subnets) == 0 {
+		return fmt.Errorf("runtime.fargate.subnets must list at least one subnet when a tier uses runtime \"fargate\"")
+	}
+	if f.RouteViaPublicIP && !f.AssignPublicIP {
+		return fmt.Errorf("runtime.fargate.route_via_public_ip requires assign_public_ip: true")
+	}
+	if f.ControlPlaneURL == "" {
+		return fmt.Errorf("runtime.fargate.control_plane_url is required when a tier uses runtime \"fargate\"")
+	}
+	if f.RouteViaPublicIP && !strings.HasPrefix(f.ControlPlaneURL, "https://") {
+		return fmt.Errorf("runtime.fargate.control_plane_url must use https:// when route_via_public_ip is true (a plaintext bundle token over a public channel is replayable within the TTL)")
+	}
+	if f.TaskCPUUnits == 0 {
+		return fmt.Errorf("runtime.fargate.task_cpu_units is required when a tier uses runtime \"fargate\"")
+	}
+	if f.TaskMemoryMB == 0 {
+		return fmt.Errorf("runtime.fargate.task_memory_mb is required when a tier uses runtime \"fargate\"")
+	}
+	entry, ok := fargateMatrix[f.TaskCPUUnits]
+	if !ok {
+		allowed := slices.Sorted(maps.Keys(fargateMatrix))
+		parts := make([]string, len(allowed))
+		for i, v := range allowed {
+			parts[i] = strconv.Itoa(v)
+		}
+		return fmt.Errorf("runtime.fargate.task_cpu_units: %d is not a valid Fargate CPU value; must be one of %s",
+			f.TaskCPUUnits, strings.Join(parts, ", "))
+	}
+	if entry.allowedMem != nil {
+		// Discrete set (256-unit tier).
+		valid := false
+		for _, m := range entry.allowedMem {
+			if f.TaskMemoryMB == m {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not valid for cpu_units=256; must be one of 512, 1024, 2048", f.TaskMemoryMB)
+		}
+	} else {
+		if f.TaskMemoryMB < entry.memMin || f.TaskMemoryMB > entry.memMax {
+			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is out of range for cpu_units=%d; must be between %d and %d",
+				f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memMax)
+		}
+		if (f.TaskMemoryMB-entry.memMin)%entry.memInc != 0 {
+			return fmt.Errorf("runtime.fargate.task_memory_mb: %d is not a valid increment for cpu_units=%d; must be %d + n*%d (n>=0)",
+				f.TaskMemoryMB, f.TaskCPUUnits, entry.memMin, entry.memInc)
+		}
+	}
+	return nil
+}
 
 func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	rc := RuntimeConfig{
@@ -874,6 +1113,33 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		rc.DefaultMaxSessionsPerReplica = *r.DefaultMaxSessionsPerReplica
 	}
 
+	rc.Fargate = FargateRuntimeConfig{
+		Cluster:           r.Fargate.Cluster,
+		TaskDefinition:    r.Fargate.TaskDefinition,
+		ContainerName:     r.Fargate.ContainerName,
+		Subnets:           r.Fargate.Subnets,
+		SecurityGroups:    r.Fargate.SecurityGroups,
+		AssignPublicIP:    r.Fargate.AssignPublicIP,
+		PlatformVersion:   r.Fargate.PlatformVersion,
+		Region:            r.Fargate.Region,
+		RouteViaPublicIP:  r.Fargate.RouteViaPublicIP,
+		TaskCPUUnits:      r.Fargate.TaskCPUUnits,
+		TaskMemoryMB:      r.Fargate.TaskMemoryMB,
+		DefaultMemoryMB:   r.Fargate.DefaultMemoryMB,
+		DefaultCPUPercent: r.Fargate.DefaultCPUPercent,
+		ControlPlaneURL:   r.Fargate.ControlPlaneURL,
+	}
+	if r.Fargate.BundleTokenTTL != "" {
+		d, err := time.ParseDuration(r.Fargate.BundleTokenTTL)
+		if err != nil {
+			return rc, fmt.Errorf("runtime.fargate.bundle_token_ttl: %w", err)
+		}
+		rc.Fargate.BundleTokenTTL = d
+	}
+	if rc.Fargate.BundleTokenTTL <= 0 {
+		rc.Fargate.BundleTokenTTL = 10 * time.Minute
+	}
+
 	rc.Autoscale.Enabled = r.Autoscale.Enabled
 	if r.Autoscale.ScanInterval != "" {
 		d, err := time.ParseDuration(r.Autoscale.ScanInterval)
@@ -925,22 +1191,28 @@ func applyEnv(cfg *Config) error {
 		cfg.Storage.AppsDir = v
 	}
 	if v := os.Getenv("SHINYHUB_STORAGE_VERSION_RETENTION"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Storage.VersionRetention = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_STORAGE_VERSION_RETENTION: %q is not an integer: %w", v, err)
 		}
+		cfg.Storage.VersionRetention = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Storage.AppQuotaMB = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_APP_QUOTA_MB: %q is not an integer: %w", v, err)
 		}
+		cfg.Storage.AppQuotaMB = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_DATA_DIR"); v != "" {
 		cfg.Storage.AppDataDir = v
 	}
 	if v := os.Getenv("SHINYHUB_MAX_BUNDLE_MB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Storage.MaxBundleMB = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_MAX_BUNDLE_MB: %q is not an integer: %w", v, err)
 		}
+		cfg.Storage.MaxBundleMB = n
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
@@ -994,14 +1266,18 @@ func applyEnv(cfg *Config) error {
 		cfg.Runtime.Docker.NetworkMode = v
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Runtime.Docker.DefaultMemoryMB = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB: %q is not an integer: %w", v, err)
 		}
+		cfg.Runtime.Docker.DefaultMemoryMB = n
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Runtime.Docker.DefaultCPUPercent = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT: %q is not an integer: %w", v, err)
 		}
+		cfg.Runtime.Docker.DefaultCPUPercent = n
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON"); v != "" {
 		cfg.Runtime.Docker.Images.Python = v
@@ -1009,18 +1285,106 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_R"); v != "" {
 		cfg.Runtime.Docker.Images.R = v
 	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_CLUSTER"); v != "" {
+		cfg.Runtime.Fargate.Cluster = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_DEFINITION"); v != "" {
+		cfg.Runtime.Fargate.TaskDefinition = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_CONTAINER_NAME"); v != "" {
+		cfg.Runtime.Fargate.ContainerName = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_SUBNETS"); v != "" {
+		cfg.Runtime.Fargate.Subnets = splitCSV(v)
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_SECURITY_GROUPS"); v != "" {
+		cfg.Runtime.Fargate.SecurityGroups = splitCSV(v)
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_ASSIGN_PUBLIC_IP"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_ASSIGN_PUBLIC_IP: %w", err)
+		}
+		cfg.Runtime.Fargate.AssignPublicIP = b
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_PLATFORM_VERSION"); v != "" {
+		cfg.Runtime.Fargate.PlatformVersion = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_REGION"); v != "" {
+		cfg.Runtime.Fargate.Region = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_ROUTE_VIA_PUBLIC_IP"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_ROUTE_VIA_PUBLIC_IP: %w", err)
+		}
+		cfg.Runtime.Fargate.RouteViaPublicIP = b
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_CONTROL_PLANE_URL"); v != "" {
+		cfg.Runtime.Fargate.ControlPlaneURL = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL: %q is not a duration: %w", v, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL: %q must be a positive duration", v)
+		}
+		cfg.Runtime.Fargate.BundleTokenTTL = d
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.TaskCPUUnits = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.TaskMemoryMB = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.DefaultMemoryMB = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Fargate.DefaultCPUPercent = n
+	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DEFAULT_REPLICAS: %q is not an integer: %w", v, err)
+		}
+		if n > 0 {
 			cfg.Runtime.DefaultReplicas = n
 		}
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_MAX_REPLICAS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_MAX_REPLICAS: %q is not an integer: %w", v, err)
+		}
+		if n > 0 {
 			cfg.Runtime.MaxReplicas = n
 		}
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA: %q is not an integer: %w", v, err)
+		}
+		if n >= 0 {
 			cfg.Runtime.DefaultMaxSessionsPerReplica = n
 		}
 	}

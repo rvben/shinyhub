@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e lint run dev goreleaser-check
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint fmt fmt-check run dev goreleaser-check build-runner-image
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -26,8 +26,30 @@ test-js:
 test-remote-e2e:
 	./scripts/remote-e2e.sh
 
+# test-fargate-it runs the Fargate runtime's real-cluster smoke test (launch a
+# task, assert routing + inventory, stop it). It is gated behind the `integration`
+# build tag and skips unless SHINYHUB_FARGATE_IT_CLUSTER (and the related
+# SHINYHUB_FARGATE_IT_* vars documented in internal/fargate/integration_test.go)
+# are set. There is no open-source ECS emulator that supports the Fargate awsvpc
+# RunTask path, so this requires a real ECS cluster and AWS credentials; running
+# it launches a billed Fargate task and then stops it.
+test-fargate-it:
+	go test -tags=integration -run TestIntegration -count=1 -v ./internal/fargate/...
+
 lint:
 	go vet ./...
+
+# fmt rewrites all tracked Go files with gofmt (go 1.26 canonical formatting).
+# Scoped to tracked files via git ls-files so nested worktrees under .claude/
+# or .claire/ are never reformatted. Run as a standalone maintenance commit.
+fmt:
+	gofmt -w $$(git ls-files '*.go')
+
+# fmt-check fails if any tracked Go file is not gofmt-clean. Wire into lint/CI
+# once the repo has been swept clean with `make fmt`.
+fmt-check:
+	@unformatted=$$(gofmt -l $$(git ls-files '*.go')); \
+	if [ -n "$$unformatted" ]; then echo "gofmt needed (run make fmt):"; echo "$$unformatted"; exit 1; fi
 
 run: build
 	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production ./bin/shinyhub serve
@@ -41,6 +63,12 @@ dev:
 
 goreleaser-check:
 	goreleaser check
+
+# build-runner-image builds the reference Python Fargate runner image. The
+# image is not required for local development but is needed for ECS-based
+# deployments. Requires Docker.
+build-runner-image:
+	docker build -t shinyhub-fargate-runner:latest build/fargate-runner/
 
 # Release workflow:
 #   make release-patch   (or release-minor / release-major)

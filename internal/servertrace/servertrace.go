@@ -22,6 +22,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/httproute"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -79,6 +80,14 @@ func (t *Tracer) Tracer() trace.Tracer { return t.tracer }
 // route PATTERN (collapsing path params and unmatched 404s so span/attribute
 // cardinality stays bounded). An inbound W3C traceparent is adopted as the
 // parent so upstream traces link through to ShinyHub.
+//
+// Route pattern resolution uses a two-tier priority: httproute.PatternFromContext
+// is checked first. When set (by api.Observe before the inner handler runs), it
+// provides an immutable string copy that is safe to read after next.ServeHTTP
+// returns even across an http.TimeoutHandler boundary. When it is absent (e.g.
+// this middleware is mounted directly inside chi without the Observe wrapper),
+// chi.RouteContext is consulted as a fallback so the standard chi-as-middleware
+// use case continues to work.
 func (t *Tracer) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := t.propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -88,7 +97,12 @@ func (t *Tracer) Middleware(next http.Handler) http.Handler {
 		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r.WithContext(ctx))
 
-		route := chi.RouteContext(ctx).RoutePattern()
+		route := httproute.PatternFromContext(ctx)
+		if route == "" {
+			if rc := chi.RouteContext(ctx); rc != nil {
+				route = rc.RoutePattern()
+			}
+		}
 		if route == "" {
 			route = "unmatched"
 		}

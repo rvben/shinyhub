@@ -3,6 +3,7 @@
 // now Overview is the only one with a renderer and other tabs show "Coming
 // soon" placeholders.
 import { makeFleetBadge, renderFleetDigest } from '/static/views/fleet-ui.js';
+import { backendLabel, metricsText } from '/static/views/replica-display.js';
 import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
 import {
   summariseAutoscale,
@@ -344,12 +345,18 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
   // placeholders until the metrics poll fills them in.
   seedReplicasFromStatus(app, replicasStatus);
 
-  // Autoscale summary reads app.autoscale_* + envelope.effective_autoscale_target;
-  // the helper resolves the inherited-target case so the row labels are honest.
+  // Autoscale summary reads app.autoscale_* plus envelope fields:
+  //   autoscale_status (last_action_at, last_action, in_cooldown, cooldown_until)
+  //   global_autoscale_enabled (kill-switch: false means scaling is paused globally)
+  // Both are emitted by handleGetApp and are consumed by summariseAutoscale.
   const autoscaleDl = document.getElementById('autoscale-summary');
   if (autoscaleDl) {
     renderAutoscaleSummary(autoscaleDl, summariseAutoscale(app, envelope || {}));
   }
+
+  // Store the envelope so the 10s metrics poll (onMetrics in app.js) can keep
+  // autoscale_status fresh without a full re-fetch of GET /api/apps/:slug.
+  if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(envelope || {});
 
   // Rejects-by-reason is optional in the envelope; the helpers tolerate a
   // missing/empty rollup and hide the card so a healthy app shows nothing.
@@ -372,13 +379,27 @@ function seedReplicasFromStatus(app, replicasStatus) {
     const li = document.createElement('li');
     li.className = 'replica-row';
     const status = r.status || 'stopped';
+    // Read r.tier and r.provider that handleGetApp already includes in
+    // replicas_status (db.Replica carries Tier + Provider; plan-01 Contract 5).
+    const backend = backendLabel({ tier: r.tier, provider: r.provider });
+    // Show n/a immediately for known-PID-less replicas so the initial panel state
+    // is honest before the first metrics poll fills in real values.
+    const { cpuText: cpuInit, ramText: ramInit, note } = metricsText({
+      metrics_available: r.metrics_available,
+    });
+    const cpuDisplay = status === 'running' ? cpuInit : '—';
+    const ramDisplay = status === 'running' ? ramInit : '—';
+    // Build the li via innerHTML for fixed strings, but set backend via
+    // textContent to avoid XSS from operator-controlled r.tier/r.provider values.
     li.innerHTML = `
       <span class="replica-index">#${r.index}</span>
       <span class="badge badge-${status}">${formatStatus(status)}</span>
+      <span class="replica-backend" title="Backend/tier"></span>
       <span class="replica-sessions">— sessions</span>
-      <span class="replica-cpu">CPU —</span>
-      <span class="replica-ram">RAM —</span>
+      <span class="replica-cpu">CPU ${cpuDisplay}</span>
+      <span class="replica-ram"${note ? ` title="${note}"` : ''}>RAM ${ramDisplay}</span>
     `;
+    li.querySelector('.replica-backend').textContent = backend;
     listEl.appendChild(li);
   }
 }

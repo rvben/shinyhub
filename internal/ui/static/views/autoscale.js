@@ -25,6 +25,19 @@ export function summariseAutoscale(app, envelope) {
   const max = Number(a.autoscale_max_replicas) || (a.autoscale_max_replicas === 0 ? 0 : 1);
   const current = Number(a.replicas) || (a.replicas === 0 ? 0 : 1);
   const enabled = !!a.autoscale_enabled;
+
+  // New fields from autoscale_status + global_autoscale_enabled.
+  // Safe defaults: null/''/ false/true so callers that omit these fields
+  // (including existing tests) see no behavior change.
+  const status = e.autoscale_status && typeof e.autoscale_status === 'object'
+    ? e.autoscale_status : {};
+  const lastActionAt  = status.last_action_at ? new Date(status.last_action_at) : null;
+  const lastAction    = status.last_action || '';
+  const inCooldown    = !!status.in_cooldown;
+  const cooldownUntil = status.cooldown_until ? new Date(status.cooldown_until) : null;
+  // globalEnabled defaults to true so a missing field never triggers the warning.
+  const globalEnabled = e.global_autoscale_enabled !== false;
+
   return {
     enabled,
     current,
@@ -34,6 +47,11 @@ export function summariseAutoscale(app, envelope) {
     effectiveTarget: effective,
     inheritsTarget: target <= 0,
     drift: enabled && (current < min || current > max),
+    lastActionAt,
+    lastAction,
+    inCooldown,
+    cooldownUntil,
+    globalEnabled,
   };
 }
 
@@ -58,18 +76,65 @@ export function formatRejectsByReason(rollup) {
   return rows;
 }
 
+/**
+ * formatRelative returns a human-readable relative-time string.
+ * nowMs and tsMs are milliseconds since epoch. Returns '' when tsMs is falsy.
+ *
+ * @param {number} nowMs
+ * @param {number|null|undefined} tsMs
+ * @returns {string}
+ */
+export function formatRelative(nowMs, tsMs) {
+  if (!tsMs) return '';
+  const diffMs = nowMs - tsMs;
+  // Clamp negative diffs (future timestamp, clock skew) to "just now" so we
+  // never produce nonsense like "-1 days ago".
+  if (diffMs < 0) return 'just now';
+  const diffS  = Math.floor(diffMs / 1000);
+  if (diffS < 60)  return 'just now';
+  const diffM = Math.floor(diffS / 60);
+  if (diffM < 60)  return `${diffM} ${diffM === 1 ? 'minute' : 'minutes'} ago`;
+  const diffH = Math.floor(diffM / 60);
+  if (diffH < 24)  return `${diffH} ${diffH === 1 ? 'hour' : 'hours'} ago`;
+  const diffD = Math.floor(diffH / 24);
+  return `${diffD} ${diffD === 1 ? 'day' : 'days'} ago`;
+}
+
+/**
+ * formatCountdown returns a human-readable string for time remaining until
+ * the given epoch-millis timestamp, or 'ready' when past.
+ * Returns '' when untilMs is falsy.
+ *
+ * @param {number} nowMs
+ * @param {number|null|undefined} untilMs
+ * @returns {string}
+ */
+export function formatCountdown(nowMs, untilMs) {
+  if (!untilMs) return '';
+  const remS = Math.ceil((untilMs - nowMs) / 1000);
+  if (remS <= 0) return 'ready';
+  if (remS < 60) return `in ${remS} s`;
+  const remM = Math.ceil(remS / 60);
+  return `in ${remM} m`;
+}
+
 // renderAutoscaleSummary fills a <dl> with one <dt>/<dd> pair per fact:
 // enabled, the live pool versus its configured band, target (with an
 // inheritance hint when the app inherits the runtime default). Stale content
 // is cleared so a refresh never double-renders.
 //
-// When autoscale is enabled the replicas row shows "current / [min–max]" so
+// When autoscale is enabled the replicas row shows "current / [min-max]" so
 // the operator sees the live pool next to the band the controller is steering
 // toward; a drift call-out is appended when the live pool is outside that band
 // so the imminent reconverge is visible rather than invisible until the next
 // scan. When autoscale is disabled the bounds are persisted (so a re-enable
 // restores them) but do not govern the pool, so the row shows a bare count to
 // avoid implying a relationship that isn't enforced.
+//
+// When autoscale is enabled, two additional rows render: "Last scaled" (with a
+// relative-time + direction label) and "Cooldown" (countdown or "ready"). When
+// the app has autoscale enabled but the global controller is disabled, a
+// kill-switch warning paragraph is appended after the dl.
 export function renderAutoscaleSummary(dl, s) {
   dl.innerHTML = '';
   const doc = dl.ownerDocument;
@@ -84,7 +149,7 @@ export function renderAutoscaleSummary(dl, s) {
   row('Autoscale', s.enabled ? 'enabled' : 'disabled');
   let replicasValue;
   if (s.enabled) {
-    replicasValue = `${s.current} / [${s.min}–${s.max}]`;
+    replicasValue = `${s.current} / [${s.min}-${s.max}]`;
     if (s.drift) {
       replicasValue += ' (drift: controller will reconverge)';
     }
@@ -96,6 +161,43 @@ export function renderAutoscaleSummary(dl, s) {
     ? `${formatTarget(s.effectiveTarget)} (inherited)`
     : formatTarget(s.target);
   row('Target session load', targetLabel);
+
+  // New rows: only rendered when autoscale is enabled so the disabled summary
+  // stays unchanged (existing test coverage stays valid).
+  if (s.enabled) {
+    const now = Date.now();
+    // "Last scaled" row.
+    let lastScaledText;
+    if (!s.lastAction) {
+      lastScaledText = 'never';
+    } else {
+      const rel = s.lastActionAt ? formatRelative(now, s.lastActionAt.getTime()) : '';
+      lastScaledText = rel ? `${rel} (${s.lastAction})` : s.lastAction;
+    }
+    row('Last scaled', lastScaledText);
+    // "Cooldown" row.
+    const cooldownText = s.inCooldown
+      ? formatCountdown(now, s.cooldownUntil ? s.cooldownUntil.getTime() : null)
+      : 'ready';
+    row('Cooldown', cooldownText || 'ready');
+
+    // Kill-switch warning: app has autoscale enabled but the global controller
+    // is disabled, so no scaling will occur.
+    // Remove any previously-appended warning first so repeated calls (e.g. the
+    // 10s metrics poll) do not accumulate stale nodes and so flipping
+    // globalEnabled back to true cleans up the warning immediately.
+    if (dl.parentNode) {
+      dl.parentNode.querySelectorAll('.autoscale-killswitch-warning').forEach(el => el.remove());
+    }
+    if (!s.globalEnabled) {
+      const warn = doc.createElement('p');
+      warn.className = 'autoscale-killswitch-warning';
+      warn.textContent =
+        'Autoscale is enabled for this app but the global controller is disabled ' +
+        '(runtime.autoscale.enabled=false); no scaling will occur.';
+      dl.parentNode ? dl.parentNode.appendChild(warn) : dl.appendChild(warn);
+    }
+  }
 }
 
 // renderRejectsByReason populates a <ul> with one <li> per reason and reveals

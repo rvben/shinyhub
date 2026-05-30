@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 func writeYAML(t *testing.T, content string) string {
@@ -1236,5 +1239,865 @@ func TestRuntimeTiers_RejectsDuplicateAndUnknownRuntime(t *testing.T) {
 				t.Fatalf("expected validation error for %q", name)
 			}
 		})
+	}
+}
+
+func TestRuntime_Fargate_TierLoadsWithValidConfig(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:7
+    container_name: app
+    subnets: [subnet-a, subnet-b]
+    security_groups: [sg-1]
+    assign_public_ip: true
+    region: eu-west-1
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+    control_plane_url: "https://cp.example.com"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, ok := cfg.Runtime.RuntimeForTier("cloud"); !ok || got != "fargate" {
+		t.Fatalf("tier cloud runtime = %q (ok=%v), want fargate", got, ok)
+	}
+	f := cfg.Runtime.Fargate
+	if f.Cluster != "shiny-cluster" || f.TaskDefinition != "shiny-app:7" || f.ContainerName != "app" {
+		t.Errorf("fargate core fields = %+v", f)
+	}
+	if len(f.Subnets) != 2 || f.Subnets[0] != "subnet-a" {
+		t.Errorf("fargate subnets = %v", f.Subnets)
+	}
+	if len(f.SecurityGroups) != 1 || f.SecurityGroups[0] != "sg-1" {
+		t.Errorf("fargate security_groups = %v", f.SecurityGroups)
+	}
+	if !f.AssignPublicIP {
+		t.Error("fargate assign_public_ip = false, want true")
+	}
+	if f.Region != "eu-west-1" {
+		t.Errorf("fargate region = %q", f.Region)
+	}
+}
+
+func TestRuntime_Fargate_TierRejectsMissingFields(t *testing.T) {
+	cases := map[string]string{
+		"cluster": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    task_definition: shiny-app:7
+    container_name: app
+    subnets: [subnet-a]
+    task_cpu_units: 256
+    task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
+`,
+		"task_definition": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    container_name: app
+    subnets: [subnet-a]
+    task_cpu_units: 256
+    task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
+`,
+		"container_name": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:7
+    subnets: [subnet-a]
+    task_cpu_units: 256
+    task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
+`,
+		"subnets": `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:7
+    container_name: app
+    task_cpu_units: 256
+    task_memory_mb: 512
+    control_plane_url: "https://cp.example.com"
+`,
+	}
+	for field, yaml := range cases {
+		t.Run(field, func(t *testing.T) {
+			_, err := config.Load(writeYAML(t, yaml))
+			if err == nil {
+				t.Fatalf("expected validation error for missing %s", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Fatalf("error %q should mention %q", err, field)
+			}
+		})
+	}
+}
+
+func TestRuntime_Fargate_NoTierDoesNotRequireConfig(t *testing.T) {
+	// A fargate config block without any fargate tier must not be validated:
+	// native/docker-only deployments leave it empty.
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: local
+      runtime: native
+`)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestRuntime_Fargate_EnvOverrides(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_CLUSTER", "env-cluster")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_SUBNETS", "subnet-x, subnet-y")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_ASSIGN_PUBLIC_IP", "true")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.Cluster != "env-cluster" {
+		t.Errorf("cluster from env = %q", cfg.Runtime.Fargate.Cluster)
+	}
+	if len(cfg.Runtime.Fargate.Subnets) != 2 || cfg.Runtime.Fargate.Subnets[1] != "subnet-y" {
+		t.Errorf("subnets from env = %v (want trimmed [subnet-x subnet-y])", cfg.Runtime.Fargate.Subnets)
+	}
+	if !cfg.Runtime.Fargate.AssignPublicIP {
+		t.Error("assign_public_ip from env = false, want true")
+	}
+}
+
+func TestRuntime_Tier_RejectsUnknownRuntimeMentionsFargate(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: kubernetes
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown tier runtime")
+	}
+	if !strings.Contains(err.Error(), "fargate") {
+		t.Fatalf("error should list fargate as an option, got %v", err)
+	}
+}
+
+func TestApplyEnvNumericErrorsAreFatal(t *testing.T) {
+	cases := []struct {
+		name   string
+		envKey string
+		badVal string
+	}{
+		{"docker default memory", "SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB", "512m"},
+		{"docker default cpu", "SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT", "50pct"},
+		{"version retention", "SHINYHUB_STORAGE_VERSION_RETENTION", "five"},
+		{"app quota", "SHINYHUB_APP_QUOTA_MB", "1G"},
+		{"max bundle mb", "SHINYHUB_MAX_BUNDLE_MB", "128mb"},
+		{"default replicas", "SHINYHUB_RUNTIME_DEFAULT_REPLICAS", "two"},
+		{"max replicas", "SHINYHUB_RUNTIME_MAX_REPLICAS", "100x"},
+		{"default max sessions", "SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA", "ten"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+			t.Setenv(tc.envKey, tc.badVal)
+			if _, err := config.Load(""); err == nil {
+				t.Errorf("Load with %s=%q: expected error for non-integer value, got nil", tc.envKey, tc.badVal)
+			}
+		})
+	}
+
+	// SHINYHUB_RUNTIME_DEFAULT_REPLICAS intentionally ignores n<=0 values (the
+	// n>0 guard keeps the compiled default of 1). A valid integer that fails the
+	// guard must not be an error; Load must succeed and the field must keep its
+	// compiled default.
+	t.Run("default replicas zero uses compiled default", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		t.Setenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS", "0")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load with SHINYHUB_RUNTIME_DEFAULT_REPLICAS=0: expected success, got %v", err)
+		}
+		// The compiled default is 1; zero is parsed but silently ignored by the n>0 guard.
+		if cfg.Runtime.DefaultReplicas != 1 {
+			t.Errorf("DefaultReplicas = %d, want 1 (compiled default when env value fails the n>0 guard)", cfg.Runtime.DefaultReplicas)
+		}
+	})
+}
+
+func TestFargateConfig_NewFields_YAMLRoundTrip(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+    default_memory_mb: 512
+    default_cpu_percent: 50
+    control_plane_url: "https://cp.example.com"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.TaskCPUUnits != 1024 {
+		t.Errorf("TaskCPUUnits: got %d, want 1024", cfg.Runtime.Fargate.TaskCPUUnits)
+	}
+	if cfg.Runtime.Fargate.TaskMemoryMB != 2048 {
+		t.Errorf("TaskMemoryMB: got %d, want 2048", cfg.Runtime.Fargate.TaskMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultMemoryMB != 512 {
+		t.Errorf("DefaultMemoryMB: got %d, want 512", cfg.Runtime.Fargate.DefaultMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultCPUPercent != 50 {
+		t.Errorf("DefaultCPUPercent: got %d, want 50", cfg.Runtime.Fargate.DefaultCPUPercent)
+	}
+}
+
+func TestFargateConfig_NewFields_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS", "2048")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB", "4096")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB", "1024")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT", "75")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.TaskCPUUnits != 2048 {
+		t.Errorf("TaskCPUUnits from env: got %d, want 2048", cfg.Runtime.Fargate.TaskCPUUnits)
+	}
+	if cfg.Runtime.Fargate.TaskMemoryMB != 4096 {
+		t.Errorf("TaskMemoryMB from env: got %d, want 4096", cfg.Runtime.Fargate.TaskMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultMemoryMB != 1024 {
+		t.Errorf("DefaultMemoryMB from env: got %d, want 1024", cfg.Runtime.Fargate.DefaultMemoryMB)
+	}
+	if cfg.Runtime.Fargate.DefaultCPUPercent != 75 {
+		t.Errorf("DefaultCPUPercent from env: got %d, want 75", cfg.Runtime.Fargate.DefaultCPUPercent)
+	}
+}
+
+func TestFargateConfig_EnvBadInteger_ReturnsError(t *testing.T) {
+	cases := []struct {
+		env string
+		val string
+	}{
+		{"SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS", "not-a-number"},
+		{"SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB", "12.5"},
+		{"SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB", "abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+			t.Setenv(tc.env, tc.val)
+			_, err := config.Load("")
+			if err == nil {
+				t.Errorf("Load with %s=%q: want error, got nil", tc.env, tc.val)
+			}
+			if !strings.Contains(err.Error(), tc.env) {
+				t.Errorf("error %q does not mention env var %s", err.Error(), tc.env)
+			}
+		})
+	}
+}
+
+// minimalFargateYAML returns a YAML string with a valid fargate tier and the
+// given cpu/mem values so matrix tests don't repeat the boilerplate.
+func minimalFargateYAML(cpuUnits, memMB int) string {
+	return fmt.Sprintf(`
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    control_plane_url: "https://cp.example.com"
+    task_cpu_units: %d
+    task_memory_mb: %d
+`, cpuUnits, memMB)
+}
+
+func TestValidateFargate_Matrix(t *testing.T) {
+	valid := []struct {
+		cpu int
+		mem int
+	}{
+		{256, 512},
+		{256, 1024},
+		{256, 2048},
+		{512, 1024},
+		{512, 4096},
+		{1024, 2048},
+		{1024, 8192},
+		{2048, 4096},
+		{2048, 16384},
+		{4096, 8192},
+		{4096, 30720},
+		{8192, 16384},
+		{8192, 61440},
+		{16384, 32768},
+		{16384, 122880},
+	}
+	for _, tc := range valid {
+		t.Run(fmt.Sprintf("valid_%d_%d", tc.cpu, tc.mem), func(t *testing.T) {
+			path := writeYAML(t, minimalFargateYAML(tc.cpu, tc.mem))
+			if _, err := config.Load(path); err != nil {
+				t.Errorf("expected valid matrix entry cpu=%d mem=%d to load without error, got: %v", tc.cpu, tc.mem, err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		cpu int
+		mem int
+		msg string
+	}{
+		// cpu not in allowed set
+		{300, 512, "unsupported cpu"},
+		// mem below minimum
+		{512, 512, "below minimum"},
+		// mem above maximum
+		{512, 8192, "above maximum"},
+		// increment violation: 8192 cpu must be multiple of 4096 above base 16384
+		// 17000 is 16384 + 616; 616 % 4096 != 0
+		{8192, 17000, "increment violation"},
+		// increment violation: 16384 cpu must be multiple of 8192 above base 32768
+		// 33000 is 32768 + 232; 232 % 8192 != 0
+		{16384, 33000, "increment violation"},
+		// 256 cpu discrete set: 1536 is not in {512,1024,2048}
+		{256, 1536, "not in discrete set"},
+		// 2048 cpu: 5000 is 4096+904; 904 % 1024 != 0
+		{2048, 5000, "increment violation"},
+		// 512 cpu (1024-step tier): 1536 is 1024+512; 512 % 1024 != 0
+		{512, 1536, "increment violation"},
+		// 1024 cpu (1024-step tier): 2560 is 2048+512; 512 % 1024 != 0
+		{1024, 2560, "increment violation"},
+	}
+	for _, tc := range invalid {
+		t.Run(fmt.Sprintf("invalid_%d_%d_%s", tc.cpu, tc.mem, tc.msg), func(t *testing.T) {
+			path := writeYAML(t, minimalFargateYAML(tc.cpu, tc.mem))
+			_, err := config.Load(path)
+			if err == nil {
+				t.Errorf("expected invalid matrix entry cpu=%d mem=%d (%s) to fail, but Load succeeded", tc.cpu, tc.mem, tc.msg)
+			}
+		})
+	}
+}
+
+func TestValidateFargate_RequiresTaskCPUAndMemory(t *testing.T) {
+	// task_cpu_units present but task_memory_mb absent
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    control_plane_url: "https://cp.example.com"
+    task_cpu_units: 1024
+`)
+	if _, err := config.Load(path); err == nil {
+		t.Error("expected error when task_memory_mb is 0 (absent), got nil")
+	}
+
+	// task_memory_mb present but task_cpu_units absent
+	path2 := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    control_plane_url: "https://cp.example.com"
+    task_memory_mb: 2048
+`)
+	if _, err := config.Load(path2); err == nil {
+		t.Error("expected error when task_cpu_units is 0 (absent), got nil")
+	}
+}
+
+func TestDefaultResourcesForTier(t *testing.T) {
+	t.Run("native_tier_returns_docker_defaults", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		// synthesized single "local" tier with runtime=native
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("local")
+		if mem != cfg.Runtime.Docker.DefaultMemoryMB {
+			t.Errorf("mem: got %d, want %d", mem, cfg.Runtime.Docker.DefaultMemoryMB)
+		}
+		if cpu != cfg.Runtime.Docker.DefaultCPUPercent {
+			t.Errorf("cpu: got %d, want %d", cpu, cfg.Runtime.Docker.DefaultCPUPercent)
+		}
+	})
+
+	t.Run("docker_tier_returns_docker_defaults", func(t *testing.T) {
+		path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: workers
+      runtime: docker
+  docker:
+    default_memory_mb: 256
+    default_cpu_percent: 25
+`)
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("workers")
+		if mem != 256 {
+			t.Errorf("mem: got %d, want 256", mem)
+		}
+		if cpu != 25 {
+			t.Errorf("cpu: got %d, want 25", cpu)
+		}
+	})
+
+	t.Run("fargate_tier_returns_fargate_defaults", func(t *testing.T) {
+		path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: c
+    task_definition: td
+    container_name: app
+    subnets: [s-1]
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+    default_memory_mb: 512
+    default_cpu_percent: 50
+    control_plane_url: "https://cp.example.com"
+`)
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("burst")
+		if mem != 512 {
+			t.Errorf("mem: got %d, want 512", mem)
+		}
+		if cpu != 50 {
+			t.Errorf("cpu: got %d, want 50", cpu)
+		}
+	})
+
+	t.Run("unknown_tier_returns_docker_defaults", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForTier("nonexistent")
+		if mem != cfg.Runtime.Docker.DefaultMemoryMB {
+			t.Errorf("mem: got %d, want Docker default %d", mem, cfg.Runtime.Docker.DefaultMemoryMB)
+		}
+		if cpu != cfg.Runtime.Docker.DefaultCPUPercent {
+			t.Errorf("cpu: got %d, want Docker default %d", cpu, cfg.Runtime.Docker.DefaultCPUPercent)
+		}
+	})
+}
+
+// loadFromString writes yaml to a temp file and calls config.Load.
+func loadFromString(t *testing.T, yaml string) (*config.Config, error) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(yaml)
+	f.Close()
+	return config.Load(f.Name())
+}
+
+func TestFargateConfig_ControlPlaneURLRequired(t *testing.T) {
+	// A fargate tier with no control_plane_url must fail Load.
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for missing control_plane_url, got nil")
+	}
+	if !strings.Contains(err.Error(), "control_plane_url") {
+		t.Fatalf("error message must mention control_plane_url, got: %v", err)
+	}
+}
+
+func TestFargateConfig_RouteViaPublicIPRequiresHTTPS(t *testing.T) {
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    assign_public_ip: true
+    route_via_public_ip: true
+    control_plane_url: "http://1.2.3.4:8080"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for http:// with route_via_public_ip, got nil")
+	}
+	if !strings.Contains(err.Error(), "https") {
+		t.Fatalf("error message must mention https, got: %v", err)
+	}
+}
+
+func TestFargateConfig_RouteViaPublicIPAcceptsHTTPS(t *testing.T) {
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    assign_public_ip: true
+    route_via_public_ip: true
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Runtime.Fargate.ControlPlaneURL != "https://example.com" {
+		t.Fatalf("ControlPlaneURL not parsed, got %q", cfg.Runtime.Fargate.ControlPlaneURL)
+	}
+}
+
+func TestFargateConfig_BundleTokenTTLDefault(t *testing.T) {
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Runtime.Fargate.BundleTokenTTL != 10*time.Minute {
+		t.Fatalf("want default BundleTokenTTL=10m, got %v", cfg.Runtime.Fargate.BundleTokenTTL)
+	}
+}
+
+func TestFargateConfig_BundleTokenTTLEnvBadValue(t *testing.T) {
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL", "notaduration")
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for bad duration env var, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL") {
+		t.Fatalf("error must name the env var, got: %v", err)
+	}
+}
+
+func TestFargateConfig_BundleTokenTTLEnvNegative(t *testing.T) {
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL", "-1m")
+	yaml := `
+auth:
+  secret: "aaaabbbbccccddddeeeeffffgggghhhh"
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-task:1
+    container_name: app
+    subnets: [subnet-abc]
+    control_plane_url: "https://example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for negative bundle_token_ttl, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL") {
+		t.Fatalf("error must name the env var, got: %v", err)
+	}
+}
+
+// placementJSON serialises a {tier: count} map for use in db.App.ReplicaPlacement.
+func placementJSON(t *testing.T, m map[string]int) string {
+	t.Helper()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal placement: %v", err)
+	}
+	return string(b)
+}
+
+// TestDefaultResourcesForApp_PlacementAwareResolution verifies that
+// DefaultResourcesForApp resolves defaults from the app's actual placement
+// tier rather than always using the global default tier.
+//
+// Config: two tiers - "local" (native, default) and "burst" (fargate).
+// Fargate defaults: 512 MiB, 50%.
+// Docker/native defaults: 0 (no limit).
+// These are intentionally distinct so the test can tell them apart.
+func TestDefaultResourcesForApp_PlacementAwareResolution(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: local
+      runtime: native
+    - name: burst
+      runtime: fargate
+  docker:
+    default_memory_mb: 0
+    default_cpu_percent: 0
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:1
+    container_name: app
+    subnets: [subnet-a]
+    control_plane_url: "https://cp.192.0.2.1.example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+    default_memory_mb: 512
+    default_cpu_percent: 50
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	t.Run("single fargate tier placement resolves fargate defaults", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: placementJSON(t, map[string]int{"burst": 2}),
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 512 {
+			t.Errorf("mem: got %d, want 512 (fargate default)", mem)
+		}
+		if cpu != 50 {
+			t.Errorf("cpu: got %d, want 50 (fargate default)", cpu)
+		}
+	})
+
+	t.Run("no placement falls back to default tier (native, zeros)", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: "",
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native/docker default)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native/docker default)", cpu)
+		}
+	})
+
+	t.Run("multi-tier placement falls back to default tier (native, zeros)", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: placementJSON(t, map[string]int{"local": 1, "burst": 1}),
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native/docker default for multi-tier fallback)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native/docker default for multi-tier fallback)", cpu)
+		}
+	})
+
+	t.Run("single native tier placement resolves native defaults", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: placementJSON(t, map[string]int{"local": 3}),
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native default)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native default)", cpu)
+		}
+	})
+
+	t.Run("malformed placement JSON falls back to default tier", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: `{"bad json`,
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (default tier fallback on malformed JSON)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (default tier fallback on malformed JSON)", cpu)
+		}
+	})
+
+	t.Run("nil app falls back to default tier (native, zeros)", func(t *testing.T) {
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(nil)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native default tier on nil app)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native default tier on nil app)", cpu)
+		}
+	})
+}
+
+// TestDefaultResourcesForApp_SingleTierFargate verifies the common single-tier
+// fargate deployment - where the global default IS the fargate tier - so that
+// results from DefaultResourcesForApp and DefaultResourcesForTier are identical.
+func TestDefaultResourcesForApp_SingleTierFargate(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:1
+    container_name: app
+    subnets: [subnet-a]
+    control_plane_url: "https://cp.192.0.2.1.example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+    default_memory_mb: 256
+    default_cpu_percent: 25
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	app := &db.App{
+		ReplicaPlacement: placementJSON(t, map[string]int{"cloud": 1}),
+	}
+	mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+	if mem != 256 {
+		t.Errorf("mem: got %d, want 256", mem)
+	}
+	if cpu != 25 {
+		t.Errorf("cpu: got %d, want 25", cpu)
 	}
 }

@@ -24,18 +24,23 @@ type scaleInput struct {
 //
 // When no effective cap or target is known the saturation ratio is undefined,
 // so it holds the current count rather than scaling on a meaningless signal.
-func desiredReplicas(in scaleInput) int {
+//
+// reason values: "pool_saturated" when the saturation-bias branch forced the
+// +1 increment; "session_load" in all other cases.
+func desiredReplicas(in scaleInput) (desired int, reason string) {
 	if in.cap <= 0 || in.target <= 0 {
-		return in.current
+		return in.current, "session_load"
 	}
 
 	perReplica := in.target * float64(in.cap)
-	desired := int(math.Ceil(float64(in.activeSessions) / perReplica))
+	desired = int(math.Ceil(float64(in.activeSessions) / perReplica))
+	reason = "session_load"
 
 	// A saturated pool is actively rejecting sessions, so the measured active
 	// count understates demand; ensure we add at least one replica.
 	if in.saturated && desired <= in.current {
 		desired = in.current + 1
+		reason = "pool_saturated"
 	}
 
 	if desired < in.min {
@@ -50,5 +55,5 @@ func desiredReplicas(in scaleInput) int {
 	if desired < 1 {
 		desired = 1
 	}
-	return desired
+	return desired, reason
 }

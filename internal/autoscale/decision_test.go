@@ -28,7 +28,7 @@ func TestDesiredReplicas(t *testing.T) {
 			in.activeSessions = tc.active
 			in.current = tc.current
 			in.saturated = tc.saturated
-			if got := desiredReplicas(in); got != tc.want {
+			if got, _ := desiredReplicas(in); got != tc.want {
 				t.Fatalf("desiredReplicas(active=%d current=%d sat=%v) = %d, want %d",
 					tc.active, tc.current, tc.saturated, got, tc.want)
 			}
@@ -41,7 +41,7 @@ func TestDesiredReplicas_RespectsRuntimeCeiling(t *testing.T) {
 		activeSessions: 1000, current: 4, cap: 10, target: 0.8,
 		min: 1, max: 50, runtimeMax: 6,
 	}
-	if got := desiredReplicas(in); got != 6 {
+	if got, _ := desiredReplicas(in); got != 6 {
 		t.Fatalf("desiredReplicas with runtimeMax=6 = %d, want 6", got)
 	}
 }
@@ -52,7 +52,7 @@ func TestDesiredReplicas_MinFloorWins(t *testing.T) {
 		min: 3, max: 8, runtimeMax: 32,
 	}
 	// ceil(5/8)=1, but per-app min is 3.
-	if got := desiredReplicas(in); got != 3 {
+	if got, _ := desiredReplicas(in); got != 3 {
 		t.Fatalf("desiredReplicas with min=3 = %d, want 3", got)
 	}
 }
@@ -61,11 +61,45 @@ func TestDesiredReplicas_NoDecisionWithoutCapOrTarget(t *testing.T) {
 	// Without an effective cap or target the saturation signal is undefined, so
 	// the controller must hold the current count rather than scale blindly.
 	noCap := scaleInput{activeSessions: 100, current: 4, cap: 0, target: 0.8, min: 1, max: 8, runtimeMax: 32}
-	if got := desiredReplicas(noCap); got != 4 {
+	if got, _ := desiredReplicas(noCap); got != 4 {
 		t.Fatalf("desiredReplicas with cap=0 = %d, want current 4", got)
 	}
 	noTarget := scaleInput{activeSessions: 100, current: 4, cap: 10, target: 0, min: 1, max: 8, runtimeMax: 32}
-	if got := desiredReplicas(noTarget); got != 4 {
+	if got, _ := desiredReplicas(noTarget); got != 4 {
 		t.Fatalf("desiredReplicas with target=0 = %d, want current 4", got)
+	}
+}
+
+func TestDesiredReplicas_ReasonPoolSaturated(t *testing.T) {
+	// saturated && desired <= current triggers the pool_saturated branch.
+	in := scaleInput{
+		activeSessions: 16, current: 2, cap: 10, target: 0.8,
+		min: 1, max: 8, runtimeMax: 32,
+		saturated: true,
+	}
+	// ceil(16/8)=2 == current; saturation forces +1 -> desired=3.
+	desired, reason := desiredReplicas(in)
+	if desired != 3 {
+		t.Fatalf("desired = %d, want 3", desired)
+	}
+	if reason != "pool_saturated" {
+		t.Fatalf("reason = %q, want pool_saturated", reason)
+	}
+}
+
+func TestDesiredReplicas_ReasonSessionLoad(t *testing.T) {
+	// plain scale-up from load, no saturation.
+	in := scaleInput{
+		activeSessions: 30, current: 2, cap: 10, target: 0.8,
+		min: 1, max: 8, runtimeMax: 32,
+		saturated: false,
+	}
+	// ceil(30/8)=4 > 2; no saturation branch.
+	desired, reason := desiredReplicas(in)
+	if desired != 4 {
+		t.Fatalf("desired = %d, want 4", desired)
+	}
+	if reason != "session_load" {
+		t.Fatalf("reason = %q, want session_load", reason)
 	}
 }

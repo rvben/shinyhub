@@ -7,7 +7,8 @@ import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
-import { readAutoscaleForm, parseReplicaBound } from '/static/views/autoscale.js';
+import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
+import { backendLabel, metricsText } from '/static/views/replica-display.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -315,6 +316,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const fleetBadge = makeFleetBadge(document, app);
       if (fleetBadge) header.appendChild(fleetBadge);
 
+      // Autoscale badge: visible when per-app autoscale is enabled.
+      // app.autoscale_enabled is already in the apps-list payload (db.App appColumns).
+      if (app.autoscale_enabled) {
+        const autoBadge = document.createElement('span');
+        autoBadge.className = 'badge badge-autoscale';
+        autoBadge.textContent = 'auto';
+        autoBadge.title = 'Autoscale enabled';
+        header.appendChild(autoBadge);
+      }
+
       const meta = document.createElement('div');
       meta.className = 'app-meta';
 
@@ -548,24 +559,24 @@ document.addEventListener('DOMContentLoaded', () => {
       'deploy', 'restart', 'rollback',
       // Auth actions
       'login', 'login_failed', 'logout',
-      // App lifecycle (blue — config)
+      // App lifecycle (blue - config)
       'create_app', 'update_app', 'delete_app', 'stop', 'set_access',
-      // User management (blue — config)
+      // User management (blue - config)
       'create_user', 'update_user', 'delete_user', 'reset_user_password',
-      // Token management (amber — security)
+      // Token management (amber - security)
       'create_token', 'delete_token',
-      // Environment (blue — config)
+      // Environment (blue - config)
       'env.set', 'env.delete',
-      // Data (blue — config)
+      // Data (blue - config)
       'data.push', 'data.delete',
-      // Schedules (blue — config)
+      // Schedules (blue - config)
       'schedule_create', 'schedule_delete',
-      // Access management (amber — security)
+      // Access management (amber - security)
       'grant_access', 'revoke_access',
-      // Shared data (blue — config)
+      // Shared data (blue - config)
       'shared_data_grant', 'shared_data_revoke',
-      // OAuth user creation
-      'create_user',
+      // Autoscale scale events (blue - config)
+      'autoscale_scale_up', 'autoscale_scale_down',
       // Deploy quota rejection (red)
       'deploy_rejected_quota',
     ];
@@ -2595,6 +2606,11 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) { /* non-critical */ }
   }
 
+  // detailLastEnvelope is updated by renderOverview (via ctx.setDetailEnvelope)
+  // and read by onMetrics to refresh the autoscale summary on each 10s poll
+  // without requiring a full GET /api/apps/:slug refetch.
+  let detailLastEnvelope = {};
+
   const metrics = createMetricsController({
     intervalMs: 10000,
     onMetrics: (slug, m) => {
@@ -2603,12 +2619,20 @@ document.addEventListener('DOMContentLoaded', () => {
       if (gridEl) {
         if (m.status !== 'running') {
           gridEl.textContent = '';
+        } else if (!m.metrics_available) {
+          // Top-level metrics_available is false when all running replicas are PID-less
+          // (Fargate / remote_docker). Rendering "0.0% CPU / 0 KB RAM" would mislead
+          // operators; show n/a instead with the standard tooltip from metricsText.
+          const { cpuText, ramText } = metricsText({ metrics_available: false });
+          gridEl.textContent = `CPU ${cpuText} · ${ramText} RAM`;
+          gridEl.title = 'Live CPU/RAM not collected for this backend (Fargate/remote tasks: see CloudWatch / the worker host)';
         } else {
           const cpu = m.cpu_percent.toFixed(1);
           const ram = m.rss_bytes >= 1 << 20
             ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
             : (m.rss_bytes / 1024).toFixed(0) + ' KB';
           gridEl.textContent = `CPU ${cpu}% · ${ram} RAM`;
+          gridEl.title = '';
         }
       }
       // Detail header (only when the detail view for this slug is visible).
@@ -2627,6 +2651,20 @@ document.addEventListener('DOMContentLoaded', () => {
           ramEl.textContent = `RAM ${ramMb}`;
         }
         renderReplicasPanel(m);
+
+        // Keep the stored envelope in sync with autoscale_status from the poll
+        // so renderAutoscaleSummary's cooldown row reflects the latest event
+        // without requiring a full GET /api/apps/:slug refetch.
+        if (m.autoscale_status) {
+          detailLastEnvelope.autoscale_status = m.autoscale_status;
+        }
+        const autoscaleDl = document.getElementById('autoscale-summary');
+        if (autoscaleDl && detailLastEnvelope.autoscale_status) {
+          const app = state.apps ? state.apps.find(a => a.slug === slug) : null;
+          if (app) {
+            renderAutoscaleSummary(autoscaleDl, summariseAutoscale(app, detailLastEnvelope));
+          }
+        }
       }
     },
   });
@@ -2652,21 +2690,20 @@ document.addEventListener('DOMContentLoaded', () => {
         ? '—'
         : (cap > 0 ? `${sessions}/${cap}` : String(sessions));
       const saturated = cap > 0 && sessions >= cap;
-      const cpu = (status === 'running' && typeof r.cpu_percent === 'number')
-        ? `${r.cpu_percent.toFixed(1)}%`
-        : '—';
-      const rssBytes = Number(r.rss_bytes || 0);
-      const ram = (status === 'running' && rssBytes > 0)
-        ? (rssBytes >= 1 << 20
-            ? (rssBytes / (1 << 20)).toFixed(0) + ' MB'
-            : (rssBytes / 1024).toFixed(0) + ' KB')
-        : '—';
+      // Use metricsText for honest display: PID-less replicas get "n/a".
+      const { cpuText, ramText, note } = metricsText(r);
+      const cpuDisplay = (status === 'running') ? cpuText : '—';
+      const ramDisplay = (status === 'running') ? ramText : '—';
+      // Escape the backend label: r.tier/r.provider come from operator YAML config
+      // and could contain HTML metacharacters if misconfigured.
+      const backend = escapeHtml(backendLabel(r));
       li.innerHTML = `
         <span class="replica-index">#${r.index}</span>
         <span class="badge badge-${status}">${formatStatus(status)}</span>
-        <span class="replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ` / cap` : ''}">${sessionsText} sessions</span>
-        <span class="replica-cpu">CPU ${cpu}</span>
-        <span class="replica-ram">RAM ${ram}</span>
+        <span class="replica-backend" title="Backend/tier">${backend}</span>
+        <span class="replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ' / cap' : ''}">${sessionsText} sessions</span>
+        <span class="replica-cpu">CPU ${cpuDisplay}</span>
+        <span class="replica-ram"${note ? ` title="${note}"` : ''}>RAM ${ramDisplay}</span>
       `;
       listEl.appendChild(li);
     }
@@ -2704,6 +2741,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSchedules,
     loadSharedData,
     refreshMemberList,
+    // setDetailEnvelope is called by renderOverview in app-detail.js to keep
+    // the stored envelope current so onMetrics can refresh the autoscale
+    // summary on each 10s poll without a full GET /api/apps/:slug refetch.
+    setDetailEnvelope: (env) => { detailLastEnvelope = env; },
   };
 
   const appDetailMount = mountAppDetail({

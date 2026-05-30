@@ -68,6 +68,46 @@ runtime:
     default_memory_mb: 512            # per-replica; pool total = replicas × memory_limit_mb; 0 = no limit
     default_cpu_percent: 100          # 100 = one full core; 0 = no limit
 
+  # Optional: AWS ECS/Fargate runtime. Required when any tier declares runtime: fargate.
+  fargate:
+    # --- Required fields (all required when a tier uses runtime: fargate) ---
+    cluster: ""                       # ECS cluster short name or full ARN  # SHINYHUB_RUNTIME_FARGATE_CLUSTER
+    task_definition: ""               # family, family:revision, or full ARN  # SHINYHUB_RUNTIME_FARGATE_TASK_DEFINITION
+    container_name: ""                # container in task_definition that receives per-replica overrides  # SHINYHUB_RUNTIME_FARGATE_CONTAINER_NAME
+    subnets:                          # awsvpc subnet IDs (at least one required)  # SHINYHUB_RUNTIME_FARGATE_SUBNETS
+      - subnet-xxxxxxxxxxxxxxxxx
+    control_plane_url: ""             # URL reachable from inside the task VPC, e.g. https://shiny.internal:8080  # SHINYHUB_RUNTIME_FARGATE_CONTROL_PLANE_URL
+                                      # SECURITY: when route_via_public_ip is true this MUST be https://
+                                      # A plain http:// URL sends the bundle token in cleartext over the public
+                                      # internet, making it replayable for the full bundle_token_ttl window.
+
+    # --- Task sizing (required; must satisfy the Fargate CPU/memory matrix) ---
+    #
+    # Valid CPU/memory combinations:
+    #   task_cpu_units | task_memory_mb range   | increment
+    #   256            | 512, 1024, 2048         | (discrete set)
+    #   512            | 1024 - 4096             | 1024 MB
+    #   1024           | 2048 - 8192             | 1024 MB
+    #   2048           | 4096 - 16384            | 1024 MB
+    #   4096           | 8192 - 30720            | 1024 MB
+    #   8192           | 16384 - 61440           | 4096 MB
+    #   16384          | 32768 - 122880          | 8192 MB
+    #
+    task_cpu_units: 512               # ECS task CPU units; 1 vCPU = 1024 units  # SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS
+    task_memory_mb: 1024              # ECS task memory in MiB  # SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB
+
+    # --- Optional fields ---
+    security_groups:                  # awsvpc security group IDs applied to each task ENI  # SHINYHUB_RUNTIME_FARGATE_SECURITY_GROUPS
+      - sg-xxxxxxxxxxxxxxxxx
+    assign_public_ip: false           # true for tasks in public subnets without a NAT gateway  # SHINYHUB_RUNTIME_FARGATE_ASSIGN_PUBLIC_IP
+    route_via_public_ip: false        # true routes to the task public IP (dev/test only; requires https control_plane_url)  # SHINYHUB_RUNTIME_FARGATE_ROUTE_VIA_PUBLIC_IP
+    platform_version: ""              # Fargate platform version, e.g. "1.4.0"; empty = ECS default ("LATEST")  # SHINYHUB_RUNTIME_FARGATE_PLATFORM_VERSION
+    region: ""                        # AWS region; empty = SDK default chain (AWS_REGION env, profile, IMDSv2)  # SHINYHUB_RUNTIME_FARGATE_REGION
+    bundle_token_ttl: 10m             # how long a minted bundle fetch token remains valid  # SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL
+                                      # increase if task cold-start (image pull + boot) regularly exceeds this window
+    default_memory_mb: 0              # per-replica container memory limit in MiB; 0 = no override (task definition applies)  # SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB
+    default_cpu_percent: 0            # per-replica container CPU quota; 0 = no override; 100 = 1 full core  # SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT
+
 # Optional: OAuth / OIDC login providers. Remove any block you don't use.
 oauth:
   github:

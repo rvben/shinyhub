@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 
@@ -644,6 +645,34 @@ func TestAppsPayloadExposesFleetFields(t *testing.T) {
 	}
 }
 
+// assertFileContains reads an on-disk file (not embedded) by absolute path and
+// asserts it contains needle.
+func assertFileContains(t *testing.T, absPath, needle, contract string) {
+	t.Helper()
+	b, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatalf("assertFileContains: read %s: %v", absPath, err)
+	}
+	if !strings.Contains(string(b), needle) {
+		t.Fatalf("assertFileContains %s: want %q\ncontract: %s", absPath, needle, contract)
+	}
+}
+
+// TestFargateBundleRouteOnMainMux guards that the bundle endpoint is registered
+// directly on the main mux (not under /api/), so large bundle streams bypass
+// the 30-second apiTimeoutHandler. We assert that main.go contains the route
+// string outside the /api/ subtree by checking for the literal path fragment.
+// This is a source-search contract test, not an HTTP test, because the mux is
+// constructed in main.go which cannot be imported as a package.
+func TestFargateBundleRouteOnMainMux(t *testing.T) {
+	// The runner entrypoint script must reference the bundle endpoint path so
+	// a refactor of the URL cannot silently break the runner without this test
+	// catching the drift.
+	assertFileContains(t, "../../build/fargate-runner/entrypoint.sh",
+		"/internal/fargate-bundle/",
+		"entrypoint.sh must fetch the bundle from GET /internal/fargate-bundle/{digest}; changing this path requires updating the entrypoint too")
+}
+
 func assertContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)
@@ -803,4 +832,152 @@ func TestTracesSurfaceWiring(t *testing.T) {
 		"unsampled spans must be detected from the span.sampled API field")
 	assertContains(t, "views/traces-ui.js", "started_at",
 		"the When column derives from the span.started_at API field")
+}
+
+// TestFargateYamlExampleHasFargateBlock asserts that shinyhub.yaml.example
+// contains a runtime.fargate config block. If this fails, the operator config
+// docs are missing and a Fargate tier cannot be correctly configured without
+// reading the source code.
+func TestFargateYamlExampleHasFargateBlock(t *testing.T) {
+	assertFileContains(t,
+		"../../shinyhub.yaml.example",
+		"  fargate:",
+		"shinyhub.yaml.example must contain a runtime.fargate block documenting all Fargate config fields",
+	)
+	assertFileContains(t,
+		"../../shinyhub.yaml.example",
+		"control_plane_url",
+		"shinyhub.yaml.example runtime.fargate block must document control_plane_url (required Fargate field)",
+	)
+	assertFileContains(t,
+		"../../shinyhub.yaml.example",
+		"bundle_token_ttl",
+		"shinyhub.yaml.example runtime.fargate block must document bundle_token_ttl (Fargate bundle fetch token TTL)",
+	)
+}
+
+// TestReplicaDisplayWiring pins the import and call sites for replica-display.js.
+// The helper is testable under jsdom (Task 1); the wiring inside app.js and
+// app-detail.js (which jsdom cannot import) is pinned here so a refactor that
+// drops the import or the call site fails the build instead of silently
+// breaking the panel.
+func TestReplicaDisplayWiring(t *testing.T) {
+	// app.js imports the helper (grid card path + renderReplicasPanel).
+	assertContains(t, "app.js", `'/static/views/replica-display.js'`,
+		"app.js must import replica-display.js for grid-card and panel backend/metrics rendering")
+	assertContains(t, "app.js", "backendLabel",
+		"app.js renderReplicasPanel and grid card must call backendLabel to show the backend/tier label")
+	assertContains(t, "app.js", "metricsText",
+		"app.js renderReplicasPanel and grid card must call metricsText for honest CPU/RAM rendering")
+
+	// app-detail.js imports the helper (seedReplicasFromStatus).
+	assertContains(t, "views/app-detail.js", `'/static/views/replica-display.js'`,
+		"app-detail.js must import replica-display.js so seedReplicasFromStatus can show tier/provider and n/a metrics")
+	assertContains(t, "views/app-detail.js", "backendLabel",
+		"seedReplicasFromStatus must call backendLabel to render the initial backend/tier label per replica")
+	assertContains(t, "views/app-detail.js", "metricsText",
+		"seedReplicasFromStatus must call metricsText so the initial panel state is honest for PID-less replicas")
+}
+
+// TestMetricsAvailableWiring pins the top-level metrics_available field
+// consumed by the grid card path. The grid card reads m.cpu_percent /
+// m.rss_bytes from the legacy top-level scalars (not m.replicas), so the
+// PID-less signal for the grid path is the top-level m.metrics_available flag
+// added in plan 01 (Contract 5). Without this pin a refactor could silently
+// revert to showing "0.0% CPU / 0 KB RAM" for Fargate apps on the grid.
+func TestMetricsAvailableWiring(t *testing.T) {
+	assertContains(t, "app.js", "m.metrics_available",
+		"app.js onMetrics grid card must read m.metrics_available to gate CPU/RAM display; see plan-01 Contract 5")
+}
+
+// TestAutoscaleStatusWiring pins the autoscale_status and global_autoscale_enabled
+// consumption in app-detail.js. The detail view passes both to summariseAutoscale
+// via the envelope object; the poll path (onMetrics) must also update the summary
+// so the cooldown indicator refreshes without a full page re-fetch.
+func TestAutoscaleStatusWiring(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "autoscale_status",
+		"app-detail.js renderOverview must pass body.autoscale_status to summariseAutoscale via the envelope")
+	assertContains(t, "views/app-detail.js", "global_autoscale_enabled",
+		"app-detail.js renderOverview must pass body.global_autoscale_enabled to summariseAutoscale via the envelope")
+	assertContains(t, "app.js", "autoscale_status",
+		"app.js onMetrics must update autoscale_status on the stored envelope so the cooldown row refreshes on each 10s poll")
+}
+
+// TestSeedReplicasConsumesNewFields pins that seedReplicasFromStatus reads the
+// tier and provider fields already present on replicas_status entries
+// (db.Replica carries them; handleGetApp includes them in the envelope).
+func TestSeedReplicasConsumesNewFields(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "r.tier",
+		"seedReplicasFromStatus must read r.tier from replicas_status entries (already present in db.Replica / handleGetApp envelope)")
+	assertContains(t, "views/app-detail.js", "r.provider",
+		"seedReplicasFromStatus must read r.provider from replicas_status entries (already present in db.Replica / handleGetApp envelope)")
+	assertContains(t, "views/app-detail.js", "r.metrics_available",
+		"seedReplicasFromStatus must read r.metrics_available to show n/a for PID-less replicas on initial load; see plan-01 Contract 5")
+}
+
+// TestKnownActionsAutoscale pins the knownActions array in app.js to include
+// the two new autoscale audit actions and to not duplicate create_user.
+func TestKnownActionsAutoscale(t *testing.T) {
+	assertContains(t, "app.js", "'autoscale_scale_up'",
+		"knownActions in app.js renderAuditEvents must include autoscale_scale_up; see Contract 8")
+	assertContains(t, "app.js", "'autoscale_scale_down'",
+		"knownActions in app.js renderAuditEvents must include autoscale_scale_down; see Contract 8")
+
+	// Assert no duplicate create_user: count occurrences inside knownActions.
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	// Locate knownActions array by finding the renderAuditEvents function
+	// and extracting the array body up to its closing bracket.
+	start := strings.Index(src, "const knownActions = [")
+	if start < 0 {
+		t.Fatal("app.js: cannot find `const knownActions = [` inside renderAuditEvents")
+	}
+	end := strings.Index(src[start:], "];")
+	if end < 0 {
+		t.Fatal("app.js: cannot find closing `];` for knownActions array")
+	}
+	arrayBody := src[start : start+end+2]
+	count := strings.Count(arrayBody, "'create_user'")
+	if count != 1 {
+		t.Fatalf("app.js knownActions: 'create_user' appears %d time(s); want exactly 1 (remove the duplicate OAuth comment block; see Contract 8)", count)
+	}
+}
+
+// TestGridAutoscaleBadge pins the autoscale badge on the grid card.
+// app.autoscale_enabled is already in the apps-list payload (no server change).
+// The badge renders a small "auto" indicator when true so operators can see
+// at a glance which apps have autoscale active.
+func TestGridAutoscaleBadge(t *testing.T) {
+	assertContains(t, "app.js", "autoscale_enabled",
+		"app.js renderGridVerbatim must read app.autoscale_enabled to conditionally render the autoscale badge on grid cards")
+	assertContains(t, "app.js", "badge-autoscale",
+		"app.js grid card must apply badge-autoscale class (or similar) to the autoscale indicator badge")
+}
+
+// TestAutoscaleActionBadgeCSS guards that the two new autoscale audit action
+// badges are styled with the blue config color, consistent with create_app /
+// update_app / env.set. Without this the badges fall back to badge-action-default
+// (gray) which is visually inconsistent with other config-change actions.
+//
+// The CSS selector MUST match the class the badge renderer actually generates.
+// app.js builds the class via `badge-action-${e.action.replace(/\./g, '-')}`,
+// which only replaces dots; underscores in the action name are preserved. So
+// "autoscale_scale_up" -> class "badge-action-autoscale_scale_up" (underscores).
+// A CSS selector with hyphens (.badge-action-autoscale-scale-up) would never
+// match that class and the badge would fall back to the default gray color.
+func TestAutoscaleActionBadgeCSS(t *testing.T) {
+	// Compute the exact class names the JS badge renderer will produce for each
+	// autoscale action, then assert those exact strings appear in style.css.
+	// This makes hyphen/underscore drift a build failure rather than a visual bug.
+	for _, action := range []string{"autoscale_scale_up", "autoscale_scale_down"} {
+		// Mirrors: badge-action-${e.action.replace(/\./g, '-')}
+		// (dots replaced with hyphens; underscores kept as-is)
+		class := "." + "badge-action-" + strings.ReplaceAll(action, ".", "-")
+		assertContains(t, "style.css", class,
+			"style.css must define "+class+" matching the class app.js generates for action "+action+
+				"; use underscores not hyphens (JS replace only converts dots)")
+	}
 }

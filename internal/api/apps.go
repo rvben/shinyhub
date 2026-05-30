@@ -244,6 +244,13 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	asEvent, asFound, asErr := s.store.LatestAutoscaleEvent(slug)
+	if asErr != nil {
+		slog.Warn("autoscale status query", "err", asErr)
+	}
+	asStatus := buildAutoscaleStatus(asEvent, asFound, s.cfg.Runtime.Autoscale.Cooldown)
+	envelope["autoscale_status"] = asStatus
+	envelope["global_autoscale_enabled"] = s.cfg.Runtime.Autoscale.Enabled
 	writeJSON(w, http.StatusOK, envelope)
 }
 
@@ -547,6 +554,38 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Write-time rejection for single-tier Fargate deployments: a per-app
+	// memory or CPU limit that exceeds the task-definition ceiling would cause
+	// a cryptic RunTask error. Reject it here when every declared tier uses the
+	// fargate runtime so the operator gets a clear message. For mixed-tier
+	// deployments (some tiers are docker/native), the RunTask clamp in
+	// fargate.buildContainerOverride handles the enforcement silently because a
+	// single ceiling answer does not exist at the API layer.
+	if s.allTiersFargate() {
+		fargateCfg := s.cfg.Runtime.Fargate
+		if setMemoryLimitMB && memoryLimitMB != nil && *memoryLimitMB > 0 &&
+			fargateCfg.TaskMemoryMB > 0 && *memoryLimitMB > fargateCfg.TaskMemoryMB {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("memory_limit_mb %d exceeds the Fargate task ceiling of %d MiB (runtime.fargate.task_memory_mb); reduce the limit or raise the task definition",
+					*memoryLimitMB, fargateCfg.TaskMemoryMB))
+			return
+		}
+		// CPU: convert quota percent to ECS units for the ceiling comparison using
+		// integer division (conservative: rejects only when the truncated units
+		// clearly exceed the ceiling; the clamp in buildContainerOverride rounds
+		// so the write-time check is never more restrictive than the actual cap).
+		if setCPUQuotaPercent && cpuQuotaPercent != nil && *cpuQuotaPercent > 0 &&
+			fargateCfg.TaskCPUUnits > 0 {
+			cpuUnits := (*cpuQuotaPercent * 1024) / 100
+			if cpuUnits > fargateCfg.TaskCPUUnits {
+				writeError(w, http.StatusBadRequest,
+					fmt.Sprintf("cpu_quota_percent %d%% (%d units) exceeds the Fargate task ceiling of %d units (runtime.fargate.task_cpu_units)",
+						*cpuQuotaPercent, cpuUnits, fargateCfg.TaskCPUUnits))
+				return
+			}
+		}
+	}
+
 	if checkAppPreconditions(w, r, app) {
 		return
 	}
@@ -681,14 +720,15 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		}
 		return
 	}
+	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          prev.ID,
@@ -945,14 +985,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	deployDefaultMem, deployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, deployDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         digest,
 		DeploymentID:          pendingDep.ID,
@@ -1209,14 +1250,15 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
+	rollbackDefaultMem, rollbackDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, rollbackDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, rollbackDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          pendingDep.ID,
@@ -1339,14 +1381,15 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
+	restartDefaultMem, restartDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, restartDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, restartDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
@@ -1748,7 +1791,19 @@ type replicaMetrics struct {
 	RSSBytes   int64   `json:"rss_bytes,omitempty"`
 	// Sessions is the proxy's best-effort live connection count for this
 	// replica. Omitted (and -1 internally) when the replica slot is empty.
-	Sessions int64 `json:"sessions"`
+	Sessions         int64  `json:"sessions"`
+	Tier             string `json:"tier,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	MetricsAvailable bool   `json:"metrics_available"`
+}
+
+// autoscaleStatus is the live autoscale state returned in the metrics poll and
+// app envelope. Timestamps are pointers so they marshal as null when absent.
+type autoscaleStatus struct {
+	LastActionAt  *time.Time `json:"last_action_at"`
+	LastAction    string     `json:"last_action"`
+	InCooldown    bool       `json:"in_cooldown"`
+	CooldownUntil *time.Time `json:"cooldown_until"`
 }
 
 type metricsResponse struct {
@@ -1758,14 +1813,37 @@ type metricsResponse struct {
 	Status string `json:"status"`
 	// SessionsCap is the per-replica session cap currently in effect for
 	// this pool. 0 means uncapped.
-	SessionsCap int              `json:"sessions_cap"`
-	Replicas    []replicaMetrics `json:"replicas"`
+	SessionsCap      int              `json:"sessions_cap"`
+	Replicas         []replicaMetrics `json:"replicas"`
+	MetricsAvailable bool             `json:"metrics_available"`
+	AutoscaleStatus  *autoscaleStatus `json:"autoscale_status"`
 	// Legacy fields preserved so existing clients (dashboard card poller)
 	// keep working while they adopt the per-replica view. These mirror the
 	// first running replica.
 	PID        int     `json:"pid,omitempty"`
 	CPUPercent float64 `json:"cpu_percent,omitempty"`
 	RSSBytes   int64   `json:"rss_bytes,omitempty"`
+}
+
+// buildAutoscaleStatus computes the autoscale_status object from the latest
+// audit event. When found is false (no scale events yet), returns a zero-state
+// object with safe defaults so the client never has to branch on a missing key.
+func buildAutoscaleStatus(event db.AuditEvent, found bool, cooldown time.Duration) autoscaleStatus {
+	if !found {
+		return autoscaleStatus{}
+	}
+	cooldownUntil := event.CreatedAt.Add(cooldown)
+	inCooldown := time.Now().Before(cooldownUntil)
+	action := "up"
+	if event.Action == "autoscale_scale_down" {
+		action = "down"
+	}
+	return autoscaleStatus{
+		LastActionAt:  &event.CreatedAt,
+		LastAction:    action,
+		InCooldown:    inCooldown,
+		CooldownUntil: &cooldownUntil,
+	}
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -1813,11 +1891,17 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		rm.Status = string(info.Status)
 		rm.PID = info.PID
+		rm.Tier = info.Tier
+		rm.Provider = info.Provider
 		if info.Status == process.StatusRunning {
 			if handle, ok := s.manager.HandleReplica(slug, i); ok {
 				if stats, err := s.sampler.Sample(handle); err == nil {
 					rm.CPUPercent = stats.CPUPercent
 					rm.RSSBytes = stats.RSSBytes
+					// MetricsAvailable is true only when the sample succeeded for a
+					// PID-backed handle; a zero PID (Fargate/remote_docker) or a
+					// failed sample both mean live CPU/RAM are not available.
+					rm.MetricsAvailable = handle.PID != 0
 				} else {
 					rm.Status = string(process.StatusStopped)
 				}
@@ -1832,10 +1916,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.Replicas = append(resp.Replicas, rm)
+		if rm.MetricsAvailable && rm.Status == string(process.StatusRunning) {
+			resp.MetricsAvailable = true
+		}
 	}
 	if anyRunning {
 		resp.Status = string(process.StatusRunning)
 	}
+
+	metricsEvent, metricsFound, metricsErr := s.store.LatestAutoscaleEvent(slug)
+	if metricsErr != nil {
+		slog.Warn("autoscale status metrics query", "err", metricsErr)
+	}
+	metricsAS := buildAutoscaleStatus(metricsEvent, metricsFound, s.cfg.Runtime.Autoscale.Cooldown)
+	resp.AutoscaleStatus = &metricsAS
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1894,4 +1988,22 @@ func parsePagination(r *http.Request) (limit, offset int) {
 		}
 	}
 	return limit, offset
+}
+
+// allTiersFargate reports true when every declared runtime tier uses the
+// "fargate" runtime. Used to scope write-time resource-ceiling enforcement to
+// single-tier Fargate deployments where a single task-level ceiling applies to
+// all replicas; mixed-tier deployments are guarded at RunTask time instead.
+func (s *Server) allTiersFargate() bool {
+	tiers := s.cfg.Runtime.TierOrder()
+	if len(tiers) == 0 {
+		return false
+	}
+	for _, t := range tiers {
+		rt, _ := s.cfg.Runtime.RuntimeForTier(t)
+		if rt != "fargate" {
+			return false
+		}
+	}
+	return true
 }

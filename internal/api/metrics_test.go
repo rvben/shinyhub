@@ -354,3 +354,51 @@ func TestGetMetrics_RunningWithStats(t *testing.T) {
 		t.Errorf("expected rss_bytes=%d, got %v", 1<<20, resp["rss_bytes"])
 	}
 }
+
+// TestGetMetrics_SamplerError_MetricsAvailableFalse asserts that a replica whose
+// Sample call fails reports metrics_available=false and status="stopped". The
+// flag must not be set true before the sample result is known, because PID!=0
+// alone does not mean live metrics are available (the process may have exited
+// between HandleReplica and Sample).
+func TestGetMetrics_SamplerError_MetricsAvailableFalse(t *testing.T) {
+	srv, store, mgr := newMetricsTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	// PID is non-zero so the PID-less check would pass, but Sample fails.
+	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", PID: 12345, Status: process.StatusRunning})
+	srv.SetSampler(fakeMetricsSampler{err: errors.New("process gone")})
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/metrics", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Replicas []struct {
+			Status           string `json:"status"`
+			MetricsAvailable bool   `json:"metrics_available"`
+		} `json:"replicas"`
+		MetricsAvailable bool `json:"metrics_available"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Replicas) != 1 {
+		t.Fatalf("expected 1 replica, got %d", len(resp.Replicas))
+	}
+	if resp.Replicas[0].Status != "stopped" {
+		t.Errorf("replica status = %q, want stopped (sample failed)", resp.Replicas[0].Status)
+	}
+	if resp.Replicas[0].MetricsAvailable {
+		t.Errorf("replica metrics_available = true, want false when sample fails")
+	}
+	if resp.MetricsAvailable {
+		t.Errorf("top-level metrics_available = true, want false when all samples fail")
+	}
+}

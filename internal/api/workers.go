@@ -150,26 +150,23 @@ func (a *WorkerAPI) authenticatedNodeID(r *http.Request) (string, bool) {
 	return nodeID, true
 }
 
-// HandleBundleFetch streams the stored bundle zip for a content digest. The
-// caller (agent) verifies the digest on receipt, so this path only resolves the
-// digest to a deployment and serves its archived zip artifact.
-func (a *WorkerAPI) HandleBundleFetch(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authenticatedNodeID(r); !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	digest := chi.URLParam(r, "digest")
-	dep, err := a.store.GetDeploymentByDigest(digest)
+// serveBundleByDigest resolves digest to a deployment, opens the stored bundle
+// zip, and streams it to w. It is the shared implementation called by both the
+// worker mTLS handler (HandleBundleFetch) and the Fargate capability-token
+// handler (FargateBundleHandler.Handle). Both callers perform their own
+// authentication before delegating here.
+func serveBundleByDigest(w http.ResponseWriter, r *http.Request, store *db.Store, appsDir, digest string) {
+	dep, err := store.GetDeploymentByDigest(digest)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "bundle not found")
 		return
 	}
-	app, err := a.store.GetAppByID(dep.AppID)
+	app, err := store.GetAppByID(dep.AppID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "bundle not found")
 		return
 	}
-	zipPath := filepath.Join(a.appsDir, app.Slug, "bundles", dep.Version+".zip")
+	zipPath := filepath.Join(appsDir, app.Slug, "bundles", dep.Version+".zip")
 	f, err := os.Open(zipPath)
 	if err != nil {
 		slog.Error("bundle fetch: open artifact", "digest", digest, "path", zipPath, "err", err)
@@ -179,4 +176,18 @@ func (a *WorkerAPI) HandleBundleFetch(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/zip")
 	http.ServeContent(w, r, dep.Version+".zip", time.Time{}, f)
+}
+
+// HandleBundleFetch streams the stored bundle zip for a content digest. The
+// caller (worker agent) presents a mTLS client certificate for authentication.
+// Bundle serving is delegated to the shared serveBundleByDigest helper so both
+// the mTLS worker path and the Fargate capability-token path have identical
+// behavior.
+func (a *WorkerAPI) HandleBundleFetch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.authenticatedNodeID(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	digest := chi.URLParam(r, "digest")
+	serveBundleByDigest(w, r, a.store, a.appsDir, digest)
 }

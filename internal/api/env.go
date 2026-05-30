@@ -251,14 +251,15 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
+	envDefaultMem, envDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, runErr := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
 		Manager:               s.manager,
 		Proxy:                 s.proxy,
-		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, s.cfg.Runtime.Docker.DefaultMemoryMB),
-		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, s.cfg.Runtime.Docker.DefaultCPUPercent),
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, envDefaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, envDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,

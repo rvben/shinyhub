@@ -8,6 +8,8 @@ import {
   renderRejectsByReason,
   readAutoscaleForm,
   parseReplicaBound,
+  formatRelative,
+  formatCountdown,
 } from '../static/views/autoscale.js';
 
 // summariseAutoscale normalises the {app, effective_autoscale_target} slice of
@@ -37,6 +39,11 @@ test('summariseAutoscale reads the app + effective fields and flags inheritance'
     effectiveTarget: 0.75,
     inheritsTarget: false,
     drift: false,
+    lastActionAt: null,
+    lastAction: '',
+    inCooldown: false,
+    cooldownUntil: null,
+    globalEnabled: true,
   });
 });
 
@@ -117,6 +124,8 @@ test('summariseAutoscale tolerates missing fields with safe defaults', () => {
   assert.deepEqual(got, {
     enabled: false, current: 1, min: 1, max: 1, target: 0,
     effectiveTarget: 0, inheritsTarget: true, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false,
+    cooldownUntil: null, globalEnabled: true,
   });
 });
 
@@ -457,3 +466,260 @@ test('readAutoscaleForm reads exponent-notation bounds as their numeric value, n
     `want max_replicas=100 from "1e2", got ${got.payload && got.payload.max_replicas}`);
 });
 
+// ---- formatRelative ----
+
+test('formatRelative returns "" for falsy tsMs', () => {
+  assert.equal(formatRelative(Date.now(), null), '');
+  assert.equal(formatRelative(Date.now(), 0), '');
+  assert.equal(formatRelative(Date.now(), undefined), '');
+});
+
+test('formatRelative returns "just now" for ts within 60 s', () => {
+  const now = Date.now();
+  const got = formatRelative(now, now - 30_000);
+  assert.equal(got, 'just now');
+});
+
+test('formatRelative returns minutes for ts 2-59 min ago', () => {
+  const now = Date.now();
+  const got = formatRelative(now, now - 2 * 60_000);
+  assert.match(got, /2 minutes? ago/);
+});
+
+test('formatRelative returns hours for ts 1-23 h ago', () => {
+  const now = Date.now();
+  const got = formatRelative(now, now - 90 * 60_000);
+  assert.match(got, /1 hour ago/);
+});
+
+test('formatRelative returns days for ts 24 h+ ago', () => {
+  const now = Date.now();
+  const got = formatRelative(now, now - 25 * 3600_000);
+  assert.match(got, /1 day ago/);
+});
+
+// ---- formatCountdown ----
+
+test('formatCountdown returns "" for falsy untilMs', () => {
+  assert.equal(formatCountdown(Date.now(), null), '');
+  assert.equal(formatCountdown(Date.now(), 0), '');
+});
+
+test('formatCountdown returns "ready" when cooldown has passed', () => {
+  const now = Date.now();
+  assert.equal(formatCountdown(now, now - 1000), 'ready');
+});
+
+test('formatCountdown returns "in N s" for sub-minute remaining', () => {
+  const now = Date.now();
+  const got = formatCountdown(now, now + 43_000);
+  assert.match(got, /in \d+ s/);
+});
+
+test('formatCountdown returns "in N m" for sub-hour remaining', () => {
+  const now = Date.now();
+  const got = formatCountdown(now, now + 3 * 60_000);
+  assert.match(got, /in \d+ m/);
+});
+
+// ---- summariseAutoscale new fields (safe-default design) ----
+
+test('summariseAutoscale returns safe defaults for new fields when absent', () => {
+  // Existing callers pass objects without the new fields; these must not error
+  // and must return safe defaults so old tests and edge-case envelopes are stable.
+  const got = summariseAutoscale(
+    { autoscale_enabled: true, autoscale_min_replicas: 1, autoscale_max_replicas: 4,
+      autoscale_target: 0.75, replicas: 2 },
+    { effective_autoscale_target: 0.75 },
+  );
+  assert.equal(got.lastActionAt, null, 'lastActionAt defaults to null');
+  assert.equal(got.lastAction, '', 'lastAction defaults to empty string');
+  assert.equal(got.inCooldown, false, 'inCooldown defaults to false');
+  assert.equal(got.cooldownUntil, null, 'cooldownUntil defaults to null');
+  assert.equal(got.globalEnabled, true, 'globalEnabled defaults to true (no spurious kill-switch warning)');
+});
+
+test('summariseAutoscale parses autoscale_status and global_autoscale_enabled from envelope', () => {
+  const lastAt = new Date('2026-05-30T10:00:00Z');
+  const coolUntil = new Date('2026-05-30T10:05:00Z');
+  const got = summariseAutoscale(
+    { autoscale_enabled: true, autoscale_min_replicas: 1, autoscale_max_replicas: 4,
+      autoscale_target: 0.75, replicas: 2 },
+    {
+      effective_autoscale_target: 0.75,
+      autoscale_status: {
+        last_action_at: lastAt.toISOString(),
+        last_action: 'up',
+        in_cooldown: true,
+        cooldown_until: coolUntil.toISOString(),
+      },
+      global_autoscale_enabled: false,
+    },
+  );
+  assert.ok(got.lastActionAt instanceof Date, 'lastActionAt must be a Date');
+  assert.equal(got.lastActionAt.getTime(), lastAt.getTime());
+  assert.equal(got.lastAction, 'up');
+  assert.equal(got.inCooldown, true);
+  assert.ok(got.cooldownUntil instanceof Date, 'cooldownUntil must be a Date');
+  assert.equal(got.cooldownUntil.getTime(), coolUntil.getTime());
+  assert.equal(got.globalEnabled, false);
+});
+
+// ---- renderAutoscaleSummary additions ----
+
+test('renderAutoscaleSummary with safe defaults: existing rows only, no errors', () => {
+  // When the new fields are absent (old code path), only the existing 3 rows
+  // render and no exception is thrown. This is the backward-compat contract.
+  const dom = new JSDOM('<dl id="dl"></dl>');
+  const dl = dom.window.document.getElementById('dl');
+  // Should not throw with minimal s object (no new fields).
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 2, min: 1, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false, cooldownUntil: null,
+    globalEnabled: true,
+  });
+  const rows = dl.querySelectorAll('dt');
+  assert.ok(rows.length >= 3, `want at least 3 rows; got ${rows.length}`);
+  // No "Last scaled" row when lastAction is empty.
+  const text = dl.textContent;
+  assert.ok(!text.includes('Last scaled') || text.includes('never'),
+    'when lastAction="" the Last scaled row should either be absent or say "never"');
+});
+
+test('renderAutoscaleSummary shows "Last scaled" row with direction when lastAction is set', () => {
+  const dom = new JSDOM('<dl id="dl"></dl>');
+  const dl = dom.window.document.getElementById('dl');
+  const now = Date.now();
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 3, min: 1, max: 8,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
+    lastActionAt: new Date(now - 90_000),
+    lastAction: 'up',
+    inCooldown: false, cooldownUntil: null,
+    globalEnabled: true,
+  });
+  assert.match(dl.textContent, /Last scaled/i);
+  assert.match(dl.textContent, /up/i);
+  assert.match(dl.textContent, /ago/i);
+});
+
+test('renderAutoscaleSummary shows "Cooldown" row with "ready" when not in cooldown', () => {
+  const dom = new JSDOM('<dl id="dl"></dl>');
+  const dl = dom.window.document.getElementById('dl');
+  const now = Date.now();
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 2, min: 1, max: 4,
+    target: 0.5, effectiveTarget: 0.5, inheritsTarget: false, drift: false,
+    lastActionAt: new Date(now - 5 * 60_000),
+    lastAction: 'down',
+    inCooldown: false, cooldownUntil: new Date(now - 1000),
+    globalEnabled: true,
+  });
+  assert.match(dl.textContent, /Cooldown/i);
+  assert.match(dl.textContent, /ready/i);
+});
+
+test('renderAutoscaleSummary shows in-cooldown countdown when inCooldown is true', () => {
+  const dom = new JSDOM('<dl id="dl"></dl>');
+  const dl = dom.window.document.getElementById('dl');
+  const now = Date.now();
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 4, min: 1, max: 8,
+    target: 0.5, effectiveTarget: 0.5, inheritsTarget: false, drift: false,
+    lastActionAt: new Date(now - 30_000),
+    lastAction: 'up',
+    inCooldown: true, cooldownUntil: new Date(now + 90_000),
+    globalEnabled: true,
+  });
+  assert.match(dl.textContent, /Cooldown/i);
+  // in 1 m or in N s depending on remaining time
+  assert.match(dl.textContent, /in \d+/i);
+});
+
+test('renderAutoscaleSummary shows kill-switch warning when enabled && !globalEnabled', () => {
+  const dom = new JSDOM('<dl id="dl"></dl>');
+  const dl = dom.window.document.getElementById('dl');
+  renderAutoscaleSummary(dl, {
+    enabled: true, current: 2, min: 1, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false, cooldownUntil: null,
+    globalEnabled: false,
+  });
+  // The warning must mention the global controller being disabled.
+  assert.match(dl.parentNode.textContent || dl.textContent,
+    /global controller is disabled|runtime\.autoscale\.enabled=false/i);
+});
+
+test('renderAutoscaleSummary does NOT show kill-switch warning when autoscale is disabled', () => {
+  // app.autoscale_enabled = false, global = false: no warning needed because
+  // autoscale wasn't going to run anyway.
+  const dom = new JSDOM('<dl id="dl"></dl>');
+  const dl = dom.window.document.getElementById('dl');
+  renderAutoscaleSummary(dl, {
+    enabled: false, current: 1, min: 1, max: 4,
+    target: 0, effectiveTarget: 0.8, inheritsTarget: true, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false, cooldownUntil: null,
+    globalEnabled: false,
+  });
+  // No warning when app autoscale is disabled regardless of global flag.
+  const fullText = (dl.parentNode || dl).textContent;
+  assert.ok(
+    !fullText.includes('global controller is disabled'),
+    'kill-switch warning must not appear when app autoscale is disabled',
+  );
+});
+
+// ---- Kill-switch warning accumulation regression ----
+
+test('renderAutoscaleSummary: kill-switch warning does not accumulate across repeated calls', () => {
+  // Regression: the warning <p> was appended to dl.parentNode on every call but
+  // dl.innerHTML='' only clears dl itself, so each 10s poll added another warning.
+  const dom = new JSDOM('<section><dl id="dl"></dl></section>');
+  const dl = dom.window.document.getElementById('dl');
+  const s = {
+    enabled: true, current: 2, min: 1, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false, cooldownUntil: null,
+    globalEnabled: false,
+  };
+
+  renderAutoscaleSummary(dl, s);
+  renderAutoscaleSummary(dl, s);
+  const warnings = dl.parentNode.querySelectorAll('.autoscale-killswitch-warning');
+  assert.equal(warnings.length, 1,
+    `want exactly 1 kill-switch warning after 2 renders; got ${warnings.length}`);
+});
+
+test('renderAutoscaleSummary: kill-switch warning is removed when globalEnabled flips back to true', () => {
+  const dom = new JSDOM('<section><dl id="dl"></dl></section>');
+  const dl = dom.window.document.getElementById('dl');
+  const sKilled = {
+    enabled: true, current: 2, min: 1, max: 4,
+    target: 0.75, effectiveTarget: 0.75, inheritsTarget: false, drift: false,
+    lastActionAt: null, lastAction: '', inCooldown: false, cooldownUntil: null,
+    globalEnabled: false,
+  };
+  const sOk = { ...sKilled, globalEnabled: true };
+
+  renderAutoscaleSummary(dl, sKilled);
+  assert.equal(dl.parentNode.querySelectorAll('.autoscale-killswitch-warning').length, 1,
+    'warning must appear when globalEnabled=false');
+
+  renderAutoscaleSummary(dl, sOk);
+  assert.equal(dl.parentNode.querySelectorAll('.autoscale-killswitch-warning').length, 0,
+    'warning must be removed when globalEnabled flips back to true');
+});
+
+// ---- formatRelative future timestamp (clock skew) ----
+
+test('formatRelative returns "just now" for a future timestamp (clock skew)', () => {
+  // A timestamp in the future (server clock ahead of client) must not produce
+  // "-N days ago". The guard clamps any negative diff to "just now".
+  const now = Date.now();
+  // Small skew: sub-minute; the < 60 branch catches this without the guard.
+  assert.equal(formatRelative(now, now + 5_000), 'just now');
+  // Large skew: server 25 h ahead; without the guard this falls through to the
+  // days branch and produces "-1 days ago".
+  assert.equal(formatRelative(now, now + 25 * 3600_000), 'just now');
+});

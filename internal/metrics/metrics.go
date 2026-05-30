@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rvben/shinyhub/internal/httproute"
 )
 
 // Registry bundles a private Prometheus registry with the server's HTTP
@@ -27,6 +28,15 @@ type Registry struct {
 	deploys          *prometheus.CounterVec
 	stateTransitions *prometheus.CounterVec
 	replicaRestarts  prometheus.Counter
+
+	// Fargate AWS operation metrics.
+	fargateRunTaskTotal         *prometheus.CounterVec
+	fargateWaitIPTimeoutTotal   prometheus.Counter
+	fargateStopTaskTotal        *prometheus.CounterVec
+	fargateInventoryErrorsTotal prometheus.Counter
+	fargateRunTaskDuration      prometheus.Histogram
+
+	autoscaleScales *prometheus.CounterVec
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -89,6 +99,43 @@ func New(version string) *Registry {
 	})
 	reg.MustRegister(replicaRestarts)
 
+	fargateRunTaskTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_run_task_total",
+		Help: "Total ECS RunTask calls by result (ok or error).",
+	}, []string{"result"})
+	reg.MustRegister(fargateRunTaskTotal)
+
+	fargateWaitIPTimeoutTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_wait_ip_timeout_total",
+		Help: "Total Fargate tasks that did not acquire an IP within the start timeout.",
+	})
+	reg.MustRegister(fargateWaitIPTimeoutTotal)
+
+	fargateStopTaskTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_stop_task_total",
+		Help: "Total ECS StopTask calls by result (ok or error).",
+	}, []string{"result"})
+	reg.MustRegister(fargateStopTaskTotal)
+
+	fargateInventoryErrorsTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_fargate_inventory_errors_total",
+		Help: "Total errors returned by the Fargate Inventory call (ListTasks or DescribeTasks failures).",
+	})
+	reg.MustRegister(fargateInventoryErrorsTotal)
+
+	fargateRunTaskDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "shinyhub_fargate_run_task_duration_seconds",
+		Help:    "Latency of ECS RunTask calls from issue to response (not including IP-wait).",
+		Buckets: []float64{0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+	})
+	reg.MustRegister(fargateRunTaskDuration)
+
+	autoscaleScales := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_autoscale_scale_total",
+		Help: "Total autoscale replica scaling actions by direction (up or down).",
+	}, []string{"direction"})
+	reg.MustRegister(autoscaleScales)
+
 	return &Registry{
 		reg:              reg,
 		httpRequests:     httpRequests,
@@ -97,6 +144,14 @@ func New(version string) *Registry {
 		deploys:          deploys,
 		stateTransitions: stateTransitions,
 		replicaRestarts:  replicaRestarts,
+
+		fargateRunTaskTotal:         fargateRunTaskTotal,
+		fargateWaitIPTimeoutTotal:   fargateWaitIPTimeoutTotal,
+		fargateStopTaskTotal:        fargateStopTaskTotal,
+		fargateInventoryErrorsTotal: fargateInventoryErrorsTotal,
+		fargateRunTaskDuration:      fargateRunTaskDuration,
+
+		autoscaleScales: autoscaleScales,
 	}
 }
 
@@ -143,16 +198,61 @@ func (r *Registry) RecordReject(slug, reason string) {
 	r.admissionRejects.WithLabelValues(slug, reason).Inc()
 }
 
+// RecordRunTask satisfies fargate.FargateMetrics. result is "ok" or "error".
+func (r *Registry) RecordRunTask(result string) {
+	r.fargateRunTaskTotal.WithLabelValues(result).Inc()
+}
+
+// RecordWaitIPTimeout satisfies fargate.FargateMetrics.
+func (r *Registry) RecordWaitIPTimeout() {
+	r.fargateWaitIPTimeoutTotal.Inc()
+}
+
+// RecordStopTask satisfies fargate.FargateMetrics. result is "ok" or "error".
+func (r *Registry) RecordStopTask(result string) {
+	r.fargateStopTaskTotal.WithLabelValues(result).Inc()
+}
+
+// RecordInventoryError satisfies fargate.FargateMetrics.
+func (r *Registry) RecordInventoryError() {
+	r.fargateInventoryErrorsTotal.Inc()
+}
+
+// ObserveRunTaskLatency satisfies fargate.FargateMetrics. seconds is the
+// duration from RunTask issue to response (not including IP-wait).
+func (r *Registry) ObserveRunTaskLatency(seconds float64) {
+	r.fargateRunTaskDuration.Observe(seconds)
+}
+
+// RecordAutoscaleScale satisfies autoscale.AutoscaleMetrics.
+// direction is "up" or "down".
+func (r *Registry) RecordAutoscaleScale(direction string) {
+	r.autoscaleScales.WithLabelValues(direction).Inc()
+}
+
 // Middleware records a request count and latency observation for every request,
 // labeled by the matched chi route PATTERN (not the raw path) so high-cardinality
 // path parameters and unmatched 404 scans cannot explode the series count.
+//
+// Route pattern resolution uses a two-tier priority: httproute.PatternFromContext
+// is checked first. When set (by api.Observe before the inner handler runs), it
+// provides an immutable string copy that is safe to read after next.ServeHTTP
+// returns even across an http.TimeoutHandler boundary. When it is absent (e.g.
+// this middleware is mounted directly inside chi without the Observe wrapper),
+// chi.RouteContext is consulted as a fallback so the standard chi-as-middleware
+// use case continues to work.
 func (r *Registry) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ww := chimw.NewWrapResponseWriter(w, req.ProtoMajor)
 		start := time.Now()
 		next.ServeHTTP(ww, req)
 
-		route := chi.RouteContext(req.Context()).RoutePattern()
+		route := httproute.PatternFromContext(req.Context())
+		if route == "" {
+			if rc := chi.RouteContext(req.Context()); rc != nil {
+				route = rc.RoutePattern()
+			}
+		}
 		if route == "" {
 			route = "unmatched"
 		}
