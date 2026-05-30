@@ -21,7 +21,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	"github.com/go-chi/chi/v5"
-	"golang.org/x/crypto/hkdf"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -47,6 +46,7 @@ import (
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/hkdf"
 )
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z".
@@ -248,8 +248,8 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, bundleTokenKey
 		AssignPublicIP:   fc.AssignPublicIP,
 		PlatformVersion:  fc.PlatformVersion,
 		RouteViaPublicIP: fc.RouteViaPublicIP,
-		TaskCPUUnits:     int32(fc.TaskCPUUnits),   // operator-configured task ceiling
-		TaskMemoryMB:     int32(fc.TaskMemoryMB),   // operator-configured task ceiling
+		TaskCPUUnits:     int32(fc.TaskCPUUnits), // operator-configured task ceiling
+		TaskMemoryMB:     int32(fc.TaskMemoryMB), // operator-configured task ceiling
 		ControlPlaneURL:  fc.ControlPlaneURL,
 		BundleTokenTTL:   fc.BundleTokenTTL,
 		BundleTokenKey:   bundleTokenKey,

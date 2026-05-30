@@ -28,9 +28,9 @@ func (stubRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint6
 func (stubRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
 }
-func (stubRuntime) HostPreparesDeps() bool                             { return false }
-func (stubRuntime) AppBindHost() string                                { return "127.0.0.1" }
-func (stubRuntime) HostProvidesAppData() bool                         { return false }
+func (stubRuntime) HostPreparesDeps() bool                               { return false }
+func (stubRuntime) AppBindHost() string                                  { return "127.0.0.1" }
+func (stubRuntime) HostProvidesAppData() bool                            { return false }
 func (stubRuntime) ReplicaTransportForWorker(_ string) http.RoundTripper { return nil }
 
 func buildTestApp(slug string, replicas int) *db.App {
@@ -72,8 +72,8 @@ func TestRecoverRemoteReplica_FargatePartialAdoptWhenNoURL(t *testing.T) {
 			"shinyhub.replica_index": "0",
 			"shinyhub.deployment_id": "42",
 		},
-		Running:  true,  // PROVISIONING = not stopped
-		URL:      "",    // no IP yet
+		Running:  true, // PROVISIONING = not stopped
+		URL:      "",   // no IP yet
 		WorkerID: fargate.WorkerID,
 	}}
 
@@ -159,7 +159,7 @@ func TestRecoverRemoteReplica_RemoteDockerEmptyURLReturnsFalse(t *testing.T) {
 			"shinyhub.deployment_id": "10",
 		},
 		Running:  true,
-		URL:      "",             // empty URL for remote_docker = error
+		URL:      "", // empty URL for remote_docker = error
 		WorkerID: "worker-node-1",
 	}}
 

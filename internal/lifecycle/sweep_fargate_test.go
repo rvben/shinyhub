@@ -28,9 +28,9 @@ func (noopRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint6
 func (noopRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
 }
-func (noopRuntime) HostPreparesDeps() bool                             { return false }
-func (noopRuntime) AppBindHost() string                                { return "127.0.0.1" }
-func (noopRuntime) HostProvidesAppData() bool                         { return false }
+func (noopRuntime) HostPreparesDeps() bool                               { return false }
+func (noopRuntime) AppBindHost() string                                  { return "127.0.0.1" }
+func (noopRuntime) HostProvidesAppData() bool                            { return false }
 func (noopRuntime) ReplicaTransportForWorker(_ string) http.RoundTripper { return nil }
 
 // fakeFargateTaskSweeper implements lifecycle.FargateTaskSweeper for testing.

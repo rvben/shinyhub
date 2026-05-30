@@ -61,7 +61,7 @@ type Controller struct {
 	lister   Lister
 	signal   Signal
 	scaler   Scaler
-	recorder AuditRecorder  // records scale events to the audit log
+	recorder AuditRecorder // records scale events to the audit log
 	log      *slog.Logger
 	metrics  AutoscaleMetrics // nil until SetMetrics is called
 

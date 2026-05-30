@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint run dev goreleaser-check build-runner-image
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint fmt fmt-check run dev goreleaser-check build-runner-image
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -38,6 +38,18 @@ test-fargate-it:
 
 lint:
 	go vet ./...
+
+# fmt rewrites all tracked Go files with gofmt (go 1.26 canonical formatting).
+# Scoped to tracked files via git ls-files so nested worktrees under .claude/
+# or .claire/ are never reformatted. Run as a standalone maintenance commit.
+fmt:
+	gofmt -w $$(git ls-files '*.go')
+
+# fmt-check fails if any tracked Go file is not gofmt-clean. Wire into lint/CI
+# once the repo has been swept clean with `make fmt`.
+fmt-check:
+	@unformatted=$$(gofmt -l $$(git ls-files '*.go')); \
+	if [ -n "$$unformatted" ]; then echo "gofmt needed (run make fmt):"; echo "$$unformatted"; exit 1; fi
 
 run: build
 	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production ./bin/shinyhub serve

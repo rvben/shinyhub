@@ -1136,10 +1136,10 @@ func TestCPURounding(t *testing.T) {
 	}
 	// Use a runtime with no task ceiling so the rounding test is not affected by clamping.
 	rt := New(&fakeECS{}, Config{
-		Cluster:       "c",
+		Cluster:        "c",
 		TaskDefinition: "td",
-		ContainerName: "app",
-		Subnets:       []string{"s-1"},
+		ContainerName:  "app",
+		Subnets:        []string{"s-1"},
 	}, nil)
 	for _, tc := range cases {
 		p := process.StartParams{CPUQuotaPercent: tc.pct}
@@ -1815,7 +1815,7 @@ func TestContainerOverride_ClampsToTaskCeiling(t *testing.T) {
 	p := process.StartParams{
 		Slug:            "myapp",
 		Index:           0,
-		CPUQuotaPercent: 200, // over the 1-vCPU ceiling (100%)
+		CPUQuotaPercent: 200,  // over the 1-vCPU ceiling (100%)
 		MemoryLimitMB:   4096, // over 2048 MB ceiling
 	}
 	ov := rt.buildContainerOverride(p)
@@ -1846,7 +1846,7 @@ func TestContainerOverride_NoClampsWhenUnderCeiling(t *testing.T) {
 	p := process.StartParams{
 		Slug:            "myapp",
 		Index:           0,
-		CPUQuotaPercent: 100, // 1024 units; task has 2048
+		CPUQuotaPercent: 100,  // 1024 units; task has 2048
 		MemoryLimitMB:   2048, // task has 4096
 	}
 	ov := rt.buildContainerOverride(p)

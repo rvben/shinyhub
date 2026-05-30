@@ -63,10 +63,10 @@ func TestResourceDefaults_MainGoDeployFn(t *testing.T) {
 // catches any new call site that skips the placement-aware helper.
 func TestResourceDefaults_AllSitesUseAppAwarePath(t *testing.T) {
 	files := map[string]string{
-		"apps.go":    filepath.Join(".", "apps.go"),
-		"env.go":     filepath.Join(".", "env.go"),
+		"apps.go":     filepath.Join(".", "apps.go"),
+		"env.go":      filepath.Join(".", "env.go"),
 		"redeploy.go": filepath.Join(".", "redeploy.go"),
-		"scale.go":   filepath.Join(".", "scale.go"),
+		"scale.go":    filepath.Join(".", "scale.go"),
 	}
 	for name, path := range files {
 		b, err := os.ReadFile(path)

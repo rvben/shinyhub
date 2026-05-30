@@ -184,9 +184,9 @@ type Runtime struct {
 // interface so callers need no nil guard. Wire to the Prometheus registry via
 // SetMetrics (mirrors lifecycle.Watcher.SetMetrics / lifecycle.MetricsRecorder).
 type FargateMetrics interface {
-	RecordRunTask(result string)          // result: "ok" | "error"
+	RecordRunTask(result string) // result: "ok" | "error"
 	RecordWaitIPTimeout()
-	RecordStopTask(result string)         // result: "ok" | "error"
+	RecordStopTask(result string) // result: "ok" | "error"
 	RecordInventoryError()
 	ObserveRunTaskLatency(seconds float64)
 }
