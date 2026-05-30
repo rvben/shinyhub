@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"go.opentelemetry.io/otel/attribute"
@@ -79,19 +78,28 @@ func TestObserve_NoSpanWhenTracingDisabled(t *testing.T) {
 // timeout handler's deadline produces a span carrying the 503 the client
 // actually received, because tracing wraps the timeout handler rather than
 // running inside it.
+//
+// The inner handler wraps the server's real router with a blocking middleware
+// so /api/auth/providers (a registered route) is resolved via s.router.Match
+// before the inner chain runs. This is the production-accurate shape.
 func TestObserve_SpanReflectsTimeoutStatus(t *testing.T) {
 	srv := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, nil, nil, nil)
 	tr, sr := recordingTracer(t)
 	srv.SetTracer(tr)
 
-	inner := chi.NewRouter()
-	inner.Get("/api/slow", func(_ http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
+	slow := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		})
+	}
+	router := srv.Router()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slow(router).ServeHTTP(w, r)
 	})
 	timed := http.TimeoutHandler(inner, 5*time.Millisecond, `{"error":"timeout"}`)
 
 	rec := httptest.NewRecorder()
-	srv.Observe(timed).ServeHTTP(rec, httptest.NewRequest("GET", "/api/slow", nil))
+	srv.Observe(timed).ServeHTTP(rec, httptest.NewRequest("GET", "/api/auth/providers", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("client saw status %d, want 503", rec.Code)
 	}

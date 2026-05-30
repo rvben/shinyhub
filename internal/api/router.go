@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -15,6 +14,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/httproute"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/metrics"
@@ -49,7 +49,7 @@ type Server struct {
 	traceBuffer   *tracing.Buffer
 	metrics       *metrics.Registry   // nil when metrics are disabled
 	tracer        *servertrace.Tracer // nil when server tracing is disabled
-	router        http.Handler
+	router        chi.Router
 
 	// nodeForTier resolves a tier name to the node identity backing it: a remote
 	// worker's node id, or "" for any tier the control plane itself backs (all
@@ -535,7 +535,7 @@ func (s *Server) revocationChecker() auth.RevocationChecker {
 	return s.store.IsTokenRevoked
 }
 
-func (s *Server) buildRouter() http.Handler {
+func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Use(s.accessLog)
 	r.Use(middleware.Recoverer)
@@ -635,20 +635,29 @@ func (s *Server) buildRouter() http.Handler {
 // tracing and Prometheus instrumentation so both record the status and latency
 // the client actually observes - covering recovered panics (the inner chi
 // Recoverer writes the 500 before observation reads it) and timeout responses
-// (http.TimeoutHandler writes the 503 below observation). It seeds a chi route
-// context so the matched route PATTERN is available for low-cardinality labels
-// even though observation runs outside the chi router; the inner router
-// populates that same context during routing. Both layers are no-ops when their
-// dependency (tracer / metrics registry) is nil, so observation is opt-in.
+// (http.TimeoutHandler writes the 503 below observation). Both layers are
+// no-ops when their dependency (tracer / metrics registry) is nil, so
+// observation is opt-in.
+//
+// The matched route pattern is resolved once, before the inner chain runs, by
+// calling Match on a private route context. The resulting pattern string is
+// stashed in the request context via httproute.WithPattern so metrics and
+// tracing can read it as an immutable value after the inner handler returns.
+// This avoids sharing a mutable chi.RouteContext across an http.TimeoutHandler
+// boundary: under a timeout, the TimeoutHandler returns (writing the 503)
+// while the inner chi mux goroutine is still mutating the same RouteContext's
+// RoutePatterns slice, causing a data race on the outer read.
 //
 // Must be wired before the server begins handling requests.
 func (s *Server) Observe(next http.Handler) http.Handler {
 	observed := s.trace(s.instrument(next))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if chi.RouteContext(r.Context()) == nil {
-			rctx := chi.NewRouteContext()
-			r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+		pattern := ""
+		rc := chi.NewRouteContext()
+		if s.router.Match(rc, r.Method, r.URL.Path) {
+			pattern = rc.RoutePattern()
 		}
+		r = r.WithContext(httproute.WithPattern(r.Context(), pattern))
 		observed.ServeHTTP(w, r)
 	})
 }

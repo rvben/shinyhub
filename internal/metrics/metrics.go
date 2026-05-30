@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rvben/shinyhub/internal/httproute"
 )
 
 // Registry bundles a private Prometheus registry with the server's HTTP
@@ -232,13 +233,26 @@ func (r *Registry) RecordAutoscaleScale(direction string) {
 // Middleware records a request count and latency observation for every request,
 // labeled by the matched chi route PATTERN (not the raw path) so high-cardinality
 // path parameters and unmatched 404 scans cannot explode the series count.
+//
+// Route pattern resolution uses a two-tier priority: httproute.PatternFromContext
+// is checked first. When set (by api.Observe before the inner handler runs), it
+// provides an immutable string copy that is safe to read after next.ServeHTTP
+// returns even across an http.TimeoutHandler boundary. When it is absent (e.g.
+// this middleware is mounted directly inside chi without the Observe wrapper),
+// chi.RouteContext is consulted as a fallback so the standard chi-as-middleware
+// use case continues to work.
 func (r *Registry) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ww := chimw.NewWrapResponseWriter(w, req.ProtoMajor)
 		start := time.Now()
 		next.ServeHTTP(ww, req)
 
-		route := chi.RouteContext(req.Context()).RoutePattern()
+		route := httproute.PatternFromContext(req.Context())
+		if route == "" {
+			if rc := chi.RouteContext(req.Context()); rc != nil {
+				route = rc.RoutePattern()
+			}
+		}
 		if route == "" {
 			route = "unmatched"
 		}
