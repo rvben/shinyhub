@@ -244,6 +244,13 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	asEvent, asFound, asErr := s.store.LatestAutoscaleEvent(slug)
+	if asErr != nil {
+		slog.Warn("autoscale status query", "err", asErr)
+	}
+	asStatus := buildAutoscaleStatus(asEvent, asFound, s.cfg.Runtime.Autoscale.Cooldown)
+	envelope["autoscale_status"] = asStatus
+	envelope["global_autoscale_enabled"] = s.cfg.Runtime.Autoscale.Enabled
 	writeJSON(w, http.StatusOK, envelope)
 }
 
@@ -1784,7 +1791,19 @@ type replicaMetrics struct {
 	RSSBytes   int64   `json:"rss_bytes,omitempty"`
 	// Sessions is the proxy's best-effort live connection count for this
 	// replica. Omitted (and -1 internally) when the replica slot is empty.
-	Sessions int64 `json:"sessions"`
+	Sessions         int64  `json:"sessions"`
+	Tier             string `json:"tier,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	MetricsAvailable bool   `json:"metrics_available"`
+}
+
+// autoscaleStatus is the live autoscale state returned in the metrics poll and
+// app envelope. Timestamps are pointers so they marshal as null when absent.
+type autoscaleStatus struct {
+	LastActionAt  *time.Time `json:"last_action_at"`
+	LastAction    string     `json:"last_action"`
+	InCooldown    bool       `json:"in_cooldown"`
+	CooldownUntil *time.Time `json:"cooldown_until"`
 }
 
 type metricsResponse struct {
@@ -1794,14 +1813,37 @@ type metricsResponse struct {
 	Status string `json:"status"`
 	// SessionsCap is the per-replica session cap currently in effect for
 	// this pool. 0 means uncapped.
-	SessionsCap int              `json:"sessions_cap"`
-	Replicas    []replicaMetrics `json:"replicas"`
+	SessionsCap      int              `json:"sessions_cap"`
+	Replicas         []replicaMetrics `json:"replicas"`
+	MetricsAvailable bool             `json:"metrics_available"`
+	AutoscaleStatus  *autoscaleStatus `json:"autoscale_status,omitempty"`
 	// Legacy fields preserved so existing clients (dashboard card poller)
 	// keep working while they adopt the per-replica view. These mirror the
 	// first running replica.
 	PID        int     `json:"pid,omitempty"`
 	CPUPercent float64 `json:"cpu_percent,omitempty"`
 	RSSBytes   int64   `json:"rss_bytes,omitempty"`
+}
+
+// buildAutoscaleStatus computes the autoscale_status object from the latest
+// audit event. When found is false (no scale events yet), returns a zero-state
+// object with safe defaults so the client never has to branch on a missing key.
+func buildAutoscaleStatus(event db.AuditEvent, found bool, cooldown time.Duration) autoscaleStatus {
+	if !found {
+		return autoscaleStatus{}
+	}
+	cooldownUntil := event.CreatedAt.Add(cooldown)
+	inCooldown := time.Now().Before(cooldownUntil)
+	action := "up"
+	if event.Action == "autoscale_scale_down" {
+		action = "down"
+	}
+	return autoscaleStatus{
+		LastActionAt:  &event.CreatedAt,
+		LastAction:    action,
+		InCooldown:    inCooldown,
+		CooldownUntil: &cooldownUntil,
+	}
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -1849,8 +1891,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		rm.Status = string(info.Status)
 		rm.PID = info.PID
+		rm.Tier = info.Tier
+		rm.Provider = info.Provider
 		if info.Status == process.StatusRunning {
 			if handle, ok := s.manager.HandleReplica(slug, i); ok {
+				rm.MetricsAvailable = handle.PID != 0
 				if stats, err := s.sampler.Sample(handle); err == nil {
 					rm.CPUPercent = stats.CPUPercent
 					rm.RSSBytes = stats.RSSBytes
@@ -1868,10 +1913,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.Replicas = append(resp.Replicas, rm)
+		if rm.MetricsAvailable && rm.Status == string(process.StatusRunning) {
+			resp.MetricsAvailable = true
+		}
 	}
 	if anyRunning {
 		resp.Status = string(process.StatusRunning)
 	}
+
+	metricsEvent, metricsFound, metricsErr := s.store.LatestAutoscaleEvent(slug)
+	if metricsErr != nil {
+		slog.Warn("autoscale status metrics query", "err", metricsErr)
+	}
+	metricsAS := buildAutoscaleStatus(metricsEvent, metricsFound, s.cfg.Runtime.Autoscale.Cooldown)
+	resp.AutoscaleStatus = &metricsAS
 
 	writeJSON(w, http.StatusOK, resp)
 }
