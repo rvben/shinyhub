@@ -119,7 +119,7 @@ func (s *Server) redeployApp(slug string) {
 		s.proxy.Deregister(slug)
 	}
 
-	redeployDefaultMem, redeployDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
+	redeployDefaultMem, redeployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,

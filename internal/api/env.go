@@ -251,7 +251,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
-	envDefaultMem, envDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
+	envDefaultMem, envDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, runErr := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,

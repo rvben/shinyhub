@@ -628,7 +628,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
-		deployDefaultMem, deployDefaultCPU := cfg.Runtime.DefaultResourcesForTier(cfg.Runtime.DefaultTierName())
+		deployDefaultMem, deployDefaultCPU := cfg.Runtime.DefaultResourcesForApp(app)
 		p := deploy.Params{
 			Slug:                  slug,
 			BundleDir:             bundleDir,

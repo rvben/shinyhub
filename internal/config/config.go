@@ -449,20 +449,33 @@ func (r RuntimeConfig) RuntimeForTier(name string) (string, bool) {
 // (runtime.docker.default_memory_mb / default_cpu_percent), preserving
 // existing behaviour for native and docker tiers. A zero value for either
 // field means "no limit" as documented.
-//
-// Scope note: all eight deploy-path call sites resolve the tier by calling
-// DefaultTierName(), which returns the first declared tier. In a mixed-tier
-// deployment where apps may be placed on a non-default fargate tier, those
-// replicas receive the default tier's defaults (e.g. Docker zeros), not the
-// fargate-tier defaults. Single-tier fargate deployments are fully supported.
-// Mixed-tier fargate is guarded at RunTask time by the container clamp in
-// fargate.buildContainerOverride.
 func (r RuntimeConfig) DefaultResourcesForTier(tier string) (memMB, cpuPct int) {
 	rt, _ := r.RuntimeForTier(tier)
 	if rt == "fargate" {
 		return r.Fargate.DefaultMemoryMB, r.Fargate.DefaultCPUPercent
 	}
 	return r.Docker.DefaultMemoryMB, r.Docker.DefaultCPUPercent
+}
+
+// DefaultResourcesForApp returns the platform-default memory limit and CPU
+// quota appropriate for the given app's placement.
+//
+// When the app is placed on exactly one tier (len(PlacementMap) == 1), that
+// tier's defaults are used - this ensures an app placed exclusively on a
+// fargate tier receives fargate defaults, not the global default tier's
+// defaults. When the app has no recorded placement or is spread across
+// multiple tiers, DefaultTierName() is used (first declared tier), preserving
+// the existing behaviour for no-placement and multi-tier cases. Multi-tier
+// apps retain the documented limitation that a single set of defaults cannot
+// serve divergent per-tier requirements.
+func (r RuntimeConfig) DefaultResourcesForApp(app *db.App) (memMB, cpuPct int) {
+	tier := r.DefaultTierName()
+	if pm := app.PlacementMap(); len(pm) == 1 {
+		for t := range pm {
+			tier = t
+		}
+	}
+	return r.DefaultResourcesForTier(tier)
 }
 
 // DockerRuntimeConfig holds Docker-specific runtime settings.

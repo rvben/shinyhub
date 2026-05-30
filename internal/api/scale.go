@@ -92,7 +92,7 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		s.proxy.SetPoolCap(slug, sessionCap)
 	}
 
-	scaleDefaultMem, scaleDefaultCPU := s.cfg.Runtime.DefaultResourcesForTier(s.cfg.Runtime.DefaultTierName())
+	scaleDefaultMem, scaleDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	p := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,

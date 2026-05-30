@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 func writeYAML(t *testing.T, content string) string {
@@ -1935,5 +1937,157 @@ runtime:
 	}
 	if !strings.Contains(err.Error(), "SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL") {
 		t.Fatalf("error must name the env var, got: %v", err)
+	}
+}
+
+// placementJSON serialises a {tier: count} map for use in db.App.ReplicaPlacement.
+func placementJSON(t *testing.T, m map[string]int) string {
+	t.Helper()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal placement: %v", err)
+	}
+	return string(b)
+}
+
+// TestDefaultResourcesForApp_PlacementAwareResolution verifies that
+// DefaultResourcesForApp resolves defaults from the app's actual placement
+// tier rather than always using the global default tier.
+//
+// Config: two tiers - "local" (native, default) and "burst" (fargate).
+// Fargate defaults: 512 MiB, 50%.
+// Docker/native defaults: 0 (no limit).
+// These are intentionally distinct so the test can tell them apart.
+func TestDefaultResourcesForApp_PlacementAwareResolution(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: local
+      runtime: native
+    - name: burst
+      runtime: fargate
+  docker:
+    default_memory_mb: 0
+    default_cpu_percent: 0
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:1
+    container_name: app
+    subnets: [subnet-a]
+    control_plane_url: "https://cp.192.0.2.1.example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+    default_memory_mb: 512
+    default_cpu_percent: 50
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	t.Run("single fargate tier placement resolves fargate defaults", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: placementJSON(t, map[string]int{"burst": 2}),
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 512 {
+			t.Errorf("mem: got %d, want 512 (fargate default)", mem)
+		}
+		if cpu != 50 {
+			t.Errorf("cpu: got %d, want 50 (fargate default)", cpu)
+		}
+	})
+
+	t.Run("no placement falls back to default tier (native, zeros)", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: "",
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native/docker default)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native/docker default)", cpu)
+		}
+	})
+
+	t.Run("multi-tier placement falls back to default tier (native, zeros)", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: placementJSON(t, map[string]int{"local": 1, "burst": 1}),
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native/docker default for multi-tier fallback)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native/docker default for multi-tier fallback)", cpu)
+		}
+	})
+
+	t.Run("single native tier placement resolves native defaults", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: placementJSON(t, map[string]int{"local": 3}),
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (native default)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (native default)", cpu)
+		}
+	})
+
+	t.Run("malformed placement JSON falls back to default tier", func(t *testing.T) {
+		app := &db.App{
+			ReplicaPlacement: `{"bad json`,
+		}
+		mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+		if mem != 0 {
+			t.Errorf("mem: got %d, want 0 (default tier fallback on malformed JSON)", mem)
+		}
+		if cpu != 0 {
+			t.Errorf("cpu: got %d, want 0 (default tier fallback on malformed JSON)", cpu)
+		}
+	})
+}
+
+// TestDefaultResourcesForApp_SingleTierFargate verifies the common single-tier
+// fargate deployment - where the global default IS the fargate tier - so that
+// results from DefaultResourcesForApp and DefaultResourcesForTier are identical.
+func TestDefaultResourcesForApp_SingleTierFargate(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: cloud
+      runtime: fargate
+  fargate:
+    cluster: shiny-cluster
+    task_definition: shiny-app:1
+    container_name: app
+    subnets: [subnet-a]
+    control_plane_url: "https://cp.192.0.2.1.example.com"
+    task_cpu_units: 256
+    task_memory_mb: 512
+    default_memory_mb: 256
+    default_cpu_percent: 25
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	app := &db.App{
+		ReplicaPlacement: placementJSON(t, map[string]int{"cloud": 1}),
+	}
+	mem, cpu := cfg.Runtime.DefaultResourcesForApp(app)
+	if mem != 256 {
+		t.Errorf("mem: got %d, want 256", mem)
+	}
+	if cpu != 25 {
+		t.Errorf("cpu: got %d, want 25", cpu)
 	}
 }
