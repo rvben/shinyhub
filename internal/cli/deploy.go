@@ -54,6 +54,8 @@ type deployFlags struct {
 	branch      string // branch/tag to check out (default: default branch)
 	subdir      string // subdirectory within the repo containing the app
 	visibility  string // app access level: private, shared, public (empty = use server default)
+
+	waitForServer time.Duration // poll /api/server-info until the server is ready before deploying
 }
 
 // newDeployCmd builds a fresh deploy command each time it is called, with its
@@ -89,6 +91,7 @@ letters, digits, and single hyphens; it must not start or end with a hyphen.`,
 	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
 	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private, shared, or public (default: server config)")
+	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before deploying")
 	return cmd
 }
 
@@ -148,6 +151,17 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
+	}
+
+	// When the target host may still be coming up (e.g. a freshly recycled EC2
+	// where a front proxy answers before shinyhub is installed), block until
+	// /api/server-info reports a healthy shinyhub instead of failing with a
+	// misleading auth error. Exit code 6 distinguishes "server not ready" from
+	// a real transport/auth failure.
+	if f.waitForServer > 0 {
+		if _, werr := waitForServerReady(cfg, f.waitForServer, serverPollInterval, cmd.ErrOrStderr(), time.Now, time.Sleep); werr != nil {
+			return &ExitCodeError{Code: 6, Err: werr}
+		}
 	}
 
 	if f.visibility != "" && !db.IsValidAppVisibility(f.visibility) {

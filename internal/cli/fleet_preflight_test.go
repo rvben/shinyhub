@@ -15,7 +15,7 @@ func TestFleetPreflight_ReturnsDiffSourcesAndHost(t *testing.T) {
 	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\nvisibility=\"private\"\n")
 
 	var errBuf bytes.Buffer
-	pf, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "plan")
+	pf, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "plan", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v (stderr=%q)", err, errBuf.String())
 	}
@@ -40,7 +40,7 @@ func TestFleetPreflight_NoManifestHelpful(t *testing.T) {
 	_, _, _ = setupCLITest(t)
 	dir := t.TempDir()
 	var errBuf bytes.Buffer
-	pf, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "plan")
+	pf, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "plan", 0)
 	if pf != nil {
 		t.Fatalf("pf must be nil on failure, got %+v", pf)
 	}
@@ -58,7 +58,7 @@ func TestFleetPreflight_CmdNameInHeader(t *testing.T) {
 	// Malformed manifest forces the validating-header path.
 	writeFleetManifest(t, dir, "fleet_id = \n")
 	var errBuf bytes.Buffer
-	_, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "apply")
+	_, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "apply", 0)
 	if err == nil || exitCode(err) != 1 {
 		t.Fatalf("want exit 1, got %v", err)
 	}

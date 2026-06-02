@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/fleet"
 )
@@ -29,10 +30,12 @@ type preflightResult struct {
 // remote source resolution, then the diff. cmdName ("plan" / "apply") only
 // selects the wording of the two section headers. Problems are reported to
 // errOut in cost order and surfaced as an ExitCodeError carrying the
-// exit code (1 manifest/usage/source, 3 transport/auth). It performs only
-// GET requests. On any error it removes temp clones itself and returns a nil
-// result; on success the caller owns cleanup via the returned closure.
-func fleetPreflight(file string, errOut io.Writer, cmdName string) (*preflightResult, error) {
+// exit code (1 manifest/usage/source, 3 transport/auth, 6 server-not-ready).
+// It performs only GET requests. When waitFor > 0 it first polls
+// /api/server-info until the server is a healthy shinyhub or waitFor elapses
+// (the EC2-churn case). On any error it removes temp clones itself and returns
+// a nil result; on success the caller owns cleanup via the returned closure.
+func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.Duration) (*preflightResult, error) {
 	var cleanups []func()
 	runCleanups := func() {
 		for _, c := range cleanups {
@@ -94,8 +97,22 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string) (*preflightRe
 		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
 		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
+	if waitFor > 0 {
+		if _, werr := waitForServerReady(cfg, waitFor, serverPollInterval, errOut, time.Now, time.Sleep); werr != nil {
+			fmt.Fprintf(errOut, "  ✗ %v\n", werr)
+			return nil, &ExitCodeError{Code: 6, Err: werr, Reported: true}
+		}
+	}
 	apps, err := fetchApps(cfg)
 	if err != nil {
+		// Distinguish "the shinyhub server isn't up yet" (a front proxy on a
+		// half-provisioned box answered) from a real transport/auth failure, so
+		// the operator is not sent chasing a credential problem that isn't there.
+		if nr := serverReadinessProblem(cfg); nr != nil {
+			fmt.Fprintf(errOut, "  ✗ %v\n     the shinyhub server is not up yet (a front proxy answered instead).\n"+
+				"     retry, or pass --wait-for-server=<duration> to block until it is ready.\n", nr)
+			return nil, &ExitCodeError{Code: 6, Err: nr, Reported: true}
+		}
 		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
 		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
