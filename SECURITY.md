@@ -55,6 +55,214 @@ Containers are not a complete security boundary by themselves; combine with a
 hardened Docker daemon (rootless or a dedicated unprivileged host/user),
 resource limits, and a network policy appropriate to your environment.
 
+### ECS/Fargate runtime
+
+When a tier declares `runtime: fargate`, ShinyHub launches each app replica as
+an AWS ECS Fargate task. The security posture differs from the native and Docker
+runtimes because workloads run in AWS-managed infrastructure, not on the
+control-plane host.
+
+#### Production posture: in-VPC private-IP routing
+
+The recommended production configuration runs the ShinyHub control plane inside
+the same VPC (or a peered VPC) as the Fargate tasks, with `route_via_public_ip:
+false` (the default) and `assign_public_ip: false`. In this posture:
+
+- The control plane routes to each task's private IP on the awsvpc ENI.
+- The bundle token travels only over private VPC networking and never crosses
+  the public internet.
+- No public IP is assigned to the task ENI, so the task is not directly
+  reachable from the internet.
+
+Minimum recommended security group rules for this posture:
+
+- **Inbound:** allow TCP on the app port from the control-plane security group
+  (or the control-plane's specific /32 CIDR) only. No other inbound rules are
+  needed.
+- **Outbound:** allow outbound HTTPS to the `control_plane_url` host on its
+  configured port (443 unless you set a non-default port) only (for the bundle
+  fetch). Deny all other egress to prevent a compromised container from
+  exfiltrating the bundle token or reaching arbitrary internet endpoints.
+
+The IAM permission `ec2:DescribeNetworkInterfaces` is NOT required in this
+posture (private-IP routing reads the IP directly from the ECS task record
+without an EC2 API call).
+
+#### Dev/test posture: public-IP routing
+
+`route_via_public_ip: true` routes to each task's public IP. This requires
+`assign_public_ip: true` and the task must be placed in a public subnet. In
+this mode:
+
+- The bundle token travels over the public internet on the path from the task
+  to the control plane.
+- **Without HTTPS, the bundle token is sent in cleartext and is replayable by
+  any network observer for the full `bundle_token_ttl` window** (default 10
+  minutes). A leaked token grants any holder the ability to download the app
+  bundle for that deployment.
+- **`control_plane_url` must use `https://` when `route_via_public_ip: true`.**
+  The server enforces this at startup and refuses to start if the URL is
+  `http://`.
+- The extra IAM permission `ec2:DescribeNetworkInterfaces` is required: the
+  control plane must resolve the public IP via EC2 after the task ENI is
+  attached (the ECS task record only carries the private IP).
+- The control plane proxies to the task over plain HTTP
+  (`http://<public-ip>:<port>`); the runner does not terminate TLS. In
+  public-IP mode that means all proxied request and response data, not just the
+  bundle token, crosses the public internet unencrypted. This is a further
+  reason public-IP routing is for dev/test only; production should use in-VPC
+  private-IP routing.
+
+Minimum security group rules in public-IP mode:
+
+- **Inbound:** allow TCP on the app port from the control-plane /32 (your NAT
+  gateway IP or the control plane's elastic IP) only. Do not allow inbound from
+  `0.0.0.0/0`.
+- **Outbound:** allow outbound HTTPS to the `control_plane_url` host on its
+  configured port (443 by default) only.
+
+#### Bundle token trust model
+
+When a Fargate task starts, the control plane mints a short-lived capability
+token (`SHINYHUB_BUNDLE_TOKEN`) and injects it as an environment variable via
+the ECS container override. The token:
+
+- Is scoped to a single content digest (one bundle version), not to the task
+  ARN or the app slug.
+- Expires after `bundle_token_ttl` (default 10 minutes). Tasks whose cold-start
+  (including image pull and boot) regularly exceeds this window should increase
+  `bundle_token_ttl` accordingly.
+- Is verified statelessly on the control plane using HMAC-SHA256 with a key
+  derived from `auth.secret` via HKDF-SHA256 with info string
+  `shinyhub-fargate-bundle-v1`. There is no revocation: a token that has not
+  yet expired is always valid. The short TTL and HTTPS transport are the
+  required mitigations.
+
+**Any AWS principal with `ecs:DescribeTasks` on the cluster can read every
+container-override environment variable on the task** - `DescribeTasks` returns
+the overrides verbatim. That is not only `SHINYHUB_BUNDLE_TOKEN`: the runtime
+injects each app environment variable as a container override too (see
+`replicaEnv` in `internal/fargate/fargate.go`), so any secret passed as an app
+env var on a Fargate tier is visible to every principal that can describe the
+task. Scope `ecs:DescribeTasks` tightly: do not attach it to roles used by app
+workloads themselves, and do not include it in broadly-shared developer
+policies without scoping to the cluster ARN.
+
+#### Least-privilege IAM policy
+
+The following IAM policy grants the minimum permissions the ShinyHub control
+plane needs to operate a Fargate tier. Replace `REGION`, `ACCOUNT_ID`, and
+`CLUSTER_NAME` with your values. `TASK_ROLE_ARN` and `EXECUTION_ROLE_ARN` are
+the ARNs of the ECS task role and task execution role respectively.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECSTaskControl",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RunTask",
+        "ecs:StopTask",
+        "ecs:DescribeTasks",
+        "ecs:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:ecs:REGION:ACCOUNT_ID:task/CLUSTER_NAME/*",
+        "arn:aws:ecs:REGION:ACCOUNT_ID:task-definition/*"
+      ],
+      "Condition": {
+        "ArnLike": {
+          "ecs:cluster": "arn:aws:ecs:REGION:ACCOUNT_ID:cluster/CLUSTER_NAME"
+        }
+      }
+    },
+    {
+      "Sid": "ECSListTasks",
+      "Effect": "Allow",
+      "Action": "ecs:ListTasks",
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": {
+          "ecs:cluster": "arn:aws:ecs:REGION:ACCOUNT_ID:cluster/CLUSTER_NAME"
+        }
+      }
+    },
+    {
+      "Sid": "PassRoleToECS",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "TASK_ROLE_ARN",
+        "EXECUTION_ROLE_ARN"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ENILookupForPublicRouting",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeNetworkInterfaces",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "REGION"
+        }
+      }
+    }
+  ]
+}
+```
+
+Notes on the policy:
+
+- `ecs:RunTask`, `ecs:StopTask`, `ecs:DescribeTasks`, `ecs:ListTasks` are the
+  direct ECS API calls the runtime makes. The `ECSClient` interface in
+  `internal/fargate/fargate.go` lists exactly these four. `ecs:ListTasks` is in
+  its own statement: it has no task-level resource type, so it must be granted
+  on `Resource: "*"` scoped by the `ecs:cluster` condition (the orphan sweep
+  lists by cluster and `startedBy`). Scoping `ecs:ListTasks` to task ARNs, as a
+  single combined statement would, denies the call.
+- `ecs:TagResource` is required because `RunTask` is called with a `Tags` field
+  (AWS applies the tags via an implicit `ecs:TagResource` action). ShinyHub
+  stamps `shinyhub.managed=true` on each task for orphan-sweep identification.
+  This is not a separate API call in the code; it is an IAM-level requirement
+  when tagging at RunTask time.
+- `ec2:DescribeNetworkInterfaces` has no resource-level constraint available in
+  IAM; the `aws:RequestedRegion` condition limits exposure to the deployment
+  region. The `ENILookupForPublicRouting` statement is needed only when
+  `route_via_public_ip: true`. For private-IP-only deployments it can be
+  omitted entirely.
+- `ecs:DescribeTasks` is intentionally included for the control plane (it polls
+  task status and performs recovery inventory), but must NOT be granted to app
+  task roles (see bundle token note above).
+
+#### Task execution role (image pull + logs)
+
+The least-privilege policy above is the *control-plane* permission set used by
+the principal that runs ShinyHub. It is separate from the ECS **task execution
+role** named in your task definition, which ECS itself assumes (not ShinyHub) to
+pull the runner image and write task logs. That role needs ECR pull plus
+CloudWatch Logs; the AWS-managed `AmazonECSTaskExecutionRolePolicy` covers both
+(`ecr:GetAuthorizationToken`, `ecr:BatchCheckLayerAvailability`,
+`ecr:GetDownloadUrlForLayer`, `ecr:BatchGetImage`, `logs:CreateLogStream`,
+`logs:PutLogEvents`). A missing ECR permission surfaces at task start as
+`CannotPullContainerError`, before the runner ever fetches its bundle.
+
+#### Pre-existing JWT signing key note
+
+`auth.secret` serves two purposes: JWT session token signing and (via HKDF
+derivation) Fargate bundle capability token signing. These are separate derived
+keys - the bundle token key uses info `shinyhub-fargate-bundle-v1` and is never
+used directly for JWT signing - but they share the same root secret. Rotating
+`auth.secret` immediately invalidates all outstanding JWTs, session cookies, AND
+bundle tokens. For a Fargate deployment, plan `auth.secret` rotation around
+task startup windows so in-flight tasks do not fail bundle fetch mid-cold-start.
+
 ## Secret handling
 
 All server secrets are sourced from the environment and are never written to
