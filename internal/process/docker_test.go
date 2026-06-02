@@ -96,11 +96,11 @@ func newDockerRuntimeWithServerAndMode(t *testing.T, handler http.Handler, netwo
 func TestDockerLabels_StampsTierAndProvider(t *testing.T) {
 	got := dockerLabels(StartParams{Slug: "my-app", Index: 2, Tier: "burst"})
 	want := map[string]string{
-		labelManaged:      "true",
-		labelSlug:         "my-app",
-		labelReplicaIndex: "2",
-		labelTier:         "burst",
-		labelProvider:     providerDocker,
+		LabelManaged:      "true",
+		LabelSlug:         "my-app",
+		LabelReplicaIndex: "2",
+		LabelTier:         "burst",
+		LabelProvider:     providerDocker,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -111,8 +111,8 @@ func TestDockerLabels_StampsTierAndProvider(t *testing.T) {
 
 func TestDockerLabels_EmptyTierDefaultsToDefaultTier(t *testing.T) {
 	got := dockerLabels(StartParams{Slug: "my-app", Index: 0})
-	if got[labelTier] != DefaultTier {
-		t.Errorf("label %q = %q, want %q", labelTier, got[labelTier], DefaultTier)
+	if got[LabelTier] != DefaultTier {
+		t.Errorf("label %q = %q, want %q", LabelTier, got[LabelTier], DefaultTier)
 	}
 }
 
@@ -125,30 +125,30 @@ func TestDockerLabels_IncludeDeploymentMetadata(t *testing.T) {
 		AppVersion:    "v3",
 		ContentDigest: "sha256:abc",
 	})
-	if labels[labelDeploymentID] != "7" {
-		t.Errorf("deployment_id label = %q, want 7", labels[labelDeploymentID])
+	if labels[LabelDeploymentID] != "7" {
+		t.Errorf("deployment_id label = %q, want 7", labels[LabelDeploymentID])
 	}
-	if labels[labelAppVersion] != "v3" {
-		t.Errorf("app_version label = %q, want v3", labels[labelAppVersion])
+	if labels[LabelAppVersion] != "v3" {
+		t.Errorf("app_version label = %q, want v3", labels[LabelAppVersion])
 	}
-	if labels[labelContentDigest] != "sha256:abc" {
-		t.Errorf("content_digest label = %q, want sha256:abc", labels[labelContentDigest])
+	if labels[LabelContentDigest] != "sha256:abc" {
+		t.Errorf("content_digest label = %q, want sha256:abc", labels[LabelContentDigest])
 	}
 	// Existing labels remain.
-	if labels[labelSlug] != "app" || labels[labelReplicaIndex] != "1" || labels[labelTier] != "burst" {
+	if labels[LabelSlug] != "app" || labels[LabelReplicaIndex] != "1" || labels[LabelTier] != "burst" {
 		t.Errorf("base labels changed: %v", labels)
 	}
 }
 
 func TestDockerLabels_OmitEmptyDeploymentMetadata(t *testing.T) {
 	labels := dockerLabels(StartParams{Slug: "app", Index: 0})
-	if _, ok := labels[labelDeploymentID]; ok {
+	if _, ok := labels[LabelDeploymentID]; ok {
 		t.Error("deployment_id label present for zero DeploymentID")
 	}
-	if _, ok := labels[labelAppVersion]; ok {
+	if _, ok := labels[LabelAppVersion]; ok {
 		t.Error("app_version label present for empty AppVersion")
 	}
-	if _, ok := labels[labelContentDigest]; ok {
+	if _, ok := labels[LabelContentDigest]; ok {
 		t.Error("content_digest label present for empty ContentDigest")
 	}
 }

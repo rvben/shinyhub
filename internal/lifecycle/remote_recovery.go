@@ -27,10 +27,10 @@ func matchInventoryItem(items []process.InventoryItem, slug string, index int, d
 	idx := strconv.Itoa(index)
 	for i := range items {
 		l := items[i].Labels
-		if l["shinyhub.slug"] != slug || l["shinyhub.replica_index"] != idx {
+		if l[process.LabelSlug] != slug || l[process.LabelReplicaIndex] != idx {
 			continue
 		}
-		if deploymentID != "" && l["shinyhub.deployment_id"] != deploymentID {
+		if deploymentID != "" && l[process.LabelDeploymentID] != deploymentID {
 			continue
 		}
 		if workerID != "" && items[i].WorkerID != workerID {

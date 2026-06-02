@@ -277,13 +277,13 @@ func TestStartBuildsCorrectRunTaskInput(t *testing.T) {
 	for _, tg := range in.Tags {
 		tags[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
 	}
-	if tags[tagSlug] != "demo" || tags[tagReplicaIndex] != "2" ||
-		tags[tagTier] != "burst" || tags[tagDeploymentID] != "99" || tags[tagAppVersion] != "v3" {
+	if tags[process.LabelSlug] != "demo" || tags[process.LabelReplicaIndex] != "2" ||
+		tags[process.LabelTier] != "burst" || tags[process.LabelDeploymentID] != "99" || tags[process.LabelAppVersion] != "v3" {
 		t.Errorf("tags = %v", tags)
 	}
 	// The port must be tagged so recovery can rebuild http://<ip>:<port>.
-	if tags[tagPort] != "8000" {
-		t.Errorf("tags[%s] = %q, want 8000", tagPort, tags[tagPort])
+	if tags[process.LabelPort] != "8000" {
+		t.Errorf("tags[%s] = %q, want 8000", process.LabelPort, tags[process.LabelPort])
 	}
 }
 
@@ -295,8 +295,8 @@ func TestInventoryFallsBackToPortlessURLWithoutPortTag(t *testing.T) {
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
 			task := taskWithIP("arn-legacy", "192.0.2.9", "RUNNING")
 			task.Tags = []ecstypes.Tag{
-				{Key: aws.String(tagSlug), Value: aws.String("demo")},
-				{Key: aws.String(tagReplicaIndex), Value: aws.String("0")},
+				{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
+				{Key: aws.String(process.LabelReplicaIndex), Value: aws.String("0")},
 			}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{task}}, nil
 		},
@@ -691,10 +691,10 @@ func TestInventoryReconcilesManagedTasks(t *testing.T) {
 			}
 			running := taskWithIP("arn-running", "192.0.2.45", "RUNNING")
 			running.Tags = []ecstypes.Tag{
-				{Key: aws.String(tagSlug), Value: aws.String("demo")},
-				{Key: aws.String(tagReplicaIndex), Value: aws.String("1")},
-				{Key: aws.String(tagDeploymentID), Value: aws.String("42")},
-				{Key: aws.String(tagPort), Value: aws.String("8000")},
+				{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
+				{Key: aws.String(process.LabelReplicaIndex), Value: aws.String("1")},
+				{Key: aws.String(process.LabelDeploymentID), Value: aws.String("42")},
+				{Key: aws.String(process.LabelPort), Value: aws.String("8000")},
 			}
 			untagged := ecstypes.Task{TaskArn: aws.String("arn-untagged"), LastStatus: aws.String("RUNNING")}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{running, untagged}}, nil
@@ -721,7 +721,7 @@ func TestInventoryReconcilesManagedTasks(t *testing.T) {
 	if it.WorkerID != WorkerID {
 		t.Errorf("WorkerID = %q, want %q", it.WorkerID, WorkerID)
 	}
-	if it.Labels[tagSlug] != "demo" || it.Labels[tagReplicaIndex] != "1" || it.Labels[tagDeploymentID] != "42" {
+	if it.Labels[process.LabelSlug] != "demo" || it.Labels[process.LabelReplicaIndex] != "1" || it.Labels[process.LabelDeploymentID] != "42" {
 		t.Errorf("Labels = %v", it.Labels)
 	}
 }
@@ -776,7 +776,7 @@ func TestInventoryReportsPROVISIONINGTaskAsRunning(t *testing.T) {
 						TaskArn:    aws.String("arn-1"),
 						LastStatus: aws.String(status),
 						Tags: []ecstypes.Tag{
-							{Key: aws.String(tagSlug), Value: aws.String("demo")},
+							{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
 						},
 					}}}, nil
 				},
@@ -807,7 +807,7 @@ func TestInventoryReportsSTOPPEDTaskAsNotRunning(t *testing.T) {
 				TaskArn:    aws.String("arn-stopped"),
 				LastStatus: aws.String("STOPPED"),
 				Tags: []ecstypes.Tag{
-					{Key: aws.String(tagSlug), Value: aws.String("demo")},
+					{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
 				},
 			}}}, nil
 		},
@@ -936,8 +936,8 @@ func TestInventoryBatches101Tasks(t *testing.T) {
 						}},
 					}},
 					Tags: []ecstypes.Tag{
-						{Key: aws.String(tagSlug), Value: aws.String("demo")},
-						{Key: aws.String(tagPort), Value: aws.String("8000")},
+						{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
+						{Key: aws.String(process.LabelPort), Value: aws.String("8000")},
 					},
 				}
 			}
@@ -1547,8 +1547,8 @@ func TestSlog_InventoryLogsCount(t *testing.T) {
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
 			t1 := taskWithIP("arn-1", "192.0.2.1", "RUNNING")
 			t1.Tags = []ecstypes.Tag{
-				{Key: aws.String(tagSlug), Value: aws.String("demo")},
-				{Key: aws.String(tagPort), Value: aws.String("8000")},
+				{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
+				{Key: aws.String(process.LabelPort), Value: aws.String("8000")},
 			}
 			t2 := ecstypes.Task{TaskArn: aws.String("arn-2"), LastStatus: aws.String("RUNNING")}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{t1, t2}}, nil
@@ -1651,9 +1651,9 @@ func TestTagsManagedIsTrue(t *testing.T) {
 	for _, tg := range f.runInputs[0].Tags {
 		tags[aws.ToString(tg.Key)] = aws.ToString(tg.Value)
 	}
-	// Key must be "shinyhub.managed" with value "true".
-	if v, ok := tags["shinyhub.managed"]; !ok || v != "true" {
-		t.Errorf("tags[shinyhub.managed] = %q (ok=%v), want \"true\"", v, ok)
+	// Key must be process.LabelManaged with value "true".
+	if v, ok := tags[process.LabelManaged]; !ok || v != "true" {
+		t.Errorf("tags[%s] = %q (ok=%v), want \"true\"", process.LabelManaged, v, ok)
 	}
 	// The key "shinyhub.managed_by" must not appear; shinyhub.managed is the canonical key.
 	if _, ok := tags["shinyhub.managed_by"]; ok {
@@ -1743,9 +1743,9 @@ func TestInventoryReportsPendingTaskAsRunning(t *testing.T) {
 				TaskArn:    aws.String("arn-pending"),
 				LastStatus: aws.String("PROVISIONING"),
 				Tags: []ecstypes.Tag{
-					{Key: aws.String(tagSlug), Value: aws.String("demo")},
-					{Key: aws.String(tagReplicaIndex), Value: aws.String("0")},
-					{Key: aws.String(tagPort), Value: aws.String("8000")},
+					{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
+					{Key: aws.String(process.LabelReplicaIndex), Value: aws.String("0")},
+					{Key: aws.String(process.LabelPort), Value: aws.String("8000")},
 				},
 			}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{task}}, nil
@@ -1777,9 +1777,9 @@ func TestInventoryReportsStoppedTaskAsNotRunning(t *testing.T) {
 				TaskArn:    aws.String("arn-stopped"),
 				LastStatus: aws.String("STOPPED"),
 				Tags: []ecstypes.Tag{
-					{Key: aws.String(tagSlug), Value: aws.String("demo")},
-					{Key: aws.String(tagReplicaIndex), Value: aws.String("0")},
-					{Key: aws.String(tagPort), Value: aws.String("8000")},
+					{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
+					{Key: aws.String(process.LabelReplicaIndex), Value: aws.String("0")},
+					{Key: aws.String(process.LabelPort), Value: aws.String("8000")},
 				},
 			}
 			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{task}}, nil
@@ -1910,14 +1910,14 @@ func TestInventoryFiltersToOwnLaunchType(t *testing.T) {
 				fgTask := taskWithIP("arn-fargate", "192.0.2.1", "RUNNING")
 				fgTask.LaunchType = ecstypes.LaunchTypeFargate
 				fgTask.Tags = []ecstypes.Tag{
-					{Key: aws.String(tagSlug), Value: aws.String("fg-app")},
-					{Key: aws.String(tagPort), Value: aws.String("8000")},
+					{Key: aws.String(process.LabelSlug), Value: aws.String("fg-app")},
+					{Key: aws.String(process.LabelPort), Value: aws.String("8000")},
 				}
 				ec2Task := taskWithIP("arn-ec2", "192.0.2.2", "RUNNING")
 				ec2Task.LaunchType = ecstypes.LaunchTypeEc2
 				ec2Task.Tags = []ecstypes.Tag{
-					{Key: aws.String(tagSlug), Value: aws.String("ec2-app")},
-					{Key: aws.String(tagPort), Value: aws.String("8000")},
+					{Key: aws.String(process.LabelSlug), Value: aws.String("ec2-app")},
+					{Key: aws.String(process.LabelPort), Value: aws.String("8000")},
 				}
 				return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{fgTask, ec2Task}}, nil
 			},
@@ -1932,7 +1932,7 @@ func TestInventoryFiltersToOwnLaunchType(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Inventory: %v", err)
 		}
-		if len(items) != 1 || items[0].Labels[tagSlug] != "fg-app" {
+		if len(items) != 1 || items[0].Labels[process.LabelSlug] != "fg-app" {
 			t.Errorf("Fargate Inventory: got %d items with slugs %v, want 1 item [fg-app]",
 				len(items), slugsOf(items))
 		}
@@ -1949,7 +1949,7 @@ func TestInventoryFiltersToOwnLaunchType(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Inventory: %v", err)
 		}
-		if len(items) != 1 || items[0].Labels[tagSlug] != "ec2-app" {
+		if len(items) != 1 || items[0].Labels[process.LabelSlug] != "ec2-app" {
 			t.Errorf("EC2 Inventory: got %d items with slugs %v, want 1 item [ec2-app]",
 				len(items), slugsOf(items))
 		}
@@ -1963,7 +1963,7 @@ func TestInventoryFiltersToOwnLaunchType(t *testing.T) {
 func slugsOf(items []process.InventoryItem) []string {
 	out := make([]string, len(items))
 	for i, it := range items {
-		out[i] = it.Labels[tagSlug]
+		out[i] = it.Labels[process.LabelSlug]
 	}
 	return out
 }

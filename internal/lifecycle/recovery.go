@@ -121,7 +121,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		if cs, ok := containerCache[l]; ok {
 			return cs
 		}
-		cs, err := l.ListByLabel(`{"label":["shinyhub.slug"]}`)
+		cs, err := l.ListByLabel(`{"label":["` + process.LabelSlug + `"]}`)
 		if err != nil {
 			slog.Error("recovery: list docker containers", "err", err)
 			cs = nil
@@ -381,7 +381,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 	}
 	var cID string
 	for _, c := range containers {
-		if c.Labels["shinyhub.slug"] == app.Slug && c.Labels["shinyhub.replica_index"] == strconv.Itoa(r.Index) {
+		if c.Labels[process.LabelSlug] == app.Slug && c.Labels[process.LabelReplicaIndex] == strconv.Itoa(r.Index) {
 			cID = c.ID
 			break
 		}
@@ -488,7 +488,7 @@ func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 	if sweeper == nil {
 		return
 	}
-	containers, err := sweeper.ListByLabel(`{"label":["shinyhub.managed=true"]}`)
+	containers, err := sweeper.ListByLabel(`{"label":["` + process.LabelManaged + `=true"]}`)
 	if err != nil {
 		slog.Error("container sweep: list", "err", err)
 		return
@@ -503,17 +503,17 @@ func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 		// containers (RunOnce) carry shinyhub.managed but no replica_index and
 		// run with AutoRemove; an in-flight scheduled run at startup must not
 		// be killed by the sweep.
-		if _, isReplica := c.Labels["shinyhub.replica_index"]; !isReplica {
+		if _, isReplica := c.Labels[process.LabelReplicaIndex]; !isReplica {
 			continue
 		}
 		if err := sweeper.RemoveHandle(process.RunHandle{ContainerID: c.ID}); err != nil {
 			slog.Warn("container sweep: remove orphan",
-				"container", c.ID, "slug", c.Labels["shinyhub.slug"], "err", err)
+				"container", c.ID, "slug", c.Labels[process.LabelSlug], "err", err)
 			continue
 		}
 		removed++
 		slog.Info("container sweep: removed orphan",
-			"container", c.ID, "slug", c.Labels["shinyhub.slug"])
+			"container", c.ID, "slug", c.Labels[process.LabelSlug])
 	}
 	if removed > 0 {
 		slog.Info("container sweep: complete", "removed", removed)

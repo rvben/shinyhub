@@ -76,26 +76,6 @@ func IsECSManagedWorkerID(id string) bool {
 	return id == WorkerID || id == EC2WorkerID
 }
 
-// Label keys stamped as ECS task tags so recovery can reconcile a replica row
-// against a live task without any local handle. They mirror the docker/remote
-// label scheme so the lifecycle reconciler treats every backend identically.
-const (
-	tagSlug         = "shinyhub.slug"
-	tagReplicaIndex = "shinyhub.replica_index"
-	tagDeploymentID = "shinyhub.deployment_id"
-	tagTier         = "shinyhub.tier"
-	tagAppVersion   = "shinyhub.app_version"
-	// tagManaged marks every task launched by this control plane so operators
-	// can filter ShinyHub-managed tasks in the ECS console by tag value.
-	// Recovery and sweep filter by StartedBy="shinyhub" (not this tag), so
-	// tasks started before this rename are still swept correctly.
-	tagManaged = "shinyhub.managed"
-	// tagPort records the port the app binds inside the task so recovery can
-	// rebuild the full route URL (http://<eni-ip>:<port>) from the task alone.
-	// Start has the port directly; Inventory recovers it only from this tag.
-	tagPort = "shinyhub.port"
-)
-
 // startedBy marks every task this control plane launches so Inventory can list
 // only ShinyHub-managed tasks on a shared cluster.
 const startedBy = "shinyhub"
@@ -447,17 +427,17 @@ func (r *Runtime) buildContainerOverride(p process.StartParams) ecstypes.Contain
 
 func (r *Runtime) tags(p process.StartParams) []ecstypes.Tag {
 	tags := []ecstypes.Tag{
-		{Key: aws.String(tagManaged), Value: aws.String("true")},
-		{Key: aws.String(tagSlug), Value: aws.String(p.Slug)},
-		{Key: aws.String(tagReplicaIndex), Value: aws.String(strconv.Itoa(p.Index))},
-		{Key: aws.String(tagTier), Value: aws.String(p.Tier)},
-		{Key: aws.String(tagPort), Value: aws.String(strconv.Itoa(p.Port))},
+		{Key: aws.String(process.LabelManaged), Value: aws.String("true")},
+		{Key: aws.String(process.LabelSlug), Value: aws.String(p.Slug)},
+		{Key: aws.String(process.LabelReplicaIndex), Value: aws.String(strconv.Itoa(p.Index))},
+		{Key: aws.String(process.LabelTier), Value: aws.String(p.Tier)},
+		{Key: aws.String(process.LabelPort), Value: aws.String(strconv.Itoa(p.Port))},
 	}
 	if p.DeploymentID > 0 {
-		tags = append(tags, ecstypes.Tag{Key: aws.String(tagDeploymentID), Value: aws.String(strconv.FormatInt(p.DeploymentID, 10))})
+		tags = append(tags, ecstypes.Tag{Key: aws.String(process.LabelDeploymentID), Value: aws.String(strconv.FormatInt(p.DeploymentID, 10))})
 	}
 	if p.AppVersion != "" {
-		tags = append(tags, ecstypes.Tag{Key: aws.String(tagAppVersion), Value: aws.String(p.AppVersion)})
+		tags = append(tags, ecstypes.Tag{Key: aws.String(process.LabelAppVersion), Value: aws.String(p.AppVersion)})
 	}
 	return tags
 }
@@ -784,7 +764,7 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 				continue
 			}
 			labels := tagsToLabels(task.Tags)
-			if labels[tagSlug] == "" {
+			if labels[process.LabelSlug] == "" {
 				continue
 			}
 			// Rebuild the full route URL (http://<ip>:<port>) the proxy registered
@@ -798,7 +778,7 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 				return nil, err
 			}
 			if ip != "" {
-				if port := labels[tagPort]; port != "" {
+				if port := labels[process.LabelPort]; port != "" {
 					url = "http://" + ip + ":" + port
 				} else {
 					url = "http://" + ip
