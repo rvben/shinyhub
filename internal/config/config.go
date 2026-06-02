@@ -1444,6 +1444,43 @@ func applyEnv(cfg *Config) error {
 			cfg.Runtime.DefaultMaxSessionsPerReplica = n
 		}
 	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_AUTOSCALE_ENABLED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_AUTOSCALE_ENABLED: %w", err)
+		}
+		cfg.Runtime.Autoscale.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_AUTOSCALE_SCAN_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_AUTOSCALE_SCAN_INTERVAL: %q is not a duration: %w", v, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_AUTOSCALE_SCAN_INTERVAL: must be > 0, got %v", d)
+		}
+		cfg.Runtime.Autoscale.ScanInterval = d
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_AUTOSCALE_COOLDOWN"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_AUTOSCALE_COOLDOWN: %q is not a duration: %w", v, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_AUTOSCALE_COOLDOWN: must be > 0, got %v", d)
+		}
+		cfg.Runtime.Autoscale.Cooldown = d
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_AUTOSCALE_DEFAULT_TARGET"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_AUTOSCALE_DEFAULT_TARGET: %q is not a number: %w", v, err)
+		}
+		if f <= 0 || f > 1 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_AUTOSCALE_DEFAULT_TARGET: must be in (0,1], got %v", f)
+		}
+		cfg.Runtime.Autoscale.DefaultTarget = f
+	}
 	if v := os.Getenv("SHINYHUB_DEFAULTS_APP_VISIBILITY"); v != "" {
 		cfg.Defaults.AppVisibility = v
 	}

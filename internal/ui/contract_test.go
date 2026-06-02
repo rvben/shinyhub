@@ -856,6 +856,30 @@ func TestFargateYamlExampleHasFargateBlock(t *testing.T) {
 	)
 }
 
+// TestYamlExampleDocumentsBackendBlocks asserts that shinyhub.yaml.example
+// documents the config blocks that gate this release's features: runtime.tiers
+// (multi-backend placement), runtime.autoscale (the replica autoscale
+// controller), and the top-level worker block (remote-worker hosting). Without
+// these an operator cannot discover how to enable the features without reading
+// the source.
+func TestYamlExampleDocumentsBackendBlocks(t *testing.T) {
+	const path = "../../shinyhub.yaml.example"
+	assertFileContains(t, path, "tiers:",
+		"shinyhub.yaml.example must document the runtime.tiers block (per-tier backend placement)")
+	assertFileContains(t, path, "launch_type",
+		"shinyhub.yaml.example tiers docs must mention launch_type (FARGATE/EC2)")
+	assertFileContains(t, path, "  autoscale:",
+		"shinyhub.yaml.example must document the runtime.autoscale block")
+	assertFileContains(t, path, "default_target",
+		"shinyhub.yaml.example autoscale block must document default_target")
+	assertFileContains(t, path, "worker:",
+		"shinyhub.yaml.example must document the top-level worker block (remote-worker hosting)")
+	assertFileContains(t, path, "join_token_file",
+		"shinyhub.yaml.example worker block must document join_token_file")
+	assertFileContains(t, path, "advertise_hosts",
+		"shinyhub.yaml.example worker block must document advertise_hosts")
+}
+
 // TestReplicaDisplayWiring pins the import and call sites for replica-display.js.
 // The helper is testable under jsdom (Task 1); the wiring inside app.js and
 // app-detail.js (which jsdom cannot import) is pinned here so a refactor that
@@ -877,6 +901,13 @@ func TestReplicaDisplayWiring(t *testing.T) {
 		"seedReplicasFromStatus must call backendLabel to render the initial backend/tier label per replica")
 	assertContains(t, "views/app-detail.js", "metricsText",
 		"seedReplicasFromStatus must call metricsText so the initial panel state is honest for PID-less replicas")
+
+	// Both render paths must surface the per-replica degraded reason (e.g.
+	// "worker unavailable" for a lost replica) instead of a bare status badge.
+	assertContains(t, "app.js", "reasonLabel",
+		"app.js renderReplicasPanel must call reasonLabel to surface a lost replica's reason")
+	assertContains(t, "views/app-detail.js", "reasonLabel",
+		"seedReplicasFromStatus must call reasonLabel to surface a lost replica's reason")
 }
 
 // TestMetricsAvailableWiring pins the top-level metrics_available field

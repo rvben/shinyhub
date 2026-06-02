@@ -8,7 +8,7 @@ import { formatManifestSummary, renderDeployResult } from '/static/deploy-summar
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
-import { backendLabel, metricsText } from '/static/views/replica-display.js';
+import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -2697,10 +2697,16 @@ document.addEventListener('DOMContentLoaded', () => {
       // Escape the backend label: r.tier/r.provider come from operator YAML config
       // and could contain HTML metacharacters if misconfigured.
       const backend = escapeHtml(backendLabel(r));
+      // reason explains a degraded state (e.g. "worker unavailable" for a lost
+      // replica). Server-supplied and fixed today, but escape defensively.
+      const reason = reasonLabel(r);
+      const reasonHTML = reason
+        ? `<span class="replica-reason" title="${escapeHtml(reason)}">${escapeHtml(reason)}</span>`
+        : '';
       li.innerHTML = `
         <span class="replica-index">#${r.index}</span>
-        <span class="badge badge-${status}">${formatStatus(status)}</span>
-        <span class="replica-backend" title="Backend/tier">${backend}</span>
+        <span class="badge badge-${status}"${reason ? ` title="${escapeHtml(reason)}"` : ''}>${formatStatus(status)}</span>
+        <span class="replica-backend" title="Backend/tier">${backend}</span>${reasonHTML}
         <span class="replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ' / cap' : ''}">${sessionsText} sessions</span>
         <span class="replica-cpu">CPU ${cpuDisplay}</span>
         <span class="replica-ram"${note ? ` title="${note}"` : ''}>RAM ${ramDisplay}</span>

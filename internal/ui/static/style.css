@@ -2705,6 +2705,8 @@ main {
 .replica-index { font-family: 'Space Mono', monospace; color: var(--cyan-bright); }
 .replica-sessions { color: var(--text-soft); font-variant-numeric: tabular-nums; }
 .replica-sessions-saturated { color: var(--danger, #f87171); font-weight: 600; }
+.replica-reason { color: var(--danger, #f87171); font-size: 0.8rem; font-style: italic; }
+.replica-reason:empty { display: none; }
 .replica-cpu, .replica-ram { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .app-card-body-link { display: block; color: inherit; text-decoration: none; }
 .app-card-body-link:hover strong { text-decoration: underline; }

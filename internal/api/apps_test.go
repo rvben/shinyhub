@@ -19,6 +19,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -1544,6 +1545,75 @@ func TestCreateApp_RejectsLingeringAppsDir(t *testing.T) {
 	srv.Router().ServeHTTP(rr, req)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+}
+
+// TestDeployApp_RejectsRAppOnFargateTier verifies that deploying an R app
+// (app.R) onto a Fargate tier is rejected with 400 before the running pool is
+// touched: the reference Fargate runner image is Python-only, so the task would
+// otherwise start and fail at exec with a cryptic error.
+func TestDeployApp_RejectsRAppOnFargateTier(t *testing.T) {
+	appsDir := t.TempDir()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir, VersionRetention: 5},
+		Runtime: config.RuntimeConfig{
+			Tiers: []config.TierConfig{{Name: "prod", Runtime: "fargate"}},
+		},
+	}
+	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
+	srv := api.New(cfg, store, mgr, proxy.New())
+	// If the guard is missing, the deploy would proceed to the deploy hook;
+	// stub it to fail fast so a regression surfaces as a non-400 status rather
+	// than actually launching a process.
+	srv.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		return nil, fmt.Errorf("stub: deploy hook must not be reached for a rejected R-on-Fargate deploy")
+	})
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	createApp(t, srv, token, "demo")
+
+	// A valid R bundle (app.R only) that ExtractBundle accepts.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, err := zw.Create("app.R")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("library(shiny)\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, _ := mw.CreateFormFile("bundle", "bundle.zip")
+	part.Write(zipBuf.Bytes())
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/demo/deploy", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Fargate") {
+		t.Errorf("body = %s, want mention of 'Fargate'", rr.Body.String())
 	}
 }
 

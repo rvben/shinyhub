@@ -65,3 +65,58 @@ func TestAppsAPI_GetDerivesWorkerUnavailableReason(t *testing.T) {
 		t.Errorf("lost replica with healthy worker present: reason = %q, want empty", r.Reason)
 	}
 }
+
+// TestMetricsPoll_SurfacesLostReason asserts the live metrics poll
+// (GET /api/apps/:slug/metrics) reflects a DB lost replica as "lost" with the
+// same "worker unavailable" reason the app envelope derives. Without this the
+// 10s poll, built from live manager state that has no "lost" concept, would
+// revert a lost replica to "stopped" and drop the reason the detail seed showed.
+func TestMetricsPoll_SurfacesLostReason(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	reg, err := worker.NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	srv.SetWorkerRegistry(reg)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("demo")
+	store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost, Tier: "remote"})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/demo/metrics", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Replicas []struct {
+			Index  int    `json:"index"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"replicas"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	found := false
+	for _, r := range body.Replicas {
+		if r.Index != 0 {
+			continue
+		}
+		found = true
+		if r.Status != "lost" {
+			t.Errorf("status = %q, want lost", r.Status)
+		}
+		if r.Reason != "worker unavailable" {
+			t.Errorf("reason = %q, want %q", r.Reason, "worker unavailable")
+		}
+	}
+	if !found {
+		t.Fatalf("lost replica index 0 missing from poll response: %s", rec.Body.String())
+	}
+}

@@ -59,6 +59,20 @@ runtime:
   mode: native                        # "native" (default) or "docker"
   default_replicas: 1                 # applied when an app does not set its own replicas  # SHINYHUB_RUNTIME_DEFAULT_REPLICAS
   max_replicas: 32                    # hard cap enforced by the API  # SHINYHUB_RUNTIME_MAX_REPLICAS
+
+  # Optional: explicit runtime tiers. Each app is placed on a tier, and each
+  # tier is backed by one runtime. Omit this block for single-backend setups -
+  # ShinyHub then synthesizes one tier named "local" whose runtime is `mode`
+  # above. Declaring tiers lets ONE server run multiple backends at the same
+  # time (e.g. a local docker tier alongside a Fargate tier). The first tier
+  # listed is the default for apps that have no explicit placement.
+  # tiers:
+  #   - name: local                    # tier name (referenced by per-app placement)
+  #     runtime: docker                # native | docker | remote_docker | fargate
+  #   - name: burst
+  #     runtime: fargate
+  #     launch_type: FARGATE           # FARGATE (default) or EC2; fargate tiers only
+
   docker:
     socket: /var/run/docker.sock
     network_mode: bridge              # "bridge" (default; isolated namespace + 127.0.0.1 port mapping) or "host"  # SHINYHUB_RUNTIME_DOCKER_NETWORK_MODE
@@ -107,6 +121,27 @@ runtime:
                                       # increase if task cold-start (image pull + boot) regularly exceeds this window
     default_memory_mb: 0              # per-replica container memory limit in MiB; 0 = no override (task definition applies)  # SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB
     default_cpu_percent: 0            # per-replica container CPU quota; 0 = no override; 100 = 1 full core  # SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT
+
+  # Optional: replica autoscale controller. These are the GLOBAL controller
+  # settings; autoscaling is opt-in per app (apps set autoscale_enabled and
+  # bounds via the CLI/UI). With no app opted in, this block has no effect.
+  autoscale:
+    enabled: false                    # global kill switch; false = controller never runs  # SHINYHUB_RUNTIME_AUTOSCALE_ENABLED
+    scan_interval: 30s                # how often opted-in apps are evaluated (must be > 0)  # SHINYHUB_RUNTIME_AUTOSCALE_SCAN_INTERVAL
+    cooldown: 3m                      # minimum time between scale actions on one app (must be > 0)  # SHINYHUB_RUNTIME_AUTOSCALE_COOLDOWN
+    default_target: 0.8               # target avg active sessions per replica, a fraction (0,1] of the session cap  # SHINYHUB_RUNTIME_AUTOSCALE_DEFAULT_TARGET
+
+# Optional: host remote workers (the distributed "remote_docker" tier). When
+# enabled, the control plane exposes a mutual-TLS listener that `shinyhub worker`
+# nodes join with a one-time token; replicas on a remote_docker tier then run as
+# Docker containers on those nodes. Leave disabled for single-node deployments.
+worker:
+  enabled: false                     # SHINYHUB_WORKER_ENABLED
+  join_token_file: ""                # path to the file holding the worker join token  # SHINYHUB_WORKER_JOIN_TOKEN_FILE
+  ca_dir: ""                         # directory holding the internal worker CA (created if absent)  # SHINYHUB_WORKER_CA_DIR
+  listen_addr: ""                    # worker-facing mTLS listen address; empty = 0.0.0.0:8443  # SHINYHUB_WORKER_LISTEN_ADDR
+  advertise_hosts:                   # hostnames/IPs workers use to reach the control plane (become cert SANs)  # SHINYHUB_WORKER_ADVERTISE_HOSTS
+    - shiny.internal                 # empty = loopback only (local testing; remote workers will fail TLS)
 
 # Optional: OAuth / OIDC login providers. Remove any block you don't use.
 oauth:
