@@ -194,6 +194,19 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture the prior role so the audit trail distinguishes a privilege
+	// escalation from a downgrade.
+	existing, err := s.store.GetUserByID(id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	oldRole := existing.Role
+
 	if err := s.store.UpdateUserRole(id, req.Role); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not found")
@@ -209,11 +222,13 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	roleDetail, _ := json.Marshal(map[string]string{"old_role": oldRole, "new_role": req.Role})
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "update_user",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
+		Detail:       string(roleDetail),
 		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusOK, toUserResponse(user))
