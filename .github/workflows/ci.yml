@@ -27,3 +27,23 @@ jobs:
 
       - name: Build
         run: go build -o /tmp/shinyhub ./cmd/shinyhub
+
+  # Remote-worker end-to-end: launches a control plane + a real `shinyhub worker`
+  # over mTLS and deploys a Shiny app onto a remote_docker tier (real containers),
+  # then exercises bundle-pull dedup, tunnel routing, control-plane restart
+  # re-adoption, and worker-kill -> replica-lost -> routing-drop. Its own job
+  # because it needs a Docker daemon and runs ~2-3 min (the worker-down heartbeat
+  # timeout dominates). ubuntu-latest ships Docker, so no extra setup is needed.
+  test-remote-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Remote-worker E2E (Docker)
+        run: make test-remote-e2e
