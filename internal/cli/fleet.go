@@ -16,6 +16,7 @@ func newFleetCmd() *cobra.Command {
 		Short: "Declaratively reconcile a fleet of apps from a manifest",
 		Long: "fleet manages a set of apps from a single shinyhub-fleet.toml.\n\n" +
 			"  shinyhub fleet init      scaffold a manifest from deployed apps\n" +
+			"  shinyhub fleet validate  check a manifest locally (offline, no server)\n" +
 			"  shinyhub fleet plan      preview the diff (read-only)\n" +
 			"  shinyhub fleet apply     converge: deploy changed, reconcile, prune\n" +
 			"  shinyhub fleet status    read-only fleet overview (no manifest)\n\n" +
@@ -25,6 +26,7 @@ func newFleetCmd() *cobra.Command {
 			"  shinyhub fleet apply -f shinyhub-fleet.toml --prune --yes",
 	}
 	cmd.AddCommand(newFleetInitCmd())
+	cmd.AddCommand(newFleetValidateCmd())
 	cmd.AddCommand(newFleetPlanCmd())
 	cmd.AddCommand(newFleetApplyCmd())
 	cmd.AddCommand(newFleetStatusCmd())
