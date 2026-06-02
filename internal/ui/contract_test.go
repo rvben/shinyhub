@@ -933,6 +933,21 @@ func TestWorkersPageWiring(t *testing.T) {
 		"the Workers tab must be admin-gated in showLoggedIn")
 }
 
+// TestFleetHealthBannerWiring pins the admin fleet-health banner: the helper
+// import, the API call, the admin gate, and the markup element it renders into.
+func TestFleetHealthBannerWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="fleet-health"`,
+		"index.html must have the fleet-health banner element on the Apps grid")
+	assertContains(t, "app.js", `'/static/views/fleet-health.js'`,
+		"app.js must import the fleet-health summarizer")
+	assertContains(t, "app.js", "summariseFleetHealth(",
+		"app.js must call summariseFleetHealth to render the banner")
+	assertContains(t, "app.js", "/api/fleet/health",
+		"app.js loadFleetHealth must call the /api/fleet/health endpoint")
+	assertContains(t, "app.js", "loadFleetHealth()",
+		"loadApps must refresh the fleet-health banner")
+}
+
 // TestMetricsAvailableWiring pins the top-level metrics_available field
 // consumed by the grid card path. The grid card reads m.cpu_percent /
 // m.rss_bytes from the legacy top-level scalars (not m.replicas), so the

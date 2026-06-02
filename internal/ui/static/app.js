@@ -3,6 +3,7 @@ import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
+import { summariseFleetHealth } from '/static/views/fleet-health.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
@@ -97,6 +98,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const loginError = document.getElementById('login-error');
   const appError = document.getElementById('app-error');
   const refreshButton = document.getElementById('refresh-button');
+  const fleetHealthEl = document.getElementById('fleet-health');
   const logoutButton = document.getElementById('logout-button');
   const sessionUser = document.getElementById('session-user');
   const serverHost  = document.getElementById('server-host');
@@ -492,6 +494,9 @@ document.addEventListener('DOMContentLoaded', () => {
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
     newAppButton.hidden = !state.canCreateApps;
+    // Load the admin fleet-health banner now that state.user is set; loadApps
+    // can fire before this during boot, when the admin gate would skip it.
+    loadFleetHealth();
     // The router (started by the caller) will mount the view that matches
     // the current URL — do not pre-show apps-view here, it leaks through
     // on direct loads of /users, /audit-log, /apps/<slug>.
@@ -500,6 +505,60 @@ document.addEventListener('DOMContentLoaded', () => {
   async function handleUnauthorized() {
     showLoggedOut();
     setError(loginError, '');
+  }
+
+  async function loadFleetHealth() {
+    if (!fleetHealthEl) return;
+    // Admin-only aggregate; hide for non-admins (the API would 403 anyway).
+    if (!state.user || state.user.role !== 'admin') {
+      fleetHealthEl.hidden = true;
+      return;
+    }
+    let resp;
+    try {
+      resp = await api('/api/fleet/health');
+    } catch {
+      fleetHealthEl.hidden = true;
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) { fleetHealthEl.hidden = true; return; }
+    let body;
+    try {
+      body = await resp.json();
+    } catch {
+      fleetHealthEl.hidden = true;
+      return;
+    }
+    renderFleetHealth(summariseFleetHealth(body));
+  }
+
+  function renderFleetHealth(s) {
+    if (!fleetHealthEl) return;
+    fleetHealthEl.textContent = '';
+    fleetHealthEl.className = `fleet-health fleet-health-${s.statusClass}`;
+
+    const dot = document.createElement('span');
+    dot.className = `badge badge-${s.statusClass}`;
+    dot.textContent = s.statusLabel;
+    fleetHealthEl.appendChild(dot);
+
+    const head = document.createElement('span');
+    head.className = 'fleet-health-headline';
+    head.textContent = s.headline;
+    fleetHealthEl.appendChild(head);
+
+    // Per-tier trouble chips (operator-controlled tier names → textContent, XSS-safe).
+    for (const chip of s.tierChips) {
+      const c = document.createElement('span');
+      c.className = 'fleet-health-chip';
+      const bits = [];
+      if (chip.lost > 0) bits.push(`${chip.lost} lost`);
+      if (chip.workersDown > 0) bits.push(`${chip.workersDown} worker${chip.workersDown === 1 ? '' : 's'} down`);
+      c.textContent = `${chip.tier}: ${bits.join(', ')}`;
+      fleetHealthEl.appendChild(c);
+    }
+    fleetHealthEl.hidden = false;
   }
 
   async function loadApps() {
@@ -525,6 +584,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.apps = (await response.json()) || [];
     renderApps();
     metrics.setTargets(state.apps.map(a => a.slug));
+    loadFleetHealth();
   }
 
   async function loadWorkers() {

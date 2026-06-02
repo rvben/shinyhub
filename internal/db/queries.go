@@ -1590,6 +1590,66 @@ const (
 	ReplicaStatusLost = "lost"
 )
 
+// FleetReplicaCount is one (tier, provider, status) bucket of the replicas
+// table, used by the fleet-health overview to break replica counts down per
+// backend without an N+1 per-app scan.
+type FleetReplicaCount struct {
+	Tier     string
+	Provider string
+	Status   string
+	Count    int
+}
+
+// FleetReplicaCounts returns replica counts grouped by tier, provider, and
+// status across every app, in a single query.
+func (s *Store) FleetReplicaCounts() ([]FleetReplicaCount, error) {
+	rows, err := s.db.Query(`SELECT tier, provider, status, COUNT(*) FROM replicas GROUP BY tier, provider, status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FleetReplicaCount
+	for rows.Next() {
+		var c FleetReplicaCount
+		if err := rows.Scan(&c.Tier, &c.Provider, &c.Status, &c.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// AppLostReplicas is one app's lost-replica count on a tier, slug-resolved.
+type AppLostReplicas struct {
+	Slug string
+	Tier string
+	Lost int
+}
+
+// AppsWithLostReplicas returns, per app and tier, the count of replicas in the
+// lost state, ordered by slug. Drives the fleet-health "degraded apps" list.
+func (s *Store) AppsWithLostReplicas() ([]AppLostReplicas, error) {
+	rows, err := s.db.Query(`
+		SELECT a.slug, r.tier, COUNT(*)
+		FROM replicas r JOIN apps a ON a.id = r.app_id
+		WHERE r.status = ?
+		GROUP BY a.slug, r.tier
+		ORDER BY a.slug, r.tier`, ReplicaStatusLost)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AppLostReplicas
+	for rows.Next() {
+		var a AppLostReplicas
+		if err := rows.Scan(&a.Slug, &a.Tier, &a.Lost); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // Replica represents a single backend process instance for an app.
 // Multiple replicas allow an app to run N parallel processes behind the proxy.
 type Replica struct {
