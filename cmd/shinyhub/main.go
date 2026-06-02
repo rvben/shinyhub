@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/autoscale"
 	"github.com/rvben/shinyhub/internal/backup"
@@ -444,28 +445,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		mgr.RegisterRuntime(tierCfg.Name, tierRT)
 		slog.Info("runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
 	}
-	mgr.SetEnvResolver(func(slug string) ([]string, error) {
+	mgr.SetEnvResolver(func(slug string) ([]string, []string, error) {
 		app, err := store.GetApp(slug)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		vars, err := store.ListAppEnvVars(app.ID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		out := make([]string, 0, len(vars))
-		for _, v := range vars {
-			val := string(v.Value)
-			if v.IsSecret {
-				pt, err := secrets.Decrypt(secretsKey, v.Value)
-				if err != nil {
-					return nil, fmt.Errorf("decrypt env %s for app %s: %w", v.Key, slug, err)
-				}
-				val = string(pt)
-			}
-			out = append(out, fmt.Sprintf("%s=%s", v.Key, val))
+		env, secretEnv, err := appenv.Resolve(vars, secretsKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve env for app %s: %w", slug, err)
 		}
-		return out, nil
+		return env, secretEnv, nil
 	})
 	mgr.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
 		app, err := store.GetApp(slug)

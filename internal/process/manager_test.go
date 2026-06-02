@@ -339,9 +339,9 @@ func TestStart_PlatformDefaultsLoseToUserEnv(t *testing.T) {
 			"OTEL_SERVICE_NAME=" + slug,
 		}
 	})
-	m.SetEnvResolver(func(slug string) ([]string, error) {
+	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
 		// User wants a different OTLP endpoint for this app.
-		return []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://user-collector:4318"}, nil
+		return []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://user-collector:4318"}, nil, nil
 	})
 
 	p := process.StartParams{
@@ -391,9 +391,9 @@ func TestStart_PlatformDefaultsReceiveSlugAndReplica(t *testing.T) {
 func TestStart_PlatformEnvWinsOverUserEnv(t *testing.T) {
 	rt := newFakeRuntime()
 	m := process.NewManager(t.TempDir(), rt)
-	m.SetEnvResolver(func(slug string) ([]string, error) {
+	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
 		// Simulate a user env row that shadows a platform key.
-		return []string{"SHINYHUB_APP_DATA=/evil"}, nil
+		return []string{"SHINYHUB_APP_DATA=/evil"}, nil, nil
 	})
 
 	p := process.StartParams{

@@ -353,6 +353,30 @@ func TestStartToleratesEventuallyConsistentDescribe(t *testing.T) {
 	}
 }
 
+// TestReplicaEnvIncludesSecretEnv verifies SecretEnv is carried into the
+// container override environment alongside Env. It is plaintext override env
+// here (no behavior change) and is kept separate so it can later move to the
+// task definition's secrets block, keeping secret values out of DescribeTasks.
+func TestReplicaEnvIncludesSecretEnv(t *testing.T) {
+	p := process.StartParams{
+		Slug:      "demo",
+		Index:     0,
+		Env:       []string{"PLAIN=1"},
+		SecretEnv: []string{"SECRET=shh"},
+	}
+	r := New(&fakeECS{}, testCfg(), nil)
+	env := map[string]string{}
+	for _, kv := range r.replicaEnv(p) {
+		env[aws.ToString(kv.Name)] = aws.ToString(kv.Value)
+	}
+	if env["PLAIN"] != "1" {
+		t.Errorf("PLAIN missing from replica env: %v", env)
+	}
+	if env["SECRET"] != "shh" {
+		t.Errorf("SECRET (from SecretEnv) missing from replica env: %v", env)
+	}
+}
+
 func TestReplicaEnvOmitsUnsetIdentity(t *testing.T) {
 	p := process.StartParams{Slug: "demo", Index: 0} // no digest, deployment, version
 	r := New(&fakeECS{}, testCfg(), nil)

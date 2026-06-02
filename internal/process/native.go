@@ -23,6 +23,10 @@ import (
 // resolves duplicate keys by last occurrence.
 func nativeChildEnv(p StartParams) []string {
 	env := append(filteredEnv(), p.Env...)
+	// Secret env vars are injected as plaintext alongside Env: native processes
+	// share the host trust boundary, so there is no out-of-band channel to
+	// deliver them through. Keys are disjoint from Env, so append order is safe.
+	env = append(env, p.SecretEnv...)
 	if p.AppDataPath != "" {
 		env = append(env, "SHINYHUB_APP_DATA="+p.AppDataPath)
 	}

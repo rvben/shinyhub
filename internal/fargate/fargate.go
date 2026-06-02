@@ -346,14 +346,25 @@ func (r *Runtime) networkConfig() *ecstypes.NetworkConfiguration {
 // SHINYHUB_BUNDLE_TOKEN are included so the runner image can fetch the bundle
 // by token without performing mTLS certificate setup.
 func (r *Runtime) replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
-	env := make([]ecstypes.KeyValuePair, 0, len(p.Env)+7)
-	for _, kv := range p.Env {
+	env := make([]ecstypes.KeyValuePair, 0, len(p.Env)+len(p.SecretEnv)+7)
+	appendKV := func(kv string) {
 		if idx := strings.IndexByte(kv, '='); idx > 0 {
 			env = append(env, ecstypes.KeyValuePair{
 				Name:  aws.String(kv[:idx]),
 				Value: aws.String(kv[idx+1:]),
 			})
 		}
+	}
+	for _, kv := range p.Env {
+		appendKV(kv)
+	}
+	// SecretEnv is carried as plaintext override Environment here, the same as
+	// the native and Docker runtimes. It is kept as a separate slice (rather
+	// than merged into Env) so it can later be delivered via the task
+	// definition's secrets block (valueFrom an ARN), which keeps secret values
+	// out of ecs:DescribeTasks.
+	for _, kv := range p.SecretEnv {
+		appendKV(kv)
 	}
 	add := func(k, v string) {
 		if v != "" {

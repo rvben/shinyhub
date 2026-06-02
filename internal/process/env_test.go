@@ -130,6 +130,158 @@ func TestDependencySetupCmdsScrubServerSecrets(t *testing.T) {
 	}
 }
 
+// TestNativeChildEnvIncludesSecretEnv verifies the native runtime concatenates
+// SecretEnv into the child process environment after Env, so secret env vars
+// still reach the app exactly as plaintext env (no behavior change vs a single
+// flat Env slice).
+func TestNativeChildEnvIncludesSecretEnv(t *testing.T) {
+	p := StartParams{
+		Env:       []string{"PLAIN=1"},
+		SecretEnv: []string{"SECRET=shh"},
+	}
+	env := nativeChildEnv(p)
+
+	var plainOK, secretOK bool
+	for _, e := range env {
+		switch e {
+		case "PLAIN=1":
+			plainOK = true
+		case "SECRET=shh":
+			secretOK = true
+		}
+	}
+	if !plainOK {
+		t.Errorf("PLAIN=1 missing from native child env: %v", env)
+	}
+	if !secretOK {
+		t.Errorf("SECRET=shh (from SecretEnv) missing from native child env: %v", env)
+	}
+}
+
+// TestDockerChildEnvIncludesSecretEnv verifies the Docker runtime concatenates
+// SecretEnv into the container environment after Env, matching the native
+// runtime: a Docker container shares the host trust boundary the same way, so
+// secret env is injected as plaintext with no behavior change.
+func TestDockerChildEnvIncludesSecretEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "must-not-leak")
+	p := StartParams{
+		Env:       []string{"PLAIN=1"},
+		SecretEnv: []string{"SECRET=shh"},
+	}
+	env := dockerChildEnv(p)
+
+	var plainOK, secretOK bool
+	for _, e := range env {
+		switch e {
+		case "PLAIN=1":
+			plainOK = true
+		case "SECRET=shh":
+			secretOK = true
+		}
+		if strings.HasPrefix(e, "SHINYHUB_") {
+			t.Errorf("SHINYHUB_ server secret leaked into container env: %s", e)
+		}
+	}
+	if !plainOK {
+		t.Errorf("PLAIN=1 missing from docker child env: %v", env)
+	}
+	if !secretOK {
+		t.Errorf("SECRET=shh (from SecretEnv) missing from docker child env: %v", env)
+	}
+}
+
+// TestStart_PopulatesSecretEnvFromResolver verifies the Manager routes the
+// resolver's secret env into StartParams.SecretEnv (kept separate from Env) so
+// downstream runtimes can deliver secrets out of band.
+func TestStart_PopulatesSecretEnvFromResolver(t *testing.T) {
+	rt := &captureRuntime{}
+	m := NewManager(t.TempDir(), rt)
+	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
+		return []string{"PLAIN=1"}, []string{"SECRET=shh"}, nil
+	})
+
+	_, err := m.Start(StartParams{
+		Slug:    "test-secret-env",
+		Dir:     t.TempDir(),
+		Command: []string{"true"},
+		Port:    19902,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if rt.captured == nil {
+		t.Fatal("runtime.Start was never called")
+	}
+
+	var secretFound bool
+	for _, e := range rt.captured.SecretEnv {
+		if e == "SECRET=shh" {
+			secretFound = true
+		}
+	}
+	if !secretFound {
+		t.Errorf("SECRET=shh not found in captured SecretEnv: %v", rt.captured.SecretEnv)
+	}
+	// The secret must NOT leak into the plaintext Env slice.
+	for _, e := range rt.captured.Env {
+		if e == "SECRET=shh" {
+			t.Errorf("secret value leaked into plaintext Env: %v", rt.captured.Env)
+		}
+	}
+}
+
+// TestStart_DeploySuppliedEnvWinsOverSecretEnv guards the precedence contract
+// for an authoritative deploy/platform-supplied key (e.g. the allocated PORT).
+// Such keys arrive in StartParams.Env and must win over per-app env. Because the
+// runtimes inject SecretEnv after Env, a per-app SECRET keyed the same as a
+// deploy-supplied var would otherwise shadow it; the Manager must drop the
+// colliding secret so the deploy value still wins (matching the prior behavior
+// where the decrypted secret lived in the user env that deploy env beat).
+func TestStart_DeploySuppliedEnvWinsOverSecretEnv(t *testing.T) {
+	rt := &captureRuntime{}
+	m := NewManager(t.TempDir(), rt)
+	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
+		// A per-app secret that collides with the allocated PORT.
+		return nil, []string{"PORT=66666"}, nil
+	})
+
+	_, err := m.Start(StartParams{
+		Slug:    "test-port-collision",
+		Dir:     t.TempDir(),
+		Command: []string{"true"},
+		Port:    19903,
+		Env:     []string{"PORT=19903"}, // deploy-supplied, authoritative
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if rt.captured == nil {
+		t.Fatal("runtime.Start was never called")
+	}
+
+	// The colliding secret must be dropped from SecretEnv so it can't shadow
+	// the deploy-supplied PORT in the child env.
+	for _, e := range rt.captured.SecretEnv {
+		if strings.HasPrefix(e, "PORT=") {
+			t.Errorf("secret PORT must be dropped (collides with deploy env), got SecretEnv=%v", rt.captured.SecretEnv)
+		}
+	}
+	// The deploy-supplied PORT must still be present in the plaintext env. The
+	// effective child env is filteredEnv()+Env+SecretEnv; with the secret PORT
+	// dropped, the only PORT entry is the deploy value.
+	var portVal string
+	var portCount int
+	for _, e := range append(append([]string{}, rt.captured.Env...), rt.captured.SecretEnv...) {
+		if strings.HasPrefix(e, "PORT=") {
+			portVal = strings.TrimPrefix(e, "PORT=")
+			portCount++
+		}
+	}
+	if portCount != 1 || portVal != "19903" {
+		t.Errorf("PORT in child env = %q (count %d), want exactly one PORT=19903", portVal, portCount)
+	}
+}
+
 // TestStart_AppliesResolverEnvAfterInherited verifies that the EnvResolver's
 // output is appended after the inherited env, so resolver values win on
 // last-wins key collision (e.g. for shells that process env in order).
@@ -139,8 +291,8 @@ func TestStart_AppliesResolverEnvAfterInherited(t *testing.T) {
 
 	rt := &captureRuntime{}
 	m := NewManager(t.TempDir(), rt)
-	m.SetEnvResolver(func(slug string) ([]string, error) {
-		return []string{"APP_VAR=from-app", "INHERITED_VAR=overridden"}, nil
+	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
+		return []string{"APP_VAR=from-app", "INHERITED_VAR=overridden"}, nil, nil
 	})
 
 	_, err := m.Start(StartParams{
@@ -202,8 +354,8 @@ func TestStart_AppliesResolverEnvAfterInherited(t *testing.T) {
 func TestStart_ResolverErrorAborts(t *testing.T) {
 	rt := &captureRuntime{}
 	m := NewManager(t.TempDir(), rt)
-	m.SetEnvResolver(func(slug string) ([]string, error) {
-		return nil, fmt.Errorf("decrypt failed: bad key")
+	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
+		return nil, nil, fmt.Errorf("decrypt failed: bad key")
 	})
 
 	_, err := m.Start(StartParams{
