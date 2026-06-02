@@ -651,7 +651,21 @@ const (
 	DefaultMaxEntrySize int64 = 128 << 20
 	// DefaultMaxBundleSize caps the combined extracted size of all entries.
 	DefaultMaxBundleSize int64 = 512 << 20
+	// maxBundleEntries caps the number of entries in a bundle. The size caps
+	// bound total bytes but not entry count; a bundle of hundreds of thousands
+	// of tiny entries would still explode inodes on the destination filesystem.
+	maxBundleEntries = 10000
 )
+
+// safeFileMode strips group/other write bits and any setuid/setgid/sticky bits
+// from a zip-declared file mode, preserving only the read/execute intent.
+// Extracted bundle files are never group- or world-writable.
+func safeFileMode(m os.FileMode) os.FileMode {
+	if m.Perm()&0o100 != 0 {
+		return 0o755
+	}
+	return 0o644
+}
 
 // ExtractBundle unzips src into destDir with the default size limits.
 func ExtractBundle(src, destDir string) error {
@@ -668,6 +682,10 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 		return fmt.Errorf("open zip: %w", err)
 	}
 	defer r.Close()
+
+	if len(r.File) > maxBundleEntries {
+		return fmt.Errorf("%w: bundle has %d entries (limit %d)", ErrBundleTooLarge, len(r.File), maxBundleEntries)
+	}
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return err
@@ -692,6 +710,14 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 		rel, err := filepath.Rel(absDestDir, target)
 		if err != nil || strings.HasPrefix(rel, "..") {
 			return fmt.Errorf("zip-slip detected in %q: entry escapes destination", f.Name)
+		}
+
+		// Reject symlink entries outright: a bundle is application code, not a
+		// place for links. Even though the path check above already blocks
+		// traversal via the entry name, a materialized symlink could later be
+		// followed to escape the bundle dir.
+		if f.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: bundle entry %q is a symlink; symlinks are not allowed", ErrBundleRejected, f.Name)
 		}
 
 		// Apply bundle filter rules before any disk side effects. Cache dirs are
@@ -750,7 +776,7 @@ func extractFile(f *zip.File, dest string, maxEntrySize int64) (int64, error) {
 		return 0, err
 	}
 	defer rc.Close()
-	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, safeFileMode(f.Mode()))
 	if err != nil {
 		return 0, err
 	}
