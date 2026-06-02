@@ -22,6 +22,12 @@ jobs:
       - name: Lint
         run: go vet ./...
 
+      # Compile-check the build-tag-gated tests (integration = real AWS ECS,
+      # e2e = proxy distribution). They never run in the default suite, so
+      # without this they silently rot when the code they call is renamed.
+      - name: Vet gated tests (integration, e2e)
+        run: go vet -tags "integration e2e" ./...
+
       - name: Test
         run: go test ./... -count=1
 

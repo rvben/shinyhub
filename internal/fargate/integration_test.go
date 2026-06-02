@@ -140,7 +140,7 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	if !strings.HasPrefix(ep.URL, "http://") || !strings.HasSuffix(ep.URL, wantSuffix) {
 		t.Errorf("URL = %q, want http://<ip>%s", ep.URL, wantSuffix)
 	}
-	taskARN, err := decodeHandle(ep.Handle.ContainerID)
+	taskARN, err := rt.decodeHandle(ep.Handle.ContainerID)
 	if err != nil || taskARN == "" {
 		t.Fatalf("decodeHandle(%q) = %q, %v", ep.Handle.ContainerID, taskARN, err)
 	}
