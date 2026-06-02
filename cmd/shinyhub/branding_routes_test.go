@@ -239,6 +239,7 @@ func TestBrandingRoutes(t *testing.T) {
 			"/apps/replica-smoke",
 			"/apps/replica-smoke/logs",
 			"/users",
+			"/workers",
 			"/audit-log",
 		}
 		for _, path := range paths {
