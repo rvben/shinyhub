@@ -31,8 +31,13 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+// bcryptCost is the password-hashing work factor. 12 is the OWASP-recommended
+// minimum for current hardware; existing lower-cost hashes still verify since
+// bcrypt self-describes its cost in the hash.
+const bcryptCost = 12
+
 func HashPassword(password string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	b, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
 		return "", err
 	}
@@ -65,6 +70,7 @@ func IssueJWT(userID int64, username, role, secret string) (string, error) {
 			Subject:   username,
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtExpiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

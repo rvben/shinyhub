@@ -556,12 +556,12 @@ func (s *Server) buildRouter() chi.Router {
 	// same-origin check; see handleSessionHandoff for the reasoning.
 	r.Post("/api/auth/handoff", s.handleSessionHandoff)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/github/login", s.handleGitHubLogin)
-	r.Get("/api/auth/github/callback", s.handleGitHubCallback)
+	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/github/callback", s.handleGitHubCallback)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/login", s.handleGoogleLogin)
-	r.Get("/api/auth/google/callback", s.handleGoogleCallback)
+	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/callback", s.handleGoogleCallback)
 	r.Get("/api/auth/providers", s.handleGetProviders)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
-	r.Get("/api/auth/oidc/callback", s.handleOIDCCallback)
+	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 	r.Get("/api/server-info", s.handleServerInfo)
 
 	// All other endpoints require either an auth header or a valid session cookie.
