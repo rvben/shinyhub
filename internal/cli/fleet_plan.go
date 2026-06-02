@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ type fleetPlanFlags struct {
 	jsonOutput       bool
 	noColor          bool
 	quiet            bool
+	waitForServer    time.Duration
 }
 
 func newFleetPlanCmd() *cobra.Command {
@@ -29,7 +31,8 @@ func newFleetPlanCmd() *cobra.Command {
 			"  0  report printed (default), or no changes (--detailed-exitcode)\n" +
 			"  1  usage / manifest validation error\n" +
 			"  2  --detailed-exitcode only: changes are pending\n" +
-			"  3  transport / auth error\n\n" +
+			"  3  transport / auth error\n" +
+			"  6  server not ready (reachable host, but shinyhub is not up yet)\n\n" +
 			"Example:\n" +
 			"  shinyhub fleet plan -f shinyhub-fleet.toml --detailed-exitcode",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -41,11 +44,12 @@ func newFleetPlanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit machine-readable JSON")
 	cmd.Flags().BoolVar(&f.noColor, "no-color", false, "Disable ANSI color (glyphs/words remain)")
 	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the summary line only")
+	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	return cmd
 }
 
 func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
-	pf, err := fleetPreflight(f.file, cmd.ErrOrStderr(), "plan")
+	pf, err := fleetPreflight(f.file, cmd.ErrOrStderr(), "plan", f.waitForServer)
 	if err != nil {
 		return err
 	}
@@ -81,32 +85,17 @@ type serverCaps struct {
 	ContentDigest      bool `json:"content_digest"`
 }
 
-// fetchServerCaps reads GET /api/server-info (unauthenticated). Best-effort:
-// an older server without the endpoint yields a zero-value caps (all false);
-// fleet apply uses these capabilities to choose its convergence strategy, while
-// fleet plan only records them.
+// fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just
+// the advertised capabilities. Best-effort: an older server without the
+// endpoint, an unreachable host, or a non-shinyhub response all yield zero-value
+// caps (all false). fleet apply uses these capabilities to choose its
+// convergence strategy, while fleet plan only records them.
 func fetchServerCaps(cfg *cliConfig) serverCaps {
-	var c serverCaps
-	req, err := http.NewRequest("GET", cfg.Host+"/api/server-info", nil)
+	info, err := probeServer(cfg)
 	if err != nil {
-		return c
+		return serverCaps{}
 	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return c
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return c
-	}
-	body, _ := io.ReadAll(resp.Body)
-	var wrap struct {
-		Capabilities serverCaps `json:"capabilities"`
-	}
-	if json.Unmarshal(body, &wrap) == nil {
-		c = wrap.Capabilities
-	}
-	return c
+	return info.Capabilities
 }
 
 // intPtrIfPositive maps a non-pointer API int to *int, treating 0 as "unset"
@@ -118,4 +107,3 @@ func intPtrIfPositive(v int) *int {
 	}
 	return &v
 }
-

@@ -495,6 +495,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	prx.SetTracing(cfg.Tracing, traceBuffer)
 
 	srv := api.New(cfg, store, mgr, prx)
+	srv.SetVersion(version)
 	if deployToken != nil {
 		srv.SetDeployToken(deployToken)
 	}

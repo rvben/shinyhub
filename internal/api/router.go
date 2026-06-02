@@ -51,6 +51,11 @@ type Server struct {
 	tracer        *servertrace.Tracer // nil when server tracing is disabled
 	router        chi.Router
 
+	// version is the binary version string advertised by GET /api/server-info,
+	// set by the parent binary via SetVersion. Empty until SetVersion is called
+	// (e.g. in test contexts that do not wire it).
+	version string
+
 	// nodeForTier resolves a tier name to the node identity backing it: a remote
 	// worker's node id, or "" for any tier the control plane itself backs (all
 	// such tiers share the "" identity, so they are mutually co-located). Nil

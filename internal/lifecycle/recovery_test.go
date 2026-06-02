@@ -260,8 +260,8 @@ func TestRecoverDockerProcesses(t *testing.T) {
 	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
 			{ID: "cont-abc", Labels: map[string]string{
-				"shinyhub.slug":          "docker-app",
-				"shinyhub.replica_index": "0",
+				process.LabelSlug:         "docker-app",
+				process.LabelReplicaIndex: "0",
 			}},
 		},
 		pids: map[string]int{"cont-abc": 99001},
@@ -315,8 +315,8 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
 			{ID: "cont-alive", Labels: map[string]string{
-				"shinyhub.slug":          "alive-app",
-				"shinyhub.replica_index": "0",
+				process.LabelSlug:         "alive-app",
+				process.LabelReplicaIndex: "0",
 			}},
 		},
 		pids: map[string]int{"cont-alive": 99002},
@@ -362,8 +362,8 @@ func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
 
 	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
-			{ID: "c0", Labels: map[string]string{"shinyhub.slug": "multi-docker", "shinyhub.replica_index": "0"}},
-			{ID: "c1", Labels: map[string]string{"shinyhub.slug": "multi-docker", "shinyhub.replica_index": "1"}},
+			{ID: "c0", Labels: map[string]string{process.LabelSlug: "multi-docker", process.LabelReplicaIndex: "0"}},
+			{ID: "c1", Labels: map[string]string{process.LabelSlug: "multi-docker", process.LabelReplicaIndex: "1"}},
 		},
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
@@ -421,8 +421,8 @@ func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 
 	rt := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
-			{ID: "c0", Labels: map[string]string{"shinyhub.slug": "shrunk-docker", "shinyhub.replica_index": "0"}},
-			{ID: "c1", Labels: map[string]string{"shinyhub.slug": "shrunk-docker", "shinyhub.replica_index": "1"}},
+			{ID: "c0", Labels: map[string]string{process.LabelSlug: "shrunk-docker", process.LabelReplicaIndex: "0"}},
+			{ID: "c1", Labels: map[string]string{process.LabelSlug: "shrunk-docker", process.LabelReplicaIndex: "1"}},
 		},
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
@@ -473,7 +473,7 @@ func TestRecoverProcesses_MixedTier(t *testing.T) {
 
 	burst := &fakeDockerRuntime{
 		containers: []process.ContainerInfo{
-			{ID: "cb1", Labels: map[string]string{"shinyhub.slug": "mixed-tier", "shinyhub.replica_index": "1"}},
+			{ID: "cb1", Labels: map[string]string{process.LabelSlug: "mixed-tier", process.LabelReplicaIndex: "1"}},
 		},
 		pids: map[string]int{"cb1": pidBurst},
 	}
@@ -579,8 +579,8 @@ func TestRecoverProcesses_RemoteTierAdoptsByDeploymentID(t *testing.T) {
 	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
 		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok", WorkerID: "node-a",
 			Labels: map[string]string{
-				"shinyhub.slug": "remote-app", "shinyhub.replica_index": "0",
-				"shinyhub.deployment_id": "7",
+				process.LabelSlug: "remote-app", process.LabelReplicaIndex: "0",
+				process.LabelDeploymentID: "7",
 			}},
 	}}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -839,8 +839,8 @@ func TestRecoverProcesses_RemoteStaleDeploymentNotAdopted(t *testing.T) {
 	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
 		{ContainerID: "c-old", Running: true, URL: "https://w:8443/v1/data/old",
 			Labels: map[string]string{
-				"shinyhub.slug": "stale-app", "shinyhub.replica_index": "0",
-				"shinyhub.deployment_id": "5",
+				process.LabelSlug: "stale-app", process.LabelReplicaIndex: "0",
+				process.LabelDeploymentID: "5",
 			}},
 	}}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -872,8 +872,8 @@ func TestRecoverProcesses_RemoteLostReplicaSkipped(t *testing.T) {
 	remote := &fakeRemoteRuntime{items: []process.InventoryItem{
 		{ContainerID: "c-1", Running: true, URL: "https://w:8443/v1/data/tok",
 			Labels: map[string]string{
-				"shinyhub.slug": "lost-app", "shinyhub.replica_index": "0",
-				"shinyhub.deployment_id": "7",
+				process.LabelSlug: "lost-app", process.LabelReplicaIndex: "0",
+				process.LabelDeploymentID: "7",
 			}},
 	}}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())

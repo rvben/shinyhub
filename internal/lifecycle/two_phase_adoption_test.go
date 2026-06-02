@@ -68,9 +68,9 @@ func TestRecoverRemoteReplica_FargatePartialAdoptWhenNoURL(t *testing.T) {
 	items := []process.InventoryItem{{
 		ContainerID: "arn-pending",
 		Labels: map[string]string{
-			"shinyhub.slug":          "demo",
-			"shinyhub.replica_index": "0",
-			"shinyhub.deployment_id": "42",
+			process.LabelSlug:         "demo",
+			process.LabelReplicaIndex: "0",
+			process.LabelDeploymentID: "42",
 		},
 		Running:  true, // PROVISIONING = not stopped
 		URL:      "",   // no IP yet
@@ -118,9 +118,9 @@ func TestRecoverRemoteReplica_FargateFullAdoptWhenURLPresent(t *testing.T) {
 	items := []process.InventoryItem{{
 		ContainerID: "arn-running",
 		Labels: map[string]string{
-			"shinyhub.slug":          "demo",
-			"shinyhub.replica_index": "0",
-			"shinyhub.deployment_id": "42",
+			process.LabelSlug:         "demo",
+			process.LabelReplicaIndex: "0",
+			process.LabelDeploymentID: "42",
 		},
 		Running:  true,
 		URL:      "http://192.0.2.5:8000",
@@ -154,9 +154,9 @@ func TestRecoverRemoteReplica_RemoteDockerEmptyURLReturnsFalse(t *testing.T) {
 	items := []process.InventoryItem{{
 		ContainerID: "container-abc",
 		Labels: map[string]string{
-			"shinyhub.slug":          "demo",
-			"shinyhub.replica_index": "0",
-			"shinyhub.deployment_id": "10",
+			process.LabelSlug:         "demo",
+			process.LabelReplicaIndex: "0",
+			process.LabelDeploymentID: "10",
 		},
 		Running:  true,
 		URL:      "", // empty URL for remote_docker = error
@@ -185,9 +185,9 @@ func TestRecoverRemoteReplica_StoppedTaskReturnsFalse(t *testing.T) {
 	items := []process.InventoryItem{{
 		ContainerID: "arn-stopped",
 		Labels: map[string]string{
-			"shinyhub.slug":          "demo",
-			"shinyhub.replica_index": "0",
-			"shinyhub.deployment_id": "42",
+			process.LabelSlug:         "demo",
+			process.LabelReplicaIndex: "0",
+			process.LabelDeploymentID: "42",
 		},
 		Running:  false, // STOPPED
 		URL:      "",

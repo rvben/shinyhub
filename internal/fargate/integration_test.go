@@ -161,7 +161,7 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	if found == nil {
 		t.Fatalf("started task %s not present in inventory of %d item(s)", taskARN, len(items))
 	}
-	if found.Labels[tagSlug] != p.Slug || found.Labels[tagReplicaIndex] != "0" {
+	if found.Labels[process.LabelSlug] != p.Slug || found.Labels[process.LabelReplicaIndex] != "0" {
 		t.Errorf("inventory labels = %v", found.Labels)
 	}
 	if found.WorkerID != WorkerID {

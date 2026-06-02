@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/spf13/cobra"
@@ -19,6 +20,7 @@ type fleetApplyFlags struct {
 	jsonOutput               bool
 	retries                  int
 	healthTimeout            int
+	waitForServer            time.Duration
 }
 
 func newFleetApplyCmd() *cobra.Command {
@@ -37,7 +39,8 @@ func newFleetApplyCmd() *cobra.Command {
 			"  1  usage / manifest validation error\n" +
 			"  3  transport / auth error\n" +
 			"  4  partial: >=1 app failed after retries\n" +
-			"  5  conflicts: >=1 app skipped on a precondition 409\n\n" +
+			"  5  conflicts: >=1 app skipped on a precondition 409\n" +
+			"  6  server not ready (reachable host, but shinyhub is not up yet)\n\n" +
 			"Example:\n" +
 			"  shinyhub fleet apply -f shinyhub-fleet.toml --prune --yes",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -56,6 +59,7 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploy-bearing actions")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
+	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	return cmd
 }
 
@@ -63,7 +67,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
-	pf, err := fleetPreflight(f.file, errOut, "apply")
+	pf, err := fleetPreflight(f.file, errOut, "apply", f.waitForServer)
 	if err != nil {
 		return err
 	}
