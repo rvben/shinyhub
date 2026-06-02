@@ -27,6 +27,7 @@
   <nav id="tab-bar" role="navigation" aria-label="Main navigation" hidden>
     <a href="/" data-nav class="tab" id="tab-apps">Apps</a>
     <a href="/users" data-nav class="tab" id="tab-users" hidden>Users</a>
+    <a href="/workers" data-nav class="tab" id="tab-workers" hidden>Workers</a>
     <a href="/audit-log" data-nav class="tab" id="tab-audit" hidden>Audit Log</a>
   </nav>
 
@@ -103,6 +104,26 @@
           </tr>
         </thead>
         <tbody id="users-body"></tbody>
+      </table>
+    </section>
+
+    <section id="workers-view" hidden>
+      <div class="toolbar">
+        <h1>Workers</h1>
+      </div>
+      <p id="workers-error" class="error" hidden></p>
+      <p id="workers-empty" class="env-empty" hidden>No workers have joined. Workers appear here when worker hosting is enabled and a `shinyhub worker` node joins over mTLS.</p>
+      <table id="workers-table" hidden>
+        <thead>
+          <tr>
+            <th scope="col">Node</th>
+            <th scope="col">Tier</th>
+            <th scope="col">Status</th>
+            <th scope="col">Version</th>
+            <th scope="col">Last heartbeat</th>
+          </tr>
+        </thead>
+        <tbody id="workers-body"></tbody>
       </table>
     </section>
 
