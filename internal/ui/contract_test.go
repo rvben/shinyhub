@@ -901,6 +901,13 @@ func TestReplicaDisplayWiring(t *testing.T) {
 		"seedReplicasFromStatus must call backendLabel to render the initial backend/tier label per replica")
 	assertContains(t, "views/app-detail.js", "metricsText",
 		"seedReplicasFromStatus must call metricsText so the initial panel state is honest for PID-less replicas")
+
+	// Both render paths must surface the per-replica degraded reason (e.g.
+	// "worker unavailable" for a lost replica) instead of a bare status badge.
+	assertContains(t, "app.js", "reasonLabel",
+		"app.js renderReplicasPanel must call reasonLabel to surface a lost replica's reason")
+	assertContains(t, "views/app-detail.js", "reasonLabel",
+		"seedReplicasFromStatus must call reasonLabel to surface a lost replica's reason")
 }
 
 // TestMetricsAvailableWiring pins the top-level metrics_available field

@@ -196,18 +196,10 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Derive a presentation-only reason for replicas lost to a dead worker: when
-	// the tier has no healthy worker, the watchdog cannot re-place the slot, so
-	// surface "worker unavailable" to disambiguate the degraded state. Once a
-	// replacement worker joins (mid-heal) the reason clears.
-	if s.workerReg != nil {
-		for i, rep := range replicas {
-			if rep.Status != db.ReplicaStatusLost {
-				continue
-			}
-			if _, ok := s.workerReg.WorkerForTier(rep.Tier); !ok {
-				replicas[i].Reason = "worker unavailable"
-			}
+	// Derive a presentation-only reason for replicas lost to a dead worker.
+	for i, rep := range replicas {
+		if rep.Status == db.ReplicaStatusLost {
+			replicas[i].Reason = s.lostReplicaReason(rep.Tier)
 		}
 	}
 
@@ -1802,9 +1794,14 @@ type replicaMetrics struct {
 	RSSBytes   int64   `json:"rss_bytes,omitempty"`
 	// Sessions is the proxy's best-effort live connection count for this
 	// replica. Omitted (and -1 internally) when the replica slot is empty.
-	Sessions         int64  `json:"sessions"`
-	Tier             string `json:"tier,omitempty"`
-	Provider         string `json:"provider,omitempty"`
+	Sessions int64  `json:"sessions"`
+	Tier     string `json:"tier,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	// Reason is a presentation-only explanation for a degraded replica, e.g.
+	// "worker unavailable" for a replica lost to a dead worker with no healthy
+	// replacement. Empty for healthy replicas. Mirrors db.Replica.Reason so the
+	// live poll stays consistent with the app envelope.
+	Reason           string `json:"reason,omitempty"`
 	MetricsAvailable bool   `json:"metrics_available"`
 }
 
@@ -1878,10 +1875,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	infos := s.manager.AllForSlug(slug)
-	if len(infos) == 0 {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
 
 	// Sessions-count slice may be shorter than infos if SetPoolSize raced
 	// with a Deregister; clamp lookups to avoid out-of-range reads.
@@ -1933,6 +1926,36 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	if anyRunning {
 		resp.Status = string(process.StatusRunning)
+	}
+
+	// Overlay DB lost-status onto the live, manager-sourced replica list. "lost"
+	// is a DB-only concept the manager pool does not track, so without this the
+	// poll would render a lost replica as "stopped" (or omit it when the pool is
+	// empty) and drop the worker-unavailable reason the app envelope derives.
+	// Overlay onto the matching slot when present, else append.
+	if dbReplicas, derr := s.store.ListReplicas(app.ID); derr == nil {
+		for _, rep := range dbReplicas {
+			if rep.Status != db.ReplicaStatusLost {
+				continue
+			}
+			reason := s.lostReplicaReason(rep.Tier)
+			if rep.Index < len(resp.Replicas) {
+				resp.Replicas[rep.Index].Status = string(db.ReplicaStatusLost)
+				resp.Replicas[rep.Index].Reason = reason
+				resp.Replicas[rep.Index].Tier = rep.Tier
+				resp.Replicas[rep.Index].Provider = rep.Provider
+				resp.Replicas[rep.Index].MetricsAvailable = false
+			} else {
+				resp.Replicas = append(resp.Replicas, replicaMetrics{
+					Index:    rep.Index,
+					Status:   string(db.ReplicaStatusLost),
+					Reason:   reason,
+					Tier:     rep.Tier,
+					Provider: rep.Provider,
+					Sessions: -1,
+				})
+			}
+		}
 	}
 
 	metricsEvent, metricsFound, metricsErr := s.store.LatestAutoscaleEvent(slug)
@@ -1999,6 +2022,22 @@ func parsePagination(r *http.Request) (limit, offset int) {
 		}
 	}
 	return limit, offset
+}
+
+// lostReplicaReason returns the presentation-only reason for a replica that is
+// in the "lost" state, or "" when none applies. A lost replica whose tier has
+// no healthy worker is stranded until one joins (the watchdog cannot re-place
+// it), so surface "worker unavailable" to disambiguate that degraded state from
+// a mid-heal lost slot. Shared by the app envelope and the live metrics poll so
+// the two cannot diverge.
+func (s *Server) lostReplicaReason(tier string) string {
+	if s.workerReg == nil {
+		return ""
+	}
+	if _, ok := s.workerReg.WorkerForTier(tier); !ok {
+		return "worker unavailable"
+	}
+	return ""
 }
 
 // appTargetsFargate reports whether any tier this app is placed on uses the

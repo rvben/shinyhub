@@ -19,6 +19,21 @@ export function backendLabel(replica) {
   return 'unknown';
 }
 
+/**
+ * reasonLabel returns a replica's presentation-only degraded-state reason
+ * (e.g. "worker unavailable" for a replica lost to a dead worker), or "" when
+ * none applies. The server sets this on lost replicas in both the app envelope
+ * (replicas_status) and the metrics poll, so both render paths can surface the
+ * cause instead of a bare "Lost" badge.
+ *
+ * @param {{ reason?: string }|null} replica
+ * @returns {string}
+ */
+export function reasonLabel(replica) {
+  if (!replica || typeof replica !== 'object') return '';
+  return typeof replica.reason === 'string' ? replica.reason : '';
+}
+
 const METRICS_NA_NOTE =
   'Live CPU/RAM not collected for this backend (Fargate/remote tasks: see CloudWatch / the worker host)';
 

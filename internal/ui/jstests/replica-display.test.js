@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { backendLabel, metricsText } from '../static/views/replica-display.js';
+import { backendLabel, metricsText, reasonLabel } from '../static/views/replica-display.js';
 
 // backendLabel
 
@@ -26,6 +26,21 @@ test('backendLabel returns "unknown" when both are absent', () => {
 
 test('backendLabel returns "unknown" for null input', () => {
   assert.equal(backendLabel(null), 'unknown');
+});
+
+// reasonLabel
+
+test('reasonLabel returns the reason string when present', () => {
+  assert.equal(reasonLabel({ status: 'lost', reason: 'worker unavailable' }), 'worker unavailable');
+});
+
+test('reasonLabel returns empty string when reason is absent', () => {
+  assert.equal(reasonLabel({ status: 'running' }), '');
+});
+
+test('reasonLabel returns empty string for null/non-object input', () => {
+  assert.equal(reasonLabel(null), '');
+  assert.equal(reasonLabel(undefined), '');
 });
 
 // metricsText

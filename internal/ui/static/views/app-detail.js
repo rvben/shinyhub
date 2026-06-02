@@ -3,7 +3,7 @@
 // now Overview is the only one with a renderer and other tabs show "Coming
 // soon" placeholders.
 import { makeFleetBadge, renderFleetDigest } from '/static/views/fleet-ui.js';
-import { backendLabel, metricsText } from '/static/views/replica-display.js';
+import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
 import {
   summariseAutoscale,
@@ -389,17 +389,25 @@ function seedReplicasFromStatus(app, replicasStatus) {
     });
     const cpuDisplay = status === 'running' ? cpuInit : '—';
     const ramDisplay = status === 'running' ? ramInit : '—';
-    // Build the li via innerHTML for fixed strings, but set backend via
-    // textContent to avoid XSS from operator-controlled r.tier/r.provider values.
+    // reason explains a degraded state (e.g. "worker unavailable" for a lost
+    // replica); empty for healthy replicas.
+    const reason = reasonLabel(r);
+    // Build the li via innerHTML for fixed strings, but set backend + reason via
+    // textContent to avoid XSS from operator-controlled values.
     li.innerHTML = `
       <span class="replica-index">#${r.index}</span>
-      <span class="badge badge-${status}">${formatStatus(status)}</span>
+      <span class="badge badge-${status}"></span>
       <span class="replica-backend" title="Backend/tier"></span>
+      <span class="replica-reason"></span>
       <span class="replica-sessions">— sessions</span>
       <span class="replica-cpu">CPU ${cpuDisplay}</span>
       <span class="replica-ram"${note ? ` title="${note}"` : ''}>RAM ${ramDisplay}</span>
     `;
+    const badgeEl = li.querySelector('.badge');
+    badgeEl.textContent = formatStatus(status);
+    if (reason) badgeEl.title = reason;
     li.querySelector('.replica-backend').textContent = backend;
+    li.querySelector('.replica-reason').textContent = reason;
     listEl.appendChild(li);
   }
 }
