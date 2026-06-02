@@ -153,7 +153,7 @@ curl -fsS "http://127.0.0.1:${CP_PORT}/app/e2eapp/" >/dev/null || fail "routing 
 #     no live replicas the proxy serves its loading page (HTTP 200), so assert
 #     the app body is no longer served rather than expecting a non-2xx status.
 kill "${WORKER_PID}"; wait "${WORKER_PID}" 2>/dev/null || true; WORKER_PID=""
-"${ROOT}/scripts/wait-log.sh" "${WORKDIR}/cp.log" "worker monitor: replica lost" 150 \
+"${ROOT}/scripts/wait-log.sh" "${WORKDIR}/cp.log" "lose replica" 150 \
   || fail "replica was not marked lost after the worker died"
 lost_body="$(curl -fsS "http://127.0.0.1:${CP_PORT}/app/e2eapp/" || true)"
 if echo "${lost_body}" | grep -q "shinyhub remote-worker E2E"; then
