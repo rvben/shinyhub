@@ -166,7 +166,11 @@ function renderLogs(panel, app) {
     body.appendChild(document.createTextNode(e.data + '\n'));
     if (followCb.checked && atBottom) body.scrollTop = body.scrollHeight;
   };
-  es.onerror = () => { es.close(); };
+  es.onerror = () => {
+    es.close();
+    body.appendChild(document.createTextNode('(log stream disconnected)\n'));
+    if (followCb.checked) body.scrollTop = body.scrollHeight;
+  };
 
   copyBtn.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(body.textContent); } catch {}

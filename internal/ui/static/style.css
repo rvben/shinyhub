@@ -1515,6 +1515,32 @@ main {
 
   nav { padding: 0.75rem 1rem; }
   #tab-bar { padding: 0 1rem; top: 56px; }
+
+  /* Search field shrinks instead of pushing the toolbar buttons off-screen. */
+  .apps-search { width: auto; min-width: 0; flex: 1 1 8rem; }
+
+  /* Detail header: drop the absolutely-positioned action bar below the title
+     so the buttons don't overlap the app name on narrow screens. */
+  .app-detail-title-row { flex-wrap: wrap; }
+  .app-detail-header { padding-bottom: 16px; }
+  .app-detail-actions {
+    position: static;
+    margin-top: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  /* Wide admin tables scroll within themselves rather than overflowing body.
+     :not([hidden]) so these ID-specificity rules don't override the hidden
+     state of an empty Workers/Audit table (display:block would outrank the
+     UA [hidden]{display:none} rule). */
+  #audit-table:not([hidden]),
+  #users-table:not([hidden]),
+  #workers-table:not([hidden]) {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
 }
 
 /* === New-app modal === */
@@ -1542,6 +1568,14 @@ main {
   border-color: var(--accent);
 }
 .apps-search::placeholder { color: var(--text-muted); }
+
+/* Loading placeholder shown in data grids/tables during the initial fetch. */
+.grid-loading {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 1.25rem 0;
+}
 
 .apps-sort {
   background: var(--surface-2);
