@@ -161,7 +161,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		Env:     append(filteredEnv(), p.Env...),
 		WorkDir: "/app",
 		Mounts: []containerMount{
-			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"},
+			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "ro"}, // deployed code is immutable; writable paths are /app-data and /tmp
 		},
 		Labels:      labels,
 		NetworkMode: r.networkMode,
@@ -357,7 +357,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 		Env:     append(filteredEnv(), p.Env...),
 		WorkDir: "/app",
 		Mounts: []containerMount{
-			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"},
+			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "ro"}, // deployed code is immutable; writable paths are /app-data and /tmp
 		},
 		Labels: map[string]string{
 			"shinyhub.managed": "true",
