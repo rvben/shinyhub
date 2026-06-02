@@ -57,22 +57,8 @@ func TestDockerRuntimeStart_HardensContainer(t *testing.T) {
 	if pl, ok := host["PidsLimit"].(float64); !ok || pl <= 0 {
 		t.Errorf("HostConfig.PidsLimit not set to a positive value: %v", host["PidsLimit"])
 	}
-
-	// The app bundle (/app) must be mounted read-only so a compromised app
-	// cannot mutate its own deployed code; /app-data remains writable.
-	mounts, _ := host["Mounts"].([]any)
-	var foundApp, appReadOnly bool
-	for _, m := range mounts {
-		mm, _ := m.(map[string]any)
-		if mm["Target"] == "/app" {
-			foundApp = true
-			appReadOnly, _ = mm["ReadOnly"].(bool)
-		}
-	}
-	if !foundApp {
-		t.Fatalf("no /app mount in HostConfig: %v", host["Mounts"])
-	}
-	if !appReadOnly {
-		t.Error("/app bundle mount must be ReadOnly")
-	}
+	// Note: /app stays read-write. In-container dependency prep (uv project sync,
+	// renv::restore) writes into the bundle dir, so a read-only /app would break
+	// Docker-hosted apps. Bundle immutability needs a different approach (separate
+	// writable venv/library dir) and is tracked as a follow-up.
 }
