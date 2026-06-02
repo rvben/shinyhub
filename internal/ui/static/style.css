@@ -2707,6 +2707,11 @@ main {
 .replica-sessions-saturated { color: var(--danger, #f87171); font-weight: 600; }
 .replica-reason { color: var(--danger, #f87171); font-size: 0.8rem; font-style: italic; }
 .replica-reason:empty { display: none; }
+.fleet-health { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 8px; font-size: 0.9rem; }
+.fleet-health[hidden] { display: none; }
+.fleet-health-headline { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+.fleet-health-chip { color: var(--danger, #f87171); font-size: 0.8rem; padding: 2px 8px; border: 1px solid var(--line); border-radius: 12px; }
+.fleet-health-lost { border-color: var(--danger, #f87171); }
 .replica-cpu, .replica-ram { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .app-card-body-link { display: block; color: inherit; text-decoration: none; }
 .app-card-body-link:hover strong { text-decoration: underline; }

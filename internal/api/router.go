@@ -631,6 +631,7 @@ func (s *Server) buildRouter() chi.Router {
 
 		r.Get("/api/workers", s.handleListWorkers)                    // admin: list joined workers
 		r.Post("/api/workers/{node_id}/revoke", s.handleRevokeWorker) // admin: revoke a worker
+		r.Get("/api/fleet/health", s.handleFleetHealth)               // admin: aggregate fleet health
 	})
 
 	return r
