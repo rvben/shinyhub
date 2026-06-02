@@ -902,6 +902,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Reject an R app placed on a Fargate tier before the running pool is
+	// touched. The reference Fargate runner image is Python-only and
+	// HostPreparesDeps() is false for the fargate runtime, so the task would
+	// start and fail at exec with no R interpreter or restored renv. A clear
+	// 400 here beats a cryptic task-startup failure later.
+	if deploy.DetectAppType(bundleDir) == "r" && s.appTargetsFargate(app) {
+		writeError(w, http.StatusBadRequest,
+			"R apps are not supported on Fargate tiers: the Fargate runner image is Python-only. Place this app on a native or docker tier.")
+		return
+	}
+
 	// Capture the current live deployment so a failed deploy can restore the
 	// previous pool, then durably record the new deployment as 'pending'
 	// BEFORE the running pool is touched. ListDeployments excludes pending
@@ -1988,6 +1999,18 @@ func parsePagination(r *http.Request) (limit, offset int) {
 		}
 	}
 	return limit, offset
+}
+
+// appTargetsFargate reports whether any tier this app is placed on uses the
+// "fargate" runtime. Unlike allTiersFargate (which inspects the global config),
+// this is per-app: it resolves the app's placement tiers and checks each one.
+func (s *Server) appTargetsFargate(app *db.App) bool {
+	for _, tier := range s.tiersForApp(app) {
+		if rt, _ := s.cfg.Runtime.RuntimeForTier(tier); rt == "fargate" {
+			return true
+		}
+	}
+	return false
 }
 
 // allTiersFargate reports true when every declared runtime tier uses the
