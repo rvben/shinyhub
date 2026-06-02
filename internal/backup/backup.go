@@ -121,7 +121,9 @@ func Create(cfg *config.Config, version, outPath string) error {
 	_ = store.Close()
 
 	tmpOut := outPath + ".partial"
-	out, err := os.Create(tmpOut)
+	// Owner-only: the archive contains the full database (password and API-key
+	// hashes, the audit log) plus all app source and data.
+	out, err := os.OpenFile(tmpOut, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", tmpOut, err)
 	}
