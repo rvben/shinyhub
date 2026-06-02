@@ -910,6 +910,29 @@ func TestReplicaDisplayWiring(t *testing.T) {
 		"seedReplicasFromStatus must call reasonLabel to surface a lost replica's reason")
 }
 
+// TestWorkersPageWiring pins the admin Workers page across the SPA: the nav tab,
+// the section, the route registration, the API call, and the admin gating. A
+// refactor that drops any of these fails the build instead of silently breaking
+// the read-only worker-fleet view.
+func TestWorkersPageWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="tab-workers"`,
+		"index.html must have the Workers nav tab")
+	assertContains(t, "index.html", `id="workers-view"`,
+		"index.html must have the workers-view section")
+	assertContains(t, "index.html", `id="workers-body"`,
+		"index.html must have the workers table body the renderer fills")
+	assertContains(t, "app.js", `'/static/views/workers.js'`,
+		"app.js must import the workers view module")
+	assertContains(t, "app.js", "router.register('/workers'",
+		"app.js must register the /workers SPA route")
+	assertContains(t, "app.js", "mountWorkers(",
+		"app.js must mount the workers view")
+	assertContains(t, "app.js", "/api/workers",
+		"app.js loadWorkers must call the /api/workers endpoint")
+	assertContains(t, "app.js", "tabWorkers.hidden = payload.user.role !== 'admin'",
+		"the Workers tab must be admin-gated in showLoggedIn")
+}
+
 // TestMetricsAvailableWiring pins the top-level metrics_available field
 // consumed by the grid card path. The grid card reads m.cpu_percent /
 // m.rss_bytes from the legacy top-level scalars (not m.replicas), so the

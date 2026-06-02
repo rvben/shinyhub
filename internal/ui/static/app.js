@@ -2,6 +2,7 @@ import { createRouter } from '/static/router.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountUsers } from '/static/views/users.js';
+import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
@@ -122,6 +123,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const tabApps     = document.getElementById('tab-apps');
   const tabAudit    = document.getElementById('tab-audit');
   const tabUsers    = document.getElementById('tab-users');
+  const tabWorkers  = document.getElementById('tab-workers');
+  const workersView    = document.getElementById('workers-view');
+  const workersError   = document.getElementById('workers-error');
+  const workersEmpty   = document.getElementById('workers-empty');
+  const workersTable   = document.getElementById('workers-table');
+  const workersBody    = document.getElementById('workers-body');
   const usersView   = document.getElementById('users-view');
   const usersError  = document.getElementById('users-error');
   const usersBody   = document.getElementById('users-body');
@@ -483,6 +490,7 @@ document.addEventListener('DOMContentLoaded', () => {
     tabBar.hidden = false;
     tabAudit.hidden = payload.user.role !== 'admin';
     tabUsers.hidden = payload.user.role !== 'admin';
+    tabWorkers.hidden = payload.user.role !== 'admin';
     newAppButton.hidden = !state.canCreateApps;
     // The router (started by the caller) will mount the view that matches
     // the current URL — do not pre-show apps-view here, it leaks through
@@ -517,6 +525,68 @@ document.addEventListener('DOMContentLoaded', () => {
     state.apps = (await response.json()) || [];
     renderApps();
     metrics.setTargets(state.apps.map(a => a.slug));
+  }
+
+  async function loadWorkers() {
+    setError(workersError, '');
+    let resp;
+    try {
+      resp = await api('/api/workers');
+    } catch {
+      setError(workersError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (resp.status === 403) { setError(workersError, 'Admin access required'); return; }
+    if (!resp.ok) { setError(workersError, 'Failed to load workers'); return; }
+    let workers;
+    try {
+      workers = await resp.json();
+    } catch {
+      setError(workersError, 'Invalid response from server');
+      return;
+    }
+    renderWorkers(Array.isArray(workers) ? workers : []);
+  }
+
+  function renderWorkers(workers) {
+    workersBody.textContent = '';
+    if (workersEmpty) workersEmpty.hidden = workers.length !== 0;
+    if (workersTable) workersTable.hidden = workers.length === 0;
+    for (const w of workers) {
+      const d = workerDisplay(w);
+      const tr = document.createElement('tr');
+
+      const node = document.createElement('td');
+      node.textContent = d.node;
+      tr.appendChild(node);
+
+      const tier = document.createElement('td');
+      tier.textContent = d.tier;
+      tr.appendChild(tier);
+
+      const status = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = `badge badge-${d.statusClass}`;
+      badge.textContent = d.statusText;
+      status.appendChild(badge);
+      tr.appendChild(status);
+
+      const version = document.createElement('td');
+      version.textContent = d.version;
+      tr.appendChild(version);
+
+      const hb = document.createElement('td');
+      let hbText = 'never';
+      if (w.last_heartbeat) {
+        const dt = new Date(w.last_heartbeat);
+        hbText = isNaN(dt.getTime()) ? String(w.last_heartbeat) : relativeTime(dt);
+      }
+      hb.textContent = hbText;
+      tr.appendChild(hb);
+
+      workersBody.appendChild(tr);
+    }
   }
 
   async function loadAuditEvents(page) {
@@ -2766,6 +2836,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function hideAllPageViews() {
     appsView.hidden = true;
     usersView.hidden = true;
+    workersView.hidden = true;
     auditView.hidden = true;
     appDetailView.hidden = true;
   }
@@ -2779,6 +2850,10 @@ document.addEventListener('DOMContentLoaded', () => {
   router.register('/users', () => {
     hideAllPageViews();
     return mountUsers({ ...ctx, loadUsers });
+  });
+  router.register('/workers', () => {
+    hideAllPageViews();
+    return mountWorkers({ ...ctx, loadWorkers });
   });
   router.register('/audit-log', () => {
     hideAllPageViews();
@@ -2874,7 +2949,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // must not contain `\` (Windows-separator normalization). It must not be
   // `/` or `/login` (those would no-op or loop). Anything else falls
   // through silently.
-  const SPA_ROUTE_PREFIXES = ['/apps/', '/users', '/audit-log'];
+  const SPA_ROUTE_PREFIXES = ['/apps/', '/users', '/workers', '/audit-log'];
   function consumeNextParam() {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('next');
