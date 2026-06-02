@@ -1044,6 +1044,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	})
 	mux.Handle("/apps/", spa)
 	mux.Handle("/users", spa)
+	mux.Handle("/workers", spa)
 	mux.Handle("/audit-log", spa)
 	mux.Handle("/login", spa) // always serves the SPA shell, even when landing_page is set
 

@@ -16,7 +16,7 @@ var appDetailPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `(/[a-z-]+)
 // should be served the index.html shell.
 func IsUIPath(path string) bool {
 	switch path {
-	case "/login", "/users", "/audit-log":
+	case "/login", "/users", "/workers", "/audit-log":
 		return true
 	}
 	return appDetailPath.MatchString(path)
