@@ -29,10 +29,10 @@ type LogFile struct {
 
 // OpenLogFile opens or creates the log file at path for appending.
 func OpenLogFile(path string, maxSize int64) (*LogFile, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
 	if err != nil {
 		return nil, err
 	}
@@ -68,16 +68,16 @@ func (l *LogFile) rotate() {
 	l.file.Close()
 	if err := os.Rename(l.path, l.backup); err != nil {
 		// Rename failed — reopen the existing file for appending so writes continue.
-		if f, err2 := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err2 == nil {
+		if f, err2 := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640); err2 == nil {
 			l.file = f
 		}
 		return
 	}
 	// Rename succeeded — open a fresh file at the primary path.
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY, 0o640)
 	if err != nil {
 		// Can't open new file — fall back to the backup so writes don't stop.
-		if f2, err2 := os.OpenFile(l.backup, os.O_APPEND|os.O_WRONLY, 0644); err2 == nil {
+		if f2, err2 := os.OpenFile(l.backup, os.O_APPEND|os.O_WRONLY, 0o640); err2 == nil {
 			l.file = f2
 		}
 		return

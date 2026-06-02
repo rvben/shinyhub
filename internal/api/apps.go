@@ -811,11 +811,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if err := os.MkdirAll(filepath.Dir(bundleZip), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(bundleZip), 0o750); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	out, err := os.Create(bundleZip)
+	out, err := os.OpenFile(bundleZip, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -1607,6 +1607,7 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	oldAccess := app.Access
 	var req struct {
 		Access string `json:"access"`
 	}
@@ -1635,9 +1636,10 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
+		accessDetail, _ := json.Marshal(map[string]string{"from": oldAccess, "to": req.Access})
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "set_access", ResourceType: "app",
-			ResourceID: slug, IPAddress: s.ClientIP(r),
+			ResourceID: slug, Detail: string(accessDetail), IPAddress: s.ClientIP(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, app)

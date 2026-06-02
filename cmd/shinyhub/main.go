@@ -286,11 +286,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	if err := os.MkdirAll(cfg.Storage.AppsDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.Storage.AppsDir, 0o750); err != nil {
 		return fmt.Errorf("create apps dir: %w", err)
 	}
 
-	if err := os.MkdirAll(cfg.Storage.AppDataDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.Storage.AppDataDir, 0o750); err != nil {
 		return fmt.Errorf("create app-data dir: %w", err)
 	}
 
@@ -312,6 +312,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
+	}
+	// The database holds password and API-key hashes and the audit log; keep the
+	// file owner-only. Best-effort and only for a real on-disk file (plain-path
+	// DSN), not an in-memory or parameterised DSN.
+	if !strings.Contains(cfg.Database.DSN, ":memory:") {
+		if _, statErr := os.Stat(cfg.Database.DSN); statErr == nil {
+			_ = os.Chmod(cfg.Database.DSN, 0o600)
+		}
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -919,7 +927,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           api.SecurityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

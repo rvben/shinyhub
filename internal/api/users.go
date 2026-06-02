@@ -106,8 +106,12 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if req.Username == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "username and password are required")
+	if req.Username == "" {
+		writeError(w, http.StatusBadRequest, "username is required")
+		return
+	}
+	if len(req.Password) < 8 {
+		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
 		return
 	}
 	role := req.Role
@@ -155,7 +159,8 @@ type patchUserRequest struct {
 }
 
 func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 
@@ -166,6 +171,12 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.refuseSystemUser(w, id) {
+		return
+	}
+	// An admin cannot change their own role via the API (the UI also blocks it):
+	// self-demotion is a footgun that can strand the last admin.
+	if admin.ID == id {
+		writeError(w, http.StatusForbidden, "cannot change your own role")
 		return
 	}
 
@@ -183,6 +194,19 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture the prior role so the audit trail distinguishes a privilege
+	// escalation from a downgrade.
+	existing, err := s.store.GetUserByID(id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	oldRole := existing.Role
+
 	if err := s.store.UpdateUserRole(id, req.Role); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not found")
@@ -198,11 +222,13 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	roleDetail, _ := json.Marshal(map[string]string{"old_role": oldRole, "new_role": req.Role})
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "update_user",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
+		Detail:       string(roleDetail),
 		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusOK, toUserResponse(user))
@@ -263,7 +289,8 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
 		return
 	}
 
@@ -274,6 +301,12 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.refuseSystemUser(w, id) {
+		return
+	}
+	// An admin cannot delete their own account via the API (the UI also blocks
+	// it): self-deletion can strand the instance with no admin.
+	if admin.ID == id {
+		writeError(w, http.StatusForbidden, "cannot delete your own account")
 		return
 	}
 

@@ -99,6 +99,14 @@ func (c *dockerClient) createContainer(cfg containerConfig) (string, error) {
 		"Memory":      cfg.MemoryBytes,
 		"NanoCPUs":    cfg.NanoCPUs,
 		"AutoRemove":  cfg.AutoRemove,
+		// Defensive container hardening, safe for a Shiny serving process:
+		// no-new-privileges blocks setuid escalation, CapDrop ALL removes every
+		// Linux capability (a serving process needs none), and PidsLimit contains
+		// fork bombs. The root filesystem stays writable so apps can still use
+		// /tmp, $HOME, and dependency caches.
+		"SecurityOpt": []string{"no-new-privileges:true"},
+		"CapDrop":     []string{"ALL"},
+		"PidsLimit":   512,
 	}
 	body := map[string]any{
 		"Image":      cfg.Image,
