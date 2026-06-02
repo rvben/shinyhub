@@ -1026,6 +1026,66 @@ func TestGridAutoscaleBadge(t *testing.T) {
 		"app.js grid card must apply badge-autoscale class (or similar) to the autoscale indicator badge")
 }
 
+// TestModalFocusManagementWiring pins the modal focus-trap wiring. The trap
+// logic lives in views/focus-trap.js (unit-tested in jstests/focus-trap.test.js);
+// app.js (not jsdom-importable) must import it and activate/release a trap for
+// each modal so keyboard focus can't escape an open dialog and is restored to
+// the trigger on close. We count activate/release pairs so a refactor that
+// drops the wiring for any one of the five modals fails the build.
+func TestModalFocusManagementWiring(t *testing.T) {
+	assertContains(t, "views/focus-trap.js", "export function createFocusTrap",
+		"focus-trap.js must export createFocusTrap")
+	assertContains(t, "views/focus-trap.js", "export function focusableElements",
+		"focus-trap.js must export focusableElements")
+	assertContains(t, "app.js", "'/static/views/focus-trap.js'",
+		"app.js must import the focus-trap module")
+	assertContains(t, "app.js", "createFocusTrap(",
+		"app.js modalTrap helper must construct a focus trap per modal")
+
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	if n := strings.Count(src, ".activate()"); n < 5 {
+		t.Fatalf("app.js: focus trap `.activate()` appears %d time(s); want >=5 (new-app, deploy, new-user, reset-password, schedule modals must each activate a trap on open)", n)
+	}
+	if n := strings.Count(src, ".release()"); n < 5 {
+		t.Fatalf("app.js: focus trap `.release()` appears %d time(s); want >=5 (each modal's close path must release the trap to restore focus to the trigger)", n)
+	}
+	// The schedule modal previously omitted initial focus; pin that it focuses
+	// its first field on open.
+	assertContains(t, "app.js", "#sched-name')?.focus()",
+		"openScheduleForm must focus #sched-name on open so keyboard users land inside the dialog")
+}
+
+// TestKeyboardFocusAndLabels pins the keyboard-focus ring, the undefined-token
+// fix, the progress-bar labels, and the per-row action aria-labels surfaced by
+// the accessibility pass.
+func TestKeyboardFocusAndLabels(t *testing.T) {
+	assertContains(t, "style.css", "button:focus-visible",
+		"style.css must give buttons a visible keyboard focus ring via :focus-visible")
+	assertContains(t, "style.css", ".tab:focus-visible",
+		"style.css must give the nav/settings tabs a visible keyboard focus ring")
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	if strings.Contains(string(b), "var(--border)") {
+		t.Fatal("style.css: var(--border) is undefined (palette defines --line/--line-2); the deploy-result card renders borderless. Use var(--line-2).")
+	}
+
+	assertContains(t, "index.html", `aria-label="Upload progress"`,
+		"deploy/data <progress> bars must carry an aria-label so screen readers announce them meaningfully")
+
+	assertContains(t, "app.js", "`Reset password for ${u.username}`",
+		"the per-row Reset password button must carry a per-user aria-label")
+	assertContains(t, "app.js", "`Delete user ${u.username}`",
+		"the per-row Delete button must carry a per-user aria-label")
+	assertContains(t, "app.js", "`Revoke access for ${m.username}`",
+		"the members-list Revoke button must carry a per-user aria-label")
+}
+
 // TestAutoscaleActionBadgeCSS guards that the two new autoscale audit action
 // badges are styled with the blue config color, consistent with create_app /
 // update_app / env.set. Without this the badges fall back to badge-action-default

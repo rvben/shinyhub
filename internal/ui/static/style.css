@@ -14,6 +14,26 @@
   border: 0;
 }
 
+/* Visible keyboard focus for interactive controls. :focus-visible keeps the
+   ring off pointer clicks; inputs/selects/textareas already style :focus. */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible,
+[role="button"]:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--cyan-bright, #38BDF8);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+/* Programmatic-focus targets (view headings get tabindex=-1 so screen readers
+   announce the new view) must not paint a keyboard focus ring. */
+[tabindex="-1"]:focus { outline: none; }
+/* Tabs sit on a sticky bar; inset the ring so it isn't clipped. */
+.tab:focus-visible,
+.settings-tab:focus-visible {
+  outline-offset: -2px;
+}
+
 /* ── Design tokens — Constellation ── */
 :root {
   --bg:          #060914;
@@ -2079,7 +2099,7 @@ main {
 .deploy-result {
   margin-top: 1rem;
   padding: 0.75rem 0.9rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line-2);
   border-radius: 6px;
   background: var(--surface);
 }

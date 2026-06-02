@@ -3,7 +3,8 @@ import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
-import { summariseFleetHealth } from '/static/views/fleet-health.js';
+import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
+import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
@@ -19,6 +20,19 @@ function setHidden(element, hidden) {
 function setError(element, message) {
   element.textContent = message || '';
   element.hidden = !message;
+}
+
+// Per-modal focus traps, created lazily and keyed by the overlay element. A
+// trap confines Tab focus to the dialog while open and restores focus to the
+// element that opened it on release.
+const _modalTraps = new WeakMap();
+function modalTrap(overlayEl) {
+  let trap = _modalTraps.get(overlayEl);
+  if (!trap) {
+    trap = createFocusTrap(overlayEl.querySelector('.modal-card') || overlayEl);
+    _modalTraps.set(overlayEl, trap);
+  }
+  return trap;
 }
 
 function canManageApp(user, app) {
@@ -843,6 +857,7 @@ document.addEventListener('DOMContentLoaded', () => {
       resetBtn.type = 'button';
       resetBtn.className = 'btn-row';
       resetBtn.textContent = 'Reset password';
+      resetBtn.setAttribute('aria-label', `Reset password for ${u.username}`);
       resetBtn.addEventListener('click', () => openResetPasswordModal(u));
       actions.appendChild(resetBtn);
 
@@ -850,6 +865,7 @@ document.addEventListener('DOMContentLoaded', () => {
       delBtn.type = 'button';
       delBtn.className = 'btn-row btn-row-danger';
       delBtn.textContent = 'Delete';
+      delBtn.setAttribute('aria-label', `Delete user ${u.username}`);
       if (u.id === selfId) {
         delBtn.disabled = true;
         delBtn.title = 'You cannot delete yourself';
@@ -913,11 +929,13 @@ document.addEventListener('DOMContentLoaded', () => {
     resetPwInput.value = '';
     setError(resetPwError, '');
     resetPwModal.hidden = false;
+    modalTrap(resetPwModal).activate();
     resetPwInput.focus();
   }
 
   function closeResetPasswordModal() {
     resetPwModal.hidden = true;
+    modalTrap(resetPwModal).release();
     state.resetPwTargetId = null;
     state.resetPwTargetUsername = '';
     resetPwInput.value = '';
@@ -966,11 +984,13 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(newUserError, '');
     renderNewUserSnippet();
     newUserModal.hidden = false;
+    modalTrap(newUserModal).activate();
     newUserUsername.focus();
   }
 
   function closeNewUserModal() {
     newUserModal.hidden = true;
+    modalTrap(newUserModal).release();
     newUserForm.reset();
     setError(newUserError, '');
   }
@@ -1725,6 +1745,7 @@ document.addEventListener('DOMContentLoaded', () => {
       roleSpan.textContent = m.role;
       const revokeBtn = document.createElement('button');
       revokeBtn.textContent = 'Revoke';
+      revokeBtn.setAttribute('aria-label', `Revoke access for ${m.username}`);
       revokeBtn.addEventListener('click', async () => {
         const slug = settingsSlug;
         if (!slug) return;
@@ -1812,6 +1833,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
+      const scheduleModal = document.getElementById('schedule-form-modal');
       if (!deployModal.hidden) {
         closeDeployModal();
       } else if (!newAppModal.hidden) {
@@ -1820,6 +1842,8 @@ document.addEventListener('DOMContentLoaded', () => {
         closeNewUserModal();
       } else if (!resetPwModal.hidden) {
         closeResetPasswordModal();
+      } else if (scheduleModal && !scheduleModal.hidden) {
+        closeScheduleForm();
       } else if (!document.getElementById('log-pane').hidden) {
         closeLogs();
       }
@@ -2048,11 +2072,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function openNewAppModal() {
     resetNewAppModal();
     newAppModal.hidden = false;
+    modalTrap(newAppModal).activate();
     newAppName.focus();
   }
 
   function closeNewAppModal() {
     newAppModal.hidden = true;
+    modalTrap(newAppModal).release();
     resetNewAppModal();
   }
 
@@ -2161,6 +2187,7 @@ document.addEventListener('DOMContentLoaded', () => {
     deployAppName.textContent = app.name ? `: ${app.name}` : '';
     renderDeployCliSnippet(app.slug);
     deployModal.hidden = false;
+    modalTrap(deployModal).activate();
     deployDropzone.focus();
   }
 
@@ -2175,6 +2202,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function closeDeployModal() {
     resetDeployModal();
     deployModal.hidden = true;
+    modalTrap(deployModal).release();
   }
 
   function renderDeploySummary(sourceName, blobSize, fileCount, rejections, rules) {
@@ -3383,11 +3411,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     modal.hidden = false;
+    modalTrap(modal).activate();
+    newForm.querySelector('#sched-name')?.focus();
   }
 
   function closeScheduleForm() {
     const modal = document.getElementById('schedule-form-modal');
-    if (modal) modal.hidden = true;
+    if (modal) {
+      modal.hidden = true;
+      modalTrap(modal).release();
+    }
   }
 
   async function runScheduleNow(slug, id) {

@@ -380,7 +380,7 @@
               <div class="env-form-row env-form-checks">
                 <label><input type="checkbox" id="data-restart-input"> Restart app after upload</label>
               </div>
-              <progress id="data-progress" max="100" value="0" hidden></progress>
+              <progress id="data-progress" max="100" value="0" aria-label="Upload progress" hidden></progress>
               <p id="data-error" class="error" hidden></p>
               <div class="env-form-actions">
                 <button id="data-upload-btn" type="submit" class="env-btn-primary">Upload</button>
@@ -539,7 +539,7 @@
           </ul>
 
           <div id="deploy-progress-wrap" class="deploy-progress" hidden>
-            <progress id="deploy-progress-bar" max="100" value="0"></progress>
+            <progress id="deploy-progress-bar" max="100" value="0" aria-label="Upload progress"></progress>
             <span id="deploy-progress-text">0%</span>
           </div>
 
