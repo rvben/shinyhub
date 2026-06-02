@@ -1026,6 +1026,116 @@ func TestGridAutoscaleBadge(t *testing.T) {
 		"app.js grid card must apply badge-autoscale class (or similar) to the autoscale indicator badge")
 }
 
+// TestModalFocusManagementWiring pins the modal focus-trap wiring. The trap
+// logic lives in views/focus-trap.js (unit-tested in jstests/focus-trap.test.js);
+// app.js (not jsdom-importable) must import it and activate/release a trap for
+// each modal so keyboard focus can't escape an open dialog and is restored to
+// the trigger on close. We count activate/release pairs so a refactor that
+// drops the wiring for any one of the five modals fails the build.
+func TestModalFocusManagementWiring(t *testing.T) {
+	assertContains(t, "views/focus-trap.js", "export function createFocusTrap",
+		"focus-trap.js must export createFocusTrap")
+	assertContains(t, "views/focus-trap.js", "export function focusableElements",
+		"focus-trap.js must export focusableElements")
+	assertContains(t, "app.js", "'/static/views/focus-trap.js'",
+		"app.js must import the focus-trap module")
+	assertContains(t, "app.js", "createFocusTrap(",
+		"app.js modalTrap helper must construct a focus trap per modal")
+
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	if n := strings.Count(src, ".activate()"); n < 5 {
+		t.Fatalf("app.js: focus trap `.activate()` appears %d time(s); want >=5 (new-app, deploy, new-user, reset-password, schedule modals must each activate a trap on open)", n)
+	}
+	if n := strings.Count(src, ".release()"); n < 5 {
+		t.Fatalf("app.js: focus trap `.release()` appears %d time(s); want >=5 (each modal's close path must release the trap to restore focus to the trigger)", n)
+	}
+	// The schedule modal previously omitted initial focus; pin that it focuses
+	// its first field on open.
+	assertContains(t, "app.js", "#sched-name')?.focus()",
+		"openScheduleForm must focus #sched-name on open so keyboard users land inside the dialog")
+}
+
+// TestKeyboardFocusAndLabels pins the keyboard-focus ring, the undefined-token
+// fix, the progress-bar labels, and the per-row action aria-labels surfaced by
+// the accessibility pass.
+func TestKeyboardFocusAndLabels(t *testing.T) {
+	assertContains(t, "style.css", "button:focus-visible",
+		"style.css must give buttons a visible keyboard focus ring via :focus-visible")
+	assertContains(t, "style.css", ".tab:focus-visible",
+		"style.css must give the nav/settings tabs a visible keyboard focus ring")
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	if strings.Contains(string(b), "var(--border)") {
+		t.Fatal("style.css: var(--border) is undefined (palette defines --line/--line-2); the deploy-result card renders borderless. Use var(--line-2).")
+	}
+
+	assertContains(t, "index.html", `aria-label="Upload progress"`,
+		"deploy/data <progress> bars must carry an aria-label so screen readers announce them meaningfully")
+
+	assertContains(t, "app.js", "`Reset password for ${u.username}`",
+		"the per-row Reset password button must carry a per-user aria-label")
+	assertContains(t, "app.js", "`Delete user ${u.username}`",
+		"the per-row Delete button must carry a per-user aria-label")
+	assertContains(t, "app.js", "`Revoke access for ${m.username}`",
+		"the members-list Revoke button must carry a per-user aria-label")
+}
+
+// TestResponsiveAndStatePolish pins the responsive breakpoint additions, the
+// loading placeholders, the audit empty-state, the SSE disconnect notice, the
+// Workers refresh control, and the degraded-app tooltip surfaced by the polish
+// pass.
+func TestResponsiveAndStatePolish(t *testing.T) {
+	// Responsive: the detail action bar de-absolutes on mobile and the wide
+	// admin tables get a horizontal scroll container.
+	assertContains(t, "style.css", "position: static",
+		"the 640px breakpoint must reflow .app-detail-actions to position: static so the buttons don't overlap the title")
+	assertContains(t, "style.css", "-webkit-overflow-scrolling: touch",
+		"the 640px breakpoint must give the wide admin tables a horizontal scroll container")
+	// The responsive table rule uses ID selectors, which outrank the UA
+	// [hidden]{display:none} rule. It must guard with :not([hidden]) so a
+	// JS-hidden table (empty Workers/Audit) stays hidden on mobile.
+	assertContains(t, "style.css", "#workers-table:not([hidden])",
+		"the 640px table-scroll rule must use :not([hidden]) so display:block does not override the hidden state of an empty Workers/Audit table")
+	assertContains(t, "style.css", ".grid-loading",
+		"style.css must style the loading placeholder")
+
+	// Loading states on the two list views.
+	assertContains(t, "app.js", "Loading apps…",
+		"loadApps must show a loading placeholder on first paint")
+	assertContains(t, "app.js", "Loading users…",
+		"loadUsers must show a loading row on first paint")
+	assertContains(t, "app.js", "aria-busy",
+		"the loading states must set aria-busy while fetching")
+
+	// Audit empty-state hides the table (mirrors the Workers pattern).
+	assertContains(t, "app.js", "auditTable.hidden = noEvents",
+		"renderAuditEvents must hide #audit-table when there are no events so empty headers don't show")
+
+	// SSE log streams announce a disconnect instead of freezing silently.
+	assertContains(t, "app.js", "(log stream disconnected)",
+		"app.js log-pane SSE onerror must append a disconnect notice")
+	assertContains(t, "views/app-detail.js", "(log stream disconnected)",
+		"app-detail.js logs-tab SSE onerror must append a disconnect notice")
+
+	// Workers refresh control (consistency with the other list views).
+	assertContains(t, "index.html", `id="workers-refresh"`,
+		"the Workers page must have a Refresh button like the other list views")
+	assertContains(t, "app.js", "getElementById('workers-refresh')",
+		"app.js must wire the Workers Refresh button to loadWorkers")
+
+	// Degraded-app detail surfaced in the banner tooltip + accessible name.
+	assertContains(t, "views/fleet-health.js", "export function degradedTooltip",
+		"fleet-health.js must export degradedTooltip so the banner can name the degraded apps")
+	assertContains(t, "app.js", "degradedTooltip(s)",
+		"renderFleetHealth must surface the degraded-app detail via degradedTooltip")
+}
+
 // TestAutoscaleActionBadgeCSS guards that the two new autoscale audit action
 // badges are styled with the blue config color, consistent with create_app /
 // update_app / env.set. Without this the badges fall back to badge-action-default

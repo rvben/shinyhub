@@ -3,7 +3,8 @@ import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
-import { summariseFleetHealth } from '/static/views/fleet-health.js';
+import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
+import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
@@ -19,6 +20,19 @@ function setHidden(element, hidden) {
 function setError(element, message) {
   element.textContent = message || '';
   element.hidden = !message;
+}
+
+// Per-modal focus traps, created lazily and keyed by the overlay element. A
+// trap confines Tab focus to the dialog while open and restores focus to the
+// element that opened it on release.
+const _modalTraps = new WeakMap();
+function modalTrap(overlayEl) {
+  let trap = _modalTraps.get(overlayEl);
+  if (!trap) {
+    trap = createFocusTrap(overlayEl.querySelector('.modal-card') || overlayEl);
+    _modalTraps.set(overlayEl, trap);
+  }
+  return trap;
 }
 
 function canManageApp(user, app) {
@@ -558,30 +572,64 @@ document.addEventListener('DOMContentLoaded', () => {
       c.textContent = `${chip.tier}: ${bits.join(', ')}`;
       fleetHealthEl.appendChild(c);
     }
+
+    // Surface which apps are degraded (and why) without crowding the banner:
+    // a hover tooltip plus the accessible name carry the actionable detail.
+    const tip = degradedTooltip(s);
+    if (tip) {
+      fleetHealthEl.title = tip;
+      fleetHealthEl.setAttribute('aria-label', `Fleet health: ${s.statusLabel}. Degraded - ${tip}`);
+    } else {
+      fleetHealthEl.removeAttribute('title');
+      fleetHealthEl.setAttribute('aria-label', `Fleet health: ${s.statusLabel}`);
+    }
+
     fleetHealthEl.hidden = false;
   }
 
   async function loadApps() {
     setError(appError, '');
 
+    // Show a loading placeholder only on the first paint (empty grid), so
+    // periodic refreshes don't flash over already-rendered cards.
+    const showLoading = appGrid.childElementCount === 0;
+    if (showLoading) {
+      appGrid.setAttribute('aria-busy', 'true');
+      appGrid.textContent = '';
+      const ph = document.createElement('p');
+      ph.className = 'grid-loading';
+      ph.setAttribute('role', 'status');
+      ph.textContent = 'Loading apps…';
+      appGrid.appendChild(ph);
+    }
+    const clearGridLoading = () => {
+      appGrid.removeAttribute('aria-busy');
+      const ph = appGrid.querySelector('.grid-loading');
+      if (ph) ph.remove();
+    };
+
     let response;
     try {
       response = await api('/api/apps');
     } catch {
+      clearGridLoading();
       setError(appError, 'Network error');
       return;
     }
 
     if (response.status === 401) {
+      clearGridLoading();
       await handleUnauthorized();
       return;
     }
     if (!response.ok) {
+      clearGridLoading();
       setError(appError, 'Failed to load apps');
       return;
     }
 
     state.apps = (await response.json()) || [];
+    clearGridLoading();
     renderApps();
     metrics.setTargets(state.apps.map(a => a.slug));
     loadFleetHealth();
@@ -682,7 +730,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderAuditEvents(events) {
     auditBody.textContent = '';
-    if (auditEmpty) auditEmpty.hidden = events.length !== 0;
+    const noEvents = events.length === 0;
+    if (auditEmpty) auditEmpty.hidden = !noEvents;
+    const auditTable = document.getElementById('audit-table');
+    if (auditTable) auditTable.hidden = noEvents;
 
     const knownActions = [
       // Deployment actions (green)
@@ -768,19 +819,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function loadUsers() {
     setError(usersError, '');
+
+    const showLoading = usersBody.childElementCount === 0;
+    if (showLoading) {
+      usersBody.setAttribute('aria-busy', 'true');
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 4;
+      td.className = 'grid-loading';
+      td.setAttribute('role', 'status');
+      td.textContent = 'Loading users…';
+      tr.appendChild(td);
+      usersBody.appendChild(tr);
+    }
+    const clearUsersLoading = () => usersBody.removeAttribute('aria-busy');
+
     let resp;
     try {
       resp = await api('/api/users');
     } catch {
+      clearUsersLoading();
+      usersBody.textContent = '';
       setError(usersError, 'Network error');
       return;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (resp.status === 403) { setError(usersError, 'Admin only'); return; }
-    if (!resp.ok) { setError(usersError, 'Failed to load users'); return; }
+    if (resp.status === 403) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Admin only'); return; }
+    if (!resp.ok) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Failed to load users'); return; }
     let users = [];
     try { users = (await resp.json()) || []; }
-    catch { setError(usersError, 'Invalid response'); return; }
+    catch { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Invalid response'); return; }
+    clearUsersLoading();
     renderUsers(users);
   }
 
@@ -843,6 +912,7 @@ document.addEventListener('DOMContentLoaded', () => {
       resetBtn.type = 'button';
       resetBtn.className = 'btn-row';
       resetBtn.textContent = 'Reset password';
+      resetBtn.setAttribute('aria-label', `Reset password for ${u.username}`);
       resetBtn.addEventListener('click', () => openResetPasswordModal(u));
       actions.appendChild(resetBtn);
 
@@ -850,6 +920,7 @@ document.addEventListener('DOMContentLoaded', () => {
       delBtn.type = 'button';
       delBtn.className = 'btn-row btn-row-danger';
       delBtn.textContent = 'Delete';
+      delBtn.setAttribute('aria-label', `Delete user ${u.username}`);
       if (u.id === selfId) {
         delBtn.disabled = true;
         delBtn.title = 'You cannot delete yourself';
@@ -913,11 +984,13 @@ document.addEventListener('DOMContentLoaded', () => {
     resetPwInput.value = '';
     setError(resetPwError, '');
     resetPwModal.hidden = false;
+    modalTrap(resetPwModal).activate();
     resetPwInput.focus();
   }
 
   function closeResetPasswordModal() {
     resetPwModal.hidden = true;
+    modalTrap(resetPwModal).release();
     state.resetPwTargetId = null;
     state.resetPwTargetUsername = '';
     resetPwInput.value = '';
@@ -966,11 +1039,13 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(newUserError, '');
     renderNewUserSnippet();
     newUserModal.hidden = false;
+    modalTrap(newUserModal).activate();
     newUserUsername.focus();
   }
 
   function closeNewUserModal() {
     newUserModal.hidden = true;
+    modalTrap(newUserModal).release();
     newUserForm.reset();
     setError(newUserError, '');
   }
@@ -1049,6 +1124,8 @@ document.addEventListener('DOMContentLoaded', () => {
     es.onerror = () => {
       es.close();
       activeEventSource = null;
+      logPaneBody.appendChild(document.createTextNode('(log stream disconnected)\n'));
+      logPaneBody.scrollTop = logPaneBody.scrollHeight;
     };
   }
 
@@ -1725,6 +1802,7 @@ document.addEventListener('DOMContentLoaded', () => {
       roleSpan.textContent = m.role;
       const revokeBtn = document.createElement('button');
       revokeBtn.textContent = 'Revoke';
+      revokeBtn.setAttribute('aria-label', `Revoke access for ${m.username}`);
       revokeBtn.addEventListener('click', async () => {
         const slug = settingsSlug;
         if (!slug) return;
@@ -1746,6 +1824,7 @@ document.addEventListener('DOMContentLoaded', () => {
   logPaneClose.addEventListener('click', closeLogs);
 
   usersRefresh.addEventListener('click', () => loadUsers());
+  document.getElementById('workers-refresh')?.addEventListener('click', () => loadWorkers());
   newUserButton.addEventListener('click', openNewUserModal);
   newUserClose.addEventListener('click', closeNewUserModal);
   newUserCancel.addEventListener('click', closeNewUserModal);
@@ -1812,6 +1891,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
+      const scheduleModal = document.getElementById('schedule-form-modal');
       if (!deployModal.hidden) {
         closeDeployModal();
       } else if (!newAppModal.hidden) {
@@ -1820,6 +1900,8 @@ document.addEventListener('DOMContentLoaded', () => {
         closeNewUserModal();
       } else if (!resetPwModal.hidden) {
         closeResetPasswordModal();
+      } else if (scheduleModal && !scheduleModal.hidden) {
+        closeScheduleForm();
       } else if (!document.getElementById('log-pane').hidden) {
         closeLogs();
       }
@@ -2048,11 +2130,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function openNewAppModal() {
     resetNewAppModal();
     newAppModal.hidden = false;
+    modalTrap(newAppModal).activate();
     newAppName.focus();
   }
 
   function closeNewAppModal() {
     newAppModal.hidden = true;
+    modalTrap(newAppModal).release();
     resetNewAppModal();
   }
 
@@ -2161,6 +2245,7 @@ document.addEventListener('DOMContentLoaded', () => {
     deployAppName.textContent = app.name ? `: ${app.name}` : '';
     renderDeployCliSnippet(app.slug);
     deployModal.hidden = false;
+    modalTrap(deployModal).activate();
     deployDropzone.focus();
   }
 
@@ -2175,6 +2260,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function closeDeployModal() {
     resetDeployModal();
     deployModal.hidden = true;
+    modalTrap(deployModal).release();
   }
 
   function renderDeploySummary(sourceName, blobSize, fileCount, rejections, rules) {
@@ -3383,11 +3469,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     modal.hidden = false;
+    modalTrap(modal).activate();
+    newForm.querySelector('#sched-name')?.focus();
   }
 
   function closeScheduleForm() {
     const modal = document.getElementById('schedule-form-modal');
-    if (modal) modal.hidden = true;
+    if (modal) {
+      modal.hidden = true;
+      modalTrap(modal).release();
+    }
   }
 
   async function runScheduleNow(slug, id) {
@@ -3470,7 +3561,14 @@ document.addEventListener('DOMContentLoaded', () => {
       logPaneBody.appendChild(line);
       logPaneBody.scrollTop = logPaneBody.scrollHeight;
     };
-    es.onerror = () => { es.close(); activeEventSource = null; };
+    es.onerror = () => {
+      es.close();
+      activeEventSource = null;
+      const line = document.createElement('div');
+      line.textContent = '(log stream disconnected)';
+      logPaneBody.appendChild(line);
+      logPaneBody.scrollTop = logPaneBody.scrollHeight;
+    };
   }
 
   // Wire the Schedules and Shared Data buttons.

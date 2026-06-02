@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { summariseFleetHealth } from '../static/views/fleet-health.js';
+import { summariseFleetHealth, degradedTooltip } from '../static/views/fleet-health.js';
 
 test('summariseFleetHealth: all-healthy → running/green', () => {
   const s = summariseFleetHealth({
@@ -67,4 +67,36 @@ test('summariseFleetHealth: tolerates null/empty input', () => {
   assert.equal(s.statusClass, 'running');
   assert.equal(s.tierChips.length, 0);
   assert.equal(s.degraded.length, 0);
+});
+
+test('degradedTooltip: empty when nothing is degraded', () => {
+  assert.equal(degradedTooltip(summariseFleetHealth(null)), '');
+});
+
+test('degradedTooltip: names the app, count, tier and reason', () => {
+  const s = summariseFleetHealth({
+    apps: { total: 2, running: 2, degraded: 1 },
+    replicas: { running: 3, lost: 1 },
+    tiers: [],
+    degraded_apps: [{ slug: 'dash', tier: 'remote', lost: 1, reason: 'worker unavailable' }],
+  });
+  assert.equal(degradedTooltip(s), 'dash: 1 lost on remote (worker unavailable)');
+});
+
+test('degradedTooltip: omits the reason clause when absent', () => {
+  const s = summariseFleetHealth({
+    apps: { degraded: 1 },
+    replicas: { lost: 2 },
+    degraded_apps: [{ slug: 'dash', tier: 'remote', lost: 2 }],
+  });
+  assert.equal(degradedTooltip(s), 'dash: 2 lost on remote');
+});
+
+test('degradedTooltip: caps the list and appends a "+N more" tail', () => {
+  const degraded_apps = Array.from({ length: 7 }, (_, i) => ({ slug: `app${i}`, tier: 't', lost: 1 }));
+  const s = summariseFleetHealth({ apps: { degraded: 7 }, replicas: { lost: 7 }, degraded_apps });
+  const tip = degradedTooltip(s, 5);
+  assert.match(tip, /^app0: 1 lost on t;/);
+  assert.match(tip, /; \+2 more$/);
+  assert.equal(tip.split(';').length, 6); // 5 entries + the "+N more" tail
 });

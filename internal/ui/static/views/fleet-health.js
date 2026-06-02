@@ -57,3 +57,27 @@ export function summariseFleetHealth(h) {
 
   return { statusClass, statusLabel, headline, tierChips, degraded };
 }
+
+/**
+ * degradedTooltip builds a one-line, human-readable list of the degraded apps
+ * (which app, how many replicas lost, on which tier, and why) for the banner's
+ * title/aria description. The banner shows tier-level chips at a glance; this
+ * surfaces the actionable per-app detail without cluttering the layout.
+ *
+ * @param {{degraded:Array<{slug:string,tier:string,lost:number,reason:string}>}} summary
+ * @param {number} [max]  cap before collapsing the tail into "+N more"
+ * @returns {string}  empty string when nothing is degraded
+ */
+export function degradedTooltip(summary, max = 5) {
+  const degraded = summary && Array.isArray(summary.degraded) ? summary.degraded : [];
+  if (degraded.length === 0) return '';
+  const shown = degraded.slice(0, max).map((d) => {
+    let s = `${d.slug}: ${Number(d.lost || 0)} lost`;
+    if (d.tier) s += ` on ${d.tier}`;
+    if (d.reason) s += ` (${d.reason})`;
+    return s;
+  });
+  let out = shown.join('; ');
+  if (degraded.length > max) out += `; +${degraded.length - max} more`;
+  return out;
+}
