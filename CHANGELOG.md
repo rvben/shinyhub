@@ -30,6 +30,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.7.1](https://github.com/rvben/shinyhub/compare/v0.7.0...v0.7.1) - 2026-06-02
+
+### Added
+
+- **security**: restrict file and directory permissions ([8030d9f](https://github.com/rvben/shinyhub/commit/8030d9f4c52130568b11a2f03702dd35851ee11b))
+- **security**: record old/new values in role-change and access-change audit events ([aa577b1](https://github.com/rvben/shinyhub/commit/aa577b1504d8dd15d94ace0f87b6f4b254325662))
+- **security**: harden bundle ZIP extraction ([0e2f02e](https://github.com/rvben/shinyhub/commit/0e2f02ee27d02d3a64de8dade1bcb4b1f685a39f))
+- **security**: harden Docker app containers ([7eeebf8](https://github.com/rvben/shinyhub/commit/7eeebf83d1ef892b243c8cffd0b7342580376803))
+- **security**: guard account self-modification and enforce create-user password length ([403cee2](https://github.com/rvben/shinyhub/commit/403cee2809bb14612ae50ff176878c4137e93268))
+- **security**: add HTTP security headers to control-plane responses ([49302a7](https://github.com/rvben/shinyhub/commit/49302a77608d9b61b36517cd20416f3e12c92da1))
+
+### Fixed
+
+- **security**: keep Docker /app bundle mount writable for in-container dep prep ([4a5c783](https://github.com/rvben/shinyhub/commit/4a5c78347de01029971afb86ef38a633453d4cca))
+
 ## [0.7.0](https://github.com/rvben/shinyhub/compare/v0.6.2...v0.7.0) - 2026-06-02
 
 ### Added
