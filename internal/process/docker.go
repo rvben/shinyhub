@@ -150,6 +150,16 @@ func dataHostPath(p StartParams) string {
 	return filepath.Join(p.Dir, "data")
 }
 
+// dockerChildEnv builds the container environment: the scrubbed host env, the
+// app's non-secret Env, then its SecretEnv. Secret env vars are injected as
+// plaintext (a container shares the host trust boundary like a native process),
+// and their keys are disjoint from Env so append order is safe.
+func dockerChildEnv(p StartParams) []string {
+	env := append(filteredEnv(), p.Env...)
+	env = append(env, p.SecretEnv...)
+	return env
+}
+
 func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (ReplicaEndpoint, error) {
 	image := r.imageForCommand(p.Command)
 
@@ -158,7 +168,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	cfg := containerConfig{
 		Image:   image,
 		Cmd:     p.Command,
-		Env:     append(filteredEnv(), p.Env...),
+		Env:     dockerChildEnv(p),
 		WorkDir: "/app",
 		Mounts: []containerMount{
 			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"}, // writable: in-container dep prep (uv project sync, renv::restore) writes into the bundle dir
@@ -354,7 +364,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	cfg := containerConfig{
 		Image:   image,
 		Cmd:     p.Command,
-		Env:     append(filteredEnv(), p.Env...),
+		Env:     dockerChildEnv(p),
 		WorkDir: "/app",
 		Mounts: []containerMount{
 			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"}, // writable: in-container dep prep (uv project sync, renv::restore) writes into the bundle dir

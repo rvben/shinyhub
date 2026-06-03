@@ -1497,6 +1497,55 @@ runtime:
 	}
 }
 
+func TestFargateConfig_Secrets_YAMLRoundTrip(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+runtime:
+  tiers:
+    - name: burst
+      runtime: fargate
+  fargate:
+    cluster: my-cluster
+    task_definition: my-td
+    container_name: app
+    subnets: [subnet-1]
+    task_cpu_units: 1024
+    task_memory_mb: 2048
+    control_plane_url: "https://cp.example.com"
+    secrets:
+      name_prefix: shinyhub/prod
+      kms_key_id: alias/shinyhub
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.SecretsNamePrefix != "shinyhub/prod" {
+		t.Errorf("SecretsNamePrefix: got %q, want shinyhub/prod", cfg.Runtime.Fargate.SecretsNamePrefix)
+	}
+	if cfg.Runtime.Fargate.SecretsKMSKeyID != "alias/shinyhub" {
+		t.Errorf("SecretsKMSKeyID: got %q, want alias/shinyhub", cfg.Runtime.Fargate.SecretsKMSKeyID)
+	}
+}
+
+func TestFargateConfig_Secrets_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_SECRETS_NAME_PREFIX", "shinyhub/staging")
+	t.Setenv("SHINYHUB_RUNTIME_FARGATE_SECRETS_KMS_KEY_ID", "arn:aws:kms:eu-west-1:111122223333:key/abc")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Fargate.SecretsNamePrefix != "shinyhub/staging" {
+		t.Errorf("SecretsNamePrefix from env: got %q", cfg.Runtime.Fargate.SecretsNamePrefix)
+	}
+	if cfg.Runtime.Fargate.SecretsKMSKeyID != "arn:aws:kms:eu-west-1:111122223333:key/abc" {
+		t.Errorf("SecretsKMSKeyID from env: got %q", cfg.Runtime.Fargate.SecretsKMSKeyID)
+	}
+}
+
 func TestFargateConfig_NewFields_EnvOverride(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_RUNTIME_FARGATE_TASK_CPU_UNITS", "2048")

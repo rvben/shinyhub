@@ -31,11 +31,49 @@ type fakeECS struct {
 	stopTaskFn      func(*ecs.StopTaskInput) (*ecs.StopTaskOutput, error)
 	describeTasksFn func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error)
 	listTasksFn     func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error)
+	describeTDFn    func(*ecs.DescribeTaskDefinitionInput) (*ecs.DescribeTaskDefinitionOutput, error)
+	registerTDFn    func(*ecs.RegisterTaskDefinitionInput) (*ecs.RegisterTaskDefinitionOutput, error)
+	listTDFn        func(*ecs.ListTaskDefinitionsInput) (*ecs.ListTaskDefinitionsOutput, error)
+	deregisterTDFn  func(*ecs.DeregisterTaskDefinitionInput) (*ecs.DeregisterTaskDefinitionOutput, error)
 
-	runInputs      []*ecs.RunTaskInput
-	stopInputs     []*ecs.StopTaskInput
-	describeInputs []*ecs.DescribeTasksInput
-	listInputs     []*ecs.ListTasksInput
+	runInputs        []*ecs.RunTaskInput
+	stopInputs       []*ecs.StopTaskInput
+	describeInputs   []*ecs.DescribeTasksInput
+	listInputs       []*ecs.ListTasksInput
+	registerTDInputs []*ecs.RegisterTaskDefinitionInput
+	deregisterInputs []*ecs.DeregisterTaskDefinitionInput
+}
+
+func (f *fakeECS) ListTaskDefinitions(_ context.Context, in *ecs.ListTaskDefinitionsInput, _ ...func(*ecs.Options)) (*ecs.ListTaskDefinitionsOutput, error) {
+	if f.listTDFn != nil {
+		return f.listTDFn(in)
+	}
+	return &ecs.ListTaskDefinitionsOutput{}, nil
+}
+
+func (f *fakeECS) DeregisterTaskDefinition(_ context.Context, in *ecs.DeregisterTaskDefinitionInput, _ ...func(*ecs.Options)) (*ecs.DeregisterTaskDefinitionOutput, error) {
+	f.deregisterInputs = append(f.deregisterInputs, in)
+	if f.deregisterTDFn != nil {
+		return f.deregisterTDFn(in)
+	}
+	return &ecs.DeregisterTaskDefinitionOutput{}, nil
+}
+
+func (f *fakeECS) DescribeTaskDefinition(_ context.Context, in *ecs.DescribeTaskDefinitionInput, _ ...func(*ecs.Options)) (*ecs.DescribeTaskDefinitionOutput, error) {
+	if f.describeTDFn != nil {
+		return f.describeTDFn(in)
+	}
+	return &ecs.DescribeTaskDefinitionOutput{}, nil
+}
+
+func (f *fakeECS) RegisterTaskDefinition(_ context.Context, in *ecs.RegisterTaskDefinitionInput, _ ...func(*ecs.Options)) (*ecs.RegisterTaskDefinitionOutput, error) {
+	f.registerTDInputs = append(f.registerTDInputs, in)
+	if f.registerTDFn != nil {
+		return f.registerTDFn(in)
+	}
+	return &ecs.RegisterTaskDefinitionOutput{TaskDefinition: &ecstypes.TaskDefinition{
+		TaskDefinitionArn: aws.String("arn:aws:ecs:eu-west-1:111122223333:task-definition/" + aws.ToString(in.Family) + ":1"),
+	}}, nil
 }
 
 func (f *fakeECS) RunTask(_ context.Context, in *ecs.RunTaskInput, _ ...func(*ecs.Options)) (*ecs.RunTaskOutput, error) {
@@ -203,6 +241,408 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 	}
 }
 
+// fakeSecretsStore is an in-memory SecretsStore that records Put/Delete calls
+// and returns a deterministic ARN derived from the secret name.
+type fakeSecretsStore struct {
+	values   map[string]string
+	deleted  []string
+	putCount int
+	putErr   error // when set, Put fails (to exercise fail-closed)
+}
+
+func newFakeSecretsStore() *fakeSecretsStore {
+	return &fakeSecretsStore{values: map[string]string{}}
+}
+
+func (f *fakeSecretsStore) Put(_ context.Context, name, value string) (string, error) {
+	if f.putErr != nil {
+		return "", f.putErr
+	}
+	f.putCount++
+	f.values[name] = value
+	return "arn:aws:secretsmanager:eu-west-1:111122223333:secret:" + name + "-XyZ", nil
+}
+
+func (f *fakeSecretsStore) Delete(_ context.Context, name string) error {
+	delete(f.values, name)
+	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+func (f *fakeSecretsStore) DeleteByPrefix(_ context.Context, prefix string) error {
+	for name := range f.values {
+		if strings.HasPrefix(name, prefix) {
+			delete(f.values, name)
+			f.deleted = append(f.deleted, name)
+		}
+	}
+	return nil
+}
+
+// secretsRuntime builds a runtime wired with a secrets store and a fake ECS that
+// describes a base task definition (one "app" container) and routes the task.
+func secretsRuntime(f *fakeECS, store SecretsStore) *Runtime {
+	cfg := testCfg()
+	cfg.SecretNamePrefix = "shinyhub/test"
+	if f.describeTDFn == nil {
+		f.describeTDFn = func(*ecs.DescribeTaskDefinitionInput) (*ecs.DescribeTaskDefinitionOutput, error) {
+			return &ecs.DescribeTaskDefinitionOutput{TaskDefinition: &ecstypes.TaskDefinition{
+				Family:           aws.String("shiny-runner"),
+				ExecutionRoleArn: aws.String("arn:aws:iam::111122223333:role/exec"),
+				NetworkMode:      ecstypes.NetworkModeAwsvpc,
+				ContainerDefinitions: []ecstypes.ContainerDefinition{
+					{Name: aws.String("app"), Image: aws.String("ghcr.io/example/runner:latest")},
+				},
+			}}, nil
+		}
+	}
+	if f.describeTasksFn == nil {
+		f.describeTasksFn = func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.50", "RUNNING")}}, nil
+		}
+	}
+	return New(f, cfg, nil,
+		WithPollInterval(time.Millisecond),
+		WithStartTimeout(50*time.Millisecond),
+		WithSecretsStore(store))
+}
+
+func TestStart_RoutesSecretsViaTaskDefinition(t *testing.T) {
+	f := &fakeECS{}
+	store := newFakeSecretsStore()
+	r := secretsRuntime(f, store)
+
+	p := process.StartParams{
+		Slug:      "demo",
+		AppID:     7,
+		Index:     0,
+		Command:   []string{"shiny", "run"},
+		Port:      8000,
+		Env:       []string{"FOO=bar"},
+		SecretEnv: []string{"DB_PASSWORD=hunter2"},
+	}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// 1. The secret value was written to the store under the per-app name.
+	const wantName = "shinyhub/test/app-7/DB_PASSWORD"
+	if store.values[wantName] != "hunter2" {
+		t.Errorf("store[%q] = %q, want hunter2 (store=%v)", wantName, store.values[wantName], store.values)
+	}
+
+	// 2. A per-app task definition was registered carrying the secrets block.
+	if len(f.registerTDInputs) != 1 {
+		t.Fatalf("RegisterTaskDefinition called %d times, want 1", len(f.registerTDInputs))
+	}
+	td := f.registerTDInputs[0]
+	fam := aws.ToString(td.Family)
+	if !strings.HasPrefix(fam, "shinyhub-test-") || !strings.HasSuffix(fam, "-app-7") {
+		t.Errorf("task def family = %q, want a shinyhub-test-*-app-7 family", fam)
+	}
+	var appC *ecstypes.ContainerDefinition
+	for i := range td.ContainerDefinitions {
+		if aws.ToString(td.ContainerDefinitions[i].Name) == "app" {
+			appC = &td.ContainerDefinitions[i]
+		}
+	}
+	if appC == nil || len(appC.Secrets) != 1 {
+		t.Fatalf("app container secrets = %+v", appC)
+	}
+	if aws.ToString(appC.Secrets[0].Name) != "DB_PASSWORD" {
+		t.Errorf("secret name = %q, want DB_PASSWORD", aws.ToString(appC.Secrets[0].Name))
+	}
+	if aws.ToString(appC.Secrets[0].ValueFrom) != "arn:aws:secretsmanager:eu-west-1:111122223333:secret:"+wantName+"-XyZ" {
+		t.Errorf("secret valueFrom = %q (want the store ARN)", aws.ToString(appC.Secrets[0].ValueFrom))
+	}
+
+	// 3. RunTask used the registered per-app revision, not the base task def.
+	if len(f.runInputs) != 1 {
+		t.Fatalf("RunTask called %d times, want 1", len(f.runInputs))
+	}
+	gotTD := aws.ToString(f.runInputs[0].TaskDefinition)
+	if gotTD == "shiny-app:7" {
+		t.Error("RunTask used the base task def; expected the per-app family")
+	}
+	// RunTask references the per-app family by NAME (not the freshly registered
+	// revision ARN) so the ClientToken stays idempotent across retries.
+	if gotTD != fam {
+		t.Errorf("RunTask TaskDefinition = %q, want the per-app family name %q", gotTD, fam)
+	}
+
+	// 4. The override Environment carries the non-secret env but NOT the secret.
+	env := map[string]string{}
+	for _, kv := range f.runInputs[0].Overrides.ContainerOverrides[0].Environment {
+		env[aws.ToString(kv.Name)] = aws.ToString(kv.Value)
+	}
+	if env["FOO"] != "bar" {
+		t.Errorf("non-secret FOO missing from override env: %v", env)
+	}
+	if _, present := env["DB_PASSWORD"]; present {
+		t.Errorf("secret DB_PASSWORD must NOT appear in plaintext override env: %v", env)
+	}
+}
+
+// secretParams is the routed-secret StartParams used by the fail-closed tests.
+func secretParams() process.StartParams {
+	return process.StartParams{
+		Slug:      "demo",
+		AppID:     7,
+		Command:   []string{"shiny", "run"},
+		Port:      8000,
+		SecretEnv: []string{"DB_PASSWORD=hunter2"},
+	}
+}
+
+// TestStart_RoutedRetriesUseStableTokenAndTaskDef guards ECS RunTask
+// idempotency: two routed starts of the same replica within one dedup window
+// must present the SAME ClientToken AND the SAME TaskDefinition parameter, so a
+// retry does not trip ConflictException. The per-app revision is re-registered
+// each time, but RunTask references the stable family name, not the new ARN.
+func TestStart_RoutedRetriesUseStableTokenAndTaskDef(t *testing.T) {
+	f := &fakeECS{}
+	r := secretsRuntime(f, newFakeSecretsStore())
+	p := secretParams()
+
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	if len(f.runInputs) != 2 {
+		t.Fatalf("RunTask called %d times, want 2", len(f.runInputs))
+	}
+	if a, b := aws.ToString(f.runInputs[0].TaskDefinition), aws.ToString(f.runInputs[1].TaskDefinition); a != b {
+		t.Errorf("TaskDefinition differs across retries (%q vs %q); ECS would reject the reused ClientToken", a, b)
+	}
+	if a, b := aws.ToString(f.runInputs[0].ClientToken), aws.ToString(f.runInputs[1].ClientToken); a != b {
+		t.Errorf("ClientToken differs across retries (%q vs %q)", a, b)
+	}
+}
+
+// TestStart_FailsClosedWhenSecretEnvButNoBackend guards the security invariant:
+// on a Fargate tier, an app with secret env must NOT fall back to plaintext task
+// overrides when no secrets backend is configured. The start fails closed.
+// TestStart_RoutedSecretSyncIsCached guards that repeated starts with an
+// UNCHANGED secret set do not re-write the store or register a new task-def
+// revision (avoiding version/revision churn), while a changed value DOES
+// re-sync. The per-app cache is the mechanism; correctness holds because the
+// cache key is the secret set itself.
+func TestStart_RoutedSecretSyncIsCached(t *testing.T) {
+	f := &fakeECS{}
+	store := newFakeSecretsStore()
+	r := secretsRuntime(f, store)
+	p := secretParams()
+
+	// Two starts, identical secret set.
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 1: %v", err)
+	}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 2: %v", err)
+	}
+	if store.putCount != 1 {
+		t.Errorf("store Put called %d times for an unchanged secret set, want 1", store.putCount)
+	}
+	if len(f.registerTDInputs) != 1 {
+		t.Errorf("RegisterTaskDefinition called %d times for an unchanged secret set, want 1", len(f.registerTDInputs))
+	}
+	// Both starts still launched the task.
+	if len(f.runInputs) != 2 {
+		t.Errorf("RunTask called %d times, want 2", len(f.runInputs))
+	}
+
+	// A changed value must re-sync.
+	p.SecretEnv = []string{"DB_PASSWORD=rotated"}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 3: %v", err)
+	}
+	if store.putCount != 2 {
+		t.Errorf("store Put called %d times after a value change, want 2", store.putCount)
+	}
+	if len(f.registerTDInputs) != 2 {
+		t.Errorf("RegisterTaskDefinition called %d times after a value change, want 2", len(f.registerTDInputs))
+	}
+}
+
+// TestCleanupApp_DeletesSecretsAndDeregistersFamily guards app-delete cleanup:
+// the app's secrets (by per-app prefix) are deleted and every revision of its
+// task-def family is deregistered, while a sibling app sharing the install
+// prefix is left untouched.
+func TestCleanupApp_DeletesSecretsAndDeregistersFamily(t *testing.T) {
+	store := newFakeSecretsStore()
+	store.values["shinyhub/test/app-7/A"] = "a"
+	store.values["shinyhub/test/app-7/B"] = "b"
+	store.values["shinyhub/test/app-70/C"] = "c" // sibling app, must survive
+
+	fam7 := taskDefFamily("shinyhub/test", 7)
+	fam70 := taskDefFamily("shinyhub/test", 70)
+	f := &fakeECS{
+		listTDFn: func(in *ecs.ListTaskDefinitionsInput) (*ecs.ListTaskDefinitionsOutput, error) {
+			// FamilyPrefix is a prefix match, so the sibling fam70 also surfaces.
+			return &ecs.ListTaskDefinitionsOutput{TaskDefinitionArns: []string{
+				"arn:aws:ecs:eu-west-1:111122223333:task-definition/" + fam7 + ":1",
+				"arn:aws:ecs:eu-west-1:111122223333:task-definition/" + fam7 + ":2",
+				"arn:aws:ecs:eu-west-1:111122223333:task-definition/" + fam70 + ":1",
+			}}, nil
+		},
+	}
+	r := secretsRuntime(f, store)
+
+	if err := r.CleanupApp(context.Background(), 7); err != nil {
+		t.Fatalf("CleanupApp: %v", err)
+	}
+
+	if _, ok := store.values["shinyhub/test/app-7/A"]; ok {
+		t.Error("app-7 secret A not deleted")
+	}
+	if _, ok := store.values["shinyhub/test/app-7/B"]; ok {
+		t.Error("app-7 secret B not deleted")
+	}
+	if _, ok := store.values["shinyhub/test/app-70/C"]; !ok {
+		t.Error("sibling app-70 secret C must survive cleanup of app 7")
+	}
+
+	var deregistered []string
+	for _, in := range f.deregisterInputs {
+		deregistered = append(deregistered, aws.ToString(in.TaskDefinition))
+	}
+	if len(deregistered) != 2 {
+		t.Fatalf("deregistered %v, want exactly the two fam7 revisions", deregistered)
+	}
+	for _, td := range deregistered {
+		if !strings.Contains(td, fam7+":") {
+			t.Errorf("deregistered unexpected task def %q (want only %s revisions)", td, fam7)
+		}
+		if strings.Contains(td, fam70+":") {
+			t.Errorf("sibling family revision %q must not be deregistered", td)
+		}
+	}
+}
+
+// TestStart_RoutedCacheInvalidatesOnBaseRevisionChange guards that a
+// secret-bearing app picks up a NEW base task-definition revision (e.g. a new
+// runner image) even when its secrets are unchanged: with an unpinned base
+// family, the cache key includes the resolved base revision, so a base change
+// forces a re-register rather than stranding the app on the old revision.
+func TestStart_RoutedCacheInvalidatesOnBaseRevisionChange(t *testing.T) {
+	baseArn := "arn:aws:ecs:eu-west-1:111122223333:task-definition/shiny-runner:1"
+	f := &fakeECS{
+		describeTDFn: func(*ecs.DescribeTaskDefinitionInput) (*ecs.DescribeTaskDefinitionOutput, error) {
+			return &ecs.DescribeTaskDefinitionOutput{TaskDefinition: &ecstypes.TaskDefinition{
+				TaskDefinitionArn: aws.String(baseArn),
+				Family:            aws.String("shiny-runner"),
+				ContainerDefinitions: []ecstypes.ContainerDefinition{
+					{Name: aws.String("app"), Image: aws.String("ghcr.io/example/runner:latest")},
+				},
+			}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.50", "RUNNING")}}, nil
+		},
+	}
+	cfg := testCfg()
+	cfg.SecretNamePrefix = "shinyhub/test"
+	cfg.TaskDefinition = "shiny-runner" // unpinned family (no :revision)
+	r := New(f, cfg, nil, WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond), WithSecretsStore(newFakeSecretsStore()))
+	p := secretParams()
+
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 1: %v", err)
+	}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 2: %v", err)
+	}
+	if len(f.registerTDInputs) != 1 {
+		t.Fatalf("RegisterTaskDefinition called %d times for an unchanged base+secrets, want 1", len(f.registerTDInputs))
+	}
+
+	// Operator rolls out a new base revision; same secrets.
+	baseArn = "arn:aws:ecs:eu-west-1:111122223333:task-definition/shiny-runner:2"
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 3: %v", err)
+	}
+	if len(f.registerTDInputs) != 2 {
+		t.Errorf("RegisterTaskDefinition called %d times after a base revision change, want 2 (app must not stay on the stale base)", len(f.registerTDInputs))
+	}
+}
+
+func TestStart_FailsClosedWhenSecretEnvButNoBackend(t *testing.T) {
+	f := &fakeECS{}
+	r := fastRuntime(f) // no WithSecretsStore
+
+	_, err := r.Start(context.Background(), secretParams(), io.Discard)
+	if err == nil {
+		t.Fatal("expected Start to fail closed when a Fargate app has secret env but no secrets backend is configured")
+	}
+	if len(f.runInputs) != 0 {
+		t.Errorf("RunTask must not be called when failing closed (got %d)", len(f.runInputs))
+	}
+}
+
+func TestStart_FailsClosedWhenSecretStorePutFails(t *testing.T) {
+	f := &fakeECS{}
+	store := newFakeSecretsStore()
+	store.putErr = errors.New("access denied")
+	r := secretsRuntime(f, store)
+
+	if _, err := r.Start(context.Background(), secretParams(), io.Discard); err == nil {
+		t.Fatal("expected Start to fail when the secret store rejects the value")
+	}
+	if len(f.runInputs) != 0 {
+		t.Errorf("RunTask must not be called when secret storage fails (got %d)", len(f.runInputs))
+	}
+}
+
+func TestStart_FailsClosedWhenDescribeTaskDefFails(t *testing.T) {
+	f := &fakeECS{
+		describeTDFn: func(*ecs.DescribeTaskDefinitionInput) (*ecs.DescribeTaskDefinitionOutput, error) {
+			return nil, errors.New("describe denied")
+		},
+	}
+	r := secretsRuntime(f, newFakeSecretsStore())
+
+	if _, err := r.Start(context.Background(), secretParams(), io.Discard); err == nil {
+		t.Fatal("expected Start to fail when the base task definition cannot be described")
+	}
+	if len(f.runInputs) != 0 {
+		t.Errorf("RunTask must not be called when describe fails (got %d)", len(f.runInputs))
+	}
+}
+
+func TestStart_FailsClosedWhenRegisterTaskDefFails(t *testing.T) {
+	f := &fakeECS{
+		registerTDFn: func(*ecs.RegisterTaskDefinitionInput) (*ecs.RegisterTaskDefinitionOutput, error) {
+			return nil, errors.New("register denied")
+		},
+	}
+	r := secretsRuntime(f, newFakeSecretsStore())
+
+	if _, err := r.Start(context.Background(), secretParams(), io.Discard); err == nil {
+		t.Fatal("expected Start to fail when registering the per-app task definition fails")
+	}
+	if len(f.runInputs) != 0 {
+		t.Errorf("RunTask must not be called when register fails (got %d)", len(f.runInputs))
+	}
+}
+
+func TestStart_FailsClosedWhenRegisterReturnsNoARN(t *testing.T) {
+	f := &fakeECS{
+		registerTDFn: func(*ecs.RegisterTaskDefinitionInput) (*ecs.RegisterTaskDefinitionOutput, error) {
+			return &ecs.RegisterTaskDefinitionOutput{TaskDefinition: &ecstypes.TaskDefinition{}}, nil
+		},
+	}
+	r := secretsRuntime(f, newFakeSecretsStore())
+
+	if _, err := r.Start(context.Background(), secretParams(), io.Discard); err == nil {
+		t.Fatal("expected Start to fail when register returns no task-definition ARN")
+	}
+	if len(f.runInputs) != 0 {
+		t.Errorf("RunTask must not be called when register returns no ARN (got %d)", len(f.runInputs))
+	}
+}
+
 func TestStartBuildsCorrectRunTaskInput(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
@@ -350,6 +790,30 @@ func TestStartToleratesEventuallyConsistentDescribe(t *testing.T) {
 	}
 	if len(f.stopInputs) != 0 {
 		t.Errorf("a transiently-invisible task must not be stopped; got %d StopTask calls", len(f.stopInputs))
+	}
+}
+
+// TestReplicaEnvIncludesSecretEnv verifies SecretEnv is carried into the
+// container override environment alongside Env. It is plaintext override env
+// here (no behavior change) and is kept separate so it can later move to the
+// task definition's secrets block, keeping secret values out of DescribeTasks.
+func TestReplicaEnvIncludesSecretEnv(t *testing.T) {
+	p := process.StartParams{
+		Slug:      "demo",
+		Index:     0,
+		Env:       []string{"PLAIN=1"},
+		SecretEnv: []string{"SECRET=shh"},
+	}
+	r := New(&fakeECS{}, testCfg(), nil)
+	env := map[string]string{}
+	for _, kv := range r.replicaEnv(p) {
+		env[aws.ToString(kv.Name)] = aws.ToString(kv.Value)
+	}
+	if env["PLAIN"] != "1" {
+		t.Errorf("PLAIN missing from replica env: %v", env)
+	}
+	if env["SECRET"] != "shh" {
+		t.Errorf("SECRET (from SecretEnv) missing from replica env: %v", env)
 	}
 }
 

@@ -1,6 +1,8 @@
 package lifecycle_test
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +11,17 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/lifecycle"
 )
+
+// fakeCleaner records CleanupApp calls and can simulate a failure.
+type fakeCleaner struct {
+	cleaned []int64
+	err     error
+}
+
+func (f *fakeCleaner) CleanupApp(_ context.Context, appID int64) error {
+	f.cleaned = append(f.cleaned, appID)
+	return f.err
+}
 
 func mkStorageCfg(t *testing.T) *config.Config {
 	t.Helper()
@@ -37,7 +50,7 @@ func TestReconcileDeletingApps_FinishesTombstone(t *testing.T) {
 		}
 	}
 
-	lifecycle.ReconcileDeletingApps(store, cfg)
+	lifecycle.ReconcileDeletingApps(context.Background(), store, cfg, nil)
 
 	if _, err := store.GetAppBySlug("gone"); err == nil {
 		t.Fatal("tombstoned app row still present after reconcile")
@@ -47,6 +60,46 @@ func TestReconcileDeletingApps_FinishesTombstone(t *testing.T) {
 	}
 	if _, err := store.GetAppBySlug("kept"); err != nil {
 		t.Errorf("non-deleting app was affected: %v", err)
+	}
+}
+
+// TestReconcileDeletingApps_InvokesSecretCleaner verifies the secret-backend
+// cleaner runs for a tombstoned app and the row is dropped only after it
+// succeeds.
+func TestReconcileDeletingApps_InvokesSecretCleaner(t *testing.T) {
+	store := mustOpenStore(t)
+	cfg := mkStorageCfg(t)
+	gone := mustCreateApp(t, store, "gone")
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: gone.Slug, Status: "deleting"}); err != nil {
+		t.Fatal(err)
+	}
+	cleaner := &fakeCleaner{}
+
+	lifecycle.ReconcileDeletingApps(context.Background(), store, cfg, cleaner)
+
+	if len(cleaner.cleaned) != 1 || cleaner.cleaned[0] != gone.ID {
+		t.Errorf("cleaner.CleanupApp called with %v, want [%d]", cleaner.cleaned, gone.ID)
+	}
+	if _, err := store.GetAppBySlug("gone"); err == nil {
+		t.Error("row should be removed after successful secret cleanup")
+	}
+}
+
+// TestReconcileDeletingApps_RetainsTombstoneOnCleanerError verifies a failing
+// secret cleaner leaves the 'deleting' tombstone in place for the next startup.
+func TestReconcileDeletingApps_RetainsTombstoneOnCleanerError(t *testing.T) {
+	store := mustOpenStore(t)
+	cfg := mkStorageCfg(t)
+	gone := mustCreateApp(t, store, "gone")
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: gone.Slug, Status: "deleting"}); err != nil {
+		t.Fatal(err)
+	}
+	cleaner := &fakeCleaner{err: errors.New("secrets manager unreachable")}
+
+	lifecycle.ReconcileDeletingApps(context.Background(), store, cfg, cleaner)
+
+	if _, err := store.GetAppBySlug("gone"); err != nil {
+		t.Error("row must be retained when secret cleanup fails, so the next startup retries")
 	}
 }
 

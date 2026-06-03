@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -67,6 +68,11 @@ type Server struct {
 	// fleet endpoints to list and revoke workers. Nil when worker hosting is
 	// disabled; the endpoints then report an empty fleet and 404 on revoke.
 	workerReg *worker.Registry
+
+	// secretsCleaner removes an app's external secret-backend resources (Fargate
+	// Secrets Manager entries + per-app task-def revisions) on delete. Nil when
+	// no Fargate secrets backend is configured. Set via SetSecretsCleaner.
+	secretsCleaner appSecretsCleaner
 
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
 	// authenticates as the synthetic system user without a DB lookup. Set via
@@ -192,6 +198,7 @@ func (s *Server) Config() *config.Config { return s.cfg }
 // through this helper so a single app's placement is applied identically
 // regardless of which control-plane action triggered the pool launch.
 func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
+	p.AppID = app.ID
 	p.Placement = app.PlacementMap()
 	p.TierOrder = s.cfg.Runtime.TierOrder()
 	p.DefaultTier = s.cfg.Runtime.DefaultTierName()
@@ -448,6 +455,26 @@ func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
 // SetSecretsKey sets the AES-256 key used to decrypt per-app secret env vars.
 // Must be called before the server begins handling requests.
 func (s *Server) SetSecretsKey(k []byte) { s.secretsKey = k }
+
+// appSecretsCleaner removes an app's external secret-backend resources on
+// delete. The Fargate runtime implements it; nil disables the step.
+type appSecretsCleaner interface {
+	CleanupApp(ctx context.Context, appID int64) error
+}
+
+// SetSecretsCleaner wires the external secret-backend cleanup invoked on app
+// delete. Called at startup when a Fargate secrets backend is configured; left
+// nil otherwise. Must be called before the server handles requests.
+func (s *Server) SetSecretsCleaner(c appSecretsCleaner) { s.secretsCleaner = c }
+
+// cleanupAppSecrets runs the external secret-backend cleanup for a deleted app,
+// or is a no-op when no cleaner is wired.
+func (s *Server) cleanupAppSecrets(ctx context.Context, appID int64) error {
+	if s.secretsCleaner == nil {
+		return nil
+	}
+	return s.secretsCleaner.CleanupApp(ctx, appID)
+}
 
 // SetJobs wires the schedule-runner and the cron scheduler into the API server.
 // Must be called before the server begins handling requests.

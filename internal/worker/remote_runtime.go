@@ -176,12 +176,21 @@ func toStartRequest(p process.StartParams) api.ReplicaStartRequest {
 	for _, m := range p.SharedMounts {
 		slugs = append(slugs, m.SourceSlug)
 	}
-	// Convert KEY=VALUE env slice to the map the wire type uses.
-	envMap := make(map[string]string, len(p.Env))
-	for _, kv := range p.Env {
+	// Convert KEY=VALUE env slices to the map the wire type uses. SecretEnv is
+	// folded in alongside Env: a remote_docker container shares the worker's
+	// trust boundary like local Docker, so secrets travel as plaintext env (no
+	// behavior change). Keys are disjoint between the two slices.
+	envMap := make(map[string]string, len(p.Env)+len(p.SecretEnv))
+	putEnv := func(kv string) {
 		if idx := strings.Index(kv, "="); idx > 0 {
 			envMap[kv[:idx]] = kv[idx+1:]
 		}
+	}
+	for _, kv := range p.Env {
+		putEnv(kv)
+	}
+	for _, kv := range p.SecretEnv {
+		putEnv(kv)
 	}
 	return api.ReplicaStartRequest{
 		Slug:             p.Slug,

@@ -122,6 +122,17 @@ runtime:
     default_memory_mb: 0              # per-replica container memory limit in MiB; 0 = no override (task definition applies)  # SHINYHUB_RUNTIME_FARGATE_DEFAULT_MEMORY_MB
     default_cpu_percent: 0            # per-replica container CPU quota; 0 = no override; 100 = 1 full core  # SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT
 
+    # --- Secret env routing (optional; strongly recommended for Fargate) ---
+    # When name_prefix is set, env vars marked secret are stored in AWS Secrets
+    # Manager and referenced by ARN from a per-app task-definition revision, so
+    # their values never appear in ecs:DescribeTasks. The control plane then
+    # needs the secretsmanager + RegisterTaskDefinition IAM in SECURITY.md, and
+    # the task EXECUTION role needs secretsmanager:GetSecretValue. WITHOUT this,
+    # a Fargate replica that has secret env vars fails closed (refuses to start).
+    secrets:
+      name_prefix: ""                 # e.g. shinyhub/prod; make it unique per install  # SHINYHUB_RUNTIME_FARGATE_SECRETS_NAME_PREFIX
+      kms_key_id: ""                  # optional customer-managed KMS key (id, ARN, or alias); empty = default aws/secretsmanager key  # SHINYHUB_RUNTIME_FARGATE_SECRETS_KMS_KEY_ID
+
   # Optional: replica autoscale controller. These are the GLOBAL controller
   # settings; autoscaling is opt-in per app (apps set autoscale_enabled and
   # bounds via the CLI/UI). With no app opted in, this block has no effect.

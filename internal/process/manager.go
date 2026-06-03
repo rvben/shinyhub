@@ -16,10 +16,39 @@ import (
 	"github.com/rvben/shinyhub/internal/storage"
 )
 
-// EnvResolver returns a slice of "KEY=VALUE" strings for the given app slug.
-// It is called during Start to inject per-app environment variables into the
-// process before launch.
-type EnvResolver func(slug string) ([]string, error)
+// EnvResolver returns the per-app environment for the given slug as two
+// "KEY=VALUE" slices: env holds non-secret values, secretEnv holds decrypted
+// secret values. They are kept separate so a runtime can deliver secrets out of
+// band (e.g. the Fargate task definition's secrets block) instead of as
+// plaintext. It is called during Start to inject per-app env before launch.
+type EnvResolver func(slug string) (env []string, secretEnv []string, err error)
+
+// dropReservedKeys returns env with every "KEY=VALUE" entry whose key also
+// appears in reserved removed. It is used to stop a per-app secret from
+// shadowing an authoritative deploy/platform-supplied variable (the reserved
+// set) that is injected later in the child environment.
+func dropReservedKeys(env, reserved []string) []string {
+	if len(env) == 0 || len(reserved) == 0 {
+		return env
+	}
+	reservedKeys := make(map[string]struct{}, len(reserved))
+	for _, kv := range reserved {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			reservedKeys[kv[:i]] = struct{}{}
+		}
+	}
+	out := env[:0:0]
+	for _, kv := range env {
+		i := strings.IndexByte(kv, '=')
+		if i > 0 {
+			if _, ok := reservedKeys[kv[:i]]; ok {
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	return out
+}
 
 // PlatformDefaultEnvResolver returns "KEY=VALUE" platform defaults that should
 // be set BEFORE the user's per-app env, so user values win on duplicate keys.
@@ -60,7 +89,12 @@ type ProcessInfo struct {
 }
 
 type StartParams struct {
-	Slug    string
+	Slug string
+	// AppID is the owning app's numeric DB id. It is used to namespace per-app
+	// external resources (e.g. Fargate secret store names and task-definition
+	// families) so a delete-then-recreate of the same slug never collides.
+	// Zero when unknown (paths that do not touch per-app external resources).
+	AppID   int64
 	Index   int
 	Tier    string // runtime tier; empty => DefaultTier
 	Dir     string
@@ -72,6 +106,14 @@ type StartParams struct {
 	// its own host. Zero means publish to the same port as Port (local case).
 	HostPublishPort int
 	Env             []string
+	// SecretEnv carries decrypted secret env vars ("KEY=VALUE"), kept in a slice
+	// separate from Env. Every runtime currently injects SecretEnv as plaintext
+	// alongside Env (the native, Docker, and Fargate runtimes concatenate the
+	// two; a key is either secret or not, so the order is immaterial). The slice
+	// is kept distinct so the Fargate runtime can later route these values
+	// through the task definition's secrets block instead of plaintext task
+	// overrides; until then secret values are NOT hidden from ecs:DescribeTasks.
+	SecretEnv       []string
 	AppDataPath     string        // host path to per-app data dir; empty disables data-dir wiring in runtime
 	MemoryLimitMB   int           // 0 = no limit
 	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
@@ -337,13 +379,25 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	}
 
 	if m.envResolver != nil {
-		userEnv, err := m.envResolver(p.Slug)
+		userEnv, userSecretEnv, err := m.envResolver(p.Slug)
 		if err != nil {
 			return nil, fmt.Errorf("resolve env: %w", err)
 		}
-		// Build user env first, then append platform env so platform values win
-		// on duplicate keys (os/exec uses last-occurrence-wins).
+		// The env passed into Start (e.g. the allocated PORT from deploy) is
+		// authoritative and must win over per-app env. Non-secret user env is
+		// prepended below, so the deploy values already beat it under
+		// last-occurrence-wins. SecretEnv, however, is injected AFTER Env by the
+		// runtimes, so a per-app secret keyed the same as a deploy var would
+		// shadow it; drop such secrets to preserve the deploy-wins precedence.
+		userSecretEnv = dropReservedKeys(userSecretEnv, p.Env)
+		// Prepend the resolved user env; the deploy-supplied env passed into
+		// Start stays at the tail so it wins on duplicate keys (os/exec uses
+		// last-occurrence-wins).
 		p.Env = append(userEnv, p.Env...)
+		// Secret env stays in its own slice so a runtime can deliver it out of
+		// band; no platform/deploy source contributes secrets, so resolver
+		// values are authoritative.
+		p.SecretEnv = append(userSecretEnv, p.SecretEnv...)
 	}
 	if m.platformEnv != nil {
 		// Platform defaults (e.g. OTEL_*) go BEFORE the user env above so the

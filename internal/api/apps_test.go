@@ -3,7 +3,9 @@ package api_test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -1945,6 +1947,70 @@ func TestDeleteApp_CleanupFailureRetainsTombstone(t *testing.T) {
 	app, err := store.GetAppBySlug("demo")
 	if err != nil {
 		t.Fatalf("row was removed despite failed cleanup (bytes orphaned): %v", err)
+	}
+	if app.Status != "deleting" {
+		t.Errorf("status = %q, want deleting (tombstone retained for reconcile)", app.Status)
+	}
+}
+
+// fakeSecretsCleaner records CleanupApp calls and can simulate a failure.
+type fakeSecretsCleaner struct {
+	cleaned []int64
+	err     error
+}
+
+func (f *fakeSecretsCleaner) CleanupApp(_ context.Context, appID int64) error {
+	f.cleaned = append(f.cleaned, appID)
+	return f.err
+}
+
+// TestDeleteApp_InvokesSecretsCleaner verifies the external secret-backend
+// cleanup runs (with the app's id) when an app is deleted.
+func TestDeleteApp_InvokesSecretsCleaner(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	createApp(t, srv, token, "demo")
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleaner := &fakeSecretsCleaner{}
+	srv.SetSecretsCleaner(cleaner)
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, authedRequest(t, "DELETE", "/api/apps/demo", nil, token))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(cleaner.cleaned) != 1 || cleaner.cleaned[0] != app.ID {
+		t.Errorf("CleanupApp called with %v, want [%d]", cleaner.cleaned, app.ID)
+	}
+	if _, err := store.GetAppBySlug("demo"); err == nil {
+		t.Error("app row should be gone after successful delete + secret cleanup")
+	}
+}
+
+// TestDeleteApp_SecretCleanerFailureRetainsTombstone verifies a failing secret
+// cleanup keeps the 'deleting' tombstone so the startup reconcile retries and
+// secrets/task-defs do not orphan.
+func TestDeleteApp_SecretCleanerFailureRetainsTombstone(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
+	createApp(t, srv, token, "demo")
+	srv.SetSecretsCleaner(&fakeSecretsCleaner{err: errors.New("secrets manager unreachable")})
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, authedRequest(t, "DELETE", "/api/apps/demo", nil, token))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatalf("row removed despite failed secret cleanup (would orphan secrets): %v", err)
 	}
 	if app.Status != "deleting" {
 		t.Errorf("status = %q, want deleting (tombstone retained for reconcile)", app.Status)

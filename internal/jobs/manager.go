@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
-	"github.com/rvben/shinyhub/internal/secrets"
 )
 
 // schedLock is a context-aware mutex used to serialize runs of a single
@@ -497,30 +497,22 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		// Non-fatal — proceed with the run. The streaming endpoint will fall back gracefully.
 	}
 
-	// Build env vars, decrypting secrets.
+	// Build env vars, decrypting secrets. Secret values are partitioned into
+	// secretEnv so the runtime can deliver them out of band; non-secret values
+	// stay in env. Decryption fails closed (see appenv.Resolve): running the job
+	// with a ciphertext or missing secret would silently misbehave instead of
+	// surfacing a key/rotation problem, and app startup fails closed the same way.
 	envVars, err := m.store.ListAppEnvVars(app.ID)
 	if err != nil {
 		m.finishRun(sched, runID, "failed", 0, trigger, userID)
 		return
 	}
-	env := make([]string, 0, len(envVars))
-	for _, v := range envVars {
-		val := string(v.Value)
-		if v.IsSecret && len(m.secretsKey) > 0 {
-			plain, derr := secrets.Decrypt(m.secretsKey, v.Value)
-			if derr != nil {
-				// Fail closed: running the job with ciphertext (or a
-				// missing secret) would silently misbehave instead of
-				// surfacing a key/rotation problem. App startup fails
-				// closed for the same class of error; schedules must too.
-				fmt.Fprintf(logFile, "shinyhub: cannot decrypt secret env var %q: %v\n", v.Key, derr)
-				slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "key", v.Key, "err", derr)
-				m.finishRun(sched, runID, "failed", 0, trigger, userID)
-				return
-			}
-			val = string(plain)
-		}
-		env = append(env, v.Key+"="+val)
+	env, secretEnv, err := appenv.Resolve(envVars, m.secretsKey)
+	if err != nil {
+		fmt.Fprintf(logFile, "shinyhub: %v\n", err)
+		slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "err", err)
+		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		return
 	}
 
 	// Build shared mounts.
@@ -585,9 +577,11 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 
 	params := process.StartParams{
 		Slug:          app.Slug,
+		AppID:         app.ID,
 		Dir:           bundleDir,
 		Command:       cmd,
 		Env:           env,
+		SecretEnv:     secretEnv,
 		Tier:          jobTier,
 		AppDataPath:   appDataPath,
 		SharedMounts:  sharedMounts,

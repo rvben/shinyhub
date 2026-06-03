@@ -21,9 +21,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/autoscale"
 	"github.com/rvben/shinyhub/internal/backup"
@@ -247,6 +249,13 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		// Out-of-VPC control plane: resolve task public IPs via EC2.
 		opts = append(opts, fargate.WithEC2Client(ec2.NewFromConfig(awsCfg)))
 	}
+	if fc.SecretsNamePrefix != "" {
+		// Route apps' secret env vars through AWS Secrets Manager (referenced by
+		// ARN from a per-app task-def secrets block) instead of plaintext task
+		// overrides, so they never appear in ecs:DescribeTasks.
+		opts = append(opts, fargate.WithSecretsStore(
+			fargate.NewSecretsManagerStore(secretsmanager.NewFromConfig(awsCfg), fc.SecretsKMSKeyID)))
+	}
 	return fargate.New(ecs.NewFromConfig(awsCfg), fargate.Config{
 		Cluster:          fc.Cluster,
 		TaskDefinition:   fc.TaskDefinition,
@@ -262,6 +271,7 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		BundleTokenTTL:   fc.BundleTokenTTL,
 		BundleTokenKey:   bundleTokenKey,
 		LaunchType:       lt,
+		SecretNamePrefix: fc.SecretsNamePrefix,
 	}, slog.Default(), opts...), nil
 }
 
@@ -444,28 +454,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		mgr.RegisterRuntime(tierCfg.Name, tierRT)
 		slog.Info("runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
 	}
-	mgr.SetEnvResolver(func(slug string) ([]string, error) {
+	mgr.SetEnvResolver(func(slug string) ([]string, []string, error) {
 		app, err := store.GetApp(slug)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		vars, err := store.ListAppEnvVars(app.ID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		out := make([]string, 0, len(vars))
-		for _, v := range vars {
-			val := string(v.Value)
-			if v.IsSecret {
-				pt, err := secrets.Decrypt(secretsKey, v.Value)
-				if err != nil {
-					return nil, fmt.Errorf("decrypt env %s for app %s: %w", v.Key, slug, err)
-				}
-				val = string(pt)
-			}
-			out = append(out, fmt.Sprintf("%s=%s", v.Key, val))
+		env, secretEnv, err := appenv.Resolve(vars, secretsKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve env for app %s: %w", slug, err)
 		}
-		return out, nil
+		return env, secretEnv, nil
 	})
 	mgr.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
 		app, err := store.GetApp(slug)
@@ -509,6 +511,23 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
+
+	// When the Fargate secrets backend is configured, wire the per-app cleanup
+	// (delete Secrets Manager entries + deregister task-def revisions) that runs
+	// on app delete and on the startup tombstone reconcile. Every Fargate runtime
+	// instance shares the cluster-wide secrets config, so the first one suffices.
+	var fargateSecretsCleaner *fargate.Runtime
+	if cfg.Runtime.Fargate.SecretsNamePrefix != "" {
+		for _, tierName := range cfg.Runtime.TierOrder() {
+			if frt, ok := mgr.RuntimeForTier(tierName).(*fargate.Runtime); ok {
+				fargateSecretsCleaner = frt
+				break
+			}
+		}
+	}
+	if fargateSecretsCleaner != nil {
+		srv.SetSecretsCleaner(fargateSecretsCleaner)
+	}
 	if workerReg != nil {
 		srv.SetNodeForTier(func(tier string) string {
 			if w, ok := workerReg.WorkerForTier(tier); ok {
@@ -655,6 +674,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		deployDefaultMem, deployDefaultCPU := cfg.Runtime.DefaultResourcesForApp(app)
 		p := deploy.Params{
 			Slug:                  slug,
+			AppID:                 app.ID,
 			BundleDir:             bundleDir,
 			Manager:               mgr,
 			Proxy:                 prx,
@@ -746,7 +766,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Finish any app deletion interrupted between the 'deleting' tombstone and
 	// the row removal, then report (do not delete) slug dirs with no owning
 	// row. Reconcile first so freshly-cleaned slugs are not flagged as orphans.
-	lifecycle.ReconcileDeletingApps(store, cfg)
+	var reconcileCleaner lifecycle.AppSecretsCleaner
+	if fargateSecretsCleaner != nil {
+		reconcileCleaner = fargateSecretsCleaner
+	}
+	lifecycle.ReconcileDeletingApps(ctx, store, cfg, reconcileCleaner)
 	lifecycle.LogOrphanAppDirs(store, cfg)
 
 	// Re-adopt any processes that survived a server restart. Recovery routes

@@ -60,6 +60,24 @@ func (s *stubLookup) Worker(nodeID string) (db.Worker, bool) {
 	return db.Worker{}, false
 }
 
+// TestToStartRequest_IncludesSecretEnv guards that secret env vars reach a
+// remote worker: a remote_docker container shares the worker's trust boundary
+// like local Docker, so SecretEnv must be folded into the wire env map
+// alongside Env (no behavior change vs a single flat Env slice).
+func TestToStartRequest_IncludesSecretEnv(t *testing.T) {
+	req := toStartRequest(process.StartParams{
+		Slug:      "demo",
+		Env:       []string{"PLAIN=1"},
+		SecretEnv: []string{"SECRET=shh"},
+	})
+	if req.Env["PLAIN"] != "1" {
+		t.Errorf("PLAIN missing from wire env: %v", req.Env)
+	}
+	if req.Env["SECRET"] != "shh" {
+		t.Errorf("SECRET (from SecretEnv) missing from wire env: %v", req.Env)
+	}
+}
+
 func TestRemoteRuntime_NoWorker_FailsClosed(t *testing.T) {
 	lookup := newStubLookup() // empty: no workers for any tier
 	rt := newRemoteRuntime(lookup, "remote", nil)
