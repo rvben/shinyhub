@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -76,6 +77,83 @@ type containerSummary struct {
 	ID     string
 	Labels map[string]string
 	State  string
+}
+
+// ensureImage makes image present in the daemon's local cache, pulling it on
+// demand. Container create fails with a 404 "No such image" if the image is
+// absent, so a deploy onto a host that has never run the app (any fresh worker
+// or CI runner) needs the pull. A cached image is left untouched so a
+// steady-state start neither contacts the registry nor pays a pull round-trip.
+func (c *dockerClient) ensureImage(image string) error {
+	if c.imageExists(image) {
+		return nil
+	}
+	return c.pullImage(image)
+}
+
+// imageExists reports whether image is already in the daemon's local cache. Any
+// transport error or non-200 status is treated as "not present" so ensureImage
+// falls through to a pull rather than failing the start outright.
+func (c *dockerClient) imageExists(image string) bool {
+	resp, err := c.hc.Get(c.base + "/images/" + image + "/json")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	return resp.StatusCode == http.StatusOK
+}
+
+// pullImage pulls image via the Docker pull API. The endpoint streams NDJSON
+// progress and only finishes the download once the body is drained; a mid-pull
+// failure is reported as a JSON object with an "error" field while the HTTP
+// status stays 200, so the stream is scanned for one.
+func (c *dockerClient) pullImage(image string) error {
+	fromImage, tag := splitImageTag(image)
+	q := url.Values{"fromImage": {fromImage}}
+	if tag != "" {
+		q.Set("tag", tag)
+	}
+	resp, err := c.stream.Post(c.base+"/images/create?"+q.Encode(), "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("pull image %s: %w", image, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("pull image %s: status %d: %s", image, resp.StatusCode, body)
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var msg struct {
+			Error string `json:"error"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("pull image %s: read progress: %w", image, err)
+		}
+		if msg.Error != "" {
+			return fmt.Errorf("pull image %s: %s", image, msg.Error)
+		}
+	}
+}
+
+// splitImageTag splits a Docker image reference into the fromImage + tag the
+// pull API expects. The tag is the part after the last colon, but only when that
+// colon falls in the final path segment (after the last slash), so a registry
+// host:port (e.g. registry:5000/repo) is not mistaken for a tag. A digest-pinned
+// ref is passed through whole as fromImage (Docker pulls it by digest); an
+// untagged ref defaults to "latest".
+func splitImageTag(image string) (fromImage, tag string) {
+	if strings.LastIndex(image, "@") >= 0 {
+		return image, ""
+	}
+	if colon := strings.LastIndex(image, ":"); colon > strings.LastIndex(image, "/") {
+		return image[:colon], image[colon+1:]
+	}
+	return image, "latest"
 }
 
 // createContainer creates a container and returns its ID.
