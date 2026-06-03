@@ -45,6 +45,15 @@ fail() {
       tail -60 "${WORKDIR}/${log}" >&2
     fi
   done
+  # App container logs (the app's own stdout/stderr) reveal whether it started
+  # and served, e.g. why a routing check saw a 404. The cleanup trap removes
+  # these containers, but it runs only after this exit, so they still exist here.
+  if command -v docker >/dev/null 2>&1; then
+    for cid in $(docker ps -aq --filter label=shinyhub.managed=true 2>/dev/null); do
+      echo "----- container ${cid} logs (last 40 lines) -----" >&2
+      docker logs --tail 40 "${cid}" 2>&1 | sed 's/^/  /' >&2
+    done
+  fi
   exit 1
 }
 
@@ -159,8 +168,16 @@ pulls="$(grep -c 'bundle: pulled' "${WORKDIR}/worker.log" || true)"
 test "${pulls}" = "1" || fail "expected exactly one bundle pull, got ${pulls}"
 
 # 9. Assert: user traffic routes through the agent mTLS tunnel to the container.
-body="$(curl -fsS "http://127.0.0.1:${CP_PORT}/app/e2eapp/")" || fail "routing through tunnel"
-echo "${body}" | grep -q "shinyhub remote-worker E2E" || fail "tunnel did not return the app body"
+#    The app's HTTP server can accept connections a moment before its routes are
+#    mounted (a brief startup window where it 404s), so retry like a real client
+#    until it serves its body rather than asserting on a single request.
+body=""
+for _ in $(seq 1 60); do
+  body="$(curl -fsS "http://127.0.0.1:${CP_PORT}/app/e2eapp/" 2>/dev/null || true)"
+  echo "${body}" | grep -q "shinyhub remote-worker E2E" && break
+  sleep 1
+done
+echo "${body}" | grep -q "shinyhub remote-worker E2E" || fail "routing through tunnel"
 
 # 10. Assert: a control-plane restart re-adopts the running replica via agent
 #     inventory, and routing survives the restart.
@@ -168,7 +185,8 @@ kill "${CP_PID}"; wait "${CP_PID}" 2>/dev/null || true; CP_PID=""
 start_cp
 "${ROOT}/scripts/wait-log.sh" "${WORKDIR}/cp.log" "recovery: re-adopted remote replica" 30 \
   || fail "control plane did not re-adopt the replica after restart"
-curl -fsS "http://127.0.0.1:${CP_PORT}/app/e2eapp/" >/dev/null || fail "routing after control-plane restart"
+"${ROOT}/scripts/wait-http.sh" "http://127.0.0.1:${CP_PORT}/app/e2eapp/" 30 \
+  || fail "routing after control-plane restart"
 
 # 11. Assert: killing the worker transitions its replica to lost and drops it
 #     from routing. The control plane marks a worker down once its heartbeat is
