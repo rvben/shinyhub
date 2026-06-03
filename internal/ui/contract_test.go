@@ -684,6 +684,29 @@ func assertContains(t *testing.T, path, needle, contract string) {
 	}
 }
 
+func assertNotContains(t *testing.T, path, needle, contract string) {
+	t.Helper()
+	b, err := fs.ReadFile(ui.Static(), path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if strings.Contains(string(b), needle) {
+		t.Fatalf("%s must NOT contain %q to honor contract: %s", path, needle, contract)
+	}
+}
+
+// TestGrantByUsernameUsesServerResolution guards the access-grant security fix:
+// the Access tab must grant by POSTing { username } to /members (the server
+// resolves it under manage-app authorization) and must NOT pre-resolve via
+// GET /api/users/{username}, which is restricted to app operators and would 403
+// for an app manager who lacks the app-create privilege.
+func TestGrantByUsernameUsesServerResolution(t *testing.T) {
+	assertContains(t, "app.js", "JSON.stringify({ username })",
+		"the grant flow must POST {username} so the server resolves it under manage-app authorization")
+	assertNotContains(t, "app.js", "/api/users/${encodeURIComponent(username)}",
+		"the grant flow must not pre-resolve the username via the operator-only user-lookup endpoint")
+}
+
 // TestDashboardFleetSurfaceWiring pins the read-only fleet dashboard surface
 // to the static SPA. app.js is a large IIFE that cannot be imported in a unit
 // test, so - exactly like TestAppDetailUnwrapsGetAppResponse - we assert the

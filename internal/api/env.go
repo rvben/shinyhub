@@ -25,7 +25,12 @@ type envListItem struct {
 
 func (s *Server) handleListAppEnv(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	app, _, ok := s.requireViewApp(w, r, slug)
+	// Manager-only: env vars are app configuration. Even non-secret values can
+	// hold connection strings, internal hostnames, or third-party keys, and key
+	// names alone reveal an app's integrations. This matches the env
+	// upsert/delete guards and the manager-only Configuration UI, and stops
+	// any authenticated viewer of a public/shared app from reading config.
+	app, ok := s.requireManageApp(w, r, slug)
 	if !ok {
 		return
 	}

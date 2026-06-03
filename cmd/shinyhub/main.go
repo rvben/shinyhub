@@ -222,6 +222,18 @@ func deriveBundleTokenKey(authSecret string) []byte {
 	return key
 }
 
+// deriveStickyCookieKey derives the HMAC key that signs the proxy's
+// sticky-routing cookie, independent of the other HKDF-derived keys via its own
+// info string. Panics on failure (HKDF read of 32 bytes is infallible).
+func deriveStickyCookieKey(authSecret string) []byte {
+	r := hkdf.New(sha256.New, []byte(authSecret), nil, []byte("shinyhub-sticky-cookie-v1"))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(r, key); err != nil {
+		panic(err)
+	}
+	return key
+}
+
 // buildFargateRuntime constructs the ECS runtime for one fargate tier from the
 // shared cfg.Runtime.Fargate settings and the tier's per-entry launch type.
 // The launch type determines the workerID ("fargate" or "ecs-ec2") and whether
@@ -503,6 +515,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	prx := proxy.New()
 	prx.SetTracing(cfg.Tracing, traceBuffer)
+	// Trust forwarding headers only from the configured upstream proxies; a
+	// direct client's X-Forwarded-* / Forwarded values are stripped before the
+	// request reaches an app backend.
+	prx.SetTrustedProxies(cfg.TrustedProxyNets)
+	// Sign the sticky-routing cookie so a client cannot forge it to pin a
+	// replica and bypass the per-replica session cap.
+	prx.SetStickySecret(deriveStickyCookieKey(cfg.Auth.Secret))
 
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetVersion(version)

@@ -97,7 +97,11 @@ func TestListAppEnv_MasksSecrets(t *testing.T) {
 	}
 }
 
-func TestListAppEnv_ViewerCanList(t *testing.T) {
+// TestListAppEnv_NonManagerDenied verifies env listing is manager-only: a
+// non-owner, non-manager user cannot read an app's env config (even non-secret
+// values / key names) on a shared app. Env is configuration, not content, and
+// must not leak to every authenticated user just because the app is shared.
+func TestListAppEnv_NonManagerDenied(t *testing.T) {
 	srv, store := newTestServer(t)
 
 	hash, _ := auth.HashPassword("pass")
@@ -116,8 +120,8 @@ func TestListAppEnv_ViewerCanList(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("viewer should be able to list env on shared app: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-manager must not list env on shared app: expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

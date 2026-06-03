@@ -3,6 +3,7 @@ package proxy_test
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,20 @@ import (
 
 	"github.com/rvben/shinyhub/internal/proxy"
 )
+
+// mustCIDRs parses CIDR strings into IPNets for SetTrustedProxies in tests.
+func mustCIDRs(t *testing.T, cidrs ...string) []*net.IPNet {
+	t.Helper()
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			t.Fatalf("parse cidr %q: %v", c, err)
+		}
+		out = append(out, n)
+	}
+	return out
+}
 
 func TestProxyRoutesKnownSlug(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -321,9 +336,12 @@ func TestProxyPreservesIncomingForwarded(t *testing.T) {
 	if err := p.Register("app", backend.URL); err != nil {
 		t.Fatal(err)
 	}
+	// The incoming Forwarded header is preserved only because the peer is a
+	// trusted upstream proxy; a direct client's value would be stripped.
+	p.SetTrustedProxies(mustCIDRs(t, "192.0.2.0/24"))
 
 	req := httptest.NewRequest("GET", "/app/app/", nil)
-	req.RemoteAddr = "10.0.0.1:8888"
+	req.RemoteAddr = "192.0.2.10:8888"
 	req.Host = "internal-shinyhub.lan"
 	req.Header.Set("Forwarded", `for="203.0.113.5:443";proto=https;host="edge.example.com"`)
 	rec := httptest.NewRecorder()
@@ -544,10 +562,12 @@ func TestProxyPreservesIncomingForwardingHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate an edge proxy (nginx/caddy) that already terminated TLS
-	// and populated the forwarding headers for us.
+	// Simulate an edge proxy (nginx/caddy) that already terminated TLS and
+	// populated the forwarding headers for us. Its values are preserved only
+	// because the peer is a configured trusted proxy.
+	p.SetTrustedProxies(mustCIDRs(t, "192.0.2.0/24"))
 	req := httptest.NewRequest("GET", "/app/app/", nil)
-	req.RemoteAddr = "10.0.0.1:45678"
+	req.RemoteAddr = "192.0.2.10:45678"
 	req.Host = "internal-shinyhub.lan"
 	req.Header.Set("X-Real-IP", "203.0.113.5")
 	req.Header.Set("X-Forwarded-Proto", "https")

@@ -2024,27 +2024,18 @@ document.addEventListener('DOMContentLoaded', () => {
     grantBtn.disabled = true;
     grantBtn.textContent = 'Granting…';
     try {
-      // Resolve username → user_id.
-      const lookupResp = await api(`/api/users/${encodeURIComponent(username)}`);
-      if (!lookupResp.ok) {
-        const msg = lookupResp.status === 404 ? 'User not found' : 'Lookup failed';
-        errEl.textContent = msg;
-        errEl.hidden = false;
-        flashToast(msg, 'error');
-        return;
-      }
-      const user = await lookupResp.json();
-
-      // Grant access.
+      // Grant by username: the server resolves it to a user id under the same
+      // manage-app authorization, so the UI never needs a separate user-lookup
+      // (which would require broader privilege than managing this app).
       const grantResp = await api(`/api/apps/${settingsSlug}/members`, {
         method: 'POST',
-        body: JSON.stringify({ user_id: user.id }),
+        body: JSON.stringify({ username }),
       });
       if (!grantResp.ok) {
-        let grantMsg = 'Grant failed';
+        let grantMsg = grantResp.status === 404 ? 'User not found' : 'Grant failed';
         try {
           const j = await grantResp.json();
-          if (j && j.error) grantMsg = j.error;
+          if (j && j.error && grantResp.status !== 404) grantMsg = j.error;
         } catch { /* non-JSON */ }
         errEl.textContent = grantMsg;
         errEl.hidden = false;
