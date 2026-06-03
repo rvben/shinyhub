@@ -1657,17 +1657,34 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		UserID int64 `json:"user_id"`
+		UserID   int64  `json:"user_id"`
+		Username string `json:"username"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if req.UserID == 0 {
-		writeError(w, http.StatusBadRequest, "user_id is required")
+	// Resolve a username to its id server-side, under this manage-gated handler,
+	// so granting access never requires a separate broadly-readable user-lookup
+	// endpoint (the previous flow's enumeration primitive).
+	userID := req.UserID
+	if userID == 0 && req.Username != "" {
+		u, err := s.store.GetUserByUsername(req.Username)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		userID = u.ID
+	}
+	if userID == 0 {
+		writeError(w, http.StatusBadRequest, "user_id or username is required")
 		return
 	}
-	if _, err := s.store.GetUserByID(req.UserID); err != nil {
+	if _, err := s.store.GetUserByID(userID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
@@ -1675,7 +1692,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if err := s.store.GrantAppAccess(slug, req.UserID); err != nil {
+	if err := s.store.GrantAppAccess(slug, userID); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -1686,7 +1703,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 			Action:       "grant_access",
 			ResourceType: "app",
 			ResourceID:   slug,
-			Detail:       fmt.Sprintf("user_id=%d", req.UserID),
+			Detail:       fmt.Sprintf("user_id=%d", userID),
 			IPAddress:    s.ClientIP(r),
 		})
 	}
@@ -1777,6 +1794,13 @@ type userLookupResponse struct {
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
+	// Username->id lookup is only needed by app operators granting access, so
+	// restrict it to users who can manage apps. This stops a plain viewer (e.g.
+	// an auto-provisioned OAuth account) from enumerating accounts.
+	if !canCreateApps(auth.UserFromContext(r.Context())) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	username := chi.URLParam(r, "username")
 	if username == "" {
 		writeError(w, http.StatusBadRequest, "username is required")

@@ -1,0 +1,72 @@
+package api_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
+)
+
+// mkUser creates a user with the given role and returns an authed JWT for them.
+func mkUser(t *testing.T, store *db.Store, username, role string) (int64, string) {
+	t.Helper()
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: username, PasswordHash: hash, Role: role}); err != nil {
+		t.Fatalf("create user %s: %v", username, err)
+	}
+	u, err := store.GetUserByUsername(username)
+	if err != nil {
+		t.Fatalf("get user %s: %v", username, err)
+	}
+	tok, _ := auth.IssueJWT(u.ID, username, role, "test-secret")
+	return u.ID, tok
+}
+
+func do(t *testing.T, srv interface{ Router() http.Handler }, method, path, token string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, method, path, body, token))
+	return rec
+}
+
+// TestGetUser_NotEnumerableByViewer verifies a plain viewer (e.g. an auto-
+// provisioned OAuth account) can no longer resolve arbitrary usernames to user
+// ids, while an app operator (developer) still can for the grant flow.
+func TestGetUser_NotEnumerableByViewer(t *testing.T) {
+	srv, store := newTestServer(t)
+	mkUser(t, store, "alice", "developer") // target
+	_, viewerTok := mkUser(t, store, "nosy", "viewer")
+	_, devTok := mkUser(t, store, "dev", "developer")
+
+	if rec := do(t, srv, "GET", "/api/users/alice", viewerTok, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("viewer user lookup = %d, want 403 (no enumeration); body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, srv, "GET", "/api/users/alice", devTok, nil); rec.Code != http.StatusOK {
+		t.Errorf("developer user lookup = %d, want 200 (grant flow); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGrantAppAccess_ByUsername verifies a manager can grant access by username
+// (server-side resolution), so the UI no longer needs a separate user-lookup.
+func TestGrantAppAccess_ByUsername(t *testing.T) {
+	srv, store := newTestServer(t)
+	ownerID, ownerTok := mkUser(t, store, "owner", "developer")
+	aliceID, _ := mkUser(t, store, "alice", "developer")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "App", OwnerID: ownerID}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, "POST", "/api/apps/app/members", ownerTok, []byte(`{"username":"alice"}`))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("grant by username = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	ok, err := store.UserCanAccessApp("app", aliceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Error("alice was not granted access after grant-by-username")
+	}
+}
