@@ -17,7 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/proxytrust"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
 
@@ -220,6 +222,15 @@ type Proxy struct {
 	onMiss     func(slug string)
 	slugExists func(slug string) (bool, error)
 
+	// trustedProxies holds the CIDRs of upstream proxies allowed to set the
+	// X-Forwarded-* / Forwarded headers the proxy forwards to app backends. A
+	// request whose immediate peer is NOT in this set has those headers stripped
+	// and repopulated from the proxy's own view, so a direct client cannot spoof
+	// the app's notion of the client IP, scheme, or host. A nil/absent pointer
+	// trusts no peer, which is correct for a directly-exposed proxy. Stored as an
+	// atomic pointer so the hot-path Director reads it lock-free.
+	trustedProxies atomic.Pointer[[]*net.IPNet]
+
 	accessLog atomic.Pointer[accessLogFn]
 	clientIP  atomic.Pointer[clientIPFn]
 
@@ -274,6 +285,23 @@ func (p *Proxy) SetAccessLogger(fn func(AccessLogEntry)) {
 // the surrounding Server injects its trusted-proxy configuration into the
 // proxy without forming an import cycle. Safe to call concurrently with
 // ServeHTTP.
+// SetTrustedProxies configures the upstream-proxy CIDRs whose forwarding
+// headers are trusted (see Proxy.trustedProxies). Wire it from
+// cfg.TrustedProxyNets at startup, before serving. Safe to leave unset (trust
+// no peer) for a directly-exposed deployment.
+func (p *Proxy) SetTrustedProxies(nets []*net.IPNet) {
+	p.trustedProxies.Store(&nets)
+}
+
+// trustedProxyNets returns the configured trusted-proxy CIDRs, or nil when none
+// are set (trust no peer).
+func (p *Proxy) trustedProxyNets() []*net.IPNet {
+	if ptr := p.trustedProxies.Load(); ptr != nil {
+		return *ptr
+	}
+	return nil
+}
+
 func (p *Proxy) SetClientIPResolver(fn func(*http.Request) string) {
 	if fn == nil {
 		p.clientIP.Store(nil)
@@ -469,22 +497,18 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		if req.TLS != nil {
 			scheme = "https"
 		}
-		if req.Header.Get("X-Forwarded-Host") == "" && req.Host != "" {
-			req.Header.Set("X-Forwarded-Host", req.Host)
+		clientIP := ""
+		if cip, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			clientIP = cip
 		}
-		if req.Header.Get("X-Forwarded-Proto") == "" {
-			req.Header.Set("X-Forwarded-Proto", scheme)
-		}
-		if req.Header.Get("X-Real-IP") == "" {
-			if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil && clientIP != "" {
-				req.Header.Set("X-Real-IP", clientIP)
-			}
-		}
-		if req.Header.Get("Forwarded") == "" {
-			if fwd := buildForwarded(req, scheme); fwd != "" {
-				req.Header.Set("Forwarded", fwd)
-			}
-		}
+		// Trust client-supplied forwarding headers only from a configured proxy
+		// peer; for a direct/untrusted client, strip and repopulate them from our
+		// own view so the backend app cannot be fed a spoofed client IP, scheme,
+		// or host.
+		applyForwardingHeaders(req, scheme, clientIP, proxytrust.PeerIsTrusted(req, p.trustedProxyNets()))
+		// Never leak ShinyHub's own auth/session/sticky cookies to the
+		// (deployer-controlled) app backend.
+		stripInternalCookies(req)
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -1050,6 +1074,82 @@ func resolveClientIP(resolver func(*http.Request) string, r *http.Request) strin
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// isInternalCookie reports whether a cookie belongs to ShinyHub itself (the
+// session JWT, CSRF token, OAuth-state nonce, or a per-app sticky-routing
+// cookie) and so must never be forwarded to an app backend.
+func isInternalCookie(name string) bool {
+	switch name {
+	case auth.SessionCookieName, auth.CSRFCookieName, auth.OAuthStateCookieName:
+		return true
+	}
+	return strings.HasPrefix(name, cookiePrefix)
+}
+
+// stripInternalCookies rewrites the request's Cookie header to drop ShinyHub's
+// own cookies before the request is forwarded to the (deployer-controlled) app
+// backend, so a malicious app cannot harvest a visitor's session JWT. Unrelated
+// app cookies are preserved; the header is removed entirely if nothing remains.
+func stripInternalCookies(req *http.Request) {
+	if req.Header.Get("Cookie") == "" {
+		return
+	}
+	cookies := req.Cookies()
+	kept := make([]*http.Cookie, 0, len(cookies))
+	for _, c := range cookies {
+		if isInternalCookie(c.Name) {
+			continue
+		}
+		kept = append(kept, c)
+	}
+	if len(kept) == len(cookies) {
+		return // nothing internal to strip
+	}
+	req.Header.Del("Cookie")
+	if len(kept) == 0 {
+		return
+	}
+	var b strings.Builder
+	for i, c := range kept {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(c.Name)
+		b.WriteByte('=')
+		b.WriteString(c.Value)
+	}
+	req.Header.Set("Cookie", b.String())
+}
+
+// applyForwardingHeaders sets the X-Forwarded-* / Forwarded headers the app
+// backend uses to reconstruct the external request. When the immediate peer is
+// not a trusted proxy, any client-supplied values are dropped first so they
+// cannot be spoofed; the headers are then populated from the proxy's own view.
+// When the peer is a trusted edge proxy, its values are preserved (set only if
+// absent), keeping authority with the terminating proxy.
+func applyForwardingHeaders(req *http.Request, scheme, clientIP string, peerTrusted bool) {
+	if !peerTrusted {
+		req.Header.Del("X-Forwarded-For")
+		req.Header.Del("X-Forwarded-Host")
+		req.Header.Del("X-Forwarded-Proto")
+		req.Header.Del("X-Real-IP")
+		req.Header.Del("Forwarded")
+	}
+	if req.Header.Get("X-Forwarded-Host") == "" && req.Host != "" {
+		req.Header.Set("X-Forwarded-Host", req.Host)
+	}
+	if req.Header.Get("X-Forwarded-Proto") == "" {
+		req.Header.Set("X-Forwarded-Proto", scheme)
+	}
+	if req.Header.Get("X-Real-IP") == "" && clientIP != "" {
+		req.Header.Set("X-Real-IP", clientIP)
+	}
+	if req.Header.Get("Forwarded") == "" {
+		if fwd := buildForwarded(req, scheme); fwd != "" {
+			req.Header.Set("Forwarded", fwd)
+		}
+	}
 }
 
 // buildForwarded constructs an RFC 7239 Forwarded header value from the

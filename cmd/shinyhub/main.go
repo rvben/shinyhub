@@ -503,6 +503,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	prx := proxy.New()
 	prx.SetTracing(cfg.Tracing, traceBuffer)
+	// Trust forwarding headers only from the configured upstream proxies; a
+	// direct client's X-Forwarded-* / Forwarded values are stripped before the
+	// request reaches an app backend.
+	prx.SetTrustedProxies(cfg.TrustedProxyNets)
 
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetVersion(version)
