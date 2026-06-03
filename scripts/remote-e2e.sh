@@ -32,7 +32,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { echo "E2E FAIL: $*" >&2; exit 1; }
+# fail aborts with a message, first dumping the tail of the control-plane,
+# worker, and deploy logs to stderr. The server-side error behind a failure
+# (e.g. why a deploy returned 500) lives in cp.log, not in the client output, so
+# dumping them here is what makes a CI failure diagnosable without re-running
+# locally. Each log is dumped only if it exists and is non-empty.
+fail() {
+  echo "E2E FAIL: $*" >&2
+  for log in cp.log worker.log deploy.log; do
+    if [ -s "${WORKDIR}/${log}" ]; then
+      echo "----- ${log} (last 60 lines) -----" >&2
+      tail -60 "${WORKDIR}/${log}" >&2
+    fi
+  done
+  exit 1
+}
 
 command -v docker >/dev/null 2>&1 || fail "docker is required for the remote-worker E2E"
 docker info >/dev/null 2>&1 || fail "docker daemon is not reachable"
@@ -137,7 +151,7 @@ curl -fsS -X PATCH "${SHINYHUB_HOST}/api/apps/e2eapp" \
 # 7. Deploy the app bundle. --wait blocks until both replicas are healthy
 #    (first-run dependency installs in the container can take minutes).
 "${BIN}" deploy "${ROOT}/testdata/e2e-app" --slug e2eapp --wait --wait-timeout 300 \
-  >"${WORKDIR}/deploy.log" 2>&1 || { cat "${WORKDIR}/deploy.log" >&2; fail "deploy"; }
+  >"${WORKDIR}/deploy.log" 2>&1 || fail "deploy"
 
 # 8. Assert: the bundle was pulled exactly once across both replicas (the cache
 #    dedups the second replica's start).
