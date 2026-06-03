@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,95 @@ import (
 // newTestDockerClient wires a dockerClient to a httptest.Server using TCP (not Unix socket).
 func newTestDockerClient(srv *httptest.Server) *dockerClient {
 	return &dockerClient{base: srv.URL, hc: srv.Client(), stream: srv.Client()}
+}
+
+// TestEnsureImagePullsWhenMissing verifies the runtime pulls an app image that
+// is not in the daemon's local cache before creating a container. Without this a
+// deploy onto a fresh host (every clean CI runner) fails with a 404 "No such
+// image" because the container create assumes the image is already present.
+func TestEnsureImagePullsWhenMissing(t *testing.T) {
+	present := false
+	var pulledFromImage, pulledTag string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/images/") && strings.HasSuffix(r.URL.Path, "/json"):
+			if present {
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]string{"Id": "img1"})
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/images/create"):
+			pulledFromImage = r.URL.Query().Get("fromImage")
+			pulledTag = r.URL.Query().Get("tag")
+			present = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"Pulling from astral-sh/uv"}`+"\n"+`{"status":"Status: Downloaded newer image"}`+"\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestDockerClient(srv)
+	if err := c.ensureImage("ghcr.io/astral-sh/uv:python3.12-bookworm-slim"); err != nil {
+		t.Fatalf("ensureImage: %v", err)
+	}
+	if pulledFromImage != "ghcr.io/astral-sh/uv" || pulledTag != "python3.12-bookworm-slim" {
+		t.Fatalf("pulled fromImage=%q tag=%q, want ghcr.io/astral-sh/uv / python3.12-bookworm-slim", pulledFromImage, pulledTag)
+	}
+}
+
+// TestEnsureImageSkipsPullWhenPresent verifies a cached image is not re-pulled,
+// so a steady-state start does not require registry reachability or pay a pull
+// round-trip on every replica boot.
+func TestEnsureImageSkipsPullWhenPresent(t *testing.T) {
+	pulled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/images/") && strings.HasSuffix(r.URL.Path, "/json"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"Id": "img1"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/images/create"):
+			pulled = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestDockerClient(srv)
+	if err := c.ensureImage("rocker/r-base:latest"); err != nil {
+		t.Fatalf("ensureImage: %v", err)
+	}
+	if pulled {
+		t.Fatal("pulled an image that was already present")
+	}
+}
+
+// TestEnsureImageSurfacesPullStreamError verifies a pull that fails mid-stream
+// (Docker reports it as a JSON {"error":...} line while the HTTP status stays
+// 200) is surfaced as an error rather than silently treated as success.
+func TestEnsureImageSurfacesPullStreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/json"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/images/create"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"Pulling"}`+"\n"+`{"error":"manifest unknown"}`+"\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestDockerClient(srv)
+	err := c.ensureImage("ghcr.io/x/missing:tag")
+	if err == nil || !strings.Contains(err.Error(), "manifest unknown") {
+		t.Fatalf("ensureImage err = %v, want an error surfacing 'manifest unknown'", err)
+	}
 }
 
 func TestDockerClientCreateAndStart(t *testing.T) {
@@ -73,7 +163,6 @@ func TestDockerClientInspect(t *testing.T) {
 		t.Errorf("expected Pid=1234, got %d", state.Pid)
 	}
 }
-
 
 func TestDockerClientContainerStatsFormula(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -163,6 +163,13 @@ func dockerChildEnv(p StartParams) []string {
 func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Writer) (ReplicaEndpoint, error) {
 	image := r.imageForCommand(p.Command)
 
+	// Pull the image if the daemon has never seen it: container create returns a
+	// 404 "No such image" otherwise, which is how a deploy onto a fresh worker
+	// (or CI runner) fails. A cached image is a no-op.
+	if err := r.client.ensureImage(image); err != nil {
+		return ReplicaEndpoint{}, fmt.Errorf("ensure image %s for %s: %w", image, p.Slug, err)
+	}
+
 	labels := dockerLabels(p)
 
 	cfg := containerConfig{

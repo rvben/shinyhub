@@ -82,6 +82,16 @@ func newDockerRuntimeWithServer(t *testing.T, handler http.Handler) *DockerRunti
 
 func newDockerRuntimeWithServerAndMode(t *testing.T, handler http.Handler, networkMode string) *DockerRuntime {
 	t.Helper()
+	// Make every image look already-present so Start's ensureImage is a no-op:
+	// these tests exercise container create/start/networking, not image pulling
+	// (that is covered directly against the dockerClient). Registering on the
+	// passed mux keeps each test's explicit routes intact.
+	if mux, ok := handler.(*http.ServeMux); ok {
+		mux.HandleFunc("/images/", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"Id":"img-present"}`)
+		})
+	}
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	client := &dockerClient{base: srv.URL, hc: srv.Client(), stream: srv.Client()}
