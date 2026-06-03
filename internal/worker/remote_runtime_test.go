@@ -3,10 +3,12 @@ package worker
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -369,4 +371,112 @@ func (d *stubDialer) DialWorker(db.Worker) (*http.Client, string, error) {
 }
 func (d *stubDialer) Transport(db.Worker) (http.RoundTripper, error) {
 	return d.client.Transport, nil
+}
+
+// refusingTransport fails the first failsLeft round trips with a connection-
+// refused dial error, then delegates to inner. It models a worker dialed in the
+// brief window after it joined but before its data-plane listener bound.
+type refusingTransport struct {
+	mu        sync.Mutex
+	failsLeft int
+	attempts  int
+	inner     http.RoundTripper
+}
+
+func (f *refusingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	f.attempts++
+	refuse := f.failsLeft > 0
+	if refuse {
+		f.failsLeft--
+	}
+	f.mu.Unlock()
+	if refuse {
+		// Same shape as a real connect refusal so errors.Is(err, ECONNREFUSED)
+		// holds through the *url.Error http.Client wraps around it.
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	}
+	return f.inner.RoundTrip(req)
+}
+
+func (f *refusingTransport) attemptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts
+}
+
+// TestRemoteRuntime_StartRetriesOnConnectionRefused asserts Start retries a
+// connection-refused POST (the request never reached the worker, so a re-POST
+// cannot double-start a container) and succeeds once the worker's data-plane
+// listener is accepting. This is the defense-in-depth half of the worker-
+// readiness fix: even if a deploy races a freshly-joined worker's listener bind,
+// the short retry rides over it instead of failing the whole deploy.
+func TestRemoteRuntime_StartRetriesOnConnectionRefused(t *testing.T) {
+	dir := t.TempDir()
+	agentSrv := NewReplicaServer(ReplicaServerConfig{
+		Runtime:      &fakeRuntime{startURL: "http://127.0.0.1:49021"},
+		DataDir:      dir,
+		NodeID:       "node-a",
+		Advertise:    "w:8443",
+		AllocatePort: func() int { return 49021 },
+	})
+	router := chi.NewRouter()
+	agentSrv.Routes(router)
+	ts := httptest.NewServer(router)
+	defer func() { ts.CloseClientConnections(); ts.Close() }()
+
+	ft := &refusingTransport{failsLeft: 2, inner: ts.Client().Transport}
+	rt := newRemoteRuntime(
+		newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+		"remote",
+		&stubDialer{client: &http.Client{Transport: ft}, base: ts.URL},
+	)
+
+	ep, err := rt.Start(context.Background(), process.StartParams{
+		Slug: "app", Port: 8080, Command: []string{"./server"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Start should retry past connection-refused, got: %v", err)
+	}
+	if got := ft.attemptCount(); got != 3 {
+		t.Fatalf("Start made %d attempts, want 3 (2 refused + 1 success)", got)
+	}
+	if !strings.HasPrefix(ep.URL, "https://w:8443/v1/data/") {
+		t.Errorf("endpoint URL = %q, want tunnel URL", ep.URL)
+	}
+}
+
+// TestRemoteRuntime_StartDoesNotRetryWorkerError asserts Start fails fast on a
+// non-dial error: a worker HTTP status means the POST reached the worker, so a
+// retry could double-start a container. Only connection-establishment failures
+// are safe to retry.
+func TestRemoteRuntime_StartDoesNotRetryWorkerError(t *testing.T) {
+	var hits int
+	var mu sync.Mutex
+	router := chi.NewRouter()
+	router.Post("/v1/replicas", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(router)
+	defer func() { ts.CloseClientConnections(); ts.Close() }()
+
+	rt := newRemoteRuntime(
+		newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+		"remote",
+		&stubDialer{client: ts.Client(), base: ts.URL},
+	)
+
+	if _, err := rt.Start(context.Background(), process.StartParams{
+		Slug: "app", Port: 8080, Command: []string{"./server"},
+	}, nil); err == nil {
+		t.Fatal("Start against a 500 worker should error")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("worker hit %d times, want 1 (no retry on a worker HTTP error)", hits)
+	}
 }

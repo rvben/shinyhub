@@ -290,6 +290,12 @@ func markReplicaLostPreservingIdentity(store *db.Store, app *db.App, r *db.Repli
 // stale. A revoked worker carries status "down" (RevokeWorker), so the single
 // status check covers both down and revoked. An empty worker id has no owner to
 // wait on and is treated as gone.
+//
+// Only an affirmatively "down" worker is gone. A "joining" worker (registered
+// but not yet promoted by its first heartbeat) is coming up, not gone, so its
+// slots are left for the WorkerDownMonitor rather than stranded here; in
+// practice a joining worker owns no replicas yet, but the conservative check
+// keeps recovery correct should that ever change.
 func workerDeclaredGone(store *db.Store, workerID string) bool {
 	if workerID == "" {
 		return true
@@ -306,7 +312,7 @@ func workerDeclaredGone(store *db.Store, workerID string) bool {
 		// Row missing/reaped, or a read error: do not assume the worker is up.
 		return true
 	}
-	return w.Status != "up"
+	return w.Status == "down"
 }
 
 // recoverNativeReplica re-adopts a single PID-backed replica. It returns true

@@ -137,6 +137,10 @@ func TestHandleRevokeWorker(t *testing.T) {
 	adminUser := ctxUser(t, store, "ops", "admin")
 	devUser := ctxUser(t, store, "dev", "developer")
 	node, _ := reg.Register(worker.RegisterParams{Tier: "burst", AdvertiseAddr: "10.0.0.5:8443"})
+	// A worker is routable only after its first heartbeat (Register -> joining).
+	if err := reg.Heartbeat(node.NodeID, ""); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
 
 	// Non-admin: forbidden, and the worker stays routable.
 	req := httptest.NewRequest(http.MethodPost, "/api/workers/"+node.NodeID+"/revoke", http.NoBody)

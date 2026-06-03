@@ -17,6 +17,13 @@ test('workerDisplay maps a down worker to a lost badge', () => {
   assert.equal(d.statusClass, 'lost');
 });
 
+test('workerDisplay maps a joining worker to a neutral (non-error) badge', () => {
+  const d = workerDisplay({ node_id: 'node-j', tier: 'remote', status: 'joining' });
+  assert.equal(d.statusText, 'joining');
+  // Neutral, not the red "lost" class: joining is transitional, not a fault.
+  assert.equal(d.statusClass, 'stopped');
+});
+
 test('workerDisplay shows "revoked" regardless of raw status', () => {
   const d = workerDisplay({ node_id: 'node-3', status: 'up', revoked: true });
   assert.equal(d.statusText, 'revoked');

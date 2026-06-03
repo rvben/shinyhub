@@ -928,8 +928,12 @@ func TestWorkerDownMonitor_ExcludesDownedWorkerFromRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
+	// A worker is routable only after its first heartbeat (Register -> joining).
+	if err := reg.Heartbeat(node.NodeID, ""); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
 	if _, ok := reg.WorkerForTier("remote"); !ok {
-		t.Fatal("worker not routable immediately after register")
+		t.Fatal("worker not routable after its first heartbeat")
 	}
 	stale := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
 	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, stale, node.NodeID); err != nil {

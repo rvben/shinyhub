@@ -65,9 +65,16 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 		Name:          p.Name,
 		AdvertiseAddr: p.AdvertiseAddr,
 		Tier:          p.Tier,
-		Status:        "up",
-		Fingerprint:   p.Fingerprint,
-		Version:       p.Version,
+		// "joining", not "up": a worker is not routable until its first heartbeat.
+		// The agent sends that heartbeat only after its data-plane mTLS listener
+		// has bound, so gating routing on the heartbeat (Heartbeat promotes
+		// joining->up) guarantees an up worker is actually accepting connections.
+		// Registering as up would advertise the worker for placement before its
+		// listener exists, and a deploy in that window dials it -> connection
+		// refused -> the replica fails to start.
+		Status:      "joining",
+		Fingerprint: p.Fingerprint,
+		Version:     p.Version,
 	}
 	// Serialize the whole registration so concurrent same-tier joins cannot
 	// interleave their store writes. regMu, not the routing RWMutex, guards the
@@ -79,11 +86,15 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 		return db.Worker{}, err
 	}
 	// One up worker per (tier, advertise address): retire any other up worker at
-	// this exact endpoint so routing never resolves a stale duplicate, e.g. an
-	// agent that rejoined under a fresh node id after losing its persisted
-	// identity (the old node id's certificate identity is stale and a dial to it
-	// would fail). Distinct-address workers on the tier are real capacity and are
-	// left up.
+	// this exact endpoint. A registration at an occupied endpoint means the
+	// occupant is being replaced - the only way to reach this is an agent that
+	// lost its persisted identity and rejoined under a fresh node id (a normal
+	// restart re-adopts its old id and merely heartbeats, so it never re-registers).
+	// The occupant is therefore stale: its old node id no longer matches the cert
+	// the rejoined listener now presents, so routing to it would fail the mTLS
+	// handshake. Retire it now and let routing fail closed (no live worker) until
+	// the replacement's first heartbeat promotes it, rather than route to a stale
+	// identity. The freshly registered worker stays "joining" until then.
 	if err := r.store.SupersedeTierAddrWorkers(w.Tier, w.AdvertiseAddr, nodeID); err != nil {
 		return db.Worker{}, err
 	}
@@ -241,12 +252,14 @@ func (r *Registry) PlanPlacementForTier(tier, slug string, count int) []db.Worke
 
 // Heartbeat records a worker's liveness and refreshes its trusted cert
 // fingerprint (cert renewal) in both the store and the index. It keeps an up
-// worker up, and promotes a down worker (one reaped for missed heartbeats, or
-// superseded while offline and now restarted under its old identity) back to up
-// only when no other up worker owns its (tier, advertise address). Gating the
-// promotion on endpoint ownership keeps the one-up-worker-per-(tier,address)
-// invariant: a stale duplicate cannot resurrect itself alongside the live worker
-// that now holds its endpoint.
+// worker up, and promotes a not-up worker - a joining worker on its first
+// heartbeat, or a down worker reaped for missed heartbeats or superseded while
+// offline and now restarted under its old identity - to up only when no other up
+// worker owns its (tier, advertise address). Gating the promotion on endpoint
+// ownership keeps the one-up-worker-per-(tier,address) invariant: a worker the
+// endpoint's live owner holds cannot resurrect itself alongside that owner. A
+// joining worker becomes routable here, and the agent sends this first heartbeat
+// only after its listener binds, so an up worker is always one that is listening.
 func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 	// Serialize against Register so the tier-ownership decision is made against a
 	// stable set of up workers, mirroring how Register guards its supersede.
@@ -269,10 +282,15 @@ func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 
 	status := "up"
 	if cur.Status != "up" {
-		// Promote a down worker back to up unless another up worker already owns
-		// its (tier, advertise address): a stale duplicate at an endpoint a live
-		// worker holds must stay superseded. Distinct-address workers on the tier
-		// do not block the promotion -- they are independent capacity.
+		// Promote a joining worker (first heartbeat after registration) or a down
+		// worker (reaped for missed heartbeats, or superseded while offline and now
+		// restarted under its old identity) to up, unless another up worker already
+		// owns its (tier, advertise address): a worker an endpoint's live owner
+		// holds must stay out of routing. Distinct-address workers on the tier are
+		// independent capacity and do not block the promotion. A joining worker
+		// becoming up here is what makes it routable, and the agent sends this first
+		// heartbeat only after its listener has bound, so an up worker is always one
+		// that is actually accepting connections.
 		for _, owner := range r.WorkersForTier(cur.Tier) {
 			if owner.NodeID != nodeID && owner.AdvertiseAddr == cur.AdvertiseAddr {
 				status = "down"

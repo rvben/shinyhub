@@ -21,21 +21,94 @@ func newTestStore(t *testing.T) *db.Store {
 	return store
 }
 
+// joinUp registers a worker and brings it up the normal way: a heartbeat.
+// Register alone leaves a worker "joining" (not routable); it becomes routable
+// only on its first heartbeat, mirroring how an agent reports in only after its
+// data-plane listener has bound. Tests that need a routable worker use this.
+func joinUp(t *testing.T, reg *Registry, p RegisterParams) db.Worker {
+	t.Helper()
+	w, err := reg.Register(p)
+	if err != nil {
+		t.Fatalf("register %s: %v", p.AdvertiseAddr, err)
+	}
+	if err := reg.Heartbeat(w.NodeID, p.Fingerprint); err != nil {
+		t.Fatalf("heartbeat %s: %v", w.NodeID, err)
+	}
+	up, ok := reg.Worker(w.NodeID)
+	if !ok {
+		t.Fatalf("worker %s missing after join", w.NodeID)
+	}
+	return up
+}
+
+// TestRegistryRegisterIsJoiningUntilHeartbeat asserts a freshly registered worker
+// is "joining" and NOT routable: it becomes routable only once it heartbeats.
+// This closes the deploy race where the control plane dialed a worker that had
+// registered but not yet bound its data-plane listener (connection refused). A
+// worker reports in (heartbeats) only after Listen() binds, so gating routing on
+// the heartbeat guarantees an "up" worker is actually listening.
+func TestRegistryRegisterIsJoiningUntilHeartbeat(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if w, ok := reg.Worker(node.NodeID); !ok || w.Status != "joining" {
+		t.Fatalf("after register, status = %q ok=%v, want joining", w.Status, ok)
+	}
+	if sw, _ := store.GetWorker(node.NodeID); sw == nil || sw.Status != "joining" {
+		t.Fatalf("after register, store status = %+v, want joining", sw)
+	}
+	if _, ok := reg.WorkerForTier("burst"); ok {
+		t.Fatal("a joining worker must not be routable")
+	}
+	if got := reg.PlanPlacementForTier("burst", "app", 1); len(got) != 0 {
+		t.Fatalf("a joining worker must not be a placement candidate, got %+v", got)
+	}
+}
+
+// TestRegistryHeartbeatPromotesJoiningToUp asserts the first heartbeat from a
+// joining worker promotes it to up and routable.
+func TestRegistryHeartbeatPromotesJoiningToUp(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := reg.Heartbeat(node.NodeID, "aa"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+
+	if w, ok := reg.Worker(node.NodeID); !ok || w.Status != "up" {
+		t.Fatalf("after heartbeat, status = %q ok=%v, want up", w.Status, ok)
+	}
+	got, ok := reg.WorkerForTier("burst")
+	if !ok || got.NodeID != node.NodeID {
+		t.Fatalf("WorkerForTier(burst) = %+v ok=%v, want %s routable after heartbeat", got, ok, node.NodeID)
+	}
+}
+
 func TestRegistryRegisterAndLookup(t *testing.T) {
 	reg, err := NewRegistry(newTestStore(t))
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	node, err := reg.Register(RegisterParams{
+	node := joinUp(t, reg, RegisterParams{
 		Name:          "burst-a",
 		AdvertiseAddr: "10.0.0.5:8443",
 		Tier:          "burst",
 		Version:       "v0.6.0",
 		Fingerprint:   "ab12",
 	})
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
 	if node.NodeID == "" {
 		t.Fatal("empty node id allocated")
 	}
@@ -65,14 +138,8 @@ func TestRegistryDistinctAddressWorkersCoexistOnTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	first, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
-	if err != nil {
-		t.Fatalf("register first: %v", err)
-	}
-	second, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "burst", Fingerprint: "bb"})
-	if err != nil {
-		t.Fatalf("register second: %v", err)
-	}
+	first := joinUp(t, reg, RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	second := joinUp(t, reg, RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "burst", Fingerprint: "bb"})
 
 	// Both workers stay up in the store: distinct addresses are not superseded.
 	for _, id := range []string{first.NodeID, second.NodeID} {
@@ -109,24 +176,34 @@ func TestRegistrySameAddressReregisterSupersedesStaleNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	stale, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
-	if err != nil {
-		t.Fatalf("register stale: %v", err)
-	}
+	stale := joinUp(t, reg, RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
 	fresh, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "bb"})
 	if err != nil {
 		t.Fatalf("register fresh: %v", err)
 	}
 
-	all := reg.WorkersForTier("burst")
-	if len(all) != 1 || all[0].NodeID != fresh.NodeID {
-		t.Fatalf("WorkersForTier(burst) = %+v, want only %s", all, fresh.NodeID)
-	}
+	// Registering fresh at an endpoint the stale node holds supersedes it at once:
+	// the stale node id no longer matches the cert the rejoined listener presents,
+	// so routing must drop it immediately rather than dial a stale identity. fresh
+	// stays "joining" (not routable) until its first heartbeat.
 	if w, _ := store.GetWorker(stale.NodeID); w == nil || w.Status != "down" {
 		t.Fatalf("stale worker %s status = %+v, want down in store", stale.NodeID, w)
 	}
 	if got, ok := reg.Worker(stale.NodeID); !ok || got.Status != "down" {
 		t.Fatalf("stale worker %s in-memory status = %+v ok=%v, want down", stale.NodeID, got, ok)
+	}
+	if _, ok := reg.WorkerForTier("burst"); ok {
+		t.Fatal("endpoint must have no routable worker between superseding the stale node and the replacement's first heartbeat")
+	}
+
+	// fresh becomes routable on its first heartbeat (promoted joining->up; the
+	// stale node is already down so it does not block the promotion).
+	if err := reg.Heartbeat(fresh.NodeID, "bb"); err != nil {
+		t.Fatalf("heartbeat fresh: %v", err)
+	}
+	all := reg.WorkersForTier("burst")
+	if len(all) != 1 || all[0].NodeID != fresh.NodeID {
+		t.Fatalf("WorkersForTier(burst) = %+v, want only %s", all, fresh.NodeID)
 	}
 }
 
@@ -138,14 +215,8 @@ func TestRegistryWorkersForTierReturnsAllUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	a, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
-	if err != nil {
-		t.Fatalf("register a: %v", err)
-	}
-	b, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "burst", Fingerprint: "bb"})
-	if err != nil {
-		t.Fatalf("register b: %v", err)
-	}
+	a := joinUp(t, reg, RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+	b := joinUp(t, reg, RegisterParams{AdvertiseAddr: "10.0.0.6:8443", Tier: "burst", Fingerprint: "bb"})
 	if got := reg.WorkersForTier("burst"); len(got) != 2 {
 		t.Fatalf("WorkersForTier(burst) = %d workers, want 2", len(got))
 	}
@@ -163,13 +234,13 @@ func TestRegistryWorkersForTierReturnsAllUp(t *testing.T) {
 	}
 }
 
-// TestRegistryConcurrentSameTierRegistrationsConverge asserts that many
-// concurrent registrations at one (tier, advertise address) converge to a single
-// up worker that the store and the in-memory index agree on. If the supersede
-// store write is not serialized with the registration, two registrations can each
-// mark the other down in the store, leaving zero up workers persisted while one
-// is up in memory -- the endpoint then has no routing candidate after a control-
-// plane restart rebuilds the index from the store.
+// TestRegistryConcurrentSameTierRegistrationsConverge asserts that many workers
+// at one (tier, advertise address) converge to a single up worker the store and
+// the in-memory index agree on. Registration now yields "joining" (not routable);
+// the endpoint-ownership decision is made when those joining workers first
+// heartbeat. Heartbeat serializes that decision, so concurrent first heartbeats
+// cannot each mark the others down and leave zero up, nor promote two at once and
+// leave the endpoint with two routing candidates.
 func TestRegistryConcurrentSameTierRegistrationsConverge(t *testing.T) {
 	store := newTestStore(t)
 	reg, err := NewRegistry(store)
@@ -178,17 +249,28 @@ func TestRegistryConcurrentSameTierRegistrationsConverge(t *testing.T) {
 	}
 
 	const n = 16
+	nodes := make([]string, n)
+	for i := 0; i < n; i++ {
+		w, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		nodes[i] = w.NodeID
+	}
+	// Freshly registered workers are joining; none routes before its heartbeat.
+	if _, ok := reg.WorkerForTier("burst"); ok {
+		t.Fatal("a joining worker must not be routable before its heartbeat")
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go func() {
+	for _, id := range nodes {
+		go func(id string) {
 			defer wg.Done()
-			if _, err := reg.Register(RegisterParams{
-				AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa",
-			}); err != nil {
-				t.Errorf("register: %v", err)
+			if err := reg.Heartbeat(id, "aa"); err != nil {
+				t.Errorf("heartbeat: %v", err)
 			}
-		}()
+		}(id)
 	}
 	wg.Wait()
 
@@ -208,7 +290,7 @@ func TestRegistryConcurrentSameTierRegistrationsConverge(t *testing.T) {
 	}
 	routed, ok := reg.WorkerForTier("burst")
 	if !ok {
-		t.Fatal("WorkerForTier(burst) found no worker after concurrent registrations")
+		t.Fatal("WorkerForTier(burst) found no worker after concurrent heartbeats")
 	}
 	if routed.NodeID != upInStore[0] {
 		t.Fatalf("routing slot %s disagrees with the up worker in store %s", routed.NodeID, upInStore[0])
@@ -227,13 +309,15 @@ func TestRegistryHeartbeatDoesNotResurrectSupersededWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	stale, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
-	if err != nil {
-		t.Fatalf("register stale: %v", err)
-	}
+	stale := joinUp(t, reg, RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "aa"})
 	fresh, err := reg.Register(RegisterParams{AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Fingerprint: "bb"})
 	if err != nil {
 		t.Fatalf("register fresh: %v", err)
+	}
+	// fresh registering supersedes the up stale node, then heartbeats up to own
+	// the endpoint's routing slot.
+	if err := reg.Heartbeat(fresh.NodeID, "bb"); err != nil {
+		t.Fatalf("heartbeat fresh: %v", err)
 	}
 
 	// The superseded worker heartbeats under its old node id.
@@ -365,8 +449,8 @@ func TestRegistryPlanPlacementForTier_LeastLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	a, _ := reg.Register(RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
-	b, _ := reg.Register(RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
+	a := joinUp(t, reg, RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
+	b := joinUp(t, reg, RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
 	owner := mustSeedOwner(t, store)
 
 	// node-a already hosts two replicas; node-b hosts none.
@@ -391,8 +475,8 @@ func TestRegistryPlanPlacementForTier_AntiAffinityTiebreak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	a, _ := reg.Register(RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
-	b, _ := reg.Register(RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
+	a := joinUp(t, reg, RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
+	b := joinUp(t, reg, RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
 	owner := mustSeedOwner(t, store)
 
 	// Equal total load (one each), but node-a already hosts the candidate app.
@@ -417,8 +501,8 @@ func TestRegistryPlanPlacementForTier_DeterministicOnFullTie(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	reg.Register(RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
-	reg.Register(RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
+	joinUp(t, reg, RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
+	joinUp(t, reg, RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
 	want := reg.WorkersForTier("remote")[0].NodeID
 
 	for i := 0; i < 25; i++ {
@@ -445,8 +529,8 @@ func TestRegistryPlanPlacementForTier_SpreadsBatchAcrossWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	reg.Register(RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
-	reg.Register(RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
+	joinUp(t, reg, RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
+	joinUp(t, reg, RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
 
 	got := reg.PlanPlacementForTier("remote", "app", 2)
 	if len(got) != 2 {
@@ -466,8 +550,8 @@ func TestRegistryPlanPlacementForTier_BalancesUnevenBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry: %v", err)
 	}
-	reg.Register(RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
-	reg.Register(RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
+	joinUp(t, reg, RegisterParams{AdvertiseAddr: "a:8443", Tier: "remote", Fingerprint: "aa"})
+	joinUp(t, reg, RegisterParams{AdvertiseAddr: "b:8443", Tier: "remote", Fingerprint: "bb"})
 
 	got := reg.PlanPlacementForTier("remote", "app", 3)
 	if len(got) != 3 {

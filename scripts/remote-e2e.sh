@@ -116,6 +116,15 @@ WORKER_PID=$!
 "${ROOT}/scripts/wait-log.sh" "${WORKDIR}/worker.log" "worker joined control plane" 30 \
   || fail "worker did not join"
 
+# 5b. Assert: the worker's data-plane listener is bound and it is up (routable).
+#     Registration marks a worker "joining" (not routable); its first heartbeat,
+#     sent only after the listener binds, promotes it to up and emits this signal.
+#     Gating the deploy on readiness (not just "joined") avoids dialing the
+#     worker before its listener exists -- the connection-refused race this test
+#     used to hit deterministically.
+"${ROOT}/scripts/wait-log.sh" "${WORKDIR}/worker.log" "worker data-plane ready" 30 \
+  || fail "worker data-plane did not become ready"
+
 # 6. Create the app (public) and place two replicas on the remote tier before
 #    deploying, so the only deploy lands on the worker.
 curl -fsS -X POST "${SHINYHUB_HOST}/api/apps" \

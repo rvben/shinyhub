@@ -32,6 +32,11 @@ export function workerDisplay(w) {
   } else if (raw === 'down') {
     statusText = 'down';
     statusClass = 'lost';
+  } else if (raw === 'joining') {
+    // Transitional: registered, awaiting its first heartbeat. Show it neutrally
+    // (not the red "lost" treatment) so a worker mid-join does not read as an error.
+    statusText = 'joining';
+    statusClass = 'stopped';
   } else {
     statusText = raw;
     statusClass = 'stopped';

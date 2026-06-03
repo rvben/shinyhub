@@ -23,6 +23,13 @@ type fleetHealthEnvelope struct {
 		Running int `json:"running"`
 		Lost    int `json:"lost"`
 	} `json:"replicas"`
+	Workers struct {
+		Total   int `json:"total"`
+		Up      int `json:"up"`
+		Down    int `json:"down"`
+		Joining int `json:"joining"`
+		Revoked int `json:"revoked"`
+	} `json:"workers"`
 	Tiers []struct {
 		Tier            string `json:"tier"`
 		Runtime         string `json:"runtime"`
@@ -124,6 +131,51 @@ func TestFleetHealth_AggregatesAcrossBackends(t *testing.T) {
 	}
 	if d.Reason != "worker unavailable" {
 		t.Errorf("degraded reason = %q, want 'worker unavailable'", d.Reason)
+	}
+}
+
+// TestFleetHealth_JoiningWorkerNotCountedDown asserts a transitional "joining"
+// worker (registered, not yet promoted by its first heartbeat) is reported in
+// its own bucket, never as "down". Counting it down would make a fleet look
+// degraded - workers.down > 0 drives the warning banner - for the moment between
+// a worker joining and its first heartbeat.
+func TestFleetHealth_JoiningWorkerNotCountedDown(t *testing.T) {
+	srv, store := newFleetHealthServer(t)
+
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	// One worker that completed its handshake (up) and one still joining.
+	if err := store.UpsertWorker(db.Worker{NodeID: "up-node", AdvertiseAddr: "a:8443", Tier: "remote", Status: "up"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorker(db.Worker{NodeID: "joining-node", AdvertiseAddr: "b:8443", Tier: "remote", Status: "joining"}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := authedRequest(t, "GET", "/api/fleet/health", nil, adminTok)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got fleetHealthEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Workers.Total != 2 {
+		t.Errorf("workers.total = %d, want 2", got.Workers.Total)
+	}
+	if got.Workers.Up != 1 {
+		t.Errorf("workers.up = %d, want 1", got.Workers.Up)
+	}
+	if got.Workers.Joining != 1 {
+		t.Errorf("workers.joining = %d, want 1", got.Workers.Joining)
+	}
+	if got.Workers.Down != 0 {
+		t.Errorf("workers.down = %d, want 0 (a joining worker must not count as down)", got.Workers.Down)
 	}
 }
 
