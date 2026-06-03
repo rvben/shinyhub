@@ -70,7 +70,7 @@ func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Loca
 
 // GET /api/apps/{slug}/schedules
 func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
-	app, _, ok := s.requireViewApp(w, r, chi.URLParam(r, "slug"))
+	app, _, ok := s.requireExplicitAppAccess(w, r, chi.URLParam(r, "slug"))
 	if !ok {
 		return
 	}
@@ -369,7 +369,7 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/apps/{slug}/schedules/{id}/runs
 func (s *Server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) {
-	app, _, ok := s.requireViewApp(w, r, chi.URLParam(r, "slug"))
+	app, _, ok := s.requireExplicitAppAccess(w, r, chi.URLParam(r, "slug"))
 	if !ok {
 		return
 	}
@@ -435,7 +435,7 @@ func (s *Server) handleCancelScheduleRun(w http.ResponseWriter, r *http.Request)
 
 // GET /api/apps/{slug}/schedules/{id}/runs/{run_id}
 func (s *Server) handleGetScheduleRun(w http.ResponseWriter, r *http.Request) {
-	app, _, ok := s.requireViewApp(w, r, chi.URLParam(r, "slug"))
+	app, _, ok := s.requireExplicitAppAccess(w, r, chi.URLParam(r, "slug"))
 	if !ok {
 		return
 	}
@@ -627,7 +627,7 @@ const sharedDataNativeWarning = "Read-only is a convention under the native runt
 
 // GET /api/apps/{slug}/shared-data
 func (s *Server) handleListSharedData(w http.ResponseWriter, r *http.Request) {
-	app, _, ok := s.requireViewApp(w, r, chi.URLParam(r, "slug"))
+	app, _, ok := s.requireExplicitAppAccess(w, r, chi.URLParam(r, "slug"))
 	if !ok {
 		return
 	}
