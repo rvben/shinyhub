@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -185,6 +186,65 @@ func TestDockerRuntimeStart(t *testing.T) {
 	}
 	if ep.Handle.ContainerID != "cont1" {
 		t.Errorf("expected cont1, got %s", ep.Handle.ContainerID)
+	}
+}
+
+// TestDockerRuntimeStart_RunsAsBundleOwnerWithWritableHome verifies the app
+// container runs as the uid:gid that owns the bundle directory and is given a
+// writable HOME. The bundle is bind-mounted rw and uv/renv must write into it,
+// but the container drops all capabilities (no CAP_DAC_OVERRIDE), so a root
+// process inside cannot bypass file permissions. When the worker and the image's
+// default user are different uids (e.g. a non-root worker), the container could
+// not write the worker-owned bundle and the app failed to start; running it as
+// the bundle's owner restores write access without relying on root.
+func TestDockerRuntimeStart_RunsAsBundleOwnerWithWritableHome(t *testing.T) {
+	var captured map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "cont1"})
+	})
+	mux.HandleFunc("/containers/cont1/start", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	bundleDir := t.TempDir()
+	fi, err := os.Stat(bundleDir)
+	if err != nil {
+		t.Fatalf("stat bundle dir: %v", err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no syscall.Stat_t on this platform")
+	}
+	wantUser := fmt.Sprintf("%d:%d", st.Uid, st.Gid)
+
+	rt := newDockerRuntimeWithServer(t, mux)
+	if _, err := rt.Start(context.Background(), StartParams{
+		Slug:    "my-app",
+		Dir:     bundleDir,
+		Command: []string{"uv", "run", "shiny", "run", "app.py"},
+		Port:    20001,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got, _ := captured["User"].(string); got != wantUser {
+		t.Errorf("container User = %q, want %q (the bundle dir owner)", got, wantUser)
+	}
+	var home string
+	if env, ok := captured["Env"].([]any); ok {
+		for _, e := range env {
+			if s, _ := e.(string); strings.HasPrefix(s, "HOME=") {
+				home = strings.TrimPrefix(s, "HOME=")
+			}
+		}
+	}
+	if home != "/app" {
+		t.Errorf("container HOME = %q, want /app (a dir the container owns and can write)", home)
 	}
 }
 

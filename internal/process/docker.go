@@ -155,7 +155,13 @@ func dataHostPath(p StartParams) string {
 // plaintext (a container shares the host trust boundary like a native process),
 // and their keys are disjoint from Env so append order is safe.
 func dockerChildEnv(p StartParams) []string {
-	env := append(filteredEnv(), p.Env...)
+	// HOME points at the bundle: it is mounted rw and owned by the container's
+	// uid (see Start), so uv/renv cache and config writes land in a writable dir.
+	// Without this the container, running as a non-root password-less uid, would
+	// inherit a HOME (from the scrubbed host env, or "/" by default) it cannot
+	// write, and uv would fail. Set before p.Env so an app can still override it.
+	env := append(filteredEnv(), "HOME=/app")
+	env = append(env, p.Env...)
 	env = append(env, p.SecretEnv...)
 	return env
 }
@@ -182,6 +188,16 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		},
 		Labels:      labels,
 		NetworkMode: r.networkMode,
+	}
+	// Run as the uid:gid that owns the bundle directory. The container drops all
+	// capabilities (no CAP_DAC_OVERRIDE), so a root process inside is still bound
+	// by file permissions and cannot write a bundle the worker created under a
+	// different uid. Running as the bundle's owner lets uv/renv write into the rw
+	// /app mount whether the worker runs as root or an unprivileged service user.
+	if fi, err := os.Stat(p.Dir); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			cfg.User = fmt.Sprintf("%d:%d", st.Uid, st.Gid)
+		}
 	}
 	if r.networkMode != "host" && p.Port > 0 {
 		// Bridge (or any non-host) network: publish the container's listening

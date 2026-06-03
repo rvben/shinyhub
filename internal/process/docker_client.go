@@ -42,6 +42,7 @@ type containerConfig struct {
 	Image       string
 	Cmd         []string
 	Env         []string
+	User        string // "uid:gid" the container process runs as; empty = image default
 	WorkDir     string
 	Mounts      []containerMount
 	Labels      map[string]string
@@ -193,6 +194,10 @@ func (c *dockerClient) createContainer(cfg containerConfig) (string, error) {
 		"WorkingDir": cfg.WorkDir,
 		"Labels":     cfg.Labels,
 		"HostConfig": hostConfig,
+	}
+	// Run as a specific uid:gid when set (empty leaves the image default).
+	if cfg.User != "" {
+		body["User"] = cfg.User
 	}
 	// Translate ports to Docker's PortBindings + ExposedPorts shape. The
 	// PortBindings value is a map keyed by "<port>/tcp" → []map{HostIp,HostPort}.
