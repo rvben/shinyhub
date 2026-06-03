@@ -34,6 +34,11 @@ type fakeSM struct {
 	createFn func(*secretsmanager.CreateSecretInput) (*secretsmanager.CreateSecretOutput, error)
 	putFn    func(*secretsmanager.PutSecretValueInput) (*secretsmanager.PutSecretValueOutput, error)
 	deleteFn func(*secretsmanager.DeleteSecretInput) (*secretsmanager.DeleteSecretOutput, error)
+	listFn   func(*secretsmanager.ListSecretsInput) (*secretsmanager.ListSecretsOutput, error)
+}
+
+func (f *fakeSM) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
+	return f.listFn(in)
 }
 
 func (f *fakeSM) CreateSecret(_ context.Context, in *secretsmanager.CreateSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error) {
@@ -136,6 +141,37 @@ func TestSecretsManagerStore_Delete_ToleratesMissingSecret(t *testing.T) {
 	store := newSecretsManagerStore(sm, "")
 	if err := store.Delete(context.Background(), "missing"); err != nil {
 		t.Errorf("Delete of a missing secret must be a no-op, got %v", err)
+	}
+}
+
+func TestSecretsManagerStore_DeleteByPrefix_DeletesOnlyMatching(t *testing.T) {
+	var deleted []string
+	sm := &fakeSM{
+		listFn: func(in *secretsmanager.ListSecretsInput) (*secretsmanager.ListSecretsOutput, error) {
+			// Mimic Secrets Manager returning a near-match sibling alongside the
+			// real matches; the store's exact HasPrefix check must drop it.
+			return &secretsmanager.ListSecretsOutput{SecretList: []smtypes.SecretListEntry{
+				{Name: aws.String("p/app-1/A")},
+				{Name: aws.String("p/app-1/B")},
+				{Name: aws.String("p/app-11/C")}, // sibling app, must NOT be deleted
+			}}, nil
+		},
+		deleteFn: func(in *secretsmanager.DeleteSecretInput) (*secretsmanager.DeleteSecretOutput, error) {
+			deleted = append(deleted, aws.ToString(in.SecretId))
+			return &secretsmanager.DeleteSecretOutput{}, nil
+		},
+	}
+	store := newSecretsManagerStore(sm, "")
+	if err := store.DeleteByPrefix(context.Background(), "p/app-1/"); err != nil {
+		t.Fatalf("DeleteByPrefix: %v", err)
+	}
+	if len(deleted) != 2 {
+		t.Fatalf("deleted %v, want exactly the two p/app-1/ secrets", deleted)
+	}
+	for _, n := range deleted {
+		if n == "p/app-11/C" {
+			t.Errorf("sibling app secret %q must not be deleted", n)
+		}
 	}
 }
 

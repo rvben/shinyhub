@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -13,10 +14,12 @@ import (
 // SecretsStore stores an app's secret env values out of band so they can be
 // referenced from a task definition by ARN instead of carried as plaintext task
 // overrides. Put is an upsert that returns the secret's ARN; Delete removes it
-// and is a no-op when the secret is already gone.
+// and is a no-op when the secret is already gone; DeleteByPrefix removes every
+// secret whose name begins with the given prefix (used for app-delete cleanup).
 type SecretsStore interface {
 	Put(ctx context.Context, name, value string) (arn string, err error)
 	Delete(ctx context.Context, name string) error
+	DeleteByPrefix(ctx context.Context, prefix string) error
 }
 
 // SecretName builds the store name for one app secret. It namespaces by an
@@ -33,6 +36,7 @@ type secretsManagerAPI interface {
 	CreateSecret(ctx context.Context, in *secretsmanager.CreateSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
 	PutSecretValue(ctx context.Context, in *secretsmanager.PutSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error)
 	DeleteSecret(ctx context.Context, in *secretsmanager.DeleteSecretInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error)
+	ListSecrets(ctx context.Context, in *secretsmanager.ListSecretsInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error)
 }
 
 // secretsManagerStore is a SecretsStore backed by AWS Secrets Manager.
@@ -102,6 +106,39 @@ func (s *secretsManagerStore) Delete(ctx context.Context, name string) error {
 		return nil
 	}
 	return fmt.Errorf("delete secret %s: %w", name, err)
+}
+
+// DeleteByPrefix removes every secret whose name begins with prefix. Secrets
+// Manager's "name" filter is itself a prefix match, but each result is verified
+// with an exact HasPrefix check so a sibling app (e.g. ".../app-1/" vs
+// ".../app-11/") can never be deleted by mistake. Paginates the full result.
+func (s *secretsManagerStore) DeleteByPrefix(ctx context.Context, prefix string) error {
+	var next *string
+	for {
+		out, err := s.api.ListSecrets(ctx, &secretsmanager.ListSecretsInput{
+			Filters: []smtypes.Filter{{
+				Key:    smtypes.FilterNameStringTypeName,
+				Values: []string{prefix},
+			}},
+			NextToken: next,
+		})
+		if err != nil {
+			return fmt.Errorf("list secrets %s*: %w", prefix, err)
+		}
+		for _, sec := range out.SecretList {
+			name := aws.ToString(sec.Name)
+			if !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			if derr := s.Delete(ctx, name); derr != nil {
+				return derr
+			}
+		}
+		if out.NextToken == nil || aws.ToString(out.NextToken) == "" {
+			return nil
+		}
+		next = out.NextToken
+	}
 }
 
 var _ SecretsStore = (*secretsManagerStore)(nil)

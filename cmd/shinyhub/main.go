@@ -511,6 +511,23 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
+
+	// When the Fargate secrets backend is configured, wire the per-app cleanup
+	// (delete Secrets Manager entries + deregister task-def revisions) that runs
+	// on app delete and on the startup tombstone reconcile. Every Fargate runtime
+	// instance shares the cluster-wide secrets config, so the first one suffices.
+	var fargateSecretsCleaner *fargate.Runtime
+	if cfg.Runtime.Fargate.SecretsNamePrefix != "" {
+		for _, tierName := range cfg.Runtime.TierOrder() {
+			if frt, ok := mgr.RuntimeForTier(tierName).(*fargate.Runtime); ok {
+				fargateSecretsCleaner = frt
+				break
+			}
+		}
+	}
+	if fargateSecretsCleaner != nil {
+		srv.SetSecretsCleaner(fargateSecretsCleaner)
+	}
 	if workerReg != nil {
 		srv.SetNodeForTier(func(tier string) string {
 			if w, ok := workerReg.WorkerForTier(tier); ok {
@@ -749,7 +766,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Finish any app deletion interrupted between the 'deleting' tombstone and
 	// the row removal, then report (do not delete) slug dirs with no owning
 	// row. Reconcile first so freshly-cleaned slugs are not flagged as orphans.
-	lifecycle.ReconcileDeletingApps(store, cfg)
+	var reconcileCleaner lifecycle.AppSecretsCleaner
+	if fargateSecretsCleaner != nil {
+		reconcileCleaner = fargateSecretsCleaner
+	}
+	lifecycle.ReconcileDeletingApps(ctx, store, cfg, reconcileCleaner)
 	lifecycle.LogOrphanAppDirs(store, cfg)
 
 	// Re-adopt any processes that survived a server restart. Recovery routes

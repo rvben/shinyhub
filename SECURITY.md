@@ -141,12 +141,41 @@ the ECS container override. The token:
 **Any AWS principal with `ecs:DescribeTasks` on the cluster can read every
 container-override environment variable on the task** - `DescribeTasks` returns
 the overrides verbatim. That is not only `SHINYHUB_BUNDLE_TOKEN`: the runtime
-injects each app environment variable as a container override too (see
-`replicaEnv` in `internal/fargate/fargate.go`), so any secret passed as an app
-env var on a Fargate tier is visible to every principal that can describe the
-task. Scope `ecs:DescribeTasks` tightly: do not attach it to roles used by app
-workloads themselves, and do not include it in broadly-shared developer
-policies without scoping to the cluster ARN.
+injects each NON-secret app environment variable as a container override too
+(see `replicaEnv` in `internal/fargate/fargate.go`), so any such value on a
+Fargate tier is visible to every principal that can describe the task. Scope
+`ecs:DescribeTasks` tightly: do not attach it to roles used by app workloads
+themselves, and do not include it in broadly-shared developer policies without
+scoping to the cluster ARN.
+
+#### Secret env vars on Fargate (`runtime.fargate.secrets`)
+
+Env vars marked secret (`is_secret`, set via the env-var UI/CLI) are routed
+**out of band** when `runtime.fargate.secrets.name_prefix` is configured: each
+secret value is stored in AWS Secrets Manager and referenced by ARN from a
+per-app task-definition revision's `containerDefinitions[].secrets` block. The
+ECS agent resolves the value at task start using the **task execution role**, so
+`ecs:DescribeTasks`/`DescribeTaskDefinition` show only the ARN, never the value,
+and the app process never needs Secrets Manager permissions of its own.
+
+This **fails closed**: if an app has secret env vars but no secrets backend is
+configured, the Fargate replica refuses to start rather than fall back to
+plaintext task overrides. Configure `runtime.fargate.secrets.name_prefix` (and,
+for cross-account isolation, a value unique to this installation) before placing
+apps with secret env on a Fargate tier.
+
+Caveats:
+
+- **Start-time only.** A running task captures secret values when it starts;
+  rotating a secret takes effect on the next fresh task, not in place.
+- **Secret store names** are `<name_prefix>/app-<app-id>/<KEY>`; the app id (not
+  the slug) namespaces them so a delete-then-recreate of a slug never reuses a
+  stale value.
+- **Bundle token.** `SHINYHUB_BUNDLE_TOKEN` is still delivered as a container
+  override (it is short-lived and digest-scoped, see above) and remains visible
+  via `ecs:DescribeTasks`; it is not routed through Secrets Manager.
+- On app delete, the secrets and the per-app task-definition revisions are
+  removed; a delete interrupted by a crash is finished by the startup reconcile.
 
 #### Least-privilege IAM policy
 
@@ -213,10 +242,35 @@ the ARNs of the ECS task role and task execution role respectively.
           "aws:RequestedRegion": "REGION"
         }
       }
+    },
+    {
+      "Sid": "ECSTaskDefForSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeTaskDefinition",
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:ListTaskDefinitions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecretsManagerForAppSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:ListSecrets"
+      ],
+      "Resource": "*"
     }
   ]
 }
 ```
+
+The last two statements are required only when `runtime.fargate.secrets` is
+configured (routing secret env vars out of band); omit them otherwise.
 
 Notes on the policy:
 
@@ -240,6 +294,19 @@ Notes on the policy:
 - `ecs:DescribeTasks` is intentionally included for the control plane (it polls
   task status and performs recovery inventory), but must NOT be granted to app
   task roles (see bundle token note above).
+- The `ECSTaskDefForSecrets` and `SecretsManagerForAppSecrets` statements back
+  the secret-routing feature: the control plane describes the operator's base
+  task definition, registers a per-app revision carrying the secrets block, and
+  deregisters those revisions on delete; and it creates/updates/deletes/lists
+  the app secrets in Secrets Manager. `RegisterTaskDefinition` has no
+  resource-level scoping in IAM, hence `Resource: "*"` (the `iam:PassRole`
+  statement still constrains which task/execution roles the registered
+  definition may reference). Scope `secretsmanager:*` to a name prefix with a
+  `secretsmanager:Name`-style condition if your account hosts unrelated secrets.
+  These two statements are unnecessary when `runtime.fargate.secrets` is unset.
+  With a customer-managed KMS key (`runtime.fargate.secrets.kms_key_id`) the
+  control plane additionally needs `kms:GenerateDataKey` and `kms:Decrypt` on
+  that key; the default `aws/secretsmanager` key needs no extra grant.
 
 #### Task execution role (image pull + logs)
 
@@ -252,6 +319,15 @@ CloudWatch Logs; the AWS-managed `AmazonECSTaskExecutionRolePolicy` covers both
 `ecr:GetDownloadUrlForLayer`, `ecr:BatchGetImage`, `logs:CreateLogStream`,
 `logs:PutLogEvents`). A missing ECR permission surfaces at task start as
 `CannotPullContainerError`, before the runner ever fetches its bundle.
+
+When `runtime.fargate.secrets` is configured, the **task execution role** also
+needs `secretsmanager:GetSecretValue` on the app secrets (ARNs
+`arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:<name_prefix>/*`) so the ECS
+agent can resolve the secrets block at task start, plus `kms:Decrypt` on the KMS
+key ONLY when a customer-managed key is used (the default `aws/secretsmanager`
+key is handled implicitly). The app's own **task role** is deliberately NOT
+granted any Secrets Manager access: the values are injected as env by the agent,
+so app code never holds secret-store permissions.
 
 #### Pre-existing JWT signing key note
 

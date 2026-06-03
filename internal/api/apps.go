@@ -1517,6 +1517,12 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		// is logically gone from the caller's perspective.
 		detail = "deferred cleanup: " + cleanupErr.Error()
 		slog.Error("app delete cleanup failed; tombstone retained for reconcile", "slug", slug, "err", cleanupErr)
+	} else if secErr := s.cleanupAppSecrets(r.Context(), app.ID); secErr != nil {
+		// External secret-backend cleanup (Fargate Secrets Manager entries +
+		// per-app task-def revisions) failed: keep the tombstone so reconcile
+		// retries and neither secrets nor revisions orphan.
+		detail = "deferred secret cleanup: " + secErr.Error()
+		slog.Error("app delete secret cleanup failed; tombstone retained for reconcile", "slug", slug, "err", secErr)
 	} else if err := s.store.DeleteApp(slug); err != nil && !errors.Is(err, db.ErrNotFound) {
 		// Bytes are gone; only the tombstone row remains. Reconcile will drop
 		// it on next startup, so this is not a client-visible failure.

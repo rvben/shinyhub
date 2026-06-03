@@ -87,6 +87,29 @@ func TestTaskDefFamily_EmptyPrefix(t *testing.T) {
 	}
 }
 
+func TestFamilyOfTaskDefARN(t *testing.T) {
+	cases := map[string]string{
+		"arn:aws:ecs:eu-west-1:111122223333:task-definition/shinyhub-prod-app-7:3": "shinyhub-prod-app-7",
+		"shinyhub-prod-app-7:1": "shinyhub-prod-app-7",
+		"no-revision":           "",
+	}
+	for arn, want := range cases {
+		if got := familyOfTaskDefARN(arn); got != want {
+			t.Errorf("familyOfTaskDefARN(%q) = %q, want %q", arn, got, want)
+		}
+	}
+}
+
+func TestAppSecretPrefix_TrailingSlashBoundary(t *testing.T) {
+	// The trailing slash makes app 1 and app 11 disjoint prefixes.
+	if p := appSecretPrefix("shinyhub/prod", 1); p != "shinyhub/prod/app-1/" {
+		t.Errorf("appSecretPrefix = %q", p)
+	}
+	if strings.HasPrefix("shinyhub/prod/app-11/X", appSecretPrefix("shinyhub/prod", 1)) {
+		t.Error("app-1 prefix must not match app-11 secrets")
+	}
+}
+
 func TestBuildTaskDefInput_InjectsSecretsOnNamedContainer(t *testing.T) {
 	secrets := []ecstypes.Secret{
 		{Name: aws.String("AWS_SECRET"), ValueFrom: aws.String("arn:aws:secretsmanager:eu-west-1:111122223333:secret:p/app-7/AWS_SECRET-AbC")},

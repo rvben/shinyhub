@@ -45,6 +45,40 @@ func taskDefFamily(prefix string, appID int64) string {
 	return fmt.Sprintf("%s-app-%d", core, appID)
 }
 
+// appSecretPrefix is the store-name prefix shared by all of one app's secrets:
+// "<install-prefix>/app-<appID>/". The trailing slash makes it an exact per-app
+// boundary, so app 1's prefix never matches app 11's secrets.
+func appSecretPrefix(prefix string, appID int64) string {
+	return fmt.Sprintf("%s/app-%d/", prefix, appID)
+}
+
+// isPinnedTaskDef reports whether a task-definition reference names a specific
+// immutable revision ("family:revision" or an ARN ending ":revision"), as
+// opposed to a bare family that always resolves to the latest ACTIVE revision.
+// A pinned base never changes, so its per-app clone can be cached without a
+// DescribeTaskDefinition on every start.
+func isPinnedTaskDef(td string) bool {
+	s := td
+	if i := strings.LastIndex(s, "task-definition/"); i >= 0 {
+		s = s[i+len("task-definition/"):]
+	}
+	return strings.Contains(s, ":")
+}
+
+// familyOfTaskDefARN extracts the family from a task-definition ARN of the form
+// "arn:...:task-definition/<family>:<revision>" (or a bare "<family>:<rev>").
+// Returns "" if no family segment is present.
+func familyOfTaskDefARN(arn string) string {
+	s := arn
+	if i := strings.LastIndex(s, "task-definition/"); i >= 0 {
+		s = s[i+len("task-definition/"):]
+	}
+	if i := strings.LastIndex(s, ":"); i >= 0 {
+		return s[:i]
+	}
+	return ""
+}
+
 // mergeSecrets returns base secrets with app secrets layered on top: an app
 // secret replaces a base secret of the same name (app wins), and base secrets
 // the app does not name are preserved. The inputs are not mutated.

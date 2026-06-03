@@ -33,12 +33,30 @@ type fakeECS struct {
 	listTasksFn     func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error)
 	describeTDFn    func(*ecs.DescribeTaskDefinitionInput) (*ecs.DescribeTaskDefinitionOutput, error)
 	registerTDFn    func(*ecs.RegisterTaskDefinitionInput) (*ecs.RegisterTaskDefinitionOutput, error)
+	listTDFn        func(*ecs.ListTaskDefinitionsInput) (*ecs.ListTaskDefinitionsOutput, error)
+	deregisterTDFn  func(*ecs.DeregisterTaskDefinitionInput) (*ecs.DeregisterTaskDefinitionOutput, error)
 
 	runInputs        []*ecs.RunTaskInput
 	stopInputs       []*ecs.StopTaskInput
 	describeInputs   []*ecs.DescribeTasksInput
 	listInputs       []*ecs.ListTasksInput
 	registerTDInputs []*ecs.RegisterTaskDefinitionInput
+	deregisterInputs []*ecs.DeregisterTaskDefinitionInput
+}
+
+func (f *fakeECS) ListTaskDefinitions(_ context.Context, in *ecs.ListTaskDefinitionsInput, _ ...func(*ecs.Options)) (*ecs.ListTaskDefinitionsOutput, error) {
+	if f.listTDFn != nil {
+		return f.listTDFn(in)
+	}
+	return &ecs.ListTaskDefinitionsOutput{}, nil
+}
+
+func (f *fakeECS) DeregisterTaskDefinition(_ context.Context, in *ecs.DeregisterTaskDefinitionInput, _ ...func(*ecs.Options)) (*ecs.DeregisterTaskDefinitionOutput, error) {
+	f.deregisterInputs = append(f.deregisterInputs, in)
+	if f.deregisterTDFn != nil {
+		return f.deregisterTDFn(in)
+	}
+	return &ecs.DeregisterTaskDefinitionOutput{}, nil
 }
 
 func (f *fakeECS) DescribeTaskDefinition(_ context.Context, in *ecs.DescribeTaskDefinitionInput, _ ...func(*ecs.Options)) (*ecs.DescribeTaskDefinitionOutput, error) {
@@ -226,9 +244,10 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 // fakeSecretsStore is an in-memory SecretsStore that records Put/Delete calls
 // and returns a deterministic ARN derived from the secret name.
 type fakeSecretsStore struct {
-	values  map[string]string
-	deleted []string
-	putErr  error // when set, Put fails (to exercise fail-closed)
+	values   map[string]string
+	deleted  []string
+	putCount int
+	putErr   error // when set, Put fails (to exercise fail-closed)
 }
 
 func newFakeSecretsStore() *fakeSecretsStore {
@@ -239,6 +258,7 @@ func (f *fakeSecretsStore) Put(_ context.Context, name, value string) (string, e
 	if f.putErr != nil {
 		return "", f.putErr
 	}
+	f.putCount++
 	f.values[name] = value
 	return "arn:aws:secretsmanager:eu-west-1:111122223333:secret:" + name + "-XyZ", nil
 }
@@ -246,6 +266,16 @@ func (f *fakeSecretsStore) Put(_ context.Context, name, value string) (string, e
 func (f *fakeSecretsStore) Delete(_ context.Context, name string) error {
 	delete(f.values, name)
 	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+func (f *fakeSecretsStore) DeleteByPrefix(_ context.Context, prefix string) error {
+	for name := range f.values {
+		if strings.HasPrefix(name, prefix) {
+			delete(f.values, name)
+			f.deleted = append(f.deleted, name)
+		}
+	}
 	return nil
 }
 
@@ -388,6 +418,166 @@ func TestStart_RoutedRetriesUseStableTokenAndTaskDef(t *testing.T) {
 	}
 	if a, b := aws.ToString(f.runInputs[0].ClientToken), aws.ToString(f.runInputs[1].ClientToken); a != b {
 		t.Errorf("ClientToken differs across retries (%q vs %q)", a, b)
+	}
+}
+
+// TestStart_FailsClosedWhenSecretEnvButNoBackend guards the security invariant:
+// on a Fargate tier, an app with secret env must NOT fall back to plaintext task
+// overrides when no secrets backend is configured. The start fails closed.
+// TestStart_RoutedSecretSyncIsCached guards that repeated starts with an
+// UNCHANGED secret set do not re-write the store or register a new task-def
+// revision (avoiding version/revision churn), while a changed value DOES
+// re-sync. The per-app cache is the mechanism; correctness holds because the
+// cache key is the secret set itself.
+func TestStart_RoutedSecretSyncIsCached(t *testing.T) {
+	f := &fakeECS{}
+	store := newFakeSecretsStore()
+	r := secretsRuntime(f, store)
+	p := secretParams()
+
+	// Two starts, identical secret set.
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 1: %v", err)
+	}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 2: %v", err)
+	}
+	if store.putCount != 1 {
+		t.Errorf("store Put called %d times for an unchanged secret set, want 1", store.putCount)
+	}
+	if len(f.registerTDInputs) != 1 {
+		t.Errorf("RegisterTaskDefinition called %d times for an unchanged secret set, want 1", len(f.registerTDInputs))
+	}
+	// Both starts still launched the task.
+	if len(f.runInputs) != 2 {
+		t.Errorf("RunTask called %d times, want 2", len(f.runInputs))
+	}
+
+	// A changed value must re-sync.
+	p.SecretEnv = []string{"DB_PASSWORD=rotated"}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 3: %v", err)
+	}
+	if store.putCount != 2 {
+		t.Errorf("store Put called %d times after a value change, want 2", store.putCount)
+	}
+	if len(f.registerTDInputs) != 2 {
+		t.Errorf("RegisterTaskDefinition called %d times after a value change, want 2", len(f.registerTDInputs))
+	}
+}
+
+// TestCleanupApp_DeletesSecretsAndDeregistersFamily guards app-delete cleanup:
+// the app's secrets (by per-app prefix) are deleted and every revision of its
+// task-def family is deregistered, while a sibling app sharing the install
+// prefix is left untouched.
+func TestCleanupApp_DeletesSecretsAndDeregistersFamily(t *testing.T) {
+	store := newFakeSecretsStore()
+	store.values["shinyhub/test/app-7/A"] = "a"
+	store.values["shinyhub/test/app-7/B"] = "b"
+	store.values["shinyhub/test/app-70/C"] = "c" // sibling app, must survive
+
+	fam7 := taskDefFamily("shinyhub/test", 7)
+	fam70 := taskDefFamily("shinyhub/test", 70)
+	f := &fakeECS{
+		listTDFn: func(in *ecs.ListTaskDefinitionsInput) (*ecs.ListTaskDefinitionsOutput, error) {
+			// FamilyPrefix is a prefix match, so the sibling fam70 also surfaces.
+			return &ecs.ListTaskDefinitionsOutput{TaskDefinitionArns: []string{
+				"arn:aws:ecs:eu-west-1:111122223333:task-definition/" + fam7 + ":1",
+				"arn:aws:ecs:eu-west-1:111122223333:task-definition/" + fam7 + ":2",
+				"arn:aws:ecs:eu-west-1:111122223333:task-definition/" + fam70 + ":1",
+			}}, nil
+		},
+	}
+	r := secretsRuntime(f, store)
+
+	if err := r.CleanupApp(context.Background(), 7); err != nil {
+		t.Fatalf("CleanupApp: %v", err)
+	}
+
+	if _, ok := store.values["shinyhub/test/app-7/A"]; ok {
+		t.Error("app-7 secret A not deleted")
+	}
+	if _, ok := store.values["shinyhub/test/app-7/B"]; ok {
+		t.Error("app-7 secret B not deleted")
+	}
+	if _, ok := store.values["shinyhub/test/app-70/C"]; !ok {
+		t.Error("sibling app-70 secret C must survive cleanup of app 7")
+	}
+
+	var deregistered []string
+	for _, in := range f.deregisterInputs {
+		deregistered = append(deregistered, aws.ToString(in.TaskDefinition))
+	}
+	if len(deregistered) != 2 {
+		t.Fatalf("deregistered %v, want exactly the two fam7 revisions", deregistered)
+	}
+	for _, td := range deregistered {
+		if !strings.Contains(td, fam7+":") {
+			t.Errorf("deregistered unexpected task def %q (want only %s revisions)", td, fam7)
+		}
+		if strings.Contains(td, fam70+":") {
+			t.Errorf("sibling family revision %q must not be deregistered", td)
+		}
+	}
+}
+
+// TestStart_RoutedCacheInvalidatesOnBaseRevisionChange guards that a
+// secret-bearing app picks up a NEW base task-definition revision (e.g. a new
+// runner image) even when its secrets are unchanged: with an unpinned base
+// family, the cache key includes the resolved base revision, so a base change
+// forces a re-register rather than stranding the app on the old revision.
+func TestStart_RoutedCacheInvalidatesOnBaseRevisionChange(t *testing.T) {
+	baseArn := "arn:aws:ecs:eu-west-1:111122223333:task-definition/shiny-runner:1"
+	f := &fakeECS{
+		describeTDFn: func(*ecs.DescribeTaskDefinitionInput) (*ecs.DescribeTaskDefinitionOutput, error) {
+			return &ecs.DescribeTaskDefinitionOutput{TaskDefinition: &ecstypes.TaskDefinition{
+				TaskDefinitionArn: aws.String(baseArn),
+				Family:            aws.String("shiny-runner"),
+				ContainerDefinitions: []ecstypes.ContainerDefinition{
+					{Name: aws.String("app"), Image: aws.String("ghcr.io/example/runner:latest")},
+				},
+			}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskWithIP("task-arn", "192.0.2.50", "RUNNING")}}, nil
+		},
+	}
+	cfg := testCfg()
+	cfg.SecretNamePrefix = "shinyhub/test"
+	cfg.TaskDefinition = "shiny-runner" // unpinned family (no :revision)
+	r := New(f, cfg, nil, WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond), WithSecretsStore(newFakeSecretsStore()))
+	p := secretParams()
+
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 1: %v", err)
+	}
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 2: %v", err)
+	}
+	if len(f.registerTDInputs) != 1 {
+		t.Fatalf("RegisterTaskDefinition called %d times for an unchanged base+secrets, want 1", len(f.registerTDInputs))
+	}
+
+	// Operator rolls out a new base revision; same secrets.
+	baseArn = "arn:aws:ecs:eu-west-1:111122223333:task-definition/shiny-runner:2"
+	if _, err := r.Start(context.Background(), p, io.Discard); err != nil {
+		t.Fatalf("Start 3: %v", err)
+	}
+	if len(f.registerTDInputs) != 2 {
+		t.Errorf("RegisterTaskDefinition called %d times after a base revision change, want 2 (app must not stay on the stale base)", len(f.registerTDInputs))
+	}
+}
+
+func TestStart_FailsClosedWhenSecretEnvButNoBackend(t *testing.T) {
+	f := &fakeECS{}
+	r := fastRuntime(f) // no WithSecretsStore
+
+	_, err := r.Start(context.Background(), secretParams(), io.Discard)
+	if err == nil {
+		t.Fatal("expected Start to fail closed when a Fargate app has secret env but no secrets backend is configured")
+	}
+	if len(f.runInputs) != 0 {
+		t.Errorf("RunTask must not be called when failing closed (got %d)", len(f.runInputs))
 	}
 }
 
