@@ -31,6 +31,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.7.2](https://github.com/rvben/shinyhub/compare/v0.7.1...v0.7.2) - 2026-06-03
+
+### Added
+
+- **fargate**: secret lifecycle, fail-closed, and churn avoidance ([9d4e463](https://github.com/rvben/shinyhub/commit/9d4e46370ad437bdf19ab884846c154938bce3e4))
+- **fargate**: route secret env vars through AWS Secrets Manager ([39fc9fc](https://github.com/rvben/shinyhub/commit/39fc9fcd1d3353dc52d2126121fefa650aab64da))
+- **env**: carry secret env vars separately from plaintext in the start path ([463fe16](https://github.com/rvben/shinyhub/commit/463fe168103b4d7bbcb7be93cab0f64e1fe6938c))
+- **security**: rate-limit OAuth/OIDC callback endpoints ([e0e4414](https://github.com/rvben/shinyhub/commit/e0e44149e9d8591e2a06084201c3be1be69b8b1c))
+- **security**: strengthen auth defaults (bcrypt cost 12, JWT not-before) ([60ebed0](https://github.com/rvben/shinyhub/commit/60ebed009761ff7fe2fc51a4c7eb1c1c64198709))
+
+### Fixed
+
+- **ui**: grant app access by username, not via the operator-only user lookup ([d14140a](https://github.com/rvben/shinyhub/commit/d14140a26b6015ef4b6a3436046aeb2acefcd537))
+- **api**: make app env config manager-only; tighten schedule reads ([a61c96d](https://github.com/rvben/shinyhub/commit/a61c96d4d16401b7158a70f28dfde21b2f42aa44))
+- **proxy**: sign the sticky-routing cookie; guard CSRF/auth invariant ([3dc66af](https://github.com/rvben/shinyhub/commit/3dc66af754a08e1f36e870fe3f623948065ce2fb))
+- **api**: stop arbitrary user enumeration; grant access by username server-side ([29dbe8a](https://github.com/rvben/shinyhub/commit/29dbe8a88d79e61738ea24a13fd22f4e53e4af9f))
+- **proxy**: stop leaking session cookies and trusting spoofed forwarding headers ([6a41a25](https://github.com/rvben/shinyhub/commit/6a41a255758cc75ac4a8e52854544dd1a6760097))
+
 ## [0.7.1](https://github.com/rvben/shinyhub/compare/v0.7.0...v0.7.1) - 2026-06-02
 
 ### Added
