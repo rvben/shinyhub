@@ -577,6 +577,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 
 	params := process.StartParams{
 		Slug:          app.Slug,
+		AppID:         app.ID,
 		Dir:           bundleDir,
 		Command:       cmd,
 		Env:           env,

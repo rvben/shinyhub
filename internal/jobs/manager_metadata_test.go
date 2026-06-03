@@ -43,6 +43,9 @@ func TestManager_Run_SplitsSecretEnvFromPlainEnv(t *testing.T) {
 	got := rt.lastParams
 	rt.mu.Unlock()
 
+	if got.AppID != 10 {
+		t.Errorf("StartParams.AppID = %d, want 10 (makeApp id) for per-app secret naming", got.AppID)
+	}
 	if !contains(got.Env, "AWS_REGION=eu-west-1") {
 		t.Errorf("non-secret AWS_REGION missing from Env: %v", got.Env)
 	}

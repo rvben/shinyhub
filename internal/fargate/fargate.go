@@ -87,6 +87,12 @@ type ECSClient interface {
 	StopTask(ctx context.Context, in *ecs.StopTaskInput, optFns ...func(*ecs.Options)) (*ecs.StopTaskOutput, error)
 	DescribeTasks(ctx context.Context, in *ecs.DescribeTasksInput, optFns ...func(*ecs.Options)) (*ecs.DescribeTasksOutput, error)
 	ListTasks(ctx context.Context, in *ecs.ListTasksInput, optFns ...func(*ecs.Options)) (*ecs.ListTasksOutput, error)
+	// DescribeTaskDefinition fetches the operator's base task definition so the
+	// runtime can clone it into a per-app revision carrying a secrets block.
+	DescribeTaskDefinition(ctx context.Context, in *ecs.DescribeTaskDefinitionInput, optFns ...func(*ecs.Options)) (*ecs.DescribeTaskDefinitionOutput, error)
+	// RegisterTaskDefinition registers a per-app task-definition revision whose
+	// container carries the secrets block (ARNs) for the app's secret env vars.
+	RegisterTaskDefinition(ctx context.Context, in *ecs.RegisterTaskDefinitionInput, optFns ...func(*ecs.Options)) (*ecs.RegisterTaskDefinitionOutput, error)
 }
 
 // Config holds the resolved Fargate settings for one tier. The same struct backs
@@ -151,6 +157,13 @@ type Config struct {
 	// ecstypes.LaunchTypeEc2 for EC2 tasks. The zero value defaults to
 	// LaunchTypeFargate in New.
 	LaunchType ecstypes.LaunchType
+
+	// SecretNamePrefix namespaces the store names of an app's secret env vars
+	// (see SecretName). It should be unique per ShinyHub installation so two
+	// installs sharing one AWS account never collide. It is also sanitized into
+	// the per-app task-definition family. Only used when a SecretsStore is wired
+	// (WithSecretsStore); empty is fine when no app on the tier has secrets.
+	SecretNamePrefix string
 }
 
 // EC2Client is the subset of the AWS EC2 API needed to resolve a task ENI's
@@ -165,8 +178,13 @@ type EC2Client interface {
 type Runtime struct {
 	client ECSClient
 	ec2    EC2Client // non-nil only when cfg.RouteViaPublicIP
-	cfg    Config
-	log    *slog.Logger
+	// secrets, when non-nil, routes an app's secret env vars through a per-app
+	// task-definition revision (containerDefinitions[].secrets -> store ARNs)
+	// instead of plaintext task overrides, keeping them out of ecs:DescribeTasks.
+	// Nil disables the feature: secret env stays plaintext (the Phase 1 behavior).
+	secrets SecretsStore
+	cfg     Config
+	log     *slog.Logger
 	// metrics records AWS operation outcomes. Never nil after New(); defaults to
 	// noopFargateMetrics{} so callers need no nil guard.
 	metrics FargateMetrics
@@ -226,6 +244,14 @@ func WithStartTimeout(d time.Duration) Option {
 // otherwise.
 func WithEC2Client(c EC2Client) Option {
 	return func(r *Runtime) { r.ec2 = c }
+}
+
+// WithSecretsStore enables out-of-band secret injection: an app's secret env
+// vars are written to the store and referenced by ARN from a per-app
+// task-definition revision's secrets block, instead of appearing as plaintext
+// task overrides. Nil leaves the feature disabled (secret env stays plaintext).
+func WithSecretsStore(s SecretsStore) Option {
+	return func(r *Runtime) { r.secrets = s }
 }
 
 // New builds a Fargate runtime against the given client and config. log may be
@@ -453,14 +479,14 @@ func (r *Runtime) tags(p process.StartParams) []ecstypes.Tag {
 	return tags
 }
 
-func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
+func (r *Runtime) runTaskInput(p process.StartParams, taskDef string) *ecs.RunTaskInput {
 	if p.Slug == "" {
 		r.log.Warn("fargate: runTaskInput called with empty slug; ClientToken will not be slug-scoped")
 	}
 	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix(), r.workerID)
 	in := &ecs.RunTaskInput{
 		Cluster:        aws.String(r.cfg.Cluster),
-		TaskDefinition: aws.String(r.cfg.TaskDefinition),
+		TaskDefinition: aws.String(taskDef),
 		LaunchType:     r.cfg.LaunchType,
 		Count:          aws.Int32(1),
 		StartedBy:      aws.String(startedBy),
@@ -484,6 +510,84 @@ func (r *Runtime) runTaskInput(p process.StartParams) *ecs.RunTaskInput {
 	return in
 }
 
+// resolveTaskDef decides which task definition a replica runs from. With no
+// secrets store wired, or an app that has no secret env, it returns the
+// operator's shared base task definition and routed=false: secret env (if any)
+// stays in the plaintext override Environment, unchanged from before.
+//
+// When a store is wired and the app has secret env, it writes each secret value
+// to the store, clones the base task definition into a per-app revision whose
+// container carries a secrets block referencing the store ARNs, registers it,
+// and returns that revision's ARN with routed=true. The caller then omits the
+// secret values from the override Environment so they never reach
+// ecs:DescribeTasks. Any store or registration failure aborts the Start (fail
+// closed) rather than silently falling back to plaintext.
+//
+// NOTE: this writes the store and registers a revision on every Start; the
+// lifecycle phase moves the write to env mutation time and persists the chosen
+// revision to avoid version churn.
+func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (taskDef string, routed bool, err error) {
+	if r.secrets == nil || len(p.SecretEnv) == 0 {
+		return r.cfg.TaskDefinition, false, nil
+	}
+	refs := make([]ecstypes.Secret, 0, len(p.SecretEnv))
+	for _, kv := range p.SecretEnv {
+		key, value, ok := strings.Cut(kv, "=")
+		if !ok || key == "" {
+			continue
+		}
+		name := SecretName(r.cfg.SecretNamePrefix, p.AppID, key)
+		arn, perr := r.secrets.Put(ctx, name, value)
+		if perr != nil {
+			return "", false, fmt.Errorf("fargate: store secret %q for app %d: %w", key, p.AppID, perr)
+		}
+		refs = append(refs, ecstypes.Secret{Name: aws.String(key), ValueFrom: aws.String(arn)})
+	}
+	if len(refs) == 0 {
+		// SecretEnv held only malformed entries; nothing to route.
+		return r.cfg.TaskDefinition, false, nil
+	}
+	base, err := r.describeBaseTaskDef(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	family := taskDefFamily(r.cfg.SecretNamePrefix, p.AppID)
+	in, err := buildTaskDefInput(base, family, r.cfg.ContainerName, refs)
+	if err != nil {
+		return "", false, err
+	}
+	out, err := r.client.RegisterTaskDefinition(ctx, in)
+	if err != nil {
+		return "", false, fmt.Errorf("fargate: register task def for app %d: %w", p.AppID, err)
+	}
+	if out.TaskDefinition == nil || out.TaskDefinition.TaskDefinitionArn == nil {
+		return "", false, fmt.Errorf("fargate: register task def for app %d returned no arn", p.AppID)
+	}
+	// Return the family NAME, not the freshly registered revision ARN. RunTask's
+	// ClientToken is keyed on replica identity and a time bucket, not the task
+	// definition; if a retry within that window re-registered a new revision and
+	// we passed its ARN, ECS would reject the reused token as a ConflictException
+	// (same token, different parameters). The family name is stable across
+	// re-registrations, and ECS resolves it to the latest ACTIVE revision, which
+	// is the one just registered.
+	return family, true, nil
+}
+
+// describeBaseTaskDef fetches the operator-configured base task definition that
+// per-app revisions are cloned from.
+func (r *Runtime) describeBaseTaskDef(ctx context.Context) (*ecstypes.TaskDefinition, error) {
+	out, err := r.client.DescribeTaskDefinition(ctx, &ecs.DescribeTaskDefinitionInput{
+		TaskDefinition: aws.String(r.cfg.TaskDefinition),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("fargate: describe base task def %q: %w", r.cfg.TaskDefinition, err)
+	}
+	if out.TaskDefinition == nil {
+		return nil, fmt.Errorf("fargate: base task def %q not found", r.cfg.TaskDefinition)
+	}
+	return out.TaskDefinition, nil
+}
+
 // Start launches one Fargate task for the replica and waits until it acquires a
 // routable private IP, returning the route URL and an opaque handle carrying the
 // task ARN. A task that fails to schedule (a RunTask failure entry) or never
@@ -493,8 +597,17 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io
 	if p.Slug == "" {
 		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: Start requires a non-empty slug")
 	}
+	taskDef, routed, err := r.resolveTaskDef(ctx, p)
+	if err != nil {
+		return process.ReplicaEndpoint{}, err
+	}
+	if routed {
+		// Secrets are delivered via the task definition's secrets block; keep
+		// them out of the plaintext override Environment.
+		p.SecretEnv = nil
+	}
 	startTime := time.Now()
-	out, err := r.client.RunTask(ctx, r.runTaskInput(p))
+	out, err := r.client.RunTask(ctx, r.runTaskInput(p, taskDef))
 	if err != nil {
 		r.metrics.RecordRunTask("error")
 		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
@@ -683,8 +796,17 @@ func (r *Runtime) RunOnce(ctx context.Context, p process.StartParams, logWriter 
 	if p.Slug == "" {
 		return process.ExitInfo{}, fmt.Errorf("fargate: RunOnce requires a non-empty slug")
 	}
+	taskDef, routed, err := r.resolveTaskDef(ctx, p)
+	if err != nil {
+		return process.ExitInfo{}, err
+	}
+	if routed {
+		// Secrets are delivered via the task definition's secrets block; keep
+		// them out of the plaintext override Environment.
+		p.SecretEnv = nil
+	}
 	startTime := time.Now()
-	out, err := r.client.RunTask(ctx, r.runTaskInput(p))
+	out, err := r.client.RunTask(ctx, r.runTaskInput(p, taskDef))
 	if err != nil {
 		r.metrics.RecordRunTask("error")
 		r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())

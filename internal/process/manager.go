@@ -89,7 +89,12 @@ type ProcessInfo struct {
 }
 
 type StartParams struct {
-	Slug    string
+	Slug string
+	// AppID is the owning app's numeric DB id. It is used to namespace per-app
+	// external resources (e.g. Fargate secret store names and task-definition
+	// families) so a delete-then-recreate of the same slug never collides.
+	// Zero when unknown (paths that do not touch per-app external resources).
+	AppID   int64
 	Index   int
 	Tier    string // runtime tier; empty => DefaultTier
 	Dir     string

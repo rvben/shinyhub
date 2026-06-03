@@ -102,7 +102,12 @@ func osAssignedPort() int {
 
 // Params controls a deploy operation.
 type Params struct {
-	Slug      string
+	Slug string
+	// AppID is the owning app's numeric DB id, threaded onto each replica's
+	// StartParams so a runtime can namespace per-app external resources (e.g.
+	// Fargate secret store names and task-def families) without a slug collision
+	// across a delete-then-recreate. Zero is allowed for local-only deploys.
+	AppID     int64
 	BundleDir string
 	// Command overrides auto-detection. If empty, the app type is detected from
 	// the bundle and the appropriate runtime command is built per replica.
@@ -491,6 +496,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 
 	info, err := p.Manager.Start(process.StartParams{
 		Slug:            p.Slug,
+		AppID:           p.AppID,
 		Index:           idx,
 		Tier:            tier,
 		Dir:             p.BundleDir,

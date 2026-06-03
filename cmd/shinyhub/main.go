@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/api"
@@ -248,6 +249,13 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		// Out-of-VPC control plane: resolve task public IPs via EC2.
 		opts = append(opts, fargate.WithEC2Client(ec2.NewFromConfig(awsCfg)))
 	}
+	if fc.SecretsNamePrefix != "" {
+		// Route apps' secret env vars through AWS Secrets Manager (referenced by
+		// ARN from a per-app task-def secrets block) instead of plaintext task
+		// overrides, so they never appear in ecs:DescribeTasks.
+		opts = append(opts, fargate.WithSecretsStore(
+			fargate.NewSecretsManagerStore(secretsmanager.NewFromConfig(awsCfg), fc.SecretsKMSKeyID)))
+	}
 	return fargate.New(ecs.NewFromConfig(awsCfg), fargate.Config{
 		Cluster:          fc.Cluster,
 		TaskDefinition:   fc.TaskDefinition,
@@ -263,6 +271,7 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		BundleTokenTTL:   fc.BundleTokenTTL,
 		BundleTokenKey:   bundleTokenKey,
 		LaunchType:       lt,
+		SecretNamePrefix: fc.SecretsNamePrefix,
 	}, slog.Default(), opts...), nil
 }
 
@@ -648,6 +657,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		deployDefaultMem, deployDefaultCPU := cfg.Runtime.DefaultResourcesForApp(app)
 		p := deploy.Params{
 			Slug:                  slug,
+			AppID:                 app.ID,
 			BundleDir:             bundleDir,
 			Manager:               mgr,
 			Proxy:                 prx,

@@ -192,6 +192,7 @@ func (s *Server) Config() *config.Config { return s.cfg }
 // through this helper so a single app's placement is applied identically
 // regardless of which control-plane action triggered the pool launch.
 func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
+	p.AppID = app.ID
 	p.Placement = app.PlacementMap()
 	p.TierOrder = s.cfg.Runtime.TierOrder()
 	p.DefaultTier = s.cfg.Runtime.DefaultTierName()

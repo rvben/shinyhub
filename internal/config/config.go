@@ -387,6 +387,18 @@ type FargateRuntimeConfig struct {
 	// to fetch the bundle; increase if your task cold-start (including image
 	// pull) regularly exceeds 10 minutes.
 	BundleTokenTTL time.Duration
+
+	// SecretsNamePrefix, when non-empty, enables routing apps' secret env vars
+	// through AWS Secrets Manager (referenced by ARN from a per-app task-def
+	// secrets block) instead of plaintext task overrides, so they never appear
+	// in ecs:DescribeTasks. It namespaces the secret store names and per-app
+	// task-definition families; make it unique per ShinyHub installation.
+	SecretsNamePrefix string
+
+	// SecretsKMSKeyID optionally encrypts the secrets with a customer-managed KMS
+	// key (id, ARN, or alias) instead of the default aws/secretsmanager key. Only
+	// meaningful when SecretsNamePrefix is set.
+	SecretsKMSKeyID string
 }
 
 // AutoscaleConfig holds the global settings for the replica autoscale
@@ -567,21 +579,27 @@ type rawRuntimeConfig struct {
 }
 
 type rawFargateRuntimeConfig struct {
-	Cluster           string   `yaml:"cluster"`
-	TaskDefinition    string   `yaml:"task_definition"`
-	ContainerName     string   `yaml:"container_name"`
-	Subnets           []string `yaml:"subnets"`
-	SecurityGroups    []string `yaml:"security_groups"`
-	AssignPublicIP    bool     `yaml:"assign_public_ip"`
-	PlatformVersion   string   `yaml:"platform_version"`
-	Region            string   `yaml:"region"`
-	RouteViaPublicIP  bool     `yaml:"route_via_public_ip"`
-	TaskCPUUnits      int      `yaml:"task_cpu_units"`
-	TaskMemoryMB      int      `yaml:"task_memory_mb"`
-	DefaultMemoryMB   int      `yaml:"default_memory_mb"`
-	DefaultCPUPercent int      `yaml:"default_cpu_percent"`
-	ControlPlaneURL   string   `yaml:"control_plane_url"`
-	BundleTokenTTL    string   `yaml:"bundle_token_ttl"` // parsed as time.Duration
+	Cluster           string                  `yaml:"cluster"`
+	TaskDefinition    string                  `yaml:"task_definition"`
+	ContainerName     string                  `yaml:"container_name"`
+	Subnets           []string                `yaml:"subnets"`
+	SecurityGroups    []string                `yaml:"security_groups"`
+	AssignPublicIP    bool                    `yaml:"assign_public_ip"`
+	PlatformVersion   string                  `yaml:"platform_version"`
+	Region            string                  `yaml:"region"`
+	RouteViaPublicIP  bool                    `yaml:"route_via_public_ip"`
+	TaskCPUUnits      int                     `yaml:"task_cpu_units"`
+	TaskMemoryMB      int                     `yaml:"task_memory_mb"`
+	DefaultMemoryMB   int                     `yaml:"default_memory_mb"`
+	DefaultCPUPercent int                     `yaml:"default_cpu_percent"`
+	ControlPlaneURL   string                  `yaml:"control_plane_url"`
+	BundleTokenTTL    string                  `yaml:"bundle_token_ttl"` // parsed as time.Duration
+	Secrets           rawFargateSecretsConfig `yaml:"secrets"`
+}
+
+type rawFargateSecretsConfig struct {
+	NamePrefix string `yaml:"name_prefix"`
+	KMSKeyID   string `yaml:"kms_key_id"`
 }
 
 type rawAutoscaleConfig struct {
@@ -1184,6 +1202,8 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		DefaultMemoryMB:   r.Fargate.DefaultMemoryMB,
 		DefaultCPUPercent: r.Fargate.DefaultCPUPercent,
 		ControlPlaneURL:   r.Fargate.ControlPlaneURL,
+		SecretsNamePrefix: r.Fargate.Secrets.NamePrefix,
+		SecretsKMSKeyID:   r.Fargate.Secrets.KMSKeyID,
 	}
 	if r.Fargate.BundleTokenTTL != "" {
 		d, err := time.ParseDuration(r.Fargate.BundleTokenTTL)
@@ -1378,6 +1398,12 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_CONTROL_PLANE_URL"); v != "" {
 		cfg.Runtime.Fargate.ControlPlaneURL = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_SECRETS_NAME_PREFIX"); v != "" {
+		cfg.Runtime.Fargate.SecretsNamePrefix = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_SECRETS_KMS_KEY_ID"); v != "" {
+		cfg.Runtime.Fargate.SecretsKMSKeyID = v
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_FARGATE_BUNDLE_TOKEN_TTL"); v != "" {
 		d, err := time.ParseDuration(v)
