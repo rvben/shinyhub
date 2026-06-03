@@ -79,6 +79,36 @@ func TestApplyForwardingHeaders_UntrustedPeerOverwrites(t *testing.T) {
 	}
 }
 
+func TestStickyCookie_SignRoundTrips(t *testing.T) {
+	key := []byte("sticky-test-key-0123456789abcdef")
+	v := signStickyValue(key, "demo", 3)
+	if v == "3" {
+		t.Fatalf("signed value should not be a bare index, got %q", v)
+	}
+	idx, ok := verifyStickyValue(key, "demo", v)
+	if !ok || idx != 3 {
+		t.Errorf("round-trip = (%d,%v), want (3,true)", idx, ok)
+	}
+}
+
+// TestStickyCookie_RejectsForgery verifies a client cannot forge a sticky cookie
+// to pin itself to a replica (and bypass the per-replica session cap): a bare
+// integer, a wrong signature, and a valid cookie replayed for another app are
+// all rejected.
+func TestStickyCookie_RejectsForgery(t *testing.T) {
+	key := []byte("sticky-test-key-0123456789abcdef")
+	if _, ok := verifyStickyValue(key, "demo", "0"); ok {
+		t.Error("bare integer (unsigned) sticky value must be rejected when signing is enabled")
+	}
+	if _, ok := verifyStickyValue(key, "demo", "0.deadbeefdeadbeef"); ok {
+		t.Error("forged signature must be rejected")
+	}
+	v := signStickyValue(key, "demo", 0)
+	if _, ok := verifyStickyValue(key, "other", v); ok {
+		t.Error("a cookie signed for one app must not verify for another (slug binding)")
+	}
+}
+
 // TestServeHTTP_UntrustedClientSanitized is the end-to-end check that a direct
 // (untrusted) client cannot spoof forwarding headers to the backend and that
 // ShinyHub's session cookie never reaches the backend, exercised through the

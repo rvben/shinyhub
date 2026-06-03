@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -222,6 +224,14 @@ type Proxy struct {
 	onMiss     func(slug string)
 	slugExists func(slug string) (bool, error)
 
+	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
+	// When set, the cookie value carries a signature bound to the app slug and
+	// replica index, so a client cannot forge or replay it to pin itself to a
+	// replica (and bypass the per-replica session cap). A nil/absent pointer
+	// disables signing (the cookie is a bare index), for tests and unconfigured
+	// setups. Atomic so the hot path reads it lock-free.
+	stickySecret atomic.Pointer[[]byte]
+
 	// trustedProxies holds the CIDRs of upstream proxies allowed to set the
 	// X-Forwarded-* / Forwarded headers the proxy forwards to app backends. A
 	// request whose immediate peer is NOT in this set has those headers stripped
@@ -285,6 +295,68 @@ func (p *Proxy) SetAccessLogger(fn func(AccessLogEntry)) {
 // the surrounding Server injects its trusted-proxy configuration into the
 // proxy without forming an import cycle. Safe to call concurrently with
 // ServeHTTP.
+// SetStickySecret enables HMAC signing of the sticky-routing cookie with the
+// given key (derive it from the server auth secret). Wire it at startup; when
+// unset the cookie is a bare replica index (back-compatible, unsigned).
+func (p *Proxy) SetStickySecret(key []byte) {
+	p.stickySecret.Store(&key)
+}
+
+func (p *Proxy) stickySecretBytes() []byte {
+	if ptr := p.stickySecret.Load(); ptr != nil {
+		return *ptr
+	}
+	return nil
+}
+
+// signStickyValue returns the signed sticky-cookie value for (slug, index):
+// "<index>.<hmac>", where the HMAC binds both the slug and the index so a value
+// cannot be replayed for a different app or edited to a different replica.
+func signStickyValue(key []byte, slug string, index int) string {
+	mac := hmac.New(sha256.New, key)
+	fmt.Fprintf(mac, "%s\x00%d", slug, index)
+	return strconv.Itoa(index) + "." + hex.EncodeToString(mac.Sum(nil))[:16]
+}
+
+// verifyStickyValue parses and authenticates a signed sticky-cookie value,
+// returning the replica index only when the signature matches (constant time).
+func verifyStickyValue(key []byte, slug, value string) (int, bool) {
+	idxStr, _, found := strings.Cut(value, ".")
+	if !found {
+		return 0, false
+	}
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil {
+		return 0, false
+	}
+	if !hmac.Equal([]byte(value), []byte(signStickyValue(key, slug, idx))) {
+		return 0, false
+	}
+	return idx, true
+}
+
+// stickyIndex extracts the replica index from a sticky-cookie value, verifying
+// its signature when signing is enabled, or parsing a bare index otherwise.
+func (p *Proxy) stickyIndex(slug, value string) (int, bool) {
+	if key := p.stickySecretBytes(); len(key) > 0 {
+		return verifyStickyValue(key, slug, value)
+	}
+	idx, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return idx, true
+}
+
+// stickyCookieValue returns the value to store in the sticky cookie for a
+// replica index: signed when a key is configured, a bare index otherwise.
+func (p *Proxy) stickyCookieValue(slug string, index int) string {
+	if key := p.stickySecretBytes(); len(key) > 0 {
+		return signStickyValue(key, slug, index)
+	}
+	return strconv.Itoa(index)
+}
+
 // SetTrustedProxies configures the upstream-proxy CIDRs whose forwarding
 // headers are trusted (see Proxy.trustedProxies). Wire it from
 // cfg.TrustedProxyNets at startup, before serving. Safe to leave unset (trust
@@ -939,7 +1011,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isStickyHit {
 		http.SetCookie(rec, &http.Cookie{
 			Name:     cookiePrefix + slug,
-			Value:    strconv.Itoa(picked.index),
+			Value:    p.stickyCookieValue(slug, picked.index),
 			Path:     "/app/" + slug + "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -1205,7 +1277,7 @@ func forwardedForToken(remoteAddr string) string {
 // flag is set so ServeHTTP can shed the request with 503.
 func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Request) (best *replicaBackend, isSticky, saturated bool) {
 	if c, err := r.Cookie(cookiePrefix + slug); err == nil {
-		if idx, err := strconv.Atoi(c.Value); err == nil {
+		if idx, ok := p.stickyIndex(slug, c.Value); ok {
 			if idx >= 0 && idx < len(pool.replicas) && pool.replicas[idx] != nil {
 				return pool.replicas[idx], true, false
 			}
