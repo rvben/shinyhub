@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // TestValidateNativeProcess is the P1 regression: recovery must not adopt a
@@ -75,4 +77,49 @@ func TestValidateNativeProcess(t *testing.T) {
 			t.Error("expected rejection with empty bundleDir + dead port, got nil")
 		}
 	})
+}
+
+// TestWorkerDeclaredGone_JoiningIsNotGone pins the worker-gone contract recovery
+// uses to decide whether a remote replica's slot enters the lost-replica healing
+// path. A worker is "gone" only when affirmatively down (revoked workers carry
+// status down) or its row is missing. A "joining" worker has registered but not
+// yet sent its first heartbeat: it is coming up, not gone, so recovery must not
+// strand its replicas. An up worker is never gone.
+func TestWorkerDeclaredGone_JoiningIsNotGone(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	seed := func(nodeID, status string) {
+		t.Helper()
+		if err := store.UpsertWorker(db.Worker{
+			NodeID: nodeID, AdvertiseAddr: nodeID + ":8443", Tier: "remote", Status: status,
+		}); err != nil {
+			t.Fatalf("seed worker %s: %v", nodeID, err)
+		}
+	}
+	seed("up-node", "up")
+	seed("joining-node", "joining")
+	seed("down-node", "down")
+
+	cases := []struct {
+		workerID string
+		wantGone bool
+	}{
+		{"up-node", false},
+		{"joining-node", false}, // transitional: coming up, not gone
+		{"down-node", true},
+		{"missing-node", true}, // no row -> treat as gone
+		{"", true},             // no owner to wait on
+	}
+	for _, c := range cases {
+		if got := workerDeclaredGone(store, c.workerID); got != c.wantGone {
+			t.Errorf("workerDeclaredGone(%q) = %v, want %v", c.workerID, got, c.wantGone)
+		}
+	}
 }

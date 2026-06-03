@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
@@ -18,6 +20,18 @@ import (
 
 // ProviderRemoteDocker labels replicas started on a remote Docker worker.
 const ProviderRemoteDocker = "remote_docker"
+
+// startDialRetries and startDialRetryBackoff bound how long Start re-POSTs a
+// replica-start request that was refused at connection time. A worker binds its
+// data-plane listener just before its first heartbeat, but a deploy racing that
+// heartbeat can dial it a moment too early; the listener then appears within
+// about a second. Only a connection-establishment failure is retried (the
+// request never reached the worker, so re-POSTing cannot double-start a
+// container); any other error fails fast. 5 retries at 200ms is ~1s of cover.
+const (
+	startDialRetries      = 5
+	startDialRetryBackoff = 200 * time.Millisecond
+)
 
 // WorkerLookup resolves workers for routing. Implemented by *Registry in
 // production; a stub is used in tests. PlanPlacementForTier plans where to place
@@ -261,11 +275,36 @@ func (r *remoteRuntime) Start(ctx context.Context, p process.StartParams, logWri
 	if err != nil {
 		return process.ReplicaEndpoint{}, err
 	}
+	body, _ := json.Marshal(toStartRequest(p))
+
+	for attempt := 0; ; attempt++ {
+		ep, err := r.startOnce(ctx, w, body, logWriter)
+		if err == nil {
+			return ep, nil
+		}
+		// Retry only a refused connection: the request never reached the worker,
+		// so re-POSTing cannot double-start a container. Any other failure (a
+		// worker HTTP status, a mid-stream error, a non-dial network error) may
+		// mean the request landed, so surface it immediately.
+		if attempt >= startDialRetries || !isConnRefused(err) {
+			return process.ReplicaEndpoint{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return process.ReplicaEndpoint{}, ctx.Err()
+		case <-time.After(startDialRetryBackoff):
+		}
+	}
+}
+
+// startOnce performs a single replica-start round trip: dial the worker, POST
+// the request, and read the result frame. Each call builds a fresh request body
+// reader so Start can re-invoke it on a retried connection refusal.
+func (r *remoteRuntime) startOnce(ctx context.Context, w db.Worker, body []byte, logWriter io.Writer) (process.ReplicaEndpoint, error) {
 	client, base, err := r.dialer.DialWorker(w)
 	if err != nil {
 		return process.ReplicaEndpoint{}, err
 	}
-	body, _ := json.Marshal(toStartRequest(p))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/replicas", bytes.NewReader(body))
 	if err != nil {
 		return process.ReplicaEndpoint{}, err
@@ -292,6 +331,15 @@ func (r *remoteRuntime) Start(ctx context.Context, p process.StartParams, logWri
 		WorkerID: result.NodeID,
 		Handle:   process.RunHandle{ContainerID: encodeRemoteHandle(result.NodeID, result.ContainerID)},
 	}, nil
+}
+
+// isConnRefused reports whether err is a connection-establishment refusal
+// (ECONNREFUSED), the one failure mode where the start request provably never
+// reached the worker and is therefore safe to retry. A connection reset or any
+// post-connect error is excluded: the request may already have started a
+// container.
+func isConnRefused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
 func (r *remoteRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {

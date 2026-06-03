@@ -307,6 +307,7 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 	defer t.Stop()
 
 	serveErrCh := make(chan error, 1)
+	listening := false
 	if a.Listen != nil {
 		// Bind before announcing liveness. Binding is the fail-fast half of
 		// serving, so doing it synchronously means a port conflict surfaces here,
@@ -317,7 +318,23 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 		if err != nil {
 			return fmt.Errorf("agent server: %w", err)
 		}
+		listening = true
 		go func() { serveErrCh <- a.Serve(ctx, ln) }()
+	}
+
+	// announceReady emits the readiness signal exactly once, on the first
+	// SUCCESSFUL heartbeat after the listener bound. At that point the worker is
+	// both listening (Listen succeeded above) and routable (the control plane
+	// promotes it joining->up on a heartbeat), so anything waiting on this signal
+	// can safely route to it. Tying readiness to the first success rather than
+	// specifically the up-front heartbeat means a transient initial failure that a
+	// later tick recovers still announces readiness instead of hanging the waiter.
+	ready := false
+	announceReady := func(hbErr error) {
+		if !ready && hbErr == nil && listening {
+			ready = true
+			slog.Info("worker data-plane ready", "advertise_addr", a.cfg.AdvertiseAddr)
+		}
 	}
 
 	// Heartbeat once up front so a freshly bootstrapped or re-adopted worker
@@ -325,9 +342,11 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 	// full interval. This closes the window where a re-adopted cert with little
 	// life left would expire before the first ticker-driven renewal.
 	if ctx.Err() == nil {
-		if err := a.heartbeatOnce(ctx); err != nil {
+		err := a.heartbeatOnce(ctx)
+		if err != nil {
 			slog.Warn("worker heartbeat failed", "err", err)
 		}
+		announceReady(err)
 	}
 
 	for {
@@ -339,9 +358,11 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 				return fmt.Errorf("agent server: %w", err)
 			}
 		case <-t.C:
-			if err := a.heartbeatOnce(ctx); err != nil {
+			err := a.heartbeatOnce(ctx)
+			if err != nil {
 				slog.Warn("worker heartbeat failed", "err", err)
 			}
+			announceReady(err)
 		}
 	}
 }

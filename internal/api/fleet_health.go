@@ -36,6 +36,7 @@ type fleetWorkerCounts struct {
 	Total   int `json:"total"`
 	Up      int `json:"up"`
 	Down    int `json:"down"`
+	Joining int `json:"joining"` // registered, not yet promoted by a first heartbeat
 	Revoked int `json:"revoked"`
 }
 
@@ -130,6 +131,12 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 				case wk.Status == "up":
 					wc.Up++
 					at(wk.Tier).workersUp++
+				case wk.Status == "joining":
+					// Transitional: registered but not yet promoted by its first
+					// heartbeat. Not routable, but not a fault either - keep it out
+					// of the down count so a just-joined worker does not read as a
+					// degraded fleet.
+					wc.Joining++
 				default:
 					wc.Down++
 					at(wk.Tier).down++

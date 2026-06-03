@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +21,13 @@ import (
 // countingControlPlane stands up a fake control plane that signs registrations
 // and counts heartbeats, so a test can observe heartbeat timing.
 func countingControlPlane(t *testing.T, heartbeats *atomic.Int32) *httptest.Server {
+	return controlPlaneFailingFirstHeartbeats(t, heartbeats, 0)
+}
+
+// controlPlaneFailingFirstHeartbeats is countingControlPlane that rejects the
+// first failFirst heartbeats with 500 before succeeding, so a test can exercise
+// a transient initial-heartbeat failure that a later ticker heartbeat recovers.
+func controlPlaneFailingFirstHeartbeats(t *testing.T, heartbeats *atomic.Int32, failFirst int32) *httptest.Server {
 	t.Helper()
 	ca, err := worker.OpenCA(t.TempDir(), []string{"good-token"})
 	if err != nil {
@@ -43,7 +52,10 @@ func countingControlPlane(t *testing.T, heartbeats *atomic.Int32) *httptest.Serv
 		})
 	})
 	mux.HandleFunc("/api/workers/heartbeat", func(w http.ResponseWriter, _ *http.Request) {
-		heartbeats.Add(1)
+		if heartbeats.Add(1) <= failFirst {
+			http.Error(w, "transient", http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(workerapi.HeartbeatResponse{})
 	})
 	return httptest.NewServer(mux)
@@ -190,5 +202,137 @@ func TestRun_ServesBoundListenerAndHeartbeats(t *testing.T) {
 	}
 	if got := heartbeats.Load(); got == 0 {
 		t.Error("Run did not heartbeat after binding the listener")
+	}
+}
+
+// TestRun_EmitsReadyAfterFirstHeartbeat verifies Run logs a single "worker
+// data-plane ready" signal after its listener has bound and its first heartbeat
+// succeeds (which promotes the worker from joining to up). Orchestration that
+// waits for this signal before routing to a freshly-joined worker - the
+// remote-worker E2E does - relies on it appearing exactly once, and only once
+// the worker is both listening and up.
+func TestRun_EmitsReadyAfterFirstHeartbeat(t *testing.T) {
+	var heartbeats atomic.Int32
+	cp := countingControlPlane(t, &heartbeats)
+	defer cp.Close()
+
+	ag, err := Bootstrap(context.Background(), Config{
+		ServerURL: cp.URL, Token: "good-token", AdvertiseAddr: "127.0.0.1:0",
+		Tier: "burst", DataDir: t.TempDir(), Version: "test",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	ag.Listen = func() (net.Listener, error) { return ln, nil }
+	ag.Serve = func(ctx context.Context, _ net.Listener) error { <-ctx.Done(); return ctx.Err() }
+
+	var mu sync.Mutex
+	var recs []slog.Record
+	prev := slog.Default()
+	slog.SetDefault(slog.New(captureHandler{mu: &mu, recs: &recs}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	readyCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, r := range recs {
+			if r.Message == "worker data-plane ready" {
+				n++
+			}
+		}
+		return n
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	// A long interval keeps the ticker from firing, so a single ready signal must
+	// come from the up-front heartbeat, not a later tick.
+	go func() { _ = ag.Run(ctx, time.Hour); close(done) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && readyCount() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got := readyCount(); got != 1 {
+		t.Fatalf("%q logged %d times, want exactly 1", "worker data-plane ready", got)
+	}
+	if heartbeats.Load() == 0 {
+		t.Fatal("readiness logged without a heartbeat")
+	}
+}
+
+// TestRun_EmitsReadyOnFirstSuccessfulHeartbeatAfterTransientFailure verifies
+// readiness is tied to the first SUCCESSFUL heartbeat, not specifically the
+// up-front one. If the up-front heartbeat fails transiently but a later ticker
+// heartbeat succeeds, the control plane still promotes the worker joining->up,
+// so the readiness signal must still fire exactly once - otherwise anything
+// waiting on it (the remote-worker E2E) hangs even though the worker is routable.
+func TestRun_EmitsReadyOnFirstSuccessfulHeartbeatAfterTransientFailure(t *testing.T) {
+	var heartbeats atomic.Int32
+	cp := controlPlaneFailingFirstHeartbeats(t, &heartbeats, 1) // first heartbeat 500s
+	defer cp.Close()
+
+	ag, err := Bootstrap(context.Background(), Config{
+		ServerURL: cp.URL, Token: "good-token", AdvertiseAddr: "127.0.0.1:0",
+		Tier: "burst", DataDir: t.TempDir(), Version: "test",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	ag.Listen = func() (net.Listener, error) { return ln, nil }
+	ag.Serve = func(ctx context.Context, _ net.Listener) error { <-ctx.Done(); return ctx.Err() }
+
+	var mu sync.Mutex
+	var recs []slog.Record
+	prev := slog.Default()
+	slog.SetDefault(slog.New(captureHandler{mu: &mu, recs: &recs}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	readyCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, r := range recs {
+			if r.Message == "worker data-plane ready" {
+				n++
+			}
+		}
+		return n
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	// A short interval so the ticker retries the heartbeat soon after the up-front
+	// one fails, well within the test deadline.
+	go func() { _ = ag.Run(ctx, 25*time.Millisecond); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && readyCount() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got := readyCount(); got != 1 {
+		t.Fatalf("%q logged %d times, want exactly 1 (readiness must fire on the first successful heartbeat, even if the up-front one failed)", "worker data-plane ready", got)
+	}
+	if heartbeats.Load() < 2 {
+		t.Fatalf("expected at least 2 heartbeats (one failed, one succeeded), got %d", heartbeats.Load())
 	}
 }

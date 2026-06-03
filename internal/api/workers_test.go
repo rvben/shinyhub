@@ -92,8 +92,18 @@ func TestRegisterSignsAndPersists(t *testing.T) {
 	if worker.NodeIDFromCert(cert) != resp.NodeID {
 		t.Fatalf("issued cert node id %q != allocated %q", worker.NodeIDFromCert(cert), resp.NodeID)
 	}
-	if _, ok := h.registry.WorkerForTier("burst"); !ok {
+	// Register persists and indexes the worker as "joining": it is not yet a
+	// routing candidate (that happens on its first heartbeat, once its data-plane
+	// listener has bound), but it must be tracked so that heartbeat can promote it.
+	indexed, ok := h.registry.Worker(resp.NodeID)
+	if !ok {
 		t.Fatal("worker not indexed after register")
+	}
+	if indexed.Status != "joining" {
+		t.Fatalf("registered worker status = %q, want joining", indexed.Status)
+	}
+	if _, ok := h.registry.WorkerForTier("burst"); ok {
+		t.Fatal("a just-registered worker must not be routable before its first heartbeat")
 	}
 }
 

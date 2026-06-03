@@ -58,8 +58,13 @@ func TestAppsAPI_GetDerivesWorkerUnavailableReason(t *testing.T) {
 
 	// A replacement worker joins the tier: the lost replica is now mid-heal, so
 	// the derived reason must clear (the watchdog will re-place it on the next tick).
-	if _, err := reg.Register(worker.RegisterParams{Name: "w1", AdvertiseAddr: "w:8443", Tier: "remote", Fingerprint: "fp", Version: "v1"}); err != nil {
+	w1, err := reg.Register(worker.RegisterParams{Name: "w1", AdvertiseAddr: "w:8443", Tier: "remote", Fingerprint: "fp", Version: "v1"})
+	if err != nil {
 		t.Fatalf("register worker: %v", err)
+	}
+	// A worker is healthy/routable only after its first heartbeat (Register -> joining).
+	if err := reg.Heartbeat(w1.NodeID, "fp"); err != nil {
+		t.Fatalf("heartbeat worker: %v", err)
 	}
 	if r := get(); r.Reason != "" {
 		t.Errorf("lost replica with healthy worker present: reason = %q, want empty", r.Reason)

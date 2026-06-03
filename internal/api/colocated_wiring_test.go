@@ -208,10 +208,15 @@ func multiWorkerColocationFixture(t *testing.T) (*Server, *db.App, *db.App, stri
 		t.Fatalf("new registry: %v", err)
 	}
 	for _, addr := range []string{"10.0.0.1:8443", "10.0.0.2:8443"} {
-		if _, err := reg.Register(worker.RegisterParams{
+		w, err := reg.Register(worker.RegisterParams{
 			Name: addr, AdvertiseAddr: addr, Tier: "burst", Fingerprint: addr,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("register worker %q: %v", addr, err)
+		}
+		// A worker is routable only after its first heartbeat (Register -> joining).
+		if err := reg.Heartbeat(w.NodeID, addr); err != nil {
+			t.Fatalf("heartbeat worker %q: %v", addr, err)
 		}
 	}
 	srv.SetWorkerRegistry(reg)
@@ -355,10 +360,15 @@ func TestResolveColocation_RejectsMultipleWorkerTiers(t *testing.T) {
 		{"10.0.1.1:8443", "burst2"},
 	}
 	for _, rp := range regs {
-		if _, err := reg.Register(worker.RegisterParams{
+		w, err := reg.Register(worker.RegisterParams{
 			Name: rp.addr, AdvertiseAddr: rp.addr, Tier: rp.tier, Fingerprint: rp.addr,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("register worker %q: %v", rp.addr, err)
+		}
+		// A worker is routable only after its first heartbeat (Register -> joining).
+		if err := reg.Heartbeat(w.NodeID, rp.addr); err != nil {
+			t.Fatalf("heartbeat worker %q: %v", rp.addr, err)
 		}
 	}
 	srv.SetWorkerRegistry(reg)
@@ -447,10 +457,15 @@ func TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource(t *testing.
 		t.Fatalf("new registry: %v", err)
 	}
 	for _, addr := range []string{"10.0.0.1:8443", "10.0.0.2:8443"} {
-		if _, err := reg.Register(worker.RegisterParams{
+		w, err := reg.Register(worker.RegisterParams{
 			Name: addr, AdvertiseAddr: addr, Tier: "burst", Fingerprint: addr,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("register worker %q: %v", addr, err)
+		}
+		// A worker is routable only after its first heartbeat (Register -> joining).
+		if err := reg.Heartbeat(w.NodeID, addr); err != nil {
+			t.Fatalf("heartbeat worker %q: %v", addr, err)
 		}
 	}
 	srv.SetWorkerRegistry(reg)
@@ -543,10 +558,15 @@ func TestMaybeRestartForChange_RejectsInfeasibleColocationBeforeTeardown(t *test
 		t.Fatalf("new registry: %v", err)
 	}
 	for _, addr := range []string{"10.0.0.1:8443", "10.0.0.2:8443"} {
-		if _, err := reg.Register(worker.RegisterParams{
+		w, err := reg.Register(worker.RegisterParams{
 			Name: addr, AdvertiseAddr: addr, Tier: "burst", Fingerprint: addr,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("register worker %q: %v", addr, err)
+		}
+		// A worker is routable only after its first heartbeat (Register -> joining).
+		if err := reg.Heartbeat(w.NodeID, addr); err != nil {
+			t.Fatalf("heartbeat worker %q: %v", addr, err)
 		}
 	}
 	srv.SetWorkerRegistry(reg)
