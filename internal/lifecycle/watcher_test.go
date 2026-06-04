@@ -119,7 +119,8 @@ func (f *fakeStore) GetAppBySlug(slug string) (*db.App, error) {
 	defer f.mu.Unlock()
 	app, ok := f.apps[slug]
 	if !ok {
-		return nil, fmt.Errorf("fakeStore: no app for slug %q", slug)
+		// Mirror the real store so callers can errors.Is(err, db.ErrNotFound).
+		return nil, db.ErrNotFound
 	}
 	return app, nil
 }
@@ -789,6 +790,42 @@ func TestWake_SupersededByStopTearsDownReplicas(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected mgr.Stop(app) to tear down superseded-wake replicas, got %v", stopped)
+	}
+}
+
+// TestWake_SupersededByDeleteTearsDownReplicas proves that when a concurrent
+// delete removes the app row while the wake is deploying, the wake (whose final
+// GetAppBySlug then returns ErrNotFound) still tears down the replicas it
+// started, so a deleted app leaves no orphaned processes.
+func TestWake_SupersededByDeleteTearsDownReplicas(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	mgr := &fakeManager{}
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, prx, st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			// Simulate a concurrent delete removing the row mid-deploy.
+			st.mu.Lock()
+			delete(st.apps, "app")
+			st.mu.Unlock()
+			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
+		})
+
+	w.OnMiss("app")
+	w.wakeWG.Wait()
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	found := false
+	for _, s := range mgr.stopped {
+		if s == "app" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected mgr.Stop(app) after a delete superseded the wake, got %v", mgr.stopped)
 	}
 }
 
