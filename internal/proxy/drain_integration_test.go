@@ -54,8 +54,8 @@ func TestDrainIntegration_ForceCloseStraggler(t *testing.T) {
 	if forced != 1 {
 		t.Fatalf("forced = %d, want 1", forced)
 	}
-	if time.Since(start) < 150*time.Millisecond {
-		t.Fatal("drain must wait the full timeout before force-closing a straggler")
+	if time.Since(start) < 190*time.Millisecond {
+		t.Fatal("drain must wait ~the full timeout before force-closing a straggler")
 	}
 	if tr.count() != 0 {
 		t.Fatalf("count after force-close = %d, want 0", tr.count())
