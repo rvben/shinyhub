@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 )
 
@@ -1280,5 +1281,51 @@ func TestListAppsDigestNilUntilPromoted(t *testing.T) {
 		if a.Slug == "pending-only" && a.ContentDigest != "" {
 			t.Fatalf("pending deployment digest must not be exposed, got %q", a.ContentDigest)
 		}
+	}
+}
+
+func TestForwardAuthAdapter_CreateAndGet(t *testing.T) {
+	store := mustOpenDB(t)
+
+	u, err := store.CreateForwardAuthUser("alice", "developer")
+	if err != nil {
+		t.Fatalf("CreateForwardAuthUser: %v", err)
+	}
+	if u.Username != "alice" || u.Role != "developer" {
+		t.Fatalf("unexpected: %+v", u)
+	}
+
+	again, err := store.GetForwardAuthUser("alice")
+	if err != nil {
+		t.Fatalf("GetForwardAuthUser: %v", err)
+	}
+	if again.ID != u.ID {
+		t.Fatalf("ID mismatch: %d vs %d", again.ID, u.ID)
+	}
+}
+
+func TestForwardAuthAdapter_GetMissing(t *testing.T) {
+	store := mustOpenDB(t)
+	_, err := store.GetForwardAuthUser("ghost")
+	if !errors.Is(err, auth.ErrUserNotFound) {
+		t.Fatalf("expected auth.ErrUserNotFound, got %v", err)
+	}
+}
+
+func TestForwardAuthAdapter_PromoteToAdmin(t *testing.T) {
+	store := mustOpenDB(t)
+	u, err := store.CreateForwardAuthUser("bob", "developer")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.PromoteToAdmin(u.ID); err != nil {
+		t.Fatalf("PromoteToAdmin: %v", err)
+	}
+	fresh, err := store.GetForwardAuthUser("bob")
+	if err != nil {
+		t.Fatalf("get after promote: %v", err)
+	}
+	if fresh.Role != "admin" {
+		t.Fatalf("role: got %q want %q", fresh.Role, "admin")
 	}
 }
