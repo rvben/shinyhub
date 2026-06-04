@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // fakeStore is an in-memory OwnerStore. A single holder at a time; epoch bumps
@@ -147,4 +149,39 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("condition not met within timeout")
+}
+
+func TestElector_RealStoreSingleOwnerHandoff(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compile-time proof the adapter satisfies the interface.
+	var _ OwnerStore = store
+
+	a := New(store, Config{InstanceID: "a", TTL: time.Second, RenewEvery: 5 * time.Millisecond})
+	b := New(store, Config{InstanceID: "b", TTL: time.Second, RenewEvery: 5 * time.Millisecond})
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	go a.Run(ctxA)
+	go b.Run(ctxB)
+
+	// Exactly one owner settles.
+	waitFor(t, func() bool { return a.IsOwner() != b.IsOwner() })
+
+	// Cancel whichever owns; the other must take over.
+	if a.IsOwner() {
+		cancelA()
+		waitFor(t, func() bool { return b.IsOwner() })
+	} else {
+		cancelB()
+		waitFor(t, func() bool { return a.IsOwner() })
+	}
 }
