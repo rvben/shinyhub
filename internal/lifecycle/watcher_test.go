@@ -171,6 +171,22 @@ func (f *fakeStore) AbortWake(slug string) error {
 	return nil
 }
 
+// FinishWake mirrors the real store's CAS: waking -> running, winner only (no-op
+// + false if a concurrent change moved the app off "waking").
+func (f *fakeStore) FinishWake(slug string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	app, ok := f.apps[slug]
+	if !ok || app.Status != "waking" {
+		return false, nil
+	}
+	app.Status = "running"
+	if f.appStatus != nil {
+		f.appStatus[slug] = "running"
+	}
+	return true, nil
+}
+
 func (f *fakeStore) ListDeployments(_ int64) ([]*db.Deployment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -699,12 +715,10 @@ func TestWake_TriggeredOnMiss(t *testing.T) {
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if len(st.statusUpdates) == 0 {
-		t.Fatal("expected running status update after wake")
-	}
-	last := st.statusUpdates[len(st.statusUpdates)-1]
-	if last.Status != "running" {
-		t.Fatalf("unexpected wake update: %+v", last)
+	// Wake finalizes via the FinishWake CAS (waking -> running), so assert the
+	// app's resulting status rather than the UpdateAppStatus call log.
+	if got := st.apps["app"].Status; got != "running" {
+		t.Fatalf("app status after wake = %q, want running", got)
 	}
 	// Verify UpsertReplica was called with running status.
 	if len(st.upsertedReplicas) == 0 {

@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,7 @@ type appStore interface {
 	UpdateAppStatus(p db.UpdateAppStatusParams) error
 	BeginWake(slug string) (bool, error)
 	AbortWake(slug string) error
+	FinishWake(slug string) (bool, error)
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
@@ -506,23 +508,39 @@ func (w *Watcher) OnMiss(slug string) {
 		var opErr error
 		defer func() { endSpan(opErr) }()
 
-		// abortWake reverts waking -> hibernated so a later request can retry.
-		abortWake := func() {
-			if aerr := w.store.AbortWake(slug); aerr != nil {
-				slog.Warn("watcher: abort wake failed", "slug", slug, "err", aerr)
+		// finalized is set once the wake reaches a stable terminal state (running,
+		// or the app's intent was changed out from under us by a concurrent
+		// stop/delete). Until then, the deferred guard reverts waking ->
+		// hibernated so the app is NEVER left stuck in the transient waking state -
+		// including on a panic. AbortWake is a conditional CAS (only acts while
+		// status is still waking), so it never clobbers a newer intent.
+		finalized := false
+		defer func() {
+			if r := recover(); r != nil {
+				opErr = fmt.Errorf("wake panicked: %v", r)
+				slog.Error("watcher: wake panicked", "slug", slug, "panic", r)
 			}
-		}
+			if !finalized {
+				if aerr := w.store.AbortWake(slug); aerr != nil {
+					slog.Warn("watcher: abort wake failed", "slug", slug, "err", aerr)
+				}
+			}
+		}()
 
 		app, err := w.store.GetAppBySlug(slug)
 		if err != nil {
 			opErr = err
-			abortWake()
+			return
+		}
+		if app.Status != "waking" {
+			// A concurrent stop/delete changed the app's intent after we won the
+			// CAS. Abandon the wake and preserve the newer status (do not revert).
+			finalized = true
 			return
 		}
 		deployments, err := w.store.ListDeployments(app.ID)
 		if err != nil || len(deployments) == 0 {
 			opErr = err
-			abortWake()
 			return
 		}
 
@@ -560,15 +578,25 @@ func (w *Watcher) OnMiss(slug string) {
 			}(i)
 		}
 		wg.Wait()
-		if started.Load() > 0 {
-			if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {
-				slog.Warn("watcher: persist woken status failed", "slug", slug, "err", err)
-			}
+		if started.Load() == 0 {
+			// No replica came up; the deferred guard reverts waking -> hibernated
+			// so a later request retries instead of being stuck in waking.
+			return
+		}
+		// Finalize waking -> running via a conditional CAS. If a concurrent
+		// stop/delete moved the app off waking during the deploy, FinishWake wins
+		// 0 rows and we leave their newer status (the deferred guard's AbortWake is
+		// also conditional, so it is a no-op in that case). On a DB error we leave
+		// !finalized so the guard reverts to a stable terminal state.
+		woke, ferr := w.store.FinishWake(slug)
+		if ferr != nil {
+			opErr = ferr
+			slog.Warn("watcher: finish wake failed", "slug", slug, "err", ferr)
+			return
+		}
+		finalized = true
+		if woke {
 			w.recordTransition("wake")
-		} else {
-			// No replica came up; revert waking -> hibernated so a later request
-			// retries the wake instead of being stuck in waking forever.
-			abortWake()
 		}
 	}()
 }
