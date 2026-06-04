@@ -39,10 +39,31 @@ type Elector struct {
 	epoch int64
 }
 
+// clampTTL enforces the Config invariant that the lease TTL is at least twice
+// the renewal interval, so a single missed renewal never expires an otherwise
+// healthy lease. A non-positive TTL is raised to that floor too. When
+// renewEvery is non-positive the TTL is returned unchanged (such a config is
+// already degenerate and is rejected elsewhere).
+func clampTTL(ttl, renewEvery time.Duration) time.Duration {
+	if renewEvery <= 0 {
+		return ttl
+	}
+	floor := 2 * renewEvery
+	if ttl < floor {
+		return floor
+	}
+	return ttl
+}
+
 // New constructs an Elector. Call Run in a goroutine to start it.
 func New(store OwnerStore, cfg Config) *Elector {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if clamped := clampTTL(cfg.TTL, cfg.RenewEvery); clamped != cfg.TTL {
+		cfg.Logger.Warn("lease TTL raised to 2x renew interval",
+			"configured_ttl", cfg.TTL, "renew_every", cfg.RenewEvery, "effective_ttl", clamped)
+		cfg.TTL = clamped
 	}
 	return &Elector{cfg: cfg, store: store}
 }
@@ -52,6 +73,18 @@ func (e *Elector) IsOwner() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.owner
+}
+
+// Epoch returns the fencing token of the currently-held lease, or 0 when this
+// instance is not the owner. Use it for an inline fencing check on a mutating
+// operation that must be stamped with the epoch under which it began.
+func (e *Elector) Epoch() int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.owner {
+		return 0
+	}
+	return e.epoch
 }
 
 func (e *Elector) snapshot() (bool, int64) {

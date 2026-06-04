@@ -131,8 +131,13 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 }
 
 // Start wires up the onMiss callback on the proxy and launches the background
-// watchdog/hibernation loop. Blocks until ctx is cancelled.
+// watchdog/hibernation loop. Blocks until ctx is cancelled. Safe to call
+// multiple times across ownership spans: resets the stopping flag so wakes
+// are admitted again after a previous span drained.
 func (w *Watcher) Start(ctx context.Context) {
+	w.mu.Lock()
+	w.stopping = false
+	w.mu.Unlock()
 	w.prx.SetOnMiss(w.OnMiss)
 	ticker := time.NewTicker(w.cfg.WatchInterval)
 	defer ticker.Stop()

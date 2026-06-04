@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fargate"
 	"github.com/rvben/shinyhub/internal/jobs"
+	"github.com/rvben/shinyhub/internal/leader"
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/logging"
@@ -786,100 +788,43 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		})
 	}
 
-	// Fail any deploy interrupted mid-flight before recovery so adoption falls
-	// back to the last good deployment.
-	lifecycle.ReconcileInflightDeployments(store)
-
-	// Finish any app deletion interrupted between the 'deleting' tombstone and
-	// the row removal, then report (do not delete) slug dirs with no owning
-	// row. Reconcile first so freshly-cleaned slugs are not flagged as orphans.
+	// reconcileCleaner is captured by ownerWork for the owner-scoped reconcile so
+	// Fargate secrets are cleaned up only when this instance holds the lease.
 	var reconcileCleaner lifecycle.AppSecretsCleaner
 	if fargateSecretsCleaner != nil {
 		reconcileCleaner = fargateSecretsCleaner
 	}
-	lifecycle.ReconcileDeletingApps(ctx, store, cfg, reconcileCleaner)
-	lifecycle.LogOrphanAppDirs(store, cfg)
 
-	// Re-adopt any processes that survived a server restart. Recovery routes
-	// each replica to its tier's runtime via the Manager's registry, so it
-	// needs no runtime argument here.
-	lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica)
-
-	// Remove ShinyHub-managed app containers no live replica re-adopted, so
-	// stopped containers from prior runs do not accumulate.
-	if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
-		lifecycle.SweepOrphanContainers(mgr, sweeper)
-	}
-
-	// Sweep orphan Fargate tasks across ALL registered tiers.
-	// The existing SweepOrphanContainers only covers the default-tier runtime;
-	// a Fargate burst tier declared via runtime.tiers[] would never be swept
-	// without this loop.
-	{
-		sweepCtx, cancelSweep := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancelSweep()
-		for _, tierName := range cfg.Runtime.TierOrder() {
-			tierRT := mgr.RuntimeForTier(tierName)
-			if fts, ok := tierRT.(lifecycle.FargateTaskSweeper); ok {
-				lifecycle.SweepOrphanFargateTasks(sweepCtx, mgr, fts)
-			}
-		}
-	}
-
-	// Start the worker-down monitor: when a worker's heartbeat goes stale it is
-	// marked down and each of its running replicas transitions to lost and is
-	// removed from proxy routing. Only relevant when worker hosting is enabled.
+	// Worker-down monitor: object created here, loop started inside ownerWork.
+	// Only relevant when worker hosting is enabled.
+	const (
+		workerTimeout   = 90 * time.Second
+		monitorInterval = 30 * time.Second
+		// workerRetention is how long a down, non-revoked worker row with no
+		// live replicas is kept before being reaped. It is far longer than the
+		// down timeout so a briefly-flapping worker is never tombstoned.
+		workerRetention = 24 * time.Hour
+	)
+	var monitor *lifecycle.WorkerDownMonitor
 	if workerReg != nil {
-		const (
-			workerTimeout   = 90 * time.Second
-			monitorInterval = 30 * time.Second
-			// workerRetention is how long a down, non-revoked worker row with no
-			// live replicas is kept before being reaped. It is far longer than the
-			// down timeout so a briefly-flapping worker is never tombstoned.
-			workerRetention = 24 * time.Hour
-		)
-		monitor := lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int, expectURL string) {
+		monitor = lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int, expectURL string) {
 			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
 		}, mgr.EvictReplicaIfWorker, workerReg.Forget)
-		go monitor.Run(ctx, monitorInterval)
-		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
 	}
-
-	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
-	defer cancelWatcher()
-	watcherDone := make(chan struct{})
-	go func() {
-		watcher.Start(watcherCtx)
-		close(watcherDone)
-	}()
 
 	jobsMgr, err := jobs.NewManager(mgr, cfg.Runtime.TierOrder(), cfg.Runtime.DefaultTierName(), store, secretsKey, cfg.Storage.AppsDir, absAppDataDir)
 	if err != nil {
 		return fmt.Errorf("init jobs manager: %w", err)
 	}
 	sched := scheduler.New(jobsMgr, store, cfg.Scheduler.Location)
-
-	schedCtx, cancelSched := context.WithCancel(context.Background())
-	defer cancelSched()
-	if err := sched.Start(schedCtx); err != nil {
-		return fmt.Errorf("start scheduler: %w", err)
-	}
-	slog.Info("scheduler started")
-
 	srv.SetJobs(jobsMgr, sched)
 
 	// Replica autoscaling is opt-in per app and gated by a global switch. When
 	// enabled, the controller evaluates opted-in apps on its own interval and
 	// drives the same incremental scale primitives the API exposes; it never
-	// scales worker hosts.
-	var (
-		cancelAutoscale context.CancelFunc
-		autoscaleDone   chan struct{}
-	)
+	// scales worker hosts. The loop is started inside ownerWork.
+	var controller *autoscale.Controller
 	if cfg.Runtime.Autoscale.Enabled {
-		var asCtx context.Context
-		asCtx, cancelAutoscale = context.WithCancel(context.Background())
-		defer cancelAutoscale()
 		runtimeMax := cfg.Runtime.MaxReplicas
 		if runtimeMax <= 0 {
 			runtimeMax = 32
@@ -891,7 +836,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if rejectWindow > cfg.Runtime.Autoscale.Cooldown {
 			rejectWindow = cfg.Runtime.Autoscale.Cooldown
 		}
-		controller := autoscale.New(autoscale.Config{
+		controller = autoscale.New(autoscale.Config{
 			ScanInterval:  cfg.Runtime.Autoscale.ScanInterval,
 			Cooldown:      cfg.Runtime.Autoscale.Cooldown,
 			DrainGrace:    30 * time.Second,
@@ -903,16 +848,87 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if metricsReg != nil {
 			controller.SetMetrics(metricsReg)
 		}
-		autoscaleDone = make(chan struct{})
-		go func() {
-			controller.Run(asCtx)
-			close(autoscaleDone)
-		}()
-		slog.Info("autoscale controller started",
-			"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
-			"cooldown", cfg.Runtime.Autoscale.Cooldown,
-			"default_target", cfg.Runtime.Autoscale.DefaultTarget)
 	}
+
+	// ownerWork runs the owner-only startup and background loops for one span of
+	// ownership. It performs the five destructive boot-time reconciles/sweeps
+	// exactly once (deferred until ownership so a coexisting new instance never
+	// fails the old owner's in-flight deploy), starts the three background loops
+	// bound to octx, then blocks until ownership is lost and stops them.
+	// jobsMgr/sched/watcher/monitor/controller are created once above and reused
+	// across spans (the scheduler supports stop/start cycles).
+	ownerWork := func(octx context.Context, epoch int64) {
+		slog.Info("became control-plane owner", "epoch", epoch, "instance", cfg.Server.InstanceID)
+
+		// Fail any deploy interrupted mid-flight before recovery so adoption falls
+		// back to the last good deployment.
+		lifecycle.ReconcileInflightDeployments(store)
+		// Finish any app deletion interrupted between the 'deleting' tombstone and
+		// the row removal. Reconcile first so freshly-cleaned slugs are not flagged
+		// as orphans by the next step.
+		lifecycle.ReconcileDeletingApps(octx, store, cfg, reconcileCleaner)
+		// Report (do not delete) slug dirs with no owning row. Run AFTER
+		// ReconcileDeletingApps so freshly-cleaned slugs are not reported.
+		lifecycle.LogOrphanAppDirs(store, cfg)
+		// Re-adopt any processes that survived a server restart. Must run after
+		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
+		// not a half-applied one.
+		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica)
+		// Remove ShinyHub-managed containers no live replica re-adopted.
+		if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
+			lifecycle.SweepOrphanContainers(mgr, sweeper)
+		}
+		// Sweep orphan Fargate tasks across ALL registered tiers.
+		sweepCtx, cancelSweep := context.WithTimeout(octx, 60*time.Second)
+		for _, tierName := range cfg.Runtime.TierOrder() {
+			tierRT := mgr.RuntimeForTier(tierName)
+			if fts, ok := tierRT.(lifecycle.FargateTaskSweeper); ok {
+				lifecycle.SweepOrphanFargateTasks(sweepCtx, mgr, fts)
+			}
+		}
+		cancelSweep()
+
+		var loops sync.WaitGroup
+		if monitor != nil {
+			loops.Add(1)
+			go func() { defer loops.Done(); monitor.Run(octx, monitorInterval) }()
+			slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
+		}
+		loops.Add(1)
+		go func() { defer loops.Done(); watcher.Start(octx) }()
+		if err := sched.Start(octx); err != nil {
+			slog.Error("start scheduler", "err", err)
+		} else {
+			slog.Info("scheduler started")
+		}
+		if controller != nil {
+			loops.Add(1)
+			go func() { defer loops.Done(); controller.Run(octx) }()
+			slog.Info("autoscale controller started",
+				"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
+				"cooldown", cfg.Runtime.Autoscale.Cooldown,
+				"default_target", cfg.Runtime.Autoscale.DefaultTarget)
+		}
+
+		<-octx.Done()
+		slog.Info("releasing control-plane ownership loops", "epoch", epoch)
+		sched.Stop() // restartable on the next acquisition
+		loops.Wait() // watcher/monitor/autoscale fully stopped
+	}
+
+	scope := leader.NewOwnerScope(ownerWork)
+	elector := leader.New(store, leader.Config{
+		InstanceID: cfg.Server.InstanceID,
+		TTL:        cfg.Server.LeaseTTL,
+		RenewEvery: cfg.Server.LeaseRenewEvery,
+		OnAcquire:  scope.Acquire,
+		OnLose:     scope.Lose,
+		Logger:     slog.Default(),
+	})
+	srv.SetOwnership(elector.IsOwner)
+	electorCtx, cancelElector := context.WithCancel(context.Background())
+	defer cancelElector()
+	go elector.Run(electorCtx)
 
 	mux := http.NewServeMux()
 	// Observe wraps the timeout handler (not the inner router) so server metrics
@@ -1001,8 +1017,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	select {
 	case err := <-serveErr:
 		if err != nil {
-			cancelSched()
-			cancelWatcher()
+			cancelElector()
+			scope.Stop()
 			return fmt.Errorf("http server: %w", err)
 		}
 	case <-ctx.Done():
@@ -1024,19 +1040,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			slog.Warn("tracer shutdown", "err", err)
 		}
 	}
-	cancelSched()
-	sched.Stop()
-	// Cron is stopped; cancel any in-flight scheduled runs and wait for
-	// them to finalize their DB rows before we close the store.
+	// Stop the owner span: the Elector releases the lease, then OwnerScope
+	// cancels the loop context and waits for the watcher/scheduler/monitor/
+	// autoscaler to exit before we drain jobs and close the store.
+	cancelElector()
+	scope.Stop()
+	// Drain in-flight scheduled job runs before the store closes.
 	jobsMgr.Stop(shutdownCtx)
-	cancelWatcher()
-	<-watcherDone
-	// Stop the autoscale controller and wait for its loop to exit before the
-	// store closes, so it cannot issue a scale query against a torn-down store.
-	if cancelAutoscale != nil {
-		cancelAutoscale()
-		<-autoscaleDone
-	}
 
 	switch cfg.Server.ShutdownApps {
 	case "stop":

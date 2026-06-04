@@ -151,6 +151,42 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("condition not met within timeout")
 }
 
+func TestClampTTL(t *testing.T) {
+	cases := []struct {
+		name             string
+		ttl, renew, want time.Duration
+	}{
+		{"already-2x", 30 * time.Second, 10 * time.Second, 30 * time.Second},
+		{"exactly-2x", 20 * time.Second, 10 * time.Second, 20 * time.Second},
+		{"below-2x-raised", 15 * time.Second, 10 * time.Second, 20 * time.Second},
+		{"zero-raised", 0, 5 * time.Second, 10 * time.Second},
+		{"negative-ttl-raised", -5 * time.Second, 10 * time.Second, 20 * time.Second},
+		{"nonpositive-renew-unchanged", 5 * time.Second, 0, 5 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clampTTL(c.ttl, c.renew); got != c.want {
+				t.Fatalf("clampTTL(%v, %v) = %v, want %v", c.ttl, c.renew, got, c.want)
+			}
+		})
+	}
+}
+
+func TestElector_EpochReflectsOwnership(t *testing.T) {
+	fs := &fakeStore{}
+	e := New(fs, Config{InstanceID: "a", TTL: time.Second, RenewEvery: time.Millisecond})
+	if e.Epoch() != 0 {
+		t.Fatalf("non-owner Epoch = %d, want 0", e.Epoch())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	waitFor(t, func() bool { return e.Epoch() != 0 })
+	if e.Epoch() != 1 {
+		t.Fatalf("owner Epoch = %d, want 1", e.Epoch())
+	}
+}
+
 func TestElector_RealStoreSingleOwnerHandoff(t *testing.T) {
 	store, err := db.Open(":memory:")
 	if err != nil {
