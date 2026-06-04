@@ -684,6 +684,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		srv.SetOIDCProvider(p)
 		slog.Info("oidc configured", "display_name", cfg.OAuth.OIDC.DisplayName, "issuer", cfg.OAuth.OIDC.IssuerURL)
 	}
+	if cfg.Auth.ForwardAuth.Enabled {
+		slog.Info("forward auth configured",
+			"user_header", cfg.Auth.ForwardAuth.UserHeader,
+			"groups_header", cfg.Auth.ForwardAuth.GroupsHeader,
+			"admin_groups", cfg.Auth.ForwardAuth.AdminGroups,
+			"default_role", cfg.Auth.ForwardAuth.DefaultRole,
+		)
+	}
 
 	deployFn := func(slug, bundleDir string, index int) (*deploy.Result, error) {
 		app, err := store.GetApp(slug)
