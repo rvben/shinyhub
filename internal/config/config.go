@@ -280,6 +280,21 @@ type AuthConfig struct {
 	// env-token is active. Sourced from SHINYHUB_DEPLOY_TOKEN_ROLE; default
 	// "developer". Must be one of viewer, developer, operator, admin.
 	DeployTokenRole string `yaml:"-"`
+
+	ForwardAuth ForwardAuthConfig `yaml:"forward_auth"`
+}
+
+// ForwardAuthConfig configures trust of an upstream reverse proxy that has
+// already authenticated the user. When Enabled is true, the forward-auth
+// middleware trusts UserHeader (and optional EmailHeader / GroupsHeader) on
+// requests whose direct peer IP is in Config.TrustedProxyNets.
+type ForwardAuthConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	UserHeader   string   `yaml:"user_header"`
+	EmailHeader  string   `yaml:"email_header"`
+	GroupsHeader string   `yaml:"groups_header"`
+	AdminGroups  []string `yaml:"admin_groups"`
+	DefaultRole  string   `yaml:"default_role"`
 }
 
 type StorageConfig struct {
@@ -767,6 +782,19 @@ func Load(path string) (*Config, error) {
 		// allowed
 	default:
 		return nil, fmt.Errorf("auth.oauth_default_role: %q is not allowed; must be one of viewer, developer, operator", cfg.Auth.OAuthDefaultRole)
+	}
+	if cfg.Auth.ForwardAuth.Enabled {
+		if cfg.Auth.ForwardAuth.UserHeader == "" {
+			cfg.Auth.ForwardAuth.UserHeader = "X-Forwarded-User"
+		}
+		if cfg.Auth.ForwardAuth.DefaultRole == "" {
+			cfg.Auth.ForwardAuth.DefaultRole = "developer"
+		}
+		switch cfg.Auth.ForwardAuth.DefaultRole {
+		case "viewer", "developer", "operator", "admin":
+		default:
+			return nil, fmt.Errorf("auth.forward_auth.default_role: invalid role %q", cfg.Auth.ForwardAuth.DefaultRole)
+		}
 	}
 	if cfg.Defaults.AppVisibility == "" {
 		cfg.Defaults.AppVisibility = "private"
@@ -1259,6 +1287,28 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_DEPLOY_TOKEN_ROLE"); v != "" {
 		cfg.Auth.DeployTokenRole = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_ENABLED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_FORWARD_AUTH_ENABLED: %w", err)
+		}
+		cfg.Auth.ForwardAuth.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_USER_HEADER"); v != "" {
+		cfg.Auth.ForwardAuth.UserHeader = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_EMAIL_HEADER"); v != "" {
+		cfg.Auth.ForwardAuth.EmailHeader = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_GROUPS_HEADER"); v != "" {
+		cfg.Auth.ForwardAuth.GroupsHeader = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS"); v != "" {
+		cfg.Auth.ForwardAuth.AdminGroups = splitCSV(v)
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE"); v != "" {
+		cfg.Auth.ForwardAuth.DefaultRole = v
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
