@@ -16,8 +16,9 @@ var ErrUserNotFound = errors.New("forward auth: user not found")
 // ForwardAuthConfig mirrors config.ForwardAuthConfig. Duplicated here so the auth
 // package has no import cycle on config.
 type ForwardAuthConfig struct {
-	Enabled      bool
-	UserHeader   string
+	Enabled    bool
+	UserHeader string
+	// EmailHeader is accepted but not yet consumed by the middleware (reserved).
 	EmailHeader  string
 	GroupsHeader string
 	AdminGroups  []string

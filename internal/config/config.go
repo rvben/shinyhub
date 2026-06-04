@@ -289,8 +289,10 @@ type AuthConfig struct {
 // middleware trusts UserHeader (and optional EmailHeader / GroupsHeader) on
 // requests whose direct peer IP is in Config.TrustedProxyNets.
 type ForwardAuthConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	UserHeader   string   `yaml:"user_header"`
+	Enabled    bool   `yaml:"enabled"`
+	UserHeader string `yaml:"user_header"`
+	// EmailHeader is accepted but not yet consumed by the middleware (reserved;
+	// the users table has no email column). Setting it has no effect today.
 	EmailHeader  string   `yaml:"email_header"`
 	GroupsHeader string   `yaml:"groups_header"`
 	AdminGroups  []string `yaml:"admin_groups"`

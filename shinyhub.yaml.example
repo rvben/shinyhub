@@ -44,7 +44,7 @@ auth:
   # forward_auth:
   #   enabled: true                              # SHINYHUB_FORWARD_AUTH_ENABLED
   #   user_header: X-Forwarded-User              # SHINYHUB_FORWARD_AUTH_USER_HEADER   (default: X-Forwarded-User)
-  #   email_header: X-Forwarded-Email            # SHINYHUB_FORWARD_AUTH_EMAIL_HEADER
+  #   email_header: X-Forwarded-Email            # SHINYHUB_FORWARD_AUTH_EMAIL_HEADER  (reserved; not yet used)
   #   groups_header: X-Forwarded-Groups          # SHINYHUB_FORWARD_AUTH_GROUPS_HEADER
   #   admin_groups: ["shinyhub-admins"]          # SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS  (comma-separated in env)
   #   default_role: developer                    # SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE  (default: developer)

@@ -57,7 +57,7 @@ example Authelia at `authelia:9091/api/verify`, or oauth2-proxy at
 | Header | Config key | Description |
 |---|---|---|
 | `X-Forwarded-User` | `user_header` | Username (required). Default header name. |
-| `X-Forwarded-Email` | `email_header` | Email address (optional). |
+| `X-Forwarded-Email` | `email_header` | Email address (optional). Accepted by config but not yet used by ShinyHub (reserved). |
 | `X-Forwarded-Groups` | `groups_header` | Comma-separated group list (optional). Used for admin promotion. |
 
 ## ShinyHub configuration
@@ -106,8 +106,9 @@ Caddy running on a different host, add that interface's CIDR to
 **Auto-provisioning.** When a user header is received from a trusted peer and
 no matching account exists, ShinyHub creates one with `default_role`. If the
 user is a member of any group listed in `admin_groups`, the role is promoted to
-`admin` regardless of `default_role`. Subsequent logins update group-based
-role promotions but do not downgrade manually-set roles.
+`admin` regardless of `default_role`. Subsequent logins re-apply group-based
+admin promotion, but the middleware never downgrades a role: a user removed
+from an admin group keeps the `admin` role until an operator changes it.
 
 **Large deploy uploads.** ShinyHub accepts bundles up to `storage.max_bundle_mb`
 (default 128 MB). Caddy's default request body limit is high, but if your auth

@@ -85,7 +85,7 @@ oauth2-proxy at `http://oauth2-proxy:4180/oauth2/auth`).
 | Header | Config key | Description |
 |---|---|---|
 | `X-Forwarded-User` | `user_header` | Username (required). Default header name. |
-| `X-Forwarded-Email` | `email_header` | Email address (optional). |
+| `X-Forwarded-Email` | `email_header` | Email address (optional). Accepted by config but not yet used by ShinyHub (reserved). |
 | `X-Forwarded-Groups` | `groups_header` | Comma-separated group list (optional). Used for admin promotion. |
 
 ## ShinyHub configuration
