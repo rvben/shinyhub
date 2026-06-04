@@ -271,6 +271,11 @@ type ServerConfig struct {
 	// startup (config stores the raw values).
 	LeaseTTL        time.Duration `yaml:"lease_ttl"`
 	LeaseRenewEvery time.Duration `yaml:"lease_renew_every"`
+
+	// DrainTimeout bounds how long a graceful shutdown waits for live WebSocket
+	// (hijacked) app sessions to close before force-closing them. Sites with
+	// long-lived sessions should raise it. Defaults to 60s.
+	DrainTimeout time.Duration `yaml:"drain_timeout"`
 }
 
 type AuthConfig struct {
@@ -774,6 +779,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.LeaseTTL <= 0 {
 		cfg.Server.LeaseTTL = 30 * time.Second
+	}
+	if cfg.Server.DrainTimeout <= 0 {
+		cfg.Server.DrainTimeout = 60 * time.Second
 	}
 
 	if cfg.OAuth.OIDC.DisplayName == "" && cfg.OAuth.OIDC.IssuerURL != "" {
