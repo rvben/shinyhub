@@ -1,0 +1,31 @@
+[Unit]
+Description=ShinyHub - self-hosted Shiny app platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=notify so the live process (and each handoff successor) reports READY=1 +
+# MAINPID=<own pid> via sd_notify; systemd then retargets MAINPID to the
+# successor on every zero-downtime upgrade instead of treating the unit as dead
+# when the original process exits. NotifyAccess=all lets the re-exec'd child
+# (not just the original MAINPID) send the notification.
+Type=notify
+NotifyAccess=all
+User=shinyhub
+Group=shinyhub
+RuntimeDirectory=shinyhub
+# shinyhub.yaml must set: server.pid_file: /run/shinyhub/shinyhub.pid
+ExecStart=/usr/local/bin/shinyhub serve --config /etc/shinyhub/shinyhub.yaml
+# Zero-downtime upgrade: drop a new /usr/local/bin/shinyhub binary, then
+# `systemctl reload shinyhub`. SIGHUP makes the running process re-exec the new
+# binary and hand off the listeners; old WebSocket sessions drain, then it exits.
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/run/shinyhub/shinyhub.pid
+# Generous start timeout: an upgrade may take a moment to become ready.
+TimeoutStartSec=120
+# Intentionally NO Restart=: after a handoff the original PID exits on purpose;
+# the successor (tracked via sd_notify MAINPID + PIDFile) keeps serving. A
+# Restart policy would race the handoff. Use an external watchdog for crash-restart.
+
+[Install]
+WantedBy=multi-user.target
