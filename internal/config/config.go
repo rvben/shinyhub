@@ -266,9 +266,9 @@ type ServerConfig struct {
 	InstanceID string `yaml:"instance_id"`
 
 	// LeaseTTL is how long this instance's control-plane ownership lease stays
-	// valid without a renewal; LeaseRenewEvery is the renewal cadence. The
-	// elector holds LeaseTTL to at least 2x LeaseRenewEvery so a single missed
-	// renewal never drops ownership.
+	// valid without a renewal; LeaseRenewEvery is the renewal cadence. LeaseTTL
+	// should be at least 2x LeaseRenewEvery; the elector enforces that floor at
+	// startup (config stores the raw values).
 	LeaseTTL        time.Duration `yaml:"lease_ttl"`
 	LeaseRenewEvery time.Duration `yaml:"lease_renew_every"`
 }

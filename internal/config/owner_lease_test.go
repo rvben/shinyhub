@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ func TestLoad_OwnerLeaseDefaults(t *testing.T) {
 		t.Fatal("InstanceID must default to a non-empty value")
 	}
 	// Default form is "<hostname>-<pid>".
-	if want := "-" + strconv.Itoa(os.Getpid()); !hasSuffix(cfg.Server.InstanceID, want) {
+	if want := "-" + strconv.Itoa(os.Getpid()); !strings.HasSuffix(cfg.Server.InstanceID, want) {
 		t.Fatalf("InstanceID = %q, want suffix %q", cfg.Server.InstanceID, want)
 	}
 	if cfg.Server.LeaseRenewEvery != 10*time.Second {
@@ -56,8 +57,4 @@ func TestLoad_OwnerLeaseExplicit(t *testing.T) {
 	if cfg.Server.LeaseRenewEvery != 20*time.Second {
 		t.Fatalf("LeaseRenewEvery = %v, want 20s", cfg.Server.LeaseRenewEvery)
 	}
-}
-
-func hasSuffix(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
