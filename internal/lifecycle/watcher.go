@@ -63,6 +63,8 @@ type MetricsRecorder interface {
 type appStore interface {
 	GetAppBySlug(slug string) (*db.App, error)
 	UpdateAppStatus(p db.UpdateAppStatusParams) error
+	BeginWake(slug string) (bool, error)
+	AbortWake(slug string) error
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
@@ -101,7 +103,6 @@ type Watcher struct {
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
 	attempts  map[replicaKey]int       // consecutive crash-restart attempts per replica
 	nextRetry map[replicaKey]time.Time // earliest time to retry a crashed replica
-	waking    map[string]bool          // true while a wake goroutine is in flight for slug
 
 	// wakeWG tracks in-flight OnMiss wake goroutines so shutdown can wait
 	// for them to persist replica/PID rows before the store is closed.
@@ -126,7 +127,6 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		deploy:    deployFn,
 		attempts:  make(map[replicaKey]int),
 		nextRetry: make(map[replicaKey]time.Time),
-		waking:    make(map[string]bool),
 	}
 }
 
@@ -474,39 +474,55 @@ func (w *Watcher) handleIdle(slug string) {
 // arrives for a hibernated app, this wakes it by re-running the deploy for all
 // replicas in parallel.
 func (w *Watcher) OnMiss(slug string) {
+	// CAS: exactly one caller (across concurrent requests AND across a brief
+	// two-process control-plane overlap during a zero-downtime handoff)
+	// transitions hibernated -> waking and proceeds to spawn; everyone else
+	// returns. This replaces the former in-memory per-process waking guard.
+	won, err := w.store.BeginWake(slug)
+	if err != nil {
+		slog.Warn("watcher: begin wake failed", "slug", slug, "err", err)
+		return
+	}
+	if !won {
+		return // not hibernated, or another caller is already waking it
+	}
+
 	w.mu.Lock()
 	if w.stopping {
 		w.mu.Unlock()
-		return // shutting down; do not start new app launches
+		// We won the CAS but are shutting down; revert so a successor wakes it.
+		if aerr := w.store.AbortWake(slug); aerr != nil {
+			slog.Warn("watcher: abort wake on shutdown failed", "slug", slug, "err", aerr)
+		}
+		return
 	}
-	if w.waking[slug] {
-		w.mu.Unlock()
-		return // already waking; concurrent requests share the same wake
-	}
-	w.waking[slug] = true
 	w.wakeWG.Add(1)
 	w.mu.Unlock()
 
 	go func() {
 		defer w.wakeWG.Done()
-		defer func() {
-			w.mu.Lock()
-			delete(w.waking, slug)
-			w.mu.Unlock()
-		}()
 
 		_, endSpan := w.traceOp(context.Background(), "lifecycle.wake", slug)
 		var opErr error
 		defer func() { endSpan(opErr) }()
 
+		// abortWake reverts waking -> hibernated so a later request can retry.
+		abortWake := func() {
+			if aerr := w.store.AbortWake(slug); aerr != nil {
+				slog.Warn("watcher: abort wake failed", "slug", slug, "err", aerr)
+			}
+		}
+
 		app, err := w.store.GetAppBySlug(slug)
-		if err != nil || app.Status != "hibernated" {
+		if err != nil {
 			opErr = err
+			abortWake()
 			return
 		}
 		deployments, err := w.store.ListDeployments(app.ID)
 		if err != nil || len(deployments) == 0 {
 			opErr = err
+			abortWake()
 			return
 		}
 
@@ -549,6 +565,10 @@ func (w *Watcher) OnMiss(slug string) {
 				slog.Warn("watcher: persist woken status failed", "slug", slug, "err", err)
 			}
 			w.recordTransition("wake")
+		} else {
+			// No replica came up; revert waking -> hibernated so a later request
+			// retries the wake instead of being stuck in waking forever.
+			abortWake()
 		}
 	}()
 }

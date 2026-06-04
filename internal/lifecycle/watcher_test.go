@@ -141,6 +141,36 @@ func (f *fakeStore) UpdateAppStatus(p db.UpdateAppStatusParams) error {
 	f.mu.Unlock()
 	return nil
 }
+
+// BeginWake mirrors the real store's CAS: hibernated -> waking, winner only.
+func (f *fakeStore) BeginWake(slug string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	app, ok := f.apps[slug]
+	if !ok || app.Status != "hibernated" {
+		return false, nil
+	}
+	app.Status = "waking"
+	if f.appStatus != nil {
+		f.appStatus[slug] = "waking"
+	}
+	return true, nil
+}
+
+// AbortWake mirrors the real store's reverse CAS: waking -> hibernated (no-op
+// otherwise).
+func (f *fakeStore) AbortWake(slug string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if app, ok := f.apps[slug]; ok && app.Status == "waking" {
+		app.Status = "hibernated"
+		if f.appStatus != nil {
+			f.appStatus[slug] = "hibernated"
+		}
+	}
+	return nil
+}
+
 func (f *fakeStore) ListDeployments(_ int64) ([]*db.Deployment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -203,7 +233,6 @@ func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
 		deploy:    deployFn,
 		attempts:  make(map[replicaKey]int),
 		nextRetry: make(map[replicaKey]time.Time),
-		waking:    make(map[string]bool),
 	}
 }
 
@@ -617,22 +646,25 @@ func TestHibernation_GloballyDisabled(t *testing.T) {
 	}
 }
 
-// waitNotWaking blocks until the OnMiss goroutine for slug has finished
-// (indicated by waking[slug] being cleared by its defer), or fails the
-// test after 2s.
-func waitNotWaking(t *testing.T, w *Watcher, slug string) {
+// waitNotWaking blocks until the wake for slug has finished, indicated by the
+// app leaving the transient "waking" status (set by BeginWake) for "running"
+// (success) or back to "hibernated" (reverted failure). Fails after 2s.
+func waitNotWaking(t *testing.T, st *fakeStore, slug string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		w.mu.Lock()
-		done := !w.waking[slug]
-		w.mu.Unlock()
-		if done {
+		st.mu.Lock()
+		s := ""
+		if app, ok := st.apps[slug]; ok {
+			s = app.Status
+		}
+		st.mu.Unlock()
+		if s != "waking" {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for OnMiss goroutine (slug=%q)", slug)
+	t.Fatalf("timed out waiting for wake to finish (slug=%q)", slug)
 }
 
 // --- wake-on-request tests ---
@@ -654,7 +686,7 @@ func TestWake_TriggeredOnMiss(t *testing.T) {
 		})
 
 	w.OnMiss("app")
-	waitNotWaking(t, w, "app")
+	waitNotWaking(t, st, "app")
 
 	mu.Lock()
 	gotDeployed := make([]string, len(deployed))
@@ -701,7 +733,7 @@ func TestWake_NoConcurrentWakes(t *testing.T) {
 	// Two concurrent OnMiss calls should result in exactly one deploy.
 	w.OnMiss("app")
 	w.OnMiss("app")
-	waitNotWaking(t, w, "app")
+	waitNotWaking(t, st, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 1 {
 		t.Errorf("expected exactly 1 deploy for concurrent OnMiss, got %d", n)
@@ -749,7 +781,7 @@ func TestWake_NonHibernatedAppNotRedeployed(t *testing.T) {
 		})
 
 	w.OnMiss("app")
-	waitNotWaking(t, w, "app")
+	waitNotWaking(t, st, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 0 {
 		t.Errorf("expected 0 deploys for non-hibernated app, got %d", n)
@@ -887,7 +919,7 @@ func TestWatcher_OnMissWakesAllReplicas(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 100 + idx, Port: 20000 + idx}, nil
 		})
 	w.OnMiss("demo")
-	waitNotWaking(t, w, "demo")
+	waitNotWaking(t, st, "demo")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -912,7 +944,7 @@ func TestWake_AllReplicasFailKeepsHibernated(t *testing.T) {
 		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("boom") })
 
 	w.OnMiss("demo")
-	waitNotWaking(t, w, "demo")
+	waitNotWaking(t, st, "demo")
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
