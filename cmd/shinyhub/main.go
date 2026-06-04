@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -49,6 +50,7 @@ import (
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
+	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/hkdf"
@@ -157,14 +159,18 @@ func main() {
 	}
 }
 
-// startMetricsListener binds addr and serves the Prometheus scrape endpoint at
-// /metrics on its own listener, separate from the main application listener so
-// server internals are never exposed on the public port. The returned server is
-// already serving in a background goroutine; the caller is responsible for
-// Shutdown. The listener is returned so callers can log the resolved address
-// (useful when addr requests an ephemeral :0 port).
-func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net.Listener, error) {
-	ln, err := net.Listen("tcp", addr)
+// listenFunc constructs a listener; injected so the metrics listener can be
+// routed through the upgrader (for zero-downtime handoff) or a fake in tests.
+type listenFunc func(network, addr string) (net.Listener, error)
+
+// startMetricsListener binds addr via listen and serves the Prometheus scrape
+// endpoint at /metrics on its own listener, separate from the main application
+// listener so server internals are never exposed on the public port. The
+// returned server is already serving in a background goroutine; the caller is
+// responsible for Shutdown. The listener is returned so callers can log the
+// resolved address (useful when addr requests an ephemeral :0 port).
+func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry) (*http.Server, net.Listener, error) {
+	ln, err := listen("tcp", addr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("metrics listen %s: %w", addr, err)
 	}
@@ -332,6 +338,37 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	sweepOrphanTempfiles(absAppDataDir)
+
+	// Zero-downtime upgrades require stable listener addresses: tableflip matches
+	// inherited sockets by network+addr, so an ephemeral port 0 would make the
+	// successor bind a fresh random port and silently break the handoff. Parse the
+	// numeric port rather than string-matching ":0" (which misses ":00" etc.).
+	if cfg.Server.Port == 0 {
+		return fmt.Errorf("server.port must be a fixed non-zero port for zero-downtime upgrades")
+	}
+	if cfg.Metrics.Enabled {
+		_, mport, perr := net.SplitHostPort(cfg.Metrics.Addr)
+		if perr != nil {
+			return fmt.Errorf("metrics.addr %q must be host:port: %w", cfg.Metrics.Addr, perr)
+		}
+		if n, aerr := strconv.Atoi(mport); aerr != nil || n == 0 {
+			return fmt.Errorf("metrics.addr must use a fixed non-zero port for zero-downtime upgrades, got %q", cfg.Metrics.Addr)
+		}
+	}
+
+	// Zero-downtime upgrades: tableflip lets a SIGHUP re-exec the new binary and
+	// inherit the listeners. All upg.Listen calls must precede upg.Ready().
+	upg, err := upgrade.New(cfg.Server.UpgradeTimeout, cfg.Server.PIDFile)
+	if err != nil {
+		return fmt.Errorf("init upgrader: %w", err)
+	}
+	defer upg.Stop()
+
+	// SIGHUP -> upgrade; ctx cancel (SIGINT/SIGTERM) -> Stop (closes Exit).
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	defer signal.Stop(sighup)
+	upgrade.WireSignals(ctx, upg, sighup, logger)
 
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
@@ -587,11 +624,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			},
 		)
 		var mln net.Listener
-		metricsSrv, mln, err = startMetricsListener(cfg.Metrics.Addr, reg)
+		metricsSrv, mln, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, reg)
 		if err != nil {
 			return err
 		}
 		slog.Info("metrics listening", "addr", mln.Addr().String())
+		// Tear down the metrics server on any early error return below. Idempotent
+		// with the ordered shutdown path (Close after Shutdown is a no-op), so it
+		// only matters when runServe returns before reaching that path.
+		defer func() { _ = metricsSrv.Close() }()
 	}
 
 	// Server tracing: when the existing tracing config is enabled, emit OTel
@@ -606,6 +647,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		srv.SetTracer(tracer)
 		slog.Info("server tracing enabled", "endpoint", cfg.Tracing.OTLPEndpoint, "protocol", cfg.Tracing.OTLPProtocol)
+		// Tear down the tracer on any early error return below (idempotent with
+		// the ordered shutdown path).
+		defer func() { _ = tracer.Shutdown(context.Background()) }()
 	}
 
 	// Emit a structured access log for every proxied app request. Using the
@@ -917,6 +961,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	scope := leader.NewOwnerScope(ownerWork)
+	// Stop the owner scope on any early error return below. Idempotent (Stop is a
+	// no-op when idle / already stopped), so it only matters on a return between
+	// here and the ordered shutdown path.
+	defer scope.Stop()
 	elector := leader.New(store, leader.Config{
 		InstanceID: cfg.Server.InstanceID,
 		TTL:        cfg.Server.LeaseTTL,
@@ -1005,7 +1053,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := upg.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
@@ -1020,6 +1068,35 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		close(serveErr)
 	}()
 
+	// Signal readiness: closes inherited-but-unused fds, writes the PID file, and
+	// (when this is an upgrade child) tells the old process it may begin draining.
+	// On error, close the servers we just started so we do not leak listeners and
+	// goroutines, then return.
+	if err := upg.Ready(); err != nil {
+		_ = httpSrv.Close()
+		if metricsSrv != nil {
+			_ = metricsSrv.Close()
+		}
+		cancelElector()
+		scope.Stop()
+		return fmt.Errorf("upgrade ready: %w", err)
+	}
+	// Tell systemd (Type=notify) we are the live process and retarget MAINPID to
+	// this PID, so a handoff successor is tracked. NotifyReady is a no-op (returns
+	// nil) when $NOTIFY_SOCKET is unset, so a non-nil error here means we ARE under
+	// systemd and the notify failed - which is fatal: systemd would kill us at
+	// TimeoutStartSec, and a successor that fails to retarget MAINPID after
+	// upg.Ready() already told the parent to drain would be left unmanaged.
+	if err := upgrade.NotifyReady(); err != nil {
+		_ = httpSrv.Close()
+		if metricsSrv != nil {
+			_ = metricsSrv.Close()
+		}
+		cancelElector()
+		scope.Stop()
+		return fmt.Errorf("sd_notify: %w", err)
+	}
+
 	select {
 	case err := <-serveErr:
 		if err != nil {
@@ -1027,8 +1104,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			scope.Stop()
 			return fmt.Errorf("http server: %w", err)
 		}
-	case <-ctx.Done():
-		slog.Info("shutdown signal received, draining")
+	case <-upg.Exit():
+		slog.Info("shutdown/handoff initiated, draining")
 	}
 	// Mark unready for both the signal and clean self-stop paths.
 	prx.SetDraining(true)

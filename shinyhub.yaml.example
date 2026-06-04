@@ -22,6 +22,10 @@ server:
                                       #   adopt (default) - leave running; re-adopt on restart (zero-downtime upgrades)
                                       #   stop            - gracefully stop all apps before exit (clean host state)
   # SHINYHUB_SHUTDOWN_APPS=stop
+  # Zero-downtime upgrades (systemd): on SIGHUP the process re-execs the new
+  # binary and hands off the listeners. See docs/zero-downtime-upgrades.md.
+  pid_file: ""                        # e.g. /run/shinyhub/shinyhub.pid (required for systemd)  # SHINYHUB_PID_FILE
+  upgrade_timeout: 60s                # wait for the successor to become ready before aborting  # SHINYHUB_UPGRADE_TIMEOUT
 
 auth:
   # REQUIRED. 32+ characters. Generate with: openssl rand -hex 32

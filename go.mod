@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.304.1
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.81.1
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.42.0
+	github.com/cloudflare/tableflip v1.2.3
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/golang-jwt/jwt/v5 v5.3.1

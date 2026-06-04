@@ -276,6 +276,16 @@ type ServerConfig struct {
 	// (hijacked) app sessions to close before force-closing them. Sites with
 	// long-lived sessions should raise it. Defaults to 60s.
 	DrainTimeout time.Duration `yaml:"drain_timeout"`
+
+	// UpgradeTimeout bounds how long the old process waits for a new one to
+	// signal Ready during a zero-downtime upgrade (SIGHUP) before aborting the
+	// upgrade and continuing to serve. Defaults to 60s.
+	UpgradeTimeout time.Duration `yaml:"upgrade_timeout"`
+
+	// PIDFile, when set, receives the ready process's PID on startup and after
+	// each zero-downtime handoff. Required for the systemd path (MAINPID
+	// tracking via PIDFile=). Empty (default) writes no PID file.
+	PIDFile string `yaml:"pid_file"`
 }
 
 type AuthConfig struct {
@@ -782,6 +792,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.DrainTimeout <= 0 {
 		cfg.Server.DrainTimeout = 60 * time.Second
+	}
+	if cfg.Server.UpgradeTimeout <= 0 {
+		cfg.Server.UpgradeTimeout = 60 * time.Second
 	}
 
 	if cfg.OAuth.OIDC.DisplayName == "" && cfg.OAuth.OIDC.IssuerURL != "" {
@@ -1348,6 +1361,19 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
+	}
+	if v := os.Getenv("SHINYHUB_PID_FILE"); v != "" {
+		cfg.Server.PIDFile = v
+	}
+	if v := os.Getenv("SHINYHUB_UPGRADE_TIMEOUT"); v != "" {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("parse SHINYHUB_UPGRADE_TIMEOUT %q: %w", v, perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("SHINYHUB_UPGRADE_TIMEOUT must be positive, got %q", v)
+		}
+		cfg.Server.UpgradeTimeout = d
 	}
 	if v := os.Getenv("SHINYHUB_APPS_DIR"); v != "" {
 		cfg.Storage.AppsDir = v
