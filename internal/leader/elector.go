@@ -41,8 +41,13 @@ type Elector struct {
 
 // clampTTL enforces the Config invariant that the lease TTL is at least twice
 // the renewal interval, so a single missed renewal never expires an otherwise
-// healthy lease. A non-positive TTL is raised to that floor too.
+// healthy lease. A non-positive TTL is raised to that floor too. When
+// renewEvery is non-positive the TTL is returned unchanged (such a config is
+// already degenerate and is rejected elsewhere).
 func clampTTL(ttl, renewEvery time.Duration) time.Duration {
+	if renewEvery <= 0 {
+		return ttl
+	}
 	floor := 2 * renewEvery
 	if ttl < floor {
 		return floor

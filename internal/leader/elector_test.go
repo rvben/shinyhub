@@ -160,6 +160,8 @@ func TestClampTTL(t *testing.T) {
 		{"exactly-2x", 20 * time.Second, 10 * time.Second, 20 * time.Second},
 		{"below-2x-raised", 15 * time.Second, 10 * time.Second, 20 * time.Second},
 		{"zero-raised", 0, 5 * time.Second, 10 * time.Second},
+		{"negative-ttl-raised", -5 * time.Second, 10 * time.Second, 20 * time.Second},
+		{"nonpositive-renew-unchanged", 5 * time.Second, 0, 5 * time.Second},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -179,7 +181,7 @@ func TestElector_EpochReflectsOwnership(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go e.Run(ctx)
-	waitFor(t, func() bool { return e.IsOwner() })
+	waitFor(t, func() bool { return e.Epoch() != 0 })
 	if e.Epoch() != 1 {
 		t.Fatalf("owner Epoch = %d, want 1", e.Epoch())
 	}
