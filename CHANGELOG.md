@@ -32,6 +32,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.7.3](https://github.com/rvben/shinyhub/compare/v0.7.2...v0.7.3) - 2026-06-04
+
+### Fixed
+
+- **worker**: run app container as the bundle-owner uid with a writable HOME ([e9c2820](https://github.com/rvben/shinyhub/commit/e9c28209f76665963f313eb0f7c91d41bbbfce5d))
+- **worker**: pull the app image before creating a container ([42db42f](https://github.com/rvben/shinyhub/commit/42db42f4408ec9446c8138435d0c2b59a0860438))
+- **worker**: make a worker routable only once its data-plane listener is up ([bd3029f](https://github.com/rvben/shinyhub/commit/bd3029fc033b717ae1905e3641b7893a4dce8ea1))
+
 ## [0.7.2](https://github.com/rvben/shinyhub/compare/v0.7.1...v0.7.2) - 2026-06-03
 
 ### Added
