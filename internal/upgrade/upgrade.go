@@ -5,7 +5,12 @@
 package upgrade
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"net"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/cloudflare/tableflip"
@@ -40,4 +45,52 @@ func New(timeout time.Duration, pidFile string) (Upgrader, error) {
 		UpgradeTimeout: timeout,
 		PIDFile:        pidFile,
 	})
+}
+
+// WireSignals connects process signals to the upgrader lifecycle and returns
+// immediately (it launches one goroutine per concern):
+//   - each value on sighup triggers a zero-downtime Upgrade; a failed upgrade is
+//     logged and the current process keeps serving.
+//   - ctx cancellation (SIGINT/SIGTERM via signal.NotifyContext) calls Stop,
+//     which closes Exit so the main loop proceeds to graceful shutdown.
+func WireSignals(ctx context.Context, upg Upgrader, sighup <-chan os.Signal, log *slog.Logger) {
+	go func() {
+		for range sighup {
+			log.Info("SIGHUP received, starting zero-downtime upgrade")
+			if err := upg.Upgrade(); err != nil {
+				log.Error("zero-downtime upgrade failed; continuing to serve", "err", err)
+				continue
+			}
+			log.Info("zero-downtime upgrade succeeded; successor is ready")
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		upg.Stop()
+	}()
+}
+
+// NotifyReady tells systemd (Type=notify) that this process is the live service:
+// it sends READY=1 and MAINPID=<own pid> to $NOTIFY_SOCKET so systemd retargets
+// MAINPID to the successor after every zero-downtime handoff. It is a no-op when
+// $NOTIFY_SOCKET is unset (dev, macOS, non-systemd). Call once, right after
+// Upgrader.Ready().
+func NotifyReady() error {
+	sock := os.Getenv("NOTIFY_SOCKET")
+	if sock == "" {
+		return nil
+	}
+	// Abstract namespace sockets are encoded with a leading '@' in NOTIFY_SOCKET.
+	if strings.HasPrefix(sock, "@") {
+		sock = "\x00" + sock[1:]
+	}
+	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: sock, Net: "unixgram"})
+	if err != nil {
+		return fmt.Errorf("sd_notify dial: %w", err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "READY=1\nMAINPID=%d\n", os.Getpid()); err != nil {
+		return fmt.Errorf("sd_notify write: %w", err)
+	}
+	return nil
 }
