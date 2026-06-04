@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -492,7 +491,8 @@ func (s *Server) SetJobs(j *jobs.Manager, sc *scheduler.Scheduler) {
 // SetOwnership wires the predicate reporting whether this instance holds the
 // control-plane ownership lease. Mutating API requests are rejected with 503 on
 // a non-owner so that during a zero-downtime handoff only the lease owner
-// mutates cluster state.
+// mutates cluster state. Call this once during startup before the server begins
+// handling requests; it is not safe to call concurrently with live traffic.
 func (s *Server) SetOwnership(isOwner func() bool) {
 	s.isOwner = isOwner
 }
@@ -507,7 +507,13 @@ func (s *Server) ownerGuard(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/auth/") {
+		// The authenticated dashboard must stay usable during a handoff so a user
+		// can still end their session. Logout is the only mutating auth route in
+		// this group; /api/auth/me is a GET already passed above. Keep this an
+		// explicit allowlist so any future /api/auth mutation is gated unless
+		// deliberately added here.
+		switch r.URL.Path {
+		case "/api/auth/logout", "/api/auth/me":
 			next.ServeHTTP(w, r)
 			return
 		}

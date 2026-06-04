@@ -18,7 +18,7 @@ func TestOwnerGuard_NonOwnerBlocksMutations(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(m, "/api/apps/foo/deploy", nil))
 		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("%s mutation: code = %d, want 503", m, rec.Code)
+			t.Errorf("%s mutation: code = %d, want 503", m, rec.Code)
 		}
 	}
 
@@ -27,6 +27,14 @@ func TestOwnerGuard_NonOwnerBlocksMutations(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/apps", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET read: code = %d, want 200", rec.Code)
+	}
+
+	for _, m := range []string{http.MethodHead, http.MethodOptions} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(m, "/api/apps", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s read: code = %d, want 200", m, rec.Code)
+		}
 	}
 
 	// Auth endpoints pass even when mutating (login/logout during a handoff).
