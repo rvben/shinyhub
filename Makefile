@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint fmt fmt-check run dev goreleaser-check build-runner-image
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -38,6 +38,20 @@ test-fargate-it:
 
 lint:
 	go vet ./...
+
+# skill-lint runs static checks on the deploy-shinyhub skill: frontmatter,
+# example bundle present, referenced docs exist, no em/en dashes. No network or
+# build, so it is safe to run anywhere; CI runs it on every push.
+skill-lint:
+	./scripts/skill-lint.sh
+
+# skill-smoke stands up a server and deploys the skill's example app exactly as
+# skills/deploy-shinyhub/SKILL.md documents, asserting the proxy serves it (200).
+# The example app installs `shiny` via uv on first start, so this needs uv plus
+# network; it SKIPS (exit 0) when uv is absent so offline runs stay green. CI
+# installs uv and runs it for real.
+skill-smoke:
+	./scripts/skill-smoke.sh
 
 # fmt rewrites all tracked Go files with gofmt (go 1.26 canonical formatting).
 # Scoped to tracked files via git ls-files so nested worktrees under .claude/

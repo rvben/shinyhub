@@ -22,6 +22,9 @@ jobs:
       - name: Lint
         run: go vet ./...
 
+      - name: Skill lint
+        run: make skill-lint
+
       # Compile-check the build-tag-gated tests (integration = real AWS ECS,
       # e2e = proxy distribution). They never run in the default suite, so
       # without this they silently rot when the code they call is renamed.
@@ -53,3 +56,27 @@ jobs:
 
       - name: Remote-worker E2E (Docker)
         run: make test-remote-e2e
+
+  # Skill smoke: deploys the deploy-shinyhub skill's example app onto a real
+  # server (native runtime) and asserts the proxy serves it (HTTP 200). Guards
+  # the skill against drift in CLI flags, env vars, or the deploy flow. Its own
+  # job because the example app installs `shiny` via uv on first start (needs uv
+  # + network); the make target skips when uv is absent so local runs stay green.
+  skill-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Skill smoke (deploy example app)
+        run: make skill-smoke
