@@ -595,6 +595,9 @@ func (s *Server) buildRouter() chi.Router {
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.userLookup, s.revocationChecker())
 	csrf := auth.CSRFMiddleware(s.cfg.TrustedProxyNets)
 	r.Group(func(r chi.Router) {
+		if s.cfg.Auth.ForwardAuth.Enabled {
+			r.Use(auth.ForwardAuthMiddleware(s.store, faConfigToAuth(s.cfg.Auth.ForwardAuth), s.cfg.TrustedProxyNets))
+		}
 		r.Use(bearer)
 		r.Use(csrf)
 
@@ -753,5 +756,19 @@ func (s *Server) rateLimitByIP(rl *keyedRateLimiter) func(http.Handler) http.Han
 			}
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+// faConfigToAuth converts the config-package ForwardAuthConfig into the
+// auth-package equivalent. The two structs are intentionally duplicated so the
+// auth package does not depend on config.
+func faConfigToAuth(c config.ForwardAuthConfig) auth.ForwardAuthConfig {
+	return auth.ForwardAuthConfig{
+		Enabled:      c.Enabled,
+		UserHeader:   c.UserHeader,
+		EmailHeader:  c.EmailHeader,
+		GroupsHeader: c.GroupsHeader,
+		AdminGroups:  c.AdminGroups,
+		DefaultRole:  c.DefaultRole,
 	}
 }
