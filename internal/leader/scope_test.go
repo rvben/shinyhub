@@ -10,18 +10,14 @@ import (
 func TestOwnerScope_AcquireRunsWork_LoseCancels(t *testing.T) {
 	started := make(chan struct{})
 	var ctxErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
 	scope := NewOwnerScope(func(ctx context.Context, epoch int64) {
-		defer wg.Done()
 		close(started)
 		<-ctx.Done()
 		ctxErr = ctx.Err()
 	})
 	scope.Acquire(1)
 	<-started
-	scope.Lose()
-	wg.Wait()
+	scope.Lose() // joins the work goroutine, so ctxErr is visible below
 	if ctxErr == nil {
 		t.Fatal("work context must be cancelled on Lose")
 	}
@@ -58,4 +54,20 @@ func TestOwnerScope_ReacquireRestartsWork(t *testing.T) {
 func TestOwnerScope_LoseWhenIdleIsNoop(t *testing.T) {
 	scope := NewOwnerScope(func(ctx context.Context, epoch int64) { <-ctx.Done() })
 	scope.Lose() // must neither panic nor block
+}
+
+func TestOwnerScope_ConcurrentStopIsSafe(t *testing.T) {
+	running := make(chan struct{})
+	scope := NewOwnerScope(func(ctx context.Context, epoch int64) {
+		close(running)
+		<-ctx.Done()
+	})
+	scope.Acquire(1)
+	<-running
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); scope.Stop() }()
+	}
+	wg.Wait() // all concurrent Stop() calls must return without panic or deadlock
 }

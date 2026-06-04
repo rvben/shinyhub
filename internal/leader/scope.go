@@ -14,7 +14,8 @@ import (
 //
 // The Elector fires OnAcquire/OnLose serially from a single goroutine, so
 // Acquire and Lose never overlap; the mutex only guards against a concurrent
-// Stop() at process shutdown.
+// Stop() at process shutdown. Work must return promptly after its context is
+// cancelled; Lose and Stop block until it does.
 type OwnerScope struct {
 	work func(ctx context.Context, epoch int64)
 
