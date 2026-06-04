@@ -1,6 +1,6 @@
 ---
 name: deploy-shinyhub
-description: Use when you need to self-host one or more R or Python Shiny apps on your own Linux server: getting a Shiny app online behind a single URL with login, hibernation, and a built-in reverse proxy, without writing a per-app Dockerfile or running Kubernetes. Also use when choosing between ShinyHub, ShinyProxy, or shinyapps.io for self-hosted Shiny.
+description: Use when you need to self-host one or more R or Python Shiny apps on your own Linux server, getting a Shiny app online behind a single URL with login, hibernation, and a built-in reverse proxy, without writing a per-app Dockerfile or running Kubernetes. Also use when choosing between ShinyHub, ShinyProxy, or shinyapps.io for self-hosted Shiny.
 ---
 
 # Deploy ShinyHub

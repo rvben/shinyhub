@@ -21,6 +21,26 @@ fail() { echo "SKILL-LINT FAIL: $*" >&2; exit 1; }
 head -n 20 "${SKILL}" | grep -Eq '^name:[[:space:]]*[^[:space:]]' || fail "frontmatter missing 'name:'"
 head -n 20 "${SKILL}" | grep -Eq '^description:[[:space:]]*[^[:space:]]' || fail "frontmatter missing 'description:'"
 
+# Frontmatter must be valid YAML. The common break is an unquoted value that
+# contains ": " (colon-space), which YAML reads as a nested mapping and rejects -
+# marketplaces then silently drop the skill ("no skills found"). Flag any
+# top-level frontmatter value that is unquoted and contains a colon-space.
+fm_bad="$(perl -0777 -ne '
+  if (/^---\s*$(.*?)^---\s*$/ms) {
+    for my $line (split /\n/, $1) {
+      next unless $line =~ /^([A-Za-z0-9_-]+):\s+(.*)$/;
+      my $val = $2;
+      next if $val =~ /^["\x27]/;   # a quoted value is safe
+      print "$line\n" if $val =~ /:\s/;
+    }
+  }
+' "${SKILL}" 2>/dev/null || true)"
+if [ -n "${fm_bad}" ]; then
+  echo "frontmatter value is unquoted and contains \": \" (breaks YAML); quote it or drop the colon:" >&2
+  echo "${fm_bad}" >&2
+  fail "frontmatter is not valid YAML"
+fi
+
 # Example bundle must exist (skill instructs deploying it; smoke test runs it).
 [ -f "${SKILL_DIR}/example-app/app.py" ] || fail "missing example-app/app.py"
 [ -f "${SKILL_DIR}/example-app/requirements.txt" ] || fail "missing example-app/requirements.txt"
