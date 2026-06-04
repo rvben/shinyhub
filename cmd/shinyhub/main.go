@@ -157,14 +157,18 @@ func main() {
 	}
 }
 
-// startMetricsListener binds addr and serves the Prometheus scrape endpoint at
-// /metrics on its own listener, separate from the main application listener so
-// server internals are never exposed on the public port. The returned server is
-// already serving in a background goroutine; the caller is responsible for
-// Shutdown. The listener is returned so callers can log the resolved address
-// (useful when addr requests an ephemeral :0 port).
-func startMetricsListener(addr string, reg *metrics.Registry) (*http.Server, net.Listener, error) {
-	ln, err := net.Listen("tcp", addr)
+// listenFunc constructs a listener; injected so the metrics listener can be
+// routed through the upgrader (for zero-downtime handoff) or a fake in tests.
+type listenFunc func(network, addr string) (net.Listener, error)
+
+// startMetricsListener binds addr via listen and serves the Prometheus scrape
+// endpoint at /metrics on its own listener, separate from the main application
+// listener so server internals are never exposed on the public port. The
+// returned server is already serving in a background goroutine; the caller is
+// responsible for Shutdown. The listener is returned so callers can log the
+// resolved address (useful when addr requests an ephemeral :0 port).
+func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry) (*http.Server, net.Listener, error) {
+	ln, err := listen("tcp", addr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("metrics listen %s: %w", addr, err)
 	}
@@ -587,7 +591,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			},
 		)
 		var mln net.Listener
-		metricsSrv, mln, err = startMetricsListener(cfg.Metrics.Addr, reg)
+		metricsSrv, mln, err = startMetricsListener(net.Listen, cfg.Metrics.Addr, reg)
 		if err != nil {
 			return err
 		}
