@@ -1029,8 +1029,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 	case <-ctx.Done():
 		slog.Info("shutdown signal received, draining")
-		prx.SetDraining(true)
 	}
+	// Mark unready for both the signal and clean self-stop paths.
+	prx.SetDraining(true)
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelShutdown()
@@ -1057,8 +1058,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	// Drain live WebSocket (hijacked) app sessions: http.Server.Shutdown does
 	// not wait for hijacked connections, so wait here up to drain_timeout, then
-	// force-close stragglers. Apps stay running (shutdown_apps=adopt), so these
-	// sessions keep flowing to their backends until the user closes them.
+	// force-close stragglers. App backends (separate processes) remain alive
+	// during this window, so sessions keep flowing until drained or force-closed.
 	if n := prx.ActiveUpgradedConns(); n > 0 {
 		slog.Info("draining upgraded connections", "count", n, "timeout", cfg.Server.DrainTimeout)
 		if forced := prx.DrainUpgraded(cfg.Server.DrainTimeout); forced > 0 {
