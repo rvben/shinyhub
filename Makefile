@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -25,6 +25,12 @@ test-js:
 # lost-replica handling). Requires a working Docker daemon.
 test-remote-e2e:
 	./scripts/remote-e2e.sh
+
+# test-handoff builds the binary and verifies a SIGHUP upgrade hands off both
+# the main and metrics listeners with no connection-refused gap and a new
+# process taking over (zero-downtime upgrade). No Docker required.
+test-handoff:
+	./scripts/handoff-e2e.sh
 
 # test-fargate-it runs the Fargate runtime's real-cluster smoke test (launch a
 # task, assert routing + inventory, stop it). It is gated behind the `integration`

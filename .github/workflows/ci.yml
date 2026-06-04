@@ -57,6 +57,24 @@ jobs:
       - name: Remote-worker E2E (Docker)
         run: make test-remote-e2e
 
+  # Zero-downtime handoff end-to-end: builds the binary, sends SIGHUP, and asserts
+  # the main + metrics listeners hand off to a successor process with no
+  # connection-refused gap. Its own job because it builds and runs the real binary
+  # (tableflip cannot re-exec under `go test`); no Docker needed.
+  test-handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Zero-downtime handoff E2E
+        run: make test-handoff
+
   # Skill smoke: deploys the deploy-shinyhub skill's example app onto a real
   # server (native runtime) and asserts the proxy serves it (HTTP 200). Guards
   # the skill against drift in CLI flags, env vars, or the deploy flow. Its own
