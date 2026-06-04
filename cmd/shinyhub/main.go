@@ -958,6 +958,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if prx.Draining() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"ready":false,"reason":"draining"}`))
+			return
+		}
 		select {
 		case <-readyCh:
 		default:
@@ -1023,6 +1029,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 	case <-ctx.Done():
 		slog.Info("shutdown signal received, draining")
+		prx.SetDraining(true)
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1047,6 +1054,19 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	scope.Stop()
 	// Drain in-flight scheduled job runs before the store closes.
 	jobsMgr.Stop(shutdownCtx)
+
+	// Drain live WebSocket (hijacked) app sessions: http.Server.Shutdown does
+	// not wait for hijacked connections, so wait here up to drain_timeout, then
+	// force-close stragglers. Apps stay running (shutdown_apps=adopt), so these
+	// sessions keep flowing to their backends until the user closes them.
+	if n := prx.ActiveUpgradedConns(); n > 0 {
+		slog.Info("draining upgraded connections", "count", n, "timeout", cfg.Server.DrainTimeout)
+		if forced := prx.DrainUpgraded(cfg.Server.DrainTimeout); forced > 0 {
+			slog.Warn("drain timeout reached, force-closed upgraded connections", "count", forced)
+		} else {
+			slog.Info("upgraded connections drained cleanly")
+		}
+	}
 
 	switch cfg.Server.ShutdownApps {
 	case "stop":
