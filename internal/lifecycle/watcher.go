@@ -597,6 +597,24 @@ func (w *Watcher) OnMiss(slug string) {
 		finalized = true
 		if woke {
 			w.recordTransition("wake")
+			return
+		}
+		// FinishWake lost: a concurrent stop/delete moved the app off "waking"
+		// while this wake was deploying, so it left live replicas behind for an
+		// app the operator no longer wants running. Re-fetch the current intent
+		// and, only if it is stopped/deleting, tear down the replicas this wake
+		// started (idempotent with the operator's own teardown). The status gate
+		// avoids killing replicas of an app that was stopped then re-started
+		// during the wake window. (The fully race-free fix is a shared per-slug
+		// lifecycle lock between the API mutators and the watcher; that is a
+		// broader hardening that also covers crash-restart.)
+		cur, gerr := w.store.GetAppBySlug(slug)
+		if gerr == nil && (cur.Status == "stopped" || cur.Status == "deleting") {
+			slog.Info("watcher: wake superseded by stop/delete; stopping replicas it started", "slug", slug, "status", cur.Status)
+			w.prx.Deregister(slug)
+			if serr := w.mgr.Stop(slug); serr != nil {
+				slog.Warn("watcher: stop superseded-wake replicas failed", "slug", slug, "err", serr)
+			}
 		}
 	}()
 }

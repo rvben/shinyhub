@@ -754,6 +754,44 @@ func TestWake_NoConcurrentWakes(t *testing.T) {
 	}
 }
 
+// TestWake_SupersededByStopTearsDownReplicas proves that when a concurrent stop
+// moves the app off "waking" while the wake is deploying, the wake leaves the
+// stopped status intact (FinishWake loses the CAS) AND tears down the replicas
+// it started, so no live processes are orphaned for a stopped app.
+func TestWake_SupersededByStopTearsDownReplicas(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	mgr := &fakeManager{}
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, prx, st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			// Simulate a concurrent stop landing mid-deploy: move off "waking".
+			_ = st.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "app", Status: "stopped"})
+			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
+		})
+
+	w.OnMiss("app")
+	w.wakeWG.Wait() // deterministic: blocks until the wake goroutine fully exits
+
+	if got := st.apps["app"].Status; got != "stopped" {
+		t.Fatalf("app status = %q, want stopped (wake must not clobber a concurrent stop)", got)
+	}
+	mgr.mu.Lock()
+	stopped := append([]string(nil), mgr.stopped...)
+	mgr.mu.Unlock()
+	found := false
+	for _, s := range stopped {
+		if s == "app" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected mgr.Stop(app) to tear down superseded-wake replicas, got %v", stopped)
+	}
+}
+
 func TestHibernation_ActiveAppNotStopped(t *testing.T) {
 	mgr := &fakeManager{entries: []*process.ProcessInfo{
 		{Slug: "app", Index: 0, Status: process.StatusRunning},
