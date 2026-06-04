@@ -728,6 +728,56 @@ func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
 	return nil
 }
 
+// BeginWake atomically transitions a hibernated app to "waking" and reports
+// whether THIS caller won the transition. It replaces the watcher's in-memory
+// waking guard: exactly one caller (even across a brief two-process control-
+// plane overlap during a zero-downtime handoff) gets won=true and performs the
+// spawn; everyone else gets false and returns.
+func (s *Store) BeginWake(slug string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE apps SET status = 'waking', updated_at = CURRENT_TIMESTAMP
+		   WHERE slug = ? AND status = 'hibernated'`,
+		slug,
+	)
+	if err != nil {
+		return false, fmt.Errorf("begin wake: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// AbortWake reverts a "waking" app to "hibernated" after a failed wake so a
+// later request retries. It is a no-op if the app already moved on (e.g. a
+// concurrent stop/delete moved it off "waking"), so it never clobbers a newer
+// intent.
+func (s *Store) AbortWake(slug string) error {
+	if _, err := s.db.Exec(
+		`UPDATE apps SET status = 'hibernated', updated_at = CURRENT_TIMESTAMP
+		   WHERE slug = ? AND status = 'waking'`,
+		slug,
+	); err != nil {
+		return fmt.Errorf("abort wake: %w", err)
+	}
+	return nil
+}
+
+// FinishWake transitions a "waking" app to "running" and reports whether the
+// transition happened. It is conditional on the app still being "waking", so a
+// concurrent stop/delete that moved the app off "waking" during the wake is not
+// clobbered back to running (won=false, the caller leaves the newer status).
+func (s *Store) FinishWake(slug string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE apps SET status = 'running', updated_at = CURRENT_TIMESTAMP
+		   WHERE slug = ? AND status = 'waking'`,
+		slug,
+	)
+	if err != nil {
+		return false, fmt.Errorf("finish wake: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 func (s *Store) IncrementDeployCount(slug string) error {
 	_, err := s.db.Exec(`UPDATE apps SET deploy_count = deploy_count + 1 WHERE slug = ?`, slug)
 	if err != nil {

@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -63,6 +64,9 @@ type MetricsRecorder interface {
 type appStore interface {
 	GetAppBySlug(slug string) (*db.App, error)
 	UpdateAppStatus(p db.UpdateAppStatusParams) error
+	BeginWake(slug string) (bool, error)
+	AbortWake(slug string) error
+	FinishWake(slug string) (bool, error)
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
@@ -101,7 +105,6 @@ type Watcher struct {
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
 	attempts  map[replicaKey]int       // consecutive crash-restart attempts per replica
 	nextRetry map[replicaKey]time.Time // earliest time to retry a crashed replica
-	waking    map[string]bool          // true while a wake goroutine is in flight for slug
 
 	// wakeWG tracks in-flight OnMiss wake goroutines so shutdown can wait
 	// for them to persist replica/PID rows before the store is closed.
@@ -126,7 +129,6 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		deploy:    deployFn,
 		attempts:  make(map[replicaKey]int),
 		nextRetry: make(map[replicaKey]time.Time),
-		waking:    make(map[string]bool),
 	}
 }
 
@@ -474,34 +476,66 @@ func (w *Watcher) handleIdle(slug string) {
 // arrives for a hibernated app, this wakes it by re-running the deploy for all
 // replicas in parallel.
 func (w *Watcher) OnMiss(slug string) {
+	// CAS: exactly one caller (across concurrent requests AND across a brief
+	// two-process control-plane overlap during a zero-downtime handoff)
+	// transitions hibernated -> waking and proceeds to spawn; everyone else
+	// returns. This replaces the former in-memory per-process waking guard.
+	won, err := w.store.BeginWake(slug)
+	if err != nil {
+		slog.Warn("watcher: begin wake failed", "slug", slug, "err", err)
+		return
+	}
+	if !won {
+		return // not hibernated, or another caller is already waking it
+	}
+
 	w.mu.Lock()
 	if w.stopping {
 		w.mu.Unlock()
-		return // shutting down; do not start new app launches
+		// We won the CAS but are shutting down; revert so a successor wakes it.
+		if aerr := w.store.AbortWake(slug); aerr != nil {
+			slog.Warn("watcher: abort wake on shutdown failed", "slug", slug, "err", aerr)
+		}
+		return
 	}
-	if w.waking[slug] {
-		w.mu.Unlock()
-		return // already waking; concurrent requests share the same wake
-	}
-	w.waking[slug] = true
 	w.wakeWG.Add(1)
 	w.mu.Unlock()
 
 	go func() {
 		defer w.wakeWG.Done()
-		defer func() {
-			w.mu.Lock()
-			delete(w.waking, slug)
-			w.mu.Unlock()
-		}()
 
 		_, endSpan := w.traceOp(context.Background(), "lifecycle.wake", slug)
 		var opErr error
 		defer func() { endSpan(opErr) }()
 
+		// finalized is set once the wake reaches a stable terminal state (running,
+		// or the app's intent was changed out from under us by a concurrent
+		// stop/delete). Until then, the deferred guard reverts waking ->
+		// hibernated so the app is NEVER left stuck in the transient waking state -
+		// including on a panic. AbortWake is a conditional CAS (only acts while
+		// status is still waking), so it never clobbers a newer intent.
+		finalized := false
+		defer func() {
+			if r := recover(); r != nil {
+				opErr = fmt.Errorf("wake panicked: %v", r)
+				slog.Error("watcher: wake panicked", "slug", slug, "panic", r)
+			}
+			if !finalized {
+				if aerr := w.store.AbortWake(slug); aerr != nil {
+					slog.Warn("watcher: abort wake failed", "slug", slug, "err", aerr)
+				}
+			}
+		}()
+
 		app, err := w.store.GetAppBySlug(slug)
-		if err != nil || app.Status != "hibernated" {
+		if err != nil {
 			opErr = err
+			return
+		}
+		if app.Status != "waking" {
+			// A concurrent stop/delete changed the app's intent after we won the
+			// CAS. Abandon the wake and preserve the newer status (do not revert).
+			finalized = true
 			return
 		}
 		deployments, err := w.store.ListDeployments(app.ID)
@@ -544,11 +578,50 @@ func (w *Watcher) OnMiss(slug string) {
 			}(i)
 		}
 		wg.Wait()
-		if started.Load() > 0 {
-			if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {
-				slog.Warn("watcher: persist woken status failed", "slug", slug, "err", err)
-			}
+		if started.Load() == 0 {
+			// No replica came up; the deferred guard reverts waking -> hibernated
+			// so a later request retries instead of being stuck in waking.
+			return
+		}
+		// Finalize waking -> running via a conditional CAS. If a concurrent
+		// stop/delete moved the app off waking during the deploy, FinishWake wins
+		// 0 rows and we leave their newer status (the deferred guard's AbortWake is
+		// also conditional, so it is a no-op in that case). On a DB error we leave
+		// !finalized so the guard reverts to a stable terminal state.
+		woke, ferr := w.store.FinishWake(slug)
+		if ferr != nil {
+			opErr = ferr
+			slog.Warn("watcher: finish wake failed", "slug", slug, "err", ferr)
+			return
+		}
+		finalized = true
+		if woke {
 			w.recordTransition("wake")
+			return
+		}
+		// FinishWake lost: a concurrent stop/delete moved the app off "waking"
+		// while this wake was deploying, so it left live replicas behind for an
+		// app the operator no longer wants running. Tear down the replicas this
+		// wake started (idempotent with the operator's own teardown) when the
+		// current intent is stopped/deleting, or when the app row is already gone
+		// (a delete that finished). The status gate avoids killing replicas of an
+		// app that was stopped then re-started during the wake window. (The fully
+		// race-free fix is a shared per-slug lifecycle lock between the API
+		// mutators and the watcher; that is a broader hardening that also covers
+		// crash-restart.)
+		tearDownStarted := func(reason string) {
+			slog.Info("watcher: wake superseded; stopping replicas it started", "slug", slug, "reason", reason)
+			w.prx.Deregister(slug)
+			if serr := w.mgr.Stop(slug); serr != nil {
+				slog.Warn("watcher: stop superseded-wake replicas failed", "slug", slug, "err", serr)
+			}
+		}
+		cur, gerr := w.store.GetAppBySlug(slug)
+		switch {
+		case errors.Is(gerr, db.ErrNotFound):
+			tearDownStarted("deleted")
+		case gerr == nil && (cur.Status == "stopped" || cur.Status == "deleting"):
+			tearDownStarted(cur.Status)
 		}
 	}()
 }

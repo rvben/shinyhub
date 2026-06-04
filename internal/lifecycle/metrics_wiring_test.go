@@ -78,7 +78,7 @@ func TestMetrics_WakeRecordsTransition(t *testing.T) {
 	w.SetMetrics(rec)
 
 	w.OnMiss("app")
-	waitNotWaking(t, w, "app")
+	waitNotWaking(t, st, "app")
 
 	if !rec.hasTransition("wake") {
 		t.Fatalf("expected a wake transition to be recorded, got %v", rec.transitions)

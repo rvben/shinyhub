@@ -615,6 +615,7 @@ main {
 .badge-running   { background: var(--green-bg);  color: var(--green); }
 .badge-healthy   { background: var(--green-bg);  color: var(--green); }
 .badge-deploying { background: var(--yellow-bg); color: var(--yellow); }
+.badge-waking    { background: var(--yellow-bg); color: var(--yellow); }
 .badge-degraded  { background: var(--red-bg);    color: var(--red); }
 .badge-stopped   { background: var(--gray-bg);   color: var(--text-muted); }
 .badge-new       { background: var(--accent-glow); color: var(--cyan-bright); }
