@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +57,11 @@ type Server struct {
 	// set by the parent binary via SetVersion. Empty until SetVersion is called
 	// (e.g. in test contexts that do not wire it).
 	version string
+
+	// isOwner reports whether this instance currently holds the control-plane
+	// ownership lease. Set via SetOwnership; nil means "behave as owner" (tests
+	// and any caller that never wires single-writer gating).
+	isOwner func() bool
 
 	// nodeForTier resolves a tier name to the node identity backing it: a remote
 	// worker's node id, or "" for any tier the control plane itself backs (all
@@ -483,6 +489,37 @@ func (s *Server) SetJobs(j *jobs.Manager, sc *scheduler.Scheduler) {
 	s.scheduler = sc
 }
 
+// SetOwnership wires the predicate reporting whether this instance holds the
+// control-plane ownership lease. Mutating API requests are rejected with 503 on
+// a non-owner so that during a zero-downtime handoff only the lease owner
+// mutates cluster state.
+func (s *Server) SetOwnership(isOwner func() bool) {
+	s.isOwner = isOwner
+}
+
+// ownerGuard rejects cluster-state mutations on a non-owner instance with 503.
+// Reads (GET/HEAD/OPTIONS) and the auth endpoints always pass so the read-only
+// dashboard stays usable and users can still log in/out during a handoff.
+func (s *Server) ownerGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.isOwner == nil || s.isOwner() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "control-plane handoff in progress, retry")
+	})
+}
+
 // SetDeployRunForTest replaces the deploy.Run hook used by maybeRestartForChange.
 // Must be called before the server begins handling requests; intended for tests.
 func (s *Server) SetDeployRunForTest(fn func(deploy.Params) (*deploy.PoolResult, error)) {
@@ -597,6 +634,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Group(func(r chi.Router) {
 		r.Use(bearer)
 		r.Use(csrf)
+		r.Use(s.ownerGuard)
 
 		// Logout is authenticated so we can revoke the caller's JWT by jti.
 		// An unauthenticated logout has nothing to revoke — the client can
