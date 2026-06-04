@@ -60,16 +60,22 @@ func (t *connTracker) closeAll() int {
 }
 
 // trackedConn wraps a hijacked net.Conn so the first Close unregisters it from
-// the tracker. All other net.Conn behaviour is inherited unchanged.
+// the tracker. All other net.Conn behaviour is inherited unchanged. Close is
+// fully idempotent: the underlying conn is closed exactly once and the cached
+// error is returned on every subsequent call.
 type trackedConn struct {
 	net.Conn
-	tracker *connTracker
-	once    sync.Once
+	tracker  *connTracker
+	once     sync.Once
+	closeErr error
 }
 
 func (c *trackedConn) Close() error {
-	c.once.Do(func() { c.tracker.forget(c) })
-	return c.Conn.Close()
+	c.once.Do(func() {
+		c.tracker.forget(c)
+		c.closeErr = c.Conn.Close()
+	})
+	return c.closeErr
 }
 
 // SetDraining marks (or unmarks) this instance as draining for shutdown. While
@@ -86,7 +92,9 @@ func (p *Proxy) ActiveUpgradedConns() int { return p.conns.count() }
 // DrainUpgraded waits for all tracked upgraded connections to close on their
 // own, up to timeout, then force-closes any that remain. It returns the number
 // force-closed (0 means everything drained cleanly). It returns immediately
-// when no upgraded connections are open.
+// when no upgraded connections are open. Callers are expected to have called
+// SetDraining(true) and stopped accepting new connections before calling
+// DrainUpgraded, so the tracked set only shrinks.
 func (p *Proxy) DrainUpgraded(timeout time.Duration) (forced int) {
 	if p.conns.count() == 0 {
 		return 0

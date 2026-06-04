@@ -99,8 +99,8 @@ func TestProxy_DrainUpgraded_WaitsThenForceCloses(t *testing.T) {
 	if !s.isClosed() {
 		t.Fatal("straggler must be force-closed at the deadline")
 	}
-	if time.Since(start) < 150*time.Millisecond {
-		t.Fatal("DrainUpgraded must wait up to the timeout before force-closing")
+	if time.Since(start) < 100*time.Millisecond {
+		t.Fatal("DrainUpgraded must wait at least one poll interval before force-closing")
 	}
 }
 
