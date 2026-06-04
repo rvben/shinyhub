@@ -172,6 +172,13 @@ func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup,
 func BearerMiddleware(secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// An upstream middleware (e.g. forward-auth) may have already authenticated
+			// this request and attached the user. Honor it and pass through.
+			if UserFromContext(r.Context()) != nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			user, token, err := AuthenticateRequest(r, secret, keyLookup, userLookup, revoked)
 			if err != nil || user == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
