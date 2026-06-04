@@ -8,8 +8,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 SERVER_PID=""
 LOOP_PID=""
+TCP_PID=""
 cleanup() {
   [ -n "$LOOP_PID" ] && kill "$LOOP_PID" 2>/dev/null || true
+  [ -n "$TCP_PID" ] && kill "$TCP_PID" 2>/dev/null || true
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
   if [ -f "$WORK/shinyhub.pid" ]; then kill "$(cat "$WORK/shinyhub.pid")" 2>/dev/null || true; fi
   rm -rf "$WORK"
@@ -85,13 +87,32 @@ echo "==> starting continuous client against both listeners"
 ) &
 LOOP_PID=$!
 
+# Tighter probe: a raw TCP connect to the main port every ~10ms (5x finer than
+# the curl loop) using bash /dev/tcp. A failed connect means the listener was
+# actually down. The small interval keeps the connect rate sane (no ephemeral
+# port exhaustion) while sampling far finer than the functional curl checks.
+TCPFAIL="$WORK/tcpfail"
+: > "$TCPFAIL"
+(
+  end=$((SECONDS + 8))
+  while [ $SECONDS -lt $end ]; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+      exec 3>&- 2>/dev/null || true
+    else
+      echo refused >> "$TCPFAIL"
+    fi
+    sleep 0.01
+  done
+) &
+TCP_PID=$!
+
 sleep 1
 OLD_PID="$(cat "$PIDFILE")"
 echo "==> triggering handoff: SIGHUP -> MAINPID ${SERVER_PID} (pidfile=${OLD_PID})"
 kill -HUP "$SERVER_PID"
 
-wait "$LOOP_PID"
-LOOP_PID=""
+wait "$LOOP_PID"; LOOP_PID=""
+wait "$TCP_PID"; TCP_PID=""
 
 NEW_PID="$(cat "$PIDFILE")"
 echo "==> old pid=${OLD_PID} new pid=${NEW_PID}"
@@ -101,8 +122,12 @@ if [ -s "$OTHER" ]; then
   sort "$OTHER" | uniq -c
 fi
 if [ -s "$REFUSED" ]; then
-  echo "FAIL: $(wc -l < "$REFUSED" | tr -d ' ') connection-refused failures (listener gap) during handoff:"
+  echo "FAIL: $(wc -l < "$REFUSED" | tr -d ' ') connection-refused failures (HTTP, listener gap) during handoff:"
   sort "$REFUSED" | uniq -c
+  exit 1
+fi
+if [ -s "$TCPFAIL" ]; then
+  echo "FAIL: $(wc -l < "$TCPFAIL" | tr -d ' ') TCP connect failures (listener gap) during handoff"
   exit 1
 fi
 if [ "$OLD_PID" = "$NEW_PID" ]; then
@@ -110,4 +135,8 @@ if [ "$OLD_PID" = "$NEW_PID" ]; then
   exit 1
 fi
 
-echo "PASS: zero-gap handoff; successor ${NEW_PID} took over from ${OLD_PID}"
+# "No gap observed" rather than "provably zero gap": the probes sample at ~10ms
+# (TCP) and per-request (HTTP). With tableflip the listener fd is held by at
+# least one process throughout, so a gap is structurally not expected; these
+# probes guard against a regression that actually drops the listener.
+echo "PASS: no listener gap observed across handoff; successor ${NEW_PID} took over from ${OLD_PID}"

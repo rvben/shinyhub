@@ -367,6 +367,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// SIGHUP -> upgrade; ctx cancel (SIGINT/SIGTERM) -> Stop (closes Exit).
 	sighup := make(chan os.Signal, 1)
 	signal.Notify(sighup, syscall.SIGHUP)
+	defer signal.Stop(sighup)
 	upgrade.WireSignals(ctx, upg, sighup, logger)
 
 	store, err := db.Open(cfg.Database.DSN)
@@ -628,6 +629,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			return err
 		}
 		slog.Info("metrics listening", "addr", mln.Addr().String())
+		// Tear down the metrics server on any early error return below. Idempotent
+		// with the ordered shutdown path (Close after Shutdown is a no-op), so it
+		// only matters when runServe returns before reaching that path.
+		defer func() { _ = metricsSrv.Close() }()
 	}
 
 	// Server tracing: when the existing tracing config is enabled, emit OTel
@@ -642,6 +647,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		srv.SetTracer(tracer)
 		slog.Info("server tracing enabled", "endpoint", cfg.Tracing.OTLPEndpoint, "protocol", cfg.Tracing.OTLPProtocol)
+		// Tear down the tracer on any early error return below (idempotent with
+		// the ordered shutdown path).
+		defer func() { _ = tracer.Shutdown(context.Background()) }()
 	}
 
 	// Emit a structured access log for every proxied app request. Using the
@@ -953,6 +961,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	scope := leader.NewOwnerScope(ownerWork)
+	// Stop the owner scope on any early error return below. Idempotent (Stop is a
+	// no-op when idle / already stopped), so it only matters on a return between
+	// here and the ordered shutdown path.
+	defer scope.Stop()
 	elector := leader.New(store, leader.Config{
 		InstanceID: cfg.Server.InstanceID,
 		TTL:        cfg.Server.LeaseTTL,

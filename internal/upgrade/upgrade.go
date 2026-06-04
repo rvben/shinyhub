@@ -54,16 +54,28 @@ func New(timeout time.Duration, pidFile string) (Upgrader, error) {
 //   - ctx cancellation (SIGINT/SIGTERM via signal.NotifyContext) calls Stop,
 //     which closes Exit so the main loop proceeds to graceful shutdown.
 func WireSignals(ctx context.Context, upg Upgrader, sighup <-chan os.Signal, log *slog.Logger) {
+	// SIGHUP loop: triggers an upgrade per signal, and exits on ctx cancellation
+	// so the goroutine does not outlive the server.
 	go func() {
-		for range sighup {
-			log.Info("SIGHUP received, starting zero-downtime upgrade")
-			if err := upg.Upgrade(); err != nil {
-				log.Error("zero-downtime upgrade failed; continuing to serve", "err", err)
-				continue
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-sighup:
+				if !ok {
+					return
+				}
+				log.Info("SIGHUP received, starting zero-downtime upgrade")
+				if err := upg.Upgrade(); err != nil {
+					log.Error("zero-downtime upgrade failed; continuing to serve", "err", err)
+					continue
+				}
+				log.Info("zero-downtime upgrade succeeded; successor is ready")
 			}
-			log.Info("zero-downtime upgrade succeeded; successor is ready")
 		}
 	}()
+	// Dedicated Stop goroutine so a SIGINT/SIGTERM closes Exit promptly even if an
+	// upgrade is in flight in the loop above.
 	go func() {
 		<-ctx.Done()
 		upg.Stop()
