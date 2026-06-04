@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -49,6 +50,7 @@ import (
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
+	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/hkdf"
@@ -337,6 +339,36 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	sweepOrphanTempfiles(absAppDataDir)
 
+	// Zero-downtime upgrades require stable listener addresses: tableflip matches
+	// inherited sockets by network+addr, so an ephemeral port 0 would make the
+	// successor bind a fresh random port and silently break the handoff. Parse the
+	// numeric port rather than string-matching ":0" (which misses ":00" etc.).
+	if cfg.Server.Port == 0 {
+		return fmt.Errorf("server.port must be a fixed non-zero port for zero-downtime upgrades")
+	}
+	if cfg.Metrics.Enabled {
+		_, mport, perr := net.SplitHostPort(cfg.Metrics.Addr)
+		if perr != nil {
+			return fmt.Errorf("metrics.addr %q must be host:port: %w", cfg.Metrics.Addr, perr)
+		}
+		if n, aerr := strconv.Atoi(mport); aerr != nil || n == 0 {
+			return fmt.Errorf("metrics.addr must use a fixed non-zero port for zero-downtime upgrades, got %q", cfg.Metrics.Addr)
+		}
+	}
+
+	// Zero-downtime upgrades: tableflip lets a SIGHUP re-exec the new binary and
+	// inherit the listeners. All upg.Listen calls must precede upg.Ready().
+	upg, err := upgrade.New(cfg.Server.UpgradeTimeout, cfg.Server.PIDFile)
+	if err != nil {
+		return fmt.Errorf("init upgrader: %w", err)
+	}
+	defer upg.Stop()
+
+	// SIGHUP -> upgrade; ctx cancel (SIGINT/SIGTERM) -> Stop (closes Exit).
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	upgrade.WireSignals(ctx, upg, sighup, logger)
+
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
@@ -591,7 +623,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			},
 		)
 		var mln net.Listener
-		metricsSrv, mln, err = startMetricsListener(net.Listen, cfg.Metrics.Addr, reg)
+		metricsSrv, mln, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, reg)
 		if err != nil {
 			return err
 		}
@@ -1009,7 +1041,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := upg.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
@@ -1024,6 +1056,35 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		close(serveErr)
 	}()
 
+	// Signal readiness: closes inherited-but-unused fds, writes the PID file, and
+	// (when this is an upgrade child) tells the old process it may begin draining.
+	// On error, close the servers we just started so we do not leak listeners and
+	// goroutines, then return.
+	if err := upg.Ready(); err != nil {
+		_ = httpSrv.Close()
+		if metricsSrv != nil {
+			_ = metricsSrv.Close()
+		}
+		cancelElector()
+		scope.Stop()
+		return fmt.Errorf("upgrade ready: %w", err)
+	}
+	// Tell systemd (Type=notify) we are the live process and retarget MAINPID to
+	// this PID, so a handoff successor is tracked. NotifyReady is a no-op (returns
+	// nil) when $NOTIFY_SOCKET is unset, so a non-nil error here means we ARE under
+	// systemd and the notify failed - which is fatal: systemd would kill us at
+	// TimeoutStartSec, and a successor that fails to retarget MAINPID after
+	// upg.Ready() already told the parent to drain would be left unmanaged.
+	if err := upgrade.NotifyReady(); err != nil {
+		_ = httpSrv.Close()
+		if metricsSrv != nil {
+			_ = metricsSrv.Close()
+		}
+		cancelElector()
+		scope.Stop()
+		return fmt.Errorf("sd_notify: %w", err)
+	}
+
 	select {
 	case err := <-serveErr:
 		if err != nil {
@@ -1031,8 +1092,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			scope.Stop()
 			return fmt.Errorf("http server: %w", err)
 		}
-	case <-ctx.Done():
-		slog.Info("shutdown signal received, draining")
+	case <-upg.Exit():
+		slog.Info("shutdown/handoff initiated, draining")
 	}
 	// Mark unready for both the signal and clean self-stop paths.
 	prx.SetDraining(true)
