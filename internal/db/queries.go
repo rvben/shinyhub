@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	sqlite "modernc.org/sqlite"
 	sqlitelib "modernc.org/sqlite/lib"
 )
@@ -118,6 +119,50 @@ func (s *Store) UpdateUserRole(id int64, role string) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// GetForwardAuthUser returns the auth.ContextUser for a username, or
+// auth.ErrUserNotFound if no such user exists. Adapter for
+// auth.ForwardAuthUserStore.
+func (s *Store) GetForwardAuthUser(username string) (*auth.ContextUser, error) {
+	u, err := s.GetUserByUsername(username)
+	if errors.Is(err, ErrNotFound) {
+		return nil, auth.ErrUserNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+}
+
+// CreateForwardAuthUser inserts a user with no local password login path
+// (forward-auth only) and returns the new ContextUser. Username uniqueness is
+// enforced by the users table; collisions return an error.
+func (s *Store) CreateForwardAuthUser(username, role string) (*auth.ContextUser, error) {
+	if err := s.CreateUser(CreateUserParams{
+		Username:     username,
+		PasswordHash: systemUserPasswordHash, // "!disabled" sentinel: no local password login path
+		Role:         role,
+	}); err != nil {
+		return nil, fmt.Errorf("create forward auth user: %w", err)
+	}
+	u, err := s.GetUserByUsername(username)
+	if err != nil {
+		return nil, err
+	}
+	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+}
+
+// PromoteToAdmin sets the user's role to "admin". Returns auth.ErrUserNotFound
+// if the user does not exist.
+func (s *Store) PromoteToAdmin(userID int64) error {
+	if err := s.UpdateUserRole(userID, "admin"); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return auth.ErrUserNotFound
+		}
+		return err
 	}
 	return nil
 }
