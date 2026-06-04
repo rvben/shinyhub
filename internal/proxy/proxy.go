@@ -860,6 +860,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// so the hook fires synchronously before the hijacked goroutine
 	// (which lives for the duration of the WS) ever starts.
 	rec.onUpgrade = func() { p.MarkWSReady(slug) }
+	// Track the hijacked connection (if this request upgrades to WebSocket) so a
+	// graceful shutdown can wait for it to close before exiting.
+	rec.trackHijack = p.conns.track
 	start := time.Now()
 	replicaIndex := -1
 	sticky := false

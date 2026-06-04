@@ -36,6 +36,10 @@ type statusRecorder struct {
 	// successful handshake without waiting for the hijacked goroutine to
 	// finish - which it never does until the client disconnects.
 	onUpgrade func()
+	// trackHijack, when non-nil, wraps the hijacked connection so the proxy can
+	// track its lifetime for graceful drain on shutdown. It returns the conn to
+	// hand back to the hijacking caller (httputil.ReverseProxy's upgrade path).
+	trackHijack func(net.Conn) net.Conn
 	// rejectReason, when set by recordReject, is the platform rejection reason
 	// for this request. The ServeHTTP access-log defer copies it into
 	// AccessLogEntry.Reject. Empty for non-rejected requests.
@@ -84,7 +88,11 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("proxy: underlying ResponseWriter does not support hijacking")
 	}
-	return h.Hijack()
+	conn, rw, err := h.Hijack()
+	if err == nil && r.trackHijack != nil {
+		conn = r.trackHijack(conn)
+	}
+	return conn, rw, err
 }
 
 // ReadFrom enables io.Copy's zero-copy fast path. When the underlying
@@ -126,7 +134,7 @@ func (w writeOnly) Write(b []byte) (int, error) {
 }
 
 var (
-	_ http.Flusher   = (*statusRecorder)(nil)
-	_ http.Hijacker  = (*statusRecorder)(nil)
-	_ io.ReaderFrom  = (*statusRecorder)(nil)
+	_ http.Flusher  = (*statusRecorder)(nil)
+	_ http.Hijacker = (*statusRecorder)(nil)
+	_ io.ReaderFrom = (*statusRecorder)(nil)
 )
