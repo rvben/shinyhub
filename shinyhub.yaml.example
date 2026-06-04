@@ -32,6 +32,23 @@ auth:
   # Bump to "developer" when your IdP only ever sees trusted employees.
   oauth_default_role: viewer            # SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE
 
+  # Optional: trust an upstream reverse proxy that has already authenticated the user.
+  # When enabled, requests whose DIRECT peer IP is in server.trusted_proxies are
+  # treated as authenticated based on the configured headers. Leave disabled
+  # (commented out) for direct ShinyHub access.
+  #
+  # Typical setup: run ShinyHub on loopback (or a private network) behind Caddy or
+  # nginx that calls an auth service; the auth service result is forwarded as HTTP
+  # headers. See docs/reverse-proxy/ for Caddy and nginx examples.
+  #
+  # forward_auth:
+  #   enabled: true                              # SHINYHUB_FORWARD_AUTH_ENABLED
+  #   user_header: X-Forwarded-User              # SHINYHUB_FORWARD_AUTH_USER_HEADER   (default: X-Forwarded-User)
+  #   email_header: X-Forwarded-Email            # SHINYHUB_FORWARD_AUTH_EMAIL_HEADER
+  #   groups_header: X-Forwarded-Groups          # SHINYHUB_FORWARD_AUTH_GROUPS_HEADER
+  #   admin_groups: ["shinyhub-admins"]          # SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS  (comma-separated in env)
+  #   default_role: developer                    # SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE  (default: developer)
+
 storage:
   apps_dir: ./data/apps               # where deployed bundles live
   app_data_dir: ./data/app-data       # persistent per-app data; survives deploys
