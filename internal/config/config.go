@@ -259,6 +259,18 @@ type ServerConfig struct {
 	//   "stop"            — gracefully stop every app before exiting
 	//                        (clean host state; apps cold-start next boot).
 	ShutdownApps string `yaml:"shutdown_apps"`
+
+	// InstanceID uniquely identifies this control-plane process among several
+	// running against one database (zero-downtime upgrades / failover). Defaults
+	// to "<hostname>-<pid>" when unset.
+	InstanceID string `yaml:"instance_id"`
+
+	// LeaseTTL is how long this instance's control-plane ownership lease stays
+	// valid without a renewal; LeaseRenewEvery is the renewal cadence. The
+	// elector holds LeaseTTL to at least 2x LeaseRenewEvery so a single missed
+	// renewal never drops ownership.
+	LeaseTTL        time.Duration `yaml:"lease_ttl"`
+	LeaseRenewEvery time.Duration `yaml:"lease_renew_every"`
 }
 
 type AuthConfig struct {
@@ -731,6 +743,20 @@ func Load(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("server.shutdown_apps: %q is not allowed; must be \"adopt\" or \"stop\"",
 			cfg.Server.ShutdownApps)
+	}
+
+	if cfg.Server.InstanceID == "" {
+		host, hostErr := os.Hostname()
+		if hostErr != nil || host == "" {
+			host = "shinyhub"
+		}
+		cfg.Server.InstanceID = fmt.Sprintf("%s-%d", host, os.Getpid())
+	}
+	if cfg.Server.LeaseRenewEvery <= 0 {
+		cfg.Server.LeaseRenewEvery = 10 * time.Second
+	}
+	if cfg.Server.LeaseTTL <= 0 {
+		cfg.Server.LeaseTTL = 30 * time.Second
 	}
 
 	if cfg.OAuth.OIDC.DisplayName == "" && cfg.OAuth.OIDC.IssuerURL != "" {
