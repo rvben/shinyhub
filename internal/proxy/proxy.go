@@ -265,6 +265,12 @@ type Proxy struct {
 	// rejectRecorder is an optional sink (the Prometheus registry) for
 	// admission-reject events. Nil disables metrics emission (e.g. in tests).
 	rejectRecorder atomic.Pointer[RejectRecorder]
+
+	// conns tracks live hijacked (WebSocket) connections for graceful drain on
+	// shutdown. instanceDraining marks this instance draining (distinct from the
+	// per-replica backend draining flag): while set, /readyz reports unready.
+	conns            *connTracker
+	instanceDraining atomic.Bool
 }
 
 func New() *Proxy {
@@ -273,6 +279,7 @@ func New() *Proxy {
 		lastSeen: make(map[string]time.Time),
 		wsReady:  make(map[string]struct{}),
 		rejects:  newRejectCounter(),
+		conns:    newConnTracker(),
 	}
 }
 
@@ -853,6 +860,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// so the hook fires synchronously before the hijacked goroutine
 	// (which lives for the duration of the WS) ever starts.
 	rec.onUpgrade = func() { p.MarkWSReady(slug) }
+	// Track the hijacked connection (if this request upgrades to WebSocket) so a
+	// graceful shutdown can wait for it to close before exiting.
+	rec.trackHijack = p.conns.track
 	start := time.Now()
 	replicaIndex := -1
 	sticky := false
