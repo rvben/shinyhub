@@ -30,7 +30,7 @@ func TestMigrate_LegacyBaselineAppliesPostBaselineMigrations(t *testing.T) {
 
 	// Build a pre-ledger schema: apply only migrations up to the legacy
 	// baseline version, leaving no schema_migrations ledger behind.
-	ms, err := loadMigrations()
+	ms, err := loadMigrations("sqlite")
 	if err != nil {
 		t.Fatalf("loadMigrations: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestMigrate_LegacyBaselineAppliesPostBaselineMigrations(t *testing.T) {
 // and ordering. A misnamed or duplicate-versioned file is a build-time
 // mistake and must fail loudly rather than silently reorder schema changes.
 func TestLoadMigrationsOrderedAndUnique(t *testing.T) {
-	ms, err := loadMigrations()
+	ms, err := loadMigrations("sqlite")
 	if err != nil {
 		t.Fatalf("loadMigrations: %v", err)
 	}

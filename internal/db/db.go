@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed migrations/*.sql
+//go:embed migrations/sqlite/*.sql migrations/postgres/*.sql
 var migrationsFS embed.FS
 
 var migrationFileRE = regexp.MustCompile(`^(\d+)_.*\.sql$`)
@@ -30,13 +30,14 @@ type migration struct {
 	sql     string
 }
 
-// loadMigrations parses every embedded migrations/NNN_*.sql file into an
-// ordered slice keyed by the numeric prefix. Filenames that do not match the
+// loadMigrations parses every embedded migrations/<subdir>/NNN_*.sql file into
+// an ordered slice keyed by the numeric prefix. Filenames that do not match the
 // NNN_name.sql convention are a build-time mistake and fail loudly.
-func loadMigrations() ([]migration, error) {
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
+func loadMigrations(subdir string) ([]migration, error) {
+	dir := path.Join("migrations", subdir)
+	entries, err := fs.ReadDir(migrationsFS, dir)
 	if err != nil {
-		return nil, fmt.Errorf("read migrations dir: %w", err)
+		return nil, fmt.Errorf("read migrations dir %q: %w", dir, err)
 	}
 	var ms []migration
 	seen := map[int]string{}
@@ -56,7 +57,7 @@ func loadMigrations() ([]migration, error) {
 			return nil, fmt.Errorf("duplicate migration version %d: %q and %q", v, prev, e.Name())
 		}
 		seen[v] = e.Name()
-		body, err := migrationsFS.ReadFile(path.Join("migrations", e.Name()))
+		body, err := migrationsFS.ReadFile(path.Join(dir, e.Name()))
 		if err != nil {
 			return nil, fmt.Errorf("read migration %q: %w", e.Name(), err)
 		}
@@ -64,6 +65,14 @@ func loadMigrations() ([]migration, error) {
 	}
 	sort.Slice(ms, func(i, j int) bool { return ms[i].version < ms[j].version })
 	return ms, nil
+}
+
+// migrationsSubdir returns the dialect-specific migration subdirectory.
+func (s *Store) migrationsSubdir() string {
+	if _, isPG := s.d.(pgDialect); isPG {
+		return "postgres"
+	}
+	return "sqlite"
 }
 
 type Store struct {
@@ -209,7 +218,7 @@ const legacyBaselineVersion = 12
 // migration from scratch.
 func (s *Store) Migrate() error {
 	defer s.timed("Migrate")()
-	migrations, err := loadMigrations()
+	migrations, err := loadMigrations(s.migrationsSubdir())
 	if err != nil {
 		return err
 	}
@@ -394,8 +403,9 @@ func (s *Store) SchemaVersion() (int, error) {
 // LatestSchemaVersion returns the highest migration version embedded in this
 // binary. A backup whose recorded schema version exceeds this value was taken
 // by a newer build and cannot be safely restored by this one.
+// Backups are SQLite-only, so the SQLite ledger is the reference.
 func LatestSchemaVersion() (int, error) {
-	ms, err := loadMigrations()
+	ms, err := loadMigrations("sqlite")
 	if err != nil {
 		return 0, err
 	}
