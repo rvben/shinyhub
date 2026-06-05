@@ -58,21 +58,29 @@ func newPostgres(t *testing.T, adminDSN string) *db.Store {
 		_ = admin.Close()
 		t.Fatalf("create test database: %v", err)
 	}
-	testDSN := swapDatabase(adminDSN, dbName)
-	store, err := db.Open(testDSN)
-	if err != nil {
-		t.Fatalf("open test postgres: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate postgres: %v", err)
-	}
+	// Register the drop cleanup immediately after CREATE DATABASE so that any
+	// subsequent failure (Open, Migrate, or inside the test) still drops the
+	// database. t.Cleanup runs LIFO, so this runs LAST (after the store is
+	// closed by the cleanup registered below).
 	t.Cleanup(func() {
-		_ = store.Close()
 		// Terminate stragglers, then drop. Best-effort.
 		_, _ = admin.Exec(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1`, dbName)
 		_, _ = admin.Exec(`DROP DATABASE IF EXISTS ` + dbName)
 		_ = admin.Close()
 	})
+
+	testDSN := swapDatabase(adminDSN, dbName)
+	store, err := db.Open(testDSN)
+	if err != nil {
+		t.Fatalf("open test postgres: %v", err)
+	}
+	// Register store.Close before the drop cleanup (LIFO order ensures the
+	// store is closed before its database is dropped).
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate postgres: %v", err)
+	}
 	return store
 }
 
@@ -107,6 +115,3 @@ func SkipIfPostgres(t *testing.T) {
 		t.Skip("SQLite-only test; skipping under Postgres")
 	}
 }
-
-// IsPostgres reports whether tests are running against Postgres.
-func IsPostgres() bool { return os.Getenv(dsnEnv) != "" }

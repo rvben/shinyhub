@@ -11,11 +11,25 @@ import (
 )
 
 // TestSchemaParity asserts the Postgres baseline reproduces the cumulative
-// SQLite schema: same tables, same columns, same nullability, same unique-index
-// column tuples, and same foreign-key edges (column -> referenced table.column).
-// Type differences are tolerated per the documented mapping (timestamptz/text
-// for datetimes, integer for booleans, bigint for epoch ints, bigserial for
-// autoincrement PKs).
+// SQLite schema. What it compares:
+//   - table set (same tables in both backends)
+//   - column set per table (same column names)
+//   - column nullability (NOT NULL vs nullable)
+//   - unique-constraint column tuples (order-independent set)
+//   - foreign-key edges: fromCol -> referencedTable.referencedCol
+//
+// What it intentionally does NOT compare:
+//   - column DEFAULT expressions: the Postgres migration uses GENERATED ALWAYS
+//     AS IDENTITY / bigserial defaults that have no SQLite equivalent.
+//   - raw type spellings: the SQLite->Postgres mapping deliberately changes
+//     types (e.g. TEXT datetime columns become timestamptz, integer booleans
+//     stay integer, AUTOINCREMENT PKs become bigserial). Comparing type strings
+//     would produce only false positives.
+//
+// Known follow-ups (not yet compared):
+//   - CHECK constraints
+//   - Non-unique indexes
+//   - FK ON DELETE / ON UPDATE actions
 //
 // It runs only when SHINYHUB_TEST_POSTGRES_DSN is set; the SQLite reference is
 // always built in-process regardless of the active backend.
