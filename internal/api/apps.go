@@ -798,7 +798,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// artefacts on any failure path before the deploy is committed.
 	version := fmt.Sprintf("%d", time.Now().UnixMilli())
 	bundleZip := filepath.Join(s.cfg.Storage.AppsDir, slug, "bundles", version+".zip")
-	bundleDir := filepath.Join(s.cfg.Storage.AppsDir, slug, "versions", version)
+	bundleDir := deploy.BundleDir(s.cfg.Storage.AppsDir, slug, version)
 
 	// keepFiles is flipped to true only once deploy.Run succeeds and the new
 	// pool is actually serving the bundle. Any earlier failure — write,

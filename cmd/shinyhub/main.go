@@ -904,6 +904,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	ownerWork := func(octx context.Context, epoch int64) {
 		slog.Info("became control-plane owner", "epoch", epoch, "instance", cfg.Server.InstanceID)
 
+		// Rewrite any legacy relative bundle_dir rows to their canonical absolute
+		// path under the configured apps_dir. Idempotent; must run before recovery
+		// so process adoption sees absolute paths.
+		if err := lifecycle.NormalizeBundleDirs(store, cfg.Storage.AppsDir); err != nil {
+			slog.Error("bundle_dir backfill", "err", err)
+		}
 		// Fail any deploy interrupted mid-flight before recovery so adoption falls
 		// back to the last good deployment.
 		lifecycle.ReconcileInflightDeployments(store)

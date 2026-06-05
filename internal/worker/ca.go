@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/secrets"
 )
 
 // nodeIDSANSuffix namespaces the DNS SAN that carries a worker's node id, so the
@@ -36,8 +39,39 @@ type CA struct {
 	joinTokens []string
 }
 
-// OpenCA loads the CA keypair from dir, generating and persisting it on first
-// run. joinTokens is the set of currently valid join tokens.
+// generateCA creates a fresh self-signed ECDSA P-256 worker CA, returning the
+// cert and key as PEM. (Extracted from OpenCA so both disk import and DB init
+// share one generator.)
+func generateCA() (certPEM, keyPEM []byte) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err) // P-256 keygen from crypto/rand cannot fail in practice
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "ShinyHub Worker CA"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		panic(err)
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+// OpenCA loads a worker CA keypair from disk, generating and persisting it on
+// first run. Production boot sources the CA from the database via LoadOrInitCA;
+// OpenCA remains as the disk-based constructor used by tests (and disk-only setups).
 func OpenCA(dir string, joinTokens []string) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("ca dir: %w", err)
@@ -53,29 +87,7 @@ func OpenCA(dir string, joinTokens []string) (*CA, error) {
 		return loadCA(certPEM, keyPEM, joinTokens)
 	}
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generate ca key: %w", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "ShinyHub Worker CA"},
-		NotBefore:             time.Now().Add(-time.Minute),
-		NotAfter:              time.Now().AddDate(10, 0, 0),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		return nil, fmt.Errorf("self-sign ca: %w", err)
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("marshal ca key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	certPEM, keyPEM := generateCA()
 	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write ca cert: %w", err)
 	}
@@ -101,6 +113,19 @@ func loadCA(certPEM, keyPEM []byte, joinTokens []string) (*CA, error) {
 	key, err := x509.ParseECPrivateKey(kb.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse ca key: %w", err)
+	}
+	if !cert.IsCA || !cert.BasicConstraintsValid {
+		return nil, fmt.Errorf("ca cert is not a valid CA")
+	}
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, fmt.Errorf("ca cert lacks cert-sign key usage")
+	}
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !pub.Equal(&key.PublicKey) {
+		return nil, fmt.Errorf("ca cert public key does not match private key")
+	}
+	if err := cert.CheckSignatureFrom(cert); err != nil {
+		return nil, fmt.Errorf("ca cert self-signature invalid: %w", err)
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
@@ -273,4 +298,124 @@ func (c *CA) ListenerTLSConfig(hosts ...string) (*tls.Config, error) {
 		ClientAuth:     tls.VerifyClientCertIfGiven,
 		ClientCAs:      c.pool,
 	}, nil
+}
+
+// workerCAKeyInfo domain-separates the CA key derivation from app env secrets.
+const workerCAKeyInfo = "shinyhub-worker-ca-v1"
+
+// CAStore is the minimal store the worker CA bootstrap needs. *db.Store
+// satisfies it. found (not an ErrNotFound sentinel) signals an empty row.
+type CAStore interface {
+	GetWorkerCA() (certPEM, keyEnc []byte, found bool, err error)
+	PutWorkerCAIfAbsent(certPEM, keyEnc []byte) (inserted bool, err error)
+}
+
+// LoadOrInitCA loads the shared worker CA from the store, importing an existing
+// on-disk CA from caDir or generating a fresh one on first boot, and converging
+// all instances on a single CA via race-safe insert. The private key is
+// encrypted at rest with a domain-separated key derived from authSecret. A
+// decrypt failure (auth.secret changed) or a disk CA that differs from the DB CA
+// is a loud fatal error - never a silent regeneration that would orphan workers.
+func LoadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) (*CA, error) {
+	keyEncKey := secrets.DeriveKeyWithInfo(authSecret, workerCAKeyInfo)
+
+	certPEM, keyEnc, found, err := store.GetWorkerCA()
+	if err != nil {
+		return nil, fmt.Errorf("load worker ca: %w", err)
+	}
+	if found {
+		return decodeAndGuard(certPEM, keyEnc, keyEncKey, caDir, joinTokens)
+	}
+
+	// Init: import an existing disk CA if present, else generate fresh.
+	var newCert, newKey []byte
+	dc, dk, present, derr := readDiskCA(caDir)
+	if derr != nil {
+		return nil, fmt.Errorf("worker CA: %w", derr)
+	}
+	if present {
+		// Validate the disk CA before persisting it as authoritative - a malformed
+		// disk CA must not be committed to the DB (it would strand every instance).
+		if _, verr := loadCA(dc, dk, joinTokens); verr != nil {
+			return nil, fmt.Errorf("invalid disk CA in %s: %w", caDir, verr)
+		}
+		newCert, newKey = dc, dk
+	} else {
+		newCert, newKey = generateCA()
+	}
+	enc, err := secrets.Encrypt(keyEncKey, newKey)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt ca key: %w", err)
+	}
+	inserted, err := store.PutWorkerCAIfAbsent(newCert, enc)
+	if err != nil {
+		return nil, fmt.Errorf("store worker ca: %w", err)
+	}
+	if !inserted {
+		// Lost the race: another instance stored a CA first. Adopt it, but if we
+		// were importing a disk CA and it differs, fail loudly.
+		certPEM, keyEnc, found, err = store.GetWorkerCA()
+		if err != nil {
+			return nil, fmt.Errorf("worker ca race reread: %w", err)
+		}
+		if !found {
+			return nil, fmt.Errorf("worker ca race reread returned no row")
+		}
+		return decodeAndGuard(certPEM, keyEnc, keyEncKey, caDir, joinTokens)
+	}
+	return loadCA(newCert, newKey, joinTokens)
+}
+
+// decodeAndGuard decrypts the stored key, applies the disk-vs-DB mismatch guard,
+// and loads the CA.
+func decodeAndGuard(certPEM, keyEnc, keyEncKey []byte, caDir string, joinTokens []string) (*CA, error) {
+	keyPEM, err := secrets.Decrypt(keyEncKey, keyEnc)
+	if err != nil {
+		return nil, fmt.Errorf("worker CA decrypt failed (auth.secret changed?): %w", err)
+	}
+	if diskCert, ok := readDiskCACert(caDir); ok && !bytes.Equal(diskCert, certPEM) {
+		return nil, fmt.Errorf("local disk CA differs from the authoritative DB CA; " +
+			"to migrate to HA boot the original CA-owning node first, or to adopt the disk CA " +
+			"stop all instances, delete the cp_worker_ca row, and start the CA-owning node first")
+	}
+	return loadCA(certPEM, keyPEM, joinTokens)
+}
+
+// readDiskCA reads ca-cert.pem + ca-key.pem from dir. present=true with both
+// files; present=false,err=nil when NEITHER exists (fresh install -> generate);
+// err!=nil for any other combination: exactly one file present (partial state),
+// or a file exists but is unreadable (permission denied, is-a-dir, IO error).
+// A non-NotExist read error is always fatal - we must never treat an unreadable
+// existing CA file as absent and silently generate a fresh CA.
+func readDiskCA(dir string) (certPEM, keyPEM []byte, present bool, err error) {
+	c, cerr := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	k, kerr := os.ReadFile(filepath.Join(dir, "ca-key.pem"))
+	certAbsent := cerr != nil && os.IsNotExist(cerr)
+	keyAbsent := kerr != nil && os.IsNotExist(kerr)
+	// A read error that is NOT "file does not exist" (permission, IO, is-a-dir)
+	// must be fatal - we must never treat an unreadable existing CA file as
+	// "absent" and silently generate a fresh CA.
+	if cerr != nil && !certAbsent {
+		return nil, nil, false, fmt.Errorf("read disk CA cert in %s: %w", dir, cerr)
+	}
+	if kerr != nil && !keyAbsent {
+		return nil, nil, false, fmt.Errorf("read disk CA key in %s: %w", dir, kerr)
+	}
+	switch {
+	case certAbsent && keyAbsent:
+		return nil, nil, false, nil // genuinely neither present -> generate fresh
+	case certAbsent || keyAbsent:
+		return nil, nil, false, fmt.Errorf("partial disk CA in %s (cert present: %v, key present: %v)", dir, !certAbsent, !keyAbsent)
+	default:
+		return c, k, true, nil // both present and readable
+	}
+}
+
+// readDiskCACert reads just the disk ca-cert.pem; ok false if absent.
+func readDiskCACert(dir string) (certPEM []byte, ok bool) {
+	c, err := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	if err != nil {
+		return nil, false
+	}
+	return c, true
 }

@@ -12,6 +12,65 @@ import (
 	"time"
 )
 
+func TestLoadCA_RejectsMismatchedKey(t *testing.T) {
+	// A valid CA cert paired with an unrelated private key must be rejected.
+	certPEM, _ := generateCA() // helper added in this task
+	_, otherKeyPEM := mustGenerateOtherECKey(t)
+	if _, err := loadCA(certPEM, otherKeyPEM, nil); err == nil {
+		t.Fatal("loadCA accepted a cert/key whose public keys differ")
+	}
+}
+
+func TestLoadCA_RejectsTamperedCert(t *testing.T) {
+	certPEM, keyPEM := generateCA()
+	tampered := flipOneCertByte(t, certPEM) // helper: flip a byte inside the DER
+	if _, err := loadCA(tampered, keyPEM, nil); err == nil {
+		t.Fatal("loadCA accepted a cert with a broken self-signature")
+	}
+}
+
+func TestLoadCA_AcceptsValidPair(t *testing.T) {
+	certPEM, keyPEM := generateCA()
+	ca, err := loadCA(certPEM, keyPEM, nil)
+	if err != nil {
+		t.Fatalf("valid pair rejected: %v", err)
+	}
+	if ca == nil || len(ca.CertPEM()) == 0 {
+		t.Fatal("loaded CA empty")
+	}
+}
+
+// mustGenerateOtherECKey generates a fresh P-256 key unrelated to any cert.
+// Only the key is needed by callers; certPEM is nil.
+func mustGenerateOtherECKey(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate other ec key: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(k)
+	if err != nil {
+		t.Fatalf("marshal other ec key: %v", err)
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return nil, keyPEM
+}
+
+// flipOneCertByte decodes the PEM cert, flips a byte in the DER tail (away from
+// the header), and re-encodes, producing a cert whose self-signature is invalid.
+func flipOneCertByte(t *testing.T, certPEM []byte) []byte {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("flipOneCertByte: no PEM block")
+	}
+	der := make([]byte, len(block.Bytes))
+	copy(der, block.Bytes)
+	// Flip a byte near the end (inside the signature, not the header).
+	der[len(der)-2] ^= 0xFF
+	return pem.EncodeToMemory(&pem.Block{Type: block.Type, Bytes: der})
+}
+
 func TestCAServerCertificateVerifies(t *testing.T) {
 	ca, err := OpenCA(t.TempDir(), []string{"t"})
 	if err != nil {
