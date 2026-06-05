@@ -2146,13 +2146,14 @@ func scanApp(s scanner) (*App, error) {
 	// aggregates lose the original column type, so the driver returns the
 	// value as a string. We parse it manually below.
 	var lastDeployedAtRaw sql.NullString
+	var autoscaleEnabledInt int
 	err := s.Scan(
 		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
 		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
-		&a.AutoscaleEnabled, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
+		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
@@ -2161,6 +2162,7 @@ func scanApp(s scanner) (*App, error) {
 		}
 		return nil, err
 	}
+	a.AutoscaleEnabled = autoscaleEnabledInt != 0
 	if projectSlug.Valid {
 		a.ProjectSlug = projectSlug.String
 	}
