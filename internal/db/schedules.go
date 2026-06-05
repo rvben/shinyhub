@@ -12,6 +12,11 @@ import (
 	sqlitelib "modernc.org/sqlite/lib"
 )
 
+// sharedDataLockKey serializes all shared-data grants on Postgres so opposing
+// grants (a->b and b->a) cannot both pass the cycle check before either inserts.
+// The value is an arbitrary fixed advisory-lock key unique to this invariant.
+const sharedDataLockKey int64 = 0x53484152 // "SHAR"
+
 // ErrScheduleNameExists is returned by CreateSchedule when a schedule with the
 // same name already exists for the given app. Callers that want idempotent
 // create behaviour (e.g. --if-not-exists) should check with errors.Is.
@@ -520,52 +525,48 @@ func (s *Store) GrantSharedData(consumerAppID, sourceAppID int64) error {
 
 	// A grant means "consumer reads source". A cycle forms if the source can
 	// already (transitively) read the consumer, so adding this edge closes a
-	// loop. The cycle check and the insert must be atomic: a dedicated
-	// connection with BEGIN IMMEDIATE takes the write lock up front so two
-	// opposing grants (a->b and b->a) serialize here instead of both passing
-	// the check before either inserts.
-	conn, err := s.rawDB().Conn(ctx)
+	// loop. The cycle check and the insert must be atomic: beginWrite takes
+	// the write lock up front (BEGIN IMMEDIATE on SQLite; a transaction plus
+	// pg_advisory_xact_lock on Postgres) so two opposing grants (a->b and
+	// b->a) serialize here instead of both passing the check before either
+	// inserts.
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), sharedDataLockKey)
 	if err != nil {
-		return fmt.Errorf("grant shared data: acquire conn: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return fmt.Errorf("grant shared data: begin immediate: %w", err)
+		return fmt.Errorf("grant shared data: begin: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			_ = tx.Rollback()
 		}
 	}()
 
-	cyclic, err := sharedDataReaches(ctx, conn, sourceAppID, consumerAppID)
+	cyclic, err := sharedDataReaches(ctx, tx, sourceAppID, consumerAppID)
 	if err != nil {
 		return fmt.Errorf("grant shared data: %w", err)
 	}
 	if cyclic {
 		return ErrSharedDataCycle
 	}
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
 		consumerAppID, sourceAppID,
 	); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if s.d.isUniqueViolation(err) {
 			return ErrDuplicateMount
 		}
 		return fmt.Errorf("grant shared data: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("grant shared data: commit: %w", err)
 	}
 	committed = true
 	return nil
 }
 
-// rowQueryer is satisfied by *sql.DB, *sql.Conn, and *sql.Tx, letting the
-// reachability probe run either standalone or inside a grant transaction.
-type rowQueryer interface {
+// sharedDataQuerier is the read-only subset of both writeTx and *boundDB used
+// by the reachability probe, so it can run standalone or inside a grant transaction.
+type sharedDataQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
@@ -575,7 +576,7 @@ func (s *Store) sharedDataReaches(startAppID, targetAppID int64) (bool, error) {
 	return sharedDataReaches(context.Background(), s.db, startAppID, targetAppID)
 }
 
-func sharedDataReaches(ctx context.Context, q rowQueryer, startAppID, targetAppID int64) (bool, error) {
+func sharedDataReaches(ctx context.Context, q sharedDataQuerier, startAppID, targetAppID int64) (bool, error) {
 	var hit int
 	err := q.QueryRowContext(ctx, `
 		WITH RECURSIVE reach(id) AS (
