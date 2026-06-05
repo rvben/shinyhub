@@ -187,7 +187,9 @@ func sqlitePragmaTableInfo(store *db.Store, table string) (map[string]colInfo, e
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
 			return nil, err
 		}
-		cols[name] = colInfo{notNull: notnull == 1}
+		// SQLite PK columns are implicitly NOT NULL even when PRAGMA table_info
+		// reports notnull=0 (the PRAGMA does not set the flag for PK columns).
+		cols[name] = colInfo{notNull: notnull == 1 || pk > 0}
 	}
 	return cols, rows.Err()
 }

@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	sqlite "modernc.org/sqlite"
-	sqlitelib "modernc.org/sqlite/lib"
 )
 
 // sharedDataLockKey serializes all shared-data grants on Postgres so opposing
@@ -113,8 +110,7 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
 	).Scan(&id)
 	if err != nil {
-		var sqliteErr *sqlite.Error
-		if errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
+		if s.d.isUniqueViolation(err) {
 			return 0, fmt.Errorf("create schedule: %w", ErrScheduleNameExists)
 		}
 		return 0, fmt.Errorf("create schedule: %w", err)
