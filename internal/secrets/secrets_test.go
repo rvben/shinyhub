@@ -69,3 +69,27 @@ func TestDeriveKey_Length32(t *testing.T) {
 		t.Errorf("want 32-byte key, got %d", len(k))
 	}
 }
+
+func TestDeriveKeyWithInfo_DomainSeparation(t *testing.T) {
+	secret := "the-auth-secret"
+	envKey := secrets.DeriveKeyWithInfo(secret, "shinyhub-app-env-v1")
+	caKey := secrets.DeriveKeyWithInfo(secret, "shinyhub-worker-ca-v1")
+	if bytes.Equal(envKey, caKey) {
+		t.Fatal("different info strings must derive different keys")
+	}
+	if len(caKey) != 32 {
+		t.Fatalf("key len = %d, want 32", len(caKey))
+	}
+	// DeriveKey must equal the env-var info derivation (back-compat).
+	if !bytes.Equal(secrets.DeriveKey(secret), envKey) {
+		t.Fatal("DeriveKey must match DeriveKeyWithInfo(secret, app-env-v1)")
+	}
+	// A value encrypted under the CA key does not decrypt under the env key.
+	ct, err := secrets.Encrypt(caKey, []byte("secret-bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secrets.Decrypt(envKey, ct); err == nil {
+		t.Fatal("env key must not decrypt CA-key ciphertext")
+	}
+}

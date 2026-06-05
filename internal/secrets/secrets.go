@@ -22,10 +22,17 @@ import (
 // for future key derivation migrations.
 const infoString = "shinyhub-app-env-v1"
 
-// DeriveKey returns a 32-byte AES-256 key from the given auth secret.
-// Deterministic for a given input; safe to call repeatedly.
+// DeriveKey returns a 32-byte AES-256 key from the auth secret for app env
+// secrets (the default domain). Deterministic; safe to call repeatedly.
 func DeriveKey(authSecret string) []byte {
-	r := hkdf.New(sha256.New, []byte(authSecret), nil, []byte(infoString))
+	return DeriveKeyWithInfo(authSecret, infoString)
+}
+
+// DeriveKeyWithInfo returns a 32-byte AES-256 key from the auth secret bound to
+// info as the HKDF info parameter. Distinct info strings yield independent keys,
+// so callers can domain-separate (e.g. app env secrets vs the worker CA key).
+func DeriveKeyWithInfo(authSecret, info string) []byte {
+	r := hkdf.New(sha256.New, []byte(authSecret), nil, []byte(info))
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(r, key); err != nil {
 		panic(err) // HKDF-SHA256 read of 32 bytes cannot fail
