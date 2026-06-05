@@ -13,6 +13,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/ui"
 )
 
@@ -21,14 +22,7 @@ import (
 // exactly the same route wiring as runServe, not a copy of it.
 func buildBrandingMux(t *testing.T, branding config.BrandingConfig) (*http.ServeMux, *db.Store) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.New(t)
 
 	cfg := &config.Config{
 		Auth:     config.AuthConfig{Secret: "test-secret"},

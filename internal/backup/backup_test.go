@@ -12,6 +12,7 @@ import (
 	"github.com/rvben/shinyhub/internal/backup"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 func mkCfg(t *testing.T) *config.Config {
@@ -60,6 +61,7 @@ func seed(t *testing.T, cfg *config.Config) {
 // TestRoundTrip backs up a populated instance and restores it into a fresh
 // config, asserting the DB row and both file trees survive intact.
 func TestRoundTrip(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
 	src := mkCfg(t)
 	seed(t, src)
 
@@ -111,6 +113,7 @@ func TestRoundTrip(t *testing.T) {
 // TestRestorePreservesExistingState verifies restore moves current state aside
 // (suffix .pre-restore-*) instead of destroying it.
 func TestRestorePreservesExistingState(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
 	src := mkCfg(t)
 	seed(t, src)
 	archive := filepath.Join(t.TempDir(), "snap.tar.gz")
@@ -146,6 +149,7 @@ func TestRestorePreservesExistingState(t *testing.T) {
 }
 
 func TestRestoreRefusesNewerSchema(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
 	src := mkCfg(t)
 	seed(t, src)
 	archive := filepath.Join(t.TempDir(), "snap.tar.gz")
@@ -167,6 +171,7 @@ func TestRestoreRefusesNewerSchema(t *testing.T) {
 // TestCreateRejectsOutputInsideBackedUpTree guards against an archive that
 // would capture its own partially written .partial file.
 func TestCreateRejectsOutputInsideBackedUpTree(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
 	cfg := mkCfg(t)
 	seed(t, cfg)
 	inside := filepath.Join(cfg.Storage.AppDataDir, "snap.tar.gz")
@@ -179,6 +184,7 @@ func TestCreateRejectsOutputInsideBackedUpTree(t *testing.T) {
 // TestRoundTripPreservesExecutableBit verifies file modes survive the archive
 // round trip (a helper script must stay executable after restore).
 func TestRoundTripPreservesExecutableBit(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
 	src := mkCfg(t)
 	seed(t, src)
 	script := filepath.Join(src.Storage.AppsDir, "demo", "run.sh")
@@ -204,6 +210,7 @@ func TestRoundTripPreservesExecutableBit(t *testing.T) {
 }
 
 func TestCreateRejectsMemoryDSN(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
 	cfg := mkCfg(t)
 	cfg.Database.DSN = ":memory:"
 	err := backup.Create(cfg, "v1", filepath.Join(t.TempDir(), "x.tar.gz"))
