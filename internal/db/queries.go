@@ -15,6 +15,10 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+// ErrSlugTaken is returned by CreateApp when the requested slug is already
+// used by another app. Callers should surface this as HTTP 409 Conflict.
+var ErrSlugTaken = errors.New("slug already taken")
+
 // ValidAppVisibilities is the canonical set of accepted app access values.
 // All callers that validate or interpolate visibility strings must reference
 // this slice so a future extension to the set automatically propagates.
@@ -451,21 +455,22 @@ type CreateAppParams struct {
 }
 
 func (s *Store) CreateApp(p CreateAppParams) error {
+	var err error
 	if p.ProjectSlug == "" {
-		_, err := s.db.Exec(
+		_, err = s.db.Exec(
 			`INSERT INTO apps (slug, name, owner_id, access) VALUES (?, ?, ?, ?)`,
 			p.Slug, p.Name, p.OwnerID, p.Access,
 		)
-		if err != nil {
-			return fmt.Errorf("create app: %w", err)
-		}
-		return nil
+	} else {
+		_, err = s.db.Exec(
+			`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
+			p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
+		)
 	}
-	_, err := s.db.Exec(
-		`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
-		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
-	)
 	if err != nil {
+		if s.d.isUniqueViolation(err) {
+			return fmt.Errorf("create app: %w", ErrSlugTaken)
+		}
 		return fmt.Errorf("create app: %w", err)
 	}
 	return nil
@@ -493,7 +498,7 @@ func (s *Store) GetAppByID(id int64) (*App, error) {
 
 func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
@@ -642,7 +647,7 @@ func (s *Store) AllSlugs() ([]string, error) {
 
 func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
@@ -677,7 +682,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 // so reusing it for anonymous callers would leak shared apps.
 func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
@@ -1008,12 +1013,12 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 // row instead of the deploy_count counter means a transient counter-write
 // failure cannot lock users out of an app whose pool is already live.
 func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
-	var exists int
+	var exists bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM deployments WHERE app_id = ?)`, appID).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
-	return exists == 1, nil
+	return exists, nil
 }
 
 // GetDeploymentBySlugAndID fetches a single deployment by its ID, verified
@@ -1122,7 +1127,7 @@ func (s *Store) GetAppMembers(slug string) ([]AppMember, error) {
 // pagination. Pass limit=0 to return all members.
 func (s *Store) ListAppMembers(slug string, limit, offset int) ([]AppMember, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT am.user_id, u.username, am.role
@@ -1335,16 +1340,27 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	var userID int64
 	for _, name := range p.UsernameCandidates {
+		// Wrap each attempt in a savepoint so a unique-constraint violation
+		// does not abort the outer transaction on Postgres (which marks any
+		// transaction with a failed statement as aborted until rolled back).
+		if _, serr := tx.ExecContext(ctx, "SAVEPOINT sp_user_insert"); serr != nil {
+			return nil, false, fmt.Errorf("create user: savepoint: %w", serr)
+		}
 		ierr := tx.QueryRowContext(ctx,
 			`INSERT INTO users (username, password_hash, role) VALUES (?, '', ?) RETURNING id`,
 			name, p.Role,
 		).Scan(&userID)
 		if ierr != nil {
+			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT sp_user_insert")
+			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT sp_user_insert")
 			if s.d.isUniqueViolation(ierr) {
 				userID = 0
 				continue // username taken, try the next candidate
 			}
 			return nil, false, fmt.Errorf("create user: %w", ierr)
+		}
+		if _, rerr := tx.ExecContext(ctx, "RELEASE SAVEPOINT sp_user_insert"); rerr != nil {
+			return nil, false, fmt.Errorf("create user: release savepoint: %w", rerr)
 		}
 		break
 	}

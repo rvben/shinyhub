@@ -43,6 +43,10 @@ type dialect interface {
 	beginWrite(ctx context.Context, db *sql.DB, lockKey int64) (writeTx, error)
 	// isUniqueViolation reports a unique/primary-key constraint violation.
 	isUniqueViolation(err error) bool
+	// noLimit returns the sentinel integer to use as a LIMIT value meaning
+	// "return all rows". SQLite uses -1; Postgres uses a large positive int
+	// because Postgres rejects negative LIMIT values.
+	noLimit() int
 }
 
 type sqliteDialect struct{}
@@ -70,6 +74,9 @@ func (sqliteDialect) isUniqueViolation(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "UNIQUE constraint failed") ||
 		strings.Contains(err.Error(), "constraint failed: UNIQUE"))
 }
+
+// SQLite treats -1 as "no limit" in a LIMIT clause.
+func (sqliteDialect) noLimit() int { return -1 }
 
 type pgDialect struct{}
 
@@ -111,3 +118,7 @@ func (pgDialect) isUniqueViolation(err error) bool {
 	}
 	return false
 }
+
+// Postgres rejects negative LIMIT values; use a large positive integer instead.
+// 2^31-1 rows is the practical upper bound for any paged listing.
+func (pgDialect) noLimit() int { return 1<<31 - 1 }
