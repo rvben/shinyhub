@@ -40,9 +40,8 @@ func TestLoadCA_AcceptsValidPair(t *testing.T) {
 	}
 }
 
-// mustGenerateOtherECKey generates a fresh P-256 key unrelated to any cert,
-// returning the PEM-encoded cert and key. The cert PEM is discarded by callers
-// who only need an unrelated key.
+// mustGenerateOtherECKey generates a fresh P-256 key unrelated to any cert.
+// Only the key is needed by callers; certPEM is nil.
 func mustGenerateOtherECKey(t *testing.T) (certPEM, keyPEM []byte) {
 	t.Helper()
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -54,7 +53,6 @@ func mustGenerateOtherECKey(t *testing.T) (certPEM, keyPEM []byte) {
 		t.Fatalf("marshal other ec key: %v", err)
 	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	// Also produce a self-signed cert for the other key so callers can use both.
 	return nil, keyPEM
 }
 

@@ -346,8 +346,11 @@ func LoadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) 
 		// Lost the race: another instance stored a CA first. Adopt it, but if we
 		// were importing a disk CA and it differs, fail loudly.
 		certPEM, keyEnc, found, err = store.GetWorkerCA()
-		if err != nil || !found {
-			return nil, fmt.Errorf("worker ca race reread: found=%v err=%w", found, err)
+		if err != nil {
+			return nil, fmt.Errorf("worker ca race reread: %w", err)
+		}
+		if !found {
+			return nil, fmt.Errorf("worker ca race reread returned no row")
 		}
 		return decodeAndGuard(certPEM, keyEnc, keyEncKey, caDir, joinTokens)
 	}
