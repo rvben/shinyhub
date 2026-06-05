@@ -11,8 +11,6 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
-	sqlite "modernc.org/sqlite"
-	sqlitelib "modernc.org/sqlite/lib"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -1290,24 +1288,19 @@ type ProvisionOAuthUserParams struct {
 func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, error) {
 	ctx := context.Background()
 
-	// A dedicated connection with an explicit BEGIN IMMEDIATE takes the
-	// write lock up front, so concurrent first logins for the same identity
-	// serialize here rather than racing to the decisive linked-account read.
-	// The loser then sees the winner's committed link and returns it. The
-	// UNIQUE-conflict path below is kept as defense in depth.
-	conn, err := s.rawDB().Conn(ctx)
+	// beginWrite takes the write lock up front (BEGIN IMMEDIATE on SQLite,
+	// standard transaction on Postgres), so concurrent first logins for the
+	// same identity serialize here rather than racing to the decisive
+	// linked-account read. lockKey=0: the unique constraint handles the
+	// single-row upsert race without a Postgres advisory lock.
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), 0)
 	if err != nil {
-		return nil, false, fmt.Errorf("acquire conn: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, false, fmt.Errorf("begin immediate: %w", err)
+		return nil, false, fmt.Errorf("first-login provisioning: begin: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -1330,8 +1323,8 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		SELECT id, username, password_hash, role, created_at
 		FROM users WHERE id = ?`
 
-	if u, gerr := scanUser(conn.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
-		if _, cerr := conn.ExecContext(ctx, "COMMIT"); cerr != nil {
+	if u, gerr := scanUser(tx.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
+		if cerr := tx.Commit(); cerr != nil {
 			return nil, false, fmt.Errorf("commit: %w", cerr)
 		}
 		committed = true
@@ -1342,39 +1335,33 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	var userID int64
 	for _, name := range p.UsernameCandidates {
-		res, ierr := conn.ExecContext(ctx,
-			`INSERT INTO users (username, password_hash, role) VALUES (?, '', ?)`,
+		ierr := tx.QueryRowContext(ctx,
+			`INSERT INTO users (username, password_hash, role) VALUES (?, '', ?) RETURNING id`,
 			name, p.Role,
-		)
+		).Scan(&userID)
 		if ierr != nil {
-			var se *sqlite.Error
-			if errors.As(ierr, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
+			if s.d.isUniqueViolation(ierr) {
+				userID = 0
 				continue // username taken, try the next candidate
 			}
 			return nil, false, fmt.Errorf("create user: %w", ierr)
 		}
-		userID, _ = res.LastInsertId()
 		break
 	}
 	if userID == 0 {
 		return nil, false, fmt.Errorf("create user: all candidate usernames in use")
 	}
 
-	if _, lerr := conn.ExecContext(ctx,
+	if _, lerr := tx.ExecContext(ctx,
 		`INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?)`,
 		userID, p.Provider, p.ProviderID,
 	); lerr != nil {
-		var se *sqlite.Error
-		if errors.As(lerr, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
-			// Lost a concurrent first-login race (rare: BEGIN IMMEDIATE
-			// serializes contenders, so the loser normally sees the link
-			// in linkedQuery above). Roll back and release this connection
-			// BEFORE the fallback read, which needs its own pooled
-			// connection — holding this one would deadlock a pool capped
-			// at a single connection (in-memory store).
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
-			committed = true // suppress the deferred ROLLBACK
-			_ = conn.Close()
+		if s.d.isUniqueViolation(lerr) {
+			// Lost a concurrent first-login race (rare: beginWrite serializes
+			// contenders, so the loser normally sees the link in linkedQuery
+			// above). Roll back and use a separate query to resolve.
+			_ = tx.Rollback()
+			committed = true // suppress the deferred Rollback
 			existing, eerr := s.GetUserByOAuthAccount(p.Provider, p.ProviderID)
 			if eerr != nil {
 				return nil, false, fmt.Errorf("resolve raced oauth user: %w", eerr)
@@ -1384,13 +1371,12 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return nil, false, fmt.Errorf("link oauth account: %w", lerr)
 	}
 
-	// Read the created row on the same connection/transaction so no second
-	// pooled connection is needed while this one is still held.
-	created, gerr := scanUser(conn.QueryRowContext(ctx, userByIDQuery, userID))
+	// Read the created row within the transaction to confirm the inserted ID.
+	created, gerr := scanUser(tx.QueryRowContext(ctx, userByIDQuery, userID))
 	if gerr != nil {
 		return nil, false, fmt.Errorf("read created user: %w", gerr)
 	}
-	if _, cerr := conn.ExecContext(ctx, "COMMIT"); cerr != nil {
+	if cerr := tx.Commit(); cerr != nil {
 		return nil, false, fmt.Errorf("commit: %w", cerr)
 	}
 	committed = true
