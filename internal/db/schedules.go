@@ -525,7 +525,7 @@ func (s *Store) GrantSharedData(consumerAppID, sourceAppID int64) error {
 	// connection with BEGIN IMMEDIATE takes the write lock up front so two
 	// opposing grants (a->b and b->a) serialize here instead of both passing
 	// the check before either inserts.
-	conn, err := s.db.Conn(ctx)
+	conn, err := s.rawDB().Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("grant shared data: acquire conn: %w", err)
 	}

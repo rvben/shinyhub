@@ -2,6 +2,30 @@ package db
 
 import "testing"
 
+func TestDialectExpressions(t *testing.T) {
+	sq := sqliteDialect{}
+	if got := sq.rebind(`WHERE a = ?`); got != `WHERE a = ?` {
+		t.Fatalf("sqlite rebind should be identity, got %q", got)
+	}
+	if sq.now() != "datetime('now')" {
+		t.Fatalf("sqlite now() = %q", sq.now())
+	}
+	if got := sq.nowPlusSeconds(30); got != "datetime('now', '+30 seconds')" {
+		t.Fatalf("sqlite nowPlusSeconds(30) = %q", got)
+	}
+
+	pg := pgDialect{}
+	if got := pg.rebind(`WHERE a = ?`); got != `WHERE a = $1` {
+		t.Fatalf("pg rebind = %q", got)
+	}
+	if pg.now() != "now()" {
+		t.Fatalf("pg now() = %q", pg.now())
+	}
+	if got := pg.nowPlusSeconds(30); got != "now() + make_interval(secs => 30)" {
+		t.Fatalf("pg nowPlusSeconds(30) = %q", got)
+	}
+}
+
 func TestRebindQuery_Postgres(t *testing.T) {
 	cases := []struct {
 		name, in, want string

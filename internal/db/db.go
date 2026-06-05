@@ -66,7 +66,8 @@ func loadMigrations() ([]migration, error) {
 }
 
 type Store struct {
-	db *sql.DB
+	db *boundDB
+	d  dialect
 }
 
 // fileDBMaxConns caps the connection pool for file-backed databases. WAL lets
@@ -113,30 +114,31 @@ func withPragmas(dsn string) string {
 
 func Open(dsn string) (*Store, error) {
 	memory := isMemoryDSN(dsn)
-	db, err := sql.Open("sqlite", withPragmas(dsn))
+	raw, err := sql.Open("sqlite", withPragmas(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	if memory {
-		db.SetMaxOpenConns(1)
+		raw.SetMaxOpenConns(1)
 	} else {
-		db.SetMaxOpenConns(fileDBMaxConns)
-		db.SetMaxIdleConns(fileDBMaxConns)
-		db.SetConnMaxIdleTime(5 * time.Minute)
+		raw.SetMaxOpenConns(fileDBMaxConns)
+		raw.SetMaxIdleConns(fileDBMaxConns)
+		raw.SetConnMaxIdleTime(5 * time.Minute)
 	}
 	// Verify the pragmas took effect on a real connection. A silent failure
 	// here (e.g. WAL rejected on a read-only volume) would otherwise surface
 	// much later as data-integrity or lock-contention bugs.
 	var fk int
-	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
-		_ = db.Close()
+	if err := raw.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
+		_ = raw.Close()
 		return nil, fmt.Errorf("verify foreign_keys pragma: %w", err)
 	}
 	if fk != 1 {
-		_ = db.Close()
+		_ = raw.Close()
 		return nil, fmt.Errorf("foreign_keys pragma not enabled (got %d)", fk)
 	}
-	return &Store{db: db}, nil
+	d := sqliteDialect{}
+	return &Store{db: &boundDB{real: raw, d: d}, d: d}, nil
 }
 
 // timed records the latency of a DB op. Slow ops (over slowQueryThreshold) are
@@ -335,6 +337,10 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// rawDB returns the underlying *sql.DB for SQLite-only internals that genuinely
+// need a raw connection (e.g. BEGIN IMMEDIATE on a dedicated conn).
+func (s *Store) rawDB() *sql.DB { return s.db.real }
+
 // SchemaVersion returns the highest migration version recorded in the
 // schema_migrations ledger, or 0 if the database has no ledger yet.
 func (s *Store) SchemaVersion() (int, error) {
@@ -376,7 +382,7 @@ func LatestSchemaVersion() (int, error) {
 func (s *Store) BackupTo(dest string) error {
 	defer s.timed("BackupTo")()
 	quoted := "'" + strings.ReplaceAll(dest, "'", "''") + "'"
-	if _, err := s.db.Exec("VACUUM INTO " + quoted); err != nil {
+	if _, err := s.rawDB().Exec("VACUUM INTO " + quoted); err != nil {
 		return fmt.Errorf("vacuum into %s: %w", dest, err)
 	}
 	return nil
@@ -387,8 +393,8 @@ func (s *Store) PingContext(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-// DB returns the underlying *sql.DB. It is exposed for test helpers that need
-// to insert rows directly without going through query methods.
-func (s *Store) DB() *sql.DB {
+// DB returns the querier for this store. It is exposed for test helpers that
+// need to insert rows directly without going through query methods.
+func (s *Store) DB() Execer {
 	return s.db
 }

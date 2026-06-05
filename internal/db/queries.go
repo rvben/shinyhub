@@ -1307,7 +1307,7 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 	// serialize here rather than racing to the decisive linked-account read.
 	// The loser then sees the winner's committed link and returns it. The
 	// UNIQUE-conflict path below is kept as defense in depth.
-	conn, err := s.db.Conn(ctx)
+	conn, err := s.rawDB().Conn(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("acquire conn: %w", err)
 	}
