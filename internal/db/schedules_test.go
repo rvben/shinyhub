@@ -6,6 +6,19 @@ import (
 	"time"
 )
 
+func mustOpenStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return store
+}
+
 func newScheduleStore(t *testing.T) *Store {
 	t.Helper()
 	return mustOpenStore(t)
