@@ -10,17 +10,6 @@ import (
 // ownerRole is the constant primary key for the single cp_owner row.
 const ownerRole = "control-plane"
 
-// ttlModifier renders a Go duration as a SQLite datetime modifier
-// ("+N seconds"), flooring at 1 second so a non-positive TTL still yields a
-// valid (immediately-near-expiry) lease rather than malformed SQL.
-func ttlModifier(ttl time.Duration) string {
-	secs := int(ttl / time.Second)
-	if secs < 1 {
-		secs = 1
-	}
-	return fmt.Sprintf("+%d seconds", secs)
-}
-
 // OwnerInfo is the current lease holder, for tests and observability.
 type OwnerInfo struct {
 	InstanceID string
@@ -33,17 +22,22 @@ type OwnerInfo struct {
 // the fencing epoch. Returns acquired=false (epoch 0) when another instance
 // holds a live lease.
 func (s *Store) AcquireOwner(instanceID string, ttl time.Duration) (bool, int64, error) {
+	secs := int(ttl / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	now := s.d.now()
 	res, err := s.db.Exec(`
 		INSERT INTO cp_owner (role, instance_id, epoch, acquired_at, heartbeat_at, expires_at)
-		VALUES (?, ?, 1, datetime('now'), datetime('now'), datetime('now', ?))
+		VALUES (?, ?, 1, `+now+`, `+now+`, `+s.d.nowPlusSeconds(secs)+`)
 		ON CONFLICT(role) DO UPDATE SET
 			instance_id  = excluded.instance_id,
 			epoch        = cp_owner.epoch + 1,
-			acquired_at  = datetime('now'),
-			heartbeat_at = datetime('now'),
+			acquired_at  = `+now+`,
+			heartbeat_at = `+now+`,
 			expires_at   = excluded.expires_at
-		WHERE cp_owner.instance_id IS NULL OR cp_owner.expires_at <= datetime('now')`,
-		ownerRole, instanceID, ttlModifier(ttl))
+		WHERE cp_owner.instance_id IS NULL OR cp_owner.expires_at <= `+now,
+		ownerRole, instanceID)
 	if err != nil {
 		return false, 0, fmt.Errorf("acquire owner: %w", err)
 	}
@@ -65,10 +59,14 @@ func (s *Store) AcquireOwner(instanceID string, ttl time.Duration) (bool, int64,
 // RenewOwner extends the lease iff instanceID still holds it at epoch. ok=false
 // means ownership was lost (a different instance, or a newer epoch, holds it).
 func (s *Store) RenewOwner(instanceID string, epoch int64, ttl time.Duration) (bool, error) {
+	secs := int(ttl / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
 	res, err := s.db.Exec(`
-		UPDATE cp_owner SET heartbeat_at = datetime('now'), expires_at = datetime('now', ?)
+		UPDATE cp_owner SET heartbeat_at = `+s.d.now()+`, expires_at = `+s.d.nowPlusSeconds(secs)+`
 		WHERE role = ? AND instance_id = ? AND epoch = ?`,
-		ttlModifier(ttl), ownerRole, instanceID, epoch)
+		ownerRole, instanceID, epoch)
 	if err != nil {
 		return false, fmt.Errorf("renew owner: %w", err)
 	}
@@ -83,7 +81,7 @@ func (s *Store) ReleaseOwner(instanceID string, epoch int64) error {
 	// Keep the row (instance_id=NULL) rather than deleting it: the next AcquireOwner
 	// takes the ON CONFLICT DO UPDATE path and bumps epoch, preserving fencing-token continuity.
 	_, err := s.db.Exec(`
-		UPDATE cp_owner SET instance_id = NULL, expires_at = datetime('now')
+		UPDATE cp_owner SET instance_id = NULL, expires_at = `+s.d.now()+`
 		WHERE role = ? AND instance_id = ? AND epoch = ?`,
 		ownerRole, instanceID, epoch)
 	if err != nil {
