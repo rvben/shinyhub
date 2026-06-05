@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -951,6 +952,14 @@ func Load(path string) (*Config, error) {
 	}
 	if err := validateBranding(&cfg.Branding); err != nil {
 		return nil, err
+	}
+	// Normalize storage roots to absolute so a relative/cwd-dependent root cannot
+	// resolve differently across HA instances sharing one filesystem.
+	if abs, err := filepath.Abs(cfg.Storage.AppsDir); err == nil {
+		cfg.Storage.AppsDir = abs
+	}
+	if abs, err := filepath.Abs(cfg.Storage.AppDataDir); err == nil {
+		cfg.Storage.AppDataDir = abs
 	}
 	return cfg, nil
 }

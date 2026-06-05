@@ -665,8 +665,13 @@ func TestLoad_AppDataDirDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got, want := cfg.Storage.AppDataDir, "./data/app-data"; got != want {
-		t.Errorf("AppDataDir default = %q, want %q", got, want)
+	// Load normalizes storage roots to absolute, so the default "./data/app-data"
+	// becomes an absolute path rooted at the process cwd.
+	if !filepath.IsAbs(cfg.Storage.AppDataDir) {
+		t.Errorf("AppDataDir default not absolute: %q", cfg.Storage.AppDataDir)
+	}
+	if !strings.HasSuffix(cfg.Storage.AppDataDir, "/data/app-data") {
+		t.Errorf("AppDataDir default = %q, want suffix /data/app-data", cfg.Storage.AppDataDir)
 	}
 	if got, want := cfg.Storage.MaxBundleMB, 128; got != want {
 		t.Errorf("MaxBundleMB default = %d, want %d", got, want)
@@ -2425,5 +2430,23 @@ auth:
 	}
 	if got, want := strings.Join(cfg.Auth.ForwardAuth.AdminGroups, ","), "admins,sre"; got != want {
 		t.Fatalf("AdminGroups: got %q want %q", got, want)
+	}
+}
+
+func TestLoad_NormalizesStorageRootsToAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("auth:\n  secret: "+strings.Repeat("a", 32)+"\nstorage:\n  apps_dir: ./rel-apps\n  app_data_dir: ./rel-data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(cfg.Storage.AppsDir) {
+		t.Errorf("apps_dir not absolute: %q", cfg.Storage.AppsDir)
+	}
+	if !filepath.IsAbs(cfg.Storage.AppDataDir) {
+		t.Errorf("app_data_dir not absolute: %q", cfg.Storage.AppDataDir)
 	}
 }
