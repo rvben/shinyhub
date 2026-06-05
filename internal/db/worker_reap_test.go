@@ -1,16 +1,19 @@
-package db
+package db_test
 
 import (
 	"testing"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 // backdateWorker forces a worker's last_heartbeat to a fixed UTC instant so
 // staleness can be exercised deterministically (UpsertWorker always stamps the
 // current time).
-func backdateWorker(t *testing.T, store *Store, nodeID string, at time.Time) {
+func backdateWorker(t *testing.T, store *db.Store, nodeID string, at time.Time) {
 	t.Helper()
-	if _, err := store.db.Exec(
+	if _, err := store.DB().Exec(
 		`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`,
 		at.UTC().Format("2006-01-02 15:04:05"), nodeID); err != nil {
 		t.Fatalf("backdate %q: %v", nodeID, err)
@@ -22,28 +25,21 @@ func backdateWorker(t *testing.T, store *Store, nodeID string, at time.Time) {
 // (running/crashed) replicas, while preserving revoked rows (audit), recently
 // seen workers, still-up workers, and workers still hosting live replicas.
 func TestDeleteStaleWorkers(t *testing.T) {
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	recent := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
 	cutoff := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 
 	// app provides app_id values for the replica rows that pin some workers.
-	if err := store.CreateUser(CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	owner, err := store.GetUserByUsername("owner")
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := store.CreateApp(CreateAppParams{Slug: "demo", Name: "demo", OwnerID: owner.ID, Access: "private"}); err != nil {
+	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: owner.ID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, err := store.GetAppBySlug("demo")
@@ -73,7 +69,7 @@ func TestDeleteStaleWorkers(t *testing.T) {
 
 	idx := 0
 	for _, s := range specs {
-		if err := store.UpsertWorker(Worker{
+		if err := store.UpsertWorker(db.Worker{
 			NodeID: s.node, AdvertiseAddr: "10.0.0.1:8443", Tier: "burst", Status: s.status,
 		}); err != nil {
 			t.Fatalf("upsert %q: %v", s.node, err)
@@ -88,7 +84,7 @@ func TestDeleteStaleWorkers(t *testing.T) {
 			backdateWorker(t, store, s.node, s.heartbeat)
 		}
 		if s.replicaStatus != "" {
-			if err := store.UpsertReplica(UpsertReplicaParams{
+			if err := store.UpsertReplica(db.UpsertReplicaParams{
 				AppID: app.ID, Index: idx, Status: s.replicaStatus,
 				Provider: "remote", Tier: "burst", WorkerID: s.node,
 			}); err != nil {
@@ -115,7 +111,7 @@ func TestDeleteStaleWorkers(t *testing.T) {
 
 	for _, s := range specs {
 		_, err := store.GetWorker(s.node)
-		gone := err == ErrNotFound
+		gone := err == db.ErrNotFound
 		if gone != s.wantDeleted {
 			t.Errorf("worker %q: gone=%v, wantDeleted=%v (err=%v)", s.node, gone, s.wantDeleted, err)
 		}

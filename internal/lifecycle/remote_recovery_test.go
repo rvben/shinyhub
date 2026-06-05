@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -79,14 +80,7 @@ func TestMatchInventoryItem_RequiresOwningWorker(t *testing.T) {
 // a later loss/revoke pass would refuse to evict the route and keep sending
 // traffic to a dead worker.
 func TestRecoverRemoteReplica_PersistsLiveEndpoint(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}

@@ -1,18 +1,16 @@
-package db
+package db_test
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
+)
 
 func TestWorkerRegistryCRUD(t *testing.T) {
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 
-	w := Worker{
+	w := db.Worker{
 		NodeID:        "node-1",
 		Name:          "burst-a",
 		AdvertiseAddr: "10.0.0.5:8443",
@@ -55,7 +53,7 @@ func TestWorkerRegistryCRUD(t *testing.T) {
 	if err := store.DeleteWorker("node-1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, err := store.GetWorker("node-1"); err != ErrNotFound {
+	if _, err := store.GetWorker("node-1"); err != db.ErrNotFound {
 		t.Fatalf("get after delete err = %v, want ErrNotFound", err)
 	}
 }
@@ -65,17 +63,10 @@ func TestWorkerRegistryCRUD(t *testing.T) {
 // address worker on the same tier is real multi-worker capacity and must stay up;
 // a same-address worker on a different tier is untouched.
 func TestSupersedeTierAddrWorkers(t *testing.T) {
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 
 	seed := func(id, tier, addr, status string) {
-		if err := store.UpsertWorker(Worker{NodeID: id, Tier: tier, AdvertiseAddr: addr, Status: status}); err != nil {
+		if err := store.UpsertWorker(db.Worker{NodeID: id, Tier: tier, AdvertiseAddr: addr, Status: status}); err != nil {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 	}

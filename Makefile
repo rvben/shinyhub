@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -31,6 +31,13 @@ test-remote-e2e:
 # process taking over (zero-downtime upgrade). No Docker required.
 test-handoff:
 	./scripts/handoff-e2e.sh
+
+# test-postgres spins up a throwaway Postgres 16 in Docker and runs the full Go
+# suite against it (SHINYHUB_TEST_POSTGRES_DSN). Each test gets an isolated
+# database. Requires a working Docker daemon. SQLite remains the default backend
+# for `make test`.
+test-postgres:
+	./scripts/postgres-test.sh
 
 # test-fargate-it runs the Fargate runtime's real-cluster smoke test (launch a
 # task, assert routing + inventory, stop it). It is gated behind the `integration`

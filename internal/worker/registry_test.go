@@ -6,19 +6,12 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 func newTestStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return store
+	return dbtest.New(t)
 }
 
 // joinUp registers a worker and brings it up the normal way: a heartbeat.

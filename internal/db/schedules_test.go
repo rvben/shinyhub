@@ -1,27 +1,22 @@
-package db
+package db_test
 
 import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
-func newScheduleStore(t *testing.T) *Store {
+func newScheduleStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
+	return dbtest.New(t)
 }
 
-func newScheduleAppFixture(t *testing.T, store *Store, slug string) int64 {
+func newScheduleAppFixture(t *testing.T, store *db.Store, slug string) int64 {
 	t.Helper()
-	if err := store.CreateUser(CreateUserParams{
+	if err := store.CreateUser(db.CreateUserParams{
 		Username: "owner-" + slug, PasswordHash: "h", Role: "developer",
 	}); err != nil {
 		t.Fatalf("create user: %v", err)
@@ -30,7 +25,7 @@ func newScheduleAppFixture(t *testing.T, store *Store, slug string) int64 {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := store.CreateApp(CreateAppParams{
+	if err := store.CreateApp(db.CreateAppParams{
 		Slug: slug, Name: slug, OwnerID: u.ID,
 	}); err != nil {
 		t.Fatalf("create app: %v", err)
@@ -46,7 +41,7 @@ func TestSchedules_CreateGetUpdateDelete(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "fetch")
 
-	id, err := store.CreateSchedule(CreateScheduleParams{
+	id, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "daily-fetch", CronExpr: "0 6 * * *",
 		CommandJSON: `["python","fetch.py"]`, Enabled: true, TimeoutSeconds: 600,
 		OverlapPolicy: "skip", MissedPolicy: "run_once",
@@ -66,7 +61,7 @@ func TestSchedules_CreateGetUpdateDelete(t *testing.T) {
 		t.Fatalf("unexpected: %+v", got)
 	}
 
-	if err := store.UpdateSchedule(id, UpdateScheduleParams{
+	if err := store.UpdateSchedule(id, db.UpdateScheduleParams{
 		CronExpr: ptrString("*/5 * * * *"), Enabled: ptrBool(false),
 	}); err != nil {
 		t.Fatalf("update: %v", err)
@@ -79,7 +74,7 @@ func TestSchedules_CreateGetUpdateDelete(t *testing.T) {
 	if err := store.DeleteSchedule(id); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, err := store.GetSchedule(id); !errors.Is(err, ErrNotFound) {
+	if _, err := store.GetSchedule(id); !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound after delete, got %v", err)
 	}
 }
@@ -90,7 +85,7 @@ func TestSchedules_ListByApp_AndAllEnabled(t *testing.T) {
 	a2 := newScheduleAppFixture(t, store, "report")
 
 	mustCreate := func(appID int64, name string, enabled bool) {
-		_, err := store.CreateSchedule(CreateScheduleParams{
+		_, err := store.CreateSchedule(db.CreateScheduleParams{
 			AppID: appID, Name: name, CronExpr: "* * * * *",
 			CommandJSON: `["true"]`, Enabled: enabled, TimeoutSeconds: 60,
 			OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -123,14 +118,14 @@ func TestSchedules_ListByApp_AndAllEnabled(t *testing.T) {
 func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "fetch")
-	schedID, _ := store.CreateSchedule(CreateScheduleParams{
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "x", CronExpr: "* * * * *",
 		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 10,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
 	})
 
 	started := time.Now().UTC().Truncate(time.Second)
-	runID, err := store.InsertScheduleRun(InsertScheduleRunParams{
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
 		ScheduleID: schedID, Status: "running", Trigger: "schedule",
 		StartedAt: started, LogPath: "/var/log/x/run-1.log",
 	})
@@ -139,7 +134,7 @@ func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 	}
 
 	finished := started.Add(2 * time.Second)
-	if err := store.FinishScheduleRun(FinishScheduleRunParams{
+	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
 		RunID: runID, Status: "succeeded", ExitCode: 0, FinishedAt: finished,
 	}); err != nil {
 		t.Fatalf("finish: %v", err)
@@ -157,12 +152,12 @@ func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 func TestScheduleRuns_MarkInterrupted(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "fetch")
-	schedID, _ := store.CreateSchedule(CreateScheduleParams{
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "x", CronExpr: "* * * * *",
 		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 10,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
 	})
-	_, _ = store.InsertScheduleRun(InsertScheduleRunParams{
+	_, _ = store.InsertScheduleRun(db.InsertScheduleRunParams{
 		ScheduleID: schedID, Status: "running", Trigger: "schedule",
 		StartedAt: time.Now().UTC(), LogPath: "x.log",
 	})
@@ -214,10 +209,10 @@ func TestSharedData_RejectsSelfMount(t *testing.T) {
 
 func TestScheduleRuns_FinishMissing_ReturnsErrNotFound(t *testing.T) {
 	store := newScheduleStore(t)
-	err := store.FinishScheduleRun(FinishScheduleRunParams{
+	err := store.FinishScheduleRun(db.FinishScheduleRunParams{
 		RunID: 999, Status: "succeeded", ExitCode: 0, FinishedAt: time.Now().UTC(),
 	})
-	if !errors.Is(err, ErrNotFound) {
+	if !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -225,12 +220,12 @@ func TestScheduleRuns_FinishMissing_ReturnsErrNotFound(t *testing.T) {
 func TestScheduleRuns_SetLogPath(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "fetch")
-	schedID, _ := store.CreateSchedule(CreateScheduleParams{
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "x", CronExpr: "* * * * *",
 		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 10,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
 	})
-	runID, err := store.InsertScheduleRun(InsertScheduleRunParams{
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
 		ScheduleID: schedID, Status: "running", Trigger: "schedule",
 		StartedAt: time.Now().UTC(), LogPath: "",
 	})
@@ -246,7 +241,7 @@ func TestScheduleRuns_SetLogPath(t *testing.T) {
 		t.Fatalf("expected /var/log/x/run-1.log, got %q", got.LogPath)
 	}
 
-	if err := store.SetScheduleRunLogPath(999, "x"); !errors.Is(err, ErrNotFound) {
+	if err := store.SetScheduleRunLogPath(999, "x"); !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for missing row, got %v", err)
 	}
 }
@@ -258,7 +253,7 @@ func TestSchedules_CreateDuplicate_ReturnsErrScheduleNameExists(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "dup")
 
-	params := CreateScheduleParams{
+	params := db.CreateScheduleParams{
 		AppID: appID, Name: "daily", CronExpr: "0 6 * * *",
 		CommandJSON: `["python","run.py"]`, Enabled: true, TimeoutSeconds: 300,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -271,7 +266,7 @@ func TestSchedules_CreateDuplicate_ReturnsErrScheduleNameExists(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on duplicate name, got nil")
 	}
-	if !errors.Is(err, ErrScheduleNameExists) {
+	if !errors.Is(err, db.ErrScheduleNameExists) {
 		t.Fatalf("expected errors.Is(err, ErrScheduleNameExists), got: %v", err)
 	}
 }
@@ -283,7 +278,7 @@ func TestUpsertScheduleByName_InsertsWhenAbsent(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "alpha")
 
-	id, created, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	id, created, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appID, Name: "daily", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","hi"]`, Enabled: true,
 		TimeoutSeconds: 600, OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -313,7 +308,7 @@ func TestUpsertScheduleByName_UpdatesWhenPresent(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "alpha")
 
-	first, createdFirst, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	first, createdFirst, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appID, Name: "daily", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","v1"]`, Enabled: true,
 		TimeoutSeconds: 600, OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -325,7 +320,7 @@ func TestUpsertScheduleByName_UpdatesWhenPresent(t *testing.T) {
 		t.Fatal("first call should report created=true")
 	}
 
-	second, created, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	second, created, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appID, Name: "daily", CronExpr: "0 7 * * *",
 		CommandJSON: `["echo","v2"]`, Enabled: false,
 		TimeoutSeconds: 900, OverlapPolicy: "queue", MissedPolicy: "run_once",
@@ -337,7 +332,7 @@ func TestUpsertScheduleByName_UpdatesWhenPresent(t *testing.T) {
 		t.Errorf("expected created=false on update")
 	}
 	if second != first {
-		t.Errorf("expected same id on upsert; got %d → %d", first, second)
+		t.Errorf("expected same id on upsert; got %d -> %d", first, second)
 	}
 
 	sc, err := store.GetSchedule(second)
@@ -356,7 +351,7 @@ func TestUpsertScheduleByName_ScopedPerApp(t *testing.T) {
 	appA := newScheduleAppFixture(t, store, "a")
 	appB := newScheduleAppFixture(t, store, "b")
 
-	idA, _, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	idA, _, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appA, Name: "daily", CronExpr: "0 6 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -364,7 +359,7 @@ func TestUpsertScheduleByName_ScopedPerApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	idB, createdB, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	idB, createdB, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appB, Name: "daily", CronExpr: "0 7 * * *",
 		CommandJSON: `["y"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -385,7 +380,7 @@ func TestSchedules_Timezone_NullRoundTrip(t *testing.T) {
 	appID := newScheduleAppFixture(t, store, "tz-null")
 
 	// Create with no timezone (nil = inherit).
-	id, err := store.CreateSchedule(CreateScheduleParams{
+	id, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "no-tz", CronExpr: "0 6 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -408,7 +403,7 @@ func TestSchedules_Timezone_ExplicitRoundTrip(t *testing.T) {
 	appID := newScheduleAppFixture(t, store, "tz-explicit")
 
 	tz := "Europe/Amsterdam"
-	id, err := store.CreateSchedule(CreateScheduleParams{
+	id, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "with-tz", CronExpr: "0 6 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -432,7 +427,7 @@ func TestSchedules_Timezone_UpsertRoundTrip(t *testing.T) {
 
 	tz := "America/New_York"
 	// Insert with explicit timezone.
-	id, created, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	id, created, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -451,7 +446,7 @@ func TestSchedules_Timezone_UpsertRoundTrip(t *testing.T) {
 
 	// Update to a different timezone via upsert.
 	tz2 := "Asia/Tokyo"
-	id2, created2, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	id2, created2, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -472,7 +467,7 @@ func TestSchedules_Timezone_UpsertRoundTrip(t *testing.T) {
 	}
 
 	// Upsert with nil clears to NULL (inherit).
-	id3, _, err := store.UpsertScheduleByName(UpsertScheduleByNameParams{
+	id3, _, err := store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
 		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -492,7 +487,7 @@ func TestSchedules_Timezone_UpdateClearsToInherit(t *testing.T) {
 	appID := newScheduleAppFixture(t, store, "tz-update")
 
 	tz := "Pacific/Auckland"
-	id, _ := store.CreateSchedule(CreateScheduleParams{
+	id, _ := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -501,7 +496,7 @@ func TestSchedules_Timezone_UpdateClearsToInherit(t *testing.T) {
 
 	// Patch to clear timezone (empty string = set to NULL).
 	empty := ""
-	if err := store.UpdateSchedule(id, UpdateScheduleParams{
+	if err := store.UpdateSchedule(id, db.UpdateScheduleParams{
 		SetTimezone: true,
 		Timezone:    &empty,
 	}); err != nil {
@@ -515,7 +510,7 @@ func TestSchedules_Timezone_UpdateClearsToInherit(t *testing.T) {
 
 func TestSchedule_EffectiveLocation_Inherit(t *testing.T) {
 	amsterdam, _ := time.LoadLocation("Europe/Amsterdam")
-	sched := &Schedule{Timezone: nil}
+	sched := &db.Schedule{Timezone: nil}
 	loc := sched.EffectiveLocation(amsterdam)
 	if loc != amsterdam {
 		t.Errorf("expected Amsterdam, got %v", loc)
@@ -524,7 +519,7 @@ func TestSchedule_EffectiveLocation_Inherit(t *testing.T) {
 
 func TestSchedule_EffectiveLocation_Explicit(t *testing.T) {
 	tz := "America/New_York"
-	sched := &Schedule{Timezone: &tz}
+	sched := &db.Schedule{Timezone: &tz}
 	loc := sched.EffectiveLocation(time.UTC)
 	if loc.String() != "America/New_York" {
 		t.Errorf("expected New_York, got %v", loc)
@@ -533,7 +528,7 @@ func TestSchedule_EffectiveLocation_Explicit(t *testing.T) {
 
 func TestSchedule_EffectiveLocation_EmptyStringInherits(t *testing.T) {
 	empty := ""
-	sched := &Schedule{Timezone: &empty}
+	sched := &db.Schedule{Timezone: &empty}
 	loc := sched.EffectiveLocation(time.UTC)
 	if loc != time.UTC {
 		t.Errorf("empty string should inherit UTC, got %v", loc)
@@ -541,7 +536,7 @@ func TestSchedule_EffectiveLocation_EmptyStringInherits(t *testing.T) {
 }
 
 func TestSchedule_EffectiveLocation_NilDefaultFallsBackToUTC(t *testing.T) {
-	sched := &Schedule{Timezone: nil}
+	sched := &db.Schedule{Timezone: nil}
 	loc := sched.EffectiveLocation(nil)
 	if loc != time.UTC {
 		t.Errorf("nil default should fall back to UTC, got %v", loc)
@@ -557,7 +552,7 @@ func TestSchedules_Timezone_UpdateSchedule_SetTimezoneFalse_LeavesUnchanged(t *t
 	appID := newScheduleAppFixture(t, store, "tz-setfalse")
 
 	tz := "Europe/Amsterdam"
-	id, err := store.CreateSchedule(CreateScheduleParams{
+	id, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "tz-sched", CronExpr: "0 9 * * *",
 		CommandJSON: `["x"]`, Enabled: true, TimeoutSeconds: 60,
 		OverlapPolicy: "skip", MissedPolicy: "skip",
@@ -569,7 +564,7 @@ func TestSchedules_Timezone_UpdateSchedule_SetTimezoneFalse_LeavesUnchanged(t *t
 
 	// Update only Enabled; SetTimezone=false means timezone must be untouched.
 	enabled := false
-	if err := store.UpdateSchedule(id, UpdateScheduleParams{
+	if err := store.UpdateSchedule(id, db.UpdateScheduleParams{
 		Enabled:     &enabled,
 		SetTimezone: false, // explicit: do not touch timezone column
 	}); err != nil {

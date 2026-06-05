@@ -19,6 +19,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -35,14 +36,7 @@ func TestDataPersistsAcrossDeploysAndIsClearedOnDelete(t *testing.T) {
 		t.Skip("uv not in PATH")
 	}
 
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	hash, err := auth.HashPassword("pass")
 	if err != nil {
 		t.Fatal(err)
@@ -269,14 +263,7 @@ func TestDeployRejectsBundleWithDataDir(t *testing.T) {
 		t.Skip("uv not in PATH")
 	}
 
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	hash, _ := auth.HashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 
@@ -325,4 +312,3 @@ func TestDeployRejectsBundleWithDataDir(t *testing.T) {
 		dumpBody(t, "deploy with data/ should be 422", resp)
 	}
 }
-

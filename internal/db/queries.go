@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
-	sqlite "modernc.org/sqlite"
-	sqlitelib "modernc.org/sqlite/lib"
 )
 
 var ErrNotFound = errors.New("not found")
+
+// ErrSlugTaken is returned by CreateApp when the requested slug is already
+// used by another app. Callers should surface this as HTTP 409 Conflict.
+var ErrSlugTaken = errors.New("slug already taken")
 
 // ValidAppVisibilities is the canonical set of accepted app access values.
 // All callers that validate or interpolate visibility strings must reference
@@ -234,14 +236,15 @@ const systemUserPasswordHash = "!disabled"
 // or updates the existing row's role to match. Returns the resulting row.
 // Idempotent: safe to call on every startup.
 //
-// Atomic at the SQLite level: INSERT OR IGNORE plus UPDATE means concurrent
-// callers cannot race between SELECT and INSERT.
+// The INSERT ... ON CONFLICT DO NOTHING plus UPDATE sequence is atomic under
+// the database's unique constraint: a concurrent caller cannot race between the
+// read and the insert because the constraint is enforced by the engine.
 func (s *Store) UpsertSystemUser(username, role string) (*User, error) {
 	if !IsSystemUser(username) {
 		return nil, fmt.Errorf("upsert system user: %q is not a system username", username)
 	}
 	if _, err := s.db.Exec(
-		`INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
+		`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?) ON CONFLICT (username) DO NOTHING`,
 		username, systemUserPasswordHash, role,
 	); err != nil {
 		return nil, fmt.Errorf("insert system user: %w", err)
@@ -266,21 +269,14 @@ type CreateAPIKeyParams struct {
 // CreateAPIKey inserts a new API key and returns the inserted row's ID and
 // creation timestamp.
 func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
-	result, err := s.db.Exec(
-		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?)`,
+	var id int64
+	var createdAt time.Time
+	err := s.db.QueryRow(
+		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?) RETURNING id, created_at`,
 		p.UserID, p.KeyHash, p.Name,
-	)
+	).Scan(&id, &createdAt)
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("create api key: %w", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("create api key last id: %w", err)
-	}
-	var createdAt time.Time
-	err = s.db.QueryRow(`SELECT created_at FROM api_keys WHERE id = ?`, id).Scan(&createdAt)
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("create api key created_at: %w", err)
 	}
 	return id, createdAt, nil
 }
@@ -459,21 +455,22 @@ type CreateAppParams struct {
 }
 
 func (s *Store) CreateApp(p CreateAppParams) error {
+	var err error
 	if p.ProjectSlug == "" {
-		_, err := s.db.Exec(
+		_, err = s.db.Exec(
 			`INSERT INTO apps (slug, name, owner_id, access) VALUES (?, ?, ?, ?)`,
 			p.Slug, p.Name, p.OwnerID, p.Access,
 		)
-		if err != nil {
-			return fmt.Errorf("create app: %w", err)
-		}
-		return nil
+	} else {
+		_, err = s.db.Exec(
+			`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
+			p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
+		)
 	}
-	_, err := s.db.Exec(
-		`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
-		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
-	)
 	if err != nil {
+		if s.d.isUniqueViolation(err) {
+			return fmt.Errorf("create app: %w", ErrSlugTaken)
+		}
 		return fmt.Errorf("create app: %w", err)
 	}
 	return nil
@@ -501,7 +498,7 @@ func (s *Store) GetAppByID(id int64) (*App, error) {
 
 func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
@@ -650,7 +647,7 @@ func (s *Store) AllSlugs() ([]string, error) {
 
 func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
@@ -685,7 +682,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 // so reusing it for anonymous callers would leak shared apps.
 func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
@@ -841,16 +838,13 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	if status == "" {
 		status = DeploymentSucceeded
 	}
-	res, err := s.db.Exec(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+	var id int64
+	err := s.db.QueryRow(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?) RETURNING id`,
 		p.AppID, p.Version, p.BundleDir, status,
-	)
+	).Scan(&id)
 	if err != nil {
 		return nil, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("last insert id: %w", err)
 	}
 	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: status}, nil
 }
@@ -870,16 +864,13 @@ func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
 // mid-deploy the row stays 'pending'; startup reconciliation fails it so it is
 // never mistaken for a good deployment.
 func (s *Store) BeginDeployment(appID int64, version, bundleDir string) (*Deployment, error) {
-	res, err := s.db.Exec(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+	var id int64
+	err := s.db.QueryRow(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?) RETURNING id`,
 		appID, version, bundleDir, DeploymentPending,
-	)
+	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("begin deployment: last insert id: %w", err)
 	}
 	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending}, nil
 }
@@ -1022,12 +1013,12 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 // row instead of the deploy_count counter means a transient counter-write
 // failure cannot lock users out of an app whose pool is already live.
 func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
-	var exists int
+	var exists bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM deployments WHERE app_id = ?)`, appID).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
-	return exists == 1, nil
+	return exists, nil
 }
 
 // GetDeploymentBySlugAndID fetches a single deployment by its ID, verified
@@ -1085,7 +1076,7 @@ type AppMember struct {
 
 func (s *Store) GrantAppAccess(slug string, userID int64) error {
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO app_members (app_slug, user_id) VALUES (?, ?)`, slug, userID)
+		`INSERT INTO app_members (app_slug, user_id) VALUES (?, ?) ON CONFLICT (app_slug, user_id) DO NOTHING`, slug, userID)
 	if err != nil {
 		return fmt.Errorf("grant app access: %w", err)
 	}
@@ -1136,7 +1127,7 @@ func (s *Store) GetAppMembers(slug string) ([]AppMember, error) {
 // pagination. Pass limit=0 to return all members.
 func (s *Store) ListAppMembers(slug string, limit, offset int) ([]AppMember, error) {
 	if limit <= 0 {
-		limit = -1 // SQLite treats -1 as no limit
+		limit = s.d.noLimit()
 	}
 	rows, err := s.db.Query(`
 		SELECT am.user_id, u.username, am.role
@@ -1257,7 +1248,7 @@ type CreateOAuthAccountParams struct {
 
 func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?)`,
+		`INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?) ON CONFLICT (provider, provider_id) DO NOTHING`,
 		p.UserID, p.Provider, p.ProviderID,
 	)
 	if err != nil {
@@ -1302,24 +1293,19 @@ type ProvisionOAuthUserParams struct {
 func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, error) {
 	ctx := context.Background()
 
-	// A dedicated connection with an explicit BEGIN IMMEDIATE takes the
-	// write lock up front, so concurrent first logins for the same identity
-	// serialize here rather than racing to the decisive linked-account read.
-	// The loser then sees the winner's committed link and returns it. The
-	// UNIQUE-conflict path below is kept as defense in depth.
-	conn, err := s.db.Conn(ctx)
+	// beginWrite takes the write lock up front (BEGIN IMMEDIATE on SQLite,
+	// standard transaction on Postgres), so concurrent first logins for the
+	// same identity serialize here rather than racing to the decisive
+	// linked-account read. lockKey=0: the unique constraint handles the
+	// single-row upsert race without a Postgres advisory lock.
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), 0)
 	if err != nil {
-		return nil, false, fmt.Errorf("acquire conn: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, false, fmt.Errorf("begin immediate: %w", err)
+		return nil, false, fmt.Errorf("first-login provisioning: begin: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -1342,8 +1328,8 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		SELECT id, username, password_hash, role, created_at
 		FROM users WHERE id = ?`
 
-	if u, gerr := scanUser(conn.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
-		if _, cerr := conn.ExecContext(ctx, "COMMIT"); cerr != nil {
+	if u, gerr := scanUser(tx.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
+		if cerr := tx.Commit(); cerr != nil {
 			return nil, false, fmt.Errorf("commit: %w", cerr)
 		}
 		committed = true
@@ -1354,39 +1340,44 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	var userID int64
 	for _, name := range p.UsernameCandidates {
-		res, ierr := conn.ExecContext(ctx,
-			`INSERT INTO users (username, password_hash, role) VALUES (?, '', ?)`,
+		// Wrap each attempt in a savepoint so a unique-constraint violation
+		// does not abort the outer transaction on Postgres (which marks any
+		// transaction with a failed statement as aborted until rolled back).
+		if _, serr := tx.ExecContext(ctx, "SAVEPOINT sp_user_insert"); serr != nil {
+			return nil, false, fmt.Errorf("create user: savepoint: %w", serr)
+		}
+		ierr := tx.QueryRowContext(ctx,
+			`INSERT INTO users (username, password_hash, role) VALUES (?, '', ?) RETURNING id`,
 			name, p.Role,
-		)
+		).Scan(&userID)
 		if ierr != nil {
-			var se *sqlite.Error
-			if errors.As(ierr, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
+			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT sp_user_insert")
+			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT sp_user_insert")
+			if s.d.isUniqueViolation(ierr) {
+				userID = 0
 				continue // username taken, try the next candidate
 			}
 			return nil, false, fmt.Errorf("create user: %w", ierr)
 		}
-		userID, _ = res.LastInsertId()
+		if _, rerr := tx.ExecContext(ctx, "RELEASE SAVEPOINT sp_user_insert"); rerr != nil {
+			return nil, false, fmt.Errorf("create user: release savepoint: %w", rerr)
+		}
 		break
 	}
 	if userID == 0 {
 		return nil, false, fmt.Errorf("create user: all candidate usernames in use")
 	}
 
-	if _, lerr := conn.ExecContext(ctx,
+	if _, lerr := tx.ExecContext(ctx,
 		`INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?)`,
 		userID, p.Provider, p.ProviderID,
 	); lerr != nil {
-		var se *sqlite.Error
-		if errors.As(lerr, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
-			// Lost a concurrent first-login race (rare: BEGIN IMMEDIATE
-			// serializes contenders, so the loser normally sees the link
-			// in linkedQuery above). Roll back and release this connection
-			// BEFORE the fallback read, which needs its own pooled
-			// connection — holding this one would deadlock a pool capped
-			// at a single connection (in-memory store).
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
-			committed = true // suppress the deferred ROLLBACK
-			_ = conn.Close()
+		if s.d.isUniqueViolation(lerr) {
+			// Lost a concurrent first-login race (rare: beginWrite serializes
+			// contenders, so the loser normally sees the link in linkedQuery
+			// above). Roll back and use a separate query to resolve.
+			_ = tx.Rollback()
+			committed = true // suppress the deferred Rollback
 			existing, eerr := s.GetUserByOAuthAccount(p.Provider, p.ProviderID)
 			if eerr != nil {
 				return nil, false, fmt.Errorf("resolve raced oauth user: %w", eerr)
@@ -1396,13 +1387,12 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return nil, false, fmt.Errorf("link oauth account: %w", lerr)
 	}
 
-	// Read the created row on the same connection/transaction so no second
-	// pooled connection is needed while this one is still held.
-	created, gerr := scanUser(conn.QueryRowContext(ctx, userByIDQuery, userID))
+	// Read the created row within the transaction to confirm the inserted ID.
+	created, gerr := scanUser(tx.QueryRowContext(ctx, userByIDQuery, userID))
 	if gerr != nil {
 		return nil, false, fmt.Errorf("read created user: %w", gerr)
 	}
-	if _, cerr := conn.ExecContext(ctx, "COMMIT"); cerr != nil {
+	if cerr := tx.Commit(); cerr != nil {
 		return nil, false, fmt.Errorf("commit: %w", cerr)
 	}
 	committed = true
@@ -1424,7 +1414,7 @@ func (s *Store) CreateOAuthState(state string) error {
 // Also sweeps all expired states to prevent unbounded table growth.
 func (s *Store) ConsumeOAuthState(state string) error {
 	// Sweep stale nonces — ignore errors; this is best-effort cleanup.
-	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < datetime('now', '-10 minutes')`) //nolint:errcheck
+	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < ` + s.d.nowMinusSeconds(600)) //nolint:errcheck
 	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ?`, state)
 	if err != nil {
 		return fmt.Errorf("consume oauth state: %w", err)
@@ -1597,11 +1587,11 @@ type AppEnvVar struct {
 func (s *Store) UpsertAppEnvVar(appID int64, key string, value []byte, isSecret bool) error {
 	_, err := s.db.Exec(`
 		INSERT INTO app_env_vars (app_id, key, value, is_secret, updated_at)
-		VALUES (?, ?, ?, ?, strftime('%s','now'))
+		VALUES (?, ?, ?, ?, `+s.d.nowEpoch()+`)
 		ON CONFLICT(app_id, key) DO UPDATE SET
 			value      = excluded.value,
 			is_secret  = excluded.is_secret,
-			updated_at = strftime('%s','now')`,
+			updated_at = `+s.d.nowEpoch(),
 		appID, key, value, boolToInt(isSecret))
 	return err
 }
@@ -1795,7 +1785,7 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
 		                      endpoint_url, worker_id, app_version, desired_state,
 		                      deployment_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`)
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid           = excluded.pid,
 			port          = excluded.port,
@@ -2146,13 +2136,14 @@ func scanApp(s scanner) (*App, error) {
 	// aggregates lose the original column type, so the driver returns the
 	// value as a string. We parse it manually below.
 	var lastDeployedAtRaw sql.NullString
+	var autoscaleEnabledInt int
 	err := s.Scan(
 		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
 		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
 		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
-		&a.AutoscaleEnabled, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
+		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
@@ -2161,6 +2152,7 @@ func scanApp(s scanner) (*App, error) {
 		}
 		return nil, err
 	}
+	a.AutoscaleEnabled = autoscaleEnabledInt != 0
 	if projectSlug.Valid {
 		a.ProjectSlug = projectSlug.String
 	}
@@ -2207,7 +2199,7 @@ func (w Worker) Revoked() bool { return w.RevokedAt != "" }
 func (s *Store) UpsertWorker(w Worker) error {
 	_, err := s.db.Exec(`
 		INSERT INTO workers (node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat)
-		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		VALUES (?, ?, ?, ?, ?, ?, ?, `+s.d.nowText()+`)
 		ON CONFLICT(node_id) DO UPDATE SET
 			name = excluded.name,
 			advertise_addr = excluded.advertise_addr,
@@ -2275,7 +2267,7 @@ func (s *Store) ListWorkers() ([]*Worker, error) {
 // alongside the tier's current owner.
 func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint, status string) error {
 	res, err := s.db.Exec(`
-		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = ?
+		UPDATE workers SET last_heartbeat = `+s.d.nowText()+`, cert_fingerprint = ?, status = ?
 		WHERE node_id = ?`, fingerprint, status, nodeID)
 	if err != nil {
 		return fmt.Errorf("touch worker %q: %w", nodeID, err)
@@ -2325,7 +2317,7 @@ func (s *Store) RevokeWorker(nodeID string) error {
 	res, err := s.db.Exec(`
 		UPDATE workers
 		SET status = 'down',
-		    revoked_at = CASE WHEN revoked_at = '' THEN datetime('now') ELSE revoked_at END
+		    revoked_at = CASE WHEN revoked_at = '' THEN `+s.d.nowText()+` ELSE revoked_at END
 		WHERE node_id = ?`, nodeID)
 	if err != nil {
 		return fmt.Errorf("revoke worker %q: %w", nodeID, err)
@@ -2511,7 +2503,7 @@ func (s *Store) RunningReplicaWorkersForSlug(slug string) ([]string, error) {
 // (app_id, idx) and refreshes its updated_at timestamp.
 func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error {
 	_, err := s.db.Exec(
-		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		`UPDATE replicas SET status = ?, updated_at = `+s.d.nowEpoch()+`
 		   WHERE app_id = ? AND idx = ?`, status, appID, index)
 	return err
 }
@@ -2524,7 +2516,7 @@ func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error
 // endpoint_url, so a stale stored value would leave a dead worker routable.
 func (s *Store) UpdateReplicaEndpoint(appID int64, index int, endpointURL string) error {
 	_, err := s.db.Exec(
-		`UPDATE replicas SET endpoint_url = ?, updated_at = strftime('%s','now')
+		`UPDATE replicas SET endpoint_url = ?, updated_at = `+s.d.nowEpoch()+`
 		   WHERE app_id = ? AND idx = ?`, endpointURL, appID, index)
 	if err != nil {
 		return fmt.Errorf("update replica endpoint: %w", err)
@@ -2541,7 +2533,7 @@ func (s *Store) UpdateReplicaEndpoint(appID int64, index int, endpointURL string
 // skips deregistering the (now healthy) routing slot.
 func (s *Store) MarkReplicaLostIfOwnedBy(appID int64, index int, workerID string) (bool, error) {
 	res, err := s.db.Exec(
-		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		`UPDATE replicas SET status = ?, updated_at = `+s.d.nowEpoch()+`
 		   WHERE app_id = ? AND idx = ? AND worker_id = ? AND status = ?`,
 		ReplicaStatusLost, appID, index, workerID, ReplicaStatusRunning)
 	if err != nil {

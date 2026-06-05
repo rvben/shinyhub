@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -97,14 +98,7 @@ func TestRedeployInFlight_Lifecycle(t *testing.T) {
 // the marker so a polling client can distinguish "pool already cycled" from
 // "redeploy still in flight" even while app.status stays "running".
 func TestHandleGetApp_AdvertisesRedeployInFlight(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	hash, _ := auth.HashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
@@ -139,14 +133,7 @@ func TestHandleGetApp_AdvertisesRedeployInFlight(t *testing.T) {
 // and an app at the given status, plus the app row, for redeployApp tests.
 func newRedeployTestStore(t *testing.T, slug, status string) (*db.Store, *db.App) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	hash, _ := auth.HashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)

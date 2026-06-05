@@ -14,6 +14,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -23,13 +24,7 @@ import (
 // app_quota_mb so the deploy handler can enforce disk quota end-to-end.
 func newQuotaTestServer(t *testing.T, appsDir string, quotaMB int) (*api.Server, *db.Store) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth: config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{
@@ -41,7 +36,6 @@ func newQuotaTestServer(t *testing.T, appsDir string, quotaMB int) (*api.Server,
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
-	t.Cleanup(func() { _ = store.Close() })
 	return srv, store
 }
 
@@ -49,25 +43,18 @@ func newQuotaTestServer(t *testing.T, appsDir string, quotaMB int) (*api.Server,
 // MaxBundleMB cap so the deploy handler can enforce the multipart size limit.
 func newMaxBundleTestServer(t *testing.T, appsDir string, maxBundleMB int) (*api.Server, *db.Store) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth: config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{
-			AppsDir:      appsDir,
-			AppDataDir:   t.TempDir(),
-			MaxBundleMB:  maxBundleMB,
+			AppsDir:     appsDir,
+			AppDataDir:  t.TempDir(),
+			MaxBundleMB: maxBundleMB,
 		},
 	}
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
-	t.Cleanup(func() { _ = store.Close() })
 	return srv, store
 }
 

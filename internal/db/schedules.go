@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	sqlite "modernc.org/sqlite"
-	sqlitelib "modernc.org/sqlite/lib"
 )
+
+// sharedDataLockKey serializes all shared-data grants on Postgres so opposing
+// grants (a->b and b->a) cannot both pass the cycle check before either inserts.
+// The value is an arbitrary fixed advisory-lock key unique to this invariant.
+const sharedDataLockKey int64 = 0x53484152 // "SHAR"
 
 // ErrScheduleNameExists is returned by CreateSchedule when a schedule with the
 // same name already exists for the given app. Callers that want idempotent
@@ -99,20 +101,21 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 	if p.Timezone != nil && *p.Timezone != "" {
 		tz = sql.NullString{String: *p.Timezone, Valid: true}
 	}
-	res, err := s.db.Exec(`
+	var id int64
+	err := s.db.QueryRow(`
 		INSERT INTO app_schedules
 			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
-	)
+	).Scan(&id)
 	if err != nil {
-		var sqliteErr *sqlite.Error
-		if errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
+		if s.d.isUniqueViolation(err) {
 			return 0, fmt.Errorf("create schedule: %w", ErrScheduleNameExists)
 		}
 		return 0, fmt.Errorf("create schedule: %w", err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 func (s *Store) GetSchedule(id int64) (*Schedule, error) {
@@ -269,15 +272,17 @@ func (s *Store) InsertScheduleRun(p InsertScheduleRunParams) (int64, error) {
 	if p.TriggeredByUserID != nil {
 		uid = sql.NullInt64{Int64: *p.TriggeredByUserID, Valid: true}
 	}
-	res, err := s.db.Exec(`
+	var id int64
+	err := s.db.QueryRow(`
 		INSERT INTO schedule_runs (schedule_id, status, trigger, triggered_by_user_id, started_at, log_path)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id`,
 		p.ScheduleID, p.Status, p.Trigger, uid, p.StartedAt, p.LogPath,
-	)
+	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert schedule run: %w", err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 func (s *Store) FinishScheduleRun(p FinishScheduleRunParams) error {
@@ -446,30 +451,25 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 		tz = sql.NullString{String: *p.Timezone, Valid: true}
 	}
 
-	res, err := tx.Exec(`
+	var insertedID int64
+	scanErr := tx.QueryRow(`
 INSERT INTO app_schedules
   (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(app_id, name) DO NOTHING`,
+ON CONFLICT(app_id, name) DO NOTHING
+RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
 		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
-	)
-	if err != nil {
-		return 0, false, fmt.Errorf("insert schedule: %w", err)
+	).Scan(&insertedID)
+	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		return 0, false, fmt.Errorf("insert schedule: %w", scanErr)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, false, fmt.Errorf("rows affected: %w", err)
-	}
-	if n == 1 {
-		id, err := res.LastInsertId()
-		if err != nil {
-			return 0, false, fmt.Errorf("last insert id: %w", err)
-		}
+	if scanErr == nil {
+		// Row was inserted; no conflict.
 		if err := tx.Commit(); err != nil {
 			return 0, false, fmt.Errorf("commit insert: %w", err)
 		}
-		return id, true, nil
+		return insertedID, true, nil
 	}
 
 	var id int64
@@ -521,52 +521,48 @@ func (s *Store) GrantSharedData(consumerAppID, sourceAppID int64) error {
 
 	// A grant means "consumer reads source". A cycle forms if the source can
 	// already (transitively) read the consumer, so adding this edge closes a
-	// loop. The cycle check and the insert must be atomic: a dedicated
-	// connection with BEGIN IMMEDIATE takes the write lock up front so two
-	// opposing grants (a->b and b->a) serialize here instead of both passing
-	// the check before either inserts.
-	conn, err := s.db.Conn(ctx)
+	// loop. The cycle check and the insert must be atomic: beginWrite takes
+	// the write lock up front (BEGIN IMMEDIATE on SQLite; a transaction plus
+	// pg_advisory_xact_lock on Postgres) so two opposing grants (a->b and
+	// b->a) serialize here instead of both passing the check before either
+	// inserts.
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), sharedDataLockKey)
 	if err != nil {
-		return fmt.Errorf("grant shared data: acquire conn: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return fmt.Errorf("grant shared data: begin immediate: %w", err)
+		return fmt.Errorf("grant shared data: begin: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			_ = tx.Rollback()
 		}
 	}()
 
-	cyclic, err := sharedDataReaches(ctx, conn, sourceAppID, consumerAppID)
+	cyclic, err := sharedDataReaches(ctx, tx, sourceAppID, consumerAppID)
 	if err != nil {
 		return fmt.Errorf("grant shared data: %w", err)
 	}
 	if cyclic {
 		return ErrSharedDataCycle
 	}
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO app_shared_data (app_id, source_app_id) VALUES (?, ?)`,
 		consumerAppID, sourceAppID,
 	); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if s.d.isUniqueViolation(err) {
 			return ErrDuplicateMount
 		}
 		return fmt.Errorf("grant shared data: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("grant shared data: commit: %w", err)
 	}
 	committed = true
 	return nil
 }
 
-// rowQueryer is satisfied by *sql.DB, *sql.Conn, and *sql.Tx, letting the
-// reachability probe run either standalone or inside a grant transaction.
-type rowQueryer interface {
+// sharedDataQuerier is the read-only subset of both writeTx and *boundDB used
+// by the reachability probe, so it can run standalone or inside a grant transaction.
+type sharedDataQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
@@ -576,7 +572,7 @@ func (s *Store) sharedDataReaches(startAppID, targetAppID int64) (bool, error) {
 	return sharedDataReaches(context.Background(), s.db, startAppID, targetAppID)
 }
 
-func sharedDataReaches(ctx context.Context, q rowQueryer, startAppID, targetAppID int64) (bool, error) {
+func sharedDataReaches(ctx context.Context, q sharedDataQuerier, startAppID, targetAppID int64) (bool, error) {
 	var hit int
 	err := q.QueryRowContext(ctx, `
 		WITH RECURSIVE reach(id) AS (

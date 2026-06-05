@@ -5,11 +5,13 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 // TestOpen_FileEnablesWALAndForeignKeys verifies a file-backed database comes
 // up in WAL mode with foreign-key enforcement on every pooled connection.
 func TestOpen_FileEnablesWALAndForeignKeys(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // probes SQLite-only PRAGMA journal_mode
 	dsn := filepath.Join(t.TempDir(), "shinyhub.db")
 	store, err := db.Open(dsn)
 	if err != nil {
@@ -45,6 +47,7 @@ func TestOpen_FileEnablesWALAndForeignKeys(t *testing.T) {
 // connection so every query sees the same database (a pool would hand out
 // connections to distinct empty in-memory databases).
 func TestOpen_MemoryStaysSingleDatabase(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // verifies SQLite :memory: single-connection behavior
 	store, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)

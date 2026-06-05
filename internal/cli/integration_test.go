@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 // bootDeployTokenServer stands up the genuine production server stack — real
@@ -26,15 +27,7 @@ import (
 func bootDeployTokenServer(t *testing.T, rawToken string) string {
 	t.Helper()
 
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret", DeployTokenRole: "developer"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},

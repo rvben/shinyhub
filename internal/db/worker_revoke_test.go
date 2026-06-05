@@ -1,21 +1,19 @@
-package db
+package db_test
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
+)
 
 // TestRevokeWorker verifies revocation marks a worker down, stamps revoked_at,
 // surfaces through Revoked() on reads, is idempotent (preserves the first
 // revoke time), and reports ErrNotFound for an unknown node.
 func TestRevokeWorker(t *testing.T) {
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 
-	if err := store.UpsertWorker(Worker{
+	if err := store.UpsertWorker(db.Worker{
 		NodeID: "node-1", AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Status: "up",
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -66,7 +64,7 @@ func TestRevokeWorker(t *testing.T) {
 		t.Errorf("re-revoke changed revoked_at: %q -> %q", firstRevokedAt, got.RevokedAt)
 	}
 
-	if err := store.RevokeWorker("ghost"); err != ErrNotFound {
+	if err := store.RevokeWorker("ghost"); err != db.ErrNotFound {
 		t.Errorf("revoke unknown node err = %v, want ErrNotFound", err)
 	}
 }

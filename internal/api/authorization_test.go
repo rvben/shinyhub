@@ -8,25 +8,19 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 // requireExplicitAppAccess is unexported, so this test runs in-package to
 // exercise it without inventing test-only HTTP routes.
 func newAuthTestServer(t *testing.T) (*Server, *db.Store) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
 	}
 	srv := New(cfg, store, nil, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 

@@ -8,21 +8,15 @@ import (
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 func TestOpenAndMigrate(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	_ = dbtest.New(t)
 }
 
 func TestMigrate_FreshDBPopulatesLedger(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // probes sqlite_master, which is SQLite-only
 	store, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -55,6 +49,7 @@ func TestMigrate_FreshDBPopulatesLedger(t *testing.T) {
 // the ledger (the original runner left no schema_migrations table) is adopted
 // without error and without destroying data, rather than re-running 001+.
 func TestMigrate_BaselinesLegacyDB(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // legacy adoption is SQLite-only (sqlite_master probe)
 	dsn := t.TempDir() + "/legacy.db"
 	store, err := db.Open(dsn)
 	if err != nil {
@@ -143,15 +138,7 @@ func TestCreateAndGetApp(t *testing.T) {
 
 func mustOpenDB(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
+	return dbtest.New(t)
 }
 
 // openTestStore is an alias for mustOpenDB used in resource-limit tests.
@@ -192,14 +179,7 @@ func mustDeleteApp(t *testing.T, s *db.Store, slug string) {
 }
 
 func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	store := dbtest.New(t)
 
 	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatal(err)
@@ -242,14 +222,7 @@ func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 }
 
 func TestAppMembers_GrantRevoke(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatal(err)
@@ -286,14 +259,7 @@ func TestAppMembers_GrantRevoke(t *testing.T) {
 }
 
 func TestAppAccess_OwnerAlwaysHasAccess(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatal(err)
@@ -313,11 +279,7 @@ func TestAppAccess_OwnerAlwaysHasAccess(t *testing.T) {
 }
 
 func TestMigrate_Idempotent(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := dbtest.New(t)
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("first Migrate: %v", err)
 	}
@@ -338,24 +300,16 @@ func TestMigrate_Idempotent(t *testing.T) {
 }
 
 func TestOAuthAccount_CreateAndLookup(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "h", Role: "developer"})
 	alice, _ := store.GetUserByUsername("alice")
 
-	err = store.CreateOAuthAccount(db.CreateOAuthAccountParams{
+	if err := store.CreateOAuthAccount(db.CreateOAuthAccountParams{
 		UserID:     alice.ID,
 		Provider:   "github",
 		ProviderID: "gh_123",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("CreateOAuthAccount: %v", err)
 	}
 
@@ -369,14 +323,7 @@ func TestOAuthAccount_CreateAndLookup(t *testing.T) {
 }
 
 func TestGetAppMembers_ReturnsUsernameAndRole(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	// Create owner and member users.
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "", Role: "developer"})
@@ -407,12 +354,7 @@ func TestGetAppMembers_ReturnsUsernameAndRole(t *testing.T) {
 }
 
 func TestOAuthState_ConsumeOnce(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	store.Migrate()
+	store := dbtest.New(t)
 
 	if err := store.CreateOAuthState("nonce-abc123"); err != nil {
 		t.Fatalf("CreateOAuthState: %v", err)
@@ -430,6 +372,7 @@ func TestOAuthState_ConsumeOnce(t *testing.T) {
 }
 
 func TestOAuthState_ExpiredStateIsRejected(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // backdates via SQLite datetime() literal
 	store, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -465,14 +408,7 @@ func TestOAuthState_ExpiredStateIsRejected(t *testing.T) {
 }
 
 func TestGetDeploymentBySlugAndID(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatal(err)
@@ -516,14 +452,7 @@ func TestGetDeploymentBySlugAndID(t *testing.T) {
 }
 
 func TestAuditLog(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	if err := store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatal(err)
@@ -805,14 +734,7 @@ func TestAppEnvVars_CascadeOnAppDelete(t *testing.T) {
 }
 
 func TestListRunningApps(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"})
 	u, _ := store.GetUserByUsername("u")
@@ -1074,14 +996,7 @@ func TestSetDeploymentDigest(t *testing.T) {
 }
 
 func TestUpsertSystemUser_CreatesThenUpdatesRole(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	u1, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
 	if err != nil {
@@ -1113,16 +1028,9 @@ func TestIsSystemUser(t *testing.T) {
 }
 
 func TestUpsertSystemUser_RejectsNonSystemUsername(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
-	_, err = store.UpsertSystemUser("alice", "developer")
+	_, err := store.UpsertSystemUser("alice", "developer")
 	if err == nil {
 		t.Fatal("expected error upserting a non-system username, got nil")
 	}
@@ -1133,14 +1041,7 @@ func TestUpsertSystemUser_RejectsNonSystemUsername(t *testing.T) {
 }
 
 func TestUpsertSystemUser_SameRoleIsIdempotent(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 
 	u1, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
 	if err != nil {

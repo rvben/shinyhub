@@ -14,26 +14,20 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
 func newLogsTestServer(t *testing.T) (*api.Server, *db.Store, string) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 	}
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	srv := api.New(cfg, store, mgr, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store, appsDir
 }
 

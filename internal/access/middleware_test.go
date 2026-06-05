@@ -9,19 +9,12 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 func makeStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	return store
+	return dbtest.New(t)
 }
 
 func next(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }

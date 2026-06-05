@@ -13,21 +13,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/rvben/shinyhub/internal/worker/agent"
 )
 
 func newRenewalTestStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return store
+	return dbtest.New(t)
 }
 
 // freePort binds an ephemeral port, releases it, and returns the address so the

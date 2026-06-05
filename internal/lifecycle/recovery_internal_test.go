@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 // TestValidateNativeProcess is the P1 regression: recovery must not adopt a
@@ -86,14 +87,7 @@ func TestValidateNativeProcess(t *testing.T) {
 // yet sent its first heartbeat: it is coming up, not gone, so recovery must not
 // strand its replicas. An up worker is never gone.
 func TestWorkerDeclaredGone_JoiningIsNotGone(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 
 	seed := func(nodeID, status string) {
 		t.Helper()

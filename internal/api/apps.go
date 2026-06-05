@@ -126,7 +126,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		OwnerID:     u.ID,
 		Access:      access,
 	}); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, db.ErrSlugTaken) {
 			writeError(w, http.StatusConflict, "slug already taken")
 			return
 		}

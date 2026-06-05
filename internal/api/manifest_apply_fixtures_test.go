@@ -9,6 +9,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 )
 
@@ -33,14 +34,7 @@ type manifestServerCfg struct {
 func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) (*Server, *db.Store, int64) {
 	t.Helper()
 
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.New(t)
 
 	// Create the owner user.
 	hash, _ := auth.HashPassword("pass")

@@ -15,10 +15,11 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
-//go:embed migrations/*.sql
+//go:embed migrations/sqlite/*.sql migrations/postgres/*.sql
 var migrationsFS embed.FS
 
 var migrationFileRE = regexp.MustCompile(`^(\d+)_.*\.sql$`)
@@ -29,13 +30,14 @@ type migration struct {
 	sql     string
 }
 
-// loadMigrations parses every embedded migrations/NNN_*.sql file into an
-// ordered slice keyed by the numeric prefix. Filenames that do not match the
+// loadMigrations parses every embedded migrations/<subdir>/NNN_*.sql file into
+// an ordered slice keyed by the numeric prefix. Filenames that do not match the
 // NNN_name.sql convention are a build-time mistake and fail loudly.
-func loadMigrations() ([]migration, error) {
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
+func loadMigrations(subdir string) ([]migration, error) {
+	dir := path.Join("migrations", subdir)
+	entries, err := fs.ReadDir(migrationsFS, dir)
 	if err != nil {
-		return nil, fmt.Errorf("read migrations dir: %w", err)
+		return nil, fmt.Errorf("read migrations dir %q: %w", dir, err)
 	}
 	var ms []migration
 	seen := map[int]string{}
@@ -55,7 +57,7 @@ func loadMigrations() ([]migration, error) {
 			return nil, fmt.Errorf("duplicate migration version %d: %q and %q", v, prev, e.Name())
 		}
 		seen[v] = e.Name()
-		body, err := migrationsFS.ReadFile(path.Join("migrations", e.Name()))
+		body, err := migrationsFS.ReadFile(path.Join(dir, e.Name()))
 		if err != nil {
 			return nil, fmt.Errorf("read migration %q: %w", e.Name(), err)
 		}
@@ -65,8 +67,17 @@ func loadMigrations() ([]migration, error) {
 	return ms, nil
 }
 
+// migrationsSubdir returns the dialect-specific migration subdirectory.
+func (s *Store) migrationsSubdir() string {
+	if _, isPG := s.d.(pgDialect); isPG {
+		return "postgres"
+	}
+	return "sqlite"
+}
+
 type Store struct {
-	db *sql.DB
+	db *boundDB
+	d  dialect
 }
 
 // fileDBMaxConns caps the connection pool for file-backed databases. WAL lets
@@ -111,32 +122,63 @@ func withPragmas(dsn string) string {
 	return dsn + sep + strings.Join(pragmas, "&")
 }
 
+// isPostgresDSN reports whether the DSN selects the Postgres backend. Any other
+// DSN (file path, :memory:, file: URI) is SQLite, preserving existing behavior.
+func isPostgresDSN(dsn string) bool {
+	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
+}
+
 func Open(dsn string) (*Store, error) {
+	if isPostgresDSN(dsn) {
+		return openPostgres(dsn)
+	}
+	return openSQLite(dsn)
+}
+
+func openSQLite(dsn string) (*Store, error) {
 	memory := isMemoryDSN(dsn)
-	db, err := sql.Open("sqlite", withPragmas(dsn))
+	raw, err := sql.Open("sqlite", withPragmas(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	if memory {
-		db.SetMaxOpenConns(1)
+		raw.SetMaxOpenConns(1)
 	} else {
-		db.SetMaxOpenConns(fileDBMaxConns)
-		db.SetMaxIdleConns(fileDBMaxConns)
-		db.SetConnMaxIdleTime(5 * time.Minute)
+		raw.SetMaxOpenConns(fileDBMaxConns)
+		raw.SetMaxIdleConns(fileDBMaxConns)
+		raw.SetConnMaxIdleTime(5 * time.Minute)
 	}
 	// Verify the pragmas took effect on a real connection. A silent failure
 	// here (e.g. WAL rejected on a read-only volume) would otherwise surface
 	// much later as data-integrity or lock-contention bugs.
 	var fk int
-	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
-		_ = db.Close()
+	if err := raw.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
+		_ = raw.Close()
 		return nil, fmt.Errorf("verify foreign_keys pragma: %w", err)
 	}
 	if fk != 1 {
-		_ = db.Close()
+		_ = raw.Close()
 		return nil, fmt.Errorf("foreign_keys pragma not enabled (got %d)", fk)
 	}
-	return &Store{db: db}, nil
+	d := sqliteDialect{}
+	return &Store{db: &boundDB{real: raw, d: d}, d: d}, nil
+}
+
+// pgMaxConns bounds the Postgres pool. The control plane issues a modest query
+// rate; a small pool keeps connection use predictable while leaving headroom for
+// the watcher/scheduler loops and request handlers.
+const pgMaxConns = 16
+
+func openPostgres(dsn string) (*Store, error) {
+	raw, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	raw.SetMaxOpenConns(pgMaxConns)
+	raw.SetMaxIdleConns(pgMaxConns)
+	raw.SetConnMaxIdleTime(5 * time.Minute)
+	d := pgDialect{}
+	return &Store{db: &boundDB{real: raw, d: d}, d: d}, nil
 }
 
 // timed records the latency of a DB op. Slow ops (over slowQueryThreshold) are
@@ -176,7 +218,7 @@ const legacyBaselineVersion = 12
 // migration from scratch.
 func (s *Store) Migrate() error {
 	defer s.timed("Migrate")()
-	migrations, err := loadMigrations()
+	migrations, err := loadMigrations(s.migrationsSubdir())
 	if err != nil {
 		return err
 	}
@@ -198,12 +240,14 @@ func (s *Store) Migrate() error {
 	}
 
 	if len(applied) == 0 {
-		legacy, err := s.hasLegacySchema()
-		if err != nil {
-			return err
-		}
-		if legacy {
-			return s.adoptLegacySchema(migrations)
+		if _, isSQLite := s.d.(sqliteDialect); isSQLite {
+			legacy, err := s.hasLegacySchema()
+			if err != nil {
+				return err
+			}
+			if legacy {
+				return s.adoptLegacySchema(migrations)
+			}
 		}
 	}
 
@@ -335,6 +379,10 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// rawDB returns the underlying *sql.DB for SQLite-only internals that genuinely
+// need a raw connection (e.g. BEGIN IMMEDIATE on a dedicated conn).
+func (s *Store) rawDB() *sql.DB { return s.db.real }
+
 // SchemaVersion returns the highest migration version recorded in the
 // schema_migrations ledger, or 0 if the database has no ledger yet.
 func (s *Store) SchemaVersion() (int, error) {
@@ -355,8 +403,9 @@ func (s *Store) SchemaVersion() (int, error) {
 // LatestSchemaVersion returns the highest migration version embedded in this
 // binary. A backup whose recorded schema version exceeds this value was taken
 // by a newer build and cannot be safely restored by this one.
+// Backups are SQLite-only, so the SQLite ledger is the reference.
 func LatestSchemaVersion() (int, error) {
-	ms, err := loadMigrations()
+	ms, err := loadMigrations("sqlite")
 	if err != nil {
 		return 0, err
 	}
@@ -373,10 +422,14 @@ func LatestSchemaVersion() (int, error) {
 // using SQLite's "VACUUM INTO". It is safe to call while the server is running:
 // the snapshot reflects a single point-in-time and is itself a defragmented,
 // single-file database with no WAL/SHM sidecars.
+// On non-SQLite backends this returns an error; use pg_dump for Postgres backups.
 func (s *Store) BackupTo(dest string) error {
 	defer s.timed("BackupTo")()
+	if _, isSQLite := s.d.(sqliteDialect); !isSQLite {
+		return fmt.Errorf("BackupTo is only supported on SQLite (Postgres backups use pg_dump)")
+	}
 	quoted := "'" + strings.ReplaceAll(dest, "'", "''") + "'"
-	if _, err := s.db.Exec("VACUUM INTO " + quoted); err != nil {
+	if _, err := s.rawDB().Exec("VACUUM INTO " + quoted); err != nil {
 		return fmt.Errorf("vacuum into %s: %w", dest, err)
 	}
 	return nil
@@ -387,8 +440,8 @@ func (s *Store) PingContext(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-// DB returns the underlying *sql.DB. It is exposed for test helpers that need
-// to insert rows directly without going through query methods.
-func (s *Store) DB() *sql.DB {
+// DB returns the querier for this store. It is exposed for test helpers that
+// need to insert rows directly without going through query methods.
+func (s *Store) DB() Execer {
 	return s.db
 }
