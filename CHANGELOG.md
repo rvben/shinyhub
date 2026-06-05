@@ -34,6 +34,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.7.5](https://github.com/rvben/shinyhub/compare/v0.7.4...v0.7.5) - 2026-06-05
+
+### Fixed
+
+- **worker**: mirror the public CA cert to disk for worker bootstrap ([6e980ea](https://github.com/rvben/shinyhub/commit/6e980eaea00a4c743404f0b3bec7b2288120ada1))
+
 ## [0.7.4](https://github.com/rvben/shinyhub/compare/v0.7.3...v0.7.4) - 2026-06-05
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "shinyhub",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "private": true,
   "description": "Dev tooling for the ShinyHub dashboard UI: jsdom unit tests for the embedded JS modules (the app itself is a Go binary; this package is never published to npm).",
   "type": "module",
