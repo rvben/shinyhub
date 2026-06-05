@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/worker"
 	workerapi "github.com/rvben/shinyhub/internal/worker/api"
 )
@@ -41,15 +42,7 @@ func mustCSR(t *testing.T) []byte {
 
 func newTestStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("db.Open: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("store.Migrate: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
+	return dbtest.New(t)
 }
 
 func TestRegisterRejectsBadToken(t *testing.T) {

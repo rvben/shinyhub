@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
 
@@ -19,15 +20,7 @@ import (
 // test controls Enabled / TraceLinkTemplate independently.
 func newTracesTestServer(t *testing.T) (*api.Server, *db.Store, *tracing.Buffer, *config.Config) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
@@ -89,9 +82,9 @@ func TestGetTraces_DisabledReturnsEmpty(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Enabled           bool             `json:"enabled"`
-		TraceLinkTemplate string           `json:"trace_link_template,omitempty"`
-		Spans             []tracing.Span   `json:"spans"`
+		Enabled           bool           `json:"enabled"`
+		TraceLinkTemplate string         `json:"trace_link_template,omitempty"`
+		Spans             []tracing.Span `json:"spans"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -141,9 +134,9 @@ func TestGetTraces_EnabledWithLinkTemplate(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Enabled           bool             `json:"enabled"`
-		TraceLinkTemplate string           `json:"trace_link_template"`
-		Spans             []tracing.Span   `json:"spans"`
+		Enabled           bool           `json:"enabled"`
+		TraceLinkTemplate string         `json:"trace_link_template"`
+		Spans             []tracing.Span `json:"spans"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)

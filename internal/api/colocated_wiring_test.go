@@ -9,20 +9,14 @@ import (
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/worker"
 )
 
 func TestCheckColocatedSharedWiring(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := dbtest.New(t)
 
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
@@ -152,14 +146,7 @@ func TestCheckColocatedSharedWiring(t *testing.T) {
 // and the two workers' node ids (sorted, as WorkersForTier reports them).
 func multiWorkerColocationFixture(t *testing.T) (*Server, *db.App, *db.App, string, string) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := dbtest.New(t)
 
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
@@ -301,14 +288,7 @@ func TestResolveColocation_RejectsWhenNoCommonWorker(t *testing.T) {
 // remote runtime would reject it as a wrong-tier target. Failing the precheck
 // gives a clear 409 instead of a confusing partial deploy.
 func TestResolveColocation_RejectsMultipleWorkerTiers(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := dbtest.New(t)
 
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
@@ -402,14 +382,7 @@ func TestResolveColocation_RejectsMultipleWorkerTiers(t *testing.T) {
 // deterministic node-equality check soundly matches it against the source's
 // control-plane replica.
 func TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := dbtest.New(t)
 
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
@@ -497,14 +470,7 @@ func TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource(t *testing.
 // Without the precheck this path stops/deregisters the old pool and then deploys
 // with no colocation pin, landing the consumer away from its source data.
 func TestMaybeRestartForChange_RejectsInfeasibleColocationBeforeTeardown(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := dbtest.New(t)
 
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},

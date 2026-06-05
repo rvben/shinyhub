@@ -9,6 +9,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -20,15 +21,7 @@ func newDataLockTestServer(t *testing.T, quotaMB int) (*Server, string) {
 	appsDir := t.TempDir()
 	dataDir := t.TempDir()
 
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth: config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{

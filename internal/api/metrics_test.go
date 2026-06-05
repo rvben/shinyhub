@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -66,20 +67,13 @@ func TestGetMetrics_NotFound(t *testing.T) {
 func newMetricsTestServer(t *testing.T) (*api.Server, *db.Store, *process.Manager) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 	}
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	srv := api.New(cfg, store, mgr, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store, mgr
 }
 
@@ -140,13 +134,7 @@ func TestGetMetrics_SamplerError(t *testing.T) {
 func newMetricsTestServerWithProxy(t *testing.T) (*api.Server, *db.Store, *process.Manager, *proxy.Proxy) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
@@ -154,7 +142,6 @@ func newMetricsTestServerWithProxy(t *testing.T) (*api.Server, *db.Store, *proce
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
-	t.Cleanup(func() { store.Close() })
 	return srv, store, mgr, prx
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -30,20 +31,13 @@ import (
 func newManagerTestServer(t *testing.T) (*api.Server, *db.Store, *process.Manager) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 	}
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	srv := api.New(cfg, store, mgr, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store, mgr
 }
 
@@ -1145,20 +1139,13 @@ func TestAppsAPI_GetIncludesReplicasStatus(t *testing.T) {
 func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Server, *db.Store) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 		Runtime: config.RuntimeConfig{MaxReplicas: maxReplicas},
 	}
 	srv := api.New(cfg, store, nil, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 
@@ -1168,13 +1155,7 @@ func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Se
 func newTestServerWithTiers(t *testing.T) (*api.Server, *db.Store) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
@@ -1187,7 +1168,6 @@ func newTestServerWithTiers(t *testing.T) (*api.Server, *db.Store) {
 		},
 	}
 	srv := api.New(cfg, store, nil, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 
@@ -1196,20 +1176,13 @@ func newTestServerWithTiers(t *testing.T) (*api.Server, *db.Store) {
 func newManagerTestServerWithRuntimeMode(t *testing.T, mode string) (*api.Server, *db.Store) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 		Runtime: config.RuntimeConfig{Mode: mode},
 	}
 	srv := api.New(cfg, store, process.NewManager(appsDir, process.NewNativeRuntime()), nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 
@@ -1217,20 +1190,13 @@ func newManagerTestServerWithRuntimeMode(t *testing.T, mode string) (*api.Server
 func newTestServerWithDefaultReplicas(t *testing.T, defaultReplicas int) (*api.Server, *db.Store) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 		Runtime: config.RuntimeConfig{DefaultReplicas: defaultReplicas, MaxReplicas: 32},
 	}
 	srv := api.New(cfg, store, nil, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 
@@ -1239,20 +1205,13 @@ func newTestServerWithDefaultReplicas(t *testing.T, defaultReplicas int) (*api.S
 func newTestServerWithDefaultMaxSessions(t *testing.T, def int) (*api.Server, *db.Store) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
 		Runtime: config.RuntimeConfig{MaxReplicas: 32, DefaultMaxSessionsPerReplica: def},
 	}
 	srv := api.New(cfg, store, nil, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 
@@ -1556,14 +1515,7 @@ func TestCreateApp_RejectsLingeringAppsDir(t *testing.T) {
 // otherwise start and fail at exec with a cryptic error.
 func TestDeployApp_RejectsRAppOnFargateTier(t *testing.T) {
 	appsDir := t.TempDir()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir, VersionRetention: 5},
@@ -1741,20 +1693,13 @@ func TestDeployApp_OrphanCleanupOnExtractFailure(t *testing.T) {
 // newTestServerWithDefaultVisibility creates a test server with a specific default app visibility.
 func newTestServerWithDefaultVisibility(t *testing.T, visibility string) (*api.Server, *db.Store) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:     config.AuthConfig{Secret: "test-secret"},
 		Storage:  config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
 		Defaults: config.DefaultsConfig{AppVisibility: visibility},
 	}
 	srv := api.New(cfg, store, nil, nil)
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 
@@ -2270,14 +2215,7 @@ func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
 	// through the proxy and read it back via the app-detail GET. (newTestServer
 	// passes a nil proxy and returns no handle, so we wire it inline here,
 	// mirroring newTestServerWithTrustedProxies.)
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
@@ -2333,14 +2271,7 @@ func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
 // prx.ServeHTTP and read them back via the API.
 func newInlineServerWithProxy(t *testing.T) (*api.Server, *db.Store, *proxy.Proxy) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},

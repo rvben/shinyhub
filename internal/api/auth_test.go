@@ -16,6 +16,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 // buildStaleJWT creates a valid but old JWT for testing session refresh.
@@ -47,13 +48,7 @@ func newTestServer(t *testing.T) (*api.Server, *db.Store) {
 // pass nil for the no-proxy case (matches newTestServer).
 func newTestServerWithTrustedProxies(t *testing.T, cidrs []string) (*api.Server, *db.Store) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	var nets []*net.IPNet
 	for _, c := range cidrs {
 		_, n, err := net.ParseCIDR(c)
@@ -68,7 +63,6 @@ func newTestServerWithTrustedProxies(t *testing.T, cidrs []string) (*api.Server,
 		TrustedProxyNets: nets,
 	}
 	srv := api.New(cfg, store, nil, nil) // no manager/proxy for auth tests
-	t.Cleanup(func() { store.Close() })
 	return srv, store
 }
 

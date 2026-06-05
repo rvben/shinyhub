@@ -17,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -26,13 +27,7 @@ import (
 // quota so data-push tests can control all three config knobs independently.
 func newDataTestServer(t *testing.T, appsDir, appDataDir string, quotaMB int) (*api.Server, *db.Store) {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth: config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{
@@ -44,7 +39,6 @@ func newDataTestServer(t *testing.T, appsDir, appDataDir string, quotaMB int) (*
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
-	t.Cleanup(func() { _ = store.Close() })
 	return srv, store
 }
 
@@ -448,9 +442,9 @@ func TestDataList_OwnerSeesEnvelope(t *testing.T) {
 	}
 
 	var resp struct {
-		Files     []any  `json:"files"`
-		QuotaMB   int    `json:"quota_mb"`
-		UsedBytes int64  `json:"used_bytes"`
+		Files     []any `json:"files"`
+		QuotaMB   int   `json:"quota_mb"`
+		UsedBytes int64 `json:"used_bytes"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -884,4 +878,3 @@ func TestDataPut_RestartFailure_SurfacedInResponse(t *testing.T) {
 		t.Errorf("app.Status = %q, want %q", app.Status, "stopped")
 	}
 }
-
