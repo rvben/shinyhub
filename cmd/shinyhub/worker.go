@@ -151,7 +151,7 @@ func startWorkerHosting(ctx context.Context, logger *slog.Logger, cfg *config.Co
 	if err != nil {
 		return nil, nil, fmt.Errorf("worker join tokens: %w", err)
 	}
-	ca, err := worker.OpenCA(cfg.Worker.CADir, tokens)
+	ca, err := worker.LoadOrInitCA(store, cfg.Worker.CADir, cfg.Auth.Secret, tokens)
 	if err != nil {
 		return nil, nil, fmt.Errorf("worker CA: %w", err)
 	}

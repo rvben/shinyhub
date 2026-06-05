@@ -69,8 +69,9 @@ func generateCA() (certPEM, keyPEM []byte) {
 	return certPEM, keyPEM
 }
 
-// OpenCA loads the CA keypair from dir, generating and persisting it on first
-// run. joinTokens is the set of currently valid join tokens.
+// OpenCA loads a worker CA keypair from disk, generating and persisting it on
+// first run. Production boot sources the CA from the database via LoadOrInitCA;
+// OpenCA remains as the disk-based constructor used by tests (and disk-only setups).
 func OpenCA(dir string, joinTokens []string) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("ca dir: %w", err)
