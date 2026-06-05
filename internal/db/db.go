@@ -422,8 +422,12 @@ func LatestSchemaVersion() (int, error) {
 // using SQLite's "VACUUM INTO". It is safe to call while the server is running:
 // the snapshot reflects a single point-in-time and is itself a defragmented,
 // single-file database with no WAL/SHM sidecars.
+// On non-SQLite backends this returns an error; use pg_dump for Postgres backups.
 func (s *Store) BackupTo(dest string) error {
 	defer s.timed("BackupTo")()
+	if _, isSQLite := s.d.(sqliteDialect); !isSQLite {
+		return fmt.Errorf("BackupTo is only supported on SQLite (Postgres backups use pg_dump)")
+	}
 	quoted := "'" + strings.ReplaceAll(dest, "'", "''") + "'"
 	if _, err := s.rawDB().Exec("VACUUM INTO " + quoted); err != nil {
 		return fmt.Errorf("vacuum into %s: %w", dest, err)

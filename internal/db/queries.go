@@ -234,14 +234,15 @@ const systemUserPasswordHash = "!disabled"
 // or updates the existing row's role to match. Returns the resulting row.
 // Idempotent: safe to call on every startup.
 //
-// Atomic at the SQLite level: INSERT OR IGNORE plus UPDATE means concurrent
-// callers cannot race between SELECT and INSERT.
+// The INSERT ... ON CONFLICT DO NOTHING plus UPDATE sequence is atomic under
+// the database's unique constraint: a concurrent caller cannot race between the
+// read and the insert because the constraint is enforced by the engine.
 func (s *Store) UpsertSystemUser(username, role string) (*User, error) {
 	if !IsSystemUser(username) {
 		return nil, fmt.Errorf("upsert system user: %q is not a system username", username)
 	}
 	if _, err := s.db.Exec(
-		`INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
+		`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?) ON CONFLICT (username) DO NOTHING`,
 		username, systemUserPasswordHash, role,
 	); err != nil {
 		return nil, fmt.Errorf("insert system user: %w", err)
@@ -1072,7 +1073,7 @@ type AppMember struct {
 
 func (s *Store) GrantAppAccess(slug string, userID int64) error {
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO app_members (app_slug, user_id) VALUES (?, ?)`, slug, userID)
+		`INSERT INTO app_members (app_slug, user_id) VALUES (?, ?) ON CONFLICT (app_slug, user_id) DO NOTHING`, slug, userID)
 	if err != nil {
 		return fmt.Errorf("grant app access: %w", err)
 	}
@@ -1244,7 +1245,7 @@ type CreateOAuthAccountParams struct {
 
 func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?)`,
+		`INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES (?, ?, ?) ON CONFLICT (provider, provider_id) DO NOTHING`,
 		p.UserID, p.Provider, p.ProviderID,
 	)
 	if err != nil {
