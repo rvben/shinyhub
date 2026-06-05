@@ -99,12 +99,14 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 	if p.Timezone != nil && *p.Timezone != "" {
 		tz = sql.NullString{String: *p.Timezone, Valid: true}
 	}
-	res, err := s.db.Exec(`
+	var id int64
+	err := s.db.QueryRow(`
 		INSERT INTO app_schedules
 			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
-	)
+	).Scan(&id)
 	if err != nil {
 		var sqliteErr *sqlite.Error
 		if errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE {
@@ -112,7 +114,7 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 		}
 		return 0, fmt.Errorf("create schedule: %w", err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 func (s *Store) GetSchedule(id int64) (*Schedule, error) {
@@ -269,15 +271,17 @@ func (s *Store) InsertScheduleRun(p InsertScheduleRunParams) (int64, error) {
 	if p.TriggeredByUserID != nil {
 		uid = sql.NullInt64{Int64: *p.TriggeredByUserID, Valid: true}
 	}
-	res, err := s.db.Exec(`
+	var id int64
+	err := s.db.QueryRow(`
 		INSERT INTO schedule_runs (schedule_id, status, trigger, triggered_by_user_id, started_at, log_path)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id`,
 		p.ScheduleID, p.Status, p.Trigger, uid, p.StartedAt, p.LogPath,
-	)
+	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert schedule run: %w", err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 func (s *Store) FinishScheduleRun(p FinishScheduleRunParams) error {
@@ -446,30 +450,25 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 		tz = sql.NullString{String: *p.Timezone, Valid: true}
 	}
 
-	res, err := tx.Exec(`
+	var insertedID int64
+	scanErr := tx.QueryRow(`
 INSERT INTO app_schedules
   (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(app_id, name) DO NOTHING`,
+ON CONFLICT(app_id, name) DO NOTHING
+RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
 		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
-	)
-	if err != nil {
-		return 0, false, fmt.Errorf("insert schedule: %w", err)
+	).Scan(&insertedID)
+	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		return 0, false, fmt.Errorf("insert schedule: %w", scanErr)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, false, fmt.Errorf("rows affected: %w", err)
-	}
-	if n == 1 {
-		id, err := res.LastInsertId()
-		if err != nil {
-			return 0, false, fmt.Errorf("last insert id: %w", err)
-		}
+	if scanErr == nil {
+		// Row was inserted; no conflict.
 		if err := tx.Commit(); err != nil {
 			return 0, false, fmt.Errorf("commit insert: %w", err)
 		}
-		return id, true, nil
+		return insertedID, true, nil
 	}
 
 	var id int64

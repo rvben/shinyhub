@@ -266,21 +266,14 @@ type CreateAPIKeyParams struct {
 // CreateAPIKey inserts a new API key and returns the inserted row's ID and
 // creation timestamp.
 func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
-	result, err := s.db.Exec(
-		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?)`,
+	var id int64
+	var createdAt time.Time
+	err := s.db.QueryRow(
+		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?) RETURNING id, created_at`,
 		p.UserID, p.KeyHash, p.Name,
-	)
+	).Scan(&id, &createdAt)
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("create api key: %w", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("create api key last id: %w", err)
-	}
-	var createdAt time.Time
-	err = s.db.QueryRow(`SELECT created_at FROM api_keys WHERE id = ?`, id).Scan(&createdAt)
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("create api key created_at: %w", err)
 	}
 	return id, createdAt, nil
 }
@@ -841,16 +834,13 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	if status == "" {
 		status = DeploymentSucceeded
 	}
-	res, err := s.db.Exec(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+	var id int64
+	err := s.db.QueryRow(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?) RETURNING id`,
 		p.AppID, p.Version, p.BundleDir, status,
-	)
+	).Scan(&id)
 	if err != nil {
 		return nil, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("last insert id: %w", err)
 	}
 	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: status}, nil
 }
@@ -870,16 +860,13 @@ func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
 // mid-deploy the row stays 'pending'; startup reconciliation fails it so it is
 // never mistaken for a good deployment.
 func (s *Store) BeginDeployment(appID int64, version, bundleDir string) (*Deployment, error) {
-	res, err := s.db.Exec(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+	var id int64
+	err := s.db.QueryRow(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?) RETURNING id`,
 		appID, version, bundleDir, DeploymentPending,
-	)
+	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("begin deployment: last insert id: %w", err)
 	}
 	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending}, nil
 }
