@@ -33,6 +33,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.7.4](https://github.com/rvben/shinyhub/compare/v0.7.3...v0.7.4) - 2026-06-05
+
+### Added
+
+- backfill relative deployment bundle_dir to absolute on boot ([7ccbf97](https://github.com/rvben/shinyhub/commit/7ccbf97201fcd06cb4382ca0f62c4b4a6f513c4b))
+- **config**: normalize storage roots to absolute paths on load ([ef5ff7f](https://github.com/rvben/shinyhub/commit/ef5ff7fa37b8db90e4cc1f5cbdd0617ccd0d688c))
+- **worker**: source the worker CA from the DB at boot via LoadOrInitCA ([026c928](https://github.com/rvben/shinyhub/commit/026c92892f516607ce8b8b2e68fa26630f15a13e))
+- **worker**: LoadOrInitCA with DB-backed CA, import, race-safe init, mismatch guard ([f5a69f2](https://github.com/rvben/shinyhub/commit/f5a69f2a457480effe138d7c71240c49566a8a2b))
+- **worker**: harden loadCA validation and extract generateCA ([2f7443a](https://github.com/rvben/shinyhub/commit/2f7443adb1f2e76cb40a4fb4f66fed1284b62af8))
+- **db**: cp_worker_ca store accessors (GetWorkerCA/PutWorkerCAIfAbsent) ([dbae767](https://github.com/rvben/shinyhub/commit/dbae76723e312f1629ecbee86df1dbf6a17b26de))
+- **db**: add cp_worker_ca migration (both dialects) ([18193aa](https://github.com/rvben/shinyhub/commit/18193aaf18884a3e4d83a2344deb2c1516d98fde))
+- **secrets**: add DeriveKeyWithInfo for HKDF domain separation ([d28a76e](https://github.com/rvben/shinyhub/commit/d28a76eae2f714408699a373b28b61afbbea0d3a))
+- **db**: per-dialect migration dirs with consolidated Postgres baseline ([1ba5361](https://github.com/rvben/shinyhub/commit/1ba5361bca1cb7e268a0253dffc59e8349dbf0a4))
+- **db**: dispatch Open by DSN scheme to SQLite or Postgres ([a96bcb6](https://github.com/rvben/shinyhub/commit/a96bcb65694ccaa47a88d69455a8baaa014a2de4))
+- **db**: add quote-aware ?->$n rebind for Postgres dialect ([6dd8bdc](https://github.com/rvben/shinyhub/commit/6dd8bdc1f2bb2905e11a39197e161d71f8521a83))
+- **ui**: style the transient waking app-status badge ([f6f13c1](https://github.com/rvben/shinyhub/commit/f6f13c1dab8c6d101a8a01015b039138c962e76f))
+- **lifecycle**: wake hibernated apps via DB CAS instead of an in-memory guard ([99fbc87](https://github.com/rvben/shinyhub/commit/99fbc87567e20fec05ab5be8b61e55f9408c5803))
+- **db**: add BeginWake/AbortWake CAS for cross-process hibernation wake ([08cad47](https://github.com/rvben/shinyhub/commit/08cad4747500b59441637073d67f5e401075838f))
+- **server**: hand off listeners across SIGHUP via tableflip for zero-downtime upgrades ([8965a40](https://github.com/rvben/shinyhub/commit/8965a40e4aa8b646cc8deb3fffde27448e886e22))
+- **upgrade**: wire SIGHUP->Upgrade, ctx->Stop, and sd_notify MAINPID retarget ([05c025f](https://github.com/rvben/shinyhub/commit/05c025ff0222e7a6fa19ef11575cfc661156cc0a))
+- **upgrade**: add tableflip-backed Upgrader interface for zero-downtime restart ([2feeb21](https://github.com/rvben/shinyhub/commit/2feeb2126cdfa2bb4e02cf996c7064f8bf49cea4))
+- **config**: add server.upgrade_timeout and server.pid_file for zero-downtime upgrades ([d0f2a94](https://github.com/rvben/shinyhub/commit/d0f2a94e04094330bd44bdd49a01751a7ee938bb))
+- **server**: drain WebSocket sessions on shutdown and report unready while draining ([dd80cc3](https://github.com/rvben/shinyhub/commit/dd80cc3a289a0e0f2a2ce602a680f568f7679d09))
+- **config**: add server.drain_timeout for graceful connection draining ([83fc359](https://github.com/rvben/shinyhub/commit/83fc359acb827d2935c8458cdaa0568af54139ad))
+- **proxy**: register hijacked WebSocket connections for graceful drain ([3d1d628](https://github.com/rvben/shinyhub/commit/3d1d628beae64ed61f21a50084aefe3abc731916))
+- **proxy**: track hijacked connections and add instance drain primitives ([e17ed78](https://github.com/rvben/shinyhub/commit/e17ed78c1e1084eabaed3baec8d44f7c0f294547))
+- **server**: gate background loops and boot reconciles behind control-plane ownership ([2032325](https://github.com/rvben/shinyhub/commit/2032325e25da3be19439f452c916dda9fa1e7a64))
+- **api**: gate mutating requests behind control-plane ownership (503 on non-owner) ([a630eea](https://github.com/rvben/shinyhub/commit/a630eeafcf21b01586ec0f3a1d0d49705db7de14))
+- **config**: add control-plane instance_id and ownership-lease tunables ([7b3dc52](https://github.com/rvben/shinyhub/commit/7b3dc528392804e3e325693ceab9a8d590a47f24))
+- **leader**: add OwnerScope per-ownership-span context lifecycle ([1a1d1ee](https://github.com/rvben/shinyhub/commit/1a1d1eed21f4d396cbdaeb838759e9a7b86c42ad))
+- **leader**: add Elector.Epoch and clamp lease TTL to 2x renew interval ([6f030e7](https://github.com/rvben/shinyhub/commit/6f030e7e3cf49655f93362e207d19d5b1325aa49))
+- **leader**: add fenced-lease Elector (acquire/renew loop, ownership callbacks) ([1cb2889](https://github.com/rvben/shinyhub/commit/1cb2889489b70a174eae551502bd5db0087c1092))
+- **db**: add fenced cp_owner lease (acquire/renew/release/get) ([d5f0ca0](https://github.com/rvben/shinyhub/commit/d5f0ca0e2916280b9e0a4a5cb2b6017888578313))
+- **api**: wire forward-auth middleware ahead of bearer on protected routes ([c58d08e](https://github.com/rvben/shinyhub/commit/c58d08ef252fbf1e12c12eb1fd3c0b42f617512b))
+- **db**: add forward-auth user store adapter methods ([23df72f](https://github.com/rvben/shinyhub/commit/23df72f053bf8f1ee350b66e7d2a741e0e76664b))
+- **auth**: BearerMiddleware yields to a pre-authenticated context user ([a67ef40](https://github.com/rvben/shinyhub/commit/a67ef40a84fd52e8d60e73ae4b7f979dd6e3b78f))
+- **auth**: add forward-auth middleware for trusted reverse proxies ([528fe9b](https://github.com/rvben/shinyhub/commit/528fe9b0794a7c30868ac9a26afb267475f7ae15))
+- **config**: add forward_auth config block with env overrides ([2633de6](https://github.com/rvben/shinyhub/commit/2633de6fcdad628726c250b136a29ca66f5e69cd))
+- **skills**: add deploy-shinyhub agent skill with CI smoke + lint guard ([855c716](https://github.com/rvben/shinyhub/commit/855c716215e2b2cac5282bade8a8f936dd68e28d))
+
+### Fixed
+
+- **worker**: validate disk CA before persisting; reject partial disk CA state ([91486d4](https://github.com/rvben/shinyhub/commit/91486d4f9e009b81d653e0a2cb10c30da39c1fe2))
+- **db**: Postgres compatibility for LIMIT, EXISTS, unique checks, and tx abort ([37ad342](https://github.com/rvben/shinyhub/commit/37ad34239eee63f0ce0a287e4e50c2f3f92f5377))
+- **db**: use dialect-aware unique-violation check in CreateSchedule ([8fca0e7](https://github.com/rvben/shinyhub/commit/8fca0e736b79ecde336f1ecd2b5b78ee8fdf3486))
+- **db**: type cp_owner timestamps as timestamptz on Postgres ([ee0dd60](https://github.com/rvben/shinyhub/commit/ee0dd606f0a3a72f6747e9f0afa53c6f6fbb80d6))
+- **db**: serialize shared-data grants via dialect beginWrite + advisory lock ([71471f2](https://github.com/rvben/shinyhub/commit/71471f26f2c519b50d765d2b994fe4aa73d8d852))
+- **db**: scan integer boolean columns via intermediate int for Postgres compatibility ([854bfab](https://github.com/rvben/shinyhub/commit/854bfabf2ba102e9e6c4b0bfc582383378a352f2))
+- **lifecycle**: tear down wake-started replicas when a concurrent delete removes the app ([1a5116c](https://github.com/rvben/shinyhub/commit/1a5116c607c83e36ec69e9ed7060b01273c0b5e1))
+- **lifecycle**: tear down replicas when a wake is superseded by stop/delete ([886fb1d](https://github.com/rvben/shinyhub/commit/886fb1d0ccfb56817272eba8ec22448e89001a3f))
+- **lifecycle**: make hibernation wake robust against failure and concurrent intent ([e4921af](https://github.com/rvben/shinyhub/commit/e4921af261036d108ea3b1dd9c2ebf3e19384b55))
+- **server**: clean up startup-error paths, exit SIGHUP goroutine on ctx, tighten handoff e2e ([854f378](https://github.com/rvben/shinyhub/commit/854f3783c699a80652757b09682e7f5b54aa6b8b))
+- **server**: keep reconcile-before-recover order under ownership and make watcher restart-safe ([8ad6785](https://github.com/rvben/shinyhub/commit/8ad6785b7d89d0ecb599e744a342f897f882a404))
+- **skills**: make deploy-shinyhub frontmatter valid YAML and harden skill-lint ([e2de7db](https://github.com/rvben/shinyhub/commit/e2de7db607b18393bfadb714cb88259d72ea2e8b))
+
 ## [0.7.3](https://github.com/rvben/shinyhub/compare/v0.7.2...v0.7.3) - 2026-06-04
 
 ### Fixed
