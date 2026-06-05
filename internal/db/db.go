@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -112,7 +113,20 @@ func withPragmas(dsn string) string {
 	return dsn + sep + strings.Join(pragmas, "&")
 }
 
+// isPostgresDSN reports whether the DSN selects the Postgres backend. Any other
+// DSN (file path, :memory:, file: URI) is SQLite, preserving existing behavior.
+func isPostgresDSN(dsn string) bool {
+	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
+}
+
 func Open(dsn string) (*Store, error) {
+	if isPostgresDSN(dsn) {
+		return openPostgres(dsn)
+	}
+	return openSQLite(dsn)
+}
+
+func openSQLite(dsn string) (*Store, error) {
 	memory := isMemoryDSN(dsn)
 	raw, err := sql.Open("sqlite", withPragmas(dsn))
 	if err != nil {
@@ -138,6 +152,23 @@ func Open(dsn string) (*Store, error) {
 		return nil, fmt.Errorf("foreign_keys pragma not enabled (got %d)", fk)
 	}
 	d := sqliteDialect{}
+	return &Store{db: &boundDB{real: raw, d: d}, d: d}, nil
+}
+
+// pgMaxConns bounds the Postgres pool. The control plane issues a modest query
+// rate; a small pool keeps connection use predictable while leaving headroom for
+// the watcher/scheduler loops and request handlers.
+const pgMaxConns = 16
+
+func openPostgres(dsn string) (*Store, error) {
+	raw, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	raw.SetMaxOpenConns(pgMaxConns)
+	raw.SetMaxIdleConns(pgMaxConns)
+	raw.SetConnMaxIdleTime(5 * time.Minute)
+	d := pgDialect{}
 	return &Store{db: &boundDB{real: raw, d: d}, d: d}, nil
 }
 
@@ -200,12 +231,14 @@ func (s *Store) Migrate() error {
 	}
 
 	if len(applied) == 0 {
-		legacy, err := s.hasLegacySchema()
-		if err != nil {
-			return err
-		}
-		if legacy {
-			return s.adoptLegacySchema(migrations)
+		if _, isSQLite := s.d.(sqliteDialect); isSQLite {
+			legacy, err := s.hasLegacySchema()
+			if err != nil {
+				return err
+			}
+			if legacy {
+				return s.adoptLegacySchema(migrations)
+			}
 		}
 	}
 
