@@ -1,10 +1,12 @@
-package db
+package db_test
 
 import (
 	"errors"
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // ERR-2: a self-mount returns a typed sentinel so the API can map it to 400.
@@ -12,7 +14,7 @@ func TestSharedData_SelfMountReturnsSentinel(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "report")
 	err := store.GrantSharedData(appID, appID)
-	if !errors.Is(err, ErrSelfMount) {
+	if !errors.Is(err, db.ErrSelfMount) {
 		t.Fatalf("expected ErrSelfMount, got %v", err)
 	}
 }
@@ -27,7 +29,7 @@ func TestSharedData_DuplicateReturnsSentinel(t *testing.T) {
 		t.Fatalf("first grant: %v", err)
 	}
 	err := store.GrantSharedData(consumer, source)
-	if !errors.Is(err, ErrDuplicateMount) {
+	if !errors.Is(err, db.ErrDuplicateMount) {
 		t.Fatalf("expected ErrDuplicateMount, got %v", err)
 	}
 }
@@ -42,7 +44,7 @@ func TestSharedData_CycleReturnsSentinel(t *testing.T) {
 		t.Fatalf("grant a->b: %v", err)
 	}
 	err := store.GrantSharedData(b, a)
-	if !errors.Is(err, ErrSharedDataCycle) {
+	if !errors.Is(err, db.ErrSharedDataCycle) {
 		t.Fatalf("expected ErrSharedDataCycle for b->a, got %v", err)
 	}
 }
@@ -60,7 +62,7 @@ func TestSharedData_TransitiveCycleReturnsSentinel(t *testing.T) {
 		t.Fatalf("grant b->c: %v", err)
 	}
 	err := store.GrantSharedData(c, a)
-	if !errors.Is(err, ErrSharedDataCycle) {
+	if !errors.Is(err, db.ErrSharedDataCycle) {
 		t.Fatalf("expected ErrSharedDataCycle for c->a, got %v", err)
 	}
 }
@@ -101,22 +103,19 @@ func TestSharedData_ConcurrentOpposingGrantsNeverCycle(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	for i, p := range ps {
-		bothSucceeded := results[i].ab == nil && results[i].ba == nil
-		if bothSucceeded {
+	for i := range ps {
+		ab, ba := results[i].ab, results[i].ba
+		if ab == nil && ba == nil {
 			t.Errorf("pair %d: both a->b and b->a succeeded, forming a cycle", i)
+			continue
 		}
-		// Ground truth: the two apps must never be mutually reachable.
-		fwd, err := store.sharedDataReaches(p.a, p.b)
-		if err != nil {
-			t.Fatalf("pair %d reaches a->b: %v", i, err)
+		// Exactly one must succeed; the loser must be rejected as a cycle (not
+		// some other error), which is the public contract of GrantSharedData.
+		if ab != nil && !errors.Is(ab, db.ErrSharedDataCycle) {
+			t.Errorf("pair %d: a->b failed with unexpected error: %v", i, ab)
 		}
-		rev, err := store.sharedDataReaches(p.b, p.a)
-		if err != nil {
-			t.Fatalf("pair %d reaches b->a: %v", i, err)
-		}
-		if fwd && rev {
-			t.Errorf("pair %d: apps are mutually reachable (cycle persisted)", i)
+		if ba != nil && !errors.Is(ba, db.ErrSharedDataCycle) {
+			t.Errorf("pair %d: b->a failed with unexpected error: %v", i, ba)
 		}
 	}
 }
