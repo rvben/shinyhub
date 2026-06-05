@@ -176,6 +176,26 @@ func TestLoadOrInitCA_UnreadableDiskCAErrors(t *testing.T) {
 	}
 }
 
+func TestLoadOrInitCA_MirrorsCertToDisk(t *testing.T) {
+	st := &fakeCAStore{}
+	dir := t.TempDir()
+	ca, err := LoadOrInitCA(st, dir, testSecret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	if err != nil {
+		t.Fatalf("ca-cert.pem not mirrored to caDir: %v", err)
+	}
+	if !bytes.Equal(onDisk, ca.CertPEM()) {
+		t.Fatal("mirrored cert does not match the loaded CA cert")
+	}
+	// The private key must NOT be on disk (it stays encrypted in the DB).
+	if _, err := os.Stat(filepath.Join(dir, "ca-key.pem")); err == nil {
+		t.Fatal("ca-key.pem must not be written to disk")
+	}
+}
+
 // writeDiskCA writes ca-cert.pem and ca-key.pem into dir with mode 0o600.
 func writeDiskCA(t *testing.T, dir string, certPEM, keyPEM []byte) {
 	t.Helper()
