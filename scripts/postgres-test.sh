@@ -16,7 +16,7 @@ docker run -d --name "$NAME" \
   -e POSTGRES_PASSWORD="$PASS" \
   -e POSTGRES_DB=postgres \
   -p "127.0.0.1:${PORT}:5432" \
-  "$IMAGE" >/dev/null
+  "$IMAGE" postgres -c max_connections=500 >/dev/null
 
 echo "waiting for postgres to be ready..."
 for i in $(seq 1 60); do
@@ -29,4 +29,4 @@ done
 
 export SHINYHUB_TEST_POSTGRES_DSN="postgres://postgres:${PASS}@127.0.0.1:${PORT}/postgres?sslmode=disable"
 echo "running suite against ${SHINYHUB_TEST_POSTGRES_DSN}"
-go test ./... -count=1
+go test ./... -count=1 -timeout 30m
