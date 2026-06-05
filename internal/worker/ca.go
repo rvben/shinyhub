@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/secrets"
 )
 
 // nodeIDSANSuffix namespaces the DNS SAN that carries a worker's node id, so the
@@ -294,4 +297,95 @@ func (c *CA) ListenerTLSConfig(hosts ...string) (*tls.Config, error) {
 		ClientAuth:     tls.VerifyClientCertIfGiven,
 		ClientCAs:      c.pool,
 	}, nil
+}
+
+// workerCAKeyInfo domain-separates the CA key derivation from app env secrets.
+const workerCAKeyInfo = "shinyhub-worker-ca-v1"
+
+// CAStore is the minimal store the worker CA bootstrap needs. *db.Store
+// satisfies it. found (not an ErrNotFound sentinel) signals an empty row.
+type CAStore interface {
+	GetWorkerCA() (certPEM, keyEnc []byte, found bool, err error)
+	PutWorkerCAIfAbsent(certPEM, keyEnc []byte) (inserted bool, err error)
+}
+
+// LoadOrInitCA loads the shared worker CA from the store, importing an existing
+// on-disk CA from caDir or generating a fresh one on first boot, and converging
+// all instances on a single CA via race-safe insert. The private key is
+// encrypted at rest with a domain-separated key derived from authSecret. A
+// decrypt failure (auth.secret changed) or a disk CA that differs from the DB CA
+// is a loud fatal error - never a silent regeneration that would orphan workers.
+func LoadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) (*CA, error) {
+	keyEncKey := secrets.DeriveKeyWithInfo(authSecret, workerCAKeyInfo)
+
+	certPEM, keyEnc, found, err := store.GetWorkerCA()
+	if err != nil {
+		return nil, fmt.Errorf("load worker ca: %w", err)
+	}
+	if found {
+		return decodeAndGuard(certPEM, keyEnc, keyEncKey, caDir, joinTokens)
+	}
+
+	// Init: import an existing disk CA if present, else generate fresh.
+	var newCert, newKey []byte
+	if dc, dk, ok := readDiskCA(caDir); ok {
+		newCert, newKey = dc, dk
+	} else {
+		newCert, newKey = generateCA()
+	}
+	enc, err := secrets.Encrypt(keyEncKey, newKey)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt ca key: %w", err)
+	}
+	inserted, err := store.PutWorkerCAIfAbsent(newCert, enc)
+	if err != nil {
+		return nil, fmt.Errorf("store worker ca: %w", err)
+	}
+	if !inserted {
+		// Lost the race: another instance stored a CA first. Adopt it, but if we
+		// were importing a disk CA and it differs, fail loudly.
+		certPEM, keyEnc, found, err = store.GetWorkerCA()
+		if err != nil || !found {
+			return nil, fmt.Errorf("worker ca race reread: found=%v err=%w", found, err)
+		}
+		return decodeAndGuard(certPEM, keyEnc, keyEncKey, caDir, joinTokens)
+	}
+	return loadCA(newCert, newKey, joinTokens)
+}
+
+// decodeAndGuard decrypts the stored key, applies the disk-vs-DB mismatch guard,
+// and loads the CA.
+func decodeAndGuard(certPEM, keyEnc, keyEncKey []byte, caDir string, joinTokens []string) (*CA, error) {
+	keyPEM, err := secrets.Decrypt(keyEncKey, keyEnc)
+	if err != nil {
+		return nil, fmt.Errorf("worker CA decrypt failed (auth.secret changed?): %w", err)
+	}
+	if diskCert, ok := readDiskCACert(caDir); ok && !bytes.Equal(diskCert, certPEM) {
+		return nil, fmt.Errorf("local disk CA differs from the authoritative DB CA; " +
+			"to migrate to HA boot the original CA-owning node first, or to adopt the disk CA " +
+			"stop all instances, delete the cp_worker_ca row, and start the CA-owning node first")
+	}
+	return loadCA(certPEM, keyPEM, joinTokens)
+}
+
+// readDiskCA reads ca-cert.pem + ca-key.pem from dir; ok is false if either is absent.
+func readDiskCA(dir string) (certPEM, keyPEM []byte, ok bool) {
+	c, err := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	if err != nil {
+		return nil, nil, false
+	}
+	k, err := os.ReadFile(filepath.Join(dir, "ca-key.pem"))
+	if err != nil {
+		return nil, nil, false
+	}
+	return c, k, true
+}
+
+// readDiskCACert reads just the disk ca-cert.pem; ok false if absent.
+func readDiskCACert(dir string) (certPEM []byte, ok bool) {
+	c, err := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	if err != nil {
+		return nil, false
+	}
+	return c, true
 }
