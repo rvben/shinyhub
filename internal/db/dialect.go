@@ -27,6 +27,15 @@ type dialect interface {
 	now() string
 	// nowPlusSeconds renders a DB-clock expression n seconds in the future.
 	nowPlusSeconds(n int) string
+	// nowMinusSeconds renders a DB-clock expression n seconds in the past.
+	nowMinusSeconds(n int) string
+	// nowText renders the DB-clock current time as an ISO8601 text string, for
+	// columns stored as text on both backends (e.g. workers.last_heartbeat).
+	// Both SQLite and Postgres produce "YYYY-MM-DD HH:MM:SS" format.
+	nowText() string
+	// nowEpoch renders the DB-clock current time as Unix epoch seconds (integer),
+	// for columns stored as bigint epoch (e.g. replicas.updated_at).
+	nowEpoch() string
 	// beginWrite starts an eagerly-serialized write transaction. lockKey, when
 	// non-zero, serializes a read-then-write invariant across transactions.
 	// The returned writeTx (defined in bound.go) is satisfied by both the
@@ -43,6 +52,11 @@ func (sqliteDialect) now() string            { return "datetime('now')" }
 func (sqliteDialect) nowPlusSeconds(n int) string {
 	return "datetime('now', '+" + strconv.Itoa(n) + " seconds')"
 }
+func (sqliteDialect) nowMinusSeconds(n int) string {
+	return "datetime('now', '-" + strconv.Itoa(n) + " seconds')"
+}
+func (sqliteDialect) nowText() string  { return "datetime('now')" }
+func (sqliteDialect) nowEpoch() string { return "strftime('%s','now')" }
 
 // beginWrite on SQLite takes the write lock up front with BEGIN IMMEDIATE on a
 // dedicated connection, dodging the deferred-upgrade SQLITE_BUSY deadlock. The
@@ -64,6 +78,13 @@ func (pgDialect) now() string            { return "now()" }
 func (pgDialect) nowPlusSeconds(n int) string {
 	return "now() + make_interval(secs => " + strconv.Itoa(n) + ")"
 }
+func (pgDialect) nowMinusSeconds(n int) string {
+	return "now() - make_interval(secs => " + strconv.Itoa(n) + ")"
+}
+func (pgDialect) nowText() string {
+	return "to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+}
+func (pgDialect) nowEpoch() string { return "extract(epoch from now())::bigint" }
 
 // beginWrite on Postgres uses a normal transaction. MVCC plus the existing
 // ON CONFLICT/unique handling cover single-row contention. For a read-then-write

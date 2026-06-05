@@ -1424,7 +1424,7 @@ func (s *Store) CreateOAuthState(state string) error {
 // Also sweeps all expired states to prevent unbounded table growth.
 func (s *Store) ConsumeOAuthState(state string) error {
 	// Sweep stale nonces — ignore errors; this is best-effort cleanup.
-	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < datetime('now', '-10 minutes')`) //nolint:errcheck
+	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < ` + s.d.nowMinusSeconds(600)) //nolint:errcheck
 	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ?`, state)
 	if err != nil {
 		return fmt.Errorf("consume oauth state: %w", err)
@@ -1597,11 +1597,11 @@ type AppEnvVar struct {
 func (s *Store) UpsertAppEnvVar(appID int64, key string, value []byte, isSecret bool) error {
 	_, err := s.db.Exec(`
 		INSERT INTO app_env_vars (app_id, key, value, is_secret, updated_at)
-		VALUES (?, ?, ?, ?, strftime('%s','now'))
+		VALUES (?, ?, ?, ?, `+s.d.nowEpoch()+`)
 		ON CONFLICT(app_id, key) DO UPDATE SET
 			value      = excluded.value,
 			is_secret  = excluded.is_secret,
-			updated_at = strftime('%s','now')`,
+			updated_at = `+s.d.nowEpoch(),
 		appID, key, value, boolToInt(isSecret))
 	return err
 }
@@ -1795,7 +1795,7 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
 		                      endpoint_url, worker_id, app_version, desired_state,
 		                      deployment_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`)
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid           = excluded.pid,
 			port          = excluded.port,
@@ -2209,7 +2209,7 @@ func (w Worker) Revoked() bool { return w.RevokedAt != "" }
 func (s *Store) UpsertWorker(w Worker) error {
 	_, err := s.db.Exec(`
 		INSERT INTO workers (node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat)
-		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		VALUES (?, ?, ?, ?, ?, ?, ?, `+s.d.nowText()+`)
 		ON CONFLICT(node_id) DO UPDATE SET
 			name = excluded.name,
 			advertise_addr = excluded.advertise_addr,
@@ -2277,7 +2277,7 @@ func (s *Store) ListWorkers() ([]*Worker, error) {
 // alongside the tier's current owner.
 func (s *Store) TouchWorkerHeartbeat(nodeID, fingerprint, status string) error {
 	res, err := s.db.Exec(`
-		UPDATE workers SET last_heartbeat = datetime('now'), cert_fingerprint = ?, status = ?
+		UPDATE workers SET last_heartbeat = `+s.d.nowText()+`, cert_fingerprint = ?, status = ?
 		WHERE node_id = ?`, fingerprint, status, nodeID)
 	if err != nil {
 		return fmt.Errorf("touch worker %q: %w", nodeID, err)
@@ -2327,7 +2327,7 @@ func (s *Store) RevokeWorker(nodeID string) error {
 	res, err := s.db.Exec(`
 		UPDATE workers
 		SET status = 'down',
-		    revoked_at = CASE WHEN revoked_at = '' THEN datetime('now') ELSE revoked_at END
+		    revoked_at = CASE WHEN revoked_at = '' THEN `+s.d.nowText()+` ELSE revoked_at END
 		WHERE node_id = ?`, nodeID)
 	if err != nil {
 		return fmt.Errorf("revoke worker %q: %w", nodeID, err)
@@ -2513,7 +2513,7 @@ func (s *Store) RunningReplicaWorkersForSlug(slug string) ([]string, error) {
 // (app_id, idx) and refreshes its updated_at timestamp.
 func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error {
 	_, err := s.db.Exec(
-		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		`UPDATE replicas SET status = ?, updated_at = `+s.d.nowEpoch()+`
 		   WHERE app_id = ? AND idx = ?`, status, appID, index)
 	return err
 }
@@ -2526,7 +2526,7 @@ func (s *Store) UpdateReplicaStatus(appID int64, index int, status string) error
 // endpoint_url, so a stale stored value would leave a dead worker routable.
 func (s *Store) UpdateReplicaEndpoint(appID int64, index int, endpointURL string) error {
 	_, err := s.db.Exec(
-		`UPDATE replicas SET endpoint_url = ?, updated_at = strftime('%s','now')
+		`UPDATE replicas SET endpoint_url = ?, updated_at = `+s.d.nowEpoch()+`
 		   WHERE app_id = ? AND idx = ?`, endpointURL, appID, index)
 	if err != nil {
 		return fmt.Errorf("update replica endpoint: %w", err)
@@ -2543,7 +2543,7 @@ func (s *Store) UpdateReplicaEndpoint(appID int64, index int, endpointURL string
 // skips deregistering the (now healthy) routing slot.
 func (s *Store) MarkReplicaLostIfOwnedBy(appID int64, index int, workerID string) (bool, error) {
 	res, err := s.db.Exec(
-		`UPDATE replicas SET status = ?, updated_at = strftime('%s','now')
+		`UPDATE replicas SET status = ?, updated_at = `+s.d.nowEpoch()+`
 		   WHERE app_id = ? AND idx = ? AND worker_id = ? AND status = ?`,
 		ReplicaStatusLost, appID, index, workerID, ReplicaStatusRunning)
 	if err != nil {

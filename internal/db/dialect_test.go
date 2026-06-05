@@ -26,6 +26,42 @@ func TestDialectExpressions(t *testing.T) {
 	}
 }
 
+func TestDialectNowMinusSeconds(t *testing.T) {
+	sq := sqliteDialect{}
+	if got := sq.nowMinusSeconds(600); got != "datetime('now', '-600 seconds')" {
+		t.Fatalf("sqlite nowMinusSeconds(600) = %q", got)
+	}
+
+	pg := pgDialect{}
+	if got := pg.nowMinusSeconds(600); got != "now() - make_interval(secs => 600)" {
+		t.Fatalf("pg nowMinusSeconds(600) = %q", got)
+	}
+}
+
+func TestDialectNowText(t *testing.T) {
+	sq := sqliteDialect{}
+	if got := sq.nowText(); got != "datetime('now')" {
+		t.Fatalf("sqlite nowText() = %q", got)
+	}
+
+	pg := pgDialect{}
+	if got := pg.nowText(); got != "to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')" {
+		t.Fatalf("pg nowText() = %q", got)
+	}
+}
+
+func TestDialectNowEpoch(t *testing.T) {
+	sq := sqliteDialect{}
+	if got := sq.nowEpoch(); got != "strftime('%s','now')" {
+		t.Fatalf("sqlite nowEpoch() = %q", got)
+	}
+
+	pg := pgDialect{}
+	if got := pg.nowEpoch(); got != "extract(epoch from now())::bigint" {
+		t.Fatalf("pg nowEpoch() = %q", got)
+	}
+}
+
 func TestRebindQuery_Postgres(t *testing.T) {
 	cases := []struct {
 		name, in, want string
