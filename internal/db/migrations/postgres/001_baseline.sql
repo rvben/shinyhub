@@ -196,7 +196,7 @@ CREATE TABLE cp_owner (
     role         TEXT PRIMARY KEY,
     instance_id  TEXT,
     epoch        BIGINT NOT NULL DEFAULT 0,
-    acquired_at  TEXT NOT NULL DEFAULT '',
-    heartbeat_at TEXT NOT NULL DEFAULT '',
-    expires_at   TEXT NOT NULL DEFAULT ''
+    acquired_at  timestamptz NOT NULL DEFAULT now(),
+    heartbeat_at timestamptz NOT NULL DEFAULT now(),
+    expires_at   timestamptz NOT NULL DEFAULT now()
 );
