@@ -36,6 +36,36 @@ type CA struct {
 	joinTokens []string
 }
 
+// generateCA creates a fresh self-signed ECDSA P-256 worker CA, returning the
+// cert and key as PEM. (Extracted from OpenCA so both disk import and DB init
+// share one generator.)
+func generateCA() (certPEM, keyPEM []byte) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err) // P-256 keygen from crypto/rand cannot fail in practice
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "ShinyHub Worker CA"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		panic(err)
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
 // OpenCA loads the CA keypair from dir, generating and persisting it on first
 // run. joinTokens is the set of currently valid join tokens.
 func OpenCA(dir string, joinTokens []string) (*CA, error) {
@@ -53,29 +83,7 @@ func OpenCA(dir string, joinTokens []string) (*CA, error) {
 		return loadCA(certPEM, keyPEM, joinTokens)
 	}
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generate ca key: %w", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "ShinyHub Worker CA"},
-		NotBefore:             time.Now().Add(-time.Minute),
-		NotAfter:              time.Now().AddDate(10, 0, 0),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		return nil, fmt.Errorf("self-sign ca: %w", err)
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("marshal ca key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	certPEM, keyPEM := generateCA()
 	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write ca cert: %w", err)
 	}
@@ -101,6 +109,19 @@ func loadCA(certPEM, keyPEM []byte, joinTokens []string) (*CA, error) {
 	key, err := x509.ParseECPrivateKey(kb.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse ca key: %w", err)
+	}
+	if !cert.IsCA || !cert.BasicConstraintsValid {
+		return nil, fmt.Errorf("ca cert is not a valid CA")
+	}
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, fmt.Errorf("ca cert lacks cert-sign key usage")
+	}
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !pub.Equal(&key.PublicKey) {
+		return nil, fmt.Errorf("ca cert public key does not match private key")
+	}
+	if err := cert.CheckSignatureFrom(cert); err != nil {
+		return nil, fmt.Errorf("ca cert self-signature invalid: %w", err)
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
