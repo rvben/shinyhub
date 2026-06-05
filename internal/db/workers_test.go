@@ -2,7 +2,8 @@ package db
 
 import "testing"
 
-func TestWorkerRegistryCRUD(t *testing.T) {
+func mustOpenStore(t *testing.T) *Store {
+	t.Helper()
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -11,6 +12,11 @@ func TestWorkerRegistryCRUD(t *testing.T) {
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	return store
+}
+
+func TestWorkerRegistryCRUD(t *testing.T) {
+	store := mustOpenStore(t)
 
 	w := Worker{
 		NodeID:        "node-1",
@@ -65,14 +71,7 @@ func TestWorkerRegistryCRUD(t *testing.T) {
 // address worker on the same tier is real multi-worker capacity and must stay up;
 // a same-address worker on a different tier is untouched.
 func TestSupersedeTierAddrWorkers(t *testing.T) {
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := mustOpenStore(t)
 
 	seed := func(id, tier, addr, status string) {
 		if err := store.UpsertWorker(Worker{NodeID: id, Tier: tier, AdvertiseAddr: addr, Status: status}); err != nil {

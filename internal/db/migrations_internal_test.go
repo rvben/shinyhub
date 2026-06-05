@@ -2,8 +2,19 @@ package db
 
 import (
 	"fmt"
+	"os"
 	"testing"
 )
+
+// skipIfPostgres skips SQLite-only migration internals tests when running
+// against Postgres. These tests probe sqlite_master, PRAGMA, and legacy
+// adoption paths that are intentionally SQLite-specific.
+func skipIfPostgres(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SHINYHUB_TEST_POSTGRES_DSN") != "" {
+		t.Skip("SQLite-only test; skipping under Postgres")
+	}
+}
 
 // columnExists reports whether the given table has the named column.
 func columnExists(t *testing.T, store *Store, table, column string) bool {
@@ -22,6 +33,7 @@ func columnExists(t *testing.T, store *Store, table, column string) bool {
 // embedded migration as "applied" without running them would leave a legacy DB
 // permanently missing the columns those later migrations add.
 func TestMigrate_LegacyBaselineAppliesPostBaselineMigrations(t *testing.T) {
+	skipIfPostgres(t) // legacy adoption uses sqlite_master and PRAGMA; SQLite-only
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -106,6 +118,7 @@ func TestLoadMigrationsOrderedAndUnique(t *testing.T) {
 }
 
 func TestMigration021_IndexesReplicaStatus(t *testing.T) {
+	skipIfPostgres(t) // probes sqlite_master; SQLite-only
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -126,6 +139,7 @@ func TestMigration021_IndexesReplicaStatus(t *testing.T) {
 }
 
 func TestMigrations015And016AddColumns(t *testing.T) {
+	skipIfPostgres(t) // uses PRAGMA table_info; SQLite-only
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)

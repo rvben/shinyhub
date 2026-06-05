@@ -6,14 +6,7 @@ import "testing"
 // surfaces through Revoked() on reads, is idempotent (preserves the first
 // revoke time), and reports ErrNotFound for an unknown node.
 func TestRevokeWorker(t *testing.T) {
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := mustOpenStore(t)
 
 	if err := store.UpsertWorker(Worker{
 		NodeID: "node-1", AdvertiseAddr: "10.0.0.5:8443", Tier: "burst", Status: "up",

@@ -5,10 +5,15 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 func newMigratedStore(t *testing.T, dsn string) *db.Store {
 	t.Helper()
+	if dsn == ":memory:" {
+		return dbtest.New(t)
+	}
+	// Non-memory DSN (e.g. file path for concurrency tests): open directly.
 	store, err := db.Open(dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -110,6 +115,7 @@ func TestProvisionOAuthUser_AllCandidatesTaken(t *testing.T) {
 // single user: every caller gets the same user ID, exactly one reports
 // created=true, and no orphan (unlinked) user rows are left behind.
 func TestProvisionOAuthUser_ConcurrentFirstLoginConverges(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // uses a SQLite file DSN for concurrent WAL writes
 	store := newMigratedStore(t, t.TempDir()+"/race.db")
 
 	const n = 16

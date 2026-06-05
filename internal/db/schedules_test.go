@@ -8,15 +8,7 @@ import (
 
 func newScheduleStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
+	return mustOpenStore(t)
 }
 
 func newScheduleAppFixture(t *testing.T, store *Store, slug string) int64 {

@@ -22,14 +22,7 @@ func backdateWorker(t *testing.T, store *Store, nodeID string, at time.Time) {
 // (running/crashed) replicas, while preserving revoked rows (audit), recently
 // seen workers, still-up workers, and workers still hosting live replicas.
 func TestDeleteStaleWorkers(t *testing.T) {
-	store, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := mustOpenStore(t)
 
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	recent := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
