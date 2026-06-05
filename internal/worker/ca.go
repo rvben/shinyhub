@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
@@ -310,13 +311,39 @@ type CAStore interface {
 	PutWorkerCAIfAbsent(certPEM, keyEnc []byte) (inserted bool, err error)
 }
 
-// LoadOrInitCA loads the shared worker CA from the store, importing an existing
+// LoadOrInitCA loads/initializes the shared worker CA (see loadOrInitCA) and
+// mirrors the public CA certificate to caDir/ca-cert.pem so worker bootstrap
+// (`shinyhub worker --ca-file <ca_dir>/ca-cert.pem`) and operator tooling can
+// read it. The private key is never written to disk; it stays encrypted in the
+// database only.
+func LoadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) (*CA, error) {
+	ca, err := loadOrInitCA(store, caDir, authSecret, joinTokens)
+	if err != nil {
+		return nil, err
+	}
+	if werr := writeCACertToDisk(caDir, ca.CertPEM()); werr != nil {
+		slog.Warn("worker CA: could not mirror cert to disk", "dir", caDir, "err", werr)
+	}
+	return ca, nil
+}
+
+// writeCACertToDisk writes the public CA certificate (only) to caDir/ca-cert.pem.
+func writeCACertToDisk(dir string, certPEM []byte) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("ca dir: %w", err)
+	}
+	// Public certificate (not the key); 0o644 so a worker process running as a
+	// different user can read it for --ca-file bootstrap.
+	return os.WriteFile(filepath.Join(dir, "ca-cert.pem"), certPEM, 0o644)
+}
+
+// loadOrInitCA loads the shared worker CA from the store, importing an existing
 // on-disk CA from caDir or generating a fresh one on first boot, and converging
 // all instances on a single CA via race-safe insert. The private key is
 // encrypted at rest with a domain-separated key derived from authSecret. A
 // decrypt failure (auth.secret changed) or a disk CA that differs from the DB CA
 // is a loud fatal error - never a silent regeneration that would orphan workers.
-func LoadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) (*CA, error) {
+func loadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) (*CA, error) {
 	keyEncKey := secrets.DeriveKeyWithInfo(authSecret, workerCAKeyInfo)
 
 	certPEM, keyEnc, found, err := store.GetWorkerCA()
