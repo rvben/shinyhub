@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -91,15 +92,7 @@ func mustCreateApp(t *testing.T, store *db.Store, slug string) *db.App {
 // mustOpenStore creates an in-memory store with migrations applied.
 func mustOpenStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	return store
+	return dbtest.New(t)
 }
 
 func TestRecoverProcesses_DeadPID(t *testing.T) {

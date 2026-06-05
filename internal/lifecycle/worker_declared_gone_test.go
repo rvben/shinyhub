@@ -4,20 +4,13 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/fargate"
 )
 
 func openMemStore(t *testing.T) *db.Store {
 	t.Helper()
-	s, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open mem store: %v", err)
-	}
-	if err := s.Migrate(); err != nil {
-		t.Fatalf("migrate mem store: %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-	return s
+	return dbtest.New(t)
 }
 
 func TestWorkerDeclaredGone_FargateWorkerIDReturnsFalse(t *testing.T) {
