@@ -116,6 +116,66 @@ func TestLoadOrInitCA_ConcurrentConverge(t *testing.T) {
 	}
 }
 
+func TestLoadOrInitCA_PartialDiskCAErrors(t *testing.T) {
+	dir := t.TempDir()
+	// Write only the cert, no key - a partial disk CA state.
+	if err := os.WriteFile(filepath.Join(dir, "ca-cert.pem"), []byte("cert content"), 0o600); err != nil {
+		t.Fatalf("write partial cert: %v", err)
+	}
+	st := &fakeCAStore{}
+	_, err := LoadOrInitCA(st, dir, testSecret, nil)
+	if err == nil {
+		t.Fatal("partial disk CA (cert only) must return an error")
+	}
+	// Nothing must have been persisted to the store.
+	_, _, found, _ := st.GetWorkerCA()
+	if found {
+		t.Fatal("partial disk CA must not be persisted to the store")
+	}
+}
+
+func TestLoadOrInitCA_MalformedDiskCANotPersisted(t *testing.T) {
+	dir := t.TempDir()
+	// Both files present but contain garbage - not valid PEM/CA material.
+	if err := os.WriteFile(filepath.Join(dir, "ca-cert.pem"), []byte("not a pem"), 0o600); err != nil {
+		t.Fatalf("write garbage cert: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ca-key.pem"), []byte("not a pem"), 0o600); err != nil {
+		t.Fatalf("write garbage key: %v", err)
+	}
+	st := &fakeCAStore{}
+	_, err := LoadOrInitCA(st, dir, testSecret, nil)
+	if err == nil {
+		t.Fatal("malformed disk CA must return an error")
+	}
+	// Nothing must have been persisted to the store.
+	_, _, found, _ := st.GetWorkerCA()
+	if found {
+		t.Fatal("malformed disk CA must not be persisted to the store")
+	}
+}
+
+func TestLoadOrInitCA_UnreadableDiskCAErrors(t *testing.T) {
+	dir := t.TempDir()
+	// Make ca-cert.pem a directory - os.ReadFile on a directory returns a
+	// non-IsNotExist error, so this simulates an unreadable/corrupt CA file
+	// without relying on chmod (which is flaky on some CI environments).
+	if err := os.MkdirAll(filepath.Join(dir, "ca-cert.pem"), 0o700); err != nil {
+		t.Fatalf("mkdir as cert: %v", err)
+	}
+	// ca-key.pem is absent (does not exist).
+	st := &fakeCAStore{}
+	_, err := LoadOrInitCA(st, dir, testSecret, nil)
+	if err == nil {
+		t.Fatal("unreadable disk CA cert must return an error, not silently generate a fresh CA")
+	}
+	// Nothing must have been persisted to the store.
+	_, _, found, _ := st.GetWorkerCA()
+	if found {
+		t.Fatal("unreadable disk CA must not be persisted to the store")
+	}
+}
+
 // writeDiskCA writes ca-cert.pem and ca-key.pem into dir with mode 0o600.
 func writeDiskCA(t *testing.T, dir string, certPEM, keyPEM []byte) {
 	t.Helper()

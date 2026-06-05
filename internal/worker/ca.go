@@ -329,7 +329,16 @@ func LoadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) 
 
 	// Init: import an existing disk CA if present, else generate fresh.
 	var newCert, newKey []byte
-	if dc, dk, ok := readDiskCA(caDir); ok {
+	dc, dk, present, derr := readDiskCA(caDir)
+	if derr != nil {
+		return nil, fmt.Errorf("worker CA: %w", derr)
+	}
+	if present {
+		// Validate the disk CA before persisting it as authoritative - a malformed
+		// disk CA must not be committed to the DB (it would strand every instance).
+		if _, verr := loadCA(dc, dk, joinTokens); verr != nil {
+			return nil, fmt.Errorf("invalid disk CA in %s: %w", caDir, verr)
+		}
 		newCert, newKey = dc, dk
 	} else {
 		newCert, newKey = generateCA()
@@ -372,17 +381,34 @@ func decodeAndGuard(certPEM, keyEnc, keyEncKey []byte, caDir string, joinTokens 
 	return loadCA(certPEM, keyPEM, joinTokens)
 }
 
-// readDiskCA reads ca-cert.pem + ca-key.pem from dir; ok is false if either is absent.
-func readDiskCA(dir string) (certPEM, keyPEM []byte, ok bool) {
-	c, err := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
-	if err != nil {
-		return nil, nil, false
+// readDiskCA reads ca-cert.pem + ca-key.pem from dir. present=true with both
+// files; present=false,err=nil when NEITHER exists (fresh install -> generate);
+// err!=nil for any other combination: exactly one file present (partial state),
+// or a file exists but is unreadable (permission denied, is-a-dir, IO error).
+// A non-NotExist read error is always fatal - we must never treat an unreadable
+// existing CA file as absent and silently generate a fresh CA.
+func readDiskCA(dir string) (certPEM, keyPEM []byte, present bool, err error) {
+	c, cerr := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	k, kerr := os.ReadFile(filepath.Join(dir, "ca-key.pem"))
+	certAbsent := cerr != nil && os.IsNotExist(cerr)
+	keyAbsent := kerr != nil && os.IsNotExist(kerr)
+	// A read error that is NOT "file does not exist" (permission, IO, is-a-dir)
+	// must be fatal - we must never treat an unreadable existing CA file as
+	// "absent" and silently generate a fresh CA.
+	if cerr != nil && !certAbsent {
+		return nil, nil, false, fmt.Errorf("read disk CA cert in %s: %w", dir, cerr)
 	}
-	k, err := os.ReadFile(filepath.Join(dir, "ca-key.pem"))
-	if err != nil {
-		return nil, nil, false
+	if kerr != nil && !keyAbsent {
+		return nil, nil, false, fmt.Errorf("read disk CA key in %s: %w", dir, kerr)
 	}
-	return c, k, true
+	switch {
+	case certAbsent && keyAbsent:
+		return nil, nil, false, nil // genuinely neither present -> generate fresh
+	case certAbsent || keyAbsent:
+		return nil, nil, false, fmt.Errorf("partial disk CA in %s (cert present: %v, key present: %v)", dir, !certAbsent, !keyAbsent)
+	default:
+		return c, k, true, nil // both present and readable
+	}
 }
 
 // readDiskCACert reads just the disk ca-cert.pem; ok false if absent.
