@@ -43,14 +43,37 @@ type RegisterParams struct {
 // workers table, so a control-plane restart re-adopts known workers.
 func NewRegistry(store *db.Store) (*Registry, error) {
 	r := &Registry{store: store, byID: map[string]db.Worker{}}
-	ws, err := store.ListWorkers()
-	if err != nil {
-		return nil, fmt.Errorf("load workers: %w", err)
-	}
-	for _, w := range ws {
-		r.byID[w.NodeID] = *w
+	if err := r.Refresh(); err != nil {
+		return nil, err
 	}
 	return r, nil
+}
+
+// Refresh rebuilds the in-memory routing index from the workers table. An
+// instance becoming the control-plane owner calls it so its routing decisions
+// reflect every worker row the previous owner wrote before it died
+// (registrations, heartbeats, supersedes, reaps) - not just the rows present when
+// this instance booted. It is a full replace: workers added since boot appear and
+// workers removed from the store disappear. Idempotent.
+//
+// It holds regMu (like Register/Heartbeat/Revoke), preserving the regMu-then-mu
+// lock order, so the rebuild is a consistent snapshot against any in-flight
+// registration on this instance.
+func (r *Registry) Refresh() error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	ws, err := r.store.ListWorkers()
+	if err != nil {
+		return fmt.Errorf("refresh worker registry: %w", err)
+	}
+	next := make(map[string]db.Worker, len(ws))
+	for _, w := range ws {
+		next[w.NodeID] = *w
+	}
+	r.mu.Lock()
+	r.byID = next
+	r.mu.Unlock()
+	return nil
 }
 
 // Register allocates a node id, persists the worker, and indexes it. Re-register

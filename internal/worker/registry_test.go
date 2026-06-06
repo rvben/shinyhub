@@ -34,6 +34,66 @@ func joinUp(t *testing.T, reg *Registry, p RegisterParams) db.Worker {
 	return up
 }
 
+// TestRegistry_RefreshRebuildsFromStore simulates failover: an "active" instance
+// (regA) registers a worker that the "standby" (regB) has not seen, then regB
+// refreshes on takeover and routes to it. Refresh is a full replace, so a worker
+// removed from the store also disappears from the index.
+func TestRegistry_RefreshRebuildsFromStore(t *testing.T) {
+	store := newTestStore(t)
+	regA, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry A: %v", err)
+	}
+	regB, err := NewRegistry(store) // standby, built before A registers anything
+	if err != nil {
+		t.Fatalf("new registry B: %v", err)
+	}
+
+	w := joinUp(t, regA, RegisterParams{AdvertiseAddr: "203.0.113.5:9000", Tier: "burst", Fingerprint: "fp"})
+
+	// The standby's index is the boot snapshot and does not see A's new worker.
+	if _, ok := regB.Worker(w.NodeID); ok {
+		t.Fatal("standby saw the worker before refresh (precondition: stale by design)")
+	}
+
+	// On takeover, the standby refreshes from the shared store and routes to it.
+	if err := regB.Refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, ok := regB.Worker(w.NodeID); !ok {
+		t.Fatal("refresh did not pick up the worker the other instance wrote")
+	}
+	if _, ok := regB.WorkerForTier("burst"); !ok {
+		t.Fatal("refreshed worker is not routable on its tier")
+	}
+
+	// Full replace: a worker removed from the store disappears on the next refresh.
+	if err := store.DeleteWorker(w.NodeID); err != nil {
+		t.Fatalf("delete worker: %v", err)
+	}
+	if err := regB.Refresh(); err != nil {
+		t.Fatalf("refresh after delete: %v", err)
+	}
+	if _, ok := regB.Worker(w.NodeID); ok {
+		t.Fatal("refresh did not drop a worker removed from the store")
+	}
+}
+
+// TestRegistry_RefreshSurfacesStoreError asserts Refresh returns the underlying
+// store error (so the owner-acquire path keeps the readiness gate closed rather
+// than routing on a stale index).
+func TestRegistry_RefreshSurfacesStoreError(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	_ = store.Close() // ListWorkers now fails
+	if err := reg.Refresh(); err == nil {
+		t.Fatal("Refresh did not surface the store error after Close")
+	}
+}
+
 // TestRegistryRegisterIsJoiningUntilHeartbeat asserts a freshly registered worker
 // is "joining" and NOT routable: it becomes routable only once it heartbeats.
 // This closes the deploy race where the control plane dialed a worker that had
