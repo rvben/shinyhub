@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -394,14 +395,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	var (
 		workerCA  *worker.CA
 		workerReg *worker.Registry
+		workerAPI *api.WorkerAPI
 	)
 	if cfg.Worker.Enabled {
-		ca, reg, err := startWorkerHosting(ctx, logger, cfg, store)
+		ca, reg, wapi, err := startWorkerHosting(ctx, logger, cfg, store)
 		if err != nil {
 			return err
 		}
 		workerCA = ca
 		workerReg = reg
+		workerAPI = wapi
 	}
 
 	var dialer worker.AgentDialer
@@ -901,8 +904,38 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// bound to octx, then blocks until ownership is lost and stops them.
 	// jobsMgr/sched/watcher/monitor/controller are created once above and reused
 	// across spans (the scheduler supports stop/start cycles).
+	// ownerReady is true only while this instance is the owner AND its worker
+	// routing index has been refreshed for the current ownership span. The
+	// mutation gates require it (not just IsOwner): the elector flips IsOwner true
+	// before ownerWork runs, so without this a freshly-acquired owner could admit
+	// deploy-placement / worker mutations against a stale index.
+	var ownerReady atomic.Bool
 	ownerWork := func(octx context.Context, epoch int64) {
+		ownerReady.Store(false)       // closed at the start of every ownership span
+		defer ownerReady.Store(false) // and on span exit (ownership lost / shutdown)
 		slog.Info("became control-plane owner", "epoch", epoch, "instance", cfg.Server.InstanceID)
+
+		// Rebuild the worker routing index from the authoritative DB so this new
+		// active reflects every worker row the previous owner wrote before it died.
+		// Fail-closed: retry until it succeeds or ownership is lost, so owner work
+		// (placement-affecting reconciles, loops, and admitted mutations) never runs
+		// on a stale index. A persistent ListWorkers failure means the DB is
+		// unusable, where no owner work could function anyway.
+		if workerReg != nil {
+			for {
+				if err := workerReg.Refresh(); err == nil {
+					break
+				} else {
+					slog.Error("worker registry refresh on acquire; not ready until it succeeds", "err", err)
+				}
+				select {
+				case <-octx.Done():
+					return // lost ownership before a fresh index; start no owner work
+				case <-time.After(2 * time.Second):
+				}
+			}
+		}
+		ownerReady.Store(true) // gate opens: the index is fresh
 
 		// Rewrite any legacy relative bundle_dir rows to their canonical absolute
 		// path under the configured apps_dir. Idempotent; must run before recovery
@@ -979,7 +1012,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		OnLose:     scope.Lose,
 		Logger:     slog.Default(),
 	})
-	srv.SetOwnership(elector.IsOwner)
+	// Gate mutations on owner AND ready: the elector reports IsOwner true before
+	// ownerWork refreshes the registry, so admitting owner-only mutations (main-API
+	// deploy/placement, worker register/heartbeat) must wait for the fresh index.
+	ownerAndReady := func() bool { return elector.IsOwner() && ownerReady.Load() }
+	srv.SetOwnership(ownerAndReady)
+	if workerAPI != nil {
+		workerAPI.SetOwnership(ownerAndReady)
+	}
 	electorCtx, cancelElector := context.WithCancel(context.Background())
 	defer cancelElector()
 	go elector.Run(electorCtx)
