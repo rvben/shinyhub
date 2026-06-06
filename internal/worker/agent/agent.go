@@ -10,12 +10,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/worker"
@@ -135,16 +137,16 @@ func register(ctx context.Context, cfg Config, agentDir string) (*Agent, error) 
 		return nil, err
 	}
 
-	resp, err := worker.Register(ctx, cfg.ServerURL, workerapi.RegisterRequest{
+	resp, err := registerWithRetry(ctx, cfg, workerapi.RegisterRequest{
 		Token:         cfg.Token,
 		Name:          cfg.Name,
 		AdvertiseAddr: cfg.AdvertiseAddr,
 		Tier:          cfg.Tier,
 		Version:       cfg.Version,
 		CSRPEM:        string(csrPEM),
-	}, cfg.CAPEM)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("register: %w", err)
+		return nil, err
 	}
 
 	keyDER, err := x509.MarshalECPrivateKey(key)
@@ -164,6 +166,48 @@ func register(ctx context.Context, cfg Config, agentDir string) (*Agent, error) 
 	}
 
 	return buildAgent(cfg, resp.NodeID, keyPEM, csrPEM, []byte(resp.CertPEM), []byte(resp.CABundle))
+}
+
+// registerWithRetry performs the join, retrying while the control plane is
+// reachable-but-not-the-ready-owner (HTTP 503 -> ErrControlPlaneUnavailable) or
+// not yet listening (connection refused), with capped exponential backoff, until
+// it succeeds or ctx is cancelled. Permanent failures - a bad join token (401), a
+// bad request (400), a CA-pin/TLS mismatch - fail fast so a misconfigured worker
+// does not spin forever. With owner-gated registration a fresh join can transiently
+// hit a non-owner (or an owner still warming up); retrying makes the join correct
+// rather than crashing the worker.
+func registerWithRetry(ctx context.Context, cfg Config, req workerapi.RegisterRequest) (workerapi.RegisterResponse, error) {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	for {
+		resp, err := worker.Register(ctx, cfg.ServerURL, req, cfg.CAPEM)
+		if err == nil {
+			return resp, nil
+		}
+		if !isRetryableRegister(err) {
+			return workerapi.RegisterResponse{}, fmt.Errorf("register: %w", err)
+		}
+		slog.Warn("worker register: control plane not ready, retrying", "err", err, "backoff", backoff)
+		select {
+		case <-ctx.Done():
+			return workerapi.RegisterResponse{}, ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// isRetryableRegister reports whether a failed registration should be retried:
+// the control plane is reachable but not the ready owner (503), or it is not yet
+// accepting connections (connection refused while it boots). Auth/validation and
+// TLS-pin failures are permanent and fail fast.
+func isRetryableRegister(err error) bool {
+	return errors.Is(err, worker.ErrControlPlaneUnavailable) ||
+		errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // readoptFromDisk rebuilds the agent from a previously persisted identity when
