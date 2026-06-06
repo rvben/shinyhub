@@ -54,36 +54,43 @@ type Config struct {
 	RuntimeMax int
 }
 
-// Controller evaluates and converges replica counts. Its internal state
-// (lastAction) is owned solely by the Run loop goroutine, so it needs no lock.
+// CooldownStore persists the per-app autoscale cooldown so it survives process
+// restart and failover to a standby control-plane instance. *db.Store satisfies
+// it. The read side of the cooldown is the persisted db.App.LastAutoscaleAt the
+// Lister returns each tick; this is only the write side.
+type CooldownStore interface {
+	SetAppLastAutoscaleAt(slug string, epoch int64) error
+}
+
+// Controller evaluates and converges replica counts. Its internal state is owned
+// solely by the Run loop goroutine, so it needs no lock. The per-app cooldown is
+// persisted (apps.last_autoscale_at, read via the app list each tick) so it
+// survives process restart and failover, rather than living in process memory.
 type Controller struct {
 	cfg      Config
 	lister   Lister
 	signal   Signal
 	scaler   Scaler
 	recorder AuditRecorder // records scale events to the audit log
+	cooldown CooldownStore // persists the per-app cooldown timestamp
 	log      *slog.Logger
 	metrics  AutoscaleMetrics // nil until SetMetrics is called
-
-	// lastAction records when the controller last scaled each slug, for the
-	// per-app cooldown. Pruned each tick to the current app set.
-	lastAction map[string]time.Time
 }
 
 // New builds a controller. log may be nil, in which case the default logger is
 // used.
-func New(cfg Config, lister Lister, signal Signal, scaler Scaler, recorder AuditRecorder, log *slog.Logger) *Controller {
+func New(cfg Config, lister Lister, signal Signal, scaler Scaler, recorder AuditRecorder, cooldown CooldownStore, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Controller{
-		cfg:        cfg,
-		lister:     lister,
-		signal:     signal,
-		scaler:     scaler,
-		recorder:   recorder,
-		log:        log,
-		lastAction: make(map[string]time.Time),
+		cfg:      cfg,
+		lister:   lister,
+		signal:   signal,
+		scaler:   scaler,
+		recorder: recorder,
+		cooldown: cooldown,
+		log:      log,
 	}
 }
 
@@ -108,17 +115,8 @@ func (c *Controller) reconcile(now time.Time) {
 		c.log.Error("autoscale: list apps", "err", err)
 		return
 	}
-	live := make(map[string]struct{}, len(apps))
 	for _, a := range apps {
-		live[a.Slug] = struct{}{}
 		c.reconcileApp(a, now)
-	}
-	// Drop cooldown state for apps that are no longer opted in / actionable so
-	// the map cannot grow without bound across app churn.
-	for slug := range c.lastAction {
-		if _, ok := live[slug]; !ok {
-			delete(c.lastAction, slug)
-		}
 	}
 }
 
@@ -182,16 +180,26 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	if desired == a.Replicas {
 		return
 	}
-	if last, ok := c.lastAction[a.Slug]; ok && now.Sub(last) < c.cfg.Cooldown {
+	// Cooldown is the persisted apps.last_autoscale_at (epoch seconds; 0 = never),
+	// read from the per-tick app list, so it survives restart and failover.
+	if a.LastAutoscaleAt != 0 && now.Unix()-a.LastAutoscaleAt < int64(c.cfg.Cooldown.Seconds()) {
 		return
 	}
 
-	// Arm the cooldown only when an action actually took effect. A no-op (the
-	// primitive refused at a ceiling/floor or for a non-running app) must not
-	// suppress a genuinely needed action in the next window.
+	// arm persists the cooldown. It is called the moment an action first takes
+	// effect - after the first successful scale-up step (not after the whole
+	// multi-step loop, so a crash mid-loop still leaves the cooldown set for the
+	// next owner), and right after a successful scale-down. A no-op (the primitive
+	// refused at a ceiling/floor or for a non-running app) never calls it, so a
+	// no-op cannot suppress a genuinely needed action in the next window.
+	arm := func() {
+		if err := c.cooldown.SetAppLastAutoscaleAt(a.Slug, now.Unix()); err != nil {
+			c.log.Error("autoscale: persist cooldown", "slug", a.Slug, "err", err)
+		}
+	}
 	var acted bool
 	if desired > a.Replicas {
-		acted = c.scaleUp(a.Slug, desired-a.Replicas) > 0
+		acted = c.scaleUp(a.Slug, desired-a.Replicas, arm) > 0
 	} else {
 		// Never remove capacity from a degraded pool: defer to the self-healer,
 		// which is restoring the missing slot, and let autoscale resume scaling
@@ -207,12 +215,12 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 			return
 		}
 		if ok {
+			arm()
 			c.log.Info("autoscale: scaled down", "slug", a.Slug, "from", a.Replicas, "toward", desired)
 		}
 		acted = ok
 	}
 	if acted {
-		c.lastAction[a.Slug] = now
 		action := ActionScaleUp
 		if desired < a.Replicas {
 			action = ActionScaleDown
@@ -246,7 +254,10 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 // scaleUp jumps toward the desired count in one tick, since adding capacity
 // under load should be fast. It stops early on the first no-op (ceiling reached
 // / app no longer running) or error, and returns the number of replicas added.
-func (c *Controller) scaleUp(slug string, steps int) int {
+// onFirstAction fires exactly once, immediately after the first successful step,
+// so the caller can arm the cooldown before the loop finishes (a crash mid-loop
+// then still leaves the cooldown set).
+func (c *Controller) scaleUp(slug string, steps int, onFirstAction func()) int {
 	added := 0
 	for i := 0; i < steps; i++ {
 		ok, err := c.scaler.ScaleUp(slug)
@@ -256,6 +267,9 @@ func (c *Controller) scaleUp(slug string, steps int) int {
 		}
 		if !ok {
 			break
+		}
+		if added == 0 {
+			onFirstAction()
 		}
 		added++
 	}

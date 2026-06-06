@@ -888,7 +888,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
 			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
 			RuntimeMax:    runtimeMax,
-		}, store, prx, srv, store, slog.Default())
+		}, store, prx, srv, store, store, slog.Default())
 		if metricsReg != nil {
 			controller.SetMetrics(metricsReg)
 		}
