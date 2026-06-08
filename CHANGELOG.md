@@ -35,6 +35,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.0](https://github.com/rvben/shinyhub/compare/v0.7.5...v0.8.0) - 2026-06-08
+
+### Added
+
+- refresh worker registry on lease acquire; gate mutations on owner-and-ready ([99f27ff](https://github.com/rvben/shinyhub/commit/99f27ffc5d625ee351865e89d723cf7614fc9ead))
+- **worker**: retry registration while the control plane is not the ready owner (503) ([fd9baea](https://github.com/rvben/shinyhub/commit/fd9baea4e1a3c3f97aed2ca063dc6116fdc8fcb7))
+- **api**: owner-gate worker register/heartbeat; DB-authoritative auth for bundle-fetch ([a363c39](https://github.com/rvben/shinyhub/commit/a363c392486eca22e77263a6c570bfeb569a9c2d))
+- **worker**: Registry.Refresh rebuilds the routing index from the DB on takeover ([7bc8f3b](https://github.com/rvben/shinyhub/commit/7bc8f3b6ae199277b46655bf800955791489b692))
+- **autoscale**: persist cooldown to apps.last_autoscale_at, arm on first step ([3b6196d](https://github.com/rvben/shinyhub/commit/3b6196dcf4565fce1d092b2c5152630c19f46ae3))
+- **db**: persist apps.last_autoscale_at (App field, scan, setter) ([ba2790c](https://github.com/rvben/shinyhub/commit/ba2790c5791ec52c11b49538828070b45f44839c))
+- **db**: add apps.last_autoscale_at migration (both dialects) ([b402fac](https://github.com/rvben/shinyhub/commit/b402fac691b9a925903a0dc4e3386c941d44587e))
+
+### Fixed
+
+- **leader**: derive local lease deadline from pre-call time (conservative vs DB) ([c19511e](https://github.com/rvben/shinyhub/commit/c19511ef64ca9b57fdb4fbdaa734f94dbf6ae407))
+- **autoscale**: enforce cooldown at whole-second resolution, never disabled ([4967166](https://github.com/rvben/shinyhub/commit/49671668d809257d95bb30f884bb6e959adbc505))
+- **worker**: retry registration on connection reset, not just refused ([9d5523a](https://github.com/rvben/shinyhub/commit/9d5523acc482db0bedc702beaaeb3ddcb02e725d))
+- **autoscale**: measure cooldown against the DB clock; compare as duration ([e583d0f](https://github.com/rvben/shinyhub/commit/e583d0f2bf709b3e432530dd1831d546f2ae1ccd))
+- **leader**: relinquish ownership when renew fails past the local lease deadline ([186021c](https://github.com/rvben/shinyhub/commit/186021c6a8c079dd3de6629541714da8660e1113))
+- **worker**: serialize MarkDown/Forget with regMu against Refresh ([982af1a](https://github.com/rvben/shinyhub/commit/982af1a4b0fd32efb9d1b3b4953772400c5a6fcd))
+
 ## [0.7.5](https://github.com/rvben/shinyhub/compare/v0.7.4...v0.7.5) - 2026-06-05
 
 ### Fixed
