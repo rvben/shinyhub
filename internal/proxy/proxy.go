@@ -225,10 +225,19 @@ type (
 
 // Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
-	mu         sync.RWMutex
-	pools      map[string]*backendPool
-	onMiss     func(slug string)
-	slugExists func(slug string) (bool, error)
+	mu          sync.RWMutex
+	pools       map[string]*backendPool
+	wakeTrigger func(slug string)
+	slugExists  func(slug string) (bool, error)
+
+	// forwardErrorWake enables the clustered forward-error recovery path.
+	// When true, a reverse-proxy upstream error triggers the wake trigger
+	// and serves the loading page (HTTP 200) instead of 502, so a client
+	// reconnects after a replica that was hibernated or stopped mid-request.
+	// Kept false on single-node deployments: the loading page has a bounded
+	// retry cap (~60 s), so the reconnect never loops indefinitely.
+	// Set once at startup via SetForwardErrorWake; read lock-free via atomic.
+	forwardErrorWake atomic.Bool
 
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
@@ -416,12 +425,33 @@ func (p *Proxy) SetTracing(cfg config.TracingConfig, buf *tracing.Buffer) {
 	p.mu.Unlock()
 }
 
-// SetOnMiss registers a callback invoked (in a goroutine) when a request
-// arrives for a slug with no registered backend. Called by lifecycle.Watcher.
-func (p *Proxy) SetOnMiss(fn func(string)) {
+// SetWakeTrigger registers a callback invoked (in a goroutine) when a request
+// arrives for a slug with no registered backend, or when a forward error
+// occurs in clustered mode. The callback issues the BeginWake CAS and, if this
+// instance is the active owner, drives the wake inline. Called at startup on
+// EVERY instance (not owner-gated) so a standby can arm the DB waking transition
+// even though only the active executes the deploy.
+func (p *Proxy) SetWakeTrigger(fn func(string)) {
 	p.mu.Lock()
-	p.onMiss = fn
+	p.wakeTrigger = fn
 	p.mu.Unlock()
+}
+
+// getWakeTrigger returns the current wake trigger under the read lock.
+func (p *Proxy) getWakeTrigger() func(string) {
+	p.mu.RLock()
+	fn := p.wakeTrigger
+	p.mu.RUnlock()
+	return fn
+}
+
+// SetForwardErrorWake enables the clustered forward-error recovery path.
+// When true, a reverse-proxy upstream error calls the wake trigger and serves
+// the loading page (HTTP 200) so a client reconnects after a replica that was
+// stopped or hibernated mid-request. Must be set only in clustered mode: on
+// single-node, the standard 502 is preserved byte-for-byte.
+func (p *Proxy) SetForwardErrorWake(enable bool) {
+	p.forwardErrorWake.Store(enable)
 }
 
 // SetSlugExists registers a synchronous predicate that the proxy uses to
@@ -593,10 +623,26 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	// Capture pre-response upstream failures (connection refused, timeout)
 	// onto the statusRecorder so the trace span surfaces span.Error. Mirrors
 	// httputil's default handler (log + 502) and adds the capture.
+	//
+	// In clustered mode (forwardErrorWake=true), an upstream error triggers the
+	// wake trigger and serves the loading page (HTTP 200) so the client retries
+	// automatically. A replica that was hibernated or stopped between the pool
+	// registration and the forwarded request causes this path; the loading page
+	// retries for up to ~60 s (bounded by loadingPageMaxRetries on the client).
+	// Single-node keeps the standard 502 byte-for-byte.
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
+		}
+		if p.forwardErrorWake.Load() {
+			if t := p.getWakeTrigger(); t != nil {
+				go t(slugCopy)
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(loadingPage)) //nolint:errcheck
+			return
 		}
 		w.WriteHeader(http.StatusBadGateway)
 	}
@@ -889,7 +935,7 @@ func (p *Proxy) Register(slug, targetURL string) error {
 }
 
 // ServeHTTP handles /app/:slug/* requests. When the slug has no live replica,
-// the loading page is served and onMiss is invoked in a goroutine.
+// the loading page is served and the wake trigger is invoked in a goroutine.
 // Routing uses a sticky session cookie (shinyhub_rep_<slug>) pinned to a
 // specific replica index. On a cache miss or stale cookie, least-connections
 // with round-robin tie-breaking selects the replica and a new cookie is set.
@@ -1015,7 +1061,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// are about to forward to.
 	p.mu.RLock()
 	pool := p.pools[slug]
-	onMiss := p.onMiss
+	trigger := p.wakeTrigger
 	if pool == nil || !poolHasAny(pool) {
 		p.mu.RUnlock()
 		// When the slug is confidently unknown, return a real 404 instead of
@@ -1027,8 +1073,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.writeUnknownApp(rec, r, slug)
 			return
 		}
-		if onMiss != nil {
-			go onMiss(slug)
+		if trigger != nil {
+			go trigger(slug)
 		}
 		rec.Header().Set("Content-Type", "text/html; charset=utf-8")
 		rec.WriteHeader(http.StatusOK)

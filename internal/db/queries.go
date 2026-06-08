@@ -524,6 +524,28 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListWakingApps returns all apps whose status is 'waking'. Used by the
+// active owner's runOnce reconciler to drive apps whose wake was triggered by
+// a standby instance (which issues the BeginWake CAS but cannot deploy).
+func (s *Store) ListWakingApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + appColumns + deploymentSummarySQL + `
+		FROM apps WHERE status = 'waking'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // ListRunningApps returns all apps whose status is 'running'. Used on startup
 // to re-adopt processes that survived a server restart.
 func (s *Store) ListRunningApps() ([]*App, error) {

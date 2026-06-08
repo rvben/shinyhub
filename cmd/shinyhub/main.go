@@ -847,6 +847,19 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
+	// Wire the wake trigger on every instance at startup, independent of
+	// ownership. A standby issues the BeginWake CAS (hibernated->waking) on a
+	// proxy miss so the DB reflects the pending wake immediately; the active's
+	// runOnce reconciler drives it to running. The active drives inline.
+	prx.SetWakeTrigger(watcher.WakeTrigger)
+
+	// In clustered mode, a forward error to a stopped/hibernated upstream
+	// should reconnect the client via the loading page rather than 502, since
+	// another replica or a just-woken replacement may become available.
+	if isClustered(cfg) {
+		prx.SetForwardErrorWake(true)
+	}
+
 	// Record hibernate/wake transitions and crash-restart counts when metrics
 	// are enabled. Nil-safe inside the watcher when metrics are disabled.
 	if metricsReg != nil {
@@ -1075,6 +1088,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		OnLose:     scope.Lose,
 		Logger:     slog.Default(),
 	})
+	// Wire the ownership predicate into the watcher's wake trigger so a standby
+	// that wins BeginWake defers to the active's reconciler rather than trying
+	// to deploy. The raw IsOwner (not ownerAndReady) is intentional: the wake
+	// trigger only needs to know "am I the active process-owner right now"; the
+	// ownerAndReady gate is for API mutations that need a fresh worker index.
+	watcher.SetIsOwner(elector.IsOwner)
+
 	// Gate mutations on owner AND ready: the elector reports IsOwner true before
 	// ownerWork refreshes the registry, so admitting owner-only mutations (main-API
 	// deploy/placement, worker register/heartbeat) must wait for the fresh index.

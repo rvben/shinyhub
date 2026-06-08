@@ -656,8 +656,8 @@ func TestProxy_ServesLoadingPageOnMiss(t *testing.T) {
 func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
 	p := proxy.New()
 	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
-	var onMissCalled bool
-	p.SetOnMiss(func(string) { onMissCalled = true })
+	var wakeTriggerCalled bool
+	p.SetWakeTrigger(func(string) { wakeTriggerCalled = true })
 
 	req := httptest.NewRequest("GET", "/app/typo/", nil)
 	rec := httptest.NewRecorder()
@@ -666,8 +666,8 @@ func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown slug, got %d (body=%q)", rec.Code, rec.Body.String())
 	}
-	if onMissCalled {
-		t.Error("onMiss should not fire for an unknown slug — wakeup is only meaningful for slugs that exist")
+	if wakeTriggerCalled {
+		t.Error("wake trigger should not fire for an unknown slug — wakeup is only meaningful for slugs that exist")
 	}
 }
 
@@ -683,7 +683,7 @@ func TestProxy_LookupErrorFallsThroughToLoadingPage(t *testing.T) {
 		return false, errors.New("database is locked")
 	})
 	done := make(chan struct{})
-	p.SetOnMiss(func(string) { close(done) })
+	p.SetWakeTrigger(func(string) { close(done) })
 
 	req := httptest.NewRequest("GET", "/app/maybe-real/", nil)
 	rec := httptest.NewRecorder()
@@ -698,7 +698,7 @@ func TestProxy_LookupErrorFallsThroughToLoadingPage(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Error("onMiss should still fire on lookup error — the slug might exist; we just couldn't tell")
+		t.Error("wake trigger should still fire on lookup error — the slug might exist; we just couldn't tell")
 	}
 }
 
@@ -706,7 +706,7 @@ func TestProxy_ServesLoadingPageWhenSlugKnown(t *testing.T) {
 	p := proxy.New()
 	p.SetSlugExists(func(slug string) (bool, error) { return true, nil })
 	done := make(chan struct{})
-	p.SetOnMiss(func(string) { close(done) })
+	p.SetWakeTrigger(func(string) { close(done) })
 
 	req := httptest.NewRequest("GET", "/app/sleeping/", nil)
 	rec := httptest.NewRecorder()
@@ -721,16 +721,16 @@ func TestProxy_ServesLoadingPageWhenSlugKnown(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Error("onMiss should fire for known hibernated slug")
+		t.Error("wake trigger should fire for known hibernated slug")
 	}
 }
 
-func TestProxy_CallsOnMissCallback(t *testing.T) {
+func TestProxy_CallsWakeTriggerCallback(t *testing.T) {
 	p := proxy.New()
 	var mu sync.Mutex
 	var called []string
 	done := make(chan struct{})
-	p.SetOnMiss(func(slug string) {
+	p.SetWakeTrigger(func(slug string) {
 		mu.Lock()
 		called = append(called, slug)
 		mu.Unlock()
@@ -744,12 +744,12 @@ func TestProxy_CallsOnMissCallback(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("onMiss not called within timeout")
+		t.Fatal("wake trigger not called within timeout")
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(called) != 1 || called[0] != "myapp" {
-		t.Errorf("expected onMiss('myapp') called once, got %v", called)
+		t.Errorf("expected wake trigger called once with 'myapp', got %v", called)
 	}
 }
 

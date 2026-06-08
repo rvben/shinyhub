@@ -46,7 +46,6 @@ type fakeProxy struct {
 	hibernateNever  bool // if true, BeginHibernate always returns false (simulates activeConns>0)
 	poolSizes       map[string]int
 	poolCaps        map[string]int
-	onMissFn        func(string)
 }
 
 func newFakeProxy() *fakeProxy {
@@ -57,7 +56,6 @@ func newFakeProxy() *fakeProxy {
 	}
 }
 
-func (f *fakeProxy) SetOnMiss(fn func(string)) { f.mu.Lock(); f.onMissFn = fn; f.mu.Unlock() }
 func (f *fakeProxy) LastSeen(slug string) time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -246,6 +244,18 @@ func (f *fakeStore) ListReconcilableApps() ([]*db.App, error) {
 	}
 	return out, nil
 }
+
+func (f *fakeStore) ListWakingApps() ([]*db.App, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*db.App
+	for _, app := range f.apps {
+		if app.Status == "waking" {
+			out = append(out, app)
+		}
+	}
+	return out, nil
+}
 func (f *fakeStore) ListReplicas(appID int64) ([]*db.Replica, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -299,6 +309,7 @@ func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
 		deploy:    deployFn,
 		attempts:  make(map[replicaKey]int),
 		nextRetry: make(map[replicaKey]time.Time),
+		driving:   make(map[string]bool),
 	}
 }
 
@@ -735,7 +746,7 @@ func waitNotWaking(t *testing.T, st *fakeStore, slug string) {
 
 // --- wake-on-request tests ---
 
-func TestWake_TriggeredOnMiss(t *testing.T) {
+func TestWake_TriggeredOnWakeTrigger(t *testing.T) {
 	prx := newFakeProxy()
 	st := newFakeStore(
 		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated", Replicas: 1}},
@@ -751,7 +762,7 @@ func TestWake_TriggeredOnMiss(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 
-	w.OnMiss("app")
+	w.WakeTrigger("app")
 	waitNotWaking(t, st, "app")
 
 	mu.Lock()
@@ -794,13 +805,13 @@ func TestWake_NoConcurrentWakes(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 44, Port: 20044}, nil
 		})
 
-	// Two concurrent OnMiss calls should result in exactly one deploy.
-	w.OnMiss("app")
-	w.OnMiss("app")
+	// Two concurrent WakeTrigger calls should result in exactly one deploy.
+	w.WakeTrigger("app")
+	w.WakeTrigger("app")
 	waitNotWaking(t, st, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 1 {
-		t.Errorf("expected exactly 1 deploy for concurrent OnMiss, got %d", n)
+		t.Errorf("expected exactly 1 deploy for concurrent WakeTrigger, got %d", n)
 	}
 }
 
@@ -822,7 +833,7 @@ func TestWake_SupersededByStopTearsDownReplicas(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 
-	w.OnMiss("app")
+	w.WakeTrigger("app")
 	w.wakeWG.Wait() // deterministic: blocks until the wake goroutine fully exits
 
 	if got := st.apps["app"].Status; got != "stopped" {
@@ -862,7 +873,7 @@ func TestWake_SupersededByDeleteTearsDownReplicas(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 
-	w.OnMiss("app")
+	w.WakeTrigger("app")
 	w.wakeWG.Wait()
 
 	mgr.mu.Lock()
@@ -918,7 +929,7 @@ func TestWake_NonHibernatedAppNotRedeployed(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 55, Port: 20055}, nil
 		})
 
-	w.OnMiss("app")
+	w.WakeTrigger("app")
 	waitNotWaking(t, st, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 0 {
@@ -1041,7 +1052,7 @@ func TestHibernation_DrainsPool(t *testing.T) {
 	}
 }
 
-func TestWatcher_OnMissWakesAllReplicas(t *testing.T) {
+func TestWatcher_WakeTriggerWakesAllReplicas(t *testing.T) {
 	prx := newFakeProxy()
 	st := newFakeStore(
 		map[string]*db.App{"demo": {ID: 1, Slug: "demo", Status: "hibernated", Replicas: 3}},
@@ -1056,7 +1067,7 @@ func TestWatcher_OnMissWakesAllReplicas(t *testing.T) {
 			mu.Unlock()
 			return &deploy.Result{Index: idx, PID: 100 + idx, Port: 20000 + idx}, nil
 		})
-	w.OnMiss("demo")
+	w.WakeTrigger("demo")
 	waitNotWaking(t, st, "demo")
 
 	mu.Lock()
@@ -1081,7 +1092,7 @@ func TestWake_AllReplicasFailKeepsHibernated(t *testing.T) {
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
 		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("boom") })
 
-	w.OnMiss("demo")
+	w.WakeTrigger("demo")
 	waitNotWaking(t, st, "demo")
 
 	st.mu.Lock()

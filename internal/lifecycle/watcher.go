@@ -55,7 +55,6 @@ type manager interface {
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
 type proxyBackend interface {
-	SetOnMiss(fn func(string))
 	LastSeen(slug string) time.Time
 	BeginHibernate(slug string, since time.Time) bool
 	Deregister(slug string)
@@ -86,6 +85,7 @@ type appStore interface {
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
+	ListWakingApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
 	// ReapStaleReplicaSessions removes replica_sessions rows whose updated_at
 	// is older than cutoffEpoch. Called on every watcher tick (owner-gated) so
@@ -131,12 +131,24 @@ type Watcher struct {
 	// nil disables tracing. Set once via SetTracer before Start, then only read.
 	tracer trace.Tracer
 
+	// isOwner reports whether this instance currently holds the control-plane
+	// lease. Set once via SetIsOwner before Start; read on every wake trigger.
+	// When nil (tests or unconfigured setups) the instance is treated as owner
+	// so single-node behaviour is byte-for-byte unchanged.
+	isOwner func() bool
+
 	mu        sync.Mutex
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
 	attempts  map[replicaKey]int       // consecutive crash-restart attempts per replica
 	nextRetry map[replicaKey]time.Time // earliest time to retry a crashed replica
+	// driving tracks slugs currently being driven by driveWakingApp so a
+	// concurrent trigger (e.g. inline from the miss path and from the reconciler)
+	// does not spawn two parallel deploys for the same wake. The guard is
+	// in-memory only; it prevents the double-drive within one process while
+	// BeginWake's DB CAS prevents it across processes.
+	driving map[string]bool
 
-	// wakeWG tracks in-flight OnMiss wake goroutines so shutdown can wait
+	// wakeWG tracks in-flight driveWakingApp goroutines so shutdown can wait
 	// for them to persist replica/PID rows before the store is closed.
 	wakeWG sync.WaitGroup
 }
@@ -159,18 +171,28 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		deploy:    deployFn,
 		attempts:  make(map[replicaKey]int),
 		nextRetry: make(map[replicaKey]time.Time),
+		driving:   make(map[string]bool),
 	}
 }
 
-// Start wires up the onMiss callback on the proxy and launches the background
-// watchdog/hibernation loop. Blocks until ctx is cancelled. Safe to call
-// multiple times across ownership spans: resets the stopping flag so wakes
-// are admitted again after a previous span drained.
+// SetIsOwner wires the predicate that reports whether this instance currently
+// holds the control-plane lease. Call once at startup before any traffic
+// arrives. When unset (nil), the instance is treated as always-owner so
+// single-node wake behaviour is byte-for-byte unchanged.
+func (w *Watcher) SetIsOwner(fn func() bool) {
+	w.isOwner = fn
+}
+
+// Start launches the background watchdog/hibernation loop. Blocks until ctx is
+// cancelled. Safe to call multiple times across ownership spans: resets the
+// stopping flag so wakes are admitted again after a previous span drained.
+// The wake trigger is wired in main.go at startup on every instance (not inside
+// Start) so a standby instance can issue the BeginWake CAS on a miss even when
+// it is not the active owner.
 func (w *Watcher) Start(ctx context.Context) {
 	w.mu.Lock()
 	w.stopping = false
 	w.mu.Unlock()
-	w.prx.SetOnMiss(w.OnMiss)
 	ticker := time.NewTicker(w.cfg.WatchInterval)
 	defer ticker.Stop()
 	for {
@@ -289,6 +311,19 @@ func (w *Watcher) runOnce() {
 		cutoff := time.Now().Add(-proxy.ReplicaSessionStaleCutoff).Unix()
 		if err := w.store.ReapStaleReplicaSessions(cutoff); err != nil {
 			slog.Warn("watcher: reap stale replica sessions failed", "err", err)
+		}
+		// Drive any apps left in 'waking' by a standby's trigger. A standby
+		// issues BeginWake (hibernated->waking) on a miss but cannot deploy
+		// because it is not the active owner. The active's reconciler picks
+		// these up here and drives them to running. Single-node skips this path:
+		// the inline trigger drive in the wake trigger already handles it.
+		wakingApps, err := w.store.ListWakingApps()
+		if err != nil {
+			slog.Warn("watcher: list waking apps failed", "err", err)
+		} else {
+			for _, app := range wakingApps {
+				w.driveWakingApp(app.Slug)
+			}
 		}
 	}
 }
@@ -631,37 +666,64 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 	w.recordTransition("hibernate")
 }
 
-// OnMiss is registered with the Proxy as the onMiss callback. When a request
-// arrives for a hibernated app, this wakes it by re-running the deploy for all
-// replicas in parallel.
-func (w *Watcher) OnMiss(slug string) {
-	// CAS: exactly one caller (across concurrent requests AND across a brief
-	// two-process control-plane overlap during a zero-downtime handoff)
-	// transitions hibernated -> waking and proceeds to spawn; everyone else
-	// returns. This replaces the former in-memory per-process waking guard.
+// WakeTrigger is the callback wired on the proxy as the wake trigger. It runs
+// on EVERY instance (active and standby alike). It issues the BeginWake CAS
+// (hibernated->waking) so the DB state reflects the wake intent regardless of
+// which instance holds the lease. If this instance is the active owner, it also
+// drives the wake inline via driveWakingApp; a standby leaves the app in the
+// 'waking' state for the active's runOnce reconciler to pick up.
+func (w *Watcher) WakeTrigger(slug string) {
 	won, err := w.store.BeginWake(slug)
 	if err != nil {
 		slog.Warn("watcher: begin wake failed", "slug", slug, "err", err)
 		return
 	}
 	if !won {
-		return // not hibernated, or another caller is already waking it
+		return // not hibernated, or another caller already won the CAS
 	}
+	// Only the active owner drives the wake inline. A standby leaves the
+	// app in 'waking'; the active's runOnce reconciler drives it on the next
+	// tick (clustered-gated).
+	owner := w.isOwner == nil || w.isOwner()
+	if !owner {
+		return
+	}
+	w.driveWakingApp(slug)
+}
 
+// driveWakingApp deploys all replicas for a slug that is already in the
+// 'waking' DB state (the BeginWake CAS was already won by the caller or a peer).
+// It MUST NOT call BeginWake itself. An in-memory guard prevents two concurrent
+// calls from spawning duplicate deploys for the same slug within this process;
+// the DB BeginWake CAS guards across processes.
+func (w *Watcher) driveWakingApp(slug string) {
 	w.mu.Lock()
 	if w.stopping {
 		w.mu.Unlock()
-		// We won the CAS but are shutting down; revert so a successor wakes it.
+		// We are shutting down; revert so a successor wakes it.
 		if aerr := w.store.AbortWake(slug); aerr != nil {
 			slog.Warn("watcher: abort wake on shutdown failed", "slug", slug, "err", aerr)
 		}
 		return
 	}
+	if w.driving[slug] {
+		// Another goroutine within this process is already driving this wake.
+		// The DB CAS prevents a second process from racing us, so this is safe
+		// to skip entirely.
+		w.mu.Unlock()
+		return
+	}
+	w.driving[slug] = true
 	w.wakeWG.Add(1)
 	w.mu.Unlock()
 
 	go func() {
-		defer w.wakeWG.Done()
+		defer func() {
+			w.mu.Lock()
+			delete(w.driving, slug)
+			w.mu.Unlock()
+			w.wakeWG.Done()
+		}()
 
 		_, endSpan := w.traceOp(context.Background(), "lifecycle.wake", slug)
 		var opErr error
@@ -707,6 +769,7 @@ func (w *Watcher) OnMiss(slug string) {
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 		w.prx.SetPoolAppID(slug, app.ID)
 
+		deploymentID := deployments[0].ID
 		var wg sync.WaitGroup
 		var started atomic.Int32
 		for i := 0; i < app.Replicas; i++ {
@@ -731,6 +794,7 @@ func (w *Watcher) OnMiss(slug string) {
 					WorkerID:     res.WorkerID,
 					AppVersion:   deployments[0].Version,
 					DesiredState: "running",
+					DeploymentID: &deploymentID,
 				}); err != nil {
 					slog.Warn("watcher: persist woken replica failed", "slug", slug, "index", idx, "err", err)
 				}

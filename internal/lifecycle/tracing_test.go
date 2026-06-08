@@ -52,7 +52,7 @@ func TestTracing_WakeEmitsSpan(t *testing.T) {
 		})
 	w.SetTracer(tp.Tracer("test"))
 
-	w.OnMiss("app")
+	w.WakeTrigger("app")
 	waitNotWaking(t, st, "app")
 
 	if !hasSpanWithSlug(sr, "lifecycle.wake", "app") {
