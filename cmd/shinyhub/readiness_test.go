@@ -11,19 +11,12 @@ import (
 )
 
 type readinessFakeRefresher struct {
-	failuresLeft int
-	calls        int
-	called       chan struct{} // optional: non-blocking signal on each Refresh call
+	failuresLeft int          // only the refresh goroutine touches this
+	calls        atomic.Int64 // total Refresh calls; readable from the test goroutine
 }
 
 func (f *readinessFakeRefresher) Refresh() error {
-	f.calls++
-	if f.called != nil {
-		select {
-		case f.called <- struct{}{}:
-		default:
-		}
-	}
+	f.calls.Add(1)
 	if f.failuresLeft > 0 {
 		f.failuresLeft--
 		return errors.New("refresh boom")
@@ -38,31 +31,39 @@ func TestRefreshUntilReady_SucceedsAfterRetries(t *testing.T) {
 	if !refreshUntilReady(context.Background(), r, time.Millisecond, readinessTestLogger()) {
 		t.Fatal("expected ready=true after the refresh eventually succeeds")
 	}
-	if r.calls != 3 {
-		t.Fatalf("Refresh calls = %d, want 3 (2 failures then success)", r.calls)
+	if got := r.calls.Load(); got != 3 {
+		t.Fatalf("Refresh calls = %d, want 3 (2 failures then success)", got)
 	}
 }
 
 func TestRefreshUntilReady_FailsClosedOnOwnershipLoss(t *testing.T) {
-	called := make(chan struct{}, 1)
-	r := &readinessFakeRefresher{failuresLeft: 1 << 30, called: called} // never succeeds
+	r := &readinessFakeRefresher{failuresLeft: 1 << 30} // never succeeds
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan bool, 1)
-	go func() { done <- refreshUntilReady(ctx, r, 5*time.Millisecond, readinessTestLogger()) }()
+	go func() { done <- refreshUntilReady(ctx, r, time.Millisecond, readinessTestLogger()) }()
 
-	// Synchronize on an actually-observed failing refresh (no arbitrary sleep).
-	select {
-	case <-called:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refreshUntilReady never called Refresh")
+	// Synchronize on an observed SECOND Refresh call: that proves the first call
+	// returned an error AND the loop backed off and retried, so the function is
+	// definitively still running (not an early give-up) - and it has not returned,
+	// because it only returns on success (impossible here) or ctx cancel (not yet).
+	// A broken immediate-return implementation never makes a second call, so it
+	// trips the done-check below or the deadline.
+	deadline := time.Now().Add(2 * time.Second)
+	for r.calls.Load() < 2 {
+		select {
+		case ready := <-done:
+			t.Fatalf("refreshUntilReady returned (ready=%v) before retrying / before ownership loss", ready)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("refreshUntilReady did not retry a failing refresh within the timeout")
+		}
+		time.Sleep(time.Millisecond)
 	}
 
-	// A refresh has failed and ctx is still live: the function must not have
-	// returned. refreshUntilReady only returns true on success (impossible here)
-	// or false on ctx cancel (not yet), so done must be empty - the gate stays
-	// closed rather than opening on a stale index or giving up early.
+	// Still running and ctx live: it must not have returned.
 	select {
 	case <-done:
 		t.Fatal("refreshUntilReady returned before ownership was lost")
