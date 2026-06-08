@@ -2,9 +2,24 @@ package db_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/dbtest"
 )
+
+// TestNowEpoch exercises the DB-clock epoch source the autoscale cooldown uses,
+// on both backends (the SQLite strftime and the Postgres extract(epoch...) forms).
+func TestNowEpoch(t *testing.T) {
+	s := dbtest.New(t)
+	got, err := s.NowEpoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if got < now-120 || got > now+120 {
+		t.Fatalf("NowEpoch = %d, want within 120s of local %d", got, now)
+	}
+}
 
 func TestAppLastAutoscaleAt_RoundTrip(t *testing.T) {
 	s := dbtest.New(t)
