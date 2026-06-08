@@ -527,7 +527,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 		return Result{}, fmt.Errorf("health: %w", err)
 	}
 
-	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport); err != nil {
+	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID); err != nil {
 		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
 			slog.Warn("deploy: stop replica after failed proxy register", "slug", p.Slug, "index", idx, "err", serr)
 		}

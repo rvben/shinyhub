@@ -404,10 +404,10 @@ func TestProxyAccessLogStickyReplica(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("app", 2)
-	if err := p.RegisterReplica("app", 0, backend0.URL, nil); err != nil {
+	if err := p.RegisterReplica("app", 0, backend0.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("app", 1, backend1.URL, nil); err != nil {
+	if err := p.RegisterReplica("app", 1, backend1.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -455,8 +455,10 @@ func TestProxyAccessLogStickyReplica(t *testing.T) {
 	if !entries[1].Sticky {
 		t.Errorf("second request: Sticky should be true (cookie present)")
 	}
-	if strconvItoa(entries[1].ReplicaIndex) != cookieVal {
-		t.Errorf("second request: ReplicaIndex %d should match cookie %q", entries[1].ReplicaIndex, cookieVal)
+	// Cookie format is "<idx>.<deploymentID>[.<hmac>]"; verify the index prefix matches.
+	cookieIdx := strings.SplitN(cookieVal, ".", 2)[0]
+	if strconvItoa(entries[1].ReplicaIndex) != cookieIdx {
+		t.Errorf("second request: ReplicaIndex %d should match cookie index %q (cookie=%q)", entries[1].ReplicaIndex, cookieIdx, cookieVal)
 	}
 }
 
@@ -757,13 +759,13 @@ func TestProxy_PoolRegister(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("demo", 3)
 
-	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil); err != nil {
+	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil); err != nil {
+	if err := p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("demo", 3, "http://x", nil); err == nil {
+	if err := p.RegisterReplica("demo", 3, "http://x", nil, 0); err == nil {
 		t.Fatal("expected error for out-of-range index")
 	}
 }
@@ -771,8 +773,8 @@ func TestProxy_PoolRegister(t *testing.T) {
 func TestProxy_DeregisterReplica(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil)
-	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil)
+	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil, 0)
+	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil, 0)
 
 	if !p.DeregisterReplicaIfTarget("demo", 0, "http://127.0.0.1:20001") {
 		t.Fatal("expected replica 0 to be deregistered")
@@ -799,8 +801,8 @@ func TestProxy_StickyCookie(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	rec := httptest.NewRecorder()
@@ -833,7 +835,7 @@ func TestProxy_StickyCookieStale(t *testing.T) {
 	defer b0.Close()
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1"})
@@ -848,8 +850,10 @@ func TestProxy_StickyCookieStale(t *testing.T) {
 			newCookie = c.Value
 		}
 	}
-	if newCookie != "0" {
-		t.Fatalf("expected new cookie=0, got %q", newCookie)
+	// New format: "<idx>.<deploymentID>" in unsigned mode. The replica was
+	// registered with deploymentID=0, so the new cookie is "0.0".
+	if newCookie != "0.0" {
+		t.Fatalf("expected new cookie=0.0, got %q", newCookie)
 	}
 }
 
@@ -1049,8 +1053,8 @@ func TestProxy_LeastConnectionsDistribution(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	for i := 0; i < 20; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
@@ -1097,8 +1101,8 @@ func TestProxy_SessionCap_Sheds503WhenAllSaturated(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 	p.SetPoolCap("demo", 1) // 1 in-flight per replica = 2 total capacity
 
 	// Launch 2 requests that will block in the backend handlers, pinning
@@ -1152,17 +1156,18 @@ func TestProxy_SessionCap_StickyCookieBypassesCap(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 	p.SetPoolCap("demo", 1)
 
 	// Pin one in-flight request against replica 0 so it sits at cap.
+	// Use the current unsigned cookie format "<idx>.<deploymentID>".
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
-		req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0"})
+		req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0.0"})
 		p.ServeHTTP(httptest.NewRecorder(), req)
 	}()
 	counts := waitForCount(p, "demo", func(c []int64) bool { return len(c) == 2 && c[0] >= 1 })
@@ -1175,7 +1180,7 @@ func TestProxy_SessionCap_StickyCookieBypassesCap(t *testing.T) {
 	// Sticky cookie to replica 1 must short-circuit the saturation check
 	// and forward — without the sticky bypass the test would 503.
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
-	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1"})
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1.0"})
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1199,7 +1204,7 @@ func TestProxy_SessionCap_ZeroMeansUnlimited(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 1)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
 	p.SetPoolCap("demo", 0) // explicit "unlimited"
 
 	var wg sync.WaitGroup
@@ -1250,8 +1255,8 @@ func TestProxy_DrainReplica_NoNewCookielessSessions(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	if !p.DrainReplica("demo", 0) {
 		t.Fatal("DrainReplica returned false for a live slot")
@@ -1288,12 +1293,13 @@ func TestProxy_DrainReplica_StickySessionsStillRouted(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 	p.DrainReplica("demo", 0)
 
+	// Use the current unsigned cookie format "<idx>.<deploymentID>".
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
-	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0"})
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0.0"})
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1338,8 +1344,8 @@ func TestProxy_UndrainReplica_RestoresRouting(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	p.DrainReplica("demo", 0)
 	if !p.UndrainReplica("demo", 0) {
@@ -1401,7 +1407,7 @@ func TestProxy_AllDrainingPool_ShedsWithoutPanic(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 1)
-	if err := p.RegisterReplica("demo", 0, b.URL, nil); err != nil {
+	if err := p.RegisterReplica("demo", 0, b.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !p.DrainReplica("demo", 0) {
@@ -1442,7 +1448,7 @@ func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2) // 2 slots, but only slot 0 is registered
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
 
 	counts := p.ReplicaSessionCounts("demo")
 	if len(counts) != 2 {
@@ -1572,7 +1578,7 @@ func TestProxy_ReadyProbe_ClearedByLifecycleEvents(t *testing.T) {
 		}},
 		{"RegisterReplica swap", func(p *proxy.Proxy) {
 			// Hot redeploy: re-register replica 0 in-place.
-			if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1", nil); err != nil {
+			if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1", nil, 0); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -1840,7 +1846,7 @@ func TestRegisterReplica_PrependsTargetPathAndUsesTransport(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := p.RegisterReplica("app", 0, target, tr); err != nil {
+	if err := p.RegisterReplica("app", 0, target, tr, 0); err != nil {
 		t.Fatalf("RegisterReplica: %v", err)
 	}
 

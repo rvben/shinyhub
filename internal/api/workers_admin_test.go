@@ -234,7 +234,7 @@ func TestHandleRevokeWorkerEvictsReplicas(t *testing.T) {
 		t.Fatalf("upsert replica: %v", err)
 	}
 	prx.SetPoolSize("demo", 1)
-	if err := prx.RegisterReplica("demo", 0, "https://10.0.0.9:8443/v1/data/tok", nil); err != nil {
+	if err := prx.RegisterReplica("demo", 0, "https://10.0.0.9:8443/v1/data/tok", nil, 0); err != nil {
 		t.Fatalf("register replica route: %v", err)
 	}
 

@@ -2349,7 +2349,7 @@ func TestHandleGetApp_RejectsByReason_MultipleReasons(t *testing.T) {
 	}))
 	prx.SetPoolSize("demo", 1)
 	prx.SetPoolCap("demo", 1)
-	if err := prx.RegisterReplica("demo", 0, backend.URL, nil); err != nil {
+	if err := prx.RegisterReplica("demo", 0, backend.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 

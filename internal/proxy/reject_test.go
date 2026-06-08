@@ -32,7 +32,7 @@ func occupyPoolToCap(t *testing.T, p *proxy.Proxy, slug string, size int) func()
 	}))
 	p.SetPoolSize(slug, size)
 	p.SetPoolCap(slug, 1) // per-replica cap = 1
-	if err := p.RegisterReplica(slug, 0, backend.URL, nil); err != nil {
+	if err := p.RegisterReplica(slug, 0, backend.URL, nil, 0); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	var wg sync.WaitGroup
@@ -207,8 +207,9 @@ func TestServeHTTP_StickyHit_NoRejectHeader(t *testing.T) {
 	// even though the pool is saturated (the held connection occupies the cap),
 	// so it reaches the backend (served immediately as the non-held request) and
 	// must NOT be tagged as rejected.
+	// Use the current unsigned cookie format "<idx>.<deploymentID>".
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
-	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0"})
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0.0"})
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 

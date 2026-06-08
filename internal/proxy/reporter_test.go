@@ -137,15 +137,15 @@ func TestSnapshotSessions_CorrectBatch(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("alpha", 1)
 	p.SetPoolAppID("alpha", 10)
-	if err := p.RegisterReplica("alpha", 0, holdSrv.URL, nil); err != nil {
+	if err := p.RegisterReplica("alpha", 0, holdSrv.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	p.SetPoolSize("beta", 2)
 	p.SetPoolAppID("beta", 20)
-	if err := p.RegisterReplica("beta", 0, holdSrv.URL, nil); err != nil {
+	if err := p.RegisterReplica("beta", 0, holdSrv.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("beta", 1, holdSrv.URL, nil); err != nil {
+	if err := p.RegisterReplica("beta", 1, holdSrv.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -251,12 +251,12 @@ func TestSnapshotSessions_SkipsPoolsWithoutAppID(t *testing.T) {
 	// One pool with appID, one without.
 	p.SetPoolSize("wired", 1)
 	p.SetPoolAppID("wired", 42)
-	if err := p.RegisterReplica("wired", 0, be.URL, nil); err != nil {
+	if err := p.RegisterReplica("wired", 0, be.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	p.SetPoolSize("unwired", 1)
 	// Deliberately NOT calling SetPoolAppID("unwired", ...).
-	if err := p.RegisterReplica("unwired", 0, be.URL, nil); err != nil {
+	if err := p.RegisterReplica("unwired", 0, be.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -306,7 +306,7 @@ func TestImmediateFlush_ZeroToActive(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("myapp", 1)
 	p.SetPoolAppID("myapp", 99)
-	if err := p.RegisterReplica("myapp", 0, holdSrv.URL, nil); err != nil {
+	if err := p.RegisterReplica("myapp", 0, holdSrv.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -380,7 +380,7 @@ func TestImmediateFlush_NotTriggeredBeyondFirstActive(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("app2", 1)
 	p.SetPoolAppID("app2", 55)
-	if err := p.RegisterReplica("app2", 0, holdSrv.URL, nil); err != nil {
+	if err := p.RegisterReplica("app2", 0, holdSrv.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -454,7 +454,7 @@ func TestSingleNode_NoRowsWritten(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("app", 1)
 	p.SetPoolAppID("app", 77)
-	if err := p.RegisterReplica("app", 0, be.URL, nil); err != nil {
+	if err := p.RegisterReplica("app", 0, be.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -488,7 +488,7 @@ func TestClusteredReporter_WritesRows(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("svc", 1)
 	p.SetPoolAppID("svc", 101)
-	if err := p.RegisterReplica("svc", 0, holdSrv.URL, nil); err != nil {
+	if err := p.RegisterReplica("svc", 0, holdSrv.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 

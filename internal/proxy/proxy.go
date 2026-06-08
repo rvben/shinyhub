@@ -156,10 +156,11 @@ const MsgPoolSaturated = "Service temporarily at capacity, please retry."
 
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
-	index       int
-	targetURL   string // the URL passed to RegisterReplica; used for introspection
-	rp          *httputil.ReverseProxy
-	activeConns atomic.Int64
+	index        int
+	targetURL    string // the URL passed to RegisterReplica; used for introspection
+	deploymentID int64  // stamped into sticky cookies; mismatch causes re-pick on redeploy
+	rp           *httputil.ReverseProxy
+	activeConns  atomic.Int64
 	// draining marks a slot scheduled for graceful removal. The least-
 	// connections picker skips draining slots so no new cookie-less session
 	// is routed to it, but the sticky-cookie path still forwards, letting
@@ -325,9 +326,10 @@ func (p *Proxy) SetAccessLogger(fn func(AccessLogEntry)) {
 // the surrounding Server injects its trusted-proxy configuration into the
 // proxy without forming an import cycle. Safe to call concurrently with
 // ServeHTTP.
+
 // SetStickySecret enables HMAC signing of the sticky-routing cookie with the
 // given key (derive it from the server auth secret). Wire it at startup; when
-// unset the cookie is a bare replica index (back-compatible, unsigned).
+// unset the cookie carries a bare index and deployment ID without a signature.
 func (p *Proxy) SetStickySecret(key []byte) {
 	p.stickySecret.Store(&key)
 }
@@ -339,52 +341,77 @@ func (p *Proxy) stickySecretBytes() []byte {
 	return nil
 }
 
-// signStickyValue returns the signed sticky-cookie value for (slug, index):
-// "<index>.<hmac>", where the HMAC binds both the slug and the index so a value
-// cannot be replayed for a different app or edited to a different replica.
-func signStickyValue(key []byte, slug string, index int) string {
+// signStickyValue returns the signed sticky-cookie value "<index>.<deploymentID>.<hmac16>".
+// The HMAC binds slug, index, and deploymentID so a value cannot be replayed for a
+// different app, replica index, or deployment. Old 2-part cookies and bare integers do
+// not satisfy the 3-part format and are treated as stale, causing a re-pick.
+func signStickyValue(key []byte, slug string, index int, deploymentID int64) string {
 	mac := hmac.New(sha256.New, key)
-	fmt.Fprintf(mac, "%s\x00%d", slug, index)
-	return strconv.Itoa(index) + "." + hex.EncodeToString(mac.Sum(nil))[:16]
+	fmt.Fprintf(mac, "%s\x00%d\x00%d", slug, index, deploymentID)
+	return strconv.Itoa(index) + "." + strconv.FormatInt(deploymentID, 10) + "." + hex.EncodeToString(mac.Sum(nil))[:16]
 }
 
-// verifyStickyValue parses and authenticates a signed sticky-cookie value,
-// returning the replica index only when the signature matches (constant time).
-func verifyStickyValue(key []byte, slug, value string) (int, bool) {
-	idxStr, _, found := strings.Cut(value, ".")
+// verifyStickyValue parses and authenticates a signed sticky-cookie value.
+// Returns (index, deploymentID, true) only when the value is exactly 3 parts
+// and the HMAC matches. A 2-part old cookie or bare integer returns (0, 0, false).
+func verifyStickyValue(key []byte, slug, value string) (int, int64, bool) {
+	// Require exactly "<idx>.<depID>.<hmac>" — 3 dot-separated parts.
+	first, rest, found := strings.Cut(value, ".")
 	if !found {
-		return 0, false
+		return 0, 0, false
 	}
-	idx, err := strconv.Atoi(idxStr)
+	depStr, _, found2 := strings.Cut(rest, ".") // _ is the hmac segment; the full value is validated by hmac.Equal below
+	if !found2 {
+		// 2-part old format: stale.
+		return 0, 0, false
+	}
+	idx, err := strconv.Atoi(first)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	if !hmac.Equal([]byte(value), []byte(signStickyValue(key, slug, idx))) {
-		return 0, false
+	depID, err := strconv.ParseInt(depStr, 10, 64)
+	if err != nil {
+		return 0, 0, false
 	}
-	return idx, true
+	if !hmac.Equal([]byte(value), []byte(signStickyValue(key, slug, idx, depID))) {
+		return 0, 0, false
+	}
+	return idx, depID, true
 }
 
-// stickyIndex extracts the replica index from a sticky-cookie value, verifying
-// its signature when signing is enabled, or parsing a bare index otherwise.
-func (p *Proxy) stickyIndex(slug, value string) (int, bool) {
+// stickyIndex extracts the replica index and deployment ID from a sticky-cookie
+// value, verifying its signature when signing is enabled. In unsigned mode the
+// expected format is "<idx>.<deploymentID>"; a bare integer is treated as stale
+// (returns false) so the request re-picks via least-connections.
+func (p *Proxy) stickyIndex(slug, value string) (int, int64, bool) {
 	if key := p.stickySecretBytes(); len(key) > 0 {
 		return verifyStickyValue(key, slug, value)
 	}
-	idx, err := strconv.Atoi(value)
-	if err != nil {
-		return 0, false
+	// Unsigned mode: expect "<idx>.<deploymentID>".
+	idxStr, depStr, found := strings.Cut(value, ".")
+	if !found {
+		// Bare integer: old unsigned cookie treated as stale.
+		return 0, 0, false
 	}
-	return idx, true
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil {
+		return 0, 0, false
+	}
+	depID, err := strconv.ParseInt(depStr, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return idx, depID, true
 }
 
 // stickyCookieValue returns the value to store in the sticky cookie for a
-// replica index: signed when a key is configured, a bare index otherwise.
-func (p *Proxy) stickyCookieValue(slug string, index int) string {
+// replica index and deployment ID: signed when a key is configured,
+// "<idx>.<deploymentID>" in unsigned mode.
+func (p *Proxy) stickyCookieValue(slug string, index int, deploymentID int64) string {
 	if key := p.stickySecretBytes(); len(key) > 0 {
-		return signStickyValue(key, slug, index)
+		return signStickyValue(key, slug, index, deploymentID)
 	}
-	return strconv.Itoa(index)
+	return strconv.Itoa(index) + "." + strconv.FormatInt(deploymentID, 10)
 }
 
 // SetTrustedProxies configures the upstream-proxy CIDRs whose forwarding
@@ -596,9 +623,11 @@ func (p *Proxy) EnableImmediateFlush(ch chan string) {
 // RegisterReplica registers a backend URL at the given index within slug's pool.
 // base is the HTTP transport used for outbound requests; nil uses the default
 // transport. Remote tunnel URLs may carry a path prefix (e.g. /v1/data/<token>)
-// that is prepended to every forwarded app-relative path.
+// that is prepended to every forwarded app-relative path. deploymentID is stamped
+// into the sticky cookie so a stale cookie from a previous deployment causes a
+// re-pick rather than pinning the client to a potentially wrong replica.
 // Returns an error if the pool size has not been set or the index is out of range.
-func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper) error {
+func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper, deploymentID int64) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("register %s#%d: invalid url: %w", slug, index, err)
@@ -699,7 +728,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		}
 		req.Host = target.Host
 	}
-	pool.replicas[index] = &replicaBackend{index: index, targetURL: targetURL, rp: rp}
+	pool.replicas[index] = &replicaBackend{index: index, targetURL: targetURL, deploymentID: deploymentID, rp: rp}
 	// A freshly registered backend has not yet proven it accepts WS upgrades.
 	// Clearing here also covers the hot-redeploy path where a caller swaps
 	// replicas without an intermediate Deregister.
@@ -928,10 +957,10 @@ func (p *Proxy) HasLiveReplica(slug string) bool {
 }
 
 // Register is kept for single-replica callers. It is equivalent to
-// SetPoolSize(slug, 1) + RegisterReplica(slug, 0, targetURL, nil).
+// SetPoolSize(slug, 1) + RegisterReplica(slug, 0, targetURL, nil, 0).
 func (p *Proxy) Register(slug, targetURL string) error {
 	p.SetPoolSize(slug, 1)
-	return p.RegisterReplica(slug, 0, targetURL, nil)
+	return p.RegisterReplica(slug, 0, targetURL, nil, 0)
 }
 
 // ServeHTTP handles /app/:slug/* requests. When the slug has no live replica,
@@ -1126,7 +1155,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isStickyHit {
 		http.SetCookie(rec, &http.Cookie{
 			Name:     cookiePrefix + slug,
-			Value:    p.stickyCookieValue(slug, picked.index),
+			Value:    p.stickyCookieValue(slug, picked.index, picked.deploymentID),
 			Path:     "/app/" + slug + "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -1410,9 +1439,17 @@ func forwardedForToken(remoteAddr string) string {
 // flag is set so ServeHTTP can shed the request with 503.
 func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Request) (best *replicaBackend, isSticky, saturated bool) {
 	if c, err := r.Cookie(cookiePrefix + slug); err == nil {
-		if idx, ok := p.stickyIndex(slug, c.Value); ok {
+		if idx, depID, ok := p.stickyIndex(slug, c.Value); ok {
 			if idx >= 0 && idx < len(pool.replicas) && pool.replicas[idx] != nil {
-				return pool.replicas[idx], true, false
+				rep := pool.replicas[idx]
+				// Honor the sticky pin only when the cookie's deployment ID matches
+				// the in-memory replica's deployment ID. A mismatch means the app
+				// was redeployed since the cookie was issued; fall through to
+				// least-connections so the client gets re-pinned to the current
+				// deployment without disruption (no 4xx, no panic).
+				if rep.deploymentID == depID {
+					return rep, true, false
+				}
 			}
 		}
 	}

@@ -963,7 +963,7 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 		t.Fatal(err)
 	}
 	prx.SetPoolSize("wd-app", 1)
-	if err := prx.RegisterReplica("wd-app", 0, "https://w:8443/v1/data/tok", nil); err != nil {
+	if err := prx.RegisterReplica("wd-app", 0, "https://w:8443/v1/data/tok", nil, 0); err != nil {
 		t.Fatal(err)
 	}
 

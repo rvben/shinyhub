@@ -13,7 +13,7 @@ import (
 func TestDeregisterReplicaIfTarget(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("demo", 1)
-	if err := p.RegisterReplica("demo", 0, "http://10.0.0.1:9/v1/data/tok", nil); err != nil {
+	if err := p.RegisterReplica("demo", 0, "http://10.0.0.1:9/v1/data/tok", nil, 0); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
