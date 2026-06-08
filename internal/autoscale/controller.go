@@ -133,6 +133,17 @@ func (c *Controller) reconcile(now time.Time) {
 	}
 }
 
+// cooldownSeconds rounds a cooldown duration UP to whole seconds - the resolution
+// of the persisted epoch-second timestamp the cooldown is measured against. A
+// positive cooldown therefore always yields at least 1s and is never silently
+// disabled by truncation; a zero or negative cooldown yields 0 (no throttle).
+func cooldownSeconds(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64((d + time.Second - 1) / time.Second)
+}
+
 // reconcileApp evaluates one app and takes at most one scaling decision.
 func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	// Defence in depth against a row that was flagged enabled without the bounds
@@ -201,8 +212,7 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	// rounded UP, so a positive cooldown is always at least 1s and never silently
 	// disabled. Sub-second cooldowns are not meaningful here - the controller acts
 	// at most once per ScanInterval, which is far coarser than a second.
-	cooldownSecs := int64((c.cfg.Cooldown + time.Second - 1) / time.Second)
-	if a.LastAutoscaleAt != 0 && now.Unix()-a.LastAutoscaleAt < cooldownSecs {
+	if a.LastAutoscaleAt != 0 && now.Unix()-a.LastAutoscaleAt < cooldownSeconds(c.cfg.Cooldown) {
 		return
 	}
 

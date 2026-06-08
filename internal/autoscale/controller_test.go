@@ -210,6 +210,26 @@ func TestController_HonoursPersistedCooldownOnFreshController(t *testing.T) {
 	}
 }
 
+func TestCooldownSeconds(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want int64
+	}{
+		{0, 0},                               // disabled -> no throttle
+		{-5 * time.Second, 0},                // defensive: negative -> no throttle
+		{1 * time.Nanosecond, 1},             // never silently disabled
+		{999 * time.Millisecond, 1},          // rounds up
+		{1 * time.Second, 1},                 // exact
+		{1*time.Second + time.Nanosecond, 2}, // rounds up past a whole second
+		{3 * time.Minute, 180},               // typical value, exact
+	}
+	for _, c := range cases {
+		if got := cooldownSeconds(c.in); got != c.want {
+			t.Errorf("cooldownSeconds(%v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
 func TestController_CooldownPersistErrorIsNonFatal(t *testing.T) {
 	// A failure to persist the cooldown must be logged, not fatal: the scale action
 	// still takes effect and the audit event still records (worst case is a possible
