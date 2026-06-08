@@ -630,6 +630,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetVersion(version)
+	if isClustered(cfg) {
+		srv.SetCluster(cfg.Server.InstanceID)
+	}
 	if deployToken != nil {
 		srv.SetDeployToken(deployToken)
 	}

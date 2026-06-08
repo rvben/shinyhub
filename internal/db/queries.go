@@ -1914,6 +1914,22 @@ func (s *Store) DeleteReplica(appID int64, index int) error {
 	return nil
 }
 
+// SetReplicaDesiredState updates the desired_state column for a single replica
+// row identified by (app_id, idx). It is used by the distributed scale-down
+// path to record drain intent before the stop, so other instances' pool syncers
+// can observe the intent and stop routing new sessions to the slot. Callers
+// pass "draining" before the drain wait and "running" to revert on stop failure.
+func (s *Store) SetReplicaDesiredState(appID int64, idx int, state string) error {
+	_, err := s.db.Exec(
+		`UPDATE replicas SET desired_state = ? WHERE app_id = ? AND idx = ?`,
+		state, appID, idx,
+	)
+	if err != nil {
+		return fmt.Errorf("set replica desired state: %w", err)
+	}
+	return nil
+}
+
 // UpdateAppReplicas sets the target replica count for an app.
 func (s *Store) UpdateAppReplicas(appID int64, n int) error {
 	res, err := s.db.Exec(

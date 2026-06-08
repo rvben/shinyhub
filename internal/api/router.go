@@ -79,6 +79,17 @@ type Server struct {
 	// no Fargate secrets backend is configured. Set via SetSecretsCleaner.
 	secretsCleaner appSecretsCleaner
 
+	// clustered is true when the server is running against a shared Postgres
+	// backend (multiple control-plane instances). When false, all cluster-only
+	// code paths (desired_state writes, fleet drain wait) are skipped and the
+	// single-node behavior is byte-for-byte identical to the pre-cluster path.
+	clustered bool
+
+	// instanceID is the unique identifier of this control-plane instance, used
+	// to exclude this instance's own replica_sessions rows from the fleet wait
+	// (its exact local count is already handled by the local drain wait).
+	instanceID string
+
 	// deployToken, when non-nil, registers a pre-shared bearer credential that
 	// authenticates as the synthetic system user without a DB lookup. Set via
 	// SetDeployToken at startup when SHINYHUB_DEPLOY_TOKEN is configured.
@@ -495,6 +506,17 @@ func (s *Server) SetJobs(j *jobs.Manager, sc *scheduler.Scheduler) {
 // handling requests; it is not safe to call concurrently with live traffic.
 func (s *Server) SetOwnership(isOwner func() bool) {
 	s.isOwner = isOwner
+}
+
+// SetCluster marks this instance as part of a multi-instance cluster and
+// records its unique identity. In clustered mode, ScaleDown also writes
+// desired_state to the DB before the drain wait and polls the fleet-wide
+// session count (excluding this instance) alongside the local count. Must be
+// called before the server begins handling requests; not safe to call
+// concurrently with live traffic.
+func (s *Server) SetCluster(instanceID string) {
+	s.clustered = true
+	s.instanceID = instanceID
 }
 
 // ownerGuard rejects cluster-state mutations on a non-owner instance with 503.
