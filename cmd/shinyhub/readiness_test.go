@@ -13,10 +13,17 @@ import (
 type readinessFakeRefresher struct {
 	failuresLeft int
 	calls        int
+	called       chan struct{} // optional: non-blocking signal on each Refresh call
 }
 
 func (f *readinessFakeRefresher) Refresh() error {
 	f.calls++
+	if f.called != nil {
+		select {
+		case f.called <- struct{}{}:
+		default:
+		}
+	}
 	if f.failuresLeft > 0 {
 		f.failuresLeft--
 		return errors.New("refresh boom")
@@ -37,23 +44,32 @@ func TestRefreshUntilReady_SucceedsAfterRetries(t *testing.T) {
 }
 
 func TestRefreshUntilReady_FailsClosedOnOwnershipLoss(t *testing.T) {
-	r := &readinessFakeRefresher{failuresLeft: 1 << 30} // never succeeds
+	called := make(chan struct{}, 1)
+	r := &readinessFakeRefresher{failuresLeft: 1 << 30, called: called} // never succeeds
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan bool, 1)
 	go func() { done <- refreshUntilReady(ctx, r, 5*time.Millisecond, readinessTestLogger()) }()
 
-	// While refresh keeps failing and ctx is live, it must NOT return - the gate
-	// stays closed rather than opening on a stale index or giving up.
+	// Synchronize on an actually-observed failing refresh (no arbitrary sleep).
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refreshUntilReady never called Refresh")
+	}
+
+	// A refresh has failed and ctx is still live: the function must not have
+	// returned. refreshUntilReady only returns true on success (impossible here)
+	// or false on ctx cancel (not yet), so done must be empty - the gate stays
+	// closed rather than opening on a stale index or giving up early.
 	select {
 	case <-done:
 		t.Fatal("refreshUntilReady returned before ownership was lost")
-	case <-time.After(40 * time.Millisecond):
+	default:
 	}
 
-	// Only once ownership is lost (ctx cancelled) does it return false. This proves
-	// the cancellation is what caused the return, not an early give-up.
+	// Cancelling ownership is what makes it return, and it returns false.
 	cancel()
 	select {
 	case ready := <-done:
