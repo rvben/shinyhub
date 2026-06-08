@@ -510,6 +510,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 		DeploymentID:    p.DeploymentID,
 		ContentDigest:   p.ContentDigest,
 		TargetWorker:    targetWorker,
+		MaxSessions:     p.MaxSessionsPerReplica,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("start: %w", err)

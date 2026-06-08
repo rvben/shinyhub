@@ -27,10 +27,17 @@ type fakeRuntime struct {
 	startParams process.StartParams
 	startURL    string
 	startErr    error
+	// started, when non-nil, is closed once by Start so callers can
+	// synchronise deterministically without sleeping.
+	started chan struct{}
 }
 
 func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, w io.Writer) (process.ReplicaEndpoint, error) {
 	f.startParams = p
+	if f.started != nil {
+		close(f.started)
+		f.started = nil // prevent double-close on a second call
+	}
 	if f.startErr != nil {
 		return process.ReplicaEndpoint{}, f.startErr
 	}

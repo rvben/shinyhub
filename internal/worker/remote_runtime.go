@@ -219,6 +219,7 @@ func toStartRequest(p process.StartParams) api.ReplicaStartRequest {
 		SharedMountSlugs: slugs,
 		MemoryLimitMB:    p.MemoryLimitMB,
 		CPUQuotaPercent:  p.CPUQuotaPercent,
+		MaxSessions:      p.MaxSessions,
 	}
 }
 

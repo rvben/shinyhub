@@ -17,6 +17,9 @@ type ReplicaStartRequest struct {
 	SharedMountSlugs []string          `json:"shared_mount_slugs,omitempty"`
 	MemoryLimitMB    int               `json:"memory_limit_mb,omitempty"`
 	CPUQuotaPercent  int               `json:"cpu_quota_percent,omitempty"`
+	// MaxSessions is the per-replica active-connection hard cap the worker enforces
+	// in the data plane. 0 means no cap.
+	MaxSessions int `json:"max_sessions,omitempty"`
 }
 
 // ReplicaResult identifies a started replica and its reachable URL. ContainerID

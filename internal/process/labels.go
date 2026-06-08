@@ -24,4 +24,8 @@ const (
 	// LabelPort is the port the app binds inside the replica so recovery can
 	// rebuild the full route URL from the resource alone.
 	LabelPort = "shinyhub.port"
+	// LabelMaxSessions is the per-replica active-connection hard cap persisted on
+	// the container so re-adoption after an agent restart restores the same limit.
+	// Value is the decimal integer cap; absent or unparseable means no cap.
+	LabelMaxSessions = "shinyhub.max_sessions"
 )
