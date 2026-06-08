@@ -105,11 +105,15 @@ func (e *Elector) set(owner bool, epoch int64) {
 	e.mu.Unlock()
 }
 
-// bumpLease records that the lease is valid for another TTL from now (called on a
-// successful acquire or renew).
-func (e *Elector) bumpLease() {
+// bumpLeaseFrom records the local lease deadline as start+TTL, where start is a
+// timestamp captured BEFORE the acquire/renew store call. The DB stamps the
+// authoritative expires_at as (DB clock at commit)+TTL, which is no earlier than
+// start+TTL, so deriving the local deadline from the pre-call time keeps it
+// conservative: this instance never believes its lease outlives the DB lease by
+// the store round-trip latency.
+func (e *Elector) bumpLeaseFrom(start time.Time) {
 	e.mu.Lock()
-	e.leaseExpiry = time.Now().Add(e.cfg.TTL)
+	e.leaseExpiry = start.Add(e.cfg.TTL)
 	e.mu.Unlock()
 }
 
@@ -157,6 +161,7 @@ func (e *Elector) Run(ctx context.Context) {
 func (e *Elector) step() {
 	owner, epoch := e.snapshot()
 	if owner {
+		start := time.Now() // before the store call, so the local deadline is conservative
 		ok, err := e.store.RenewOwner(e.cfg.InstanceID, epoch, e.cfg.TTL)
 		if err != nil {
 			// Transient: keep believing we own it and retry next tick - but only
@@ -177,9 +182,10 @@ func (e *Elector) step() {
 			e.relinquish()
 			return
 		}
-		e.bumpLease() // successful renew extends the local lease deadline
+		e.bumpLeaseFrom(start) // successful renew extends the local lease deadline
 		return
 	}
+	start := time.Now() // before the store call, so the local deadline is conservative
 	acquired, newEpoch, err := e.store.AcquireOwner(e.cfg.InstanceID, e.cfg.TTL)
 	if err != nil {
 		e.cfg.Logger.Warn("acquire owner", "err", err)
@@ -187,7 +193,7 @@ func (e *Elector) step() {
 	}
 	if acquired {
 		e.set(true, newEpoch)
-		e.bumpLease()
+		e.bumpLeaseFrom(start)
 		e.cfg.Logger.Info("acquired control-plane ownership", "epoch", newEpoch)
 		if e.cfg.OnAcquire != nil {
 			e.cfg.OnAcquire(newEpoch)
