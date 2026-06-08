@@ -193,11 +193,16 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 	if desired == a.Replicas {
 		return
 	}
-	// Cooldown is the persisted apps.last_autoscale_at (epoch seconds; 0 = never),
-	// read from the per-tick app list, so it survives restart and failover. now is
-	// the DB clock (see Run), so this elapsed comparison is skew-free. Compare as a
-	// duration (not truncated whole seconds) so a sub-second Cooldown is not lost.
-	if a.LastAutoscaleAt != 0 && now.Sub(time.Unix(a.LastAutoscaleAt, 0)) < c.cfg.Cooldown {
+	// Cooldown is the persisted apps.last_autoscale_at (DB-clock epoch seconds;
+	// 0 = never), read from the per-tick app list, so it survives restart and
+	// failover. Both now and the stored value come from the DB clock (see Run), so
+	// the elapsed comparison is skew-free across instances. Resolution is whole
+	// seconds (the stored value is epoch seconds); the configured cooldown is
+	// rounded UP, so a positive cooldown is always at least 1s and never silently
+	// disabled. Sub-second cooldowns are not meaningful here - the controller acts
+	// at most once per ScanInterval, which is far coarser than a second.
+	cooldownSecs := int64((c.cfg.Cooldown + time.Second - 1) / time.Second)
+	if a.LastAutoscaleAt != 0 && now.Unix()-a.LastAutoscaleAt < cooldownSecs {
 		return
 	}
 
