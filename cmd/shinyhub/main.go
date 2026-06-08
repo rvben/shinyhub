@@ -947,6 +947,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if rejectWindow > cfg.Runtime.Autoscale.Cooldown {
 			rejectWindow = cfg.Runtime.Autoscale.Cooldown
 		}
+		// In clustered mode the autoscaler reads the fleet-wide session count
+		// (sum across all instances from replica_sessions) so a scale decision
+		// is based on total load, not just this instance's local count. In
+		// single-node mode the proxy is used directly for the exact local count,
+		// which is byte-for-byte unchanged from before.
+		var autoscaleSignal autoscale.Signal = prx
+		if isClustered(cfg) {
+			autoscaleSignal = proxy.NewFleetSignal(prx, store, slog.Default())
+		}
 		controller = autoscale.New(autoscale.Config{
 			ScanInterval:  cfg.Runtime.Autoscale.ScanInterval,
 			Cooldown:      cfg.Runtime.Autoscale.Cooldown,
@@ -955,7 +964,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
 			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
 			RuntimeMax:    runtimeMax,
-		}, store, prx, srv, store, store, slog.Default())
+		}, store, autoscaleSignal, srv, store, store, slog.Default())
 		if metricsReg != nil {
 			controller.SetMetrics(metricsReg)
 		}

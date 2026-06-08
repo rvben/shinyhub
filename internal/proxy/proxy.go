@@ -842,6 +842,18 @@ func (p *Proxy) ReplicaSessionCounts(slug string) []int64 {
 	return out
 }
 
+// appIDForSlug returns the numeric database app ID recorded for slug's pool and
+// true, or 0 and false if the pool is not registered or has no ID set. Used by
+// FleetSignal to resolve slug->appID without a DB round-trip at signal time.
+func (p *Proxy) appIDForSlug(slug string) (int64, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if pool := p.pools[slug]; pool != nil && pool.appID != 0 {
+		return pool.appID, true
+	}
+	return 0, false
+}
+
 // PoolCap returns the per-replica session cap for slug, or 0 if the pool is
 // not registered or the cap is disabled.
 func (p *Proxy) PoolCap(slug string) int {
