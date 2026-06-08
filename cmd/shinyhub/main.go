@@ -186,6 +186,38 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 	return srv, ln, nil
 }
 
+// isClustered reports whether cfg is using the Postgres backend, which means
+// multiple control-plane instances may share the same database. The check
+// reuses the same scheme-prefix dispatch that db.Open uses to pick a backend,
+// so the two can never disagree.
+func isClustered(cfg *config.Config) bool {
+	return db.IsPostgresDSN(cfg.Database.DSN)
+}
+
+// checkClusteredRuntimeTiers returns an error when a clustered deployment
+// (Postgres DSN) includes a local-only tier (native or docker). Local runtimes
+// bind loopback ports on a single host and cannot be reached by other CP
+// instances, so they must be refused at boot with a clear message directing the
+// operator to use an off-host tier (remote_docker or fargate).
+//
+// Single-node deployments (SQLite) are unaffected: native and docker tiers
+// continue to work unchanged.
+func checkClusteredRuntimeTiers(cfg *config.Config) error {
+	if !isClustered(cfg) {
+		return nil
+	}
+	for _, tier := range cfg.Runtime.Tiers {
+		if tier.Runtime == "native" || tier.Runtime == "docker" {
+			return fmt.Errorf(
+				"tier %q uses runtime %q, which is not supported in a clustered deployment "+
+					"(Postgres DSN detected); use an off-host runtime (remote_docker or fargate) instead",
+				tier.Name, tier.Runtime,
+			)
+		}
+	}
+	return nil
+}
+
 // buildRuntime constructs a process.Runtime for a single tier from its TierConfig.
 // Docker tiers share the daemon settings from cfg.Runtime.Docker; a burst tier
 // may therefore point at the same daemon under a distinct tier name. Fargate tiers
@@ -465,6 +497,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		slog.Info("deploy token registered",
 			"username", sysUser.Username,
 			"role", sysUser.Role)
+	}
+
+	// Refuse local-only runtimes in a clustered (Postgres) deployment before
+	// constructing any tier. Native and docker processes bind loopback on one
+	// host; other CP instances cannot reach them, so they are incompatible with
+	// shared state across nodes.
+	if err := checkClusteredRuntimeTiers(cfg); err != nil {
+		return err
 	}
 
 	// Build one runtime per configured tier. The first tier is the default

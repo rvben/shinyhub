@@ -14,13 +14,13 @@ func TestIsPostgresDSN(t *testing.T) {
 		"data/shinyhub.db",
 	}
 	for _, d := range pg {
-		if !isPostgresDSN(d) {
-			t.Errorf("isPostgresDSN(%q) = false, want true", d)
+		if !IsPostgresDSN(d) {
+			t.Errorf("IsPostgresDSN(%q) = false, want true", d)
 		}
 	}
 	for _, d := range notPG {
-		if isPostgresDSN(d) {
-			t.Errorf("isPostgresDSN(%q) = true, want false", d)
+		if IsPostgresDSN(d) {
+			t.Errorf("IsPostgresDSN(%q) = true, want false", d)
 		}
 	}
 }
