@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -29,6 +30,14 @@ type WorkerAPI struct {
 	// sliding-window limiter self-evicts idle source keys on a periodic sweep,
 	// so the tracked-source map cannot grow without bound over long uptime.
 	registerRL *keyedRateLimiter
+
+	// ownMu guards isOwner, the control-plane ownership-and-readiness predicate
+	// that gates the worker mutation endpoints (register/heartbeat). A nil
+	// predicate serves unconditionally (tests / single-node-without-elector); the
+	// production boot path sets a reject-all predicate before the listener serves
+	// and upgrades it to elector-and-ready once that exists.
+	ownMu   sync.RWMutex
+	isOwner func() bool
 }
 
 // NewWorkerAPI constructs the worker API with a default short cert TTL.
@@ -47,6 +56,25 @@ func NewWorkerAPI(store *db.Store, reg *worker.Registry, ca *worker.CA, appsDir 
 	}
 }
 
+// SetOwnership wires the control-plane ownership-and-readiness predicate. Until
+// it is set (tests, or a single-node build that never constructs an elector) the
+// worker mutation endpoints serve unconditionally; the production boot path sets
+// a reject-all predicate before the listener serves and upgrades it afterward.
+func (a *WorkerAPI) SetOwnership(fn func() bool) {
+	a.ownMu.Lock()
+	a.isOwner = fn
+	a.ownMu.Unlock()
+}
+
+// owner reports whether this instance may handle worker mutations. A nil
+// predicate means "serve" (see SetOwnership).
+func (a *WorkerAPI) owner() bool {
+	a.ownMu.RLock()
+	fn := a.isOwner
+	a.ownMu.RUnlock()
+	return fn == nil || fn()
+}
+
 func sourceHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -56,6 +84,12 @@ func sourceHost(r *http.Request) string {
 }
 
 func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
+	// Worker registration mutates control-plane state (worker rows), so only the
+	// ready owner accepts it. A standby returns 503; the agent retries.
+	if !a.owner() {
+		writeError(w, http.StatusServiceUnavailable, "not control-plane owner")
+		return
+	}
 	if !a.registerRL.allow(sourceHost(r)) {
 		writeError(w, http.StatusTooManyRequests, "rate limited")
 		return
@@ -98,6 +132,12 @@ func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	// Heartbeat mutates worker liveness/cert state, so only the ready owner
+	// accepts it (checked before auth). A standby returns 503; the agent retries.
+	if !a.owner() {
+		writeError(w, http.StatusServiceUnavailable, "not control-plane owner")
+		return
+	}
 	nodeID, ok := a.authenticatedNodeID(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -132,9 +172,13 @@ func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 // authenticatedNodeID derives the caller's node id from its client certificate
-// and confirms the node is known to the registry and not revoked. A revoked
-// worker is rejected immediately, so its still-valid certificate cannot pull
-// bundles or heartbeat within its TTL.
+// and confirms the node exists and is not revoked, reading the AUTHORITATIVE
+// store rather than the in-memory routing index. On a standby the index can be
+// stale in either direction - missing a worker registered after this instance
+// booted, or still holding a worker the active has since revoked - so the open
+// bundle-fetch endpoint must consult the shared store, not byID, or a revoked
+// worker presenting a still-valid cert could pull bundles off a stale standby.
+// The store read is on a non-proxy-hot path (replica start / heartbeat interval).
 func (a *WorkerAPI) authenticatedNodeID(r *http.Request) (string, bool) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return "", false
@@ -143,8 +187,8 @@ func (a *WorkerAPI) authenticatedNodeID(r *http.Request) (string, bool) {
 	if nodeID == "" {
 		return "", false
 	}
-	w, ok := a.registry.Worker(nodeID)
-	if !ok || w.Revoked() {
+	w, err := a.store.GetWorker(nodeID) // ErrNotFound => unauthenticated
+	if err != nil || w.Revoked() {
 		return "", false
 	}
 	return nodeID, true

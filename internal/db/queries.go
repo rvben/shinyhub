@@ -404,6 +404,10 @@ type App struct {
 	// fraction (0,1] of the per-replica session cap, or 0 to use the
 	// runtime-wide default target.
 	AutoscaleTarget float64 `json:"autoscale_target"`
+	// LastAutoscaleAt is the Unix-epoch seconds of the most recent autoscale
+	// action on this app, or 0 if it has never been scaled. The controller reads
+	// it as the persisted cooldown so the cooldown survives restart and failover.
+	LastAutoscaleAt int64 `json:"last_autoscale_at"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -441,7 +445,8 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       memory_limit_mb, cpu_quota_percent,
 		       created_at, updated_at,
 		       managed_by, replica_placement,
-		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,`
+		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
+		       last_autoscale_at,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -601,6 +606,29 @@ func (s *Store) ListAutoscaleApps() ([]*App, error) {
 		apps = append(apps, app)
 	}
 	return apps, rows.Err()
+}
+
+// SetAppLastAutoscaleAt records the epoch-seconds timestamp of the most recent
+// autoscale action for an app, persisting the controller cooldown so it survives
+// restart and failover to a standby control-plane instance. A no-op (no error)
+// for an unknown slug.
+func (s *Store) SetAppLastAutoscaleAt(slug string, epoch int64) error {
+	if _, err := s.db.Exec(`UPDATE apps SET last_autoscale_at = ? WHERE slug = ?`, epoch, slug); err != nil {
+		return fmt.Errorf("set last_autoscale_at: %w", err)
+	}
+	return nil
+}
+
+// NowEpoch returns the database server's current time as Unix epoch seconds. The
+// autoscale cooldown uses it so the armed timestamp (SetAppLastAutoscaleAt) and
+// the cooldown check are both measured against a single clock - the DB - immune
+// to wall-clock skew between control-plane instances across a failover.
+func (s *Store) NowEpoch() (int64, error) {
+	var e int64
+	if err := s.db.QueryRow(`SELECT ` + s.d.nowEpoch()).Scan(&e); err != nil {
+		return 0, fmt.Errorf("db now epoch: %w", err)
+	}
+	return e, nil
 }
 
 // ListDeletingApps returns all apps left in the 'deleting' tombstone state.
@@ -2144,6 +2172,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
+		&a.LastAutoscaleAt,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {

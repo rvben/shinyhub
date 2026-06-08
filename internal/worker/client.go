@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,12 @@ import (
 
 	workerapi "github.com/rvben/shinyhub/internal/worker/api"
 )
+
+// ErrControlPlaneUnavailable is returned by Register when the control plane
+// responds 503: it is reachable but not the ready owner (a standby, or an owner
+// still warming up). Callers retry it, unlike auth/validation failures (401/400)
+// which are permanent.
+var ErrControlPlaneUnavailable = errors.New("control plane unavailable (not owner)")
 
 // Client is a worker's mTLS HTTP client to its control plane. After bootstrap it
 // carries the signed client cert and pins the CA; the same transport backs the
@@ -50,6 +57,9 @@ func Register(ctx context.Context, serverURL string, req workerapi.RegisterReque
 		return workerapi.RegisterResponse{}, fmt.Errorf("register request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return workerapi.RegisterResponse{}, ErrControlPlaneUnavailable
+	}
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return workerapi.RegisterResponse{}, fmt.Errorf("register: %s: %s", resp.Status, msg)

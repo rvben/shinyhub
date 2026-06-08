@@ -2,6 +2,7 @@ package autoscale
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -33,19 +34,60 @@ type fakeScaler struct {
 	// app - so tests can assert the controller does not arm a cooldown on it.
 	upNoOp   bool
 	downNoOp bool
+	// onUp, when set, is called after each ScaleUp call with the running call
+	// count for this slug, so a test can observe cooldown state mid-loop.
+	onUp func(callNum int)
 }
 
 func newFakeScaler() *fakeScaler {
 	return &fakeScaler{ups: map[string]int{}, downs: map[string]int{}}
 }
-func (f *fakeScaler) ScaleUp(slug string) (bool, error) { f.ups[slug]++; return !f.upNoOp, nil }
+func (f *fakeScaler) ScaleUp(slug string) (bool, error) {
+	f.ups[slug]++
+	if f.onUp != nil {
+		f.onUp(f.ups[slug])
+	}
+	return !f.upNoOp, nil
+}
 func (f *fakeScaler) ScaleDown(slug string, _ time.Duration) (bool, error) {
 	f.downs[slug]++
 	return !f.downNoOp, nil
 }
 
-func newTestController(lister Lister, signal Signal, scaler Scaler, rec AuditRecorder) *Controller {
-	return New(Config{
+// fakeCooldownStore is an in-memory CooldownStore. When seeded over the lister's
+// app pointers (via cooldownStoreFor) a write reflects into the app so the next
+// tick's reconcile reads the persisted value - simulating the DB round-trip.
+type fakeCooldownStore struct {
+	apps   map[string]*db.App
+	writes int
+	setErr error // when non-nil, SetAppLastAutoscaleAt returns it (write still counted)
+}
+
+func (f *fakeCooldownStore) SetAppLastAutoscaleAt(slug string, epoch int64) error {
+	f.writes++
+	if f.setErr != nil {
+		return f.setErr
+	}
+	if a, ok := f.apps[slug]; ok {
+		a.LastAutoscaleAt = epoch
+	}
+	return nil
+}
+
+// NowEpoch satisfies CooldownStore. The cooldown tests drive c.reconcile(now)
+// directly with a controlled time, so this is only exercised if Run is used.
+func (f *fakeCooldownStore) NowEpoch() (int64, error) { return time.Now().Unix(), nil }
+
+func cooldownStoreFor(apps []*db.App) *fakeCooldownStore {
+	m := make(map[string]*db.App, len(apps))
+	for _, a := range apps {
+		m[a.Slug] = a
+	}
+	return &fakeCooldownStore{apps: m}
+}
+
+func testCfg() Config {
+	return Config{
 		ScanInterval:  30 * time.Second,
 		Cooldown:      3 * time.Minute,
 		DrainGrace:    30 * time.Second,
@@ -53,7 +95,22 @@ func newTestController(lister Lister, signal Signal, scaler Scaler, rec AuditRec
 		DefaultTarget: 0.8,
 		DefaultCap:    10,
 		RuntimeMax:    32,
-	}, lister, signal, scaler, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+}
+
+func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// newTestControllerCD builds a controller whose cooldown store is seeded over the
+// lister's app pointers (so persisted cooldowns reflect into the next tick) and
+// returns the store for inspection.
+func newTestControllerCD(lister *fakeLister, signal Signal, scaler Scaler, rec AuditRecorder) (*Controller, *fakeCooldownStore) {
+	cd := cooldownStoreFor(lister.apps)
+	return New(testCfg(), lister, signal, scaler, rec, cd, testLogger()), cd
+}
+
+func newTestController(lister Lister, signal Signal, scaler Scaler, rec AuditRecorder) *Controller {
+	c, _ := newTestControllerCD(lister.(*fakeLister), signal, scaler, rec)
+	return c
 }
 
 func testController(lister Lister, signal Signal, scaler Scaler) *Controller {
@@ -136,6 +193,97 @@ func TestController_CooldownBlocksSecondAction(t *testing.T) {
 	}
 }
 
+func TestController_HonoursPersistedCooldownOnFreshController(t *testing.T) {
+	// A new active (fresh process, empty in-memory state) must honour a cooldown a
+	// prior owner persisted: the value rides on the listed app, not process memory.
+	now := time.Now()
+	a := app("demo", 2, 1, 8)
+	a.LastAutoscaleAt = now.Unix() // as if a prior owner just scaled it
+	lister := &fakeLister{apps: []*db.App{a}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}} // would scale up if not for cooldown
+	scaler := newFakeScaler()
+	c, _ := newTestControllerCD(lister, signal, scaler, &fakeAuditor{})
+
+	c.reconcile(now.Add(time.Minute)) // within the 3-minute cooldown
+	if scaler.ups["demo"] != 0 {
+		t.Fatalf("fresh controller ignored a persisted cooldown: ups=%d", scaler.ups["demo"])
+	}
+}
+
+func TestCooldownSeconds(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want int64
+	}{
+		{0, 0},                               // disabled -> no throttle
+		{-5 * time.Second, 0},                // defensive: negative -> no throttle
+		{1 * time.Nanosecond, 1},             // never silently disabled
+		{999 * time.Millisecond, 1},          // rounds up
+		{1 * time.Second, 1},                 // exact
+		{1*time.Second + time.Nanosecond, 2}, // rounds up past a whole second
+		{3 * time.Minute, 180},               // typical value, exact
+	}
+	for _, c := range cases {
+		if got := cooldownSeconds(c.in); got != c.want {
+			t.Errorf("cooldownSeconds(%v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestController_CooldownPersistErrorIsNonFatal(t *testing.T) {
+	// A failure to persist the cooldown must be logged, not fatal: the scale action
+	// still takes effect and the audit event still records (worst case is a possible
+	// duplicate action next tick - no worse than the old in-memory map on restart).
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}} // total 40 -> desired 5 (up)
+	scaler := newFakeScaler()
+	auditor := &fakeAuditor{}
+	cd := cooldownStoreFor(lister.apps)
+	cd.setErr = errors.New("db write failed")
+	c := New(testCfg(), lister, signal, scaler, auditor, cd, testLogger())
+
+	c.reconcile(time.Now()) // must not panic
+
+	if scaler.ups["demo"] == 0 {
+		t.Fatal("a cooldown persist error must not prevent the scale action")
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("audit events = %d, want 1 (persist error is non-fatal)", len(auditor.events))
+	}
+	if cd.writes == 0 {
+		t.Fatal("expected a persist attempt even though it errored")
+	}
+}
+
+func TestController_ArmsCooldownOnFirstScaleUpStep(t *testing.T) {
+	// A multi-step scale-up must arm (persist) the cooldown after the FIRST step,
+	// not after the whole loop, so a crash mid-loop still leaves it set.
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}} // total 40 -> desired 5 (3 steps)
+	scaler := newFakeScaler()
+	cd := cooldownStoreFor(lister.apps)
+	var armedBeforeSecondStep bool
+	scaler.onUp = func(callNum int) {
+		// By the second ScaleUp call the cooldown must already be persisted.
+		if callNum >= 2 && cd.writes >= 1 {
+			armedBeforeSecondStep = true
+		}
+	}
+	c := New(testCfg(), lister, signal, scaler, &fakeAuditor{}, cd, testLogger())
+
+	c.reconcile(time.Now())
+
+	if scaler.ups["demo"] != 3 {
+		t.Fatalf("ScaleUp calls = %d, want 3 (2 -> 5)", scaler.ups["demo"])
+	}
+	if !armedBeforeSecondStep {
+		t.Fatal("cooldown was not armed after the first successful step")
+	}
+	if cd.writes != 1 {
+		t.Fatalf("cooldown writes = %d, want exactly 1 for one scale-up action", cd.writes)
+	}
+}
+
 func TestController_SkipsAppUnknownToProxy(t *testing.T) {
 	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
 	signal := &fakeSignal{counts: map[string][]int64{}} // proxy has no pool for demo
@@ -190,12 +338,15 @@ func TestController_NoOpScaleDownDoesNotArmCooldown(t *testing.T) {
 	signal := &fakeSignal{counts: map[string][]int64{"demo": {1, 1}}} // total 2 -> desired 1 (down)
 	scaler := newFakeScaler()
 	scaler.downNoOp = true
-	c := testController(lister, signal, scaler)
+	c, cd := newTestControllerCD(lister, signal, scaler, &fakeAuditor{})
 
 	start := time.Now()
 	c.reconcile(start)
 	if scaler.downs["demo"] != 1 {
 		t.Fatalf("expected a ScaleDown attempt, got %d", scaler.downs["demo"])
+	}
+	if cd.writes != 0 {
+		t.Fatalf("no-op scale-down armed the cooldown (%d writes)", cd.writes)
 	}
 	// Load spikes within the cooldown window; the prior no-op must not block it.
 	signal.counts["demo"] = []int64{20, 20} // total 40 -> desired 5 (up)
@@ -212,10 +363,13 @@ func TestController_NoOpScaleUpDoesNotArmCooldown(t *testing.T) {
 	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}} // desired 5 (up)
 	scaler := newFakeScaler()
 	scaler.upNoOp = true
-	c := testController(lister, signal, scaler)
+	c, cd := newTestControllerCD(lister, signal, scaler, &fakeAuditor{})
 
 	start := time.Now()
 	c.reconcile(start)
+	if cd.writes != 0 {
+		t.Fatalf("no-op scale-up armed the cooldown (%d writes)", cd.writes)
+	}
 	c.reconcile(start.Add(time.Second))
 	if scaler.ups["demo"] < 2 {
 		t.Fatalf("expected a retry after a no-op scale-up, got %d attempts", scaler.ups["demo"])
