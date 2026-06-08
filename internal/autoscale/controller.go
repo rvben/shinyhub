@@ -55,10 +55,14 @@ type Config struct {
 }
 
 // CooldownStore persists the per-app autoscale cooldown so it survives process
-// restart and failover to a standby control-plane instance. *db.Store satisfies
-// it. The read side of the cooldown is the persisted db.App.LastAutoscaleAt the
-// Lister returns each tick; this is only the write side.
+// restart and failover to a standby control-plane instance, and supplies the DB
+// clock the cooldown is measured against. *db.Store satisfies it. The read side
+// of the cooldown is the persisted db.App.LastAutoscaleAt the Lister returns each
+// tick; SetAppLastAutoscaleAt is the write side. NowEpoch returns the DB clock so
+// the armed timestamp and the cooldown check use one clock (immune to wall-clock
+// skew between instances), not the local clock of whichever instance is active.
 type CooldownStore interface {
+	NowEpoch() (int64, error)
 	SetAppLastAutoscaleAt(slug string, epoch int64) error
 }
 
@@ -94,7 +98,11 @@ func New(cfg Config, lister Lister, signal Signal, scaler Scaler, recorder Audit
 	}
 }
 
-// Run evaluates opted-in apps every ScanInterval until ctx is cancelled.
+// Run evaluates opted-in apps every ScanInterval until ctx is cancelled. Each
+// tick reads the current time from the DB clock so the cooldown is measured
+// against the same clock that stamped the last action, regardless of which
+// instance is active. A DB-clock read failure skips the tick (the DB is the same
+// one ListAutoscaleApps needs, so it would fail too).
 func (c *Controller) Run(ctx context.Context) {
 	t := time.NewTicker(c.cfg.ScanInterval)
 	defer t.Stop()
@@ -102,8 +110,13 @@ func (c *Controller) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-t.C:
-			c.reconcile(now)
+		case <-t.C:
+			epoch, err := c.cooldown.NowEpoch()
+			if err != nil {
+				c.log.Error("autoscale: read db clock", "err", err)
+				continue
+			}
+			c.reconcile(time.Unix(epoch, 0))
 		}
 	}
 }
@@ -181,8 +194,10 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 		return
 	}
 	// Cooldown is the persisted apps.last_autoscale_at (epoch seconds; 0 = never),
-	// read from the per-tick app list, so it survives restart and failover.
-	if a.LastAutoscaleAt != 0 && now.Unix()-a.LastAutoscaleAt < int64(c.cfg.Cooldown.Seconds()) {
+	// read from the per-tick app list, so it survives restart and failover. now is
+	// the DB clock (see Run), so this elapsed comparison is skew-free. Compare as a
+	// duration (not truncated whole seconds) so a sub-second Cooldown is not lost.
+	if a.LastAutoscaleAt != 0 && now.Sub(time.Unix(a.LastAutoscaleAt, 0)) < c.cfg.Cooldown {
 		return
 	}
 

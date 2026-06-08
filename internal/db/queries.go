@@ -619,6 +619,18 @@ func (s *Store) SetAppLastAutoscaleAt(slug string, epoch int64) error {
 	return nil
 }
 
+// NowEpoch returns the database server's current time as Unix epoch seconds. The
+// autoscale cooldown uses it so the armed timestamp (SetAppLastAutoscaleAt) and
+// the cooldown check are both measured against a single clock - the DB - immune
+// to wall-clock skew between control-plane instances across a failover.
+func (s *Store) NowEpoch() (int64, error) {
+	var e int64
+	if err := s.db.QueryRow(`SELECT ` + s.d.nowEpoch()).Scan(&e); err != nil {
+		return 0, fmt.Errorf("db now epoch: %w", err)
+	}
+	return e, nil
+}
+
 // ListDeletingApps returns all apps left in the 'deleting' tombstone state.
 // handleDeleteApp marks an app 'deleting' before doing disk cleanup; a crash
 // (or a cleanup failure) between the tombstone and the row delete leaves such

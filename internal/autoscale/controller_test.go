@@ -2,6 +2,7 @@ package autoscale
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -59,15 +60,23 @@ func (f *fakeScaler) ScaleDown(slug string, _ time.Duration) (bool, error) {
 type fakeCooldownStore struct {
 	apps   map[string]*db.App
 	writes int
+	setErr error // when non-nil, SetAppLastAutoscaleAt returns it (write still counted)
 }
 
 func (f *fakeCooldownStore) SetAppLastAutoscaleAt(slug string, epoch int64) error {
 	f.writes++
+	if f.setErr != nil {
+		return f.setErr
+	}
 	if a, ok := f.apps[slug]; ok {
 		a.LastAutoscaleAt = epoch
 	}
 	return nil
 }
+
+// NowEpoch satisfies CooldownStore. The cooldown tests drive c.reconcile(now)
+// directly with a controlled time, so this is only exercised if Run is used.
+func (f *fakeCooldownStore) NowEpoch() (int64, error) { return time.Now().Unix(), nil }
 
 func cooldownStoreFor(apps []*db.App) *fakeCooldownStore {
 	m := make(map[string]*db.App, len(apps))
@@ -198,6 +207,31 @@ func TestController_HonoursPersistedCooldownOnFreshController(t *testing.T) {
 	c.reconcile(now.Add(time.Minute)) // within the 3-minute cooldown
 	if scaler.ups["demo"] != 0 {
 		t.Fatalf("fresh controller ignored a persisted cooldown: ups=%d", scaler.ups["demo"])
+	}
+}
+
+func TestController_CooldownPersistErrorIsNonFatal(t *testing.T) {
+	// A failure to persist the cooldown must be logged, not fatal: the scale action
+	// still takes effect and the audit event still records (worst case is a possible
+	// duplicate action next tick - no worse than the old in-memory map on restart).
+	lister := &fakeLister{apps: []*db.App{app("demo", 2, 1, 8)}}
+	signal := &fakeSignal{counts: map[string][]int64{"demo": {20, 20}}} // total 40 -> desired 5 (up)
+	scaler := newFakeScaler()
+	auditor := &fakeAuditor{}
+	cd := cooldownStoreFor(lister.apps)
+	cd.setErr = errors.New("db write failed")
+	c := New(testCfg(), lister, signal, scaler, auditor, cd, testLogger())
+
+	c.reconcile(time.Now()) // must not panic
+
+	if scaler.ups["demo"] == 0 {
+		t.Fatal("a cooldown persist error must not prevent the scale action")
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("audit events = %d, want 1 (persist error is non-fatal)", len(auditor.events))
+	}
+	if cd.writes == 0 {
+		t.Fatal("expected a persist attempt even though it errored")
 	}
 }
 
