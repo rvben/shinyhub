@@ -141,7 +141,13 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 // in-memory routing index, so a worker whose heartbeat went stale is excluded
 // from routing without waiting for a control-plane restart to rebuild the
 // index. Unknown node ids are a no-op in memory; the store write still runs.
+//
+// It holds regMu so the store write and the index update are one unit against a
+// concurrent Refresh: without it, a Refresh whose ListWorkers snapshot predates
+// this MarkDown could overwrite the index and resurrect the worker as "up".
 func (r *Registry) MarkDown(nodeID string) error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
 	if err := r.store.SetWorkerStatus(nodeID, "down"); err != nil {
 		return err
 	}
@@ -185,7 +191,12 @@ func (r *Registry) Revoke(nodeID string) error {
 // store reaps a long-dead worker row so the fleet snapshot does not keep listing
 // a node that no longer exists. Unknown node ids are a no-op. Forget never
 // touches the store; the row is already gone.
+//
+// It holds regMu so the delete is serialized against a concurrent Refresh, whose
+// older ListWorkers snapshot could otherwise reinsert the just-reaped worker.
 func (r *Registry) Forget(nodeID string) {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
 	r.mu.Lock()
 	delete(r.byID, nodeID)
 	r.mu.Unlock()
