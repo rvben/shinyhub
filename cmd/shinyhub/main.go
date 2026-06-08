@@ -1004,7 +1004,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Gate mutations on owner AND ready: the elector reports IsOwner true before
 	// ownerWork refreshes the registry, so admitting owner-only mutations (main-API
 	// deploy/placement, worker register/heartbeat) must wait for the fresh index.
-	ownerAndReady := func() bool { return elector.IsOwner() && ownerReady.Load() }
+	ownerAndReady := ownerAndReadyPredicate(elector.IsOwner, &ownerReady)
 	srv.SetOwnership(ownerAndReady)
 	if workerAPI != nil {
 		workerAPI.SetOwnership(ownerAndReady)
