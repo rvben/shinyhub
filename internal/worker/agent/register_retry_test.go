@@ -6,15 +6,39 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/worker"
 	workerapi "github.com/rvben/shinyhub/internal/worker/api"
 )
+
+func TestIsRetryableRegister(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"503 unavailable", worker.ErrControlPlaneUnavailable, true},
+		{"connection refused", syscall.ECONNREFUSED, true},
+		{"connection reset", syscall.ECONNRESET, true},
+		{"wrapped refused (real dial-error shape)", fmt.Errorf("register request: %w", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},
+		{"wrapped reset", fmt.Errorf("register request: %w", &net.OpError{Op: "read", Err: syscall.ECONNRESET}), true},
+		{"permanent 401", errors.New("register: 401 Unauthorized: unauthorized"), false},
+		{"permanent bad request", errors.New("register: 400 Bad Request"), false},
+	}
+	for _, c := range cases {
+		if got := isRetryableRegister(c.err); got != c.want {
+			t.Errorf("%s: isRetryableRegister = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
 
 // newCountingControlPlane is a TLS control plane (cert signed by ca) whose
 // register handler returns the status produced by status(callNum) and, on 200,

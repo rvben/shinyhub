@@ -202,12 +202,14 @@ func registerWithRetry(ctx context.Context, cfg Config, req workerapi.RegisterRe
 }
 
 // isRetryableRegister reports whether a failed registration should be retried:
-// the control plane is reachable but not the ready owner (503), or it is not yet
-// accepting connections (connection refused while it boots). Auth/validation and
-// TLS-pin failures are permanent and fail fast.
+// the control plane is reachable but not the ready owner (503), or the connection
+// failed transiently while it boots or restarts - refused (not yet listening) or
+// reset (accepted then dropped during a restart/socket handoff). Auth/validation
+// and TLS-pin failures are permanent and fail fast.
 func isRetryableRegister(err error) bool {
 	return errors.Is(err, worker.ErrControlPlaneUnavailable) ||
-		errors.Is(err, syscall.ECONNREFUSED)
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET)
 }
 
 // readoptFromDisk rebuilds the agent from a previously persisted identity when
