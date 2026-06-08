@@ -27,6 +27,12 @@ type Config struct {
 	// DefaultMaxSessionsPerReplica is the runtime-wide session cap fallback
 	// applied on wake when an app has max_sessions_per_replica == 0.
 	DefaultMaxSessionsPerReplica int
+	// Clustered must be true when the deployment uses a shared Postgres
+	// database (isClustered). When true the watcher reaps stale
+	// replica_sessions rows on every tick. When false (single-node SQLite)
+	// the reaper is skipped entirely so single-node behaviour is byte-for-byte
+	// unchanged.
+	Clustered bool
 }
 
 // replicaKey uniquely identifies a single replica within a slug.
@@ -50,6 +56,11 @@ type proxyBackend interface {
 	Deregister(slug string)
 	SetPoolSize(slug string, size int)
 	SetPoolCap(slug string, max int)
+	// SetPoolAppID associates the numeric DB app ID with slug's pool so the
+	// session reporter can key replica_sessions rows without a DB lookup.
+	// A zero appID is ignored. Called alongside SetPoolSize wherever the app
+	// object is available.
+	SetPoolAppID(slug string, appID int64)
 }
 
 // MetricsRecorder records lifecycle business metrics. A nil recorder disables
@@ -71,6 +82,10 @@ type appStore interface {
 	UpsertReplica(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
+	// ReapStaleReplicaSessions removes replica_sessions rows whose updated_at
+	// is older than cutoffEpoch. Called on every watcher tick (owner-gated) so
+	// rows from crashed or restarted instances are pruned promptly.
+	ReapStaleReplicaSessions(cutoffEpoch int64) error
 }
 
 // Compile-time interface satisfaction checks.
@@ -233,6 +248,8 @@ func (w *Watcher) traceOp(ctx context.Context, op, slug string) (context.Context
 // runOnce processes all current manager entries for one watchdog/hibernation tick.
 // handleIdle is called at most once per slug — since idleness is per-app (not
 // per-replica), iterating the whole pool would redundantly hibernate the same app.
+// As the active (owner) instance it also reaps stale replica_sessions rows so
+// counts from crashed or restarted peers do not linger in the fleet view.
 func (w *Watcher) runOnce() {
 	idleChecked := make(map[string]bool)
 	handled := make(map[replicaKey]bool)
@@ -250,6 +267,15 @@ func (w *Watcher) runOnce() {
 	}
 	w.reconcileReplicas(handled)
 	w.reconcileStatuses()
+	// Reap stale replica_sessions rows only in clustered mode. Single-node
+	// deployments never write replica_sessions rows, so this DELETE is both
+	// unnecessary and a behavioral change we must avoid.
+	if w.cfg.Clustered {
+		cutoff := time.Now().Add(-proxy.ReplicaSessionStaleCutoff).Unix()
+		if err := w.store.ReapStaleReplicaSessions(cutoff); err != nil {
+			slog.Warn("watcher: reap stale replica sessions failed", "err", err)
+		}
+	}
 }
 
 // reconcileReplicas re-places replica slots the process manager is not actively
@@ -546,6 +572,7 @@ func (w *Watcher) OnMiss(slug string) {
 
 		w.prx.SetPoolSize(slug, app.Replicas)
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
+		w.prx.SetPoolAppID(slug, app.ID)
 
 		var wg sync.WaitGroup
 		var started atomic.Int32

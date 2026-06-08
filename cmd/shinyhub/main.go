@@ -605,6 +605,29 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// replica and bypass the per-replica session cap.
 	prx.SetStickySecret(deriveStickyCookieKey(cfg.Auth.Secret))
 
+	// In clustered deployments every instance runs a session reporter that
+	// periodically upserts its local per-(app, replica) active-connection
+	// counts into replica_sessions so other instances can aggregate fleet
+	// load. Single-node deployments skip this entirely: no rows, no goroutine.
+	var reporterWG sync.WaitGroup
+	var reporterCancel context.CancelFunc
+	if isClustered(cfg) {
+		flushCh := make(chan string, 16)
+		prx.EnableImmediateFlush(flushCh)
+		reporter := proxy.NewSessionReporter(prx, store, cfg.Server.InstanceID, flushCh)
+		reporterCtx, cancelReporter := context.WithCancel(context.Background())
+		reporterCancel = cancelReporter
+		reporterWG.Add(1)
+		go func() {
+			defer reporterWG.Done()
+			reporter.Run(reporterCtx)
+		}()
+		slog.Info("session reporter started",
+			"interval", proxy.ReporterInterval,
+			"stale_cutoff", proxy.ReplicaSessionStaleCutoff,
+			"instance", cfg.Server.InstanceID)
+	}
+
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetVersion(version)
 	if deployToken != nil {
@@ -819,6 +842,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		RestartMaxAttempts:           cfg.Lifecycle.RestartMaxAttempts,
 		HibernateTimeout:             cfg.Lifecycle.HibernateTimeout,
 		DefaultMaxSessionsPerReplica: cfg.Runtime.DefaultMaxSessionsPerReplica,
+		Clustered:                    isClustered(cfg),
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
@@ -1205,6 +1229,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// autoscaler to exit before we drain jobs and close the store.
 	cancelElector()
 	scope.Stop()
+	// Stop the session reporter (clustered only). Cancel triggers a final
+	// flush so the last known counts are persisted before the store closes.
+	if reporterCancel != nil {
+		reporterCancel()
+		reporterWG.Wait()
+	}
 	// Drain in-flight scheduled job runs before the store closes.
 	jobsMgr.Stop(shutdownCtx)
 

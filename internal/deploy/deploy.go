@@ -310,6 +310,7 @@ func Run(p Params) (*PoolResult, error) {
 
 	p.Proxy.SetPoolSize(p.Slug, total)
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
+	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
 
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.

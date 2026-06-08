@@ -176,6 +176,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		}
 		prx.SetPoolSize(app.Slug, app.Replicas)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
+		prx.SetPoolAppID(app.Slug, app.ID)
 		bundleDir := activeBundleDir(store, app.ID)
 
 		anyAlive := false

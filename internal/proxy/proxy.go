@@ -174,11 +174,17 @@ type replicaBackend struct {
 // maxSessions is the per-replica active-connection cap. When every non-nil
 // replica is at or above this value, new requests without a valid sticky
 // cookie are shed with 503 (see ServeHTTP). A value of 0 disables the cap.
+//
+// appID is the numeric database primary key for the owning app. It is set by
+// SetPoolAppID at the same time the pool is created so the session reporter
+// can key replica_sessions rows without a DB lookup at snapshot time. Zero
+// means not yet set (reporter skips pools without an appID).
 type backendPool struct {
 	size        int
 	replicas    []*replicaBackend
 	rrCounter   atomic.Int64
 	maxSessions int
+	appID       int64
 }
 
 // AccessLogEntry describes a single proxied request. It is passed to the
@@ -271,6 +277,14 @@ type Proxy struct {
 	// per-replica backend draining flag): while set, /readyz reports unready.
 	conns            *connTracker
 	instanceDraining atomic.Bool
+
+	// immediateFlush receives a slug when that slug's active-connection count
+	// rises from 0 to >0. The session reporter drains this channel to flush
+	// that slug's row immediately without waiting for the next periodic tick.
+	// Nil when the reporter is not wired (single-node or clustered but not yet
+	// started). Writes are non-blocking: a full channel means a flush is already
+	// pending for some slug and the current signal can be dropped safely.
+	immediateFlush chan string
 }
 
 func New() *Proxy {
@@ -514,6 +528,39 @@ func (p *Proxy) SetPoolCap(slug string, max int) {
 		p.pools[slug] = pool
 	}
 	pool.maxSessions = max
+}
+
+// SetPoolAppID records the numeric database primary key for the app that owns
+// slug's pool. The session reporter uses this to write replica_sessions rows
+// keyed by app_id without a DB lookup at snapshot time. Call this alongside
+// SetPoolSize whenever the app's ID is known. Creates the pool (size 1) if it
+// does not yet exist. A zero appID is ignored so callers that do not know the
+// ID (e.g. single-node paths that never use the reporter) are safe to omit it.
+func (p *Proxy) SetPoolAppID(slug string, appID int64) {
+	if appID == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok {
+		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		p.pools[slug] = pool
+	}
+	pool.appID = appID
+}
+
+// EnableImmediateFlush wires the channel that the session reporter reads to
+// detect 0->active transitions. The channel must be buffered (capacity >= 1).
+// Call once at startup before serving; never call it again. Passing a nil
+// channel is a no-op (disables the feature, used by single-node paths).
+func (p *Proxy) EnableImmediateFlush(ch chan string) {
+	if ch == nil {
+		return
+	}
+	p.mu.Lock()
+	p.immediateFlush = ch
+	p.mu.Unlock()
 }
 
 // RegisterReplica registers a backend URL at the given index within slug's pool.
@@ -1027,9 +1074,27 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			SameSite: http.SameSiteLaxMode,
 		})
 	}
-	picked.activeConns.Add(1)
+	newConns := picked.activeConns.Add(1)
 	p.mu.RUnlock()
 	defer picked.activeConns.Add(-1)
+
+	// When this slug's local active count rises from 0 to 1, signal the session
+	// reporter for an immediate DB flush so other instances see the new session
+	// without waiting for the next periodic tick. The send is non-blocking: a
+	// full channel means a flush is already queued for this slug (or another)
+	// and the current signal is safely dropped.
+	// immediateFlush is read without holding p.mu: EnableImmediateFlush is
+	// called once at startup before ListenAndServe begins, so the write
+	// happens-before any ServeHTTP invocation and the field is never mutated
+	// again. The unsynchronised read is therefore race-free after startup.
+	if newConns == 1 {
+		if ch := p.immediateFlush; ch != nil {
+			select {
+			case ch <- slug:
+			default:
+			}
+		}
+	}
 
 	p.RecordActivity(slug)
 	// Thread the recorder through the request context only while tracing is on

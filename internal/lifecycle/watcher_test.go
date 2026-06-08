@@ -89,6 +89,7 @@ func (f *fakeProxy) SetPoolCap(slug string, max int) {
 	f.poolCaps[slug] = max
 	f.mu.Unlock()
 }
+func (f *fakeProxy) SetPoolAppID(_ string, _ int64) {}
 
 type fakeStore struct {
 	mu               sync.Mutex
@@ -100,6 +101,7 @@ type fakeStore struct {
 	replicas         map[int64][]*db.Replica
 	upsertErr        error // when set, UpsertReplica records the call then returns this
 	updateStatusErr  error // when set, UpdateAppStatus records the call then returns this
+	reapCount        int   // incremented by each ReapStaleReplicaSessions call
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -236,6 +238,13 @@ func (f *fakeStore) ListReplicas(appID int64) ([]*db.Replica, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.replicas[appID], nil
+}
+
+func (f *fakeStore) ReapStaleReplicaSessions(_ int64) error {
+	f.mu.Lock()
+	f.reapCount++
+	f.mu.Unlock()
+	return nil
 }
 
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
@@ -1041,5 +1050,43 @@ func TestWake_AllReplicasFailKeepsHibernated(t *testing.T) {
 		if upd.Status == "running" {
 			t.Fatal("app marked running despite all replicas failing")
 		}
+	}
+}
+
+// TestReaperGate_ClusteredCallsReap asserts that a single runOnce tick with
+// Clustered:true calls ReapStaleReplicaSessions exactly once. This pins the
+// owner-gated cleanup path so a regression removing the if-clustered guard
+// fails loudly.
+func TestReaperGate_ClusteredCallsReap(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(map[string]*db.App{}, nil)
+	w := newTestWatcher(Config{Clustered: true}, &fakeManager{}, prx, st, nil)
+
+	w.RunOnce()
+
+	st.mu.Lock()
+	n := st.reapCount
+	st.mu.Unlock()
+	if n != 1 {
+		t.Errorf("clustered runOnce: expected ReapStaleReplicaSessions called 1 time, got %d", n)
+	}
+}
+
+// TestReaperGate_SingleNodeSkipsReap asserts that a single runOnce tick with
+// Clustered:false (the single-node default) never calls ReapStaleReplicaSessions.
+// This is the invariant that keeps single-node behaviour byte-for-byte unchanged:
+// no DELETE FROM replica_sessions is issued on SQLite deployments.
+func TestReaperGate_SingleNodeSkipsReap(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(map[string]*db.App{}, nil)
+	w := newTestWatcher(Config{Clustered: false}, &fakeManager{}, prx, st, nil)
+
+	w.RunOnce()
+
+	st.mu.Lock()
+	n := st.reapCount
+	st.mu.Unlock()
+	if n != 0 {
+		t.Errorf("single-node runOnce: expected ReapStaleReplicaSessions NOT called, got %d call(s)", n)
 	}
 }
