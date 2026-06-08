@@ -158,6 +158,17 @@ func TestHandleBundleFetch_DBAuthoritative_StaleNegative(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (auth passed, digest absent)", w.Code)
 	}
+
+	// Negative control: a cert for a node that exists in NEITHER the store nor the
+	// index must be rejected 401. This proves the 404 above is specifically because
+	// the store-backed auth succeeded, not because auth is being skipped entirely.
+	reqUnknown := signedCertReq(t, h, "node-never-stored", http.MethodGet, "/internal/bundles/"+digest)
+	reqUnknown = withURLParam(reqUnknown, "digest", digest)
+	wUnknown := httptest.NewRecorder()
+	h.HandleBundleFetch(wUnknown, reqUnknown)
+	if wUnknown.Code != http.StatusUnauthorized {
+		t.Fatalf("control: unknown node status = %d, want 401", wUnknown.Code)
+	}
 }
 
 func TestHandleBundleFetch_DBAuthoritative_StalePositiveRevoked(t *testing.T) {
