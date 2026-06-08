@@ -803,6 +803,27 @@ func (s *Store) FinishWake(slug string) (bool, error) {
 	return n == 1, nil
 }
 
+// HibernateApp atomically transitions a running app to "hibernated" and reports
+// whether THIS caller won the transition. The CAS guards against a concurrent
+// wake or handoff that already moved the app off "running": if the app is not
+// in "running" state the transition is a no-op and won=false is returned.
+//
+// Callers must issue this CAS BEFORE stopping replicas so that any request
+// arriving after the CAS commit hits BeginWake (hibernated->waking) instead of
+// an app that is still "running" but has already had its pool removed.
+func (s *Store) HibernateApp(slug string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE apps SET status = 'hibernated', updated_at = CURRENT_TIMESTAMP
+		   WHERE slug = ? AND status = 'running'`,
+		slug,
+	)
+	if err != nil {
+		return false, fmt.Errorf("hibernate app: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 func (s *Store) IncrementDeployCount(slug string) error {
 	_, err := s.db.Exec(`UPDATE apps SET deploy_count = deploy_count + 1 WHERE slug = ?`, slug)
 	if err != nil {

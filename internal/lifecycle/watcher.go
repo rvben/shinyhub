@@ -29,10 +29,15 @@ type Config struct {
 	DefaultMaxSessionsPerReplica int
 	// Clustered must be true when the deployment uses a shared Postgres
 	// database (isClustered). When true the watcher reaps stale
-	// replica_sessions rows on every tick. When false (single-node SQLite)
-	// the reaper is skipped entirely so single-node behaviour is byte-for-byte
-	// unchanged.
+	// replica_sessions rows on every tick and uses the conservative fleet-idle
+	// CAS for hibernation. When false (single-node SQLite) the reaper is
+	// skipped entirely and single-node behaviour is byte-for-byte unchanged.
 	Clustered bool
+	// InstanceID is the per-instance identifier used to exclude this
+	// instance's own replica_sessions rows from the fleet-idle check, so the
+	// active's local idle predicate (BeginHibernate) and the fleet predicate
+	// (AppFleetLoad) each cover a disjoint set of sessions.
+	InstanceID string
 }
 
 // replicaKey uniquely identifies a single replica within a slug.
@@ -86,6 +91,16 @@ type appStore interface {
 	// is older than cutoffEpoch. Called on every watcher tick (owner-gated) so
 	// rows from crashed or restarted instances are pruned promptly.
 	ReapStaleReplicaSessions(cutoffEpoch int64) error
+	// HibernateApp atomically transitions a running app to "hibernated". Used
+	// by the clustered hibernation path: the CAS is issued before stopping
+	// replicas so any concurrent wake hits the hibernated->waking transition
+	// rather than finding the app still "running" but pool-less.
+	HibernateApp(slug string) (bool, error)
+	// AppFleetLoad returns the per-replica active session counts and the
+	// maximum last_activity epoch reported by non-stale, non-excluded
+	// instances. Used by the clustered hibernation path to confirm that no
+	// other instance is currently serving traffic before hibernating.
+	AppFleetLoad(appID int64, staleCutoffEpoch int64, excludeInstanceID string) (active []int64, maxLastActivity int64, err error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -446,6 +461,10 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 
 // handleIdle checks whether a running app has been idle past its configured
 // timeout and hibernates it if so. It stops all replicas and zeroes replica rows.
+//
+// Single-node (!w.cfg.Clustered): the original path is taken byte-for-byte.
+// Clustered (w.cfg.Clustered): a conservative fleet-idle CAS is used. See
+// handleIdleClustered for the exact predicate and ordering.
 func (w *Watcher) handleIdle(slug string) {
 	app, err := w.store.GetAppBySlug(slug)
 	if err != nil {
@@ -465,6 +484,12 @@ func (w *Watcher) handleIdle(slug string) {
 		timeout = w.cfg.HibernateTimeout
 	}
 
+	if w.cfg.Clustered {
+		w.handleIdleClustered(app, timeout)
+		return
+	}
+
+	// Single-node path: byte-for-byte original behaviour.
 	lastActivity := w.prx.LastSeen(slug)
 	if lastActivity.IsZero() {
 		lastActivity = app.UpdatedAt // freshly deployed, never served
@@ -495,6 +520,114 @@ func (w *Watcher) handleIdle(slug string) {
 	if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"}); err != nil {
 		slog.Warn("watcher: persist hibernated status failed", "slug", slug, "err", err)
 	}
+	w.recordTransition("hibernate")
+}
+
+// handleIdleClustered is the clustered hibernation path. It uses a conservative
+// two-part idle predicate before issuing a DB CAS (running -> hibernated).
+//
+// Predicate order (all must pass):
+//  1. (A) Time-idle: time.Since(lastActivity) >= timeout.
+//  2. (B) Fleet-idle: AppFleetLoad(excludeSelf) reports no other instance has
+//     active sessions AND no other instance has recent last_activity within the
+//     timeout window.
+//  3. (C) Local CAS: BeginHibernate(lastActivity) atomically removes the local
+//     pool and returns true iff lastSeen has not advanced AND activeConns==0.
+//  4. (D) DB CAS: HibernateApp(slug) = UPDATE ... WHERE status='running'.
+//     One winner; the loser no-ops (idempotent).
+//
+// Only after the DB CAS wins: Stop replicas + UpsertReplica(stopped).
+//
+// Ordering rationale: the DB CAS is issued BEFORE mgr.Stop so that after commit
+// any request arriving on any instance triggers BeginWake (hibernated->waking)
+// rather than finding the app "running" with a removed pool. The brief sub-second
+// window between CAS-commit and replica-stop is acceptable for an idle app: a
+// stray request either hits a still-alive replica or triggers a harmless wake.
+//
+// Leadership-transfer safety: a stale old-active and a new active could both
+// evaluate this during handover, but correctness holds by construction:
+//   - The running->hibernated DB CAS is idempotent: exactly one caller wins.
+//   - mgr.Stop is idempotent: the loser's call is a no-op.
+//   - The fleet-idle check (B) uses AppFleetLoad(excludeSelf): each active's own
+//     sessions appear in the OTHER instance's fleet view, so neither hibernates
+//     an app that the other is actively serving.
+//
+// No owner-epoch fence is added to the CAS; it would be dead complexity.
+func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
+	slug := app.Slug
+	now := time.Now()
+
+	// (A) Time-idle check.
+	lastActivity := w.prx.LastSeen(slug)
+	if lastActivity.IsZero() {
+		lastActivity = app.UpdatedAt
+	}
+	if now.Sub(lastActivity) < timeout {
+		return
+	}
+
+	// (B) Fleet-idle check: consult other instances via replica_sessions rows.
+	// Use ReplicaSessionStaleCutoff so rows from crashed/restarted instances
+	// drop out (conservative: can only delay hibernation, never wrongly trigger it).
+	staleCutoff := now.Add(-proxy.ReplicaSessionStaleCutoff).Unix()
+	otherActive, otherMaxLastActivity, err := w.store.AppFleetLoad(app.ID, staleCutoff, w.cfg.InstanceID)
+	if err != nil {
+		slog.Warn("watcher: fleet load for hibernation check failed", "slug", slug, "err", err)
+		return
+	}
+	// Sum other-instance active counts.
+	var totalOtherActive int64
+	for _, a := range otherActive {
+		totalOtherActive += a
+	}
+	if totalOtherActive > 0 {
+		return // another instance is actively serving; do not hibernate
+	}
+	// Check other instances' last_activity: if any peer had recent activity
+	// within the timeout window, delay hibernation to let the peer's own idle
+	// check fire on its next tick without the active count double-counting.
+	if otherMaxLastActivity > 0 && otherMaxLastActivity > now.Add(-timeout).Unix() {
+		return
+	}
+
+	// (C) Local CAS: atomically remove the local pool from routing iff no
+	// activity has been recorded since the snapshot AND no local request is
+	// in flight. If a request slipped in between (A) and here, abort.
+	if !w.prx.BeginHibernate(slug, lastActivity) {
+		return
+	}
+
+	// (D) DB CAS: running -> hibernated. Must happen BEFORE mgr.Stop so the
+	// wake path (BeginWake: hibernated->waking) is armed immediately after commit.
+	won, err := w.store.HibernateApp(slug)
+	if err != nil {
+		slog.Warn("watcher: hibernate CAS failed", "slug", slug, "err", err)
+		return
+	}
+	if !won {
+		// Another active (e.g. during a concurrent handoff) already won the CAS
+		// or moved the app to a different state. The local pool was already
+		// removed by BeginHibernate. Until the DB-driven pool syncer is wired,
+		// this is a transient gap: the replicas keep running but are unreachable
+		// via this instance's proxy until the pool is restored on a later tick
+		// or wake. This is an idempotent no-op: no stop.
+		return
+	}
+
+	_, endSpan := w.traceOp(context.Background(), "lifecycle.hibernate", slug)
+	defer func() { endSpan(nil) }()
+
+	if err := w.mgr.Stop(slug); err != nil {
+		slog.Warn("watcher: stop on hibernate failed", "slug", slug, "err", err)
+	}
+	for i := 0; i < app.Replicas; i++ {
+		if err := w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped"}); err != nil {
+			slog.Warn("watcher: persist hibernated replica failed", "slug", slug, "index", i, "err", err)
+		}
+	}
+	// Do NOT call UpdateAppStatus(hibernated) here: the DB CAS (D) already set
+	// the status. Calling it again would be redundant and would unconditionally
+	// overwrite any concurrent status change (e.g. an immediate wake).
 	w.recordTransition("hibernate")
 }
 

@@ -43,6 +43,7 @@ type fakeProxy struct {
 	deregistered    []string
 	hibernated      []string
 	hibernateAlways bool // if true, BeginHibernate ignores `since` and always returns true
+	hibernateNever  bool // if true, BeginHibernate always returns false (simulates activeConns>0)
 	poolSizes       map[string]int
 	poolCaps        map[string]int
 	onMissFn        func(string)
@@ -70,6 +71,9 @@ func (f *fakeProxy) Deregister(slug string) {
 func (f *fakeProxy) BeginHibernate(slug string, since time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.hibernateNever {
+		return false // simulates activeConns>0 or a raced-in request
+	}
 	if !f.hibernateAlways {
 		if last := f.seen[slug]; last.After(since) {
 			return false
@@ -102,6 +106,14 @@ type fakeStore struct {
 	upsertErr        error // when set, UpsertReplica records the call then returns this
 	updateStatusErr  error // when set, UpdateAppStatus records the call then returns this
 	reapCount        int   // incremented by each ReapStaleReplicaSessions call
+
+	// hibernateAppCalls tracks every HibernateApp call (slug).
+	hibernateAppCalls []string
+
+	// fleetActive and fleetMaxLastActivity are returned by AppFleetLoad.
+	// fleetActive is the sum of other-instance active counts (0 = fleet idle).
+	fleetActive          int64
+	fleetMaxLastActivity int64
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -245,6 +257,34 @@ func (f *fakeStore) ReapStaleReplicaSessions(_ int64) error {
 	f.reapCount++
 	f.mu.Unlock()
 	return nil
+}
+
+// HibernateApp mirrors the real store's CAS: running -> hibernated, winner only.
+func (f *fakeStore) HibernateApp(slug string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hibernateAppCalls = append(f.hibernateAppCalls, slug)
+	app, ok := f.apps[slug]
+	if !ok || app.Status != "running" {
+		return false, nil
+	}
+	app.Status = "hibernated"
+	if f.appStatus != nil {
+		f.appStatus[slug] = "hibernated"
+	}
+	return true, nil
+}
+
+// AppFleetLoad returns the configured fake fleet load values. The real signature
+// includes a staleCutoffEpoch and excludeInstanceID but the fake ignores them
+// and returns the pre-configured values so tests can control fleet-idle outcomes.
+func (f *fakeStore) AppFleetLoad(_ int64, _ int64, _ string) ([]int64, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fleetActive == 0 {
+		return []int64{}, f.fleetMaxLastActivity, nil
+	}
+	return []int64{f.fleetActive}, f.fleetMaxLastActivity, nil
 }
 
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
@@ -1089,4 +1129,328 @@ func TestReaperGate_SingleNodeSkipsReap(t *testing.T) {
 	if n != 0 {
 		t.Errorf("single-node runOnce: expected ReapStaleReplicaSessions NOT called, got %d call(s)", n)
 	}
+}
+
+// --- clustered hibernation tests ---
+
+// idleApp builds a running app in the store that has been idle for 2 hours, with
+// a proxy that has a stale lastSeen so BeginHibernate returns true.
+func idleClusteredSetup(t *testing.T) (*fakeManager, *fakeProxy, *fakeStore) {
+	t.Helper()
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:        42,
+			Slug:      "app",
+			Status:    "running",
+			Replicas:  1,
+			UpdatedAt: time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	return mgr, prx, st
+}
+
+// TestClusteredHibernation_OtherInstanceActiveBlocksHibernation asserts that the
+// clustered path does NOT hibernate when another instance reports active>0, even
+// though the local predicate (lastSeen old, activeConns 0) would pass.
+func TestClusteredHibernation_OtherInstanceActiveBlocksHibernation(t *testing.T) {
+	mgr, prx, st := idleClusteredSetup(t)
+	// Simulate another instance with active sessions.
+	st.fleetActive = 3
+	st.fleetMaxLastActivity = time.Now().Unix() // recent
+
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	st.mu.Lock()
+	calls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+	if len(calls) != 0 {
+		t.Errorf("HibernateApp must NOT fire when another instance has active sessions, got %v", calls)
+	}
+	if len(mgr.stopped) != 0 {
+		t.Errorf("mgr.Stop must NOT be called when fleet has active sessions, got %v", mgr.stopped)
+	}
+}
+
+// TestClusteredHibernation_LocalRaceBlocksDBCAS asserts that when the time-idle
+// check (A) passes and the fleet is idle (B), but BeginHibernate (C) returns
+// false - simulating a local in-flight request or activeConns>0 - the DB CAS
+// (HibernateApp) is never issued and mgr.Stop is never called.
+//
+// lastSeen is set to 2h ago so the time-idle check passes. hibernateNever forces
+// BeginHibernate to return false regardless of the seen timestamp, isolating the
+// (C) guard from the (A) time check. This is the only test that exercises the
+// path where handleIdleClustered reaches BeginHibernate and is blocked there.
+func TestClusteredHibernation_LocalRaceBlocksDBCAS(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	// lastSeen old enough to pass the time-idle check (A).
+	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
+	// hibernateNever makes BeginHibernate always return false, simulating a local
+	// in-flight request (activeConns>0) that races in after the time check.
+	prx.hibernateNever = true
+
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:        42,
+			Slug:      "app",
+			Status:    "running",
+			Replicas:  1,
+			UpdatedAt: time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	// Fleet is idle so check (B) passes - the only thing blocking hibernation is (C).
+	st.fleetActive = 0
+	st.fleetMaxLastActivity = 0
+
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	// BeginHibernate returned false: the DB CAS must not fire.
+	st.mu.Lock()
+	calls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+	if len(calls) != 0 {
+		t.Errorf("HibernateApp DB CAS must NOT fire when BeginHibernate returns false, got %v", calls)
+	}
+	if len(mgr.stopped) != 0 {
+		t.Errorf("mgr.Stop must NOT be called when BeginHibernate returns false, got %v", mgr.stopped)
+	}
+}
+
+// TestClusteredHibernation_FleetIdleButLocalRecentlyActivePreventsHibernation
+// asserts that when time.Since(lastActivity) < timeout the app is NOT hibernated,
+// even if the fleet is idle. This proves the local time-idle predicate (A) is
+// retained and not dropped in the clustered path.
+func TestClusteredHibernation_FleetIdleButLocalRecentlyActivePreventsHibernation(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	// lastSeen only 5 minutes ago, well under the 30-minute timeout.
+	prx.seen["app"] = time.Now().Add(-5 * time.Minute)
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:        42,
+			Slug:      "app",
+			Status:    "running",
+			Replicas:  1,
+			UpdatedAt: time.Now().Add(-10 * time.Minute),
+		}},
+		nil,
+	)
+	st.fleetActive = 0
+	st.fleetMaxLastActivity = 0
+
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	st.mu.Lock()
+	calls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+	if len(calls) != 0 {
+		t.Errorf("HibernateApp must NOT fire when local lastActivity < timeout, got %v", calls)
+	}
+	if len(mgr.stopped) != 0 {
+		t.Errorf("mgr.Stop must NOT be called when local app is recently active, got %v", mgr.stopped)
+	}
+}
+
+// TestClusteredHibernation_FleetIdleAndLocalIdleHibernates asserts that when
+// both the fleet and the local predicates pass, the CAS fires and replicas are
+// stopped in the correct order (CAS first, then Stop).
+func TestClusteredHibernation_FleetIdleAndLocalIdleHibernates(t *testing.T) {
+	mgr, prx, st := idleClusteredSetup(t)
+	// Fleet is idle: no other instances, no recent activity.
+	st.fleetActive = 0
+	st.fleetMaxLastActivity = 0
+
+	var stopOrder []string
+	var mu sync.Mutex
+
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	// Patch mgr.Stop to record that HibernateApp was already called before Stop.
+	// We verify order by inspecting hibernateAppCalls at Stop time.
+	origMgr := w.mgr
+	w.mgr = &orderCheckingManager{
+		inner: origMgr,
+		onStop: func(slug string) {
+			st.mu.Lock()
+			hasCalls := len(st.hibernateAppCalls)
+			st.mu.Unlock()
+			mu.Lock()
+			if hasCalls > 0 {
+				stopOrder = append(stopOrder, "stop-after-cas")
+			} else {
+				stopOrder = append(stopOrder, "stop-before-cas")
+			}
+			mu.Unlock()
+		},
+	}
+
+	w.runOnce()
+
+	st.mu.Lock()
+	hibernateCalls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+
+	if len(hibernateCalls) != 1 || hibernateCalls[0] != "app" {
+		t.Errorf("HibernateApp must fire once for 'app', got %v", hibernateCalls)
+	}
+	if len(mgr.stopped) == 0 || mgr.stopped[0] != "app" {
+		t.Errorf("mgr.Stop('app') must be called after CAS, got %v", mgr.stopped)
+	}
+	mu.Lock()
+	ord := append([]string(nil), stopOrder...)
+	mu.Unlock()
+	if len(ord) == 0 || ord[0] != "stop-after-cas" {
+		t.Errorf("CAS must commit before Stop: got order %v", ord)
+	}
+
+	// Verify replica rows updated.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.upsertedReplicas) == 0 {
+		t.Fatal("expected UpsertReplica called after CAS hibernation")
+	}
+	for _, ur := range st.upsertedReplicas {
+		if ur.Status != "stopped" {
+			t.Errorf("expected UpsertReplica status=stopped, got %q", ur.Status)
+		}
+	}
+	// In clustered mode, UpdateAppStatus(hibernated) must NOT be called as a
+	// separate step because the CAS already set the status.
+	for _, upd := range st.statusUpdates {
+		if upd.Slug == "app" && upd.Status == "hibernated" {
+			t.Errorf("UpdateAppStatus(hibernated) must NOT be called in clustered mode (CAS did it), got %+v", upd)
+		}
+	}
+}
+
+// TestClusteredHibernation_SingleNodeUnchanged asserts that with Clustered:false
+// the original single-node path is taken: AppFleetLoad is never called,
+// HibernateApp CAS is never called, and the unconditional UpdateAppStatus is used.
+func TestClusteredHibernation_SingleNodeUnchanged(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:        42,
+			Slug:      "app",
+			Status:    "running",
+			Replicas:  1,
+			UpdatedAt: time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          false,
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	// Single-node path: Stop must fire.
+	if len(mgr.stopped) == 0 || mgr.stopped[0] != "app" {
+		t.Errorf("single-node: expected mgr.Stop('app'), got %v", mgr.stopped)
+	}
+	// Single-node path: BeginHibernate must fire (local CAS).
+	if len(prx.hibernated) == 0 || prx.hibernated[0] != "app" {
+		t.Errorf("single-node: expected proxy.BeginHibernate('app'), got %v", prx.hibernated)
+	}
+	// Single-node path: unconditional UpdateAppStatus(hibernated) must fire.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	found := false
+	for _, upd := range st.statusUpdates {
+		if upd.Slug == "app" && upd.Status == "hibernated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("single-node: expected UpdateAppStatus(hibernated), got %v", st.statusUpdates)
+	}
+	// Single-node path: HibernateApp CAS must NOT be called.
+	if len(st.hibernateAppCalls) != 0 {
+		t.Errorf("single-node: HibernateApp must NOT be called, got %v", st.hibernateAppCalls)
+	}
+}
+
+// TestClusteredHibernation_OtherInstanceRecentActivityBlocksHibernation asserts
+// that even when another instance has active=0 but a recent last_activity epoch
+// (within the timeout window), hibernation is blocked. This covers the case where
+// a peer finished serving all requests moments ago.
+func TestClusteredHibernation_OtherInstanceRecentActivityBlocksHibernation(t *testing.T) {
+	mgr, prx, st := idleClusteredSetup(t)
+	// Other instance: no active sessions, but last_activity is recent (5 min ago).
+	st.fleetActive = 0
+	st.fleetMaxLastActivity = time.Now().Add(-5 * time.Minute).Unix()
+
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	st.mu.Lock()
+	calls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+	if len(calls) != 0 {
+		t.Errorf("HibernateApp must NOT fire when other instance has recent last_activity, got %v", calls)
+	}
+}
+
+// orderCheckingManager wraps a manager and fires onStop before delegating.
+type orderCheckingManager struct {
+	inner  manager
+	onStop func(slug string)
+}
+
+func (m *orderCheckingManager) All() []*process.ProcessInfo { return m.inner.All() }
+func (m *orderCheckingManager) Stop(slug string) error {
+	if m.onStop != nil {
+		m.onStop(slug)
+	}
+	return m.inner.Stop(slug)
 }

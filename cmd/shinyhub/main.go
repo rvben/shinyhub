@@ -843,6 +843,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		HibernateTimeout:             cfg.Lifecycle.HibernateTimeout,
 		DefaultMaxSessionsPerReplica: cfg.Runtime.DefaultMaxSessionsPerReplica,
 		Clustered:                    isClustered(cfg),
+		InstanceID:                   cfg.Server.InstanceID,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
