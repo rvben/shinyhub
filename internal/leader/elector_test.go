@@ -121,6 +121,32 @@ func TestElector_RenewErrorKeepsOwnership(t *testing.T) {
 	}
 }
 
+func TestElector_RenewErrorRelinquishesPastLeaseExpiry(t *testing.T) {
+	fs := &fakeStore{}
+	var lost atomic.Int32
+	e := New(fs, Config{
+		InstanceID: "a", TTL: 40 * time.Millisecond, RenewEvery: time.Millisecond,
+		OnLose: func() { lost.Store(1) },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	waitFor(t, func() bool { return e.IsOwner() })
+
+	// Renew now keeps failing. Within the lease slack the elector retains ownership
+	// (covered by TestElector_RenewErrorKeepsOwnership), but once the lease deadline
+	// passes it must fail closed - relinquish and fire OnLose - rather than keep
+	// serving mutations after the DB lease can be acquired by another instance.
+	fs.mu.Lock()
+	fs.renewErr = errors.New("db partition")
+	fs.mu.Unlock()
+
+	waitFor(t, func() bool { return lost.Load() == 1 })
+	if e.IsOwner() {
+		t.Fatal("elector kept ownership past the lease deadline despite failing renews")
+	}
+}
+
 func TestElector_ReleasesOnContextCancel(t *testing.T) {
 	fs := &fakeStore{}
 	var lost atomic.Int32

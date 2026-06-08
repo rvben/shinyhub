@@ -37,6 +37,12 @@ type Elector struct {
 	mu    sync.Mutex
 	owner bool
 	epoch int64
+	// leaseExpiry is the local-clock deadline of the lease this instance last
+	// secured (set on acquire and each successful renew to now+TTL). A transient
+	// renew error keeps ownership only until this deadline; past it the instance
+	// fails closed, because the DB lease can then be acquired by another instance
+	// and continuing to serve mutations would make this a split owner.
+	leaseExpiry time.Time
 }
 
 // clampTTL enforces the Config invariant that the lease TTL is at least twice
@@ -99,6 +105,29 @@ func (e *Elector) set(owner bool, epoch int64) {
 	e.mu.Unlock()
 }
 
+// bumpLease records that the lease is valid for another TTL from now (called on a
+// successful acquire or renew).
+func (e *Elector) bumpLease() {
+	e.mu.Lock()
+	e.leaseExpiry = time.Now().Add(e.cfg.TTL)
+	e.mu.Unlock()
+}
+
+// leaseExpired reports whether the local lease deadline has passed.
+func (e *Elector) leaseExpired() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.leaseExpiry.IsZero() && !time.Now().Before(e.leaseExpiry)
+}
+
+// relinquish drops ownership and fires OnLose.
+func (e *Elector) relinquish() {
+	e.set(false, 0)
+	if e.cfg.OnLose != nil {
+		e.cfg.OnLose()
+	}
+}
+
 // Run drives the acquire/renew loop until ctx is cancelled, then releases the
 // lease if held. It blocks; run it in a goroutine.
 func (e *Elector) Run(ctx context.Context) {
@@ -130,18 +159,25 @@ func (e *Elector) step() {
 	if owner {
 		ok, err := e.store.RenewOwner(e.cfg.InstanceID, epoch, e.cfg.TTL)
 		if err != nil {
-			// Transient: keep believing we own it and retry next tick. TTL >
-			// 2x RenewEvery gives slack for a blip without expiring the lease.
-			e.cfg.Logger.Warn("renew owner", "err", err)
+			// Transient: keep believing we own it and retry next tick - but only
+			// while the lease we last secured has not locally expired. TTL > 2x
+			// RenewEvery gives slack for a blip; once we pass the deadline we fail
+			// closed, since the DB lease can be acquired by another instance and we
+			// must not keep serving mutations as a split owner.
+			if e.leaseExpired() {
+				e.cfg.Logger.Warn("renew failing past lease expiry; relinquishing ownership", "err", err)
+				e.relinquish()
+			} else {
+				e.cfg.Logger.Warn("renew owner", "err", err)
+			}
 			return
 		}
 		if !ok {
 			e.cfg.Logger.Warn("lost control-plane ownership")
-			e.set(false, 0)
-			if e.cfg.OnLose != nil {
-				e.cfg.OnLose()
-			}
+			e.relinquish()
+			return
 		}
+		e.bumpLease() // successful renew extends the local lease deadline
 		return
 	}
 	acquired, newEpoch, err := e.store.AcquireOwner(e.cfg.InstanceID, e.cfg.TTL)
@@ -151,6 +187,7 @@ func (e *Elector) step() {
 	}
 	if acquired {
 		e.set(true, newEpoch)
+		e.bumpLease()
 		e.cfg.Logger.Info("acquired control-plane ownership", "epoch", newEpoch)
 		if e.cfg.OnAcquire != nil {
 			e.cfg.OnAcquire(newEpoch)
