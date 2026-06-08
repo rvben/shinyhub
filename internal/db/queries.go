@@ -1905,6 +1905,24 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	return out, rows.Err()
 }
 
+// AppHasRunningReplica reports whether the app identified by slug has at
+// least one replica row with status='running'. Used by the clustered
+// app-readiness probe so all instances answer consistently from the DB instead
+// of relying on a locally-observed WebSocket handshake.
+func (s *Store) AppHasRunningReplica(slug string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM replicas r
+			JOIN apps a ON a.id = r.app_id
+			WHERE a.slug = ? AND r.status = 'running'
+		)`, slug).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("app has running replica: %w", err)
+	}
+	return exists, nil
+}
+
 // DeleteReplica removes the replica at the given index for an app.
 func (s *Store) DeleteReplica(appID int64, index int) error {
 	_, err := s.db.Exec(`DELETE FROM replicas WHERE app_id = ? AND idx = ?`, appID, index)

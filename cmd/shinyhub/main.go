@@ -604,6 +604,25 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Sign the sticky-routing cookie so a client cannot forge it to pin a
 	// replica and bypass the per-replica session cap.
 	prx.SetStickySecret(deriveStickyCookieKey(cfg.Auth.Secret))
+	// On single-node deployments there is no pool syncer, so pre-seed the
+	// first-sync gate as satisfied. This keeps /readyz behaviour unchanged
+	// from before the gate was added (a clustered deployment leaves it false
+	// until the pool syncer marks it after its first pass).
+	if !isClustered(cfg) {
+		prx.MarkSynced()
+	}
+	// In clustered mode answer the per-app readiness probe from the DB replica
+	// status so all instances agree, rather than from the locally-observed WS
+	// handshake which only the instance that handled the connection sees.
+	if isClustered(cfg) {
+		prx.SetAppReadyFunc(func(slug string) bool {
+			ok, err := store.AppHasRunningReplica(slug)
+			if err != nil {
+				slog.Warn("app readiness probe: AppHasRunningReplica failed", "slug", slug, "err", err)
+			}
+			return ok
+		})
+	}
 
 	// In clustered deployments every instance runs a session reporter that
 	// periodically upserts its local per-(app, replica) active-connection
@@ -1137,33 +1156,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if prx.Draining() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"ready":false,"reason":"draining"}`))
-			return
-		}
-		select {
-		case <-readyCh:
-		default:
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"ready":false,"reason":"starting"}`))
-			return
-		}
-		pingCtx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
-		defer cancel()
-		if err := store.PingContext(pingCtx); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"ready":false,"reason":"db"}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"ready":true}`))
-	})
+	mux.HandleFunc("/readyz", readyzHandler(prx, readyCh, store))
+	mux.HandleFunc("/activez", activezHandler(ownerAndReady))
 	mux.Handle("/static/", ui.Handler())
 
 	// GET /internal/fargate-bundle/{digest} - streams the bundle zip to a Fargate

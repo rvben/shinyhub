@@ -295,7 +295,23 @@ type Proxy struct {
 	// started). Writes are non-blocking: a full channel means a flush is already
 	// pending for some slug and the current signal can be dropped safely.
 	immediateFlush chan string
+
+	// syncedOnce is true once the pool syncer has completed its first
+	// synchronisation from the authoritative DB. On single-node deployments it
+	// is pre-seeded true at startup (no syncer runs) so /readyz is unaffected.
+	// On clustered deployments the pool syncer calls MarkSynced after its first
+	// successful pass; until then /readyz returns 503 with reason "syncing".
+	syncedOnce atomic.Bool
+
+	// appReadyFunc, when non-nil, overrides IsWSReady for the readiness probe.
+	// The pool syncer wires this in clustered mode to answer from the DB replica
+	// status so all instances answer consistently. When nil (single-node or
+	// before the syncer wires it), serveReadyProbe falls back to IsWSReady.
+	appReadyFunc atomic.Pointer[appReadyFuncT]
 }
+
+// appReadyFuncT is the signature for the injected per-slug readiness predicate.
+type appReadyFuncT func(slug string) bool
 
 func New() *Proxy {
 	return &Proxy{
@@ -528,6 +544,28 @@ func (p *Proxy) IsWSReady(slug string) bool {
 	defer p.seenMu.RUnlock()
 	_, ok := p.wsReady[slug]
 	return ok
+}
+
+// MarkSynced marks the proxy as having completed at least one pool
+// synchronisation from the authoritative DB. On single-node deployments this
+// is called at startup so /readyz is unchanged. On clustered deployments the
+// pool syncer calls this after its first successful pass.
+func (p *Proxy) MarkSynced() { p.syncedOnce.Store(true) }
+
+// SyncedOnce reports whether MarkSynced has been called at least once.
+func (p *Proxy) SyncedOnce() bool { return p.syncedOnce.Load() }
+
+// SetAppReadyFunc wires an injected predicate that serveReadyProbe uses
+// instead of IsWSReady when determining whether a slug is ready. When fn is
+// nil (the default), serveReadyProbe reverts to IsWSReady. Called at most once
+// at startup; reads on the hot path are lock-free via atomic.Pointer.
+func (p *Proxy) SetAppReadyFunc(fn func(slug string) bool) {
+	if fn == nil {
+		p.appReadyFunc.Store(nil)
+		return
+	}
+	f := appReadyFuncT(fn)
+	p.appReadyFunc.Store(&f)
 }
 
 // clearWSReadyLocked drops any cached readiness for slug. Caller must hold
@@ -1212,7 +1250,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // gate: a method complaint about a resource that doesn't exist on this server
 // is noise.
 func (p *Proxy) serveReadyProbe(w http.ResponseWriter, r *http.Request, slug string) {
-	ready := p.IsWSReady(slug)
+	var ready bool
+	if fn := p.appReadyFunc.Load(); fn != nil {
+		ready = (*fn)(slug)
+	} else {
+		ready = p.IsWSReady(slug)
+	}
 	// The unknown-vs-cold-start distinction only matters when we're about to
 	// answer "not ready": a ready slug is known by definition (a replica has
 	// handshaked), so the steady-state 200 path skips the existence lookup the

@@ -1862,6 +1862,138 @@ func TestRegisterReplica_PrependsTargetPathAndUsesTransport(t *testing.T) {
 	}
 }
 
+// TestProxy_SyncedOnce_DefaultFalse ensures that a freshly created proxy has
+// SyncedOnce() == false, so clustered /readyz starts gated.
+func TestProxy_SyncedOnce_DefaultFalse(t *testing.T) {
+	p := proxy.New()
+	if p.SyncedOnce() {
+		t.Fatal("SyncedOnce should be false on a fresh proxy")
+	}
+}
+
+// TestProxy_MarkSynced_FlipsToTrue ensures that MarkSynced transitions
+// SyncedOnce to true and subsequent calls are idempotent.
+func TestProxy_MarkSynced_FlipsToTrue(t *testing.T) {
+	p := proxy.New()
+	p.MarkSynced()
+	if !p.SyncedOnce() {
+		t.Fatal("SyncedOnce should be true after MarkSynced")
+	}
+	p.MarkSynced() // idempotent
+	if !p.SyncedOnce() {
+		t.Fatal("SyncedOnce should still be true after a second MarkSynced")
+	}
+}
+
+// TestProxy_ReadyProbe_InjectedFuncOverridesIsWSReady verifies that when
+// SetAppReadyFunc is wired the probe answers from the injected predicate, not
+// from the local WS-handshake flag. Regression pin: a standby that never
+// observed a WS handshake must still report 200 if the injected func says yes.
+func TestProxy_ReadyProbe_InjectedFuncOverridesIsWSReady(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	// IsWSReady is false (no MarkWSReady called), but the injected func says ready.
+	p.SetAppReadyFunc(func(slug string) bool { return slug == "demo" })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (injected func overrides IsWSReady=false)", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"ready":true}` {
+		t.Errorf("body = %q, want {\"ready\":true}", got)
+	}
+}
+
+// TestProxy_ReadyProbe_InjectedFuncFalse verifies that a false return from the
+// injected predicate still yields a 503 cold-start response.
+func TestProxy_ReadyProbe_InjectedFuncFalse(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	p.SetAppReadyFunc(func(slug string) bool { return false })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 when injected func returns false", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"ready":false}` {
+		t.Errorf("body = %q, want {\"ready\":false}", got)
+	}
+}
+
+// TestProxy_ReadyProbe_SingleNodeFallback ensures that when no appReadyFunc is
+// set (single-node mode), the probe still answers from IsWSReady exactly as
+// before. This is a regression pin for single-node behaviour.
+func TestProxy_ReadyProbe_SingleNodeFallback(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+
+	// No SetAppReadyFunc call -- nil func pointer, single-node path.
+
+	req503 := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec503 := httptest.NewRecorder()
+	p.ServeHTTP(rec503, req503)
+	if rec503.Code != http.StatusServiceUnavailable {
+		t.Fatalf("before MarkWSReady: status = %d, want 503", rec503.Code)
+	}
+
+	p.MarkWSReady("demo")
+	req200 := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec200 := httptest.NewRecorder()
+	p.ServeHTTP(rec200, req200)
+	if rec200.Code != http.StatusOK {
+		t.Fatalf("after MarkWSReady: status = %d, want 200", rec200.Code)
+	}
+}
+
+// TestProxy_ReadyProbe_InjectedFunc404and405Preserved ensures the 404-unknown
+// and 405-method gates still apply when the injected predicate is wired.
+func TestProxy_ReadyProbe_InjectedFunc404and405Preserved(t *testing.T) {
+	p := proxy.New()
+	// appReadyFunc returns false for every slug; slugExists says "missing" is unknown.
+	p.SetAppReadyFunc(func(slug string) bool { return false })
+	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
+
+	// Unknown slug -> 404 even with injected func.
+	req404 := httptest.NewRequest(http.MethodGet, "/app/missing/.shinyhub/ready", nil)
+	rec404 := httptest.NewRecorder()
+	p.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Errorf("unknown slug: status = %d, want 404", rec404.Code)
+	}
+
+	// Known slug, wrong method -> 405 (injected func said false, known slug, so
+	// execution reaches the method gate).
+	req405 := httptest.NewRequest(http.MethodPost, "/app/known/.shinyhub/ready", nil)
+	rec405 := httptest.NewRecorder()
+	p.ServeHTTP(rec405, req405)
+	if rec405.Code != http.StatusMethodNotAllowed {
+		t.Errorf("wrong method: status = %d, want 405", rec405.Code)
+	}
+}
+
+// TestProxy_SetAppReadyFunc_NilReverts ensures that SetAppReadyFunc(nil) reverts
+// the probe to IsWSReady, allowing the single-node path to be restored if needed.
+func TestProxy_SetAppReadyFunc_NilReverts(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	p.SetAppReadyFunc(func(slug string) bool { return true }) // always ready
+	p.SetAppReadyFunc(nil)                                    // revert to IsWSReady
+
+	// IsWSReady is false, so with func reverted to nil we expect 503.
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("after SetAppReadyFunc(nil): status = %d, want 503", rec.Code)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
