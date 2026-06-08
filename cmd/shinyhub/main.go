@@ -647,6 +647,32 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			"instance", cfg.Server.InstanceID)
 	}
 
+	// In clustered deployments every instance runs a pool syncer that
+	// reconciles the proxy's backend pools against the DB replica table.
+	// This lets standbys serve off-host apps without relying on the local
+	// placement registry. Single-node deployments skip this entirely: the
+	// deploy fast-path and RecoverProcesses remain the sole pool-population
+	// paths, byte-for-byte unchanged.
+	var syncerWG sync.WaitGroup
+	var syncerCancel context.CancelFunc
+	if isClustered(cfg) {
+		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
+		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default())
+		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
+		syncerCancel = cancelSyncer
+		syncerWG.Add(1)
+		go func() {
+			defer syncerWG.Done()
+			syncer.Run(syncerCtx)
+		}()
+		// Wire the on-miss sync hook so a first-request for a freshly-started
+		// app is served immediately without waiting for the next background tick.
+		prx.SetOnMissSync(func(slug string) {
+			syncer.SyncSlug(syncerCtx, slug)
+		})
+		slog.Info("pool syncer started", "interval", proxy.PoolSyncInterval)
+	}
+
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetVersion(version)
 	if isClustered(cfg) {
@@ -1261,6 +1287,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if reporterCancel != nil {
 		reporterCancel()
 		reporterWG.Wait()
+	}
+	// Stop the pool syncer (clustered only). Nil out the on-miss hook after
+	// the syncer goroutine exits so a late-arriving request cannot invoke
+	// SyncSlug with an already-cancelled context.
+	if syncerCancel != nil {
+		syncerCancel()
+		syncerWG.Wait()
+		prx.SetOnMissSync(nil)
 	}
 	// Drain in-flight scheduled job runs before the store closes.
 	jobsMgr.Stop(shutdownCtx)

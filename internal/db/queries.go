@@ -1905,6 +1905,56 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	return out, rows.Err()
 }
 
+// RoutableReplica pairs a Replica row with the app slug it belongs to, plus
+// the app-level values the pool syncer needs to configure the pool without a
+// separate per-app lookup.
+type RoutableReplica struct {
+	Slug                  string
+	AppMaxSessionsPerRepl int // apps.max_sessions_per_replica
+	Replica               *Replica
+}
+
+// ListRoutableReplicas returns every replica whose status is 'running' or
+// 'draining', joined to the parent app to carry the slug and pool settings.
+// The result spans all apps regardless of the parent app's own status, so a
+// degraded app (the watcher marks apps degraded when a replica crashes) with
+// surviving running replicas stays routable. Ordered by app slug then replica
+// index.
+func (s *Store) ListRoutableReplicas() ([]RoutableReplica, error) {
+	rows, err := s.db.Query(`
+		SELECT a.slug, a.max_sessions_per_replica,
+		       r.app_id, r.idx, r.pid, r.port, r.status, r.provider, r.tier,
+		       r.endpoint_url, r.worker_id, r.app_version, r.desired_state,
+		       r.deployment_id, r.updated_at
+		FROM replicas r
+		JOIN apps a ON a.id = r.app_id
+		WHERE r.status IN ('running', 'draining')
+		ORDER BY a.slug, r.idx`)
+	if err != nil {
+		return nil, fmt.Errorf("list routable replicas: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutableReplica
+	for rows.Next() {
+		var slug string
+		var maxSess int
+		var r Replica
+		var updatedAt int64
+		if err := rows.Scan(&slug, &maxSess,
+			&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
+			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
+			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			return nil, fmt.Errorf("list routable replicas scan: %w", err)
+		}
+		r.UpdatedAt = time.Unix(updatedAt, 0)
+		out = append(out, RoutableReplica{Slug: slug, AppMaxSessionsPerRepl: maxSess, Replica: &r})
+	}
+	if out == nil {
+		out = []RoutableReplica{}
+	}
+	return out, rows.Err()
+}
+
 // AppHasRunningReplica reports whether the app identified by slug has at
 // least one replica row with status='running'. Used by the clustered
 // app-readiness probe so all instances answer consistently from the DB instead

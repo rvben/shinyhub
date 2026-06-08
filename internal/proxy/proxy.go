@@ -308,7 +308,17 @@ type Proxy struct {
 	// status so all instances answer consistently. When nil (single-node or
 	// before the syncer wires it), serveReadyProbe falls back to IsWSReady.
 	appReadyFunc atomic.Pointer[appReadyFuncT]
+
+	// onMissSync, when non-nil, is called synchronously before the loading page
+	// is served for a slug with no pool. In clustered mode the pool syncer wires
+	// this to SyncSlug so a freshly-active app is served without waiting for the
+	// next background tick. On single-node this remains nil and the miss path is
+	// byte-for-byte unchanged.
+	onMissSync atomic.Pointer[onMissSyncFuncT]
 }
+
+// onMissSyncFuncT is the signature for the injected on-miss synchronous sync.
+type onMissSyncFuncT func(slug string)
 
 // appReadyFuncT is the signature for the injected per-slug readiness predicate.
 type appReadyFuncT func(slug string) bool
@@ -566,6 +576,21 @@ func (p *Proxy) SetAppReadyFunc(fn func(slug string) bool) {
 	}
 	f := appReadyFuncT(fn)
 	p.appReadyFunc.Store(&f)
+}
+
+// SetOnMissSync registers a function called synchronously when a request
+// arrives for a slug with no live pool, before the loading page is served.
+// In clustered mode the pool syncer wires this to SyncSlug so a freshly-
+// active app becomes routable on the very first request rather than after the
+// next background tick. When fn is nil (the default, and always on single-node)
+// the miss path is byte-for-byte unchanged. Called at most once at startup.
+func (p *Proxy) SetOnMissSync(fn func(slug string)) {
+	if fn == nil {
+		p.onMissSync.Store(nil)
+		return
+	}
+	f := onMissSyncFuncT(fn)
+	p.onMissSync.Store(&f)
 }
 
 // clearWSReadyLocked drops any cached readiness for slug. Caller must hold
@@ -887,12 +912,42 @@ func (p *Proxy) ReplicaTargetURL(slug string, index int) string {
 	return pool.replicas[index].targetURL
 }
 
+// ReplicaDeploymentID returns the deployment ID stamped into the replica at
+// index for slug, or 0 if the slot is unset or the pool does not exist.
+// Used by the pool syncer to diff the current state against the DB row so
+// an unchanged slot is not re-registered (which would clear wsReady).
+func (p *Proxy) ReplicaDeploymentID(slug string, index int) int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return 0
+	}
+	if pool.replicas[index] == nil {
+		return 0
+	}
+	return pool.replicas[index].deploymentID
+}
+
 // Deregister removes the entire pool for slug from the routing table.
 func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
 	delete(p.pools, slug)
 	p.mu.Unlock()
 	p.clearWSReady(slug)
+}
+
+// RegisteredSlugs returns the set of slugs that currently have a pool entry.
+// Used by the pool syncer to deregister slugs that have no routable replicas
+// in the DB on a given sync pass.
+func (p *Proxy) RegisteredSlugs() map[string]struct{} {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]struct{}, len(p.pools))
+	for slug := range p.pools {
+		out[slug] = struct{}{}
+	}
+	return out
 }
 
 // BeginHibernate atomically removes slug from the routing table iff no
@@ -1140,13 +1195,39 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.writeUnknownApp(rec, r, slug)
 			return
 		}
-		if trigger != nil {
-			go trigger(slug)
+		// In clustered mode a synchronous targeted sync runs before the wake
+		// trigger: the DB may already have a running replica (registered by the
+		// owner's deploy path) that has not yet propagated to this instance's pool
+		// via the background ticker. After the sync, re-check the pool under the
+		// read lock; if a replica appeared, fall through to normal routing without
+		// a loading-page round-trip.
+		if syncFn := p.onMissSync.Load(); syncFn != nil {
+			(*syncFn)(slug)
+			p.mu.RLock()
+			pool = p.pools[slug]
+			trigger = p.wakeTrigger
+			if pool == nil || !poolHasAny(pool) {
+				p.mu.RUnlock()
+				// Sync populated nothing; serve loading page as usual.
+				if trigger != nil {
+					go trigger(slug)
+				}
+				rec.Header().Set("Content-Type", "text/html; charset=utf-8")
+				rec.WriteHeader(http.StatusOK)
+				rec.Write([]byte(loadingPage)) //nolint:errcheck
+				return
+			}
+			// Pool is now populated; fall through to the routing path below
+			// while still holding p.mu.RLock (matching the normal routing path).
+		} else {
+			if trigger != nil {
+				go trigger(slug)
+			}
+			rec.Header().Set("Content-Type", "text/html; charset=utf-8")
+			rec.WriteHeader(http.StatusOK)
+			rec.Write([]byte(loadingPage)) //nolint:errcheck
+			return
 		}
-		rec.Header().Set("Content-Type", "text/html; charset=utf-8")
-		rec.WriteHeader(http.StatusOK)
-		rec.Write([]byte(loadingPage)) //nolint:errcheck
-		return
 	}
 
 	picked, isStickyHit, saturated := p.pickReplicaLocked(pool, slug, r)
