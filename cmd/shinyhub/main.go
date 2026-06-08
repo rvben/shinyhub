@@ -919,21 +919,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// active reflects every worker row the previous owner wrote before it died.
 		// Fail-closed: retry until it succeeds or ownership is lost, so owner work
 		// (placement-affecting reconciles, loops, and admitted mutations) never runs
-		// on a stale index. A persistent ListWorkers failure means the DB is
-		// unusable, where no owner work could function anyway.
-		if workerReg != nil {
-			for {
-				if err := workerReg.Refresh(); err == nil {
-					break
-				} else {
-					slog.Error("worker registry refresh on acquire; not ready until it succeeds", "err", err)
-				}
-				select {
-				case <-octx.Done():
-					return // lost ownership before a fresh index; start no owner work
-				case <-time.After(2 * time.Second):
-				}
-			}
+		// on a stale index. A persistent failure means the DB is unusable, where no
+		// owner work could function anyway.
+		if workerReg != nil && !refreshUntilReady(octx, workerReg, registryRefreshBackoff, slog.Default()) {
+			return // lost ownership before a fresh index; start no owner work
 		}
 		ownerReady.Store(true) // gate opens: the index is fresh
 
