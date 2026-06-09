@@ -135,3 +135,81 @@ func appsContainSlug(apps []*db.App, slug string) bool {
 	}
 	return false
 }
+
+func TestReconcileFromManifest_AddUpdateDelete(t *testing.T) {
+	store := dbtest.New(t)
+	ownerID := agaOwner(t, store)
+	store.CreateApp(db.CreateAppParams{Slug: "m1", Name: "m1", OwnerID: ownerID})
+
+	skipped, err := store.ReconcileAppGroupAccessFromManifest("m1", []db.AppGroupRule{
+		{Group: "finance", Role: "viewer"},
+		{Group: "leads", Role: "manager"},
+	})
+	if err != nil || len(skipped) != 0 {
+		t.Fatalf("reconcile1: skipped=%v err=%v", skipped, err)
+	}
+	rules, _ := store.ListAppGroupAccess("m1")
+	if len(rules) != 2 {
+		t.Fatalf("rules=%v, want 2", rules)
+	}
+
+	if _, err := store.ReconcileAppGroupAccessFromManifest("m1", []db.AppGroupRule{
+		{Group: "finance", Role: "manager"},
+		{Group: "new", Role: "viewer"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rules, _ = store.ListAppGroupAccess("m1")
+	got := map[string]string{}
+	for _, r := range rules {
+		got[r.Group] = r.Role
+		if r.Source != "manifest" {
+			t.Fatalf("rule %s source=%s, want manifest", r.Group, r.Source)
+		}
+	}
+	if len(got) != 2 || got["finance"] != "manager" || got["new"] != "viewer" {
+		t.Fatalf("after reconcile2 got=%v (leads should be gone)", got)
+	}
+
+	if _, err := store.ReconcileAppGroupAccessFromManifest("m1", nil); err != nil {
+		t.Fatal(err)
+	}
+	rules, _ = store.ListAppGroupAccess("m1")
+	if len(rules) != 0 {
+		t.Fatalf("empty reconcile left %v", rules)
+	}
+}
+
+func TestReconcileFromManifest_PreservesManual(t *testing.T) {
+	store := dbtest.New(t)
+	ownerID := agaOwner(t, store)
+	store.CreateApp(db.CreateAppParams{Slug: "m2", Name: "m2", OwnerID: ownerID})
+
+	store.GrantAppGroupAccess("m2", "finance", "manager", "manual")
+
+	skipped, err := store.ReconcileAppGroupAccessFromManifest("m2", []db.AppGroupRule{
+		{Group: "finance", Role: "viewer"},
+		{Group: "analysts", Role: "viewer"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 1 || skipped[0] != "finance" {
+		t.Fatalf("skipped=%v, want [finance] (manual preempts manifest)", skipped)
+	}
+	rules, _ := store.ListAppGroupAccess("m2")
+	for _, r := range rules {
+		if r.Group == "finance" && (r.Role != "manager" || r.Source != "manual") {
+			t.Fatalf("manual finance was overwritten: %+v", r)
+		}
+		if r.Group == "analysts" && r.Source != "manifest" {
+			t.Fatalf("analysts should be manifest-sourced: %+v", r)
+		}
+	}
+
+	store.ReconcileAppGroupAccessFromManifest("m2", nil)
+	rules, _ = store.ListAppGroupAccess("m2")
+	if len(rules) != 1 || rules[0].Group != "finance" || rules[0].Source != "manual" {
+		t.Fatalf("manual row not preserved after empty reconcile: %v", rules)
+	}
+}
