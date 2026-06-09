@@ -124,7 +124,8 @@ Configure both values in YAML under `server:`:
 ```yaml
 server:
   lease_ttl: 30s          # default: 30s
-  lease_renew_every: 10s  # default: 10s; must be < lease_ttl / 2
+  lease_renew_every: 10s  # recommend < lease_ttl/2; ShinyHub raises the effective
+                          # TTL to at least 2x lease_renew_every if set higher
 ```
 
 ```
@@ -182,6 +183,41 @@ To get aggregate access logs and metrics across the cluster, ship logs to a
 centralized sink (e.g. a structured log aggregator, Loki, Datadog) and sum
 the per-instance counters in your dashboards. No built-in log aggregation is
 provided by ShinyHub itself.
+
+## Run an HA cluster locally
+
+You can run a two-instance HA cluster on one machine against a local Postgres to
+see failover behavior first-hand. Each instance is a `shinyhub serve` process
+with its own `server.port` and `server.instance_id`, sharing one `database.dsn`
+and the same `SHINYHUB_AUTH_SECRET` (the auth secret derives the sticky-cookie
+key, so a shared secret gives cross-instance session affinity):
+
+```yaml
+# instance-a.yaml (instance-b.yaml differs only in port + instance_id)
+server:
+  host: 127.0.0.1
+  port: 8080
+  instance_id: a
+  lease_ttl: 30s
+  lease_renew_every: 10s
+database:
+  dsn: postgres://shinyhub:secret@127.0.0.1:5432/shinyhub?sslmode=disable
+runtime:
+  tiers:
+    - name: fargate
+      runtime: fargate
+  fargate: { ... }   # your real off-host tier config
+```
+
+Start both with the same `SHINYHUB_AUTH_SECRET`, point a load balancer's health
+check at `/readyz` on both, and route app traffic to the `/readyz`-healthy pool.
+Exactly one instance reports `/activez=200` (the active control plane).
+
+This failover path is covered by an automated kill-the-active integration test
+(`make test-ha`): it boots two real instances against a throwaway Postgres,
+SIGKILLs the active, and asserts the standby keeps serving the same running
+replica immediately (sticky reconnect, no app restart) and then acquires the
+control-plane lease. Run it yourself with `make test-ha` (requires Docker).
 
 ## Summary: what the operator configures
 

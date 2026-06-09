@@ -75,6 +75,25 @@ jobs:
       - name: Zero-downtime handoff E2E
         run: make test-handoff
 
+  # Kill-the-active HA failover: two real shinyhub processes against one Postgres;
+  # SIGKILL the active and assert the standby keeps serving the same live replica
+  # and then acquires the control-plane lease. Its own job because it needs a
+  # Docker daemon (throwaway Postgres) and builds + runs the real binary.
+  # ubuntu-latest ships Docker, so no extra setup is needed.
+  test-ha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Kill-the-active HA failover (Docker + Postgres)
+        run: make test-ha
+
   # Skill smoke: deploys the deploy-shinyhub skill's example app onto a real
   # server (native runtime) and asserts the proxy serves it (HTTP 200). Guards
   # the skill against drift in CLI flags, env vars, or the deploy flow. Its own

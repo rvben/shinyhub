@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -38,6 +38,14 @@ test-handoff:
 # for `make test`.
 test-postgres:
 	./scripts/postgres-test.sh
+
+# test-ha builds the binary, spins up a throwaway Postgres, starts TWO shinyhub
+# instances against it, kills the active with SIGKILL, and asserts the standby
+# keeps serving the same live replica and acquires the control-plane lease.
+# Requires Docker. Gated behind the `integration` build tag, so `make test` and
+# `make test-postgres` never run it.
+test-ha:
+	./scripts/ha-failover-e2e.sh
 
 # test-fargate-it runs the Fargate runtime's real-cluster smoke test (launch a
 # task, assert routing + inventory, stop it). It is gated behind the `integration`
