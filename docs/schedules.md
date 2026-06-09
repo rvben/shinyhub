@@ -36,6 +36,7 @@ Fields:
 | `timeout` | Seconds before SIGTERM; SIGKILL after a 10-second grace. |
 | `overlap` | `skip` (default) drops new ticks while one is in flight; `queue` holds at most one extra; `concurrent` allows overlap. |
 | `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup. |
+| `run_on_register` | When `true`, fire this schedule once on first registration if the app has never had a successful run of it, warming the cache on a fresh deploy. CLI flag: `--run-on-register`. See "Warm on first deploy" below. |
 
 **Timezone PATCH tri-state:** The `timezone` key in a PATCH request has three distinct meanings:
 
@@ -96,6 +97,45 @@ shinyhub schedule run fetch daily-fetch --follow
 ```
 
 `--follow` tails the run's log until exit.
+
+## Warm on first deploy (`run_on_register`)
+
+A fresh deploy leaves an app's cache empty until the schedule first fires, which
+may be hours away (`0 5 * * *`). `run_on_register` closes that gap: when a
+schedule is registered for the first time on an app that has never had a
+successful run of it, the platform fires it once so the cache is warm by the
+time the first user arrives.
+
+```bash
+shinyhub schedule add fetch --name daily-fetch \
+    --cron "0 6 * * *" --cmd "python helpers/fetch.py" \
+    --run-on-register
+```
+
+Or in a `shinyhub.toml` manifest:
+
+```toml
+[[schedule]]
+name = "daily-fetch"
+cron = "0 6 * * *"
+cmd = "python helpers/fetch.py"
+run_on_register = true
+```
+
+Semantics:
+
+- **Gate: never succeeded.** A brand-new schedule fires once; a schedule that
+  has already succeeded is never re-fired by a re-deploy. A failed first-fire is
+  non-fatal and is re-attempted on the next deploy until a run succeeds. A
+  `disabled` schedule is never first-fired.
+- **Async by default.** The deploy returns immediately and the run warms the
+  cache in the background (a `register`-triggered run, visible in the run
+  history).
+- **Opt-in wait.** Pass `--wait-for-warm` to `shinyhub deploy` or
+  `shinyhub fleet apply` to block until the run finishes (within the deploy's
+  wait timeout). A genuine warm failure then exits non-zero; a `skipped_overlap`
+  (another run is already warming the schedule) is reported as "in progress",
+  not a failure.
 
 ## Sharing data between apps
 

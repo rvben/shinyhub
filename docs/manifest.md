@@ -116,6 +116,7 @@ mirrors the CLI fields.
 | `overlap` | no | `skip` (default), `queue`, or `concurrent`. |
 | `missed` | no | `skip` (default) or `run_once`. |
 | `disabled` | no | When `true`, the schedule row exists but the runner skips ticks. |
+| `run_on_register` | no | When `true`, fire this schedule once on first registration if the app has never had a *successful* run of it, warming the cache on a fresh deploy. Re-deploys of an already-warmed schedule do not re-fire. See [First-fire on register](#first-fire-on-register-run_on_register). |
 
 Exactly one of `cmd` or `cmd_json` is required. Both empty or both set is
 a parse error.
@@ -141,6 +142,31 @@ Schedules **not** present in the manifest are left alone — removing a
 `shinyhub schedule delete` or the UI to remove a schedule. This avoids
 silently dropping schedules that were created interactively while the
 manifest was being authored.
+
+### First-fire on register (`run_on_register`)
+
+Setting `run_on_register = true` makes the platform fire the schedule once,
+asynchronously, the first time it is registered on an app that has never had a
+successful run of it. This warms the app's cache on a fresh deploy without
+re-blocking every deploy the way a deploy-time `[[hook]]` would.
+
+The gate is "has this schedule ever succeeded?": a brand-new schedule fires; a
+schedule that has already succeeded is never re-fired by a re-deploy. A failed
+first-fire is non-fatal (the deploy stays live and durable) and is re-attempted
+on the next deploy until a run succeeds. A `disabled` schedule is never
+first-fired. If a re-deploy arrives while a first-fire is still running, the gate
+is still open (no success yet) and a second fire is dispatched, which the
+schedule's `overlap` policy (default `skip`) records as `skipped_overlap` rather
+than running the job twice.
+
+By default the fire is fire-and-forget: the deploy returns immediately and the
+run warms the cache in the background. Pass `--wait-for-warm` to `shinyhub deploy`
+or `shinyhub fleet apply` to block until the run completes (within the deploy's
+wait/health timeout); a genuine warm failure then exits non-zero, while a
+`skipped_overlap` (another run is already warming the same schedule) is treated
+as "in progress", not a failure. The imperative
+`shinyhub schedule add --run-on-register` fires the same way and reports the
+triggered run id (add `--follow` to stream it).
 
 ## `[[hook]]` — deploy lifecycle hooks
 
@@ -220,7 +246,7 @@ The wire shape:
   "manifest": {
     "app": { "replicas": 2, "max_sessions_per_replica": 10 },
     "schedules": [
-      { "name": "nightly", "action": "created" }
+      { "name": "nightly", "action": "created", "schedule_id": 7, "first_fire": { "run_id": 42 } }
     ]
   }
 }
@@ -230,6 +256,11 @@ The wire shape:
 is omitted when no `[[schedule]]` was upserted; the entire `manifest` key is
 omitted when the bundle has no `shinyhub.toml`. Top-level app fields stay in
 place so scripts that read `deploy_count` keep working.
+
+Each schedule entry carries its `schedule_id`; a `first_fire` object with the
+dispatched `run_id` is present only when `run_on_register` fired a run on this
+deploy. `shinyhub fleet apply --json` surfaces the same data per app under a
+`first_fires` array (with the run's `status` when `--wait-for-warm` waited).
 
 ## Worked example
 
