@@ -122,14 +122,15 @@ func withPragmas(dsn string) string {
 	return dsn + sep + strings.Join(pragmas, "&")
 }
 
-// isPostgresDSN reports whether the DSN selects the Postgres backend. Any other
+// IsPostgresDSN reports whether the DSN selects the Postgres backend. Any other
 // DSN (file path, :memory:, file: URI) is SQLite, preserving existing behavior.
-func isPostgresDSN(dsn string) bool {
+// This is the same dispatch check used by Open to pick the backend.
+func IsPostgresDSN(dsn string) bool {
 	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
 }
 
 func Open(dsn string) (*Store, error) {
-	if isPostgresDSN(dsn) {
+	if IsPostgresDSN(dsn) {
 		return openPostgres(dsn)
 	}
 	return openSQLite(dsn)

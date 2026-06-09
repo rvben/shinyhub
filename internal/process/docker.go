@@ -45,6 +45,9 @@ func dockerLabels(p StartParams) map[string]string {
 	if p.ContentDigest != "" {
 		labels[LabelContentDigest] = p.ContentDigest
 	}
+	if p.MaxSessions > 0 {
+		labels[LabelMaxSessions] = strconv.Itoa(p.MaxSessions)
+	}
 	return labels
 }
 

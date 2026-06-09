@@ -34,10 +34,10 @@ func TestE2E_ReplicasDistribution(t *testing.T) {
 
 	prx := proxy.New()
 	prx.SetPoolSize("demo", 2)
-	if err := prx.RegisterReplica("demo", 0, backend0.URL, nil); err != nil {
+	if err := prx.RegisterReplica("demo", 0, backend0.URL, nil, 0); err != nil {
 		t.Fatalf("register replica 0: %v", err)
 	}
-	if err := prx.RegisterReplica("demo", 1, backend1.URL, nil); err != nil {
+	if err := prx.RegisterReplica("demo", 1, backend1.URL, nil, 0); err != nil {
 		t.Fatalf("register replica 1: %v", err)
 	}
 

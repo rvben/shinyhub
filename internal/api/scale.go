@@ -10,6 +10,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 // defaultMaxReplicas is the fallback per-app replica ceiling when the runtime
@@ -212,7 +213,20 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 
 	if s.proxy != nil {
 		s.proxy.DrainReplica(slug, victim)
-		s.waitForDrain(slug, victim, grace)
+	}
+	// In clustered mode, persist drain intent to the DB so other instances'
+	// pool syncers can observe it and stop routing new sessions to this slot.
+	// This happens after the local CAS (DrainReplica) and before the wait so
+	// a standby starting its own syncer loop sees the intent immediately.
+	if s.clustered {
+		if err := s.store.SetReplicaDesiredState(app.ID, victim, "draining"); err != nil {
+			// Log and proceed: the intent is advisory for remote instances; the
+			// local drain wait and stop still happen normally.
+			slog.Warn("scale down: set desired_state draining", "slug", slug, "index", victim, "err", err)
+		}
+	}
+	if s.proxy != nil {
+		s.waitForDrain(slug, victim, grace, s.clusteredFleetWait(app.ID, victim))
 	}
 	if s.manager != nil {
 		if err := s.manager.StopReplica(slug, victim); err != nil {
@@ -226,11 +240,16 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 				// Any other failure means the replica may still be running (e.g. a
 				// remote worker rejected the SIGTERM). Shrinking the proxy and
 				// deleting the row now would orphan a live replica while the
-				// control plane believes capacity was removed. Roll back the drain
-				// mark so the still-running replica resumes full service, and abort
-				// with state intact.
+				// control plane believes capacity was removed. Roll back both the
+				// local drain mark and, in clustered mode, the desired_state row
+				// so the still-running replica resumes full service everywhere.
 				if s.proxy != nil {
 					s.proxy.UndrainReplica(slug, victim)
+				}
+				if s.clustered {
+					if rerr := s.store.SetReplicaDesiredState(app.ID, victim, "running"); rerr != nil {
+						slog.Warn("scale down: revert desired_state running", "slug", slug, "index", victim, "err", rerr)
+					}
 				}
 				return false, fmt.Errorf("scale down %s: stop replica %d: %w", slug, victim, err)
 			}
@@ -287,17 +306,45 @@ func lastPopulatedTier(placement map[string]int, tierOrder []string) string {
 
 // waitForDrain blocks until the active session count for slug's slot at index
 // reaches zero or grace elapses, whichever comes first. A nil or absent slot
-// (count -1) is treated as already drained.
-func (s *Server) waitForDrain(slug string, index int, grace time.Duration) {
+// (count -1) is treated as already drained. An optional fleetDrained predicate
+// (non-nil in clustered mode) must also return true for the drain to complete
+// early; when absent the local count alone governs early exit.
+func (s *Server) waitForDrain(slug string, index int, grace time.Duration, fleetDrained func() bool) {
 	deadline := time.Now().Add(grace)
 	for {
 		counts := s.proxy.ReplicaSessionCounts(slug)
-		if index >= len(counts) || counts[index] <= 0 {
+		localDrained := index >= len(counts) || counts[index] <= 0
+		fleetOK := fleetDrained == nil || fleetDrained()
+		if localDrained && fleetOK {
 			return
 		}
 		if !time.Now().Before(deadline) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// clusteredFleetWait returns a predicate that reports whether the fleet-wide
+// session count for the given app's replica index (excluding this instance)
+// has reached zero. Returns nil in single-node mode so waitForDrain skips the
+// fleet check. The predicate is deadline-bounded by the caller: waitForDrain
+// exits when its grace elapses regardless of what this predicate returns.
+func (s *Server) clusteredFleetWait(appID int64, idx int) func() bool {
+	if !s.clustered {
+		return nil
+	}
+	return func() bool {
+		staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+		active, _, err := s.store.AppFleetLoad(appID, staleWindowSec, s.instanceID)
+		if err != nil {
+			// Treat a store error as not-yet-drained (conservative); the
+			// deadline in waitForDrain ensures we do not block forever.
+			return false
+		}
+		if idx >= len(active) {
+			return true // no rows for this index = no sessions on other instances
+		}
+		return active[idx] <= 0
 	}
 }

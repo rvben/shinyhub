@@ -310,6 +310,7 @@ func Run(p Params) (*PoolResult, error) {
 
 	p.Proxy.SetPoolSize(p.Slug, total)
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
+	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
 
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.
@@ -509,6 +510,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 		DeploymentID:    p.DeploymentID,
 		ContentDigest:   p.ContentDigest,
 		TargetWorker:    targetWorker,
+		MaxSessions:     p.MaxSessionsPerReplica,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("start: %w", err)
@@ -526,7 +528,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 		return Result{}, fmt.Errorf("health: %w", err)
 	}
 
-	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport); err != nil {
+	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID); err != nil {
 		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
 			slog.Warn("deploy: stop replica after failed proxy register", "slug", p.Slug, "index", idx, "err", serr)
 		}

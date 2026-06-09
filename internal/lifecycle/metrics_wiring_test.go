@@ -77,7 +77,7 @@ func TestMetrics_WakeRecordsTransition(t *testing.T) {
 	rec := &fakeRecorder{}
 	w.SetMetrics(rec)
 
-	w.OnMiss("app")
+	w.WakeTrigger("app")
 	waitNotWaking(t, st, "app")
 
 	if !rec.hasTransition("wake") {

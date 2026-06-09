@@ -486,7 +486,7 @@ func TestScaleDown_StopFailureKeepsStateIntact(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer backend.Close()
 	srv.proxy.SetPoolSize("demo", 2)
-	if err := srv.proxy.RegisterReplica("demo", 1, backend.URL, nil); err != nil {
+	if err := srv.proxy.RegisterReplica("demo", 1, backend.URL, nil, 0); err != nil {
 		t.Fatalf("register victim backend: %v", err)
 	}
 
@@ -550,7 +550,7 @@ func TestScaleDown_ForceStopsAfterGraceWithActiveSessions(t *testing.T) {
 	defer backend.Close()
 
 	srv.proxy.SetPoolSize("demo", 2)
-	if err := srv.proxy.RegisterReplica("demo", 1, backend.URL, nil); err != nil {
+	if err := srv.proxy.RegisterReplica("demo", 1, backend.URL, nil, 0); err != nil {
 		t.Fatalf("register victim backend: %v", err)
 	}
 

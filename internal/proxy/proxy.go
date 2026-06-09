@@ -156,10 +156,11 @@ const MsgPoolSaturated = "Service temporarily at capacity, please retry."
 
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
-	index       int
-	targetURL   string // the URL passed to RegisterReplica; used for introspection
-	rp          *httputil.ReverseProxy
-	activeConns atomic.Int64
+	index        int
+	targetURL    string // the URL passed to RegisterReplica; used for introspection
+	deploymentID int64  // stamped into sticky cookies; mismatch causes re-pick on redeploy
+	rp           *httputil.ReverseProxy
+	activeConns  atomic.Int64
 	// draining marks a slot scheduled for graceful removal. The least-
 	// connections picker skips draining slots so no new cookie-less session
 	// is routed to it, but the sticky-cookie path still forwards, letting
@@ -174,11 +175,17 @@ type replicaBackend struct {
 // maxSessions is the per-replica active-connection cap. When every non-nil
 // replica is at or above this value, new requests without a valid sticky
 // cookie are shed with 503 (see ServeHTTP). A value of 0 disables the cap.
+//
+// appID is the numeric database primary key for the owning app. It is set by
+// SetPoolAppID at the same time the pool is created so the session reporter
+// can key replica_sessions rows without a DB lookup at snapshot time. Zero
+// means not yet set (reporter skips pools without an appID).
 type backendPool struct {
 	size        int
 	replicas    []*replicaBackend
 	rrCounter   atomic.Int64
 	maxSessions int
+	appID       int64
 }
 
 // AccessLogEntry describes a single proxied request. It is passed to the
@@ -219,10 +226,19 @@ type (
 
 // Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
-	mu         sync.RWMutex
-	pools      map[string]*backendPool
-	onMiss     func(slug string)
-	slugExists func(slug string) (bool, error)
+	mu          sync.RWMutex
+	pools       map[string]*backendPool
+	wakeTrigger func(slug string)
+	slugExists  func(slug string) (bool, error)
+
+	// forwardErrorWake enables the clustered forward-error recovery path.
+	// When true, a reverse-proxy upstream error triggers the wake trigger
+	// and serves the loading page (HTTP 200) instead of 502, so a client
+	// reconnects after a replica that was hibernated or stopped mid-request.
+	// Kept false on single-node deployments: the loading page has a bounded
+	// retry cap (~60 s), so the reconnect never loops indefinitely.
+	// Set once at startup via SetForwardErrorWake; read lock-free via atomic.
+	forwardErrorWake atomic.Bool
 
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
@@ -271,7 +287,41 @@ type Proxy struct {
 	// per-replica backend draining flag): while set, /readyz reports unready.
 	conns            *connTracker
 	instanceDraining atomic.Bool
+
+	// immediateFlush receives a slug when that slug's active-connection count
+	// rises from 0 to >0. The session reporter drains this channel to flush
+	// that slug's row immediately without waiting for the next periodic tick.
+	// Nil when the reporter is not wired (single-node or clustered but not yet
+	// started). Writes are non-blocking: a full channel means a flush is already
+	// pending for some slug and the current signal can be dropped safely.
+	immediateFlush chan string
+
+	// syncedOnce is true once the pool syncer has completed its first
+	// synchronisation from the authoritative DB. On single-node deployments it
+	// is pre-seeded true at startup (no syncer runs) so /readyz is unaffected.
+	// On clustered deployments the pool syncer calls MarkSynced after its first
+	// successful pass; until then /readyz returns 503 with reason "syncing".
+	syncedOnce atomic.Bool
+
+	// appReadyFunc, when non-nil, overrides IsWSReady for the readiness probe.
+	// The pool syncer wires this in clustered mode to answer from the DB replica
+	// status so all instances answer consistently. When nil (single-node or
+	// before the syncer wires it), serveReadyProbe falls back to IsWSReady.
+	appReadyFunc atomic.Pointer[appReadyFuncT]
+
+	// onMissSync, when non-nil, is called synchronously before the loading page
+	// is served for a slug with no pool. In clustered mode the pool syncer wires
+	// this to SyncSlug so a freshly-active app is served without waiting for the
+	// next background tick. On single-node this remains nil and the miss path is
+	// byte-for-byte unchanged.
+	onMissSync atomic.Pointer[onMissSyncFuncT]
 }
+
+// onMissSyncFuncT is the signature for the injected on-miss synchronous sync.
+type onMissSyncFuncT func(slug string)
+
+// appReadyFuncT is the signature for the injected per-slug readiness predicate.
+type appReadyFuncT func(slug string) bool
 
 func New() *Proxy {
 	return &Proxy{
@@ -302,9 +352,10 @@ func (p *Proxy) SetAccessLogger(fn func(AccessLogEntry)) {
 // the surrounding Server injects its trusted-proxy configuration into the
 // proxy without forming an import cycle. Safe to call concurrently with
 // ServeHTTP.
+
 // SetStickySecret enables HMAC signing of the sticky-routing cookie with the
 // given key (derive it from the server auth secret). Wire it at startup; when
-// unset the cookie is a bare replica index (back-compatible, unsigned).
+// unset the cookie carries a bare index and deployment ID without a signature.
 func (p *Proxy) SetStickySecret(key []byte) {
 	p.stickySecret.Store(&key)
 }
@@ -316,52 +367,77 @@ func (p *Proxy) stickySecretBytes() []byte {
 	return nil
 }
 
-// signStickyValue returns the signed sticky-cookie value for (slug, index):
-// "<index>.<hmac>", where the HMAC binds both the slug and the index so a value
-// cannot be replayed for a different app or edited to a different replica.
-func signStickyValue(key []byte, slug string, index int) string {
+// signStickyValue returns the signed sticky-cookie value "<index>.<deploymentID>.<hmac16>".
+// The HMAC binds slug, index, and deploymentID so a value cannot be replayed for a
+// different app, replica index, or deployment. Old 2-part cookies and bare integers do
+// not satisfy the 3-part format and are treated as stale, causing a re-pick.
+func signStickyValue(key []byte, slug string, index int, deploymentID int64) string {
 	mac := hmac.New(sha256.New, key)
-	fmt.Fprintf(mac, "%s\x00%d", slug, index)
-	return strconv.Itoa(index) + "." + hex.EncodeToString(mac.Sum(nil))[:16]
+	fmt.Fprintf(mac, "%s\x00%d\x00%d", slug, index, deploymentID)
+	return strconv.Itoa(index) + "." + strconv.FormatInt(deploymentID, 10) + "." + hex.EncodeToString(mac.Sum(nil))[:16]
 }
 
-// verifyStickyValue parses and authenticates a signed sticky-cookie value,
-// returning the replica index only when the signature matches (constant time).
-func verifyStickyValue(key []byte, slug, value string) (int, bool) {
-	idxStr, _, found := strings.Cut(value, ".")
+// verifyStickyValue parses and authenticates a signed sticky-cookie value.
+// Returns (index, deploymentID, true) only when the value is exactly 3 parts
+// and the HMAC matches. A 2-part old cookie or bare integer returns (0, 0, false).
+func verifyStickyValue(key []byte, slug, value string) (int, int64, bool) {
+	// Require exactly "<idx>.<depID>.<hmac>" — 3 dot-separated parts.
+	first, rest, found := strings.Cut(value, ".")
 	if !found {
-		return 0, false
+		return 0, 0, false
 	}
-	idx, err := strconv.Atoi(idxStr)
+	depStr, _, found2 := strings.Cut(rest, ".") // _ is the hmac segment; the full value is validated by hmac.Equal below
+	if !found2 {
+		// 2-part old format: stale.
+		return 0, 0, false
+	}
+	idx, err := strconv.Atoi(first)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	if !hmac.Equal([]byte(value), []byte(signStickyValue(key, slug, idx))) {
-		return 0, false
+	depID, err := strconv.ParseInt(depStr, 10, 64)
+	if err != nil {
+		return 0, 0, false
 	}
-	return idx, true
+	if !hmac.Equal([]byte(value), []byte(signStickyValue(key, slug, idx, depID))) {
+		return 0, 0, false
+	}
+	return idx, depID, true
 }
 
-// stickyIndex extracts the replica index from a sticky-cookie value, verifying
-// its signature when signing is enabled, or parsing a bare index otherwise.
-func (p *Proxy) stickyIndex(slug, value string) (int, bool) {
+// stickyIndex extracts the replica index and deployment ID from a sticky-cookie
+// value, verifying its signature when signing is enabled. In unsigned mode the
+// expected format is "<idx>.<deploymentID>"; a bare integer is treated as stale
+// (returns false) so the request re-picks via least-connections.
+func (p *Proxy) stickyIndex(slug, value string) (int, int64, bool) {
 	if key := p.stickySecretBytes(); len(key) > 0 {
 		return verifyStickyValue(key, slug, value)
 	}
-	idx, err := strconv.Atoi(value)
-	if err != nil {
-		return 0, false
+	// Unsigned mode: expect "<idx>.<deploymentID>".
+	idxStr, depStr, found := strings.Cut(value, ".")
+	if !found {
+		// Bare integer: old unsigned cookie treated as stale.
+		return 0, 0, false
 	}
-	return idx, true
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil {
+		return 0, 0, false
+	}
+	depID, err := strconv.ParseInt(depStr, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return idx, depID, true
 }
 
 // stickyCookieValue returns the value to store in the sticky cookie for a
-// replica index: signed when a key is configured, a bare index otherwise.
-func (p *Proxy) stickyCookieValue(slug string, index int) string {
+// replica index and deployment ID: signed when a key is configured,
+// "<idx>.<deploymentID>" in unsigned mode.
+func (p *Proxy) stickyCookieValue(slug string, index int, deploymentID int64) string {
 	if key := p.stickySecretBytes(); len(key) > 0 {
-		return signStickyValue(key, slug, index)
+		return signStickyValue(key, slug, index, deploymentID)
 	}
-	return strconv.Itoa(index)
+	return strconv.Itoa(index) + "." + strconv.FormatInt(deploymentID, 10)
 }
 
 // SetTrustedProxies configures the upstream-proxy CIDRs whose forwarding
@@ -402,12 +478,33 @@ func (p *Proxy) SetTracing(cfg config.TracingConfig, buf *tracing.Buffer) {
 	p.mu.Unlock()
 }
 
-// SetOnMiss registers a callback invoked (in a goroutine) when a request
-// arrives for a slug with no registered backend. Called by lifecycle.Watcher.
-func (p *Proxy) SetOnMiss(fn func(string)) {
+// SetWakeTrigger registers a callback invoked (in a goroutine) when a request
+// arrives for a slug with no registered backend, or when a forward error
+// occurs in clustered mode. The callback issues the BeginWake CAS and, if this
+// instance is the active owner, drives the wake inline. Called at startup on
+// EVERY instance (not owner-gated) so a standby can arm the DB waking transition
+// even though only the active executes the deploy.
+func (p *Proxy) SetWakeTrigger(fn func(string)) {
 	p.mu.Lock()
-	p.onMiss = fn
+	p.wakeTrigger = fn
 	p.mu.Unlock()
+}
+
+// getWakeTrigger returns the current wake trigger under the read lock.
+func (p *Proxy) getWakeTrigger() func(string) {
+	p.mu.RLock()
+	fn := p.wakeTrigger
+	p.mu.RUnlock()
+	return fn
+}
+
+// SetForwardErrorWake enables the clustered forward-error recovery path.
+// When true, a reverse-proxy upstream error calls the wake trigger and serves
+// the loading page (HTTP 200) so a client reconnects after a replica that was
+// stopped or hibernated mid-request. Must be set only in clustered mode: on
+// single-node, the standard 502 is preserved byte-for-byte.
+func (p *Proxy) SetForwardErrorWake(enable bool) {
+	p.forwardErrorWake.Store(enable)
 }
 
 // SetSlugExists registers a synchronous predicate that the proxy uses to
@@ -457,6 +554,43 @@ func (p *Proxy) IsWSReady(slug string) bool {
 	defer p.seenMu.RUnlock()
 	_, ok := p.wsReady[slug]
 	return ok
+}
+
+// MarkSynced marks the proxy as having completed at least one pool
+// synchronisation from the authoritative DB. On single-node deployments this
+// is called at startup so /readyz is unchanged. On clustered deployments the
+// pool syncer calls this after its first successful pass.
+func (p *Proxy) MarkSynced() { p.syncedOnce.Store(true) }
+
+// SyncedOnce reports whether MarkSynced has been called at least once.
+func (p *Proxy) SyncedOnce() bool { return p.syncedOnce.Load() }
+
+// SetAppReadyFunc wires an injected predicate that serveReadyProbe uses
+// instead of IsWSReady when determining whether a slug is ready. When fn is
+// nil (the default), serveReadyProbe reverts to IsWSReady. Called at most once
+// at startup; reads on the hot path are lock-free via atomic.Pointer.
+func (p *Proxy) SetAppReadyFunc(fn func(slug string) bool) {
+	if fn == nil {
+		p.appReadyFunc.Store(nil)
+		return
+	}
+	f := appReadyFuncT(fn)
+	p.appReadyFunc.Store(&f)
+}
+
+// SetOnMissSync registers a function called synchronously when a request
+// arrives for a slug with no live pool, before the loading page is served.
+// In clustered mode the pool syncer wires this to SyncSlug so a freshly-
+// active app becomes routable on the very first request rather than after the
+// next background tick. When fn is nil (the default, and always on single-node)
+// the miss path is byte-for-byte unchanged. Called at most once at startup.
+func (p *Proxy) SetOnMissSync(fn func(slug string)) {
+	if fn == nil {
+		p.onMissSync.Store(nil)
+		return
+	}
+	f := onMissSyncFuncT(fn)
+	p.onMissSync.Store(&f)
 }
 
 // clearWSReadyLocked drops any cached readiness for slug. Caller must hold
@@ -516,12 +650,47 @@ func (p *Proxy) SetPoolCap(slug string, max int) {
 	pool.maxSessions = max
 }
 
+// SetPoolAppID records the numeric database primary key for the app that owns
+// slug's pool. The session reporter uses this to write replica_sessions rows
+// keyed by app_id without a DB lookup at snapshot time. Call this alongside
+// SetPoolSize whenever the app's ID is known. Creates the pool (size 1) if it
+// does not yet exist. A zero appID is ignored so callers that do not know the
+// ID (e.g. single-node paths that never use the reporter) are safe to omit it.
+func (p *Proxy) SetPoolAppID(slug string, appID int64) {
+	if appID == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok {
+		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		p.pools[slug] = pool
+	}
+	pool.appID = appID
+}
+
+// EnableImmediateFlush wires the channel that the session reporter reads to
+// detect 0->active transitions. The channel must be buffered (capacity >= 1).
+// Call once at startup before serving; never call it again. Passing a nil
+// channel is a no-op (disables the feature, used by single-node paths).
+func (p *Proxy) EnableImmediateFlush(ch chan string) {
+	if ch == nil {
+		return
+	}
+	p.mu.Lock()
+	p.immediateFlush = ch
+	p.mu.Unlock()
+}
+
 // RegisterReplica registers a backend URL at the given index within slug's pool.
 // base is the HTTP transport used for outbound requests; nil uses the default
 // transport. Remote tunnel URLs may carry a path prefix (e.g. /v1/data/<token>)
-// that is prepended to every forwarded app-relative path.
+// that is prepended to every forwarded app-relative path. deploymentID is stamped
+// into the sticky cookie so a stale cookie from a previous deployment causes a
+// re-pick rather than pinning the client to a potentially wrong replica.
 // Returns an error if the pool size has not been set or the index is out of range.
-func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper) error {
+func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper, deploymentID int64) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("register %s#%d: invalid url: %w", slug, index, err)
@@ -546,10 +715,26 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	// Capture pre-response upstream failures (connection refused, timeout)
 	// onto the statusRecorder so the trace span surfaces span.Error. Mirrors
 	// httputil's default handler (log + 502) and adds the capture.
+	//
+	// In clustered mode (forwardErrorWake=true), an upstream error triggers the
+	// wake trigger and serves the loading page (HTTP 200) so the client retries
+	// automatically. A replica that was hibernated or stopped between the pool
+	// registration and the forwarded request causes this path; the loading page
+	// retries for up to ~60 s (bounded by loadingPageMaxRetries on the client).
+	// Single-node keeps the standard 502 byte-for-byte.
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
+		}
+		if p.forwardErrorWake.Load() {
+			if t := p.getWakeTrigger(); t != nil {
+				go t(slugCopy)
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(loadingPage)) //nolint:errcheck
+			return
 		}
 		w.WriteHeader(http.StatusBadGateway)
 	}
@@ -606,7 +791,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		}
 		req.Host = target.Host
 	}
-	pool.replicas[index] = &replicaBackend{index: index, targetURL: targetURL, rp: rp}
+	pool.replicas[index] = &replicaBackend{index: index, targetURL: targetURL, deploymentID: deploymentID, rp: rp}
 	// A freshly registered backend has not yet proven it accepts WS upgrades.
 	// Clearing here also covers the hot-redeploy path where a caller swaps
 	// replicas without an intermediate Deregister.
@@ -727,12 +912,42 @@ func (p *Proxy) ReplicaTargetURL(slug string, index int) string {
 	return pool.replicas[index].targetURL
 }
 
+// ReplicaDeploymentID returns the deployment ID stamped into the replica at
+// index for slug, or 0 if the slot is unset or the pool does not exist.
+// Used by the pool syncer to diff the current state against the DB row so
+// an unchanged slot is not re-registered (which would clear wsReady).
+func (p *Proxy) ReplicaDeploymentID(slug string, index int) int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return 0
+	}
+	if pool.replicas[index] == nil {
+		return 0
+	}
+	return pool.replicas[index].deploymentID
+}
+
 // Deregister removes the entire pool for slug from the routing table.
 func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
 	delete(p.pools, slug)
 	p.mu.Unlock()
 	p.clearWSReady(slug)
+}
+
+// RegisteredSlugs returns the set of slugs that currently have a pool entry.
+// Used by the pool syncer to deregister slugs that have no routable replicas
+// in the DB on a given sync pass.
+func (p *Proxy) RegisteredSlugs() map[string]struct{} {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]struct{}, len(p.pools))
+	for slug := range p.pools {
+		out[slug] = struct{}{}
+	}
+	return out
 }
 
 // BeginHibernate atomically removes slug from the routing table iff no
@@ -795,6 +1010,18 @@ func (p *Proxy) ReplicaSessionCounts(slug string) []int64 {
 	return out
 }
 
+// appIDForSlug returns the numeric database app ID recorded for slug's pool and
+// true, or 0 and false if the pool is not registered or has no ID set. Used by
+// FleetSignal to resolve slug->appID without a DB round-trip at signal time.
+func (p *Proxy) appIDForSlug(slug string) (int64, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if pool := p.pools[slug]; pool != nil && pool.appID != 0 {
+		return pool.appID, true
+	}
+	return 0, false
+}
+
 // PoolCap returns the per-replica session cap for slug, or 0 if the pool is
 // not registered or the cap is disabled.
 func (p *Proxy) PoolCap(slug string) int {
@@ -823,14 +1050,14 @@ func (p *Proxy) HasLiveReplica(slug string) bool {
 }
 
 // Register is kept for single-replica callers. It is equivalent to
-// SetPoolSize(slug, 1) + RegisterReplica(slug, 0, targetURL, nil).
+// SetPoolSize(slug, 1) + RegisterReplica(slug, 0, targetURL, nil, 0).
 func (p *Proxy) Register(slug, targetURL string) error {
 	p.SetPoolSize(slug, 1)
-	return p.RegisterReplica(slug, 0, targetURL, nil)
+	return p.RegisterReplica(slug, 0, targetURL, nil, 0)
 }
 
 // ServeHTTP handles /app/:slug/* requests. When the slug has no live replica,
-// the loading page is served and onMiss is invoked in a goroutine.
+// the loading page is served and the wake trigger is invoked in a goroutine.
 // Routing uses a sticky session cookie (shinyhub_rep_<slug>) pinned to a
 // specific replica index. On a cache miss or stale cookie, least-connections
 // with round-robin tie-breaking selects the replica and a new cookie is set.
@@ -956,7 +1183,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// are about to forward to.
 	p.mu.RLock()
 	pool := p.pools[slug]
-	onMiss := p.onMiss
+	trigger := p.wakeTrigger
 	if pool == nil || !poolHasAny(pool) {
 		p.mu.RUnlock()
 		// When the slug is confidently unknown, return a real 404 instead of
@@ -968,13 +1195,39 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.writeUnknownApp(rec, r, slug)
 			return
 		}
-		if onMiss != nil {
-			go onMiss(slug)
+		// In clustered mode a synchronous targeted sync runs before the wake
+		// trigger: the DB may already have a running replica (registered by the
+		// owner's deploy path) that has not yet propagated to this instance's pool
+		// via the background ticker. After the sync, re-check the pool under the
+		// read lock; if a replica appeared, fall through to normal routing without
+		// a loading-page round-trip.
+		if syncFn := p.onMissSync.Load(); syncFn != nil {
+			(*syncFn)(slug)
+			p.mu.RLock()
+			pool = p.pools[slug]
+			trigger = p.wakeTrigger
+			if pool == nil || !poolHasAny(pool) {
+				p.mu.RUnlock()
+				// Sync populated nothing; serve loading page as usual.
+				if trigger != nil {
+					go trigger(slug)
+				}
+				rec.Header().Set("Content-Type", "text/html; charset=utf-8")
+				rec.WriteHeader(http.StatusOK)
+				rec.Write([]byte(loadingPage)) //nolint:errcheck
+				return
+			}
+			// Pool is now populated; fall through to the routing path below
+			// while still holding p.mu.RLock (matching the normal routing path).
+		} else {
+			if trigger != nil {
+				go trigger(slug)
+			}
+			rec.Header().Set("Content-Type", "text/html; charset=utf-8")
+			rec.WriteHeader(http.StatusOK)
+			rec.Write([]byte(loadingPage)) //nolint:errcheck
+			return
 		}
-		rec.Header().Set("Content-Type", "text/html; charset=utf-8")
-		rec.WriteHeader(http.StatusOK)
-		rec.Write([]byte(loadingPage)) //nolint:errcheck
-		return
 	}
 
 	picked, isStickyHit, saturated := p.pickReplicaLocked(pool, slug, r)
@@ -1021,15 +1274,33 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isStickyHit {
 		http.SetCookie(rec, &http.Cookie{
 			Name:     cookiePrefix + slug,
-			Value:    p.stickyCookieValue(slug, picked.index),
+			Value:    p.stickyCookieValue(slug, picked.index, picked.deploymentID),
 			Path:     "/app/" + slug + "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
 		})
 	}
-	picked.activeConns.Add(1)
+	newConns := picked.activeConns.Add(1)
 	p.mu.RUnlock()
 	defer picked.activeConns.Add(-1)
+
+	// When this slug's local active count rises from 0 to 1, signal the session
+	// reporter for an immediate DB flush so other instances see the new session
+	// without waiting for the next periodic tick. The send is non-blocking: a
+	// full channel means a flush is already queued for this slug (or another)
+	// and the current signal is safely dropped.
+	// immediateFlush is read without holding p.mu: EnableImmediateFlush is
+	// called once at startup before ListenAndServe begins, so the write
+	// happens-before any ServeHTTP invocation and the field is never mutated
+	// again. The unsynchronised read is therefore race-free after startup.
+	if newConns == 1 {
+		if ch := p.immediateFlush; ch != nil {
+			select {
+			case ch <- slug:
+			default:
+			}
+		}
+	}
 
 	p.RecordActivity(slug)
 	// Thread the recorder through the request context only while tracing is on
@@ -1060,7 +1331,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // gate: a method complaint about a resource that doesn't exist on this server
 // is noise.
 func (p *Proxy) serveReadyProbe(w http.ResponseWriter, r *http.Request, slug string) {
-	ready := p.IsWSReady(slug)
+	var ready bool
+	if fn := p.appReadyFunc.Load(); fn != nil {
+		ready = (*fn)(slug)
+	} else {
+		ready = p.IsWSReady(slug)
+	}
 	// The unknown-vs-cold-start distinction only matters when we're about to
 	// answer "not ready": a ready slug is known by definition (a replica has
 	// handshaked), so the steady-state 200 path skips the existence lookup the
@@ -1287,9 +1563,17 @@ func forwardedForToken(remoteAddr string) string {
 // flag is set so ServeHTTP can shed the request with 503.
 func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Request) (best *replicaBackend, isSticky, saturated bool) {
 	if c, err := r.Cookie(cookiePrefix + slug); err == nil {
-		if idx, ok := p.stickyIndex(slug, c.Value); ok {
+		if idx, depID, ok := p.stickyIndex(slug, c.Value); ok {
 			if idx >= 0 && idx < len(pool.replicas) && pool.replicas[idx] != nil {
-				return pool.replicas[idx], true, false
+				rep := pool.replicas[idx]
+				// Honor the sticky pin only when the cookie's deployment ID matches
+				// the in-memory replica's deployment ID. A mismatch means the app
+				// was redeployed since the cookie was issued; fall through to
+				// least-connections so the client gets re-pinned to the current
+				// deployment without disruption (no 4xx, no panic).
+				if rep.deploymentID == depID {
+					return rep, true, false
+				}
 			}
 		}
 	}

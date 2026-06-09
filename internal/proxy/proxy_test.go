@@ -404,10 +404,10 @@ func TestProxyAccessLogStickyReplica(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("app", 2)
-	if err := p.RegisterReplica("app", 0, backend0.URL, nil); err != nil {
+	if err := p.RegisterReplica("app", 0, backend0.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("app", 1, backend1.URL, nil); err != nil {
+	if err := p.RegisterReplica("app", 1, backend1.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -455,8 +455,10 @@ func TestProxyAccessLogStickyReplica(t *testing.T) {
 	if !entries[1].Sticky {
 		t.Errorf("second request: Sticky should be true (cookie present)")
 	}
-	if strconvItoa(entries[1].ReplicaIndex) != cookieVal {
-		t.Errorf("second request: ReplicaIndex %d should match cookie %q", entries[1].ReplicaIndex, cookieVal)
+	// Cookie format is "<idx>.<deploymentID>[.<hmac>]"; verify the index prefix matches.
+	cookieIdx := strings.SplitN(cookieVal, ".", 2)[0]
+	if strconvItoa(entries[1].ReplicaIndex) != cookieIdx {
+		t.Errorf("second request: ReplicaIndex %d should match cookie index %q (cookie=%q)", entries[1].ReplicaIndex, cookieIdx, cookieVal)
 	}
 }
 
@@ -656,8 +658,8 @@ func TestProxy_ServesLoadingPageOnMiss(t *testing.T) {
 func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
 	p := proxy.New()
 	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
-	var onMissCalled bool
-	p.SetOnMiss(func(string) { onMissCalled = true })
+	var wakeTriggerCalled bool
+	p.SetWakeTrigger(func(string) { wakeTriggerCalled = true })
 
 	req := httptest.NewRequest("GET", "/app/typo/", nil)
 	rec := httptest.NewRecorder()
@@ -666,8 +668,8 @@ func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown slug, got %d (body=%q)", rec.Code, rec.Body.String())
 	}
-	if onMissCalled {
-		t.Error("onMiss should not fire for an unknown slug — wakeup is only meaningful for slugs that exist")
+	if wakeTriggerCalled {
+		t.Error("wake trigger should not fire for an unknown slug — wakeup is only meaningful for slugs that exist")
 	}
 }
 
@@ -683,7 +685,7 @@ func TestProxy_LookupErrorFallsThroughToLoadingPage(t *testing.T) {
 		return false, errors.New("database is locked")
 	})
 	done := make(chan struct{})
-	p.SetOnMiss(func(string) { close(done) })
+	p.SetWakeTrigger(func(string) { close(done) })
 
 	req := httptest.NewRequest("GET", "/app/maybe-real/", nil)
 	rec := httptest.NewRecorder()
@@ -698,7 +700,7 @@ func TestProxy_LookupErrorFallsThroughToLoadingPage(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Error("onMiss should still fire on lookup error — the slug might exist; we just couldn't tell")
+		t.Error("wake trigger should still fire on lookup error — the slug might exist; we just couldn't tell")
 	}
 }
 
@@ -706,7 +708,7 @@ func TestProxy_ServesLoadingPageWhenSlugKnown(t *testing.T) {
 	p := proxy.New()
 	p.SetSlugExists(func(slug string) (bool, error) { return true, nil })
 	done := make(chan struct{})
-	p.SetOnMiss(func(string) { close(done) })
+	p.SetWakeTrigger(func(string) { close(done) })
 
 	req := httptest.NewRequest("GET", "/app/sleeping/", nil)
 	rec := httptest.NewRecorder()
@@ -721,16 +723,16 @@ func TestProxy_ServesLoadingPageWhenSlugKnown(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Error("onMiss should fire for known hibernated slug")
+		t.Error("wake trigger should fire for known hibernated slug")
 	}
 }
 
-func TestProxy_CallsOnMissCallback(t *testing.T) {
+func TestProxy_CallsWakeTriggerCallback(t *testing.T) {
 	p := proxy.New()
 	var mu sync.Mutex
 	var called []string
 	done := make(chan struct{})
-	p.SetOnMiss(func(slug string) {
+	p.SetWakeTrigger(func(slug string) {
 		mu.Lock()
 		called = append(called, slug)
 		mu.Unlock()
@@ -744,12 +746,12 @@ func TestProxy_CallsOnMissCallback(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("onMiss not called within timeout")
+		t.Fatal("wake trigger not called within timeout")
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(called) != 1 || called[0] != "myapp" {
-		t.Errorf("expected onMiss('myapp') called once, got %v", called)
+		t.Errorf("expected wake trigger called once with 'myapp', got %v", called)
 	}
 }
 
@@ -757,13 +759,13 @@ func TestProxy_PoolRegister(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("demo", 3)
 
-	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil); err != nil {
+	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil); err != nil {
+	if err := p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.RegisterReplica("demo", 3, "http://x", nil); err == nil {
+	if err := p.RegisterReplica("demo", 3, "http://x", nil, 0); err == nil {
 		t.Fatal("expected error for out-of-range index")
 	}
 }
@@ -771,8 +773,8 @@ func TestProxy_PoolRegister(t *testing.T) {
 func TestProxy_DeregisterReplica(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil)
-	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil)
+	_ = p.RegisterReplica("demo", 0, "http://127.0.0.1:20001", nil, 0)
+	_ = p.RegisterReplica("demo", 1, "http://127.0.0.1:20002", nil, 0)
 
 	if !p.DeregisterReplicaIfTarget("demo", 0, "http://127.0.0.1:20001") {
 		t.Fatal("expected replica 0 to be deregistered")
@@ -799,8 +801,8 @@ func TestProxy_StickyCookie(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	rec := httptest.NewRecorder()
@@ -833,7 +835,7 @@ func TestProxy_StickyCookieStale(t *testing.T) {
 	defer b0.Close()
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1"})
@@ -848,8 +850,10 @@ func TestProxy_StickyCookieStale(t *testing.T) {
 			newCookie = c.Value
 		}
 	}
-	if newCookie != "0" {
-		t.Fatalf("expected new cookie=0, got %q", newCookie)
+	// New format: "<idx>.<deploymentID>" in unsigned mode. The replica was
+	// registered with deploymentID=0, so the new cookie is "0.0".
+	if newCookie != "0.0" {
+		t.Fatalf("expected new cookie=0.0, got %q", newCookie)
 	}
 }
 
@@ -1049,8 +1053,8 @@ func TestProxy_LeastConnectionsDistribution(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	for i := 0; i < 20; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
@@ -1097,8 +1101,8 @@ func TestProxy_SessionCap_Sheds503WhenAllSaturated(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 	p.SetPoolCap("demo", 1) // 1 in-flight per replica = 2 total capacity
 
 	// Launch 2 requests that will block in the backend handlers, pinning
@@ -1152,17 +1156,18 @@ func TestProxy_SessionCap_StickyCookieBypassesCap(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 	p.SetPoolCap("demo", 1)
 
 	// Pin one in-flight request against replica 0 so it sits at cap.
+	// Use the current unsigned cookie format "<idx>.<deploymentID>".
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
-		req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0"})
+		req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0.0"})
 		p.ServeHTTP(httptest.NewRecorder(), req)
 	}()
 	counts := waitForCount(p, "demo", func(c []int64) bool { return len(c) == 2 && c[0] >= 1 })
@@ -1175,7 +1180,7 @@ func TestProxy_SessionCap_StickyCookieBypassesCap(t *testing.T) {
 	// Sticky cookie to replica 1 must short-circuit the saturation check
 	// and forward — without the sticky bypass the test would 503.
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
-	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1"})
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "1.0"})
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1199,7 +1204,7 @@ func TestProxy_SessionCap_ZeroMeansUnlimited(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 1)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
 	p.SetPoolCap("demo", 0) // explicit "unlimited"
 
 	var wg sync.WaitGroup
@@ -1250,8 +1255,8 @@ func TestProxy_DrainReplica_NoNewCookielessSessions(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	if !p.DrainReplica("demo", 0) {
 		t.Fatal("DrainReplica returned false for a live slot")
@@ -1288,12 +1293,13 @@ func TestProxy_DrainReplica_StickySessionsStillRouted(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 	p.DrainReplica("demo", 0)
 
+	// Use the current unsigned cookie format "<idx>.<deploymentID>".
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
-	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0"})
+	req.AddCookie(&http.Cookie{Name: "shinyhub_rep_demo", Value: "0.0"})
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1338,8 +1344,8 @@ func TestProxy_UndrainReplica_RestoresRouting(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2)
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
-	_ = p.RegisterReplica("demo", 1, b1.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
 
 	p.DrainReplica("demo", 0)
 	if !p.UndrainReplica("demo", 0) {
@@ -1401,7 +1407,7 @@ func TestProxy_AllDrainingPool_ShedsWithoutPanic(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 1)
-	if err := p.RegisterReplica("demo", 0, b.URL, nil); err != nil {
+	if err := p.RegisterReplica("demo", 0, b.URL, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !p.DrainReplica("demo", 0) {
@@ -1442,7 +1448,7 @@ func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {
 
 	p := proxy.New()
 	p.SetPoolSize("demo", 2) // 2 slots, but only slot 0 is registered
-	_ = p.RegisterReplica("demo", 0, b0.URL, nil)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
 
 	counts := p.ReplicaSessionCounts("demo")
 	if len(counts) != 2 {
@@ -1572,7 +1578,7 @@ func TestProxy_ReadyProbe_ClearedByLifecycleEvents(t *testing.T) {
 		}},
 		{"RegisterReplica swap", func(p *proxy.Proxy) {
 			// Hot redeploy: re-register replica 0 in-place.
-			if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1", nil); err != nil {
+			if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1", nil, 0); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -1840,7 +1846,7 @@ func TestRegisterReplica_PrependsTargetPathAndUsesTransport(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := p.RegisterReplica("app", 0, target, tr); err != nil {
+	if err := p.RegisterReplica("app", 0, target, tr, 0); err != nil {
 		t.Fatalf("RegisterReplica: %v", err)
 	}
 
@@ -1853,6 +1859,138 @@ func TestRegisterReplica_PrependsTargetPathAndUsesTransport(t *testing.T) {
 	}
 	if gotPath != "/v1/data/tok123/health/ready" {
 		t.Errorf("backend path = %q, want /v1/data/tok123/health/ready", gotPath)
+	}
+}
+
+// TestProxy_SyncedOnce_DefaultFalse ensures that a freshly created proxy has
+// SyncedOnce() == false, so clustered /readyz starts gated.
+func TestProxy_SyncedOnce_DefaultFalse(t *testing.T) {
+	p := proxy.New()
+	if p.SyncedOnce() {
+		t.Fatal("SyncedOnce should be false on a fresh proxy")
+	}
+}
+
+// TestProxy_MarkSynced_FlipsToTrue ensures that MarkSynced transitions
+// SyncedOnce to true and subsequent calls are idempotent.
+func TestProxy_MarkSynced_FlipsToTrue(t *testing.T) {
+	p := proxy.New()
+	p.MarkSynced()
+	if !p.SyncedOnce() {
+		t.Fatal("SyncedOnce should be true after MarkSynced")
+	}
+	p.MarkSynced() // idempotent
+	if !p.SyncedOnce() {
+		t.Fatal("SyncedOnce should still be true after a second MarkSynced")
+	}
+}
+
+// TestProxy_ReadyProbe_InjectedFuncOverridesIsWSReady verifies that when
+// SetAppReadyFunc is wired the probe answers from the injected predicate, not
+// from the local WS-handshake flag. Regression pin: a standby that never
+// observed a WS handshake must still report 200 if the injected func says yes.
+func TestProxy_ReadyProbe_InjectedFuncOverridesIsWSReady(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	// IsWSReady is false (no MarkWSReady called), but the injected func says ready.
+	p.SetAppReadyFunc(func(slug string) bool { return slug == "demo" })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (injected func overrides IsWSReady=false)", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"ready":true}` {
+		t.Errorf("body = %q, want {\"ready\":true}", got)
+	}
+}
+
+// TestProxy_ReadyProbe_InjectedFuncFalse verifies that a false return from the
+// injected predicate still yields a 503 cold-start response.
+func TestProxy_ReadyProbe_InjectedFuncFalse(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	p.SetAppReadyFunc(func(slug string) bool { return false })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 when injected func returns false", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"ready":false}` {
+		t.Errorf("body = %q, want {\"ready\":false}", got)
+	}
+}
+
+// TestProxy_ReadyProbe_SingleNodeFallback ensures that when no appReadyFunc is
+// set (single-node mode), the probe still answers from IsWSReady exactly as
+// before. This is a regression pin for single-node behaviour.
+func TestProxy_ReadyProbe_SingleNodeFallback(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+
+	// No SetAppReadyFunc call -- nil func pointer, single-node path.
+
+	req503 := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec503 := httptest.NewRecorder()
+	p.ServeHTTP(rec503, req503)
+	if rec503.Code != http.StatusServiceUnavailable {
+		t.Fatalf("before MarkWSReady: status = %d, want 503", rec503.Code)
+	}
+
+	p.MarkWSReady("demo")
+	req200 := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec200 := httptest.NewRecorder()
+	p.ServeHTTP(rec200, req200)
+	if rec200.Code != http.StatusOK {
+		t.Fatalf("after MarkWSReady: status = %d, want 200", rec200.Code)
+	}
+}
+
+// TestProxy_ReadyProbe_InjectedFunc404and405Preserved ensures the 404-unknown
+// and 405-method gates still apply when the injected predicate is wired.
+func TestProxy_ReadyProbe_InjectedFunc404and405Preserved(t *testing.T) {
+	p := proxy.New()
+	// appReadyFunc returns false for every slug; slugExists says "missing" is unknown.
+	p.SetAppReadyFunc(func(slug string) bool { return false })
+	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
+
+	// Unknown slug -> 404 even with injected func.
+	req404 := httptest.NewRequest(http.MethodGet, "/app/missing/.shinyhub/ready", nil)
+	rec404 := httptest.NewRecorder()
+	p.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Errorf("unknown slug: status = %d, want 404", rec404.Code)
+	}
+
+	// Known slug, wrong method -> 405 (injected func said false, known slug, so
+	// execution reaches the method gate).
+	req405 := httptest.NewRequest(http.MethodPost, "/app/known/.shinyhub/ready", nil)
+	rec405 := httptest.NewRecorder()
+	p.ServeHTTP(rec405, req405)
+	if rec405.Code != http.StatusMethodNotAllowed {
+		t.Errorf("wrong method: status = %d, want 405", rec405.Code)
+	}
+}
+
+// TestProxy_SetAppReadyFunc_NilReverts ensures that SetAppReadyFunc(nil) reverts
+// the probe to IsWSReady, allowing the single-node path to be restored if needed.
+func TestProxy_SetAppReadyFunc_NilReverts(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	p.SetAppReadyFunc(func(slug string) bool { return true }) // always ready
+	p.SetAppReadyFunc(nil)                                    // revert to IsWSReady
+
+	// IsWSReady is false, so with func reverted to nil we expect 503.
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("after SetAppReadyFunc(nil): status = %d, want 503", rec.Code)
 	}
 }
 

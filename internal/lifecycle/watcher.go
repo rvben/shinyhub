@@ -27,6 +27,17 @@ type Config struct {
 	// DefaultMaxSessionsPerReplica is the runtime-wide session cap fallback
 	// applied on wake when an app has max_sessions_per_replica == 0.
 	DefaultMaxSessionsPerReplica int
+	// Clustered must be true when the deployment uses a shared Postgres
+	// database (isClustered). When true the watcher reaps stale
+	// replica_sessions rows on every tick and uses the conservative fleet-idle
+	// CAS for hibernation. When false (single-node SQLite) the reaper is
+	// skipped entirely and single-node behaviour is byte-for-byte unchanged.
+	Clustered bool
+	// InstanceID is the per-instance identifier used to exclude this
+	// instance's own replica_sessions rows from the fleet-idle check, so the
+	// active's local idle predicate (BeginHibernate) and the fleet predicate
+	// (AppFleetLoad) each cover a disjoint set of sessions.
+	InstanceID string
 }
 
 // replicaKey uniquely identifies a single replica within a slug.
@@ -44,12 +55,16 @@ type manager interface {
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
 type proxyBackend interface {
-	SetOnMiss(fn func(string))
 	LastSeen(slug string) time.Time
 	BeginHibernate(slug string, since time.Time) bool
 	Deregister(slug string)
 	SetPoolSize(slug string, size int)
 	SetPoolCap(slug string, max int)
+	// SetPoolAppID associates the numeric DB app ID with slug's pool so the
+	// session reporter can key replica_sessions rows without a DB lookup.
+	// A zero appID is ignored. Called alongside SetPoolSize wherever the app
+	// object is available.
+	SetPoolAppID(slug string, appID int64)
 }
 
 // MetricsRecorder records lifecycle business metrics. A nil recorder disables
@@ -70,7 +85,23 @@ type appStore interface {
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
+	ListWakingApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
+	// ReapStaleReplicaSessions removes replica_sessions rows whose updated_at
+	// is older than staleWindowSec seconds ago on the database clock. Called on
+	// every watcher tick (owner-gated) so rows from crashed or restarted
+	// instances are pruned promptly.
+	ReapStaleReplicaSessions(staleWindowSec int64) error
+	// HibernateApp atomically transitions a running app to "hibernated". Used
+	// by the clustered hibernation path: the CAS is issued before stopping
+	// replicas so any concurrent wake hits the hibernated->waking transition
+	// rather than finding the app still "running" but pool-less.
+	HibernateApp(slug string) (bool, error)
+	// AppFleetLoad returns the per-replica active session counts and the
+	// number of seconds since the most recent fleet activity (idleSinceSec),
+	// both measured on the database clock. Used by the clustered hibernation
+	// path to confirm that no other instance is currently serving traffic.
+	AppFleetLoad(appID int64, staleWindowSec int64, excludeInstanceID string) (active []int64, idleSinceSec int64, err error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -101,12 +132,24 @@ type Watcher struct {
 	// nil disables tracing. Set once via SetTracer before Start, then only read.
 	tracer trace.Tracer
 
+	// isOwner reports whether this instance currently holds the control-plane
+	// lease. Set once via SetIsOwner before Start; read on every wake trigger.
+	// When nil (tests or unconfigured setups) the instance is treated as owner
+	// so single-node behaviour is byte-for-byte unchanged.
+	isOwner func() bool
+
 	mu        sync.Mutex
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
 	attempts  map[replicaKey]int       // consecutive crash-restart attempts per replica
 	nextRetry map[replicaKey]time.Time // earliest time to retry a crashed replica
+	// driving tracks slugs currently being driven by driveWakingApp so a
+	// concurrent trigger (e.g. inline from the miss path and from the reconciler)
+	// does not spawn two parallel deploys for the same wake. The guard is
+	// in-memory only; it prevents the double-drive within one process while
+	// BeginWake's DB CAS prevents it across processes.
+	driving map[string]bool
 
-	// wakeWG tracks in-flight OnMiss wake goroutines so shutdown can wait
+	// wakeWG tracks in-flight driveWakingApp goroutines so shutdown can wait
 	// for them to persist replica/PID rows before the store is closed.
 	wakeWG sync.WaitGroup
 }
@@ -129,18 +172,28 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		deploy:    deployFn,
 		attempts:  make(map[replicaKey]int),
 		nextRetry: make(map[replicaKey]time.Time),
+		driving:   make(map[string]bool),
 	}
 }
 
-// Start wires up the onMiss callback on the proxy and launches the background
-// watchdog/hibernation loop. Blocks until ctx is cancelled. Safe to call
-// multiple times across ownership spans: resets the stopping flag so wakes
-// are admitted again after a previous span drained.
+// SetIsOwner wires the predicate that reports whether this instance currently
+// holds the control-plane lease. Call once at startup before any traffic
+// arrives. When unset (nil), the instance is treated as always-owner so
+// single-node wake behaviour is byte-for-byte unchanged.
+func (w *Watcher) SetIsOwner(fn func() bool) {
+	w.isOwner = fn
+}
+
+// Start launches the background watchdog/hibernation loop. Blocks until ctx is
+// cancelled. Safe to call multiple times across ownership spans: resets the
+// stopping flag so wakes are admitted again after a previous span drained.
+// The wake trigger is wired in main.go at startup on every instance (not inside
+// Start) so a standby instance can issue the BeginWake CAS on a miss even when
+// it is not the active owner.
 func (w *Watcher) Start(ctx context.Context) {
 	w.mu.Lock()
 	w.stopping = false
 	w.mu.Unlock()
-	w.prx.SetOnMiss(w.OnMiss)
 	ticker := time.NewTicker(w.cfg.WatchInterval)
 	defer ticker.Stop()
 	for {
@@ -233,6 +286,8 @@ func (w *Watcher) traceOp(ctx context.Context, op, slug string) (context.Context
 // runOnce processes all current manager entries for one watchdog/hibernation tick.
 // handleIdle is called at most once per slug — since idleness is per-app (not
 // per-replica), iterating the whole pool would redundantly hibernate the same app.
+// As the active (owner) instance it also reaps stale replica_sessions rows so
+// counts from crashed or restarted peers do not linger in the fleet view.
 func (w *Watcher) runOnce() {
 	idleChecked := make(map[string]bool)
 	handled := make(map[replicaKey]bool)
@@ -250,6 +305,28 @@ func (w *Watcher) runOnce() {
 	}
 	w.reconcileReplicas(handled)
 	w.reconcileStatuses()
+	// Reap stale replica_sessions rows only in clustered mode. Single-node
+	// deployments never write replica_sessions rows, so this DELETE is both
+	// unnecessary and a behavioral change we must avoid.
+	if w.cfg.Clustered {
+		staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+		if err := w.store.ReapStaleReplicaSessions(staleWindowSec); err != nil {
+			slog.Warn("watcher: reap stale replica sessions failed", "err", err)
+		}
+		// Drive any apps left in 'waking' by a standby's trigger. A standby
+		// issues BeginWake (hibernated->waking) on a miss but cannot deploy
+		// because it is not the active owner. The active's reconciler picks
+		// these up here and drives them to running. Single-node skips this path:
+		// the inline trigger drive in the wake trigger already handles it.
+		wakingApps, err := w.store.ListWakingApps()
+		if err != nil {
+			slog.Warn("watcher: list waking apps failed", "err", err)
+		} else {
+			for _, app := range wakingApps {
+				w.driveWakingApp(app.Slug)
+			}
+		}
+	}
 }
 
 // reconcileReplicas re-places replica slots the process manager is not actively
@@ -420,6 +497,10 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 
 // handleIdle checks whether a running app has been idle past its configured
 // timeout and hibernates it if so. It stops all replicas and zeroes replica rows.
+//
+// Single-node (!w.cfg.Clustered): the original path is taken byte-for-byte.
+// Clustered (w.cfg.Clustered): a conservative fleet-idle CAS is used. See
+// handleIdleClustered for the exact predicate and ordering.
 func (w *Watcher) handleIdle(slug string) {
 	app, err := w.store.GetAppBySlug(slug)
 	if err != nil {
@@ -439,6 +520,12 @@ func (w *Watcher) handleIdle(slug string) {
 		timeout = w.cfg.HibernateTimeout
 	}
 
+	if w.cfg.Clustered {
+		w.handleIdleClustered(app, timeout)
+		return
+	}
+
+	// Single-node path: byte-for-byte original behaviour.
 	lastActivity := w.prx.LastSeen(slug)
 	if lastActivity.IsZero() {
 		lastActivity = app.UpdatedAt // freshly deployed, never served
@@ -472,37 +559,175 @@ func (w *Watcher) handleIdle(slug string) {
 	w.recordTransition("hibernate")
 }
 
-// OnMiss is registered with the Proxy as the onMiss callback. When a request
-// arrives for a hibernated app, this wakes it by re-running the deploy for all
-// replicas in parallel.
-func (w *Watcher) OnMiss(slug string) {
-	// CAS: exactly one caller (across concurrent requests AND across a brief
-	// two-process control-plane overlap during a zero-downtime handoff)
-	// transitions hibernated -> waking and proceeds to spawn; everyone else
-	// returns. This replaces the former in-memory per-process waking guard.
+// handleIdleClustered is the clustered hibernation path. It uses a conservative
+// two-part idle predicate before issuing a DB CAS (running -> hibernated).
+//
+// Predicate order (all must pass):
+//  1. (A) Time-idle: time.Since(lastActivity) >= timeout.
+//  2. (B) Fleet-idle: AppFleetLoad(excludeSelf) reports no other instance has
+//     active sessions AND no other instance has recent last_activity within the
+//     timeout window.
+//  3. (C) Local CAS: BeginHibernate(lastActivity) atomically removes the local
+//     pool and returns true iff lastSeen has not advanced AND activeConns==0.
+//  4. (D) DB CAS: HibernateApp(slug) = UPDATE ... WHERE status='running'.
+//     One winner; the loser no-ops (idempotent).
+//
+// Only after the DB CAS wins: Stop replicas + UpsertReplica(stopped).
+//
+// Ordering rationale: the DB CAS is issued BEFORE mgr.Stop so that after commit
+// any request arriving on any instance triggers BeginWake (hibernated->waking)
+// rather than finding the app "running" with a removed pool. The brief sub-second
+// window between CAS-commit and replica-stop is acceptable for an idle app: a
+// stray request either hits a still-alive replica or triggers a harmless wake.
+//
+// Leadership-transfer safety: a stale old-active and a new active could both
+// evaluate this during handover, but correctness holds by construction:
+//   - The running->hibernated DB CAS is idempotent: exactly one caller wins.
+//   - mgr.Stop is idempotent: the loser's call is a no-op.
+//   - The fleet-idle check (B) uses AppFleetLoad(excludeSelf): each active's own
+//     sessions appear in the OTHER instance's fleet view, so neither hibernates
+//     an app that the other is actively serving.
+//
+// No owner-epoch fence is added to the CAS; it would be dead complexity.
+func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
+	slug := app.Slug
+
+	// (A) Time-idle check: compare local last-seen against the local clock.
+	// This is the only place the local wall clock appears, and it governs only
+	// the local idle predicate - never the cross-instance stale/idle decision.
+	lastActivity := w.prx.LastSeen(slug)
+	if lastActivity.IsZero() {
+		lastActivity = app.UpdatedAt
+	}
+	if time.Since(lastActivity) < timeout {
+		return
+	}
+
+	// (B) Fleet-idle check: consult other instances via replica_sessions rows.
+	// All freshness and idle comparisons are on the database clock (staleWindowSec
+	// and idleSinceSec), so the result is not affected by control-plane clock skew.
+	staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+	otherActive, otherIdleSinceSec, err := w.store.AppFleetLoad(app.ID, staleWindowSec, w.cfg.InstanceID)
+	if err != nil {
+		slog.Warn("watcher: fleet load for hibernation check failed", "slug", slug, "err", err)
+		return
+	}
+	// Sum other-instance active counts.
+	var totalOtherActive int64
+	for _, a := range otherActive {
+		totalOtherActive += a
+	}
+	if totalOtherActive > 0 {
+		return // another instance is actively serving; do not hibernate
+	}
+	// Check other instances' last_activity age: if any peer had recent activity
+	// within the timeout window, delay hibernation to let the peer's own idle
+	// check fire on its next tick without the active count double-counting.
+	// otherIdleSinceSec is a pure duration (db_now - MAX(last_activity)) so this
+	// comparison involves no local wall clock.
+	if otherIdleSinceSec < int64(timeout.Seconds()) {
+		return
+	}
+
+	// (C) Local CAS: atomically remove the local pool from routing iff no
+	// activity has been recorded since the snapshot AND no local request is
+	// in flight. If a request slipped in between (A) and here, abort.
+	if !w.prx.BeginHibernate(slug, lastActivity) {
+		return
+	}
+
+	// (D) DB CAS: running -> hibernated. Must happen BEFORE mgr.Stop so the
+	// wake path (BeginWake: hibernated->waking) is armed immediately after commit.
+	won, err := w.store.HibernateApp(slug)
+	if err != nil {
+		slog.Warn("watcher: hibernate CAS failed", "slug", slug, "err", err)
+		return
+	}
+	if !won {
+		// Another active (e.g. during a concurrent handoff) already won the CAS
+		// or moved the app to a different state. The local pool was already
+		// removed by BeginHibernate. Until the DB-driven pool syncer is wired,
+		// this is a transient gap: the replicas keep running but are unreachable
+		// via this instance's proxy until the pool is restored on a later tick
+		// or wake. This is an idempotent no-op: no stop.
+		return
+	}
+
+	_, endSpan := w.traceOp(context.Background(), "lifecycle.hibernate", slug)
+	defer func() { endSpan(nil) }()
+
+	if err := w.mgr.Stop(slug); err != nil {
+		slog.Warn("watcher: stop on hibernate failed", "slug", slug, "err", err)
+	}
+	for i := 0; i < app.Replicas; i++ {
+		if err := w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped"}); err != nil {
+			slog.Warn("watcher: persist hibernated replica failed", "slug", slug, "index", i, "err", err)
+		}
+	}
+	// Do NOT call UpdateAppStatus(hibernated) here: the DB CAS (D) already set
+	// the status. Calling it again would be redundant and would unconditionally
+	// overwrite any concurrent status change (e.g. an immediate wake).
+	w.recordTransition("hibernate")
+}
+
+// WakeTrigger is the callback wired on the proxy as the wake trigger. It runs
+// on EVERY instance (active and standby alike). It issues the BeginWake CAS
+// (hibernated->waking) so the DB state reflects the wake intent regardless of
+// which instance holds the lease. If this instance is the active owner, it also
+// drives the wake inline via driveWakingApp; a standby leaves the app in the
+// 'waking' state for the active's runOnce reconciler to pick up.
+func (w *Watcher) WakeTrigger(slug string) {
 	won, err := w.store.BeginWake(slug)
 	if err != nil {
 		slog.Warn("watcher: begin wake failed", "slug", slug, "err", err)
 		return
 	}
 	if !won {
-		return // not hibernated, or another caller is already waking it
+		return // not hibernated, or another caller already won the CAS
 	}
+	// Only the active owner drives the wake inline. A standby leaves the
+	// app in 'waking'; the active's runOnce reconciler drives it on the next
+	// tick (clustered-gated).
+	owner := w.isOwner == nil || w.isOwner()
+	if !owner {
+		return
+	}
+	w.driveWakingApp(slug)
+}
 
+// driveWakingApp deploys all replicas for a slug that is already in the
+// 'waking' DB state (the BeginWake CAS was already won by the caller or a peer).
+// It MUST NOT call BeginWake itself. An in-memory guard prevents two concurrent
+// calls from spawning duplicate deploys for the same slug within this process;
+// the DB BeginWake CAS guards across processes.
+func (w *Watcher) driveWakingApp(slug string) {
 	w.mu.Lock()
 	if w.stopping {
 		w.mu.Unlock()
-		// We won the CAS but are shutting down; revert so a successor wakes it.
+		// We are shutting down; revert so a successor wakes it.
 		if aerr := w.store.AbortWake(slug); aerr != nil {
 			slog.Warn("watcher: abort wake on shutdown failed", "slug", slug, "err", aerr)
 		}
 		return
 	}
+	if w.driving[slug] {
+		// Another goroutine within this process is already driving this wake.
+		// The DB CAS prevents a second process from racing us, so this is safe
+		// to skip entirely.
+		w.mu.Unlock()
+		return
+	}
+	w.driving[slug] = true
 	w.wakeWG.Add(1)
 	w.mu.Unlock()
 
 	go func() {
-		defer w.wakeWG.Done()
+		defer func() {
+			w.mu.Lock()
+			delete(w.driving, slug)
+			w.mu.Unlock()
+			w.wakeWG.Done()
+		}()
 
 		_, endSpan := w.traceOp(context.Background(), "lifecycle.wake", slug)
 		var opErr error
@@ -546,7 +771,9 @@ func (w *Watcher) OnMiss(slug string) {
 
 		w.prx.SetPoolSize(slug, app.Replicas)
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
+		w.prx.SetPoolAppID(slug, app.ID)
 
+		deploymentID := deployments[0].ID
 		var wg sync.WaitGroup
 		var started atomic.Int32
 		for i := 0; i < app.Replicas; i++ {
@@ -571,6 +798,7 @@ func (w *Watcher) OnMiss(slug string) {
 					WorkerID:     res.WorkerID,
 					AppVersion:   deployments[0].Version,
 					DesiredState: "running",
+					DeploymentID: &deploymentID,
 				}); err != nil {
 					slog.Warn("watcher: persist woken replica failed", "slug", slug, "index", idx, "err", err)
 				}

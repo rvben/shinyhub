@@ -524,6 +524,28 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListWakingApps returns all apps whose status is 'waking'. Used by the
+// active owner's runOnce reconciler to drive apps whose wake was triggered by
+// a standby instance (which issues the BeginWake CAS but cannot deploy).
+func (s *Store) ListWakingApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + appColumns + deploymentSummarySQL + `
+		FROM apps WHERE status = 'waking'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // ListRunningApps returns all apps whose status is 'running'. Used on startup
 // to re-adopt processes that survived a server restart.
 func (s *Store) ListRunningApps() ([]*App, error) {
@@ -798,6 +820,27 @@ func (s *Store) FinishWake(slug string) (bool, error) {
 	)
 	if err != nil {
 		return false, fmt.Errorf("finish wake: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// HibernateApp atomically transitions a running app to "hibernated" and reports
+// whether THIS caller won the transition. The CAS guards against a concurrent
+// wake or handoff that already moved the app off "running": if the app is not
+// in "running" state the transition is a no-op and won=false is returned.
+//
+// Callers must issue this CAS BEFORE stopping replicas so that any request
+// arriving after the CAS commit hits BeginWake (hibernated->waking) instead of
+// an app that is still "running" but has already had its pool removed.
+func (s *Store) HibernateApp(slug string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE apps SET status = 'hibernated', updated_at = CURRENT_TIMESTAMP
+		   WHERE slug = ? AND status = 'running'`,
+		slug,
+	)
+	if err != nil {
+		return false, fmt.Errorf("hibernate app: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n == 1, nil
@@ -1862,11 +1905,95 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	return out, rows.Err()
 }
 
+// RoutableReplica pairs a Replica row with the app slug it belongs to, plus
+// the app-level values the pool syncer needs to configure the pool without a
+// separate per-app lookup.
+type RoutableReplica struct {
+	Slug                  string
+	AppMaxSessionsPerRepl int // apps.max_sessions_per_replica
+	Replica               *Replica
+}
+
+// ListRoutableReplicas returns every replica whose status is 'running' or
+// 'draining', joined to the parent app to carry the slug and pool settings.
+// The result spans all apps regardless of the parent app's own status, so a
+// degraded app (the watcher marks apps degraded when a replica crashes) with
+// surviving running replicas stays routable. Ordered by app slug then replica
+// index.
+func (s *Store) ListRoutableReplicas() ([]RoutableReplica, error) {
+	rows, err := s.db.Query(`
+		SELECT a.slug, a.max_sessions_per_replica,
+		       r.app_id, r.idx, r.pid, r.port, r.status, r.provider, r.tier,
+		       r.endpoint_url, r.worker_id, r.app_version, r.desired_state,
+		       r.deployment_id, r.updated_at
+		FROM replicas r
+		JOIN apps a ON a.id = r.app_id
+		WHERE r.status IN ('running', 'draining')
+		ORDER BY a.slug, r.idx`)
+	if err != nil {
+		return nil, fmt.Errorf("list routable replicas: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutableReplica
+	for rows.Next() {
+		var slug string
+		var maxSess int
+		var r Replica
+		var updatedAt int64
+		if err := rows.Scan(&slug, &maxSess,
+			&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
+			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
+			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			return nil, fmt.Errorf("list routable replicas scan: %w", err)
+		}
+		r.UpdatedAt = time.Unix(updatedAt, 0)
+		out = append(out, RoutableReplica{Slug: slug, AppMaxSessionsPerRepl: maxSess, Replica: &r})
+	}
+	if out == nil {
+		out = []RoutableReplica{}
+	}
+	return out, rows.Err()
+}
+
+// AppHasRunningReplica reports whether the app identified by slug has at
+// least one replica row with status='running'. Used by the clustered
+// app-readiness probe so all instances answer consistently from the DB instead
+// of relying on a locally-observed WebSocket handshake.
+func (s *Store) AppHasRunningReplica(slug string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM replicas r
+			JOIN apps a ON a.id = r.app_id
+			WHERE a.slug = ? AND r.status = 'running'
+		)`, slug).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("app has running replica: %w", err)
+	}
+	return exists, nil
+}
+
 // DeleteReplica removes the replica at the given index for an app.
 func (s *Store) DeleteReplica(appID int64, index int) error {
 	_, err := s.db.Exec(`DELETE FROM replicas WHERE app_id = ? AND idx = ?`, appID, index)
 	if err != nil {
 		return fmt.Errorf("delete replica: %w", err)
+	}
+	return nil
+}
+
+// SetReplicaDesiredState updates the desired_state column for a single replica
+// row identified by (app_id, idx). It is used by the distributed scale-down
+// path to record drain intent before the stop, so other instances' pool syncers
+// can observe the intent and stop routing new sessions to the slot. Callers
+// pass "draining" before the drain wait and "running" to revert on stop failure.
+func (s *Store) SetReplicaDesiredState(appID int64, idx int, state string) error {
+	_, err := s.db.Exec(
+		`UPDATE replicas SET desired_state = ? WHERE app_id = ? AND idx = ?`,
+		state, appID, idx,
+	)
+	if err != nil {
+		return fmt.Errorf("set replica desired state: %w", err)
 	}
 	return nil
 }

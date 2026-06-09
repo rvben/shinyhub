@@ -129,6 +129,10 @@ type StartParams struct {
 	// live load, which is correct for a single-replica boot (e.g. a watchdog
 	// restart). Runtimes that do not route to workers ignore it.
 	TargetWorker string
+	// MaxSessions is the per-replica active-connection hard cap enforced at the
+	// worker data plane. 0 means no cap. Persisted as a Docker label so re-adoption
+	// after an agent restart restores the same limit.
+	MaxSessions int
 }
 
 type entry struct {

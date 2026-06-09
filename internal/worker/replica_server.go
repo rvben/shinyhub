@@ -12,7 +12,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/go-chi/chi/v5"
@@ -28,6 +30,11 @@ type replicaRecord struct {
 	containerID string
 	handle      process.RunHandle
 	hostPort    int // host publish port the in-container bind port maps to
+	// maxSessions is the per-replica active-connection hard cap. 0 means no cap.
+	maxSessions int
+	// activeConns is the count of data-plane requests currently being served by
+	// this replica. Incremented on accept, decremented when the handler returns.
+	activeConns atomic.Int64
 }
 
 // BundleEnsurer makes an app bundle present on the worker's local disk,
@@ -198,6 +205,7 @@ func (s *replicaServer) buildStartParams(ctx context.Context, reqBody api.Replic
 		AppVersion:      reqBody.AppVersion,
 		DeploymentID:    reqBody.DeploymentID,
 		ContentDigest:   reqBody.ContentDigest,
+		MaxSessions:     reqBody.MaxSessions,
 	}
 	if s.bundles != nil {
 		if reqBody.ContentDigest == "" {
@@ -251,6 +259,7 @@ func (s *replicaServer) handleStart(w http.ResponseWriter, r *http.Request) {
 		containerID: endpoint.Handle.ContainerID,
 		handle:      endpoint.Handle,
 		hostPort:    hostPort,
+		maxSessions: reqBody.MaxSessions,
 	}
 	s.mu.Lock()
 	s.byContainer[rec.containerID] = rec
@@ -367,6 +376,13 @@ func (s *replicaServer) handleRunOnce(w http.ResponseWriter, r *http.Request) {
 // handleData reverse-proxies a data-plane request to the worker-local host port
 // the replica's container is published on. The /v1/data/{token} prefix is
 // stripped so the backend sees the app-relative path.
+//
+// When maxSessions > 0, the handler enforces a hard active-connection cap:
+// it atomically increments the counter, and if the new value exceeds the cap it
+// decrements and responds 503 without proxying. Established long-lived
+// connections (e.g. WebSocket) hold the handler goroutine open and therefore
+// remain counted for their full lifetime; only new connections beyond the cap
+// are shed.
 func (s *replicaServer) handleData(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
 	s.mu.RLock()
@@ -379,6 +395,19 @@ func (s *replicaServer) handleData(w http.ResponseWriter, r *http.Request) {
 	if rec.hostPort == 0 {
 		http.Error(w, "replica port not resolved", http.StatusServiceUnavailable)
 		return
+	}
+
+	// Enforce the per-replica session cap. Increment first so concurrent admits
+	// cannot both read the same count and both pass; decrement on the 503 path
+	// so the slot is released immediately and the next request can take it.
+	if rec.maxSessions > 0 {
+		n := rec.activeConns.Add(1)
+		if n > int64(rec.maxSessions) {
+			rec.activeConns.Add(-1)
+			http.Error(w, "replica session cap reached", http.StatusServiceUnavailable)
+			return
+		}
+		defer rec.activeConns.Add(-1)
 	}
 
 	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", rec.hostPort)}
@@ -436,6 +465,26 @@ func (s *replicaServer) RebuildFromContainers() error {
 			} else {
 				rec.hostPort = port
 			}
+		}
+		// Restore the per-replica session cap from the container label. A missing
+		// or unparseable label (e.g. a container started by an older version before
+		// this label existed) is treated as no cap so re-adoption does not refuse a
+		// healthy app. The CP-side soft admission still sheds at the configured
+		// ceiling; the blast radius is bounded until the app is redeployed to
+		// persist the label.
+		//
+		// "0" is a valid parseable value meaning uncapped - it must not warn.
+		// Warn only on a genuinely missing label or an unparseable value.
+		if capStr, ok := c.Labels[process.LabelMaxSessions]; ok {
+			if n, err := strconv.Atoi(capStr); err == nil {
+				rec.maxSessions = n // 0 = uncapped, positive = enforced
+			} else {
+				slog.Warn("agent: re-adopted container has unparseable max_sessions label; treating as uncapped - redeploy to restore cap",
+					"container", c.ID, "value", capStr)
+			}
+		} else {
+			slog.Warn("agent: re-adopted container has no max_sessions label; treating as uncapped - redeploy to restore cap",
+				"container", c.ID)
 		}
 		s.byContainer[c.ID] = rec
 		s.byToken[token] = rec

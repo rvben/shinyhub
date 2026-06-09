@@ -165,10 +165,10 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 	// session counters and the cap, never forwards traffic.
 	prx.SetPoolSize("myapp", 2)
 	prx.SetPoolCap("myapp", 15)
-	if err := prx.RegisterReplica("myapp", 0, "http://127.0.0.1:1", nil); err != nil {
+	if err := prx.RegisterReplica("myapp", 0, "http://127.0.0.1:1", nil, 0); err != nil {
 		t.Fatalf("register replica 0: %v", err)
 	}
-	if err := prx.RegisterReplica("myapp", 1, "http://127.0.0.1:2", nil); err != nil {
+	if err := prx.RegisterReplica("myapp", 1, "http://127.0.0.1:2", nil, 0); err != nil {
 		t.Fatalf("register replica 1: %v", err)
 	}
 
@@ -262,7 +262,7 @@ func TestGetMetrics_StoppedReplicaSlot(t *testing.T) {
 
 	prx.SetPoolSize("myapp", 2)
 	prx.SetPoolCap("myapp", 0) // uncapped
-	if err := prx.RegisterReplica("myapp", 1, "http://127.0.0.1:1", nil); err != nil {
+	if err := prx.RegisterReplica("myapp", 1, "http://127.0.0.1:1", nil, 0); err != nil {
 		t.Fatalf("register replica 1: %v", err)
 	}
 

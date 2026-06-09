@@ -176,6 +176,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		}
 		prx.SetPoolSize(app.Slug, app.Replicas)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
+		prx.SetPoolAppID(app.Slug, app.ID)
 		bundleDir := activeBundleDir(store, app.ID)
 
 		anyAlive := false
@@ -354,7 +355,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("http://127.0.0.1:%d", *r.Port)
 	}
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID)); err != nil {
 		slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}
@@ -372,6 +373,14 @@ func markReplicaCrashed(store *db.Store, app *db.App, index int, reason string) 
 		slog.Warn("recovery: persist crashed replica failed",
 			"slug", app.Slug, "idx", index, "reason", reason, "err", err)
 	}
+}
+
+// derefInt64 dereferences a nullable int64 pointer, returning 0 for nil.
+func derefInt64(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // recoverContainerReplica re-adopts a single container-backed replica by
@@ -420,7 +429,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		EndpointURL: r.EndpointURL,
 		WorkerID:    r.WorkerID,
 	}, process.RunHandle{ContainerID: cID})
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID)); err != nil {
 		slog.Error("recovery: register docker proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}

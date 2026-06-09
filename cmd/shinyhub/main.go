@@ -186,6 +186,38 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 	return srv, ln, nil
 }
 
+// isClustered reports whether cfg is using the Postgres backend, which means
+// multiple control-plane instances may share the same database. The check
+// reuses the same scheme-prefix dispatch that db.Open uses to pick a backend,
+// so the two can never disagree.
+func isClustered(cfg *config.Config) bool {
+	return db.IsPostgresDSN(cfg.Database.DSN)
+}
+
+// checkClusteredRuntimeTiers returns an error when a clustered deployment
+// (Postgres DSN) includes a local-only tier (native or docker). Local runtimes
+// bind loopback ports on a single host and cannot be reached by other CP
+// instances, so they must be refused at boot with a clear message directing the
+// operator to use an off-host tier (remote_docker or fargate).
+//
+// Single-node deployments (SQLite) are unaffected: native and docker tiers
+// continue to work unchanged.
+func checkClusteredRuntimeTiers(cfg *config.Config) error {
+	if !isClustered(cfg) {
+		return nil
+	}
+	for _, tier := range cfg.Runtime.Tiers {
+		if tier.Runtime == "native" || tier.Runtime == "docker" {
+			return fmt.Errorf(
+				"tier %q uses runtime %q, which is not supported in a clustered deployment "+
+					"(Postgres DSN detected); use an off-host runtime (remote_docker or fargate) instead",
+				tier.Name, tier.Runtime,
+			)
+		}
+	}
+	return nil
+}
+
 // buildRuntime constructs a process.Runtime for a single tier from its TierConfig.
 // Docker tiers share the daemon settings from cfg.Runtime.Docker; a burst tier
 // may therefore point at the same daemon under a distinct tier name. Fargate tiers
@@ -467,6 +499,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			"role", sysUser.Role)
 	}
 
+	// Refuse local-only runtimes in a clustered (Postgres) deployment before
+	// constructing any tier. Native and docker processes bind loopback on one
+	// host; other CP instances cannot reach them, so they are incompatible with
+	// shared state across nodes.
+	if err := checkClusteredRuntimeTiers(cfg); err != nil {
+		return err
+	}
+
 	// Build one runtime per configured tier. The first tier is the default
 	// (config.Load synthesizes a single "local" tier from Mode when none are
 	// declared, so single-node behavior is unchanged). The default tier's
@@ -564,9 +604,80 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Sign the sticky-routing cookie so a client cannot forge it to pin a
 	// replica and bypass the per-replica session cap.
 	prx.SetStickySecret(deriveStickyCookieKey(cfg.Auth.Secret))
+	// On single-node deployments there is no pool syncer, so pre-seed the
+	// first-sync gate as satisfied. This keeps /readyz behaviour unchanged
+	// from before the gate was added (a clustered deployment leaves it false
+	// until the pool syncer marks it after its first pass).
+	if !isClustered(cfg) {
+		prx.MarkSynced()
+	}
+	// In clustered mode answer the per-app readiness probe from the DB replica
+	// status so all instances agree, rather than from the locally-observed WS
+	// handshake which only the instance that handled the connection sees.
+	if isClustered(cfg) {
+		prx.SetAppReadyFunc(func(slug string) bool {
+			ok, err := store.AppHasRunningReplica(slug)
+			if err != nil {
+				slog.Warn("app readiness probe: AppHasRunningReplica failed", "slug", slug, "err", err)
+			}
+			return ok
+		})
+	}
+
+	// In clustered deployments every instance runs a session reporter that
+	// periodically upserts its local per-(app, replica) active-connection
+	// counts into replica_sessions so other instances can aggregate fleet
+	// load. Single-node deployments skip this entirely: no rows, no goroutine.
+	var reporterWG sync.WaitGroup
+	var reporterCancel context.CancelFunc
+	if isClustered(cfg) {
+		flushCh := make(chan string, 16)
+		prx.EnableImmediateFlush(flushCh)
+		reporter := proxy.NewSessionReporter(prx, store, cfg.Server.InstanceID, flushCh)
+		reporterCtx, cancelReporter := context.WithCancel(context.Background())
+		reporterCancel = cancelReporter
+		reporterWG.Add(1)
+		go func() {
+			defer reporterWG.Done()
+			reporter.Run(reporterCtx)
+		}()
+		slog.Info("session reporter started",
+			"interval", proxy.ReporterInterval,
+			"stale_cutoff", proxy.ReplicaSessionStaleCutoff,
+			"instance", cfg.Server.InstanceID)
+	}
+
+	// In clustered deployments every instance runs a pool syncer that
+	// reconciles the proxy's backend pools against the DB replica table.
+	// This lets standbys serve off-host apps without relying on the local
+	// placement registry. Single-node deployments skip this entirely: the
+	// deploy fast-path and RecoverProcesses remain the sole pool-population
+	// paths, byte-for-byte unchanged.
+	var syncerWG sync.WaitGroup
+	var syncerCancel context.CancelFunc
+	if isClustered(cfg) {
+		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
+		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default())
+		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
+		syncerCancel = cancelSyncer
+		syncerWG.Add(1)
+		go func() {
+			defer syncerWG.Done()
+			syncer.Run(syncerCtx)
+		}()
+		// Wire the on-miss sync hook so a first-request for a freshly-started
+		// app is served immediately without waiting for the next background tick.
+		prx.SetOnMissSync(func(slug string) {
+			syncer.SyncSlug(syncerCtx, slug)
+		})
+		slog.Info("pool syncer started", "interval", proxy.PoolSyncInterval)
+	}
 
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetVersion(version)
+	if isClustered(cfg) {
+		srv.SetCluster(cfg.Server.InstanceID)
+	}
 	if deployToken != nil {
 		srv.SetDeployToken(deployToken)
 	}
@@ -779,8 +890,23 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		RestartMaxAttempts:           cfg.Lifecycle.RestartMaxAttempts,
 		HibernateTimeout:             cfg.Lifecycle.HibernateTimeout,
 		DefaultMaxSessionsPerReplica: cfg.Runtime.DefaultMaxSessionsPerReplica,
+		Clustered:                    isClustered(cfg),
+		InstanceID:                   cfg.Server.InstanceID,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
+
+	// Wire the wake trigger on every instance at startup, independent of
+	// ownership. A standby issues the BeginWake CAS (hibernated->waking) on a
+	// proxy miss so the DB reflects the pending wake immediately; the active's
+	// runOnce reconciler drives it to running. The active drives inline.
+	prx.SetWakeTrigger(watcher.WakeTrigger)
+
+	// In clustered mode, a forward error to a stopped/hibernated upstream
+	// should reconnect the client via the loading page rather than 502, since
+	// another replica or a just-woken replacement may become available.
+	if isClustered(cfg) {
+		prx.SetForwardErrorWake(true)
+	}
 
 	// Record hibernate/wake transitions and crash-restart counts when metrics
 	// are enabled. Nil-safe inside the watcher when metrics are disabled.
@@ -883,6 +1009,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if rejectWindow > cfg.Runtime.Autoscale.Cooldown {
 			rejectWindow = cfg.Runtime.Autoscale.Cooldown
 		}
+		// In clustered mode the autoscaler reads the fleet-wide session count
+		// (sum across all instances from replica_sessions) so a scale decision
+		// is based on total load, not just this instance's local count. In
+		// single-node mode the proxy is used directly for the exact local count,
+		// which is byte-for-byte unchanged from before.
+		var autoscaleSignal autoscale.Signal = prx
+		if isClustered(cfg) {
+			autoscaleSignal = proxy.NewFleetSignal(prx, store, slog.Default())
+		}
 		controller = autoscale.New(autoscale.Config{
 			ScanInterval:  cfg.Runtime.Autoscale.ScanInterval,
 			Cooldown:      cfg.Runtime.Autoscale.Cooldown,
@@ -891,7 +1026,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			DefaultTarget: cfg.Runtime.Autoscale.DefaultTarget,
 			DefaultCap:    cfg.Runtime.DefaultMaxSessionsPerReplica,
 			RuntimeMax:    runtimeMax,
-		}, store, prx, srv, store, store, slog.Default())
+		}, store, autoscaleSignal, srv, store, store, slog.Default())
 		if metricsReg != nil {
 			controller.SetMetrics(metricsReg)
 		}
@@ -1001,6 +1136,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		OnLose:     scope.Lose,
 		Logger:     slog.Default(),
 	})
+	// Wire the ownership predicate into the watcher's wake trigger so a standby
+	// that wins BeginWake defers to the active's reconciler rather than trying
+	// to deploy. The raw IsOwner (not ownerAndReady) is intentional: the wake
+	// trigger only needs to know "am I the active process-owner right now"; the
+	// ownerAndReady gate is for API mutations that need a fresh worker index.
+	watcher.SetIsOwner(elector.IsOwner)
+
 	// Gate mutations on owner AND ready: the elector reports IsOwner true before
 	// ownerWork refreshes the registry, so admitting owner-only mutations (main-API
 	// deploy/placement, worker register/heartbeat) must wait for the fresh index.
@@ -1040,33 +1182,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if prx.Draining() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"ready":false,"reason":"draining"}`))
-			return
-		}
-		select {
-		case <-readyCh:
-		default:
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"ready":false,"reason":"starting"}`))
-			return
-		}
-		pingCtx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
-		defer cancel()
-		if err := store.PingContext(pingCtx); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"ready":false,"reason":"db"}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"ready":true}`))
-	})
+	mux.HandleFunc("/readyz", readyzHandler(prx, readyCh, store))
+	mux.HandleFunc("/activez", activezHandler(ownerAndReady))
 	mux.Handle("/static/", ui.Handler())
 
 	// GET /internal/fargate-bundle/{digest} - streams the bundle zip to a Fargate
@@ -1165,6 +1282,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// autoscaler to exit before we drain jobs and close the store.
 	cancelElector()
 	scope.Stop()
+	// Stop the session reporter (clustered only). Cancel triggers a final
+	// flush so the last known counts are persisted before the store closes.
+	if reporterCancel != nil {
+		reporterCancel()
+		reporterWG.Wait()
+	}
+	// Stop the pool syncer (clustered only). Nil out the on-miss hook after
+	// the syncer goroutine exits so a late-arriving request cannot invoke
+	// SyncSlug with an already-cancelled context.
+	if syncerCancel != nil {
+		syncerCancel()
+		syncerWG.Wait()
+		prx.SetOnMissSync(nil)
+	}
 	// Drain in-flight scheduled job runs before the store closes.
 	jobsMgr.Stop(shutdownCtx)
 
