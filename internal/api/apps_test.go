@@ -2563,3 +2563,28 @@ func TestSetMemberRole_EmptyRole400(t *testing.T) {
 		t.Fatalf("empty role: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestSetMemberRole_RejectsSelfChange(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	mgr, _ := store.GetUserByUsername("mgr")
+	store.CreateApp(db.CreateAppParams{Slug: "app8", Name: "App 8", OwnerID: owner.ID})
+	store.GrantAppAccessWithRole("app8", mgr.ID, "manager") // mgr is a manager-member
+
+	// mgr passes requireManageApp (role=manager) but must not change their OWN role.
+	token, _ := auth.IssueJWT(mgr.ID, "mgr", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"role": "viewer"})
+	req := authedRequest(t, "PATCH", "/api/apps/app8/members/"+strconv.FormatInt(mgr.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self role-change: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app8", mgr.ID)
+	if role != "manager" {
+		t.Fatalf("role changed to %q despite self-guard; want manager", role)
+	}
+}

@@ -1701,6 +1701,9 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "role must be one of "+strings.Join(db.ValidMemberRoles, ", "))
 		return
 	}
+	// Granting is an upsert: re-granting an existing member sets their role to
+	// the requested value. An omitted role defaults to viewer, which downgrades
+	// a prior manager - use PATCH /members/{user_id} to change a role in place.
 	if err := s.store.GrantAppAccessWithRole(slug, userID, role); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -1794,6 +1797,12 @@ func (s *Server) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 	userID, err := strconv.ParseInt(chi.URLParam(r, "user_id"), 10, 64)
 	if err != nil || userID == 0 {
 		writeError(w, http.StatusBadRequest, "invalid user_id")
+		return
+	}
+	// A caller cannot change their own member role (mirrors handlePatchUser):
+	// self-demotion is a footgun that can strand a manager out of an app.
+	if caller := auth.UserFromContext(r.Context()); caller != nil && caller.ID == userID {
+		writeError(w, http.StatusForbidden, "cannot change your own role")
 		return
 	}
 	var req struct {
