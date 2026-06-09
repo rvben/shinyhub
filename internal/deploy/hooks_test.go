@@ -510,3 +510,41 @@ cmd = "python fetch.py"
 		t.Errorf("error missing cron_expr context: %v", err)
 	}
 }
+
+func TestLoadManifest_RunOnRegister(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "warm"
+cron = "0 5 * * *"
+cmd = "python fetch.py"
+run_on_register = true
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(m.Schedules) != 1 {
+		t.Fatalf("want 1 schedule, got %d", len(m.Schedules))
+	}
+	if !m.Schedules[0].RunOnRegister {
+		t.Errorf("RunOnRegister = false, want true")
+	}
+}
+
+func TestLoadManifest_RunOnRegister_DefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "warm"
+cron = "0 5 * * *"
+cmd = "python fetch.py"
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.Schedules[0].RunOnRegister {
+		t.Errorf("RunOnRegister = true, want false (default)")
+	}
+}

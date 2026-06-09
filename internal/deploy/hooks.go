@@ -82,6 +82,12 @@ type ScheduleSpec struct {
 	// manifest parse time.
 	Timezone string `toml:"timezone"`
 
+	// RunOnRegister, when true, fires this schedule once immediately the first
+	// time it is registered on an app that has never had a successful run of it
+	// - warming the app's cache on a fresh deploy. It is a deploy-time
+	// instruction, never persisted; the gate lives in the server.
+	RunOnRegister bool `toml:"run_on_register"`
+
 	Command []string `toml:"-"`
 }
 
