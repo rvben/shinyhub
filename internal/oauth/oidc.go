@@ -25,6 +25,12 @@ type OIDCUser struct {
 	Name               string
 	Groups             []string
 	GroupsClaimPresent bool
+	// GroupsClaimMalformed is true when the groups claim was present and non-null
+	// but could not be decoded as a JSON array of strings or a single string. When
+	// malformed, GroupsClaimPresent is false so callers skip group reconciliation
+	// (a claim we cannot parse must not be read as "no groups" and demote the
+	// user); callers should log it so the IdP misconfiguration is visible.
+	GroupsClaimMalformed bool
 }
 
 // NewOIDCProvider performs OIDC discovery against issuerURL and returns a
@@ -94,29 +100,38 @@ func (p *OIDCProvider) VerifyIDToken(ctx context.Context, tok *oauth2.Token) (*O
 		return nil, fmt.Errorf("oidc: id_token missing sub claim")
 	}
 	rawGroups := claims[p.groupsClaim]
-	present := len(rawGroups) > 0 && string(rawGroups) != "null"
+	groups, decoded := decodeGroupsClaim(rawGroups)
+	hasValue := len(rawGroups) > 0 && string(rawGroups) != "null"
 	return &OIDCUser{
-		Sub:                sub,
-		Email:              email,
-		Name:               name,
-		Groups:             decodeGroupsClaim(rawGroups),
-		GroupsClaimPresent: present,
+		Sub:                  sub,
+		Email:                email,
+		Name:                 name,
+		Groups:               groups,
+		GroupsClaimPresent:   hasValue && decoded,
+		GroupsClaimMalformed: hasValue && !decoded,
 	}, nil
 }
 
-// decodeGroupsClaim normalizes an OIDC groups claim that may be a JSON array
-// of strings or a single string. Returns an empty slice when absent or null.
-func decodeGroupsClaim(raw json.RawMessage) []string {
-	if len(raw) == 0 {
-		return []string{}
+// decodeGroupsClaim normalizes an OIDC groups claim that may be a JSON array of
+// strings or a single string. The bool is false when the claim is present but
+// cannot be decoded as either form (malformed); callers MUST treat that as
+// "groups unknown" rather than "no groups", so a malformed claim never silently
+// demotes a user. Absent, null, empty-array, and empty-string claims decode to
+// an empty slice with ok=true (a definite "no groups").
+func decodeGroupsClaim(raw json.RawMessage) ([]string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return []string{}, true
 	}
 	var arr []string
 	if err := json.Unmarshal(raw, &arr); err == nil {
-		return arr
+		return arr, true
 	}
 	var one string
-	if err := json.Unmarshal(raw, &one); err == nil && one != "" {
-		return []string{one}
+	if err := json.Unmarshal(raw, &one); err == nil {
+		if one == "" {
+			return []string{}, true
+		}
+		return []string{one}, true
 	}
-	return []string{}
+	return nil, false
 }
