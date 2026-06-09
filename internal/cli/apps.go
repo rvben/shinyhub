@@ -797,7 +797,12 @@ func newAppsAccessCmd() *cobra.Command {
 		Use:   "access",
 		Short: "Manage app access control",
 	}
-	cmd.AddCommand(newAppsAccessSetCmd())
+	cmd.AddCommand(
+		newAppsAccessSetCmd(),
+		newAppsAccessGrantCmd(),
+		newAppsAccessRevokeCmd(),
+		newAppsAccessListCmd(),
+	)
 	return cmd
 }
 
@@ -836,6 +841,161 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 		return httpError(cfg.Token, "set access", resp, out)
 	}
 	fmt.Printf("%s: access set to %s\n", slug, accessLevel)
+	return nil
+}
+
+type appsAccessGrantFlags struct {
+	role string
+}
+
+func newAppsAccessGrantCmd() *cobra.Command {
+	f := &appsAccessGrantFlags{}
+	cmd := &cobra.Command{
+		Use:   "grant <slug> <username>",
+		Short: "Grant a user access to an app",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsAccessGrant(cmd, args, f)
+		},
+	}
+	cmd.Flags().StringVar(&f.role, "role", "viewer", "Member role: viewer or manager")
+	return cmd
+}
+
+func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFlags) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug, username := args[0], args[1]
+	payload := map[string]string{"username": username}
+	// Only send role when explicitly set, so a plain `grant` never changes an
+	// existing member's role (the server preserves it when role is absent).
+	if cmd.Flags().Changed("role") {
+		payload["role"] = f.role
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/members", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "grant access", resp, out)
+	}
+	if cmd.Flags().Changed("role") {
+		fmt.Printf("%s: granted %s access to %s\n", slug, f.role, username)
+	} else {
+		fmt.Printf("%s: granted access to %s\n", slug, username)
+	}
+	return nil
+}
+
+func newAppsAccessRevokeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "revoke <slug> <username>",
+		Short: "Revoke a user's access to an app",
+		Args:  cobra.ExactArgs(2),
+		RunE:  runAppsAccessRevoke,
+	}
+}
+
+func runAppsAccessRevoke(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug, username := args[0], args[1]
+	body, err := json.Marshal(map[string]string{"username": username})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("DELETE", cfg.Host+"/api/apps/"+slug+"/members", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "revoke access", resp, out)
+	}
+	fmt.Printf("%s: revoked access for %s\n", slug, username)
+	return nil
+}
+
+type appsAccessListFlags struct {
+	jsonOutput bool
+}
+
+func newAppsAccessListCmd() *cobra.Command {
+	f := &appsAccessListFlags{}
+	cmd := &cobra.Command{
+		Use:   "list <slug>",
+		Short: "List members granted access to an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsAccessList(cmd, args, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	return cmd
+}
+
+func runAppsAccessList(cmd *cobra.Command, args []string, f *appsAccessListFlags) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/members", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "list members", resp, out)
+	}
+	if f.jsonOutput {
+		fmt.Println(string(out))
+		return nil
+	}
+	var members []struct {
+		UserID   int64  `json:"user_id"`
+		Username string `json:"username"`
+		Role     string `json:"role"`
+	}
+	if err := json.Unmarshal(out, &members); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+	if len(members) == 0 {
+		fmt.Printf("%s: no members\n", slug)
+		return nil
+	}
+	for _, m := range members {
+		fmt.Printf("%-20s %s\n", m.Username, m.Role)
+	}
 	return nil
 }
 

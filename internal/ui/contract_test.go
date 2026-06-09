@@ -1183,3 +1183,16 @@ func TestAutoscaleActionBadgeCSS(t *testing.T) {
 				"; use underscores not hyphens (JS replace only converts dots)")
 	}
 }
+
+// TestMemberRoleDropdownWiring guards the Access-tab member-role control. The
+// member list must render an editable <select> (viewer/manager) per member and
+// PATCH /api/apps/:slug/members/:user_id on change so a manager can promote or
+// demote members from the UI. See internal/api/router.go handleSetMemberRole.
+func TestMemberRoleDropdownWiring(t *testing.T) {
+	assertContains(t, "app.js", "async function updateMemberRole",
+		"the Access tab must define updateMemberRole so a manager can change a member's role")
+	assertContains(t, "app.js", "/members/${userId}",
+		"updateMemberRole must PATCH /api/apps/:slug/members/:user_id; see internal/api/router.go handleSetMemberRole")
+	assertContains(t, "app.js", "member-role-select",
+		"refreshMemberList must render an editable role <select> per member so managers can promote/demote")
+}

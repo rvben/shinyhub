@@ -1657,8 +1657,9 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		UserID   int64  `json:"user_id"`
-		Username string `json:"username"`
+		UserID   int64   `json:"user_id"`
+		Username string  `json:"username"`
+		Role     *string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -1692,18 +1693,39 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if err := s.store.GrantAppAccess(slug, userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+	// POST is additive. With no role field we add the member (a NEW member
+	// defaults to viewer) and never change an existing member's role - use
+	// PATCH /members/{user_id} for that. An explicit role sets the role
+	// (upsert) and, like PATCH, may not target the caller's own membership.
+	auditDetail := fmt.Sprintf("user_id=%d", userID)
+	if req.Role == nil {
+		if err := s.store.GrantAppAccess(slug, userID); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	} else {
+		role := *req.Role
+		if !db.IsValidMemberRole(role) {
+			writeError(w, http.StatusBadRequest, "role must be one of "+strings.Join(db.ValidMemberRoles, ", "))
+			return
+		}
+		if caller := auth.UserFromContext(r.Context()); caller != nil && caller.ID == userID {
+			writeError(w, http.StatusForbidden, "cannot change your own role")
+			return
+		}
+		if err := s.store.GrantAppAccessWithRole(slug, userID, role); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		auditDetail = fmt.Sprintf("user_id=%d role=%s", userID, role)
 	}
-
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "grant_access",
 			ResourceType: "app",
 			ResourceID:   slug,
-			Detail:       fmt.Sprintf("user_id=%d", userID),
+			Detail:       auditDetail,
 			IPAddress:    s.ClientIP(r),
 		})
 	}
@@ -1729,14 +1751,27 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 		userID = id
 	} else {
 		var req struct {
-			UserID int64 `json:"user_id"`
+			UserID   int64  `json:"user_id"`
+			Username string `json:"username"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "bad request")
 			return
 		}
+		if req.UserID == 0 && req.Username != "" {
+			u, err := s.store.GetUserByUsername(req.Username)
+			if err != nil {
+				if errors.Is(err, db.ErrNotFound) {
+					writeError(w, http.StatusNotFound, "user not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "internal server error")
+				return
+			}
+			req.UserID = u.ID
+		}
 		if req.UserID == 0 {
-			writeError(w, http.StatusBadRequest, "user_id is required")
+			writeError(w, http.StatusBadRequest, "user_id or username is required")
 			return
 		}
 		userID = req.UserID
@@ -1758,6 +1793,54 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 			ResourceType: "app",
 			ResourceID:   slug,
 			Detail:       fmt.Sprintf("user_id=%d", userID),
+			IPAddress:    s.ClientIP(r),
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+	userID, err := strconv.ParseInt(chi.URLParam(r, "user_id"), 10, 64)
+	if err != nil || userID == 0 {
+		writeError(w, http.StatusBadRequest, "invalid user_id")
+		return
+	}
+	// A caller cannot change their own member role (mirrors handlePatchUser):
+	// self-demotion is a footgun that can strand a manager out of an app.
+	if caller := auth.UserFromContext(r.Context()); caller != nil && caller.ID == userID {
+		writeError(w, http.StatusForbidden, "cannot change your own role")
+		return
+	}
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if !db.IsValidMemberRole(req.Role) {
+		writeError(w, http.StatusBadRequest, "role must be one of "+strings.Join(db.ValidMemberRoles, ", "))
+		return
+	}
+	if err := s.store.SetMemberRole(slug, userID, req.Role); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "set_member_role",
+			ResourceType: "app",
+			ResourceID:   slug,
+			Detail:       fmt.Sprintf("user_id=%d role=%s", userID, req.Role),
 			IPAddress:    s.ClientIP(r),
 		})
 	}

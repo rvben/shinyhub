@@ -1797,9 +1797,18 @@ document.addEventListener('DOMContentLoaded', () => {
       const nameSpan = document.createElement('span');
       nameSpan.className = 'member-name';
       nameSpan.textContent = m.username;
-      const roleSpan = document.createElement('span');
-      roleSpan.className = 'member-role';
-      roleSpan.textContent = m.role;
+      const roleSelect = document.createElement('select');
+      roleSelect.className = 'member-role member-role-select';
+      roleSelect.setAttribute('aria-label', `Role for ${m.username}`);
+      for (const role of ['viewer', 'manager']) {
+        const opt = document.createElement('option');
+        opt.value = role;
+        opt.textContent = role.charAt(0).toUpperCase() + role.slice(1);
+        if (m.role === role) opt.selected = true;
+        roleSelect.appendChild(opt);
+      }
+      roleSelect.dataset.previous = m.role;
+      roleSelect.addEventListener('change', () => updateMemberRole(m.user_id, m.username, roleSelect));
       const revokeBtn = document.createElement('button');
       revokeBtn.textContent = 'Revoke';
       revokeBtn.setAttribute('aria-label', `Revoke access for ${m.username}`);
@@ -1815,10 +1824,36 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch { /* network error — leave row in place */ }
       });
       li.appendChild(nameSpan);
-      li.appendChild(roleSpan);
+      li.appendChild(roleSelect);
       li.appendChild(revokeBtn);
       list.appendChild(li);
     }
+  }
+
+  async function updateMemberRole(userId, username, selectEl) {
+    const slug = settingsSlug;
+    if (!slug) return;
+    const newRole = selectEl.value;
+    const previous = selectEl.dataset.previous || '';
+    selectEl.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${slug}/members/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role: newRole }),
+      });
+    } catch {
+      selectEl.disabled = false;
+      if (previous) selectEl.value = previous;
+      return;
+    }
+    selectEl.disabled = false;
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      if (previous) selectEl.value = previous; // revert to last-known role
+      return;
+    }
+    selectEl.dataset.previous = newRole;
   }
 
   logPaneClose.addEventListener('click', closeLogs);

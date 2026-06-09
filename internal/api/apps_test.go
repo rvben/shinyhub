@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2408,5 +2409,230 @@ func TestHandleGetApp_RejectsByReason_MultipleReasons(t *testing.T) {
 	}
 	if counts["pool-saturated"].(float64) != 1 {
 		t.Errorf("counts[pool-saturated] = %v, want 1", counts["pool-saturated"])
+	}
+}
+
+func TestSetMemberRole_ByManager(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	bob, _ := store.GetUserByUsername("bob")
+	store.CreateApp(db.CreateAppParams{Slug: "app1", Name: "App 1", OwnerID: owner.ID})
+	store.GrantAppAccess("app1", bob.ID) // starts as viewer
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"role": "manager"})
+	req := authedRequest(t, "PATCH", "/api/apps/app1/members/"+strconv.FormatInt(bob.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app1", bob.ID)
+	if role != "manager" {
+		t.Fatalf("role = %q, want manager", role)
+	}
+}
+
+func TestSetMemberRole_NonMember404(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "carol", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	carol, _ := store.GetUserByUsername("carol")
+	store.CreateApp(db.CreateAppParams{Slug: "app2", Name: "App 2", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"role": "manager"})
+	req := authedRequest(t, "PATCH", "/api/apps/app2/members/"+strconv.FormatInt(carol.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-member, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetMemberRole_InvalidRole400(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "dan", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	dan, _ := store.GetUserByUsername("dan")
+	store.CreateApp(db.CreateAppParams{Slug: "app3", Name: "App 3", OwnerID: owner.ID})
+	store.GrantAppAccess("app3", dan.ID)
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"role": "admin"}) // not a member role
+	req := authedRequest(t, "PATCH", "/api/apps/app3/members/"+strconv.FormatInt(dan.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid role, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetMemberRole_ViewerMemberForbidden(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	viewer, _ := store.GetUserByUsername("viewer")
+	target, _ := store.GetUserByUsername("target")
+	store.CreateApp(db.CreateAppParams{Slug: "app4", Name: "App 4", OwnerID: owner.ID})
+	store.GrantAppAccess("app4", viewer.ID) // viewer-role member
+	store.GrantAppAccess("app4", target.ID)
+
+	token, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"role": "manager"})
+	req := authedRequest(t, "PATCH", "/api/apps/app4/members/"+strconv.FormatInt(target.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer member: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGrantAppAccess_WithManagerRole(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "erin", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	erin, _ := store.GetUserByUsername("erin")
+	store.CreateApp(db.CreateAppParams{Slug: "app5", Name: "App 5", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"username": "erin", "role": "manager"})
+	req := authedRequest(t, "POST", "/api/apps/app5/members", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app5", erin.ID)
+	if role != "manager" {
+		t.Fatalf("role = %q, want manager", role)
+	}
+}
+
+func TestGrantAppAccess_DefaultRole(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "frank", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	frank, _ := store.GetUserByUsername("frank")
+	store.CreateApp(db.CreateAppParams{Slug: "app6", Name: "App 6", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"username": "frank"}) // no role field
+	req := authedRequest(t, "POST", "/api/apps/app6/members", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app6", frank.ID)
+	if role != "viewer" {
+		t.Fatalf("default role = %q, want viewer", role)
+	}
+}
+
+func TestSetMemberRole_EmptyRole400(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "grace", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	grace, _ := store.GetUserByUsername("grace")
+	store.CreateApp(db.CreateAppParams{Slug: "app7", Name: "App 7", OwnerID: owner.ID})
+	store.GrantAppAccess("app7", grace.ID)
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body := []byte(`{}`) // no role -> must be rejected, not defaulted
+	req := authedRequest(t, "PATCH", "/api/apps/app7/members/"+strconv.FormatInt(grace.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty role: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetMemberRole_RejectsSelfChange(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	mgr, _ := store.GetUserByUsername("mgr")
+	store.CreateApp(db.CreateAppParams{Slug: "app8", Name: "App 8", OwnerID: owner.ID})
+	store.GrantAppAccessWithRole("app8", mgr.ID, "manager") // mgr is a manager-member
+
+	// mgr passes requireManageApp (role=manager) but must not change their OWN role.
+	token, _ := auth.IssueJWT(mgr.ID, "mgr", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"role": "viewer"})
+	req := authedRequest(t, "PATCH", "/api/apps/app8/members/"+strconv.FormatInt(mgr.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self role-change: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app8", mgr.ID)
+	if role != "manager" {
+		t.Fatalf("role changed to %q despite self-guard; want manager", role)
+	}
+}
+
+func TestGrantAppAccess_OmittedRolePreservesExisting(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "ivy", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	ivy, _ := store.GetUserByUsername("ivy")
+	store.CreateApp(db.CreateAppParams{Slug: "app9", Name: "App 9", OwnerID: owner.ID})
+	store.GrantAppAccessWithRole("app9", ivy.ID, "manager") // existing manager
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"username": "ivy"}) // no role -> must NOT downgrade
+	req := authedRequest(t, "POST", "/api/apps/app9/members", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app9", ivy.ID)
+	if role != "manager" {
+		t.Fatalf("re-grant without role downgraded to %q; want manager preserved", role)
+	}
+}
+
+func TestGrantAppAccess_RejectsSelfRoleChange(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	mgr, _ := store.GetUserByUsername("mgr")
+	store.CreateApp(db.CreateAppParams{Slug: "app10", Name: "App 10", OwnerID: owner.ID})
+	store.GrantAppAccessWithRole("app10", mgr.ID, "manager") // manager-member
+
+	token, _ := auth.IssueJWT(mgr.ID, "mgr", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"username": "mgr", "role": "viewer"}) // self downgrade attempt
+	req := authedRequest(t, "POST", "/api/apps/app10/members", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self role change via grant: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app10", mgr.ID)
+	if role != "manager" {
+		t.Fatalf("self downgrade via grant succeeded (role=%q); want manager", role)
 	}
 }
