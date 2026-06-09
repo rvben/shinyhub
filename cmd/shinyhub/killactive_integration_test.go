@@ -248,6 +248,28 @@ func seedRunningFargateApp(t *testing.T, store *db.Store, slug string, endpoints
 	}
 }
 
+// stickyCookie returns the shinyhub_rep_<slug> cookie from a response's
+// Set-Cookie list, or nil if none was set.
+func stickyCookie(slug string, cookies []*http.Cookie) *http.Cookie {
+	name := "shinyhub_rep_" + slug
+	for _, c := range cookies {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// stubFor maps a proxied response body back to its stub.
+func stubFor(body string, stubs ...*stub) *stub {
+	for _, s := range stubs {
+		if s.body == body {
+			return s
+		}
+	}
+	return nil
+}
+
 func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 	store, dsn := dbtest.NewPostgres(t)
 	tmp := t.TempDir()
@@ -274,5 +296,39 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 	// LB contract: both ready, exactly one active.
 	if code, _, _ := get(t, instA.url("/readyz"), nil); code != http.StatusOK {
 		t.Fatalf("A /readyz = %d, want 200", code)
+	}
+
+	// --- pre-crash: A serves /app and pins a replica via a sticky cookie ---
+	codeA, setCookies, bodyA := get(t, instA.url("/app/"+slug+"/"), nil)
+	if codeA != http.StatusOK {
+		t.Fatalf("A /app pre-crash = %d, want 200 (body %q)", codeA, bodyA)
+	}
+	pinned := stubFor(bodyA, stub0, stub1)
+	other := stub1
+	if pinned == stub1 {
+		other = stub0
+	}
+	if pinned == nil {
+		t.Fatalf("A /app body %q matched neither stub", bodyA)
+	}
+	cookie := stickyCookie(slug, setCookies)
+	if cookie == nil {
+		t.Fatal("A did not set a sticky cookie - cannot assert cross-instance affinity")
+	}
+
+	// --- cross-instance affinity: B honors A's HMAC-signed cookie ---
+	otherBefore := other.hits.Load()
+	codeB, bReissue, bodyB := get(t, instB.url("/app/"+slug+"/"), cookie)
+	if codeB != http.StatusOK {
+		t.Fatalf("B /app with A's cookie = %d, want 200 (body %q)", codeB, bodyB)
+	}
+	if bodyB != pinned.body {
+		t.Fatalf("B routed to %q, want pinned %q - cross-instance affinity broken", bodyB, pinned.body)
+	}
+	if stickyCookie(slug, bReissue) != nil {
+		t.Fatal("B reissued a sticky cookie - it re-picked instead of honoring A's HMAC-signed cookie")
+	}
+	if other.hits.Load() != otherBefore {
+		t.Fatal("the non-pinned stub was hit - B did not honor the pin")
 	}
 }
