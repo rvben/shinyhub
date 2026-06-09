@@ -157,28 +157,45 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, spec.Name, effectiveTZ))
 
 		result := ManifestScheduleResult{Name: spec.Name, Action: resultAction, ScheduleID: id}
-		// run_on_register: fire once if this schedule has never succeeded.
-		// Inline dispatch is safe because ownerGuard gates the deploy POST, so
-		// only the owner instance reaches this code - the same invariant the
-		// scheduler relies on. A dispatch failure is logged and NEVER fails the
-		// deploy: the recurring cron and the next deploy's self-heal are the
-		// safety net. A disabled schedule is not first-fired.
-		if spec.RunOnRegister && !spec.Disabled && s.jobs != nil {
-			if _, lerr := s.store.LastSuccessfulRun(id); errors.Is(lerr, db.ErrNotFound) {
-				if runID, rerr := s.jobs.Run(id, "register", nil); rerr == nil {
-					result.FirstFire = &FirstFireRef{RunID: runID}
-				} else {
-					slog.Warn("run_on_register: first-fire dispatch failed",
-						"slug", app.Slug, "schedule", spec.Name, "err", rerr)
-				}
-			} else if lerr != nil {
-				slog.Warn("run_on_register: gate check failed; skipping first-fire",
-					"slug", app.Slug, "schedule", spec.Name, "err", lerr)
-			}
+		if rid := s.maybeFirstFire(id, spec.RunOnRegister, spec.Disabled, app.Slug, spec.Name); rid != nil {
+			result.FirstFire = &FirstFireRef{RunID: *rid}
 		}
 		results = append(results, result)
 	}
 	return results, nil
+}
+
+// maybeFirstFire fires the schedule once for run_on_register and returns the
+// dispatched run id, or nil. It NEVER fails the caller: a disabled schedule, an
+// unavailable job manager, a closed gate (the schedule has already succeeded),
+// or a dispatch error all yield nil, with problems logged. The gate is "has
+// this schedule ever succeeded?" so a failed first-fire self-heals on the next
+// registration.
+//
+// Inline dispatch is safe because ownerGuard gates both the deploy POST and the
+// schedule-create endpoint, so only the owner instance reaches here - the same
+// invariant the scheduler relies on when it calls jobs.Run.
+func (s *Server) maybeFirstFire(scheduleID int64, runOnRegister, disabled bool, slug, name string) *int64 {
+	if !runOnRegister || disabled || s.jobs == nil {
+		return nil
+	}
+	// Fire only when the schedule has never had a successful run. A non-nil
+	// error that is NOT ErrNotFound means the gate check itself failed; skip
+	// firing and log rather than risk a double-fire on uncertain state.
+	if _, lerr := s.store.LastSuccessfulRun(scheduleID); !errors.Is(lerr, db.ErrNotFound) {
+		if lerr != nil {
+			slog.Warn("run_on_register: gate check failed; skipping first-fire",
+				"slug", slug, "schedule", name, "err", lerr)
+		}
+		return nil
+	}
+	runID, rerr := s.jobs.Run(scheduleID, "register", nil)
+	if rerr != nil {
+		slog.Warn("run_on_register: first-fire dispatch failed",
+			"slug", slug, "schedule", name, "err", rerr)
+		return nil
+	}
+	return &runID
 }
 
 func derefOrZero(p *int) int {

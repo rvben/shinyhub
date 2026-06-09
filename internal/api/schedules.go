@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -157,18 +156,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location)))
 
-	var firstFireRunID *int64
-	if req.RunOnRegister && enabled && s.jobs != nil {
-		if _, lerr := s.store.LastSuccessfulRun(id); errors.Is(lerr, db.ErrNotFound) {
-			if runID, rerr := s.jobs.Run(id, "register", nil); rerr == nil {
-				firstFireRunID = &runID
-			} else {
-				slog.Warn("run_on_register: first-fire dispatch failed", "slug", app.Slug, "schedule", req.Name, "err", rerr)
-			}
-		} else if lerr != nil {
-			slog.Warn("run_on_register: gate check failed; skipping first-fire", "slug", app.Slug, "schedule", req.Name, "err", lerr)
-		}
-	}
+	firstFireRunID := s.maybeFirstFire(id, req.RunOnRegister, !enabled, app.Slug, req.Name)
 	sc, _ := s.store.GetSchedule(id)
 	dto := toScheduleDTO(sc, nil, s.cfg.Scheduler.Location)
 	dto.FirstFireRunID = firstFireRunID
