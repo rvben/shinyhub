@@ -84,8 +84,16 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 // ManifestScheduleResult records the outcome of one [[schedule]] upsert so
 // callers can surface a per-schedule action in their response.
 type ManifestScheduleResult struct {
-	Name   string `json:"name"`
-	Action string `json:"action"` // "created" or "updated"
+	Name       string        `json:"name"`
+	Action     string        `json:"action"` // "created" or "updated"
+	ScheduleID int64         `json:"schedule_id,omitempty"`
+	FirstFire  *FirstFireRef `json:"first_fire,omitempty"`
+}
+
+// FirstFireRef points the CLI at the run dispatched by run_on_register so it
+// can report it and (under --wait-for-warm) poll it to completion.
+type FirstFireRef struct {
+	RunID int64 `json:"run_id"`
 }
 
 // applyManifestSchedules (Phase B) upserts each [[schedule]] from the
@@ -147,7 +155,28 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 		effectiveTZ := effectiveTZLabel(tzPtr, s.cfg.Scheduler.Location)
 		s.audit(r, auditAction, "schedule", fmt.Sprintf("%d", id),
 			fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, spec.Name, effectiveTZ))
-		results = append(results, ManifestScheduleResult{Name: spec.Name, Action: resultAction})
+
+		result := ManifestScheduleResult{Name: spec.Name, Action: resultAction, ScheduleID: id}
+		// run_on_register: fire once if this schedule has never succeeded.
+		// Inline dispatch is safe because ownerGuard gates the deploy POST, so
+		// only the owner instance reaches this code - the same invariant the
+		// scheduler relies on. A dispatch failure is logged and NEVER fails the
+		// deploy: the recurring cron and the next deploy's self-heal are the
+		// safety net. A disabled schedule is not first-fired.
+		if spec.RunOnRegister && !spec.Disabled && s.jobs != nil {
+			if _, lerr := s.store.LastSuccessfulRun(id); errors.Is(lerr, db.ErrNotFound) {
+				if runID, rerr := s.jobs.Run(id, "register", nil); rerr == nil {
+					result.FirstFire = &FirstFireRef{RunID: runID}
+				} else {
+					slog.Warn("run_on_register: first-fire dispatch failed",
+						"slug", app.Slug, "schedule", spec.Name, "err", rerr)
+				}
+			} else if lerr != nil {
+				slog.Warn("run_on_register: gate check failed; skipping first-fire",
+					"slug", app.Slug, "schedule", spec.Name, "err", lerr)
+			}
+		}
+		results = append(results, result)
 	}
 	return results, nil
 }
