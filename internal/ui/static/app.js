@@ -39,6 +39,12 @@ function canManageApp(user, app) {
   if (!user || !app) {
     return false;
   }
+  // Prefer the server-computed value when present (it accounts for per-app
+  // member/group manager roles the client cannot see). Falls back to the
+  // global-role/owner heuristic for list views that do not carry it.
+  if (typeof app.can_manage === 'boolean') {
+    return app.can_manage;
+  }
   return user.role === 'admin' || user.role === 'operator' || user.id === app.owner_id;
 }
 
@@ -1839,6 +1845,44 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  async function refreshGroupAccessList() {
+    if (!settingsSlug) return;
+    const list = document.getElementById('group-access-list');
+    if (!list) return;
+    list.innerHTML = '<li class="loading-placeholder">Loading…</li>';
+    let resp;
+    try {
+      resp = await api(`/api/apps/${settingsSlug}/group-access`);
+    } catch { list.innerHTML = ''; return; }
+    if (!resp.ok) { list.innerHTML = ''; return; }
+    const rules = await resp.json();
+    list.innerHTML = '';
+    for (const rule of rules) {
+      const li = document.createElement('li');
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'member-name';
+      nameSpan.textContent = rule.group;
+      const roleSpan = document.createElement('span');
+      roleSpan.className = 'member-role';
+      roleSpan.textContent = rule.role;
+      const removeBtn = document.createElement('button');
+      removeBtn.textContent = 'Remove';
+      removeBtn.setAttribute('aria-label', `Remove group rule ${rule.group}`);
+      removeBtn.addEventListener('click', async () => {
+        const slug = settingsSlug;
+        if (!slug) return;
+        try {
+          const r = await api(`/api/apps/${slug}/group-access/${encodeURIComponent(rule.group)}`, { method: 'DELETE' });
+          if (r.ok) li.remove();
+        } catch { /* network error - leave row in place */ }
+      });
+      li.appendChild(nameSpan);
+      li.appendChild(roleSpan);
+      li.appendChild(removeBtn);
+      list.appendChild(li);
+    }
+  }
+
   async function updateMemberRole(userId, username, selectEl) {
     const slug = settingsSlug;
     if (!slug) return;
@@ -2093,6 +2137,27 @@ document.addEventListener('DOMContentLoaded', () => {
       grantBtn.disabled = false;
       grantBtn.textContent = 'Grant';
     }
+  });
+
+  // Group access: add a group rule (bound once; uses current settingsSlug at call time).
+  document.getElementById('group-access-add-btn')?.addEventListener('click', async () => {
+    const nameEl = document.getElementById('group-access-name');
+    const roleEl = document.getElementById('group-access-role');
+    const errEl = document.getElementById('group-access-error');
+    errEl.hidden = true;
+    const group = nameEl.value.trim();
+    if (!group || !settingsSlug) return;
+    try {
+      const resp = await api(`/api/apps/${settingsSlug}/group-access`, {
+        method: 'POST',
+        body: JSON.stringify({ group, role: roleEl.value }),
+      });
+      if (!resp.ok) { errEl.textContent = 'Add failed'; errEl.hidden = false; return; }
+      const warn = resp.headers.get('X-ShinyHub-Warning');
+      if (warn) flashToast(warn, 'info');
+      nameEl.value = '';
+      await refreshGroupAccessList();
+    } catch { errEl.textContent = 'Network error'; errEl.hidden = false; }
   });
 
   // Danger zone: typed-confirmation unlocks the Delete button.
@@ -2998,6 +3063,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSchedules,
     loadSharedData,
     refreshMemberList,
+    refreshGroupAccessList,
     // setDetailEnvelope is called by renderOverview in app-detail.js to keep
     // the stored envelope current so onMetrics can refresh the autoscale
     // summary on each 10s poll without a full GET /api/apps/:slug refetch.

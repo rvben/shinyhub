@@ -57,6 +57,7 @@ export function mountAppDetail(ctx) {
     // GET /api/apps/:slug returns {app, replicas_status}.
     const body = await resp.json();
     const app = body.app || body;
+    if (typeof body.can_manage === 'boolean') app.can_manage = body.can_manage;
     const replicasStatus = Array.isArray(body.replicas_status) ? body.replicas_status : [];
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
@@ -434,6 +435,7 @@ function renderAccess(panel, app, ctx) {
   ctx.setSettingsSlug(app.slug);
   ctx.populateAccessPanel(app);
   ctx.refreshMemberList();
+  ctx.refreshGroupAccessList();
 }
 
 // renderTraces polls /api/apps/<slug>/traces every 5 s and renders recent

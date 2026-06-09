@@ -2684,3 +2684,127 @@ func TestGrantAppAccess_ByUserID(t *testing.T) {
 		t.Fatalf("role = %q, want manager", role)
 	}
 }
+
+func TestGroupAccess_GrantListRevoke(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "ga", Name: "GA", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"group": "finance", "role": "manager"})
+	req := authedRequest(t, "POST", "/api/apps/ga/group-access", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("grant: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	req = authedRequest(t, "GET", "/api/apps/ga/group-access", nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d", rec.Code)
+	}
+	var rules []map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &rules)
+	if len(rules) != 1 || rules[0]["group"] != "finance" || rules[0]["role"] != "manager" {
+		t.Fatalf("list rules = %v", rules)
+	}
+	req = authedRequest(t, "DELETE", "/api/apps/ga/group-access/finance", nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke: expected 204, got %d", rec.Code)
+	}
+}
+
+func TestGroupAccess_InvalidRole400(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "ga2", Name: "GA2", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"group": "x", "role": "admin"})
+	req := authedRequest(t, "POST", "/api/apps/ga2/group-access", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestGroupAccess_RequiresManage(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	stranger, _ := store.GetUserByUsername("stranger")
+	store.CreateApp(db.CreateAppParams{Slug: "ga3", Name: "GA3", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(stranger.ID, "stranger", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"group": "x", "role": "viewer"})
+	req := authedRequest(t, "POST", "/api/apps/ga3/group-access", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound && rec.Code != http.StatusForbidden {
+		t.Fatalf("stranger: expected 404/403, got %d", rec.Code)
+	}
+}
+
+func TestGroupAccess_AdditiveWarningOnPublic(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: owner.ID})
+	store.SetAppAccess("pub", "public")
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"group": "x", "role": "viewer"})
+	req := authedRequest(t, "POST", "/api/apps/pub/group-access", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rec.Code)
+	}
+	if rec.Header().Get("X-ShinyHub-Warning") == "" {
+		t.Fatal("expected an additive-only warning header on a public app")
+	}
+}
+
+func TestGetApp_CanManage_ViaGroupManager(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "gm", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "gv", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	gm, _ := store.GetUserByUsername("gm")
+	gv, _ := store.GetUserByUsername("gv")
+	store.CreateApp(db.CreateAppParams{Slug: "cm", Name: "CM", OwnerID: owner.ID})
+	store.SetAppAccess("cm", "private")
+	store.ReplaceUserGroups(gm.ID, []string{"leads"})
+	store.GrantAppGroupAccess("cm", "leads", "manager", "manual")
+	store.ReplaceUserGroups(gv.ID, []string{"viewers"})
+	store.GrantAppGroupAccess("cm", "viewers", "viewer", "manual")
+
+	get := func(uid int64, uname string) map[string]any {
+		token, _ := auth.IssueJWT(uid, uname, "developer", "test-secret")
+		req := authedRequest(t, "GET", "/api/apps/cm", nil, token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s GET: expected 200, got %d: %s", uname, rec.Code, rec.Body.String())
+		}
+		var env map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &env)
+		return env
+	}
+	if env := get(gm.ID, "gm"); env["can_manage"] != true {
+		t.Fatalf("group-manager can_manage = %v, want true", env["can_manage"])
+	}
+	if env := get(gv.ID, "gv"); env["can_manage"] != false {
+		t.Fatalf("group-viewer can_manage = %v, want false", env["can_manage"])
+	}
+}

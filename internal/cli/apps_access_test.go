@@ -17,7 +17,10 @@ func TestAppsAccessSubcommandsRegistered(t *testing.T) {
 	if access == nil {
 		t.Fatal("apps access command not registered")
 	}
-	want := map[string]bool{"set": false, "grant": false, "revoke": false, "list": false}
+	want := map[string]bool{
+		"set": false, "grant": false, "revoke": false, "list": false,
+		"group-grant": false, "group-revoke": false, "group-list": false,
+	}
 	for _, c := range access.Commands() {
 		if _, ok := want[c.Name()]; ok {
 			want[c.Name()] = true
@@ -29,12 +32,19 @@ func TestAppsAccessSubcommandsRegistered(t *testing.T) {
 		}
 	}
 	var grant *cobra.Command
+	var groupGrant *cobra.Command
 	for _, c := range access.Commands() {
-		if c.Name() == "grant" {
+		switch c.Name() {
+		case "grant":
 			grant = c
+		case "group-grant":
+			groupGrant = c
 		}
 	}
 	if grant == nil || grant.Flags().Lookup("role") == nil {
 		t.Error("apps access grant must expose a --role flag")
+	}
+	if groupGrant == nil || groupGrant.Flags().Lookup("role") == nil {
+		t.Error("apps access group-grant must expose a --role flag")
 	}
 }

@@ -520,6 +520,48 @@ func TestAccess_Forbidden_BrowserNav_WithForeignAuthHeader_GetsHTML(t *testing.T
 	}
 }
 
+// TestAccess_PrivateApp_GroupMemberAllowed verifies that a user whose only access
+// comes from a group rule (no app_members row, no direct grant) passes the
+// access middleware on a private app. UserCanAccessApp already covers the group
+// path in its SQL (via app_group_access JOIN user_groups); this test pins that
+// the middleware delegates to it correctly so group membership grants /app/* access.
+func TestAccess_PrivateApp_GroupMemberAllowed(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "groupmember", PasswordHash: "h", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "outsider", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	member, _ := store.GetUserByUsername("groupmember")
+	outsider, _ := store.GetUserByUsername("outsider")
+
+	store.CreateApp(db.CreateAppParams{Slug: "grp", Name: "Group App", OwnerID: owner.ID})
+	// groupmember is in the "devs" group, which has a viewer grant on the app.
+	store.ReplaceUserGroups(member.ID, []string{"devs"})
+	store.GrantAppGroupAccess("grp", "devs", "viewer", "manual")
+	// outsider has no group or direct membership.
+
+	mw := access.Middleware(store, "test-secret", nil, nil)
+	handler := mw(http.HandlerFunc(next))
+
+	memberToken, _ := auth.IssueJWT(member.ID, "groupmember", "developer", "test-secret")
+	req := httptest.NewRequest("GET", "/app/grp/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: memberToken})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("group member: expected 200, got %d", rec.Code)
+	}
+
+	outsiderToken, _ := auth.IssueJWT(outsider.ID, "outsider", "developer", "test-secret")
+	req2 := httptest.NewRequest("GET", "/app/grp/", nil)
+	req2.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: outsiderToken})
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusForbidden {
+		t.Errorf("outsider (no group): expected 403, got %d", rec2.Code)
+	}
+}
+
 // TestAccess_PrivateApp_ForwardAuthContextUser verifies that a request whose
 // context already carries a forward-auth ContextUser (set by ForwardAuthMiddleware
 // upstream of access.Middleware) is authorised for a private app even when no

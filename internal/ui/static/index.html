@@ -409,6 +409,21 @@
               <h4>Members</h4>
               <ul id="members-list"></ul>
             </section>
+            <section class="group-access-section">
+              <h4>Group access</h4>
+              <p class="hint">Grant an IdP group viewer or manager access to this app. Group access is additive and does not restrict a public or shared app.</p>
+              <ul id="group-access-list"></ul>
+              <div class="grant-row">
+                <label for="group-access-name" class="sr-only">Group name</label>
+                <input id="group-access-name" type="text" placeholder="group name" autocomplete="off">
+                <select id="group-access-role" aria-label="Group role">
+                  <option value="viewer">Viewer</option>
+                  <option value="manager">Manager</option>
+                </select>
+                <button id="group-access-add-btn" type="button" class="btn-primary">Add</button>
+              </div>
+              <p id="group-access-error" class="error" hidden></p>
+            </section>
             <section class="grant-section">
               <h4>Grant access</h4>
               <div class="grant-row">
