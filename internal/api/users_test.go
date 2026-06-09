@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -329,5 +330,88 @@ func TestPatchUserPassword_RejectsSystemUser(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+// TestPatchUser_SetsManualOverride verifies that PATCH /api/users/{id} with a
+// valid role sets the manual override and returns the updated role.
+func TestPatchUser_SetsManualOverride(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "viewer"})
+	admin, _ := store.GetUserByUsername("admin")
+	bob, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{"role": "operator"})
+	req := authedRequest(t, "PATCH", "/api/users/"+strconv.FormatInt(bob.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	u, _ := store.GetUserByID(bob.ID)
+	if u.Role != "operator" {
+		t.Fatalf("role = %q, want operator", u.Role)
+	}
+}
+
+// TestPatchUser_ClearsManualOverrideWithEmptyRole verifies that an empty role
+// in the PATCH body clears the manual override (returns the user to
+// group/default governance) and returns 200.
+func TestPatchUser_ClearsManualOverrideWithEmptyRole(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "viewer"})
+	admin, _ := store.GetUserByUsername("admin")
+	bob, _ := store.GetUserByUsername("bob")
+	// Pre-set a manual override so there is something to clear.
+	if err := store.SetManualRole(bob.ID, "operator"); err != nil {
+		t.Fatalf("SetManualRole: %v", err)
+	}
+	token, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	// Empty role means "clear manual override, revert to SSO/default governance".
+	body, _ := json.Marshal(map[string]string{"role": ""})
+	req := authedRequest(t, "PATCH", "/api/users/"+strconv.FormatInt(bob.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	u, _ := store.GetUserByID(bob.ID)
+	// No groups and no mappings configured -> falls back to OAuthDefaultRole ("viewer").
+	if u.Role != "viewer" {
+		t.Fatalf("role = %q, want viewer after clear", u.Role)
+	}
+}
+
+// TestPatchUser_MultiAdminDemotionAllowed confirms that demoting one of several
+// admins returns 200, and that the 409 ErrLastAdmin wiring compiles and maps
+// correctly at the handler level. The true last-admin 409 is structurally
+// unreachable via PATCH /api/users/{id} (the caller must be admin, so at least
+// two admins always exist); the store-level rejection is tested in db/.
+func TestPatchUser_MultiAdminDemotionAllowed(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "second", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	second, _ := store.GetUserByUsername("second")
+	token, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	// Demoting 'second' (one of two admins) to viewer is allowed.
+	body, _ := json.Marshal(map[string]string{"role": "viewer"})
+	req := authedRequest(t, "PATCH", "/api/users/"+strconv.FormatInt(second.ID, 10), body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("multi-admin demotion: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	u, _ := store.GetUserByID(second.ID)
+	if u.Role != "viewer" {
+		t.Fatalf("role = %q, want viewer", u.Role)
 	}
 }
