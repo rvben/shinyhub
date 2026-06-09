@@ -1199,10 +1199,23 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	registerBrandingRoutes(mux, cfg, srv, store, appUserLookup)
 
+	var rootHandler http.Handler = mux
+	if cfg.Auth.ForwardAuth.Enabled {
+		faCfg := auth.ForwardAuthConfig{
+			Enabled:           true,
+			UserHeader:        cfg.Auth.ForwardAuth.UserHeader,
+			EmailHeader:       cfg.Auth.ForwardAuth.EmailHeader,
+			GroupsHeader:      cfg.Auth.ForwardAuth.GroupsHeader,
+			DefaultRole:       cfg.Auth.ForwardAuth.DefaultRole,
+			GroupRoleMappings: toAuthMappings(cfg.Auth.GroupRoleMappings),
+		}
+		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(mux)
+	}
+
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(mux),
+		Handler:           api.SecurityHeaders(rootHandler),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -1516,4 +1529,15 @@ func isScheduleRunLogsPath(sub string) bool {
 		seg[0] == "schedules" && seg[1] != "" &&
 		seg[2] == "runs" && seg[3] != "" &&
 		seg[4] == "logs"
+}
+
+// toAuthMappings converts config-package GroupRoleMapping slice into the
+// auth-package equivalent. The two types are intentionally separate so the
+// auth package has no dependency on config.
+func toAuthMappings(ms []config.GroupRoleMapping) []auth.GroupRoleMapping {
+	out := make([]auth.GroupRoleMapping, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, auth.GroupRoleMapping{Group: m.Group, Role: m.Role})
+	}
+	return out
 }

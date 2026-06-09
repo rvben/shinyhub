@@ -11,11 +11,22 @@ import (
 
 // fakeUserStore implements ForwardAuthUserStore for tests.
 type fakeUserStore struct {
-	users          map[string]*ContextUser
-	created        []string // usernames passed to CreateForwardAuthUser
-	rolePromotions []string // usernames promoted to admin
-	getErr         error    // if set, GetForwardAuthUser returns this error
-	promoteErr     error    // if set, PromoteToAdmin returns this error
+	users            map[string]*ContextUser
+	created          []string // usernames passed to CreateForwardAuthUser
+	getErr           error    // if set, GetForwardAuthUser returns this error
+	reconcileErr     error    // if set, ReconcileUserFromGroups returns this error
+	getUserGroupsErr error    // if set, GetUserGroups returns this error
+
+	// state for GetUserGroups / ReconcileUserFromGroups
+	storedGroups   []string            // returned by GetUserGroups
+	reconcileCalls []reconcileCallArgs // recorded calls to ReconcileUserFromGroups
+}
+
+type reconcileCallArgs struct {
+	userID   int64
+	groups   []string
+	mappings []GroupRoleMapping
+	defRole  string
 }
 
 func newFakeStore() *fakeUserStore {
@@ -40,18 +51,21 @@ func (f *fakeUserStore) CreateForwardAuthUser(username, role string) (*ContextUs
 	return u, nil
 }
 
-func (f *fakeUserStore) PromoteToAdmin(userID int64) error {
-	if f.promoteErr != nil {
-		return f.promoteErr
+func (f *fakeUserStore) GetUserGroups(userID int64) ([]string, error) {
+	if f.getUserGroupsErr != nil {
+		return nil, f.getUserGroupsErr
 	}
-	for _, u := range f.users {
-		if u.ID == userID {
-			u.Role = "admin"
-			f.rolePromotions = append(f.rolePromotions, u.Username)
-			return nil
-		}
-	}
-	return ErrUserNotFound
+	return f.storedGroups, nil
+}
+
+func (f *fakeUserStore) ReconcileUserFromGroups(userID int64, groups []string, mappings []GroupRoleMapping, defaultRole string) error {
+	f.reconcileCalls = append(f.reconcileCalls, reconcileCallArgs{
+		userID:   userID,
+		groups:   groups,
+		mappings: mappings,
+		defRole:  defaultRole,
+	})
+	return f.reconcileErr
 }
 
 func mustCIDR(t *testing.T, s string) *net.IPNet {
@@ -149,14 +163,21 @@ func TestForwardAuth_NoUserHeader_FallsThrough(t *testing.T) {
 	}
 }
 
-func TestForwardAuth_GroupsHeaderPromotesToAdmin(t *testing.T) {
+// TestForwardAuth_GroupsHeaderPresent_ReconcilesCalled verifies that when the
+// groups header is present and the group membership has changed, ReconcileUserFromGroups
+// is called with the parsed groups and the configured GroupRoleMappings.
+func TestForwardAuth_GroupsHeaderPresent_ReconcilesCalled(t *testing.T) {
 	store := newFakeStore()
+	store.users["bob"] = &ContextUser{ID: 1, Username: "bob", Role: "developer"}
+	store.storedGroups = []string{"engineers"} // DB has only engineers
+
+	mappings := []GroupRoleMapping{{Group: "shinyhub-admins", Role: "admin"}}
 	cfg := ForwardAuthConfig{
-		Enabled:      true,
-		UserHeader:   "X-Forwarded-User",
-		GroupsHeader: "X-Forwarded-Groups",
-		AdminGroups:  []string{"shinyhub-admins"},
-		DefaultRole:  "developer",
+		Enabled:           true,
+		UserHeader:        "X-Forwarded-User",
+		GroupsHeader:      "X-Forwarded-Groups",
+		DefaultRole:       "developer",
+		GroupRoleMappings: mappings,
 	}
 	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
 
@@ -166,16 +187,101 @@ func TestForwardAuth_GroupsHeaderPromotesToAdmin(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "127.0.0.1:5555"
 	r.Header.Set("X-Forwarded-User", "bob")
-	r.Header.Set("X-Forwarded-Groups", "engineers,shinyhub-admins,sre")
+	r.Header.Set("X-Forwarded-Groups", "engineers,shinyhub-admins")
 	w := httptest.NewRecorder()
 
 	mw.ServeHTTP(w, r)
 
-	if h.user == nil || h.user.Role != "admin" {
-		t.Fatalf("expected bob role=admin, got %+v", h.user)
+	if !h.called {
+		t.Fatal("inner handler not called")
 	}
-	if len(store.rolePromotions) != 1 || store.rolePromotions[0] != "bob" {
-		t.Fatalf("expected bob promoted, got %v", store.rolePromotions)
+	if len(store.reconcileCalls) != 1 {
+		t.Fatalf("expected 1 reconcile call, got %d", len(store.reconcileCalls))
+	}
+	call := store.reconcileCalls[0]
+	if call.userID != 1 {
+		t.Errorf("reconcile called for wrong user: %d", call.userID)
+	}
+	wantGroups := []string{"engineers", "shinyhub-admins"}
+	if strings.Join(call.groups, ",") != strings.Join(wantGroups, ",") {
+		t.Errorf("reconcile groups: got %v want %v", call.groups, wantGroups)
+	}
+	if len(call.mappings) != 1 || call.mappings[0].Group != "shinyhub-admins" {
+		t.Errorf("reconcile mappings not forwarded: %v", call.mappings)
+	}
+	if call.defRole != "developer" {
+		t.Errorf("reconcile defaultRole: got %q want developer", call.defRole)
+	}
+}
+
+// TestForwardAuth_GroupsHeaderAbsent_NoReconcile verifies that when the
+// groups header is NOT present, ReconcileUserFromGroups is NOT called.
+// This is the "trusted IdP always sends the header" contract: absence means
+// the IdP intentionally omitted groups, so we must not reconcile.
+func TestForwardAuth_GroupsHeaderAbsent_NoReconcile(t *testing.T) {
+	store := newFakeStore()
+	store.users["carol"] = &ContextUser{ID: 2, Username: "carol", Role: "developer"}
+
+	cfg := ForwardAuthConfig{
+		Enabled:           true,
+		UserHeader:        "X-Forwarded-User",
+		GroupsHeader:      "X-Forwarded-Groups",
+		DefaultRole:       "developer",
+		GroupRoleMappings: []GroupRoleMapping{{Group: "admins", Role: "admin"}},
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "carol")
+	// Deliberately NOT setting X-Forwarded-Groups
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if !h.called {
+		t.Fatal("inner handler not called")
+	}
+	if len(store.reconcileCalls) != 0 {
+		t.Fatalf("absent groups header must not trigger reconcile, got %d calls", len(store.reconcileCalls))
+	}
+}
+
+// TestForwardAuth_GroupsHeaderUnchanged_NoReconcile verifies that when the
+// groups header is present but groups are unchanged (same as stored), reconcile
+// is skipped to avoid unnecessary DB writes.
+func TestForwardAuth_GroupsHeaderUnchanged_NoReconcile(t *testing.T) {
+	store := newFakeStore()
+	store.users["dave"] = &ContextUser{ID: 3, Username: "dave", Role: "developer"}
+	store.storedGroups = []string{"engineers"} // same as incoming
+
+	cfg := ForwardAuthConfig{
+		Enabled:      true,
+		UserHeader:   "X-Forwarded-User",
+		GroupsHeader: "X-Forwarded-Groups",
+		DefaultRole:  "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "dave")
+	r.Header.Set("X-Forwarded-Groups", "engineers")
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if !h.called {
+		t.Fatal("inner handler not called")
+	}
+	if len(store.reconcileCalls) != 0 {
+		t.Fatalf("unchanged groups must not trigger reconcile, got %d calls", len(store.reconcileCalls))
 	}
 }
 
@@ -234,17 +340,22 @@ func TestForwardAuth_StoreGetError_Returns500(t *testing.T) {
 	}
 }
 
-func TestForwardAuth_PromoteError_Returns500(t *testing.T) {
+// TestForwardAuth_ReconcileError_Returns500 verifies that a ReconcileUserFromGroups
+// failure returns 500 and prevents the inner handler from running.
+func TestForwardAuth_ReconcileError_Returns500(t *testing.T) {
 	store := newFakeStore()
-	store.promoteErr = errors.New("update failed")
+	store.reconcileErr = errors.New("update failed")
 	// Pre-populate bob so GetForwardAuthUser succeeds.
 	store.users["bob"] = &ContextUser{ID: 1, Username: "bob", Role: "developer"}
+	// storedGroups empty so incoming groups "shinyhub-admins" triggers reconcile.
 	cfg := ForwardAuthConfig{
 		Enabled:      true,
 		UserHeader:   "X-Forwarded-User",
 		GroupsHeader: "X-Forwarded-Groups",
-		AdminGroups:  []string{"shinyhub-admins"},
 		DefaultRole:  "developer",
+		GroupRoleMappings: []GroupRoleMapping{
+			{Group: "shinyhub-admins", Role: "admin"},
+		},
 	}
 	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
 
@@ -260,7 +371,7 @@ func TestForwardAuth_PromoteError_Returns500(t *testing.T) {
 	mw.ServeHTTP(w, r)
 
 	if h.called {
-		t.Fatal("inner handler must not be called on promote error")
+		t.Fatal("inner handler must not be called on reconcile error")
 	}
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)

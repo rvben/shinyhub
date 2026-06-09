@@ -519,3 +519,34 @@ func TestAccess_Forbidden_BrowserNav_WithForeignAuthHeader_GetsHTML(t *testing.T
 		t.Errorf("body should carry the handoff form, got %q", rec.Body.String())
 	}
 }
+
+// TestAccess_PrivateApp_ForwardAuthContextUser verifies that a request whose
+// context already carries a forward-auth ContextUser (set by ForwardAuthMiddleware
+// upstream of access.Middleware) is authorised for a private app even when no
+// session cookie is present. This is the /app/* forward-auth path: the top-level
+// mux wraps the entire handler chain with ForwardAuthMiddleware, which attaches
+// the user to the context; access.Middleware must honour that context user rather
+// than demanding a fresh cookie.
+func TestAccess_PrivateApp_ForwardAuthContextUser(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+
+	// Simulate what ForwardAuthMiddleware does: attach an admin ContextUser to the
+	// request context. No session cookie is set on the request.
+	mw := access.Middleware(store, "test-secret", nil, nil)
+	handler := mw(http.HandlerFunc(next))
+
+	req := httptest.NewRequest("GET", "/app/priv/", nil)
+	// Attach via auth.WithUser the way ForwardAuthMiddleware does.
+	ctx := auth.WithUser(req.Context(), &auth.ContextUser{ID: owner.ID, Username: "owner", Role: "admin"})
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("forward-auth context admin: expected 200, got %d — access middleware must honour context users set by ForwardAuthMiddleware", rec.Code)
+	}
+}
