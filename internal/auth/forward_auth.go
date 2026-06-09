@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -96,7 +95,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				}
 			}
 
-			ctx := context.WithValue(r.Context(), userContextKey, user)
+			ctx := WithUser(r.Context(), user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
