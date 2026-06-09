@@ -29,7 +29,8 @@ func New(t *testing.T) *db.Store {
 	if adminDSN == "" {
 		return newSQLite(t)
 	}
-	return newPostgres(t, adminDSN)
+	store, _ := newPostgres(t, adminDSN)
+	return store
 }
 
 func newSQLite(t *testing.T) *db.Store {
@@ -45,7 +46,7 @@ func newSQLite(t *testing.T) *db.Store {
 	return store
 }
 
-func newPostgres(t *testing.T, adminDSN string) *db.Store {
+func newPostgres(t *testing.T, adminDSN string) (*db.Store, string) {
 	t.Helper()
 	// Create a uniquely-named database on the admin connection, then open it.
 	admin, err := sql.Open("pgx", adminDSN)
@@ -81,7 +82,7 @@ func newPostgres(t *testing.T, adminDSN string) *db.Store {
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate postgres: %v", err)
 	}
-	return store
+	return store, testDSN
 }
 
 // swapDatabase replaces the path component (database name) of a postgres DSN.
@@ -96,6 +97,20 @@ func swapDatabase(dsn, name string) string {
 		dsn = dsn[:i+1] + name
 	}
 	return dsn + q
+}
+
+// NewPostgres returns a migrated, isolated Postgres store AND its DSN, so a test
+// can hand the same database to child processes it spawns. It SKIPS the test
+// when SHINYHUB_TEST_POSTGRES_DSN is unset - there is no SQLite fallback,
+// because a two-process shared-lease test is meaningless on per-process
+// in-memory SQLite.
+func NewPostgres(t *testing.T) (*db.Store, string) {
+	t.Helper()
+	adminDSN := os.Getenv(dsnEnv)
+	if adminDSN == "" {
+		t.Skip("SHINYHUB_TEST_POSTGRES_DSN not set; skipping Postgres-only test")
+	}
+	return newPostgres(t, adminDSN)
 }
 
 // RequirePostgres skips the test unless a Postgres DSN is configured. Use for
