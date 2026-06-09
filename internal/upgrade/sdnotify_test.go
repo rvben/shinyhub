@@ -10,7 +10,16 @@ import (
 )
 
 func TestNotifyReady_SendsReadyAndMainPID(t *testing.T) {
-	dir := t.TempDir()
+	// The socket path must fit in sockaddr_un.sun_path (104 bytes on macOS, 108
+	// on Linux). t.TempDir() embeds the long test name, and on macOS $TMPDIR
+	// lives under /var/folders/..., so that path overruns the limit and bind()
+	// fails with EINVAL ("invalid argument"). A short MkdirTemp dir (no embedded
+	// test name) keeps the path well within the limit on both platforms.
+	dir, err := os.MkdirTemp("", "sdnotify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sockPath := dir + "/notify.sock"
 	laddr, err := net.ResolveUnixAddr("unixgram", sockPath)
 	if err != nil {
@@ -18,7 +27,9 @@ func TestNotifyReady_SendsReadyAndMainPID(t *testing.T) {
 	}
 	conn, err := net.ListenUnixgram("unixgram", laddr)
 	if err != nil {
-		t.Fatalf("listen unixgram: %v", err)
+		// Include the path and its byte length so any future sun_path overrun
+		// is self-diagnosing rather than a cryptic EINVAL.
+		t.Fatalf("listen unixgram at %q (%d bytes): %v", sockPath, len(sockPath), err)
 	}
 	defer conn.Close()
 
