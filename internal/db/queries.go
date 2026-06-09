@@ -705,8 +705,13 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		       SELECT 1 FROM app_members
 		       WHERE app_slug = apps.slug AND user_id = ?
 		   )
+		   OR EXISTS (
+		       SELECT 1 FROM app_group_access aga
+		       JOIN user_groups ug ON ug.group_name = aga.group_name
+		       WHERE aga.app_slug = apps.slug AND ug.user_id = ?
+		   )
 		ORDER BY created_at DESC
-		LIMIT ? OFFSET ?`, userID, userID, limit, offset)
+		LIMIT ? OFFSET ?`, userID, userID, userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1236,8 +1241,10 @@ func (s *Store) ListAppMembers(slug string, limit, offset int) ([]AppMember, err
 	return members, rows.Err()
 }
 
-// UserCanAccessApp returns true if userID is the app's owner or has been
-// explicitly granted access via app_members.
+// UserCanAccessApp returns true if userID is the app's owner, has been
+// explicitly granted access via app_members, or has access via a group rule
+// (app_group_access joined through user_groups). Used by both the API view
+// check and the /app/* proxy.
 func (s *Store) UserCanAccessApp(slug string, userID int64) (bool, error) {
 	var count int
 	err := s.db.QueryRow(`
@@ -1245,7 +1252,11 @@ func (s *Store) UserCanAccessApp(slug string, userID int64) (bool, error) {
 			SELECT 1 FROM apps WHERE slug = ? AND owner_id = ?
 			UNION ALL
 			SELECT 1 FROM app_members WHERE app_slug = ? AND user_id = ?
-		)`, slug, userID, slug, userID).Scan(&count)
+			UNION ALL
+			SELECT 1 FROM app_group_access aga
+			    JOIN user_groups ug ON ug.group_name = aga.group_name
+			    WHERE aga.app_slug = ? AND ug.user_id = ?
+		)`, slug, userID, slug, userID, slug, userID).Scan(&count)
 	if err != nil {
 		return false, err
 	}
