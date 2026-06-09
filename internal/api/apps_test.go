@@ -2588,3 +2588,51 @@ func TestSetMemberRole_RejectsSelfChange(t *testing.T) {
 		t.Fatalf("role changed to %q despite self-guard; want manager", role)
 	}
 }
+
+func TestGrantAppAccess_OmittedRolePreservesExisting(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "ivy", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	ivy, _ := store.GetUserByUsername("ivy")
+	store.CreateApp(db.CreateAppParams{Slug: "app9", Name: "App 9", OwnerID: owner.ID})
+	store.GrantAppAccessWithRole("app9", ivy.ID, "manager") // existing manager
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"username": "ivy"}) // no role -> must NOT downgrade
+	req := authedRequest(t, "POST", "/api/apps/app9/members", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app9", ivy.ID)
+	if role != "manager" {
+		t.Fatalf("re-grant without role downgraded to %q; want manager preserved", role)
+	}
+}
+
+func TestGrantAppAccess_RejectsSelfRoleChange(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	mgr, _ := store.GetUserByUsername("mgr")
+	store.CreateApp(db.CreateAppParams{Slug: "app10", Name: "App 10", OwnerID: owner.ID})
+	store.GrantAppAccessWithRole("app10", mgr.ID, "manager") // manager-member
+
+	token, _ := auth.IssueJWT(mgr.ID, "mgr", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]string{"username": "mgr", "role": "viewer"}) // self downgrade attempt
+	req := authedRequest(t, "POST", "/api/apps/app10/members", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self role change via grant: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app10", mgr.ID)
+	if role != "manager" {
+		t.Fatalf("self downgrade via grant succeeded (role=%q); want manager", role)
+	}
+}

@@ -1657,9 +1657,9 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		UserID   int64  `json:"user_id"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
+		UserID   int64   `json:"user_id"`
+		Username string  `json:"username"`
+		Role     *string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -1693,29 +1693,39 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	role := req.Role
-	if role == "" {
-		role = "viewer"
+	// POST is additive. With no role field we add the member (a NEW member
+	// defaults to viewer) and never change an existing member's role - use
+	// PATCH /members/{user_id} for that. An explicit role sets the role
+	// (upsert) and, like PATCH, may not target the caller's own membership.
+	auditDetail := fmt.Sprintf("user_id=%d", userID)
+	if req.Role == nil {
+		if err := s.store.GrantAppAccess(slug, userID); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	} else {
+		role := *req.Role
+		if !db.IsValidMemberRole(role) {
+			writeError(w, http.StatusBadRequest, "role must be one of "+strings.Join(db.ValidMemberRoles, ", "))
+			return
+		}
+		if caller := auth.UserFromContext(r.Context()); caller != nil && caller.ID == userID {
+			writeError(w, http.StatusForbidden, "cannot change your own role")
+			return
+		}
+		if err := s.store.GrantAppAccessWithRole(slug, userID, role); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		auditDetail = fmt.Sprintf("user_id=%d role=%s", userID, role)
 	}
-	if !db.IsValidMemberRole(role) {
-		writeError(w, http.StatusBadRequest, "role must be one of "+strings.Join(db.ValidMemberRoles, ", "))
-		return
-	}
-	// Granting is an upsert: re-granting an existing member sets their role to
-	// the requested value. An omitted role defaults to viewer, which downgrades
-	// a prior manager - use PATCH /members/{user_id} to change a role in place.
-	if err := s.store.GrantAppAccessWithRole(slug, userID, role); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "grant_access",
 			ResourceType: "app",
 			ResourceID:   slug,
-			Detail:       fmt.Sprintf("user_id=%d role=%s", userID, role),
+			Detail:       auditDetail,
 			IPAddress:    s.ClientIP(r),
 		})
 	}

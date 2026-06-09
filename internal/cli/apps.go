@@ -868,7 +868,13 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 		return err
 	}
 	slug, username := args[0], args[1]
-	body, err := json.Marshal(map[string]string{"username": username, "role": f.role})
+	payload := map[string]string{"username": username}
+	// Only send role when explicitly set, so a plain `grant` never changes an
+	// existing member's role (the server preserves it when role is absent).
+	if cmd.Flags().Changed("role") {
+		payload["role"] = f.role
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -887,7 +893,11 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "grant access", resp, out)
 	}
-	fmt.Printf("%s: granted %s access to %s\n", slug, f.role, username)
+	if cmd.Flags().Changed("role") {
+		fmt.Printf("%s: granted %s access to %s\n", slug, f.role, username)
+	} else {
+		fmt.Printf("%s: granted access to %s\n", slug, username)
+	}
 	return nil
 }
 
