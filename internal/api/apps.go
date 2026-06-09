@@ -164,7 +164,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	app, _, ok := s.requireViewApp(w, r, slug)
+	app, u, ok := s.requireViewApp(w, r, slug)
 	if !ok {
 		return
 	}
@@ -214,12 +214,24 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	if effectiveTarget <= 0 {
 		effectiveTarget = s.cfg.Runtime.Autoscale.DefaultTarget
 	}
+	// can_manage tells the UI whether this caller may manage the app, including
+	// via a per-app member or group manager role (the client cannot derive this
+	// from global role + ownership alone). A lookup error degrades to false; the
+	// management endpoints enforce authorization regardless.
+	canManage := canManageApp(u, app)
+	if !canManage {
+		if role, ok, err := s.effectiveAppMemberRole(u, app); err == nil && ok && role == "manager" {
+			canManage = true
+		}
+	}
+
 	envelope := map[string]any{
 		"app":                                app,
 		"replicas_status":                    replicas,
 		"effective_max_sessions_per_replica": effectiveCap,
 		"effective_autoscale_target":         effectiveTarget,
 		"redeploy_in_flight":                 s.isRedeployInFlight(slug),
+		"can_manage":                         canManage,
 	}
 	// rejects_by_reason is a rolling 10-minute rollup of platform rejections for
 	// this app, keyed by reason. Omitted entirely when no proxy is wired or when

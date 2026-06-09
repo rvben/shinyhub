@@ -2772,3 +2772,39 @@ func TestGroupAccess_AdditiveWarningOnPublic(t *testing.T) {
 		t.Fatal("expected an additive-only warning header on a public app")
 	}
 }
+
+func TestGetApp_CanManage_ViaGroupManager(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "gm", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "gv", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	gm, _ := store.GetUserByUsername("gm")
+	gv, _ := store.GetUserByUsername("gv")
+	store.CreateApp(db.CreateAppParams{Slug: "cm", Name: "CM", OwnerID: owner.ID})
+	store.SetAppAccess("cm", "private")
+	store.ReplaceUserGroups(gm.ID, []string{"leads"})
+	store.GrantAppGroupAccess("cm", "leads", "manager", "manual")
+	store.ReplaceUserGroups(gv.ID, []string{"viewers"})
+	store.GrantAppGroupAccess("cm", "viewers", "viewer", "manual")
+
+	get := func(uid int64, uname string) map[string]any {
+		token, _ := auth.IssueJWT(uid, uname, "developer", "test-secret")
+		req := authedRequest(t, "GET", "/api/apps/cm", nil, token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s GET: expected 200, got %d: %s", uname, rec.Code, rec.Body.String())
+		}
+		var env map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &env)
+		return env
+	}
+	if env := get(gm.ID, "gm"); env["can_manage"] != true {
+		t.Fatalf("group-manager can_manage = %v, want true", env["can_manage"])
+	}
+	if env := get(gv.ID, "gv"); env["can_manage"] != false {
+		t.Fatalf("group-viewer can_manage = %v, want false", env["can_manage"])
+	}
+}

@@ -192,3 +192,36 @@ func TestRequireExplicitAppAccess_MissingSlugIs404(t *testing.T) {
 		t.Errorf("expected 404, got %d", rr.Code)
 	}
 }
+
+// TestRequireExplicitAppAccess_GroupMemberPasses verifies that a user with ONLY
+// a group rule (no app_members row) passes requireExplicitAppAccess. This is the
+// per-app group access path: group membership grants explicit access without a
+// direct app_members row.
+func TestRequireExplicitAppAccess_GroupMemberPasses(t *testing.T) {
+	srv, store := newAuthTestServer(t)
+	hash, _ := auth.HashPassword("pw")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
+	if err := store.SetAppAccess("demo", "private"); err != nil {
+		t.Fatalf("SetAppAccess: %v", err)
+	}
+
+	store.CreateUser(db.CreateUserParams{Username: "groupmember", PasswordHash: hash, Role: "developer"})
+	gm, _ := store.GetUserByUsername("groupmember")
+	if err := store.ReplaceUserGroups(gm.ID, []string{"eng"}); err != nil {
+		t.Fatalf("ReplaceUserGroups: %v", err)
+	}
+	if err := store.GrantAppGroupAccess("demo", "eng", "viewer", "manual"); err != nil {
+		t.Fatalf("GrantAppGroupAccess: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	app, u, ok := srv.requireExplicitAppAccess(rr, reqWithUser(&auth.ContextUser{ID: gm.ID, Username: "groupmember", Role: "developer"}), "demo")
+	if !ok {
+		t.Fatalf("group member should pass requireExplicitAppAccess, got %d %s", rr.Code, rr.Body.String())
+	}
+	if app == nil || u == nil {
+		t.Fatalf("expected app and user, got %v %v", app, u)
+	}
+}

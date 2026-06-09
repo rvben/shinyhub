@@ -39,6 +39,12 @@ function canManageApp(user, app) {
   if (!user || !app) {
     return false;
   }
+  // Prefer the server-computed value when present (it accounts for per-app
+  // member/group manager roles the client cannot see). Falls back to the
+  // global-role/owner heuristic for list views that do not carry it.
+  if (typeof app.can_manage === 'boolean') {
+    return app.can_manage;
+  }
   return user.role === 'admin' || user.role === 'operator' || user.id === app.owner_id;
 }
 

@@ -1219,3 +1219,14 @@ func TestGroupAccessSectionWiring(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "refreshGroupAccessList",
 		"the Access tab must refresh the group-rules list when rendered")
 }
+
+// TestCanManageAppHonorsServerValue guards the per-app manager UI gate: the JS
+// canManageApp must honor the server-computed app.can_manage (so member/group
+// managers get the management tabs), and the detail view must copy body.can_manage
+// onto the app object. See internal/api/apps.go handleGetApp.
+func TestCanManageAppHonorsServerValue(t *testing.T) {
+	assertContains(t, "app.js", "typeof app.can_manage === 'boolean'",
+		"canManageApp must prefer the server-computed app.can_manage when present")
+	assertContains(t, "views/app-detail.js", "body.can_manage",
+		"the detail view must copy body.can_manage onto the app object so canManageApp sees it")
+}
