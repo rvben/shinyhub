@@ -165,18 +165,6 @@ func (s *Store) CreateForwardAuthUser(username, role string) (*auth.ContextUser,
 	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
 }
 
-// PromoteToAdmin sets the user's role to "admin". Returns auth.ErrUserNotFound
-// if the user does not exist.
-func (s *Store) PromoteToAdmin(userID int64) error {
-	if err := s.UpdateUserRole(userID, "admin"); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return auth.ErrUserNotFound
-		}
-		return err
-	}
-	return nil
-}
-
 // UpdateUserPassword sets a new password hash for the user identified by ID.
 // Returns ErrNotFound if no user with that ID exists.
 func (s *Store) UpdateUserPassword(id int64, hash string) error {

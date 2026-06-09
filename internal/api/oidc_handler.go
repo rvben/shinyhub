@@ -130,6 +130,28 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Authoritative role reconciliation from IdP groups. Only when the provider
+	// actually sent the groups claim - an absent claim must not demote the user.
+	if oidcUser.GroupsClaimPresent {
+		if err := s.store.ReconcileUserFromGroups(
+			user.ID, oidcUser.Groups,
+			AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole(),
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "oidc reconcile groups: %v\n", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		// Re-read so the issued JWT carries the reconciled role. A read failure
+		// here must not issue a session with a stale role claim.
+		fresh, err := s.store.GetUserByID(user.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "oidc re-read user after reconcile: %v\n", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		user = fresh
+	}
+
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")

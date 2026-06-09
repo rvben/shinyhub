@@ -111,6 +111,9 @@ func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker,
 // function - callers are responsible for calling auth.WithUser if they want
 // to propagate the identity downstream.
 func ResolveOptionalUser(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) *auth.ContextUser {
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		return u
+	}
 	user, _, err := auth.AuthenticateBrowserSession(r, secret, userLookup, revoked)
 	if err != nil {
 		return nil

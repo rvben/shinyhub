@@ -13,6 +13,7 @@ func TestNewOIDCProvider_InvalidIssuer(t *testing.T) {
 		ctx,
 		"https://invalid.example.invalid/oidc",
 		"client", "secret", "https://app.example.com/callback", "SSO",
+		"", "",
 	)
 	if err == nil {
 		t.Error("expected error for invalid issuer URL")

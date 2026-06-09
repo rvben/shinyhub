@@ -185,14 +185,6 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if req.Role == "" {
-		writeError(w, http.StatusBadRequest, "role is required")
-		return
-	}
-	if !auth.IsValidGlobalRole(req.Role) {
-		writeError(w, http.StatusBadRequest, "role must be viewer, developer, operator, or admin")
-		return
-	}
 
 	// Capture the prior role so the audit trail distinguishes a privilege
 	// escalation from a downgrade.
@@ -207,13 +199,29 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	}
 	oldRole := existing.Role
 
-	if err := s.store.UpdateUserRole(id, req.Role); err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not found")
+	if req.Role == "" {
+		// Empty role clears the manual override: the user returns to group/default governance.
+		if err := s.store.ClearManualRole(id, AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole()); err != nil {
+			if errors.Is(err, db.ErrLastAdmin) {
+				writeError(w, http.StatusConflict, "cannot remove the last admin")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+	} else {
+		if !auth.IsValidGlobalRole(req.Role) {
+			writeError(w, http.StatusBadRequest, "role must be viewer, developer, operator, or admin")
+			return
+		}
+		if err := s.store.SetManualRole(id, req.Role); err != nil {
+			if errors.Is(err, db.ErrLastAdmin) {
+				writeError(w, http.StatusConflict, "cannot remove the last admin")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
 	}
 
 	user, err := s.store.GetUserByID(id)
@@ -222,7 +230,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roleDetail, _ := json.Marshal(map[string]string{"old_role": oldRole, "new_role": req.Role})
+	roleDetail, _ := json.Marshal(map[string]string{"old_role": oldRole, "new_role": user.Role})
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "update_user",
@@ -303,6 +311,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if s.refuseSystemUser(w, id) {
 		return
 	}
+	// No last-admin guard is needed here: requireAdmin means the caller is an
+	// admin, and self-delete is blocked below, so the caller always remains an
+	// admin after any delete - the count can never reach zero.
+	//
 	// An admin cannot delete their own account via the API (the UI also blocks
 	// it): self-deletion can strand the instance with no admin.
 	if admin.ID == id {

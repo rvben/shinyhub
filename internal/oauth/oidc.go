@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
@@ -14,21 +15,34 @@ type OIDCProvider struct {
 	verifier    *gooidc.IDTokenVerifier
 	oauth2Cfg   oauth2.Config
 	DisplayName string
+	groupsClaim string
 }
 
 // OIDCUser holds the claims extracted from the ID token.
 type OIDCUser struct {
-	Sub   string
-	Email string
-	Name  string
+	Sub                string
+	Email              string
+	Name               string
+	Groups             []string
+	GroupsClaimPresent bool
 }
 
 // NewOIDCProvider performs OIDC discovery against issuerURL and returns a
-// configured provider. Returns an error if discovery fails.
-func NewOIDCProvider(ctx context.Context, issuerURL, clientID, clientSecret, callbackURL, displayName string) (*OIDCProvider, error) {
+// configured provider. groupsClaim names the ID-token claim that carries group
+// memberships (defaults to "groups" when empty). groupsScope is an optional
+// additional OAuth2 scope to request (e.g. "groups"). Returns an error if
+// discovery fails.
+func NewOIDCProvider(ctx context.Context, issuerURL, clientID, clientSecret, callbackURL, displayName, groupsClaim, groupsScope string) (*OIDCProvider, error) {
 	provider, err := gooidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discover %s: %w", issuerURL, err)
+	}
+	scopes := []string{gooidc.ScopeOpenID, "email", "profile"}
+	if groupsScope != "" {
+		scopes = append(scopes, groupsScope)
+	}
+	if groupsClaim == "" {
+		groupsClaim = "groups"
 	}
 	return &OIDCProvider{
 		verifier: provider.Verifier(&gooidc.Config{ClientID: clientID}),
@@ -37,9 +51,10 @@ func NewOIDCProvider(ctx context.Context, issuerURL, clientID, clientSecret, cal
 			ClientSecret: clientSecret,
 			RedirectURL:  callbackURL,
 			Endpoint:     provider.Endpoint(),
-			Scopes:       []string{gooidc.ScopeOpenID, "email", "profile"},
+			Scopes:       scopes,
 		},
 		DisplayName: displayName,
+		groupsClaim: groupsClaim,
 	}, nil
 }
 
@@ -67,16 +82,41 @@ func (p *OIDCProvider) VerifyIDToken(ctx context.Context, tok *oauth2.Token) (*O
 	if err != nil {
 		return nil, fmt.Errorf("oidc verify id_token: %w", err)
 	}
-	var claims struct {
-		Sub   string `json:"sub"`
-		Email string `json:"email"`
-		Name  string `json:"name"`
-	}
+	var claims map[string]json.RawMessage
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("oidc extract claims: %w", err)
 	}
-	if claims.Sub == "" {
+	var sub, email, name string
+	_ = json.Unmarshal(claims["sub"], &sub)
+	_ = json.Unmarshal(claims["email"], &email)
+	_ = json.Unmarshal(claims["name"], &name)
+	if sub == "" {
 		return nil, fmt.Errorf("oidc: id_token missing sub claim")
 	}
-	return &OIDCUser{Sub: claims.Sub, Email: claims.Email, Name: claims.Name}, nil
+	rawGroups := claims[p.groupsClaim]
+	present := len(rawGroups) > 0 && string(rawGroups) != "null"
+	return &OIDCUser{
+		Sub:                sub,
+		Email:              email,
+		Name:               name,
+		Groups:             decodeGroupsClaim(rawGroups),
+		GroupsClaimPresent: present,
+	}, nil
+}
+
+// decodeGroupsClaim normalizes an OIDC groups claim that may be a JSON array
+// of strings or a single string. Returns an empty slice when absent or null.
+func decodeGroupsClaim(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return []string{}
+	}
+	var arr []string
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return arr
+	}
+	var one string
+	if err := json.Unmarshal(raw, &one); err == nil && one != "" {
+		return []string{one}
+	}
+	return []string{}
 }

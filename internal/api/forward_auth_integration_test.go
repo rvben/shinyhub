@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 )
 
@@ -31,7 +32,17 @@ func TestForwardAuthIntegration_TrustedPeerAuthenticates(t *testing.T) {
 	store := newTestStore(t) // defined in workers_test.go (package api)
 	srv := New(cfg, store, nil, nil)
 
-	ts := httptest.NewServer(srv.Router())
+	// Mirror the main.go wiring: ForwardAuthMiddleware wraps the chi router at
+	// the top-level mux so it covers all paths (/api and /app/*). The chi
+	// router itself no longer carries forward-auth middleware.
+	faCfg := auth.ForwardAuthConfig{
+		Enabled:     true,
+		UserHeader:  cfg.Auth.ForwardAuth.UserHeader,
+		DefaultRole: cfg.Auth.ForwardAuth.DefaultRole,
+	}
+	handler := auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(srv.Router())
+
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	// GET /api/auth/me requires authentication. With forward-auth enabled, a

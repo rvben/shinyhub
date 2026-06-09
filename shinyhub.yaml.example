@@ -36,6 +36,18 @@ auth:
   # Bump to "developer" when your IdP only ever sees trusted employees.
   oauth_default_role: viewer            # SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE
 
+  # Optional: map IdP groups to global roles. Groups come from the OIDC `groups`
+  # claim (see oauth.oidc.groups_claim) or the forward-auth groups header.
+  # Highest-rank match wins. Unlike oauth_default_role, a group MAY confer admin.
+  # Reconciliation is authoritative (removal from a mapped group demotes on the
+  # next login); a manual role set in the UI is a break-glass override that
+  # survives reconciliation. forward_auth.admin_groups still works as a
+  # deprecated alias for an entry with role: admin.
+  # Env: SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS="shinyhub-admins:admin,data-sci:developer"
+  # group_role_mappings:
+  #   - { group: "shinyhub-admins", role: admin }
+  #   - { group: "data-scientists", role: developer }
+
   # Optional: trust an upstream reverse proxy that has already authenticated the user.
   # When enabled, requests whose DIRECT peer IP is in server.trusted_proxies are
   # treated as authenticated based on the configured headers. Leave disabled
@@ -50,7 +62,7 @@ auth:
   #   user_header: X-Forwarded-User              # SHINYHUB_FORWARD_AUTH_USER_HEADER   (default: X-Forwarded-User)
   #   email_header: X-Forwarded-Email            # SHINYHUB_FORWARD_AUTH_EMAIL_HEADER  (reserved; not yet used)
   #   groups_header: X-Forwarded-Groups          # SHINYHUB_FORWARD_AUTH_GROUPS_HEADER
-  #   admin_groups: ["shinyhub-admins"]          # SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS  (comma-separated in env)
+  #   admin_groups: ["shinyhub-admins"]          # SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS  (deprecated alias for auth.group_role_mappings role: admin)
   #   default_role: developer                    # SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE  (default: developer)
 
 storage:
@@ -191,6 +203,8 @@ oauth:
     client_secret: ""                 # SHINYHUB_OIDC_CLIENT_SECRET
     callback_url:  ""                 # SHINYHUB_OIDC_CALLBACK_URL
     display_name:  "Sign in with SSO" # SHINYHUB_OIDC_DISPLAY_NAME
+    groups_claim:  "groups"           # SHINYHUB_OIDC_GROUPS_CLAIM (ID-token claim holding group names; default "groups")
+    groups_scope:  ""                 # SHINYHUB_OIDC_GROUPS_SCOPE (optional extra scope to request; omit to not request)
 
 # Optional: OpenTelemetry trace propagation to app processes.
 # When enabled, ShinyHub injects OTEL_* env vars into each app process so Shiny's

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/textproto"
 	"strings"
 )
 
@@ -19,10 +20,10 @@ type ForwardAuthConfig struct {
 	Enabled    bool
 	UserHeader string
 	// EmailHeader is accepted but not yet consumed by the middleware (reserved).
-	EmailHeader  string
-	GroupsHeader string
-	AdminGroups  []string
-	DefaultRole  string
+	EmailHeader       string
+	GroupsHeader      string
+	GroupRoleMappings []GroupRoleMapping
+	DefaultRole       string
 }
 
 // ForwardAuthUserStore is the narrow store interface the middleware needs.
@@ -30,13 +31,14 @@ type ForwardAuthConfig struct {
 type ForwardAuthUserStore interface {
 	GetForwardAuthUser(username string) (*ContextUser, error)
 	CreateForwardAuthUser(username, role string) (*ContextUser, error)
-	PromoteToAdmin(userID int64) error
+	GetUserGroups(userID int64) ([]string, error)
+	ReconcileUserFromGroups(userID int64, groups []string, mappings []GroupRoleMapping, defaultRole string) error
 }
 
 // ForwardAuthMiddleware trusts a username header from a reverse proxy whose direct
 // peer IP is in trustedProxies. When the header is present and trusted, it looks up
-// or auto-provisions the user, optionally promotes to admin based on the groups
-// header, and attaches ContextUser to the request context.
+// or auto-provisions the user, optionally reconciles the user's role from the groups
+// header (when present and changed), and attaches ContextUser to the request context.
 //
 // When disabled, header missing, or peer untrusted, the middleware passes the
 // request through unchanged so subsequent middleware (BearerMiddleware) can run. It
@@ -67,14 +69,23 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				return
 			}
 
-			if cfg.GroupsHeader != "" && len(cfg.AdminGroups) > 0 {
-				groups := parseGroups(r.Header.Get(cfg.GroupsHeader))
-				if anyGroupMatches(groups, cfg.AdminGroups) && user.Role != "admin" {
-					if err := store.PromoteToAdmin(user.ID); err != nil {
-						http.Error(w, "forward auth: promote error", http.StatusInternalServerError)
+			if cfg.GroupsHeader != "" {
+				if vals, present := r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]; present {
+					groups := parseGroups(strings.Join(vals, ","))
+					changed, err := groupsChanged(store, user.ID, groups)
+					if err != nil {
+						http.Error(w, "forward auth: groups error", http.StatusInternalServerError)
 						return
 					}
-					user.Role = "admin"
+					if changed {
+						if err := store.ReconcileUserFromGroups(user.ID, groups, cfg.GroupRoleMappings, cfg.DefaultRole); err != nil {
+							http.Error(w, "forward auth: reconcile error", http.StatusInternalServerError)
+							return
+						}
+						if fresh, err := store.GetForwardAuthUser(user.Username); err == nil && fresh != nil {
+							user = fresh
+						}
+					}
 				}
 			}
 
@@ -82,6 +93,31 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// groupsChanged reports whether incoming differs from the stored group snapshot.
+// Returns true (trigger reconcile) when lengths differ or any incoming group is
+// absent from the stored set.
+func groupsChanged(store ForwardAuthUserStore, userID int64, incoming []string) (bool, error) {
+	stored, err := store.GetUserGroups(userID)
+	if err != nil {
+		return false, err
+	}
+	// The length check catches removals; the loop below catches additions.
+	// Together they detect any set difference (order-insensitive).
+	if len(stored) != len(incoming) {
+		return true, nil
+	}
+	set := make(map[string]struct{}, len(stored))
+	for _, g := range stored {
+		set[g] = struct{}{}
+	}
+	for _, g := range incoming {
+		if _, ok := set[g]; !ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // peerInTrustedProxies reports whether r.RemoteAddr's host portion is inside any
@@ -115,18 +151,4 @@ func parseGroups(header string) []string {
 		}
 	}
 	return out
-}
-
-// anyGroupMatches reports whether any element of have appears in the admin set.
-func anyGroupMatches(have, admin []string) bool {
-	set := make(map[string]struct{}, len(admin))
-	for _, g := range admin {
-		set[g] = struct{}{}
-	}
-	for _, g := range have {
-		if _, ok := set[g]; ok {
-			return true
-		}
-	}
-	return false
 }

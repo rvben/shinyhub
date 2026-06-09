@@ -1184,6 +1184,15 @@ func TestAutoscaleActionBadgeCSS(t *testing.T) {
 	}
 }
 
+// TestUsersRoleDropdownHasSSOManagedOption guards the manual-override clear path.
+// The users page role <select> must offer an "(SSO-managed)" option with value ""
+// so an admin can clear a manual override and return a user to group/default
+// governance via PATCH /api/users/{id} {role:""}. See internal/api/users.go.
+func TestUsersRoleDropdownHasSSOManagedOption(t *testing.T) {
+	assertContains(t, "app.js", "(SSO-managed)",
+		"users role dropdown must offer an (SSO-managed) option to clear the manual override")
+}
+
 // TestMemberRoleDropdownWiring guards the Access-tab member-role control. The
 // member list must render an editable <select> (viewer/manager) per member and
 // PATCH /api/apps/:slug/members/:user_id on change so a manager can promote or

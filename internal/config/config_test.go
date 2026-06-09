@@ -2450,3 +2450,56 @@ func TestLoad_NormalizesStorageRootsToAbsolute(t *testing.T) {
 		t.Errorf("app_data_dir not absolute: %q", cfg.Storage.AppDataDir)
 	}
 }
+
+func TestGroupRoleMappings_FromEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS", "shinyhub-admins:admin,data-sci:developer")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.Auth.GroupRoleMappings
+	if len(got) != 2 || got[0] != (config.GroupRoleMapping{Group: "shinyhub-admins", Role: "admin"}) ||
+		got[1] != (config.GroupRoleMapping{Group: "data-sci", Role: "developer"}) {
+		t.Fatalf("mappings = %+v", got)
+	}
+}
+
+func TestGroupRoleMappings_RejectsInvalidRole(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS", "g:superuser")
+	if _, err := config.Load(""); err == nil {
+		t.Fatal("expected error for invalid mapped role")
+	}
+}
+
+func TestAdminGroupsAliasMergesIntoMappings(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_FORWARD_AUTH_ENABLED", "true")
+	t.Setenv("SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS", "legacy-admins")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	found := false
+	for _, m := range cfg.Auth.GroupRoleMappings {
+		if m.Group == "legacy-admins" && m.Role == "admin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("admin_groups alias not merged: %+v", cfg.Auth.GroupRoleMappings)
+	}
+}
+
+func TestOIDCGroupsClaimDefault(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_OIDC_ISSUER_URL", "https://idp.example.com")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OAuth.OIDC.GroupsClaim != "groups" {
+		t.Fatalf("GroupsClaim = %q, want default \"groups\"", cfg.OAuth.OIDC.GroupsClaim)
+	}
+}

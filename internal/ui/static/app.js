@@ -879,6 +879,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const roleCell = document.createElement('td');
       const select = document.createElement('select');
       select.className = 'users-row-role';
+      // "(SSO-managed)" clears any manual override (sends PATCH {role:""}),
+      // returning the user to group/default governance. Selected as the
+      // fallback when the user's role is not an explicit manual option.
+      const ssoOpt = document.createElement('option');
+      ssoOpt.value = '';
+      ssoOpt.textContent = '(SSO-managed)';
+      const explicitRoles = ['developer', 'operator', 'admin'];
+      if (!explicitRoles.includes(u.role)) ssoOpt.selected = true;
+      select.appendChild(ssoOpt);
       for (const r of ['developer', 'operator', 'admin']) {
         const opt = document.createElement('option');
         opt.value = r;

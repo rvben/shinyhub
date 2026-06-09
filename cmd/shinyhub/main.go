@@ -836,6 +836,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			cfg.OAuth.OIDC.ClientSecret,
 			cfg.OAuth.OIDC.CallbackURL,
 			cfg.OAuth.OIDC.DisplayName,
+			cfg.OAuth.OIDC.GroupsClaim,
+			cfg.OAuth.OIDC.GroupsScope,
 		)
 		oidcCancel()
 		if err != nil {
@@ -848,7 +850,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		slog.Info("forward auth configured",
 			"user_header", cfg.Auth.ForwardAuth.UserHeader,
 			"groups_header", cfg.Auth.ForwardAuth.GroupsHeader,
-			"admin_groups", cfg.Auth.ForwardAuth.AdminGroups,
+			"group_role_mappings", len(cfg.Auth.GroupRoleMappings),
 			"default_role", cfg.Auth.ForwardAuth.DefaultRole,
 		)
 	}
@@ -1197,10 +1199,23 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	registerBrandingRoutes(mux, cfg, srv, store, appUserLookup)
 
+	var rootHandler http.Handler = mux
+	if cfg.Auth.ForwardAuth.Enabled {
+		faCfg := auth.ForwardAuthConfig{
+			Enabled:           true,
+			UserHeader:        cfg.Auth.ForwardAuth.UserHeader,
+			EmailHeader:       cfg.Auth.ForwardAuth.EmailHeader,
+			GroupsHeader:      cfg.Auth.ForwardAuth.GroupsHeader,
+			DefaultRole:       cfg.Auth.ForwardAuth.DefaultRole,
+			GroupRoleMappings: api.AuthMappings(cfg.Auth.GroupRoleMappings),
+		}
+		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(mux)
+	}
+
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(mux),
+		Handler:           api.SecurityHeaders(rootHandler),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

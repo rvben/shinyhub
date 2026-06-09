@@ -660,9 +660,6 @@ func (s *Server) buildRouter() chi.Router {
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.userLookup, s.revocationChecker())
 	csrf := auth.CSRFMiddleware(s.cfg.TrustedProxyNets)
 	r.Group(func(r chi.Router) {
-		if s.cfg.Auth.ForwardAuth.Enabled {
-			r.Use(auth.ForwardAuthMiddleware(s.store, faConfigToAuth(s.cfg.Auth.ForwardAuth), s.cfg.TrustedProxyNets))
-		}
 		r.Use(bearer)
 		r.Use(csrf)
 		r.Use(s.ownerGuard)
@@ -826,16 +823,11 @@ func (s *Server) rateLimitByIP(rl *keyedRateLimiter) func(http.Handler) http.Han
 	}
 }
 
-// faConfigToAuth converts the config-package ForwardAuthConfig into the
-// auth-package equivalent. The two structs are intentionally duplicated so the
-// auth package does not depend on config.
-func faConfigToAuth(c config.ForwardAuthConfig) auth.ForwardAuthConfig {
-	return auth.ForwardAuthConfig{
-		Enabled:      c.Enabled,
-		UserHeader:   c.UserHeader,
-		EmailHeader:  c.EmailHeader,
-		GroupsHeader: c.GroupsHeader,
-		AdminGroups:  c.AdminGroups,
-		DefaultRole:  c.DefaultRole,
+// AuthMappings converts config group-role mappings into the auth-package type.
+func AuthMappings(ms []config.GroupRoleMapping) []auth.GroupRoleMapping {
+	out := make([]auth.GroupRoleMapping, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, auth.GroupRoleMapping{Group: m.Group, Role: m.Role})
 	}
+	return out
 }

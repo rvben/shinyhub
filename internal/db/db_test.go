@@ -1213,24 +1213,6 @@ func TestForwardAuthAdapter_GetMissing(t *testing.T) {
 	}
 }
 
-func TestForwardAuthAdapter_PromoteToAdmin(t *testing.T) {
-	store := mustOpenDB(t)
-	u, err := store.CreateForwardAuthUser("bob", "developer")
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := store.PromoteToAdmin(u.ID); err != nil {
-		t.Fatalf("PromoteToAdmin: %v", err)
-	}
-	fresh, err := store.GetForwardAuthUser("bob")
-	if err != nil {
-		t.Fatalf("get after promote: %v", err)
-	}
-	if fresh.Role != "admin" {
-		t.Fatalf("role: got %q want %q", fresh.Role, "admin")
-	}
-}
-
 func TestGrantAppAccessWithRole(t *testing.T) {
 	store := dbtest.New(t)
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
