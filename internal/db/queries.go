@@ -29,6 +29,14 @@ func IsValidAppVisibility(s string) bool {
 	return slices.Contains(ValidAppVisibilities, s)
 }
 
+// ValidMemberRoles is the canonical set of per-app member roles.
+var ValidMemberRoles = []string{"viewer", "manager"}
+
+// IsValidMemberRole reports whether s is a recognised app member role.
+func IsValidMemberRole(s string) bool {
+	return slices.Contains(ValidMemberRoles, s)
+}
+
 // --- Users ---
 
 type User struct {
@@ -1154,6 +1162,20 @@ func (s *Store) GrantAppAccess(slug string, userID int64) error {
 	return nil
 }
 
+// GrantAppAccessWithRole grants userID access to slug with the given role,
+// upserting the role when the user is already a member. role must be one of
+// ValidMemberRoles (validated by callers).
+func (s *Store) GrantAppAccessWithRole(slug string, userID int64, role string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO app_members (app_slug, user_id, role) VALUES (?, ?, ?)
+		 ON CONFLICT (app_slug, user_id) DO UPDATE SET role = excluded.role`,
+		slug, userID, role)
+	if err != nil {
+		return fmt.Errorf("grant app access with role: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) RevokeAppAccess(slug string, userID int64) error {
 	result, err := s.db.Exec(
 		`DELETE FROM app_members WHERE app_slug = ? AND user_id = ?`, slug, userID)
@@ -1253,14 +1275,21 @@ func (s *Store) GetMemberRole(slug string, userID int64) (string, error) {
 	return role, nil
 }
 
-// SetMemberRole updates the role of an explicit app member. Intended primarily
-// for testing and admin use.
+// SetMemberRole updates the role of an existing explicit app member. Returns
+// ErrNotFound when the user has no app_members row for slug.
 func (s *Store) SetMemberRole(slug string, userID int64, role string) error {
-	_, err := s.db.Exec(
+	result, err := s.db.Exec(
 		`UPDATE app_members SET role = ? WHERE app_slug = ? AND user_id = ?`,
 		role, slug, userID)
 	if err != nil {
 		return fmt.Errorf("set member role: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set member role rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

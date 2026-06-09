@@ -1230,3 +1230,66 @@ func TestForwardAuthAdapter_PromoteToAdmin(t *testing.T) {
 		t.Fatalf("role: got %q want %q", fresh.Role, "admin")
 	}
 }
+
+func TestGrantAppAccessWithRole(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: "h", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	mgr, _ := store.GetUserByUsername("mgr")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.GrantAppAccessWithRole("myapp", mgr.ID, "manager"); err != nil {
+		t.Fatalf("GrantAppAccessWithRole: %v", err)
+	}
+	role, err := store.GetMemberRole("myapp", mgr.ID)
+	if err != nil {
+		t.Fatalf("GetMemberRole: %v", err)
+	}
+	if role != "manager" {
+		t.Fatalf("role = %q, want manager", role)
+	}
+
+	// Re-granting the same user upserts the role (no duplicate-row error).
+	if err := store.GrantAppAccessWithRole("myapp", mgr.ID, "viewer"); err != nil {
+		t.Fatalf("re-grant: %v", err)
+	}
+	role, _ = store.GetMemberRole("myapp", mgr.ID)
+	if role != "viewer" {
+		t.Fatalf("after re-grant role = %q, want viewer", role)
+	}
+}
+
+func TestSetMemberRole_NotFound(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// owner has no explicit app_members row; updating its role must report not-found.
+	if err := store.SetMemberRole("myapp", owner.ID, "manager"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("SetMemberRole on non-member = %v, want ErrNotFound", err)
+	}
+}
+
+func TestIsValidMemberRole(t *testing.T) {
+	for _, r := range []string{"viewer", "manager"} {
+		if !db.IsValidMemberRole(r) {
+			t.Errorf("IsValidMemberRole(%q) = false, want true", r)
+		}
+	}
+	for _, r := range []string{"", "admin", "owner", "Manager"} {
+		if db.IsValidMemberRole(r) {
+			t.Errorf("IsValidMemberRole(%q) = true, want false", r)
+		}
+	}
+}
