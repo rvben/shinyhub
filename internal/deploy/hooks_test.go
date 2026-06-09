@@ -548,3 +548,44 @@ cmd = "python fetch.py"
 		t.Errorf("RunOnRegister = true, want false (default)")
 	}
 }
+
+func TestLoadManifest_AccessBlock(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[access]
+viewer_groups = ["finance", "analysts"]
+manager_groups = ["finance-leads"]
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(m.Access.ViewerGroups) != 2 || m.Access.ViewerGroups[0] != "finance" {
+		t.Fatalf("viewer_groups = %v", m.Access.ViewerGroups)
+	}
+	if len(m.Access.ManagerGroups) != 1 || m.Access.ManagerGroups[0] != "finance-leads" {
+		t.Fatalf("manager_groups = %v", m.Access.ManagerGroups)
+	}
+}
+
+func TestLoadManifest_AccessBlock_RejectsEmptyGroup(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[access]
+viewer_groups = ["finance", ""]
+`)
+	if _, err := LoadManifest(dir); err == nil {
+		t.Fatal("expected error for an empty group name")
+	}
+}
+
+func TestLoadManifest_UnknownKeyStillRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[access]
+bogus_key = ["x"]
+`)
+	if _, err := LoadManifest(dir); err == nil {
+		t.Fatal("strict-mode parsing must reject an unknown key under [access]")
+	}
+}

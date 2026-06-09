@@ -760,6 +760,8 @@ document.addEventListener('DOMContentLoaded', () => {
       'schedule_create', 'schedule_delete',
       // Access management (amber - security)
       'grant_access', 'revoke_access',
+      // Group-access management (amber - security)
+      'grant_group_access', 'revoke_group_access', 'reconcile_group_access',
       // Shared data (blue - config)
       'shared_data_grant', 'shared_data_revoke',
       // Autoscale scale events (blue - config)
@@ -1865,6 +1867,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const roleSpan = document.createElement('span');
       roleSpan.className = 'member-role';
       roleSpan.textContent = rule.role;
+      if (rule.source === 'manifest') {
+        const tag = document.createElement('span');
+        tag.className = 'member-role';
+        tag.textContent = '(manifest)';
+        li.appendChild(nameSpan);
+        li.appendChild(roleSpan);
+        li.appendChild(tag);
+        list.appendChild(li);
+        continue; // manifest rules are managed by the bundle; not removable here
+      }
       const removeBtn = document.createElement('button');
       removeBtn.textContent = 'Remove';
       removeBtn.setAttribute('aria-label', `Remove group rule ${rule.group}`);

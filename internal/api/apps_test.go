@@ -2808,3 +2808,25 @@ func TestGetApp_CanManage_ViaGroupManager(t *testing.T) {
 		t.Fatalf("group-viewer can_manage = %v, want false", env["can_manage"])
 	}
 }
+
+func TestGroupAccess_RevokeManifestRuleRejected(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "gm1", Name: "GM1", OwnerID: owner.ID})
+	// Seed a manifest-sourced rule directly.
+	store.ReconcileAppGroupAccessFromManifest("gm1", []db.AppGroupRule{{Group: "finance", Role: "viewer"}})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "DELETE", "/api/apps/gm1/group-access/finance", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("revoke manifest rule: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// The rule is still present.
+	rules, _ := store.ListAppGroupAccess("gm1")
+	if len(rules) != 1 {
+		t.Fatalf("manifest rule was deleted: %v", rules)
+	}
+}

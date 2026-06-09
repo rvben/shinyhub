@@ -1,6 +1,9 @@
 package db
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // AppGroupRule is a per-app group access rule.
 type AppGroupRule struct {
@@ -104,4 +107,69 @@ func memberRank(role string) int {
 	default:
 		return 0
 	}
+}
+
+// ReconcileAppGroupAccessFromManifest replaces the app's source='manifest' group
+// rules with exactly the given desired rules, in one transaction. Rules whose
+// group already has a source='manual' row are NOT applied (manual is
+// authoritative) and are returned in skipped. source='manual' rows are never
+// deleted or modified. Passing nil/empty rules removes all manifest rows.
+func (s *Store) ReconcileAppGroupAccessFromManifest(slug string, rules []AppGroupRule) (skipped []string, err error) {
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), 0)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile manifest group access: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Collect groups that have a manual row - these are authoritative and must
+	// not be touched.
+	manual := map[string]struct{}{}
+	mrows, err := tx.QueryContext(ctx,
+		`SELECT group_name FROM app_group_access WHERE app_slug = ? AND source = 'manual'`, slug)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile manifest group access: read manual: %w", err)
+	}
+	for mrows.Next() {
+		var g string
+		if err := mrows.Scan(&g); err != nil {
+			mrows.Close()
+			return nil, err
+		}
+		manual[g] = struct{}{}
+	}
+	mrows.Close()
+	if err := mrows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Remove all existing manifest rows; manual rows are untouched by the WHERE.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM app_group_access WHERE app_slug = ? AND source = 'manifest'`, slug); err != nil {
+		return nil, fmt.Errorf("reconcile manifest group access: delete: %w", err)
+	}
+
+	for _, rule := range rules {
+		if _, isManual := manual[rule.Group]; isManual {
+			skipped = append(skipped, rule.Group)
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO app_group_access (app_slug, group_name, role, source) VALUES (?, ?, ?, 'manifest')
+			 ON CONFLICT (app_slug, group_name) DO UPDATE SET role = excluded.role, source = 'manifest'`,
+			slug, rule.Group, rule.Role); err != nil {
+			return nil, fmt.Errorf("reconcile manifest group access: upsert: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("reconcile manifest group access: commit: %w", err)
+	}
+	committed = true
+	return skipped, nil
 }

@@ -221,18 +221,58 @@ func derefOrZero(p *int) int {
 	return *p
 }
 
+// applyManifestAccessGroups flattens the manifest [access] block to desired
+// group rules (manager wins when a group appears in both lists) and reconciles
+// them into app_group_access as source='manifest', preserving any manual rules.
+func (s *Server) applyManifestAccessGroups(app *db.App, access deploy.AppAccess) ([]ManifestAccessGroupResult, error) {
+	desired := map[string]string{}
+	for _, g := range access.ViewerGroups {
+		desired[g] = db.HigherMemberRole(desired[g], "viewer")
+	}
+	for _, g := range access.ManagerGroups {
+		desired[g] = db.HigherMemberRole(desired[g], "manager")
+	}
+	rules := make([]db.AppGroupRule, 0, len(desired))
+	for g, role := range desired {
+		rules = append(rules, db.AppGroupRule{Group: g, Role: role})
+	}
+	skipped, err := s.store.ReconcileAppGroupAccessFromManifest(app.Slug, rules)
+	if err != nil {
+		return nil, err
+	}
+	skippedSet := map[string]struct{}{}
+	for _, g := range skipped {
+		skippedSet[g] = struct{}{}
+	}
+	results := make([]ManifestAccessGroupResult, 0, len(rules))
+	for _, r := range rules {
+		_, sk := skippedSet[r.Group]
+		results = append(results, ManifestAccessGroupResult{Group: r.Group, Role: r.Role, Skipped: sk})
+	}
+	return results, nil
+}
+
+// ManifestAccessGroupResult records the outcome of one [access] group rule
+// reconciled from the manifest into app_group_access.
+type ManifestAccessGroupResult struct {
+	Group   string `json:"group"`
+	Role    string `json:"role"`
+	Skipped bool   `json:"skipped,omitempty"` // true when a manual rule preempted this manifest rule
+}
+
 // ManifestApplied summarises what the manifest changed during this deploy.
 // Returned alongside the app in the deploy response so CLI / UI can show
 // the operator a concrete record of what landed.
 type ManifestApplied struct {
-	App       map[string]any           `json:"app,omitempty"`
-	Schedules []ManifestScheduleResult `json:"schedules,omitempty"`
+	App          map[string]any              `json:"app,omitempty"`
+	Schedules    []ManifestScheduleResult    `json:"schedules,omitempty"`
+	AccessGroups []ManifestAccessGroupResult `json:"access_groups,omitempty"`
 }
 
 // IsEmpty reports whether nothing was applied. The handler omits the field
 // from the response in that case so the wire shape stays clean.
 func (m *ManifestApplied) IsEmpty() bool {
-	return m == nil || (len(m.App) == 0 && len(m.Schedules) == 0)
+	return m == nil || (len(m.App) == 0 && len(m.Schedules) == 0 && len(m.AccessGroups) == 0)
 }
 
 // manifestAppliedSummary computes the per-field record of [app] changes. It
