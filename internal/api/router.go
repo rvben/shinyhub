@@ -691,6 +691,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/apps/{slug}/members", s.handleGrantAppAccess)
 		r.Delete("/api/apps/{slug}/members", s.handleRevokeAppAccess)
 		r.Delete("/api/apps/{slug}/members/{user_id}", s.handleRevokeAppAccess)
+		r.Patch("/api/apps/{slug}/members/{user_id}", s.handleSetMemberRole)
 		r.Get("/api/apps/{slug}/deployments", s.handleListDeployments)
 		r.Get("/api/apps/{slug}/env", s.handleListAppEnv)
 		r.Put("/api/apps/{slug}/env/{key}", s.handleUpsertAppEnv)
