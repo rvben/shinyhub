@@ -1153,6 +1153,10 @@ type AppMember struct {
 	Role     string
 }
 
+// GrantAppAccess adds userID as a member of slug with the default viewer role.
+// It is idempotent (ON CONFLICT DO NOTHING): re-granting an existing member is a
+// no-op and never changes their current role. Use GrantAppAccessWithRole or
+// SetMemberRole to set a specific role.
 func (s *Store) GrantAppAccess(slug string, userID int64) error {
 	_, err := s.db.Exec(
 		`INSERT INTO app_members (app_slug, user_id) VALUES (?, ?) ON CONFLICT (app_slug, user_id) DO NOTHING`, slug, userID)

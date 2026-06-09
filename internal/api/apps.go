@@ -1669,7 +1669,19 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 	// so granting access never requires a separate broadly-readable user-lookup
 	// endpoint (the previous flow's enumeration primitive).
 	userID := req.UserID
-	if userID == 0 && req.Username != "" {
+	switch {
+	case userID != 0:
+		// Verify the supplied id exists.
+		if _, err := s.store.GetUserByID(userID); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	case req.Username != "":
+		// GetUserByUsername also confirms existence, so no second lookup is needed.
 		u, err := s.store.GetUserByUsername(req.Username)
 		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
@@ -1680,17 +1692,8 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		userID = u.ID
-	}
-	if userID == 0 {
+	default:
 		writeError(w, http.StatusBadRequest, "user_id or username is required")
-		return
-	}
-	if _, err := s.store.GetUserByID(userID); err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	// POST is additive. With no role field we add the member (a NEW member
@@ -1775,6 +1778,13 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		userID = req.UserID
+	}
+
+	// A caller cannot remove their own membership (mirrors the self-role-change
+	// guard): self-removal is a footgun that can strand a manager out of an app.
+	if caller := auth.UserFromContext(r.Context()); caller != nil && caller.ID == userID {
+		writeError(w, http.StatusForbidden, "cannot remove your own access")
+		return
 	}
 
 	if err := s.store.RevokeAppAccess(slug, userID); err != nil {
