@@ -110,6 +110,14 @@ func NewPostgres(t *testing.T) (*db.Store, string) {
 	if adminDSN == "" {
 		t.Skip("SHINYHUB_TEST_POSTGRES_DSN not set; skipping Postgres-only test")
 	}
+	// Per-test isolation rewrites the DSN's database name via swapDatabase, which
+	// only understands URL-form DSNs (postgres://host/db). A keyword DSN
+	// (host=... dbname=...) would silently keep the admin database, so child
+	// processes handed this DSN would share the admin DB instead of the isolated
+	// one. Fail loudly rather than misbehave.
+	if !strings.Contains(adminDSN, "://") {
+		t.Fatalf("%s must be a URL-form DSN (postgres://...); keyword DSNs are not supported by per-test database isolation", dsnEnv)
+	}
 	return newPostgres(t, adminDSN)
 }
 

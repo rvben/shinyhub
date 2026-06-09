@@ -332,6 +332,16 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 		t.Fatal("the non-pinned stub was hit - B did not honor the pin")
 	}
 
+	// Immediately before the crash, anchor the roles: A is the active owner and B
+	// is provably still a standby. This makes the post-kill ordering proof airtight
+	// - B serves the reconnect below while it has NOT yet acquired the lease.
+	if code, _, _ := get(t, instA.url("/activez"), nil); code != http.StatusOK {
+		t.Fatalf("A /activez = %d immediately before kill, want 200 (A must be active at crash time)", code)
+	}
+	if code, _, _ := get(t, instB.url("/activez"), nil); code != http.StatusServiceUnavailable {
+		t.Fatalf("B /activez = %d immediately before kill, want 503 (B must be standby at crash time)", code)
+	}
+
 	// --- THE CRASH: SIGKILL A (no graceful lease release; lease must expire) ---
 	pinnedBefore := pinned.hits.Load()
 	if err := instA.cmd.Process.Kill(); err != nil {
