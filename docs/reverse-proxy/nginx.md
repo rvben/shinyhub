@@ -86,7 +86,7 @@ oauth2-proxy at `http://oauth2-proxy:4180/oauth2/auth`).
 |---|---|---|
 | `X-Forwarded-User` | `user_header` | Username (required). Default header name. |
 | `X-Forwarded-Email` | `email_header` | Email address (optional). Accepted by config but not yet used by ShinyHub (reserved). |
-| `X-Forwarded-Groups` | `groups_header` | Comma-separated group list (optional). Used for admin promotion. |
+| `X-Forwarded-Groups` | `groups_header` | Comma-separated group list. When `groups_header` is configured the proxy MUST send this header on every request (empty when the user has no groups); the listed groups drive role promotion AND revocation. An absent header is treated as no groups and revokes any group-derived role, so a dropped header demotes the user to the default role. |
 
 ## ShinyHub configuration
 
@@ -105,10 +105,14 @@ auth:
     enabled: true
     user_header: X-Forwarded-User     # must match proxy_set_header names above
     email_header: X-Forwarded-Email
-    groups_header: X-Forwarded-Groups
+    groups_header: X-Forwarded-Groups  # when set, always emit - empty value for users with no groups
     admin_groups: ["shinyhub-admins"] # users in this group get admin role
     default_role: developer           # role for newly provisioned accounts
 ```
+
+When `groups_header` is set, always emit it - send an empty value for users with
+no groups - because ShinyHub treats an absent header as "no groups" and revokes
+group-derived roles on that request.
 
 Or with environment variables:
 

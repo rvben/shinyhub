@@ -37,8 +37,9 @@ type ForwardAuthUserStore interface {
 
 // ForwardAuthMiddleware trusts a username header from a reverse proxy whose direct
 // peer IP is in trustedProxies. When the header is present and trusted, it looks up
-// or auto-provisions the user, optionally reconciles the user's role from the groups
-// header (when present and changed), and attaches ContextUser to the request context.
+// or auto-provisions the user, reconciles the user's role from the groups header
+// whenever the group snapshot has changed (treating an absent header as no groups),
+// and attaches ContextUser to the request context.
 //
 // When disabled, header missing, or peer untrusted, the middleware passes the
 // request through unchanged so subsequent middleware (BearerMiddleware) can run. It
@@ -70,21 +71,27 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			}
 
 			if cfg.GroupsHeader != "" {
-				if vals, present := r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]; present {
-					groups := parseGroups(strings.Join(vals, ","))
-					changed, err := groupsChanged(store, user.ID, groups)
-					if err != nil {
-						http.Error(w, "forward auth: groups error", http.StatusInternalServerError)
+				// With groups_header configured the proxy is the authoritative source of
+				// the user's groups on every request. An absent header is treated as an
+				// empty group list so group-derived role elevation is revoked when the
+				// user's groups go away. The break-glass manual_role override and the
+				// transactional last-admin guard inside ReconcileUserFromGroups prevent
+				// accidental admin lockout. The proxy MUST therefore always send this
+				// header, empty when the user has no groups.
+				vals := r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]
+				groups := parseGroups(strings.Join(vals, ","))
+				changed, err := groupsChanged(store, user.ID, groups)
+				if err != nil {
+					http.Error(w, "forward auth: groups error", http.StatusInternalServerError)
+					return
+				}
+				if changed {
+					if err := store.ReconcileUserFromGroups(user.ID, groups, cfg.GroupRoleMappings, cfg.DefaultRole); err != nil {
+						http.Error(w, "forward auth: reconcile error", http.StatusInternalServerError)
 						return
 					}
-					if changed {
-						if err := store.ReconcileUserFromGroups(user.ID, groups, cfg.GroupRoleMappings, cfg.DefaultRole); err != nil {
-							http.Error(w, "forward auth: reconcile error", http.StatusInternalServerError)
-							return
-						}
-						if fresh, err := store.GetForwardAuthUser(user.Username); err == nil && fresh != nil {
-							user = fresh
-						}
+					if fresh, err := store.GetForwardAuthUser(user.Username); err == nil && fresh != nil {
+						user = fresh
 					}
 				}
 			}
