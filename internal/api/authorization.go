@@ -80,11 +80,30 @@ func (s *Server) requireViewApp(w http.ResponseWriter, r *http.Request, slug str
 	return app, u, true
 }
 
+// effectiveAppMemberRole returns the highest-rank per-app role for u on app,
+// combining the manual app_members role and any group-derived role. Returns
+// ("", false) when the user has neither. Platform/owner bypass is handled by
+// the callers.
+func (s *Server) effectiveAppMemberRole(u *auth.ContextUser, app *db.App) (string, bool) {
+	if u == nil || app == nil {
+		return "", false
+	}
+	best := ""
+	if role, err := s.store.GetMemberRole(app.Slug, u.ID); err == nil {
+		best = db.HigherMemberRole(best, role)
+	}
+	if role, ok := s.store.GroupRoleForUserOnApp(app.Slug, u.ID); ok {
+		best = db.HigherMemberRole(best, role)
+	}
+	return best, best != ""
+}
+
 // hasExplicitAccess reports whether u has explicit (non-public, non-shared)
-// access to app — i.e. operator/admin, owner, or an explicit row in
-// app_members. Public or shared visibility on app does NOT qualify. Used by
-// endpoints that need to reject public-only callers without writing a
-// response themselves (the caller must already hold the app pointer).
+// access to app — i.e. operator/admin, owner, an explicit row in app_members,
+// or a group rule that grants any role. Public or shared visibility on app does
+// NOT qualify. Used by endpoints that need to reject public-only callers
+// without writing a response themselves (the caller must already hold the app
+// pointer).
 //
 // "Not a member" is the expected miss path; only DB errors propagate.
 func (s *Server) hasExplicitAccess(u *auth.ContextUser, app *db.App) (bool, error) {
@@ -94,14 +113,8 @@ func (s *Server) hasExplicitAccess(u *auth.ContextUser, app *db.App) (bool, erro
 	if isPrivilegedAppOperator(u) || app.OwnerID == u.ID {
 		return true, nil
 	}
-	role, err := s.store.GetMemberRole(app.Slug, u.ID)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	return role != "", nil
+	_, ok := s.effectiveAppMemberRole(u, app)
+	return ok, nil
 }
 
 // requireExplicitAppAccess loads the named app and verifies the caller has
@@ -164,9 +177,8 @@ func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug s
 	if canManageApp(u, app) {
 		return app, true
 	}
-	// A member with role="manager" may also manage the app.
-	role, err := s.store.GetMemberRole(app.Slug, u.ID)
-	if err == nil && role == "manager" {
+	// A member OR group rule with role "manager" may also manage the app.
+	if role, ok := s.effectiveAppMemberRole(u, app); ok && role == "manager" {
 		return app, true
 	}
 	writeError(w, http.StatusForbidden, "forbidden")
