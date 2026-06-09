@@ -862,3 +862,87 @@ func TestDeploy_ManifestUnknownAppFieldFails400(t *testing.T) {
 		t.Fatalf("expected 400 for unknown manifest field, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestDeploy_AppliesManifestAccessGroups deploys a bundle whose shinyhub.toml
+// declares an [access] block and asserts that the store reflects the rules as
+// source='manifest' rows, and that the deploy response includes
+// manifest.access_groups with one entry per group.
+func TestDeploy_AppliesManifestAccessGroups(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "accgrp", Name: "Access Groups App", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := `
+[access]
+viewer_groups  = ["finance"]
+manager_groups = ["leads"]
+`
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/accgrp/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// (a) store has the expected manifest rows.
+	rules, err := store.ListAppGroupAccess("accgrp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byGroup := map[string]db.AppGroupRule{}
+	for _, r := range rules {
+		byGroup[r.Group] = r
+	}
+	financeRule, ok := byGroup["finance"]
+	if !ok {
+		t.Errorf("expected rule for group 'finance', got rules=%v", rules)
+	} else {
+		if financeRule.Role != "viewer" {
+			t.Errorf("finance role = %q, want viewer", financeRule.Role)
+		}
+		if financeRule.Source != "manifest" {
+			t.Errorf("finance source = %q, want manifest", financeRule.Source)
+		}
+	}
+	leadsRule, ok := byGroup["leads"]
+	if !ok {
+		t.Errorf("expected rule for group 'leads', got rules=%v", rules)
+	} else {
+		if leadsRule.Role != "manager" {
+			t.Errorf("leads role = %q, want manager", leadsRule.Role)
+		}
+		if leadsRule.Source != "manifest" {
+			t.Errorf("leads source = %q, want manifest", leadsRule.Source)
+		}
+	}
+
+	// (b) deploy response includes manifest.access_groups with 2 entries.
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v: %s", err, rec.Body.String())
+	}
+	manifestObj, ok := resp["manifest"].(map[string]any)
+	if !ok {
+		t.Fatalf(`response missing "manifest" object: %s`, rec.Body.String())
+	}
+	accessGroups, ok := manifestObj["access_groups"].([]any)
+	if !ok {
+		t.Fatalf("manifest.access_groups missing or not an array: %v", manifestObj)
+	}
+	if len(accessGroups) != 2 {
+		t.Errorf("manifest.access_groups has %d entries, want 2: %v", len(accessGroups), accessGroups)
+	}
+}

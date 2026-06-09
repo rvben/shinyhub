@@ -1132,6 +1132,32 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		manifestSummary.Schedules = scheduleResults
 	}
 
+	// Phase C: reconcile manifest-declared per-app group access. Runs whenever a
+	// manifest is present so a removed [access] block drops its manifest rules
+	// (declarative); manual rules are preserved by the store.
+	if manifest != nil {
+		agResults, err := s.applyManifestAccessGroups(app, manifest.Access)
+		if err != nil {
+			slog.Error("manifest [access] apply failed", "slug", slug, "err", err)
+			s.recordDeploy("failure")
+			writeError(w, http.StatusInternalServerError, "access apply failed: "+err.Error())
+			return
+		}
+		if len(agResults) > 0 {
+			manifestSummary.AccessGroups = agResults
+		}
+		if u := auth.UserFromContext(r.Context()); u != nil && len(agResults) > 0 {
+			s.store.LogAuditEvent(db.AuditEventParams{
+				UserID:       &u.ID,
+				Action:       "reconcile_group_access",
+				ResourceType: "app",
+				ResourceID:   slug,
+				Detail:       fmt.Sprintf("manifest rules=%d", len(agResults)),
+				IPAddress:    s.ClientIP(r),
+			})
+		}
+	}
+
 	// Prune old version directories beyond the retention limit.
 	go func() {
 		if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
