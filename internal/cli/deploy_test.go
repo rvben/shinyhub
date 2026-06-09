@@ -1075,3 +1075,86 @@ func TestZipDir_StatErrorOnIgnoreFile(t *testing.T) {
 		t.Errorf("expected error from read-on-unreadable parent, got nil")
 	}
 }
+
+// TestDeploy_FirstFire_ReportedAndWaited verifies that --wait-for-warm polls
+// the first-fire run endpoint after deploy and exits 0 on "succeeded".
+func TestDeploy_FirstFire_ReportedAndWaited(t *testing.T) {
+	var runPolls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules/5/runs/42", func(w http.ResponseWriter, r *http.Request) {
+		runPolls++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"succeeded"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Write a minimal bundle dir with an app.py so zipDir succeeds.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("# shiny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point loadConfig() at the test server via writeTestCLIConfig.
+	writeTestCLIConfig(t, srv.URL)
+
+	cmd := newDeployCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--wait-for-warm"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if runPolls == 0 {
+		t.Errorf("--wait-for-warm did not poll the run endpoint")
+	}
+}
+
+// TestDeploy_FirstFire_FailureIsFatal verifies that a genuine first-fire failure
+// causes --wait-for-warm to return a non-nil error (non-zero exit).
+func TestDeploy_FirstFire_FailureIsFatal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules/5/runs/42", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"failed"}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules/5/runs/42/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: boom\n\n"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("# shiny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestCLIConfig(t, srv.URL)
+
+	cmd := newDeployCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--wait-for-warm"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected non-nil error when first-fire fails under --wait-for-warm")
+	}
+}

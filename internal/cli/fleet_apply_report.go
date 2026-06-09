@@ -26,14 +26,16 @@ const (
 
 // applyResult is one app's outcome. note carries a short human reason for
 // skipped / self-healed states; err carries the failure/conflict cause.
+// firstFires holds the per-schedule run_on_register outcomes for this deploy.
 type applyResult struct {
-	slug     string
-	action   fleet.Action
-	status   applyStatus
-	attempts int
-	duration time.Duration
-	err      error
-	note     string
+	slug       string
+	action     fleet.Action
+	status     applyStatus
+	attempts   int
+	duration   time.Duration
+	err        error
+	note       string
+	firstFires []firstFireOutcome
 }
 
 type applyTally struct {
@@ -135,6 +137,15 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 			line += fmt.Sprintf("   %s", r.duration.Round(100*time.Millisecond))
 		}
 		fmt.Fprintln(out, line)
+		for _, ff := range r.firstFires {
+			if ff.Status == "" {
+				fmt.Fprintf(out, "     %s: first-fire triggered (run #%d)\n", ff.Schedule, ff.RunID)
+			} else if ff.Status == "skipped_overlap" {
+				fmt.Fprintf(out, "     %s: first-fire skipped (already warming)\n", ff.Schedule)
+			} else {
+				fmt.Fprintf(out, "     %s: first-fire %s\n", ff.Schedule, ff.Status)
+			}
+		}
 	}
 	fmt.Fprintf(out, "\n%s\nResult: %s. Exit %d.\n", summary, reason, code)
 
@@ -162,15 +173,16 @@ type jsonResult struct {
 }
 
 type applyJSONApp struct {
-	Slug          string          `json:"slug"`
-	Action        string          `json:"action"`
-	Owned         bool            `json:"owned"`
-	Digest        jsonDigest      `json:"digest"`
-	ConfigDrift   []jsonDriftItem `json:"config_drift"`
-	AdoptRequired bool            `json:"adopt_required"`
-	AdoptFrom     string          `json:"adopt_from,omitempty"`
-	PruneEligible bool            `json:"prune_eligible"`
-	Result        *jsonResult     `json:"result,omitempty"`
+	Slug          string             `json:"slug"`
+	Action        string             `json:"action"`
+	Owned         bool               `json:"owned"`
+	Digest        jsonDigest         `json:"digest"`
+	ConfigDrift   []jsonDriftItem    `json:"config_drift"`
+	AdoptRequired bool               `json:"adopt_required"`
+	AdoptFrom     string             `json:"adopt_from,omitempty"`
+	PruneEligible bool               `json:"prune_eligible"`
+	Result        *jsonResult        `json:"result,omitempty"`
+	FirstFires    []firstFireOutcome `json:"first_fires,omitempty"`
 }
 
 type applyJSONEnvelope struct {
@@ -212,6 +224,7 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 				jr.Error = r.err.Error()
 			}
 			aj.Result = jr
+			aj.FirstFires = r.firstFires
 		}
 		apps = append(apps, aj)
 	}

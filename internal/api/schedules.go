@@ -19,27 +19,30 @@ import (
 )
 
 type scheduleDTO struct {
-	ID               int64    `json:"id"`
-	AppID            int64    `json:"app_id"`
-	Name             string   `json:"name"`
-	CronExpr         string   `json:"cron_expr"`
-	Command          []string `json:"command"`
-	Enabled          bool     `json:"enabled"`
-	TimeoutSeconds   int      `json:"timeout_seconds"`
-	OverlapPolicy    string   `json:"overlap_policy"`
-	MissedPolicy     string   `json:"missed_policy"`
+	ID             int64    `json:"id"`
+	AppID          int64    `json:"app_id"`
+	Name           string   `json:"name"`
+	CronExpr       string   `json:"cron_expr"`
+	Command        []string `json:"command"`
+	Enabled        bool     `json:"enabled"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
+	OverlapPolicy  string   `json:"overlap_policy"`
+	MissedPolicy   string   `json:"missed_policy"`
 	// Timezone is the raw stored value; null/nil means "inherit server default".
-	Timezone         *string  `json:"timezone"`
+	Timezone *string `json:"timezone"`
 	// EffectiveTimezone is the resolved IANA zone name that will actually be
 	// used when firing this schedule (after server-default and UTC fallback).
-	EffectiveTimezone string   `json:"effective_timezone"`
+	EffectiveTimezone string `json:"effective_timezone"`
 	// TimezoneInherited is true when no per-schedule timezone is stored and
 	// the effective zone comes from the server default.
-	TimezoneInherited bool     `json:"timezone_inherited"`
-	NextFire         *string  `json:"next_fire,omitempty"`
+	TimezoneInherited bool    `json:"timezone_inherited"`
+	NextFire          *string `json:"next_fire,omitempty"`
 	// DSTAdvisory warns when a fixed-hour schedule in a DST-observing zone will
 	// fire twice on the fall-back day. Omitted when the schedule is safe.
 	DSTAdvisory *string `json:"dst_advisory,omitempty"`
+	// FirstFireRunID is set only on a create response when run_on_register
+	// dispatched a first run. Omitted everywhere else.
+	FirstFireRunID *int64 `json:"first_fire_run_id,omitempty"`
 }
 
 func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Location) scheduleDTO {
@@ -107,6 +110,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		OverlapPolicy  string   `json:"overlap_policy"`
 		MissedPolicy   string   `json:"missed_policy"`
 		Timezone       *string  `json:"timezone"`
+		RunOnRegister  bool     `json:"run_on_register"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -151,8 +155,12 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location)))
+
+	firstFireRunID := s.maybeFirstFire(id, req.RunOnRegister, !enabled, app.Slug, req.Name)
 	sc, _ := s.store.GetSchedule(id)
-	writeJSON(w, http.StatusCreated, toScheduleDTO(sc, nil, s.cfg.Scheduler.Location))
+	dto := toScheduleDTO(sc, nil, s.cfg.Scheduler.Location)
+	dto.FirstFireRunID = firstFireRunID
+	writeJSON(w, http.StatusCreated, dto)
 }
 
 // PATCH /api/apps/{slug}/schedules/{id}

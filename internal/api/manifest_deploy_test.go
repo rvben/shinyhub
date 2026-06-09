@@ -20,6 +20,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -95,6 +96,45 @@ func (f *manifestFakeRuntime) HostPreparesDeps() bool    { return false }
 func (f *manifestFakeRuntime) AppBindHost() string       { return "127.0.0.1" }
 func (f *manifestFakeRuntime) HostProvidesAppData() bool { return true }
 
+// buildManifestE2EServer constructs the shared scaffolding used by all
+// manifest E2E server variants: temp appsDir, in-memory store, admin user +
+// JWT, config, process manager with the fake runtime, Server, and a no-op
+// health-check deploy runner. SetJobs is intentionally NOT called here so
+// each variant can wire the scheduler it needs (nil vs real jobs.Manager).
+func buildManifestE2EServer(t *testing.T, runtime config.RuntimeConfig) (srv *Server, store *db.Store, token string, mgr *process.Manager, appsDir string) {
+	t.Helper()
+	appsDir = t.TempDir()
+	store = dbtest.New(t)
+
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "admin", PasswordHash: hash, Role: "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	admin, _ := store.GetUserByUsername("admin")
+	token, _ = auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
+
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir, VersionRetention: 5},
+		Runtime: runtime,
+	}
+
+	mgr = process.NewManager(appsDir, newManifestFakeRuntime())
+	srv = New(cfg, store, mgr, proxy.New())
+
+	// Replace the deploy runner to inject a no-op health check so tests
+	// complete instantly instead of waiting for the 120 s timeout. Sync hooks
+	// are already bypassed because manifestFakeRuntime.HostPreparesDeps()
+	// returns false (container-mode semantics: no host-side dep installation).
+	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
+		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error { return nil }
+		return deploy.Run(p)
+	})
+	return srv, store, token, mgr, appsDir
+}
+
 // newManifestE2EServer wires a Server with a fake runtime, no-op sync hooks,
 // a no-op health check, and a started (wired) scheduler stub. Returns the
 // server, store, and an admin JWT bearer token.
@@ -105,42 +145,9 @@ func newManifestE2EServer(t *testing.T) (*Server, *db.Store, string) {
 
 func newManifestE2EServerCfg(t *testing.T, runtime config.RuntimeConfig) (*Server, *db.Store, string) {
 	t.Helper()
-	appsDir := t.TempDir()
-	store := dbtest.New(t)
-
-	hash, _ := auth.HashPassword("pass")
-	if err := store.CreateUser(db.CreateUserParams{
-		Username: "admin", PasswordHash: hash, Role: "admin",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	admin, _ := store.GetUserByUsername("admin")
-	token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
-
-	cfg := &config.Config{
-		Auth:    config.AuthConfig{Secret: "test-secret"},
-		Storage: config.StorageConfig{AppsDir: appsDir, VersionRetention: 5},
-		Runtime: runtime,
-	}
-
-	rt := newManifestFakeRuntime()
-	mgr := process.NewManager(appsDir, rt)
-	prx := proxy.New()
-	srv := New(cfg, store, mgr, prx)
-
+	srv, store, token, _, _ := buildManifestE2EServer(t, runtime)
 	// Wire scheduler (not started — ErrNotStarted is treated as a soft warning).
-	sc := scheduler.New(nil, store, time.UTC)
-	srv.SetJobs(nil, sc)
-
-	// Replace the deploy runner to inject a no-op health check so tests
-	// complete instantly instead of waiting for the 120 s timeout. Sync hooks
-	// are already bypassed because manifestFakeRuntime.HostPreparesDeps()
-	// returns false (container-mode semantics: no host-side dep installation).
-	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
-		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error { return nil }
-		return deploy.Run(p)
-	})
-
+	srv.SetJobs(nil, scheduler.New(nil, store, time.UTC))
 	return srv, store, token
 }
 
@@ -666,6 +673,163 @@ func TestDeployRecordsContentDigest(t *testing.T) {
 	}
 	if digest == nil || *digest == "" {
 		t.Fatal("promoted deployment must carry a content_digest")
+	}
+}
+
+// newManifestE2EServerWithJobs is like newManifestE2EServer but wires a real
+// jobs.Manager (backed by the manifest fake runtime, whose RunOnce returns
+// success) so run_on_register first-fires actually execute and record runs.
+func newManifestE2EServerWithJobs(t *testing.T) (*Server, *db.Store, string) {
+	t.Helper()
+	srv, store, token, mgr, appsDir := buildManifestE2EServer(t, config.RuntimeConfig{})
+	jm, err := jobs.NewManager(mgr, nil, process.DefaultTier, store, nil, appsDir, appsDir)
+	if err != nil {
+		t.Fatalf("jobs.NewManager: %v", err)
+	}
+	srv.SetJobs(jm, scheduler.New(jm, store, time.UTC))
+	return srv, store, token
+}
+
+// scheduleIDByName resolves a schedule's id by listing the app's schedules.
+func scheduleIDByName(t *testing.T, store *db.Store, appID int64, name string) int64 {
+	t.Helper()
+	rows, err := store.ListSchedulesByApp(appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range rows {
+		if sc.Name == name {
+			return sc.ID
+		}
+	}
+	t.Fatalf("schedule %q not found", name)
+	return 0
+}
+
+// waitForRegisterRunSucceeded blocks until the schedule has a succeeded run
+// triggered by "register", or fails the test after a short deadline.
+func waitForRegisterRunSucceeded(t *testing.T, store *db.Store, scheduleID int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err := store.ListScheduleRuns(scheduleID, 50, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range runs {
+			if r.Trigger == "register" && r.Status == "succeeded" {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no succeeded 'register' run for schedule %d within deadline", scheduleID)
+}
+
+// TestDeploy_RunOnRegister_FiresOnceThenSelfGates verifies that a schedule with
+// run_on_register = true fires exactly once on the first deploy and NOT again
+// on subsequent deploys (once a succeeded run exists, the gate closes).
+func TestDeploy_RunOnRegister_FiresOnceThenSelfGates(t *testing.T) {
+	srv, store, token := newManifestE2EServerWithJobs(t)
+	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("warmapp")
+
+	manifest := `
+[[schedule]]
+name = "warm"
+cron = "0 5 * * *"
+cmd = "true"
+run_on_register = true
+`
+	body, ct := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "print('x')",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	schedID := scheduleIDByName(t, store, app.ID, "warm")
+	waitForRegisterRunSucceeded(t, store, schedID)
+
+	runsAfterFirst, _ := store.ListScheduleRuns(schedID, 50, 0)
+	registerCount := 0
+	for _, r := range runsAfterFirst {
+		if r.Trigger == "register" {
+			registerCount++
+		}
+	}
+	if registerCount != 1 {
+		t.Fatalf("after first deploy: register runs = %d, want 1", registerCount)
+	}
+
+	body2, ct2 := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "print('x')",
+		"shinyhub.toml": manifest,
+	})
+	req2 := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body2)
+	req2.Header.Set("Content-Type", ct2)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rr2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("redeploy status = %d, body=%s", rr2.Code, rr2.Body.String())
+	}
+	runsAfterSecond, _ := store.ListScheduleRuns(schedID, 50, 0)
+	registerCount = 0
+	for _, r := range runsAfterSecond {
+		if r.Trigger == "register" {
+			registerCount++
+		}
+	}
+	if registerCount != 1 {
+		t.Errorf("after redeploy: register runs = %d, want 1 (must not re-fire)", registerCount)
+	}
+}
+
+// TestDeploy_RunOnRegister_DisabledNotFired verifies that a schedule with both
+// run_on_register = true and disabled = true is NOT first-fired on deploy.
+func TestDeploy_RunOnRegister_DisabledNotFired(t *testing.T) {
+	srv, store, token := newManifestE2EServerWithJobs(t)
+	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("warmapp")
+	manifest := `
+[[schedule]]
+name = "warm"
+cron = "0 5 * * *"
+cmd = "true"
+disabled = true
+run_on_register = true
+`
+	body, ct := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "print('x')",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	schedID := scheduleIDByName(t, store, app.ID, "warm")
+	// Settle: if a dispatch were ever going to happen it would be queued
+	// synchronously inside the deploy handler before it returns; the fake
+	// runtime's RunOnce has no I/O. A brief wait is therefore sufficient to
+	// prove the disabled gate prevented any run.
+	time.Sleep(100 * time.Millisecond)
+	runs, _ := store.ListScheduleRuns(schedID, 50, 0)
+	if len(runs) != 0 {
+		t.Errorf("disabled schedule: runs = %d, want 0 (must not first-fire)", len(runs))
 	}
 }
 

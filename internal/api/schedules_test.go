@@ -15,7 +15,12 @@ import (
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
+	"github.com/rvben/shinyhub/internal/jobs"
+	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 // validScheduleBody returns a JSON body for a schedule that passes validation.
@@ -1073,5 +1078,107 @@ func TestSchedules_RevokeSharedData_NotMountedReturns404(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("revoke non-mounted: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// newScheduleE2EServerWithJobs builds a test server with a real jobs.Manager
+// and NativeRuntime wired so run_on_register first-fires actually execute and
+// record runs. Returns the server, store, and an admin JWT bearer token.
+func newScheduleE2EServerWithJobs(t *testing.T) (*api.Server, *db.Store, string) {
+	t.Helper()
+	appsDir := t.TempDir()
+	store := dbtest.New(t)
+
+	hash, _ := auth.HashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "admin", PasswordHash: hash, Role: "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	admin, _ := store.GetUserByUsername("admin")
+	token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
+
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir, VersionRetention: 5},
+	}
+	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
+	srv := api.New(cfg, store, mgr, proxy.New())
+
+	jm, err := jobs.NewManager(mgr, nil, process.DefaultTier, store, nil, appsDir, appsDir)
+	if err != nil {
+		t.Fatalf("jobs.NewManager: %v", err)
+	}
+	// Pass nil scheduler so s.scheduler is nil and Reload is skipped; s.jobs is
+	// non-nil so run_on_register dispatch is enabled.
+	srv.SetJobs(jm, nil)
+	return srv, store, token
+}
+
+// scheduleIDBySlugAndName resolves a schedule ID by listing all schedules for
+// the given app and matching by name.
+func scheduleIDBySlugAndName(t *testing.T, store *db.Store, appID int64, name string) int64 {
+	t.Helper()
+	rows, err := store.ListSchedulesByApp(appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range rows {
+		if sc.Name == name {
+			return sc.ID
+		}
+	}
+	t.Fatalf("schedule %q not found in app %d", name, appID)
+	return 0
+}
+
+// TestCreateSchedule_RunOnRegister_FiresOnce verifies that creating a schedule
+// with run_on_register=true dispatches a first run immediately and returns the
+// run id in the response as first_fire_run_id.
+func TestCreateSchedule_RunOnRegister_FiresOnce(t *testing.T) {
+	srv, store, token := newScheduleE2EServerWithJobs(t)
+	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("warmapp")
+
+	reqBody := `{"name":"warm","cron_expr":"0 5 * * *","command":["true"],"timeout_seconds":60,"overlap_policy":"skip","missed_policy":"skip","run_on_register":true}`
+	req := httptest.NewRequest("POST", "/api/apps/warmapp/schedules", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var dto struct {
+		ID             int64  `json:"id"`
+		FirstFireRunID *int64 `json:"first_fire_run_id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &dto); err != nil {
+		t.Fatal(err)
+	}
+	if dto.FirstFireRunID == nil {
+		t.Fatalf("first_fire_run_id is nil, want a run id")
+	}
+
+	schedID := scheduleIDBySlugAndName(t, store, app.ID, "warm")
+	// Wait for the async run to be recorded.
+	deadline := time.Now().Add(5 * time.Second)
+	var hasRegister bool
+	for time.Now().Before(deadline) {
+		runs, _ := store.ListScheduleRuns(schedID, 50, 0)
+		for _, r := range runs {
+			if r.Trigger == "register" {
+				hasRegister = true
+			}
+		}
+		if hasRegister {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !hasRegister {
+		t.Errorf("no 'register' run recorded")
 	}
 }

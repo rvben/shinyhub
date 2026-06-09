@@ -20,6 +20,7 @@ type fleetApplyFlags struct {
 	jsonOutput               bool
 	retries                  int
 	healthTimeout            int
+	waitForWarm              bool
 	waitForServer            time.Duration
 }
 
@@ -59,6 +60,7 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploy-bearing actions")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
+	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for run_on_register first-fires to finish (within --health-timeout); a genuine failure fails that app")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	return cmd
 }
@@ -139,6 +141,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		preconditions:      pf.caps.FleetPreconditions,
 		retries:            f.retries,
 		healthTimeout:      healthTimeoutDuration(f.healthTimeout),
+		waitForWarm:        f.waitForWarm,
 		fleetID:            pf.manifest.FleetID,
 		runID:              newRunID(),
 	}

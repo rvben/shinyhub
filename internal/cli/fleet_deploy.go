@@ -47,13 +47,13 @@ func healthTimeoutDuration(seconds int) time.Duration {
 // apply), so the status alone cannot tell whether the new bundle went live -
 // callers that care (adopt) resolve that authoritatively with a digest
 // readback.
-func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, err error) {
+func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, err error) {
 	if err := ensureFleetApp(cfg, slug, visibility, out); err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	buf, summary, err := zipDir(dir)
 	if err != nil {
-		return "", false, fmt.Errorf("bundle %s: %w", slug, err)
+		return "", false, nil, fmt.Errorf("bundle %s: %w", slug, err)
 	}
 	if summary != "" {
 		fmt.Fprintf(out, "  %s: %s\n", slug, summary)
@@ -63,17 +63,17 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("bundle", "bundle.zip")
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	if _, err := io.Copy(part, buf); err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	if err := writer.Close(); err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -82,13 +82,15 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	// Use http.DefaultClient (no timeout) to match the SSE logs command.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", false, fmt.Errorf("deploy %s: %w", slug, err)
+		return "", false, nil, fmt.Errorf("deploy %s: %w", slug, err)
 	}
 	rb, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", false, fmt.Errorf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb))
+		return "", false, nil, fmt.Errorf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb))
 	}
+
+	firstFires = firstFireRefsFromDeployResponse(rb)
 
 	// Surface the same post-deploy-hooks-skipped warning the single-app deploy
 	// prints, so a fleet operator is not left unaware that setup hooks did not
@@ -103,10 +105,10 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	// Bundle accepted: from here on the deploy is committed even if a
 	// post-deploy step fails.
 	if err := waitForFleetHealthy(cfg, slug, out, timeout); err != nil {
-		return "", true, err
+		return "", true, firstFires, err
 	}
 	promoted, err = readPromotedDigest(cfg, slug)
-	return promoted, true, err
+	return promoted, true, firstFires, err
 }
 
 // readPromotedDigest re-GETs the app list and returns the live (succeeded)

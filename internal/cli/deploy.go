@@ -49,6 +49,7 @@ func sanitizeSlug(name string) string {
 type deployFlags struct {
 	slug        string
 	wait        bool
+	waitForWarm bool
 	waitTimeout int    // seconds
 	git         string // git repo URL; if set, clone instead of using local dir
 	branch      string // branch/tag to check out (default: default branch)
@@ -87,6 +88,7 @@ letters, digits, and single hyphens; it must not start or end with a hyphen.`,
 	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug; serves at /app/<slug>/ (lowercase letters, digits, single hyphens; no leading/trailing hyphen). Defaults to the directory name")
 	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until deployment is healthy")
 	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 300, "Seconds to wait for healthy status when --wait is set (first-run dependency installs can take minutes)")
+	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for any run_on_register first-fire to finish (uses --wait-timeout); a genuine failure exits non-zero")
 	cmd.Flags().StringVar(&f.git, "git", "", "Git repository URL to clone and deploy")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
@@ -226,6 +228,38 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" {
 		fmt.Fprintln(os.Stderr, warn)
+	}
+
+	refs := firstFireRefsFromDeployResponse(out)
+	for _, ref := range refs {
+		fmt.Printf("%s: first-fire triggered (run #%d)\n", ref.Schedule, ref.RunID)
+	}
+	if f.waitForWarm && len(refs) > 0 {
+		timeout := time.Duration(f.waitTimeout) * time.Second
+		var firstFireErr error
+		for _, ref := range refs {
+			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
+			status, werr := waitForFirstFireLoop(poll, timeout, healthPollInterval, 15*time.Second, time.Now, time.Sleep, os.Stdout, ref.Schedule)
+			switch {
+			case werr != nil:
+				// A timeout or transient poll error is not a hard failure: the run
+				// may still be warming and the next deploy self-heals. This matches
+				// fleet apply, which also treats an unfinished wait as non-fatal.
+				fmt.Fprintf(os.Stderr, "%s: first-fire not confirmed: %v (warming may still be in progress)\n", ref.Schedule, werr)
+			case status == "skipped_overlap":
+				fmt.Printf("%s: first-fire skipped (another run is warming the cache); warming in progress\n", ref.Schedule)
+			case firstFireStatusOK(status):
+				fmt.Printf("%s: first-fire %s\n", ref.Schedule, status)
+			default:
+				// Dump the failed run's own log so the operator sees why the warm-up
+				// failed.
+				_ = streamRunLogs(cfg, slug, ref.ScheduleID, ref.RunID, false, cmd)
+				firstFireErr = errors.Join(firstFireErr, fmt.Errorf("%s first-fire %s", ref.Schedule, status))
+			}
+		}
+		if firstFireErr != nil {
+			return firstFireErr
+		}
 	}
 
 	if f.wait {

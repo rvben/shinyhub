@@ -655,6 +655,63 @@ func TestSchedule_Update_CmdShellwords(t *testing.T) {
 	}
 }
 
+// TestScheduleAdd_RunOnRegister_ReportsFirstFire verifies that --run-on-register
+// sends run_on_register:true in the body and prints the first-fire run id when
+// the server returns one.
+func TestScheduleAdd_RunOnRegister_ReportsFirstFire(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(201, `{"id":7,"name":"warm","first_fire_run_id":42}`)
+
+	cmd := newScheduleAddCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"warmapp", "--name", "warm", "--cron", "0 5 * * *", "--cmd", "true", "--run-on-register"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	var gotBody map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &gotBody); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if gotBody["run_on_register"] != true {
+		t.Errorf("run_on_register in body = %v, want true", gotBody["run_on_register"])
+	}
+	if !strings.Contains(out.String(), "run #42") {
+		t.Errorf("output missing first-fire run id; got: %s", out.String())
+	}
+}
+
+// TestScheduleAdd_NoFirstFire_NoTriggerLine verifies that when the server's
+// create response omits first_fire_run_id (schedule already succeeded, or
+// --run-on-register was not passed), the CLI prints the normal "created
+// schedule" line, does not print any "first-fire" line, and exits 0. Also
+// confirms --follow alone (without a first-fire run id) is silently ignored.
+func TestScheduleAdd_NoFirstFire_NoTriggerLine(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"id":7,"name":"warm"}`)
+
+	cmd := newScheduleAddCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	// --follow passed without --run-on-register must be a no-op.
+	cmd.SetArgs([]string{"warmapp", "--name", "warm", "--cron", "0 5 * * *", "--cmd", "true", "--follow"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if strings.Contains(out.String(), "first-fire") {
+		t.Errorf("unexpected first-fire line when server returned no run id; got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "created schedule") {
+		t.Errorf("missing normal created output; got: %s", out.String())
+	}
+}
+
 // TestShareCmd_RegisteredWithRoot verifies share is registered with the root command.
 func TestShareCmd_RegisteredWithRoot(t *testing.T) {
 	root := &cobra.Command{Use: "root"}

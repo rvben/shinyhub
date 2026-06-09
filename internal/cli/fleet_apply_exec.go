@@ -17,6 +17,7 @@ type convergeOpts struct {
 	preconditions      bool // server supports If-Match-style headers
 	retries            int  // attempts AFTER the first for deploy-bearing actions
 	healthTimeout      time.Duration
+	waitForWarm        bool
 	fleetID            string
 	runID              string
 }
@@ -54,17 +55,51 @@ func precondPtrs(opt convergeOpts, digest, managedBy string) (*string, *string) 
 // committed is true if any attempt's bundle was accepted by the server, so
 // callers can tell a pre-commit failure (safe to roll back) from a post-commit
 // one (this fleet's source is already live).
-func deployWithRetry(cfg *cliConfig, slug, dir, visibility string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, err error) {
+func deployWithRetry(cfg *cliConfig, slug, dir, visibility string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, firstFires []firstFireRef, err error) {
 	total := 1 + opt.retries
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
-		promoted, c, err = deployAppBundle(cfg, slug, dir, visibility, out, opt.runID, opt.healthTimeout)
+		var ff []firstFireRef
+		promoted, c, ff, err = deployAppBundle(cfg, slug, dir, visibility, out, opt.runID, opt.healthTimeout)
 		committed = committed || c
+		// Keep the first-fire refs from whichever attempt actually fired them.
+		// A later retry of an already-created schedule returns none (the gate is
+		// closed), so it must not clobber an earlier attempt's refs.
+		if len(ff) > 0 {
+			firstFires = ff
+		}
 		if err == nil {
-			return promoted, attempts, committed, nil
+			return promoted, attempts, committed, firstFires, nil
 		}
 	}
-	return "", total, committed, err
+	return "", total, committed, firstFires, err
+}
+
+// resolveFirstFires records the per-schedule first-fire outcomes on res and,
+// when --wait-for-warm is set, polls each run to completion. Without
+// --wait-for-warm it only records that the runs were triggered (async path).
+// When waiting, a non-nil error is returned only for genuine run failures:
+// skipped_overlap is treated as success by firstFireStatusOK, and a timeout
+// (werr != nil) is non-fatal because the run is still warming and the next
+// apply self-heals.
+func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt convergeOpts, res *applyResult, out io.Writer) error {
+	for _, ref := range refs {
+		oc := firstFireOutcome{Schedule: ref.Schedule, RunID: ref.RunID}
+		if opt.waitForWarm {
+			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
+			status, werr := waitForFirstFireLoop(poll, opt.healthTimeout, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, ref.Schedule)
+			oc.Status = status
+			res.firstFires = append(res.firstFires, oc)
+			if werr == nil && !firstFireStatusOK(status) {
+				return fmt.Errorf("schedule %q first-fire %s", ref.Schedule, status)
+			}
+			// A timeout (werr != nil) is reported but not fatal: the run is still
+			// warming and the next apply self-heals.
+			continue
+		}
+		res.firstFires = append(res.firstFires, oc)
+	}
+	return nil
 }
 
 // applyConfigDrift patches exactly the drifted fleet-declared keys. A
@@ -186,12 +221,15 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// (2xx, or an ambiguous error whose readback shows the promoted digest
 		// advanced past the pre-deploy one), the reservation is KEPT because
 		// this fleet's source is now the app's bundle.
-		promoted, attempts, committed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, committed, firstFires, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		if err != nil {
 			if !committed && !adoptBundleWentLive(cfg, d.Slug, d.ServerDigest) {
 				releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt)
 			}
 			return fail(err, attempts)
+		}
+		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+			return fail(ffErr, attempts)
 		}
 		res.attempts = attempts
 		// Assert the manifest's full declared config on top of the bundle's.
@@ -222,10 +260,13 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
-		promoted, attempts, _, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, firstFires, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
 			return fail(err, attempts)
+		}
+		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+			return fail(ffErr, attempts)
 		}
 		// create => app was just made, currently unmanaged. Stamp failure is
 		// non-fatal and self-healing (next plan shows adopt) UNLESS it is a
@@ -249,10 +290,13 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusCreated)
 
 	case fleet.ActionUpdateSource:
-		_, attempts, _, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		_, attempts, _, firstFires, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
 			return fail(err, attempts)
+		}
+		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+			return fail(ffErr, attempts)
 		}
 		return done(statusUpdated)
 
@@ -267,10 +311,13 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// Mandatory ordering: deploy first, then patch fleet config
 		// on top with a precondition built from the FRESHLY promoted digest -
 		// never the stale pre-deploy one.
-		promoted, attempts, _, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, firstFires, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
 			return fail(err, attempts)
+		}
+		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+			return fail(ffErr, attempts)
 		}
 		ifD, ifM := precondPtrs(opt, promoted, marker)
 		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, ifD, ifM, opt.runID); err != nil {

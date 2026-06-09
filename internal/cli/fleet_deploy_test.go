@@ -115,6 +115,19 @@ func TestFleetApplyCmd_HasHealthTimeoutFlag(t *testing.T) {
 	}
 }
 
+// FLT-SCH: fleet apply exposes a --wait-for-warm flag so an operator can block
+// until run_on_register first-fires complete within the health timeout.
+func TestFleetApplyCmd_HasWaitForWarmFlag(t *testing.T) {
+	cmd := newFleetApplyCmd()
+	f := cmd.Flags().Lookup("wait-for-warm")
+	if f == nil {
+		t.Fatal("fleet apply must expose a --wait-for-warm flag")
+	}
+	if f.DefValue != "false" {
+		t.Fatalf("--wait-for-warm default = %q, want false", f.DefValue)
+	}
+}
+
 // FLT-11: fleet reconciles visibility through its own config-drift path, so
 // the deploy-layer "--visibility ignored for existing apps" warning is noise
 // in the fleet context (and leaked once per retry). ensureFleetApp must not
@@ -185,7 +198,7 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
-	dg, committed, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1", 5*time.Second)
+	dg, committed, _, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1", 5*time.Second)
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -233,7 +246,7 @@ func TestDeployAppBundle_EmitsHooksSkippedWarning(t *testing.T) {
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
 	var buf bytes.Buffer
-	if _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+	if _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	out := buf.String()
@@ -263,7 +276,7 @@ func TestDeployAppBundle_ClientRejectionIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, committed, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}
@@ -296,11 +309,47 @@ func TestDeployAppBundle_ServerErrorIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, committed, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}
 	if committed {
 		t.Fatal("only a 2xx deploy is known-committed; a 5xx must report committed=false")
+	}
+}
+
+// FLT-SCH: deployAppBundle parses first-fire refs from the deploy response so
+// fleet apply can report and optionally wait for run_on_register schedule runs.
+func TestDeployAppBundle_ReturnsFirstFireRefs(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+	})
+	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"slug": "warmapp", "content_digest": "sha256:warm"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cfg := &cliConfig{Host: srv.URL, Token: "t"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	var out bytes.Buffer
+	_, committed, refs, err := deployAppBundle(cfg, "warmapp", dir, "", &out, "run-1", time.Minute)
+	if err != nil {
+		t.Fatalf("deployAppBundle: %v", err)
+	}
+	if !committed {
+		t.Errorf("committed = false, want true")
+	}
+	if len(refs) != 1 || refs[0].RunID != 42 || refs[0].ScheduleID != 5 || refs[0].Schedule != "warm" {
+		t.Fatalf("refs = %+v, want one {warm 5 42}", refs)
 	}
 }

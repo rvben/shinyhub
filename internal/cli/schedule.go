@@ -43,6 +43,7 @@ type scheduleDTO struct {
 	EffectiveTimezone string   `json:"effective_timezone"`
 	TimezoneInherited bool     `json:"timezone_inherited"`
 	DSTAdvisory       *string  `json:"dst_advisory"`
+	FirstFireRunID    *int64   `json:"first_fire_run_id"`
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
@@ -172,16 +173,18 @@ func newScheduleLsCmd() *cobra.Command {
 
 func newScheduleAddCmd() *cobra.Command {
 	var flags struct {
-		name        string
-		cron        string
-		cmd         string
-		cmdJSON     string
-		timeout     int
-		overlap     string
-		missed      string
-		disabled    bool
-		ifNotExists bool
-		timezone    string
+		name          string
+		cron          string
+		cmd           string
+		cmdJSON       string
+		timeout       int
+		overlap       string
+		missed        string
+		disabled      bool
+		ifNotExists   bool
+		timezone      string
+		runOnRegister bool
+		follow        bool
 	}
 
 	addCmd := &cobra.Command{
@@ -199,6 +202,8 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.Flags().BoolVar(&flags.disabled, "disabled", false, "Create the schedule in disabled state")
 	addCmd.Flags().BoolVar(&flags.ifNotExists, "if-not-exists", false, "Exit silently if a same-named schedule already exists")
 	addCmd.Flags().StringVar(&flags.timezone, "timezone", "", "IANA timezone for this schedule (e.g. Europe/Amsterdam); empty inherits server default")
+	addCmd.Flags().BoolVar(&flags.runOnRegister, "run-on-register", false, "Fire this schedule once now if it has never succeeded (warms the cache on first deploy)")
+	addCmd.Flags().BoolVar(&flags.follow, "follow", false, "With --run-on-register, stream the first-fire run's logs until it finishes")
 	_ = addCmd.MarkFlagRequired("name")
 	_ = addCmd.MarkFlagRequired("cron")
 
@@ -237,6 +242,7 @@ func newScheduleAddCmd() *cobra.Command {
 			"overlap_policy":  flags.overlap,
 			"missed_policy":   flags.missed,
 			"timezone":        flags.timezone,
+			"run_on_register": flags.runOnRegister,
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -268,6 +274,15 @@ func newScheduleAddCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "created schedule %q (id %d)\n", created.Name, created.ID)
 			if created.DSTAdvisory != nil && *created.DSTAdvisory != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+*created.DSTAdvisory)
+			}
+			if created.FirstFireRunID != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "first-fire triggered (run #%d)\n", *created.FirstFireRunID)
+				if flags.follow {
+					if err := streamRunLogs(cfg, slug, created.ID, *created.FirstFireRunID, true, cmd); err != nil {
+						return err
+					}
+					return runFinalExitError(cfg, slug, created.ID, *created.FirstFireRunID)
+				}
 			}
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q created\n", slug, flags.name)
