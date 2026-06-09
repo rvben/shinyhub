@@ -802,6 +802,9 @@ func newAppsAccessCmd() *cobra.Command {
 		newAppsAccessGrantCmd(),
 		newAppsAccessRevokeCmd(),
 		newAppsAccessListCmd(),
+		newAppsAccessGroupGrantCmd(),
+		newAppsAccessGroupRevokeCmd(),
+		newAppsAccessGroupListCmd(),
 	)
 	return cmd
 }
@@ -995,6 +998,150 @@ func runAppsAccessList(cmd *cobra.Command, args []string, f *appsAccessListFlags
 	}
 	for _, m := range members {
 		fmt.Printf("%-20s %s\n", m.Username, m.Role)
+	}
+	return nil
+}
+
+// ── apps access group-grant / group-revoke / group-list ─────────────────────
+
+type appsAccessGroupGrantFlags struct {
+	role string
+}
+
+func newAppsAccessGroupGrantCmd() *cobra.Command {
+	f := &appsAccessGroupGrantFlags{}
+	cmd := &cobra.Command{
+		Use:   "group-grant <slug> <group>",
+		Short: "Grant an IdP group access to an app",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsAccessGroupGrant(cmd, args, f)
+		},
+	}
+	cmd.Flags().StringVar(&f.role, "role", "viewer", "Group role: viewer or manager")
+	return cmd
+}
+
+func runAppsAccessGroupGrant(cmd *cobra.Command, args []string, f *appsAccessGroupGrantFlags) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug, group := args[0], args[1]
+	body, err := json.Marshal(map[string]string{"group": group, "role": f.role})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/group-access", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "grant group access", resp, out)
+	}
+	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
+		fmt.Printf("warning: %s\n", warn)
+	}
+	fmt.Printf("%s: granted %s access to group %s\n", slug, f.role, group)
+	return nil
+}
+
+func newAppsAccessGroupRevokeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "group-revoke <slug> <group>",
+		Short: "Revoke an IdP group's access to an app",
+		Args:  cobra.ExactArgs(2),
+		RunE:  runAppsAccessGroupRevoke,
+	}
+}
+
+func runAppsAccessGroupRevoke(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug, group := args[0], args[1]
+	req, err := http.NewRequest("DELETE", cfg.Host+"/api/apps/"+slug+"/group-access/"+group, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "revoke group access", resp, out)
+	}
+	fmt.Printf("%s: revoked access for group %s\n", slug, group)
+	return nil
+}
+
+type appsAccessGroupListFlags struct {
+	jsonOutput bool
+}
+
+func newAppsAccessGroupListCmd() *cobra.Command {
+	f := &appsAccessGroupListFlags{}
+	cmd := &cobra.Command{
+		Use:   "group-list <slug>",
+		Short: "List IdP group access rules for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsAccessGroupList(cmd, args, f)
+		},
+	}
+	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	return cmd
+}
+
+func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *appsAccessGroupListFlags) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/group-access", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "list group access", resp, out)
+	}
+	if f.jsonOutput {
+		fmt.Println(string(out))
+		return nil
+	}
+	var rules []struct {
+		Group string `json:"group"`
+		Role  string `json:"role"`
+	}
+	if err := json.Unmarshal(out, &rules); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+	if len(rules) == 0 {
+		fmt.Printf("%s: no group rules\n", slug)
+		return nil
+	}
+	for _, r := range rules {
+		fmt.Printf("%-20s %s\n", r.Group, r.Role)
 	}
 	return nil
 }
