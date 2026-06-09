@@ -135,7 +135,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if oidcUser.GroupsClaimPresent {
 		if err := s.store.ReconcileUserFromGroups(
 			user.ID, oidcUser.Groups,
-			authMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole(),
+			AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole(),
 		); err != nil {
 			fmt.Fprintf(os.Stderr, "oidc reconcile groups: %v\n", err)
 			writeError(w, http.StatusInternalServerError, "internal server error")

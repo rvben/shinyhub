@@ -103,6 +103,8 @@ func groupsChanged(store ForwardAuthUserStore, userID int64, incoming []string) 
 	if err != nil {
 		return false, err
 	}
+	// The length check catches removals; the loop below catches additions.
+	// Together they detect any set difference (order-insensitive).
 	if len(stored) != len(incoming) {
 		return true, nil
 	}

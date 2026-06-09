@@ -823,8 +823,8 @@ func (s *Server) rateLimitByIP(rl *keyedRateLimiter) func(http.Handler) http.Han
 	}
 }
 
-// authMappings converts config group-role mappings into the auth-package type.
-func authMappings(ms []config.GroupRoleMapping) []auth.GroupRoleMapping {
+// AuthMappings converts config group-role mappings into the auth-package type.
+func AuthMappings(ms []config.GroupRoleMapping) []auth.GroupRoleMapping {
 	out := make([]auth.GroupRoleMapping, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, auth.GroupRoleMapping{Group: m.Group, Role: m.Role})

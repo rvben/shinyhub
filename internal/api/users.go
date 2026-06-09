@@ -201,7 +201,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 
 	if req.Role == "" {
 		// Empty role clears the manual override: the user returns to group/default governance.
-		if err := s.store.ClearManualRole(id, authMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole()); err != nil {
+		if err := s.store.ClearManualRole(id, AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole()); err != nil {
 			if errors.Is(err, db.ErrLastAdmin) {
 				writeError(w, http.StatusConflict, "cannot remove the last admin")
 				return
@@ -311,6 +311,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if s.refuseSystemUser(w, id) {
 		return
 	}
+	// No last-admin guard is needed here: requireAdmin means the caller is an
+	// admin, and self-delete is blocked below, so the caller always remains an
+	// admin after any delete - the count can never reach zero.
+	//
 	// An admin cannot delete their own account via the API (the UI also blocks
 	// it): self-deletion can strand the instance with no admin.
 	if admin.ID == id {
