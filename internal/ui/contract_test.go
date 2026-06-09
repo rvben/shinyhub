@@ -1241,3 +1241,13 @@ func TestGroupAccessShowsManifestSource(t *testing.T) {
 	assertContains(t, "app.js", "manifest",
 		"manifest-sourced group rules must be labelled (e.g. \"(manifest)\") and not offer a Remove button")
 }
+
+// TestAuditKnownActionsIncludeGroupAccess pins that the audit-log UI recognizes
+// the per-app group-access audit actions (so they get a labelled badge, not the
+// gray default). See internal/api/apps.go (grant/revoke/reconcile_group_access).
+func TestAuditKnownActionsIncludeGroupAccess(t *testing.T) {
+	for _, a := range []string{"grant_group_access", "revoke_group_access", "reconcile_group_access"} {
+		assertContains(t, "app.js", "'"+a+"'",
+			"app.js knownActions must include "+a+" so the audit badge is labelled")
+	}
+}

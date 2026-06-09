@@ -760,6 +760,8 @@ document.addEventListener('DOMContentLoaded', () => {
       'schedule_create', 'schedule_delete',
       // Access management (amber - security)
       'grant_access', 'revoke_access',
+      // Group-access management (amber - security)
+      'grant_group_access', 'revoke_group_access', 'reconcile_group_access',
       // Shared data (blue - config)
       'shared_data_grant', 'shared_data_revoke',
       // Autoscale scale events (blue - config)
