@@ -2636,3 +2636,51 @@ func TestGrantAppAccess_RejectsSelfRoleChange(t *testing.T) {
 		t.Fatalf("self downgrade via grant succeeded (role=%q); want manager", role)
 	}
 }
+
+func TestRevokeAppAccess_RejectsSelfRevoke(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	mgr, _ := store.GetUserByUsername("mgr")
+	store.CreateApp(db.CreateAppParams{Slug: "app11", Name: "App 11", OwnerID: owner.ID})
+	store.GrantAppAccessWithRole("app11", mgr.ID, "manager") // manager-member
+
+	// A manager-member passes requireManageApp but must not remove their OWN access.
+	token, _ := auth.IssueJWT(mgr.ID, "mgr", "developer", "test-secret")
+	req := authedRequest(t, "DELETE", "/api/apps/app11/members/"+strconv.FormatInt(mgr.ID, 10), nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self revoke: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, err := store.GetMemberRole("app11", mgr.ID)
+	if err != nil || role != "manager" {
+		t.Fatalf("self revoke removed membership (role=%q err=%v); want still manager", role, err)
+	}
+}
+
+func TestGrantAppAccess_ByUserID(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "jack", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	jack, _ := store.GetUserByUsername("jack")
+	store.CreateApp(db.CreateAppParams{Slug: "app12", Name: "App 12", OwnerID: owner.ID})
+
+	// Grant by numeric user_id (exercises the existence-check branch of the handler).
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	body, _ := json.Marshal(map[string]any{"user_id": jack.ID, "role": "manager"})
+	req := authedRequest(t, "POST", "/api/apps/app12/members", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	role, _ := store.GetMemberRole("app12", jack.ID)
+	if role != "manager" {
+		t.Fatalf("role = %q, want manager", role)
+	}
+}
