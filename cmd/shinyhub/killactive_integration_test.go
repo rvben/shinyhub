@@ -331,4 +331,36 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 	if other.hits.Load() != otherBefore {
 		t.Fatal("the non-pinned stub was hit - B did not honor the pin")
 	}
+
+	// --- THE CRASH: SIGKILL A (no graceful lease release; lease must expire) ---
+	pinnedBefore := pinned.hits.Load()
+	if err := instA.cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill A: %v", err)
+	}
+
+	// --- data-plane reconnect, BEFORE any lease handover ---
+	// The proof is causal ordering: B serves the same live backend here, and the
+	// test has NOT yet observed B /activez=200 (that poll is the next step). No
+	// sleep between the kill and this request.
+	codeR, rReissue, bodyR := get(t, instB.url("/app/"+slug+"/"), cookie)
+	if codeR != http.StatusOK {
+		t.Fatalf("reconnect on B after kill = %d, want 200 (body %q)", codeR, bodyR)
+	}
+	if bodyR != pinned.body {
+		t.Fatalf("reconnect routed to %q, want same pinned %q", bodyR, pinned.body)
+	}
+	if pinned.hits.Load() <= pinnedBefore {
+		t.Fatalf("pinned stub hit-count did not climb (%d <= %d) - backend restarted or unreachable",
+			pinned.hits.Load(), pinnedBefore)
+	}
+	if stickyCookie(slug, rReissue) != nil {
+		t.Fatal("B reissued a cookie on reconnect - cross-instance affinity lost post-crash")
+	}
+	// Best-effort, timing-tolerant: B has not yet acquired the lease. The 5s TTL
+	// leaves ample margin for the few-ms reconnect above; this is a sanity check,
+	// not the load-bearing proof (that is the ordering).
+	if code, _, _ := get(t, instB.url("/activez"), nil); code == http.StatusOK {
+		t.Log("note: B already active immediately after kill (TTL elapsed faster than expected); " +
+			"data-plane reconnect above still proves independence")
+	}
 }
