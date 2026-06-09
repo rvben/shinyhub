@@ -37,6 +37,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.2](https://github.com/rvben/shinyhub/compare/v0.8.1...v0.8.2) - 2026-06-09
+
+### Added
+
+- **ui**: mark manifest-sourced group rules read-only on the Access tab ([b59a866](https://github.com/rvben/shinyhub/commit/b59a866a7cd868219e60f4c61d832fd5202bbd6b))
+- **api**: apply manifest [access] group rules on deploy (Phase C) ([5c3ecc4](https://github.com/rvben/shinyhub/commit/5c3ecc4a96e25e95b4efbdcfe60fab392837e374))
+- **db**: reconcile manifest-sourced app group rules, preserving manual ([1dac1ac](https://github.com/rvben/shinyhub/commit/1dac1acee9f737d1a2f5c549e99b71edf5eb20b4))
+- **deploy**: manifest [access] block (viewer_groups/manager_groups) ([c6de0b3](https://github.com/rvben/shinyhub/commit/c6de0b3f49b717aa33990aa51a14b53991324a33))
+- **api**: expose can_manage so per-app member/group managers get the management UI ([6aa42bd](https://github.com/rvben/shinyhub/commit/6aa42bd1df70fbfd25e4fc880a433f5bfc0df3fb))
+- **cli**: apps access group-grant/group-revoke/group-list ([171b435](https://github.com/rvben/shinyhub/commit/171b4357b02692d8b8e5899626106c2e7f1659d2))
+- **ui**: Access-tab group-access rules (list/add/remove) with additive-only hint ([87e51e4](https://github.com/rvben/shinyhub/commit/87e51e4dfcd8cc52a108577a3f32b8977b90e859))
+- **api**: per-app group-access CRUD endpoints with additive-only advisory ([f0d705d](https://github.com/rvben/shinyhub/commit/f0d705d4792c7414526dc98b3e898245c0ca421f))
+- **api**: honor per-app group role in manage and explicit-access checks ([2f72f46](https://github.com/rvben/shinyhub/commit/2f72f46c89fa87e70a43f2a59f91978b16b27183))
+- **db**: app_group_access CRUD + group-aware UserCanAccessApp and app list ([b4933f9](https://github.com/rvben/shinyhub/commit/b4933f9425872d11deef337c6b21ea3b8e0ada8e))
+- **db**: migration 029 - app_group_access per-app group rules table ([4ee7db8](https://github.com/rvben/shinyhub/commit/4ee7db8ae301179f872faa6b4e5c23004d7a1482))
+- **cli**: thread, report, and optionally wait for first-fire in fleet apply ([fabb887](https://github.com/rvben/shinyhub/commit/fabb887612606776b026f123459ce6f03a4311a2))
+- **ui**: (SSO-managed) option to clear a user's manual role override ([a0af8b5](https://github.com/rvben/shinyhub/commit/a0af8b5741151d0eda8c42748da90d1bf99f9106))
+- **cli**: report and optionally wait for run_on_register first-fire on deploy ([1387d7f](https://github.com/rvben/shinyhub/commit/1387d7fae8771b101551b10762a070e50ef89c5c))
+- **api**: user role PATCH sets/clears manual override (empty role = SSO-managed) ([1868eec](https://github.com/rvben/shinyhub/commit/1868eec69f9f9cecca01cb68e76d7d56c48c85b7))
+- **cli**: add first-fire ref parsing and run-poll helpers ([06c135d](https://github.com/rvben/shinyhub/commit/06c135d6a3e7b967a41363fe04803f24b0b68496))
+- **cli**: add --run-on-register and --follow to schedule add ([0014c13](https://github.com/rvben/shinyhub/commit/0014c1324092eb5eb890a2da9153cf38f6b22ade))
+- **auth**: forward-auth full role reconcile covering /app/* via top-level mux ([89eb352](https://github.com/rvben/shinyhub/commit/89eb352d6dc772299d613cdaa0e1734345e7040f))
+- **schedules**: accept run_on_register on schedule create and return the run id ([7c57b18](https://github.com/rvben/shinyhub/commit/7c57b18a7ac572cc69f42b3bdb74e56473fae0b4))
+- **api**: reconcile global role from OIDC groups on login ([05f6bd6](https://github.com/rvben/shinyhub/commit/05f6bd6839b640228634ca217485ecbb5831548e))
+- **schedules**: fire run_on_register once on first registration during deploy ([6593aad](https://github.com/rvben/shinyhub/commit/6593aadd472591e84be96b0ae03b74f99b44fca3))
+- **oauth**: extract configurable OIDC groups claim and optional scope ([e0fc223](https://github.com/rvben/shinyhub/commit/e0fc2239ac7ed6d9342bbb097612ca2be4ac6bd6))
+- **db**: authoritative group reconcile, manual role override, last-admin guard ([dd94e0d](https://github.com/rvben/shinyhub/commit/dd94e0d2e2f0b725c45538f471f30149c8491f75))
+- **manifest**: add run_on_register field to [[schedule]] ([2095dda](https://github.com/rvben/shinyhub/commit/2095ddac00ea9c7e1b770549a12591c1fbaf73b8))
+- **config**: group_role_mappings, OIDC groups claim/scope, admin_groups alias merge ([f67564e](https://github.com/rvben/shinyhub/commit/f67564e2b1cd46dba1691720f23b50870932dd4a))
+- **auth**: ResolveGlobalRole group-to-role mapping engine ([9a7cc65](https://github.com/rvben/shinyhub/commit/9a7cc656ded43412372bd09a39c668e0da2abb56))
+- **db**: migration 028 - user_groups + role provenance columns with viewer-baseline seed ([af35290](https://github.com/rvben/shinyhub/commit/af35290a893897796ece157bb27f2231360c7baa))
+- **api**: reject self-revoke and dedupe member-grant existence check ([18442e1](https://github.com/rvben/shinyhub/commit/18442e1b7b153866c622a6af7951a64084fe8d21))
+- **api**: reject self member-role change to prevent manager self-lockout ([2d78a3f](https://github.com/rvben/shinyhub/commit/2d78a3f3791b7c03cc33b6d9db3bd55e0e1ef402))
+- **cli**: apps access grant/revoke/list with --role ([e12724d](https://github.com/rvben/shinyhub/commit/e12724d6e48614fb371fe48dbad662d813694eff))
+- **ui**: editable member role dropdown on the app Access tab ([04b479f](https://github.com/rvben/shinyhub/commit/04b479fe8a91fb5b3d1581b15f50e3645b7de7ae))
+- **api**: assign app member roles via PATCH members and role on grant ([2044a09](https://github.com/rvben/shinyhub/commit/2044a09546cd86d40498a90267786f9ba6de5e3c))
+- **db**: role-aware app-member grant and not-found-aware SetMemberRole ([466ba80](https://github.com/rvben/shinyhub/commit/466ba805c25d9de58502620bfb8f37140e17fa70))
+
+### Fixed
+
+- **api**: reject API revoke of manifest group rules; label group-access audit actions ([ac1b825](https://github.com/rvben/shinyhub/commit/ac1b825e940e93bbe4d1503da90c4aac5c4aaf88))
+- **schedules**: return 201 not 500 when the scheduler is not yet started ([7a83c37](https://github.com/rvben/shinyhub/commit/7a83c37d8c27a78b1960f3fb8891374607c5e6d7))
+- **api**: propagate DB errors in per-app group authz instead of degrading to 404 ([c93109d](https://github.com/rvben/shinyhub/commit/c93109d1a603485f3fd429fc0eb414ca243e4c67))
+- **cli**: treat first-fire wait timeout as non-fatal on single deploy (match fleet apply) ([ab29c2f](https://github.com/rvben/shinyhub/commit/ab29c2f8afb4817504a551b49734503a44ab4109))
+- **api**: make member grant additive so POST cannot self-downgrade or silently demote ([e7eca78](https://github.com/rvben/shinyhub/commit/e7eca7873687b60940f7de371d017f06a3a63eee))
+
 ## [0.8.1](https://github.com/rvben/shinyhub/compare/v0.8.0...v0.8.1) - 2026-06-09
 
 ### Added
