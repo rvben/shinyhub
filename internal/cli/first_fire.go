@@ -17,6 +17,14 @@ type firstFireRef struct {
 	RunID      int64
 }
 
+// firstFireOutcome is the per-schedule result the fleet report and JSON envelope
+// surface. Status is empty when the CLI did not wait (default async path).
+type firstFireOutcome struct {
+	Schedule string `json:"schedule"`
+	RunID    int64  `json:"run_id"`
+	Status   string `json:"status,omitempty"`
+}
+
 // firstFireRefsFromDeployResponse extracts the first-fire references from a raw
 // deploy response body. It returns an empty slice when no schedule was first-
 // fired (the common case), so callers can range over it unconditionally.
