@@ -1857,6 +1857,110 @@ func (s *Server) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type appGroupRuleResponse struct {
+	Group  string `json:"group"`
+	Role   string `json:"role"`
+	Source string `json:"source"`
+}
+
+func (s *Server) handleGetAppGroupAccess(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+	rules, err := s.store.ListAppGroupAccess(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	resp := make([]appGroupRuleResponse, len(rules))
+	for i, rule := range rules {
+		resp[i] = appGroupRuleResponse{Group: rule.Group, Role: rule.Role, Source: rule.Source}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleGrantAppGroupAccess(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+	var req struct {
+		Group string `json:"group"`
+		Role  string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	req.Group = strings.TrimSpace(req.Group)
+	if req.Group == "" {
+		writeError(w, http.StatusBadRequest, "group is required")
+		return
+	}
+	role := req.Role
+	if role == "" {
+		role = "viewer"
+	}
+	if !db.IsValidMemberRole(role) {
+		writeError(w, http.StatusBadRequest, "role must be one of "+strings.Join(db.ValidMemberRoles, ", "))
+		return
+	}
+	if err := s.store.GrantAppGroupAccess(slug, req.Group, role, "manual"); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID: &u.ID, Action: "grant_group_access", ResourceType: "app",
+			ResourceID: slug, Detail: fmt.Sprintf("group=%s role=%s", req.Group, role),
+			IPAddress: s.ClientIP(r),
+		})
+	}
+	if app.Access == "public" || app.Access == "shared" {
+		w.Header().Set("X-ShinyHub-Warning", "app is "+app.Access+"; group rules grant access but do not restrict viewing")
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRevokeAppGroupAccess(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+	group := chi.URLParam(r, "group")
+	if group == "" {
+		var req struct {
+			Group string `json:"group"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "bad request")
+			return
+		}
+		group = strings.TrimSpace(req.Group)
+	}
+	if group == "" {
+		writeError(w, http.StatusBadRequest, "group is required")
+		return
+	}
+	if err := s.store.RevokeAppGroupAccess(slug, group); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "group rule not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID: &u.ID, Action: "revoke_group_access", ResourceType: "app",
+			ResourceID: slug, Detail: fmt.Sprintf("group=%s", group), IPAddress: s.ClientIP(r),
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type appMemberResponse struct {
 	UserID   int64  `json:"user_id"`
 	Username string `json:"username"`
