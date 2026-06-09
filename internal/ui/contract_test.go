@@ -1230,3 +1230,14 @@ func TestCanManageAppHonorsServerValue(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "body.can_manage",
 		"the detail view must copy body.can_manage onto the app object so canManageApp sees it")
 }
+
+// TestGroupAccessShowsManifestSource guards that manifest-sourced group rules are
+// distinguished from manual ones in the Access tab and are not removable via the
+// UI (they are managed by the bundle manifest; a UI removal would return on the
+// next deploy). See internal/api/apps.go applyManifestAccessGroups.
+func TestGroupAccessShowsManifestSource(t *testing.T) {
+	assertContains(t, "app.js", "rule.source",
+		"refreshGroupAccessList must read rule.source to distinguish manifest from manual rules")
+	assertContains(t, "app.js", "manifest",
+		"manifest-sourced group rules must be labelled (e.g. \"(manifest)\") and not offer a Remove button")
+}

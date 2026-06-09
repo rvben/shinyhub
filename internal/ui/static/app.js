@@ -1865,6 +1865,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const roleSpan = document.createElement('span');
       roleSpan.className = 'member-role';
       roleSpan.textContent = rule.role;
+      if (rule.source === 'manifest') {
+        const tag = document.createElement('span');
+        tag.className = 'member-role';
+        tag.textContent = '(manifest)';
+        li.appendChild(nameSpan);
+        li.appendChild(roleSpan);
+        li.appendChild(tag);
+        list.appendChild(li);
+        continue; // manifest rules are managed by the bundle; not removable here
+      }
       const removeBtn = document.createElement('button');
       removeBtn.textContent = 'Remove';
       removeBtn.setAttribute('aria-label', `Remove group rule ${rule.group}`);
