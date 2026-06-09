@@ -53,12 +53,17 @@ Deploy proceeds in this order:
 6. **Phase B — `[[schedule]]` blocks** upsert by name into the schedules
    table. The scheduler is reloaded so the new cron expressions take effect
    immediately.
+7. **Phase C - `[access]` group rules** reconcile into the per-app group
+   access table as `source = manifest`, preserving any manually-managed
+   rules. Unlike schedules, this is declarative: a group removed from the
+   manifest loses its manifest rule on the next deploy.
 
 Phase A failure aborts the deploy (the new bundle never starts) with HTTP
 400 (validation) or 500 (DB error). Phase B failure returns HTTP 500 but
 the new bundle is already durable and serving traffic — the schedule set
 may be incomplete; the next deploy converges because the upsert is
-idempotent.
+idempotent. Phase C failure likewise returns HTTP 500 with the bundle
+already live; re-deploying re-runs the reconcile.
 
 Reloading the scheduler is a soft step: if the scheduler is not yet
 started (e.g. during early-startup deploys), the reload is skipped and
@@ -198,6 +203,38 @@ Hooks inherit the app's environment (including secrets injected via
 `shinyhub env set`), but not `PORT` (which is per-replica and only set
 when an app process starts).
 
+## `[access]` - per-app group access rules
+
+Declare which IdP groups may view or manage this app. Groups come from the
+OIDC `groups` claim or the forward-auth groups header (see the auth docs).
+
+```toml
+[access]
+viewer_groups  = ["finance", "analysts"]   # granted the viewer role
+manager_groups = ["finance-leads"]         # granted the manager role
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `viewer_groups` | list of strings | groups granted `viewer` access to this app |
+| `manager_groups` | list of strings | groups granted `manager` access to this app |
+
+Semantics:
+
+- **Declarative.** On every deploy, the manifest's `source = manifest` group
+  rules are reconciled to exactly the `[access]` block. Removing a group (or
+  the whole block) deletes its manifest rule on the next deploy.
+- **Manual rules win.** Rules added through the UI / API / CLI (`shinyhub apps
+  access group-grant`) are `source = manual` and are never modified or deleted
+  by a manifest reconcile. If the manifest names a group that already has a
+  manual rule, the manifest entry is skipped (reported with `skipped: true` in
+  the deploy response) and the manual rule stands.
+- **Manager wins on overlap.** A group listed in both `viewer_groups` and
+  `manager_groups` is granted `manager`.
+- **Additive.** Group access grants access; it does not restrict a `public` or
+  `shared` app.
+- Group names must be non-empty (validated at parse time).
+
 ## Idempotency
 
 Re-deploying the same bundle yields the same state:
@@ -208,6 +245,8 @@ Re-deploying the same bundle yields the same state:
   command changes update the row in place.
 - `[[hook]]` blocks run every deploy; they are expected to be idempotent
   (e.g. `migrate.py` should handle "already migrated").
+- `[access]` reconciles to exactly the declared groups each deploy; re-applying
+  the same block is a no-op, and manual rules are always preserved.
 
 ## Audit events
 
@@ -219,6 +258,7 @@ actions:
 | `update_app` | Phase A changed at least one `[app]` field. |
 | `schedule_create` | First time a `[[schedule]]` with this name is seen for this app. |
 | `schedule_update` | Subsequent deploys that mention an existing schedule. |
+| `reconcile_group_access` | Phase C reconciled at least one `[access]` group rule. |
 
 Hook executions are logged into the deploy log but do not emit per-hook
 audit events. The overall deploy is recorded as `app_deploy`.
@@ -247,15 +287,22 @@ The wire shape:
     "app": { "replicas": 2, "max_sessions_per_replica": 10 },
     "schedules": [
       { "name": "nightly", "action": "created", "schedule_id": 7, "first_fire": { "run_id": 42 } }
+    ],
+    "access_groups": [
+      { "group": "finance", "role": "viewer" },
+      { "group": "finance-leads", "role": "manager" },
+      { "group": "ops", "role": "viewer", "skipped": true }
     ]
   }
 }
 ```
 
 `manifest.app` is omitted when no `[app]` field changed; `manifest.schedules`
-is omitted when no `[[schedule]]` was upserted; the entire `manifest` key is
-omitted when the bundle has no `shinyhub.toml`. Top-level app fields stay in
-place so scripts that read `deploy_count` keep working.
+is omitted when no `[[schedule]]` was upserted; `manifest.access_groups` is
+omitted when the `[access]` block is empty (each entry has `skipped: true` when
+a manual rule preempted it); the entire `manifest` key is omitted when the
+bundle has no `shinyhub.toml`. Top-level app fields stay in place so scripts
+that read `deploy_count` keep working.
 
 Each schedule entry carries its `schedule_id`; a `first_fire` object with the
 dispatched `run_id` is present only when `run_on_register` fired a run on this
