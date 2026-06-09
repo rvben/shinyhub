@@ -36,6 +36,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.1](https://github.com/rvben/shinyhub/compare/v0.8.0...v0.8.1) - 2026-06-09
+
+### Added
+
+- **proxy**: DB-driven pool sync so every instance can serve off-host apps ([1bce4fd](https://github.com/rvben/shinyhub/commit/1bce4fd13918fd08d8c2e787db4983041cd2380b))
+- **api**: /readyz (serving) + /activez (active) readiness contract ([3350790](https://github.com/rvben/shinyhub/commit/3350790c770a2e0e84305e47d6debc23ba46fad2))
+- **worker**: enforce + persist the per-replica session hard cap (incl. re-adoption) ([7a15820](https://github.com/rvben/shinyhub/commit/7a158203be93cfcc2ecf44159d67ac0fcd3d28ee))
+- **proxy**: deployment-stamp the sticky cookie so redeploys re-pin cleanly ([506bc28](https://github.com/rvben/shinyhub/commit/506bc2827000698e8ab3a37141a449c2fd46e127))
+- **proxy**: build worker mTLS transport from the DB replica row, not the registry ([4b819f2](https://github.com/rvben/shinyhub/commit/4b819f2798f76dc8e32a35e24e611817a3741c4f))
+- distributed scale-down drain (local CAS + DB desired_state + fleet wait) ([eec3e45](https://github.com/rvben/shinyhub/commit/eec3e458f2c68894950f6bfca5c601bb69d6dc1a))
+- **lifecycle**: cross-instance wake reconciler + forward-error wake recovery ([f533f49](https://github.com/rvben/shinyhub/commit/f533f497d29e1d57109ad3d0f941315ce6265195))
+- **lifecycle**: conservative fleet-idle hibernation CAS in clustered mode; single-node unchanged ([be5728d](https://github.com/rvben/shinyhub/commit/be5728d85f11ae2cedec02a4e0d20d9856a9a2cc))
+- **autoscale**: scale on the fleet-wide session count in clustered mode ([bbf56fb](https://github.com/rvben/shinyhub/commit/bbf56fb62ebef89de4f34c878277113ac8db91f7))
+- **proxy**: report local replica session counts + activity to the DB (clustered only) ([ac475b5](https://github.com/rvben/shinyhub/commit/ac475b5939f3bd91f53be27f065a58a2f1a45463))
+- **db**: replica_sessions table + AppFleetLoad + stale reaper (both dialects) ([e74629c](https://github.com/rvben/shinyhub/commit/e74629ccc466b7bfeeb931bcb76134db88a9bd42))
+- **cmd**: refuse native/local-docker runtimes in a clustered deployment ([daa8e71](https://github.com/rvben/shinyhub/commit/daa8e71c91260daef380c06ee3f3a75aeb6b92db))
+
+### Fixed
+
+- **db**: base replica-session staleness on the DB clock to tolerate control-plane clock skew ([4e65037](https://github.com/rvben/shinyhub/commit/4e65037f1132e5e6f7bf977ada742ac7b5bf0831))
+
 ## [0.8.0](https://github.com/rvben/shinyhub/compare/v0.7.5...v0.8.0) - 2026-06-08
 
 ### Added
