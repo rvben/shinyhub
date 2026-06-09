@@ -33,7 +33,7 @@ const ReplicaSessionStaleCutoff = 3 * ReporterInterval
 // sessionStore is the subset of *db.Store that the SessionReporter needs.
 // A narrow interface keeps the reporter unit-testable without a real DB.
 type sessionStore interface {
-	UpsertReplicaSessions(instanceID string, updatedAt int64, rows []db.ReplicaSessionRow) error
+	UpsertReplicaSessions(instanceID string, rows []db.ReplicaSessionRow) error
 }
 
 // SessionReporter periodically snapshots the local proxy's per-(slug, replica)
@@ -108,8 +108,7 @@ func (r *SessionReporter) flush(slugFilter map[string]struct{}) {
 	if len(rows) == 0 {
 		return
 	}
-	now := time.Now().Unix()
-	if err := r.store.UpsertReplicaSessions(r.instanceID, now, rows); err != nil {
+	if err := r.store.UpsertReplicaSessions(r.instanceID, rows); err != nil {
 		slog.Warn("session reporter: upsert failed", "err", err)
 	}
 }
@@ -172,15 +171,27 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 
 	// Read per-replica state without the lock: activeConns is atomic, and
 	// lastSeen is per-slug under seenMu which LastSeen acquires briefly.
+	//
+	// LastActivityAgeSec is the seconds since this replica last saw activity,
+	// computed as a skew-independent duration on local time. The DB upsert
+	// subtracts this age from the DB-clock now so last_activity ends up on the
+	// shared database clock, making it safely comparable across instances.
+	now := time.Now()
 	rows := make([]db.ReplicaSessionRow, 0, len(snaps)*2)
 	for _, ps := range snaps {
-		lastAct := p.LastSeen(ps.slug).Unix()
+		lastSeen := p.LastSeen(ps.slug)
+		var ageSec int64
+		if !lastSeen.IsZero() {
+			if d := int64(now.Sub(lastSeen).Seconds()); d > 0 {
+				ageSec = d
+			}
+		}
 		for _, rep := range ps.replicas {
 			rows = append(rows, db.ReplicaSessionRow{
-				AppID:        ps.appID,
-				Idx:          rep.index,
-				Active:       rep.activeConns.Load(),
-				LastActivity: lastAct,
+				AppID:              ps.appID,
+				Idx:                rep.index,
+				Active:             rep.activeConns.Load(),
+				LastActivityAgeSec: ageSec,
 			})
 		}
 	}

@@ -1,7 +1,9 @@
 package db_test
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
@@ -10,6 +12,9 @@ import (
 // TestReplicaSessions exercises UpsertReplicaSessions, AppFleetLoad, and
 // ReapStaleReplicaSessions on both SQLite (always) and Postgres (when
 // SHINYHUB_TEST_POSTGRES_DSN is set, handled transparently by dbtest.New).
+//
+// All staleness is simulated by backdating updated_at via raw SQL after normal
+// upserts so the tests do not depend on any local wall clock.
 func TestReplicaSessions(t *testing.T) {
 	s := dbtest.New(t)
 
@@ -22,35 +27,32 @@ func TestReplicaSessions(t *testing.T) {
 		instB = "instance-B"
 	)
 
-	// Base epoch: rows from instA are "fresh" (updated_at = freshEpoch) and from
-	// instB will be staged as stale later. Use a fixed epoch well in the past so
-	// the test is deterministic.
-	const freshEpoch = int64(1_750_000_000)
-	const staleEpoch = int64(1_000_000_000)
-	const cutoff = int64(1_500_000_000) // freshEpoch > cutoff, staleEpoch < cutoff
+	// staleWindowSec matches the realistic production stale window (15 s).
+	// fresh rows have updated_at = db_now (just inserted).
+	const staleWindowSec = int64(15)
 
-	// -- Upsert two instances for the same app --
+	// -- Upsert two instances for the same app (rows are fresh, db_now) --
 	// instA covers replica indexes 0 and 1.
 	rowsA := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 3, LastActivity: freshEpoch - 10},
-		{AppID: appID, Idx: 1, Active: 5, LastActivity: freshEpoch - 20},
+		{AppID: appID, Idx: 0, Active: 3, LastActivityAgeSec: 10},
+		{AppID: appID, Idx: 1, Active: 5, LastActivityAgeSec: 20},
 	}
-	if err := s.UpsertReplicaSessions(instA, freshEpoch, rowsA); err != nil {
+	if err := s.UpsertReplicaSessions(instA, rowsA); err != nil {
 		t.Fatalf("UpsertReplicaSessions instA: %v", err)
 	}
 	// instB covers replica indexes 0 and 2.
 	rowsB := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 2, LastActivity: freshEpoch - 5},
-		{AppID: appID, Idx: 2, Active: 7, LastActivity: freshEpoch - 1},
+		{AppID: appID, Idx: 0, Active: 2, LastActivityAgeSec: 5},
+		{AppID: appID, Idx: 2, Active: 7, LastActivityAgeSec: 1},
 	}
-	if err := s.UpsertReplicaSessions(instB, freshEpoch, rowsB); err != nil {
+	if err := s.UpsertReplicaSessions(instB, rowsB); err != nil {
 		t.Fatalf("UpsertReplicaSessions instB: %v", err)
 	}
 
 	// -- AppFleetLoad("") sums across ALL instances --
-	// idx 0: 3 + 2 = 5, idx 1: 5, idx 2: 7
-	// maxLastActivity: freshEpoch-1 (from instB idx 2)
-	active, maxLast, err := s.AppFleetLoad(appID, cutoff, "")
+	// idx 0: 3+2=5, idx 1: 5, idx 2: 7
+	// idleSinceSec should be approximately min(10,20,5,1) = 1 (most recent activity).
+	active, idleSince, err := s.AppFleetLoad(appID, staleWindowSec, "")
 	if err != nil {
 		t.Fatalf("AppFleetLoad all: %v", err)
 	}
@@ -66,14 +68,16 @@ func TestReplicaSessions(t *testing.T) {
 	if active[2] != 7 {
 		t.Errorf("active[2] = %d, want 7", active[2])
 	}
-	wantMax := freshEpoch - 1
-	if maxLast != wantMax {
-		t.Errorf("maxLastActivity = %d, want %d", maxLast, wantMax)
+	// idleSinceSec = db_now - MAX(last_activity) across all fresh rows.
+	// The MIN age across all rows is 1 s (instB idx2); allow up to 5s tolerance for
+	// DB round-trip and test execution time.
+	if idleSince < 1 || idleSince > 10 {
+		t.Errorf("idleSinceSec all instances = %d, want approx 1 (within 10s tolerance)", idleSince)
 	}
 
 	// -- AppFleetLoad(excludeInstanceID = instB) excludes instB's rows --
-	// Only instA rows remain: idx 0=3, idx 1=5. Max last_activity = freshEpoch-10.
-	active2, maxLast2, err := s.AppFleetLoad(appID, cutoff, instB)
+	// Only instA rows remain: idx 0=3, idx 1=5. Min age = 10 s (instA idx0).
+	active2, idleSince2, err := s.AppFleetLoad(appID, staleWindowSec, instB)
 	if err != nil {
 		t.Fatalf("AppFleetLoad exclude instB: %v", err)
 	}
@@ -86,22 +90,31 @@ func TestReplicaSessions(t *testing.T) {
 	if active2[1] != 5 {
 		t.Errorf("active2[1] (excl instB) = %d, want 5", active2[1])
 	}
-	if maxLast2 != freshEpoch-10 {
-		t.Errorf("maxLast2 (excl instB) = %d, want %d", maxLast2, freshEpoch-10)
+	// Min age across instA rows is 10 s. Allow up to 15s for timing.
+	if idleSince2 < 10 || idleSince2 > 20 {
+		t.Errorf("idleSinceSec excl instB = %d, want approx 10 (within 10s tolerance)", idleSince2)
 	}
 
-	// -- Stale instance: insert instC rows with old updated_at --
+	// -- Stale instance: insert instC rows normally then backdate updated_at --
+	// After backdating, instC rows will fall outside the staleWindowSec window
+	// and must be excluded by AppFleetLoad.
 	const instC = "instance-C"
 	rowsC := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 99, LastActivity: staleEpoch},
+		{AppID: appID, Idx: 0, Active: 99, LastActivityAgeSec: 0},
 	}
-	if err := s.UpsertReplicaSessions(instC, staleEpoch, rowsC); err != nil {
-		t.Fatalf("UpsertReplicaSessions instC (stale): %v", err)
+	if err := s.UpsertReplicaSessions(instC, rowsC); err != nil {
+		t.Fatalf("UpsertReplicaSessions instC: %v", err)
+	}
+	// Backdate instC's updated_at to make it appear stale (1000 seconds ago).
+	if _, err := s.DB().Exec(
+		`UPDATE replica_sessions SET updated_at = updated_at - 1000 WHERE instance_id = ?`,
+		instC,
+	); err != nil {
+		t.Fatalf("backdate instC updated_at: %v", err)
 	}
 
-	// AppFleetLoad with cutoff excludes instC (staleEpoch < cutoff).
-	// instA(idx0=3,idx1=5) + instB(idx0=2,idx2=7); max idx=2 so slice len=3.
-	active3, _, err := s.AppFleetLoad(appID, cutoff, "")
+	// AppFleetLoad with staleWindowSec=15 must exclude instC (1000s old > 15s window).
+	active3, _, err := s.AppFleetLoad(appID, staleWindowSec, "")
 	if err != nil {
 		t.Fatalf("AppFleetLoad with staleness cutoff: %v", err)
 	}
@@ -113,13 +126,12 @@ func TestReplicaSessions(t *testing.T) {
 		t.Errorf("active3[0] after stale exclusion = %d, want 5", active3[0])
 	}
 
-	// -- ReapStaleReplicaSessions removes only instC's rows (staleEpoch < cutoff) --
-	if err := s.ReapStaleReplicaSessions(cutoff); err != nil {
+	// -- ReapStaleReplicaSessions removes only instC's rows --
+	if err := s.ReapStaleReplicaSessions(staleWindowSec); err != nil {
 		t.Fatalf("ReapStaleReplicaSessions: %v", err)
 	}
 	// After reap: instC rows gone, instA + instB remain. Max idx=2, slice len=3.
-	// Max last_activity is still freshEpoch-1 (from instB idx 2).
-	active4, maxLast4, err := s.AppFleetLoad(appID, cutoff, "")
+	active4, _, err := s.AppFleetLoad(appID, staleWindowSec, "")
 	if err != nil {
 		t.Fatalf("AppFleetLoad after reap: %v", err)
 	}
@@ -129,20 +141,17 @@ func TestReplicaSessions(t *testing.T) {
 	if active4[0] != 5 {
 		t.Errorf("active4[0] after reap = %d, want 5", active4[0])
 	}
-	if maxLast4 != freshEpoch-1 {
-		t.Errorf("maxLast4 after reap = %d, want %d", maxLast4, freshEpoch-1)
-	}
 
-	// -- Sparse idx gap: instA covers idx 0 and 4 (skip 1,2,3) --
+	// -- Sparse idx gap: instD covers idx 0 and 4 (skip 1,2,3) --
 	const instD = "instance-D"
 	rowsD := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 1, LastActivity: freshEpoch},
-		{AppID: appID, Idx: 4, Active: 9, LastActivity: freshEpoch},
+		{AppID: appID, Idx: 0, Active: 1, LastActivityAgeSec: 0},
+		{AppID: appID, Idx: 4, Active: 9, LastActivityAgeSec: 0},
 	}
-	if err := s.UpsertReplicaSessions(instD, freshEpoch, rowsD); err != nil {
+	if err := s.UpsertReplicaSessions(instD, rowsD); err != nil {
 		t.Fatalf("UpsertReplicaSessions instD (sparse): %v", err)
 	}
-	activeD, _, err := s.AppFleetLoad(appID, cutoff, instA)
+	activeD, _, err := s.AppFleetLoad(appID, staleWindowSec, instA)
 	if err != nil {
 		t.Fatalf("AppFleetLoad instD sparse: %v", err)
 	}
@@ -160,14 +169,14 @@ func TestReplicaSessions(t *testing.T) {
 
 	// -- Upsert idempotency: re-upserting instA updates the values --
 	rowsA2 := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 10, LastActivity: freshEpoch + 100},
+		{AppID: appID, Idx: 0, Active: 10, LastActivityAgeSec: 0},
 	}
-	if err := s.UpsertReplicaSessions(instA, freshEpoch+100, rowsA2); err != nil {
+	if err := s.UpsertReplicaSessions(instA, rowsA2); err != nil {
 		t.Fatalf("UpsertReplicaSessions instA re-upsert: %v", err)
 	}
 	// Only the idx=0 row from instA was re-upserted; the idx=1 row from instA
-	// still exists. Exclude everything but instA to verify.
-	activeRe, _, err := s.AppFleetLoad(appID, cutoff, instB)
+	// still exists. Exclude instB to verify.
+	activeRe, _, err := s.AppFleetLoad(appID, staleWindowSec, instB)
 	if err != nil {
 		t.Fatalf("AppFleetLoad after re-upsert: %v", err)
 	}
@@ -185,13 +194,13 @@ func TestReplicaSessions(t *testing.T) {
 }
 
 // TestAppFleetLoad_Empty checks that an app with no replica_sessions rows
-// returns an empty (zero-length, non-nil) slice and maxLastActivity=0.
+// returns an empty (zero-length, non-nil) slice and idleSinceSec = NoFleetActivity.
 func TestAppFleetLoad_Empty(t *testing.T) {
 	s := dbtest.New(t)
 	owner := mustCreateUser(t, s, "rs-empty-owner", "developer")
 	app := mustCreateApp(t, s, "rs-empty-app", owner.ID)
 
-	active, maxLast, err := s.AppFleetLoad(app.ID, 0, "")
+	active, idleSince, err := s.AppFleetLoad(app.ID, 15, "")
 	if err != nil {
 		t.Fatalf("AppFleetLoad empty: %v", err)
 	}
@@ -201,7 +210,148 @@ func TestAppFleetLoad_Empty(t *testing.T) {
 	if len(active) != 0 {
 		t.Errorf("active slice len = %d, want 0", len(active))
 	}
-	if maxLast != 0 {
-		t.Errorf("maxLastActivity = %d, want 0", maxLast)
+	if idleSince != db.NoFleetActivity {
+		t.Errorf("idleSinceSec empty = %d, want NoFleetActivity (%d)", idleSince, db.NoFleetActivity)
+	}
+}
+
+// TestAppFleetLoad_IdleSinceSec verifies that idleSinceSec reflects the age of
+// the most recent fleet activity on the database clock. We set a precise
+// last_activity via raw SQL and assert the returned age is approximately correct.
+func TestAppFleetLoad_IdleSinceSec(t *testing.T) {
+	s := dbtest.New(t)
+	owner := mustCreateUser(t, s, "rs-idle-owner", "developer")
+	app := mustCreateApp(t, s, "rs-idle-app", owner.ID)
+
+	// Insert a row with LastActivityAgeSec=100 so last_activity = db_now - 100.
+	rows := []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 0, Active: 0, LastActivityAgeSec: 100},
+	}
+	if err := s.UpsertReplicaSessions("inst-A", rows); err != nil {
+		t.Fatalf("UpsertReplicaSessions: %v", err)
+	}
+
+	_, idleSince, err := s.AppFleetLoad(app.ID, 60 /* staleWindowSec */, "")
+	if err != nil {
+		t.Fatalf("AppFleetLoad: %v", err)
+	}
+	// idleSinceSec = db_now - last_activity = db_now - (db_now_at_insert - 100).
+	// As long as the test completes in under a few seconds, idleSinceSec should be
+	// approximately 100. Allow [99, 115] to tolerate sub-second clock differences
+	// and test execution time.
+	if idleSince < 99 || idleSince > 115 {
+		t.Errorf("idleSinceSec = %d, want approximately 100 (got outside [99,115])", idleSince)
+	}
+}
+
+// TestReapStaleReplicaSessions_OnlyRemovesStale confirms that ReapStaleReplicaSessions
+// deletes rows with an old updated_at but preserves fresh rows.
+func TestReapStaleReplicaSessions_OnlyRemovesStale(t *testing.T) {
+	s := dbtest.New(t)
+	owner := mustCreateUser(t, s, "rs-reap-owner", "developer")
+	app := mustCreateApp(t, s, "rs-reap-app", owner.ID)
+
+	const staleWindowSec = int64(15)
+
+	// Insert fresh rows for instA.
+	rowsA := []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 0, Active: 1, LastActivityAgeSec: 0},
+	}
+	if err := s.UpsertReplicaSessions("inst-fresh", rowsA); err != nil {
+		t.Fatalf("UpsertReplicaSessions fresh: %v", err)
+	}
+
+	// Insert rows for instStale and backdate them.
+	rowsStale := []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 1, Active: 9, LastActivityAgeSec: 0},
+	}
+	if err := s.UpsertReplicaSessions("inst-stale", rowsStale); err != nil {
+		t.Fatalf("UpsertReplicaSessions stale: %v", err)
+	}
+	if _, err := s.DB().Exec(
+		`UPDATE replica_sessions SET updated_at = updated_at - 1000 WHERE instance_id = ?`,
+		"inst-stale",
+	); err != nil {
+		t.Fatalf("backdate stale rows: %v", err)
+	}
+
+	// Verify instStale is excluded by AppFleetLoad before reap.
+	active, _, err := s.AppFleetLoad(app.ID, staleWindowSec, "")
+	if err != nil {
+		t.Fatalf("AppFleetLoad pre-reap: %v", err)
+	}
+	if len(active) == 0 || active[0] != 1 {
+		t.Fatalf("pre-reap: expected only fresh row (active[0]=1), got %v", active)
+	}
+
+	// Reap: only the stale row must be deleted.
+	if err := s.ReapStaleReplicaSessions(staleWindowSec); err != nil {
+		t.Fatalf("ReapStaleReplicaSessions: %v", err)
+	}
+
+	// Fresh row must survive; stale row must be gone.
+	active2, _, err := s.AppFleetLoad(app.ID, staleWindowSec, "")
+	if err != nil {
+		t.Fatalf("AppFleetLoad post-reap: %v", err)
+	}
+	if len(active2) == 0 || active2[0] != 1 {
+		t.Fatalf("post-reap: expected fresh row to survive (active[0]=1), got %v", active2)
+	}
+
+	// The stale instance's idx=1 slot must be absent (zero-filled or slice len=1).
+	if len(active2) > 1 && active2[1] != 0 {
+		t.Errorf("post-reap: stale idx=1 should be gone, got active[1]=%d", active2[1])
+	}
+}
+
+// TestReplicaSessions_NoFleetActivitySentinel asserts that NoFleetActivity is
+// math.MaxInt64 so callers can use >= comparisons against timeout durations safely.
+func TestReplicaSessions_NoFleetActivitySentinel(t *testing.T) {
+	if db.NoFleetActivity != math.MaxInt64 {
+		t.Errorf("NoFleetActivity = %d, want %d (math.MaxInt64)", db.NoFleetActivity, int64(math.MaxInt64))
+	}
+}
+
+// TestReplicaSessions_DBClockStamps verifies that two upserts from instances
+// running concurrently produce updated_at values from the DB clock (not the
+// local Go clock). We insert rows, wait a known interval, re-insert, and assert
+// that the second updated_at is strictly greater than the first. This confirms
+// the DB is stamping updated_at (not the caller), and that monotonic DB time
+// progresses between inserts. The test uses a real sleep to let DB time advance.
+func TestReplicaSessions_DBClockStamps(t *testing.T) {
+	s := dbtest.New(t)
+	owner := mustCreateUser(t, s, "rs-clock-owner", "developer")
+	app := mustCreateApp(t, s, "rs-clock-app", owner.ID)
+
+	row := []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 0, Active: 1, LastActivityAgeSec: 0},
+	}
+	if err := s.UpsertReplicaSessions("inst-clock", row); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	var ts1 int64
+	if err := s.DB().QueryRow(
+		`SELECT updated_at FROM replica_sessions WHERE instance_id = ?`, "inst-clock",
+	).Scan(&ts1); err != nil {
+		t.Fatalf("read ts1: %v", err)
+	}
+
+	// Sleep 1.1s to ensure the DB-clock second advances.
+	time.Sleep(1100 * time.Millisecond)
+
+	if err := s.UpsertReplicaSessions("inst-clock", row); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	var ts2 int64
+	if err := s.DB().QueryRow(
+		`SELECT updated_at FROM replica_sessions WHERE instance_id = ?`, "inst-clock",
+	).Scan(&ts2); err != nil {
+		t.Fatalf("read ts2: %v", err)
+	}
+
+	if ts2 <= ts1 {
+		t.Errorf("second updated_at (%d) must be greater than first (%d); DB clock did not advance", ts2, ts1)
 	}
 }

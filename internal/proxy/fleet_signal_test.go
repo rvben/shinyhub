@@ -37,15 +37,10 @@ func mustCreateAppFleet(t *testing.T, s *db.Store, slug string, ownerID int64) *
 	return a
 }
 
-// freshUpdatedAt is a unix epoch far in the future (year 2255). Using a value
-// beyond any realistic now means these rows will always pass the staleness
-// filter (updated_at >= now - ReplicaSessionStaleCutoff) regardless of when
-// the test runs.
-const freshUpdatedAt = int64(9_000_000_000)
-
 // TestFleetSignal_ReturnsSumAcrossInstances verifies that ReplicaSessionCounts
 // (the autoscale.Signal method) returns the per-index fleet sum from two
-// instances for the same app.
+// instances for the same app. Rows are inserted with the DB clock (no external
+// timestamp), so they are always fresh relative to the stale window.
 func TestFleetSignal_ReturnsSumAcrossInstances(t *testing.T) {
 	s := dbtest.New(t)
 	owner := mustCreateUserFleet(t, s, "fs-owner", "developer")
@@ -55,18 +50,18 @@ func TestFleetSignal_ReturnsSumAcrossInstances(t *testing.T) {
 	// Seed two instances into replica_sessions.
 	// Instance A: replica 0 -> 3 sessions, replica 1 -> 5 sessions.
 	rowsA := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 3, LastActivity: freshUpdatedAt},
-		{AppID: appID, Idx: 1, Active: 5, LastActivity: freshUpdatedAt},
+		{AppID: appID, Idx: 0, Active: 3, LastActivityAgeSec: 0},
+		{AppID: appID, Idx: 1, Active: 5, LastActivityAgeSec: 0},
 	}
-	if err := s.UpsertReplicaSessions("instance-A", freshUpdatedAt, rowsA); err != nil {
+	if err := s.UpsertReplicaSessions("instance-A", rowsA); err != nil {
 		t.Fatalf("UpsertReplicaSessions A: %v", err)
 	}
 	// Instance B: replica 0 -> 2 sessions (additional), replica 2 -> 7 sessions.
 	rowsB := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 2, LastActivity: freshUpdatedAt},
-		{AppID: appID, Idx: 2, Active: 7, LastActivity: freshUpdatedAt},
+		{AppID: appID, Idx: 0, Active: 2, LastActivityAgeSec: 0},
+		{AppID: appID, Idx: 2, Active: 7, LastActivityAgeSec: 0},
 	}
-	if err := s.UpsertReplicaSessions("instance-B", freshUpdatedAt, rowsB); err != nil {
+	if err := s.UpsertReplicaSessions("instance-B", rowsB); err != nil {
 		t.Fatalf("UpsertReplicaSessions B: %v", err)
 	}
 
@@ -96,22 +91,28 @@ func TestFleetSignal_ReturnsSumAcrossInstances(t *testing.T) {
 }
 
 // TestFleetSignal_StaleRows verifies that when all replica_sessions rows have
-// an updated_at older than the stale cutoff, ReplicaSessionCounts returns an
+// an updated_at outside the stale window, ReplicaSessionCounts returns an
 // empty/nil slice so the autoscaler's existing early-return holds (no
-// over-scale). Rows with updated_at=1 (year 1970) are always stale against the
-// real-time cutoff of now-ReplicaSessionStaleCutoff.
+// over-scale). Staleness is simulated by backdating updated_at via raw SQL.
 func TestFleetSignal_StaleRows(t *testing.T) {
 	s := dbtest.New(t)
 	owner := mustCreateUserFleet(t, s, "fs-stale-owner", "developer")
 	app := mustCreateAppFleet(t, s, "fs-stale-app", owner.ID)
 
-	// Insert rows with epoch=1 (always older than now-15s staleness cutoff).
+	// Insert fresh rows, then backdate updated_at by 1000 seconds so they fall
+	// outside the production stale window (ReplicaSessionStaleCutoff = 15 s).
 	rows := []db.ReplicaSessionRow{
-		{AppID: app.ID, Idx: 0, Active: 99, LastActivity: 1},
-		{AppID: app.ID, Idx: 1, Active: 99, LastActivity: 1},
+		{AppID: app.ID, Idx: 0, Active: 99, LastActivityAgeSec: 0},
+		{AppID: app.ID, Idx: 1, Active: 99, LastActivityAgeSec: 0},
 	}
-	if err := s.UpsertReplicaSessions("instance-A", 1 /* epoch 1 = stale */, rows); err != nil {
+	if err := s.UpsertReplicaSessions("instance-A", rows); err != nil {
 		t.Fatalf("UpsertReplicaSessions: %v", err)
+	}
+	if _, err := s.DB().Exec(
+		`UPDATE replica_sessions SET updated_at = updated_at - 1000 WHERE instance_id = ?`,
+		"instance-A",
+	); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
 	}
 
 	p := proxy.New()
@@ -167,7 +168,7 @@ func TestFleetSignal_UnsetAppID(t *testing.T) {
 // (autoscaler holds) and must not panic.
 type errFleetStore struct{ err error }
 
-func (e *errFleetStore) AppFleetLoad(_ int64, _ int64, _ string) ([]int64, int64, error) {
+func (e *errFleetStore) AppFleetLoad(_ int64, _ int64, _ string) (active []int64, idleSinceSec int64, err error) {
 	return nil, 0, e.err
 }
 
@@ -200,9 +201,9 @@ func TestFleetSignal_LocalReplicaSessionCountsUnchanged(t *testing.T) {
 	// Seed enormous fleet rows that would bias the count if the local method
 	// ever consulted the DB.
 	rows := []db.ReplicaSessionRow{
-		{AppID: appID, Idx: 0, Active: 999, LastActivity: freshUpdatedAt},
+		{AppID: appID, Idx: 0, Active: 999, LastActivityAgeSec: 0},
 	}
-	if err := s.UpsertReplicaSessions("other-instance", freshUpdatedAt, rows); err != nil {
+	if err := s.UpsertReplicaSessions("other-instance", rows); err != nil {
 		t.Fatalf("UpsertReplicaSessions: %v", err)
 	}
 

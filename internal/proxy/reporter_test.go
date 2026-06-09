@@ -21,11 +21,10 @@ type fakeSessionStore struct {
 
 type upsertCall struct {
 	instanceID string
-	updatedAt  int64
 	rows       []db.ReplicaSessionRow
 }
 
-func (s *fakeSessionStore) UpsertReplicaSessions(instanceID string, updatedAt int64, rows []db.ReplicaSessionRow) error {
+func (s *fakeSessionStore) UpsertReplicaSessions(instanceID string, rows []db.ReplicaSessionRow) error {
 	if s.errFn != nil {
 		if err := s.errFn(); err != nil {
 			return err
@@ -34,7 +33,7 @@ func (s *fakeSessionStore) UpsertReplicaSessions(instanceID string, updatedAt in
 	cp := make([]db.ReplicaSessionRow, len(rows))
 	copy(cp, rows)
 	s.mu.Lock()
-	s.calls = append(s.calls, upsertCall{instanceID, updatedAt, cp})
+	s.calls = append(s.calls, upsertCall{instanceID, cp})
 	s.mu.Unlock()
 	return nil
 }

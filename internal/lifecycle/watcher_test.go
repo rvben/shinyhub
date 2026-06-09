@@ -108,10 +108,14 @@ type fakeStore struct {
 	// hibernateAppCalls tracks every HibernateApp call (slug).
 	hibernateAppCalls []string
 
-	// fleetActive and fleetMaxLastActivity are returned by AppFleetLoad.
+	// fleetActive and fleetIdleSinceSec are returned by AppFleetLoad.
 	// fleetActive is the sum of other-instance active counts (0 = fleet idle).
-	fleetActive          int64
-	fleetMaxLastActivity int64
+	// fleetIdleSinceSec is the seconds since the most recent fleet activity on
+	// the DB clock; set to db.NoFleetActivity (math.MaxInt64) to simulate "no
+	// peers". Values >= timeout.Seconds() allow hibernation; values < timeout.Seconds()
+	// block it.
+	fleetActive       int64
+	fleetIdleSinceSec int64
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -286,15 +290,17 @@ func (f *fakeStore) HibernateApp(slug string) (bool, error) {
 }
 
 // AppFleetLoad returns the configured fake fleet load values. The real signature
-// includes a staleCutoffEpoch and excludeInstanceID but the fake ignores them
-// and returns the pre-configured values so tests can control fleet-idle outcomes.
+// includes a staleWindowSec and excludeInstanceID but the fake ignores them and
+// returns the pre-configured values so tests can control fleet-idle outcomes.
+// fleetIdleSinceSec represents seconds since the most recent fleet activity on
+// the DB clock; use db.NoFleetActivity to simulate "no live peer data".
 func (f *fakeStore) AppFleetLoad(_ int64, _ int64, _ string) ([]int64, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fleetActive == 0 {
-		return []int64{}, f.fleetMaxLastActivity, nil
+		return []int64{}, f.fleetIdleSinceSec, nil
 	}
-	return []int64{f.fleetActive}, f.fleetMaxLastActivity, nil
+	return []int64{f.fleetActive}, f.fleetIdleSinceSec, nil
 }
 
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
@@ -1171,9 +1177,11 @@ func idleClusteredSetup(t *testing.T) (*fakeManager, *fakeProxy, *fakeStore) {
 // though the local predicate (lastSeen old, activeConns 0) would pass.
 func TestClusteredHibernation_OtherInstanceActiveBlocksHibernation(t *testing.T) {
 	mgr, prx, st := idleClusteredSetup(t)
-	// Simulate another instance with active sessions.
+	// Simulate another instance with active sessions; idleSinceSec=0 means
+	// activity just happened (blocks hibernation as a belt-and-suspenders check,
+	// but the active>0 guard fires first).
 	st.fleetActive = 3
-	st.fleetMaxLastActivity = time.Now().Unix() // recent
+	st.fleetIdleSinceSec = 0
 
 	w := newTestWatcher(Config{
 		HibernateTimeout:   30 * time.Minute,
@@ -1227,7 +1235,7 @@ func TestClusteredHibernation_LocalRaceBlocksDBCAS(t *testing.T) {
 	)
 	// Fleet is idle so check (B) passes - the only thing blocking hibernation is (C).
 	st.fleetActive = 0
-	st.fleetMaxLastActivity = 0
+	st.fleetIdleSinceSec = db.NoFleetActivity
 
 	w := newTestWatcher(Config{
 		HibernateTimeout:   30 * time.Minute,
@@ -1272,7 +1280,7 @@ func TestClusteredHibernation_FleetIdleButLocalRecentlyActivePreventsHibernation
 		nil,
 	)
 	st.fleetActive = 0
-	st.fleetMaxLastActivity = 0
+	st.fleetIdleSinceSec = db.NoFleetActivity
 
 	w := newTestWatcher(Config{
 		HibernateTimeout:   30 * time.Minute,
@@ -1301,7 +1309,7 @@ func TestClusteredHibernation_FleetIdleAndLocalIdleHibernates(t *testing.T) {
 	mgr, prx, st := idleClusteredSetup(t)
 	// Fleet is idle: no other instances, no recent activity.
 	st.fleetActive = 0
-	st.fleetMaxLastActivity = 0
+	st.fleetIdleSinceSec = db.NoFleetActivity
 
 	var stopOrder []string
 	var mu sync.Mutex
@@ -1431,9 +1439,11 @@ func TestClusteredHibernation_SingleNodeUnchanged(t *testing.T) {
 // a peer finished serving all requests moments ago.
 func TestClusteredHibernation_OtherInstanceRecentActivityBlocksHibernation(t *testing.T) {
 	mgr, prx, st := idleClusteredSetup(t)
-	// Other instance: no active sessions, but last_activity is recent (5 min ago).
+	// Other instance: no active sessions, but activity was only 5 minutes ago
+	// (well within the 30-minute timeout). idleSinceSec = 5*60 = 300 seconds,
+	// which is less than timeout (1800 s), so hibernation must be blocked.
 	st.fleetActive = 0
-	st.fleetMaxLastActivity = time.Now().Add(-5 * time.Minute).Unix()
+	st.fleetIdleSinceSec = 5 * 60
 
 	w := newTestWatcher(Config{
 		HibernateTimeout:   30 * time.Minute,

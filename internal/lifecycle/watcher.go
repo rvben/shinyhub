@@ -88,19 +88,20 @@ type appStore interface {
 	ListWakingApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
 	// ReapStaleReplicaSessions removes replica_sessions rows whose updated_at
-	// is older than cutoffEpoch. Called on every watcher tick (owner-gated) so
-	// rows from crashed or restarted instances are pruned promptly.
-	ReapStaleReplicaSessions(cutoffEpoch int64) error
+	// is older than staleWindowSec seconds ago on the database clock. Called on
+	// every watcher tick (owner-gated) so rows from crashed or restarted
+	// instances are pruned promptly.
+	ReapStaleReplicaSessions(staleWindowSec int64) error
 	// HibernateApp atomically transitions a running app to "hibernated". Used
 	// by the clustered hibernation path: the CAS is issued before stopping
 	// replicas so any concurrent wake hits the hibernated->waking transition
 	// rather than finding the app still "running" but pool-less.
 	HibernateApp(slug string) (bool, error)
 	// AppFleetLoad returns the per-replica active session counts and the
-	// maximum last_activity epoch reported by non-stale, non-excluded
-	// instances. Used by the clustered hibernation path to confirm that no
-	// other instance is currently serving traffic before hibernating.
-	AppFleetLoad(appID int64, staleCutoffEpoch int64, excludeInstanceID string) (active []int64, maxLastActivity int64, err error)
+	// number of seconds since the most recent fleet activity (idleSinceSec),
+	// both measured on the database clock. Used by the clustered hibernation
+	// path to confirm that no other instance is currently serving traffic.
+	AppFleetLoad(appID int64, staleWindowSec int64, excludeInstanceID string) (active []int64, idleSinceSec int64, err error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -308,8 +309,8 @@ func (w *Watcher) runOnce() {
 	// deployments never write replica_sessions rows, so this DELETE is both
 	// unnecessary and a behavioral change we must avoid.
 	if w.cfg.Clustered {
-		cutoff := time.Now().Add(-proxy.ReplicaSessionStaleCutoff).Unix()
-		if err := w.store.ReapStaleReplicaSessions(cutoff); err != nil {
+		staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+		if err := w.store.ReapStaleReplicaSessions(staleWindowSec); err != nil {
 			slog.Warn("watcher: reap stale replica sessions failed", "err", err)
 		}
 		// Drive any apps left in 'waking' by a standby's trigger. A standby
@@ -590,22 +591,23 @@ func (w *Watcher) handleIdle(slug string) {
 // No owner-epoch fence is added to the CAS; it would be dead complexity.
 func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 	slug := app.Slug
-	now := time.Now()
 
-	// (A) Time-idle check.
+	// (A) Time-idle check: compare local last-seen against the local clock.
+	// This is the only place the local wall clock appears, and it governs only
+	// the local idle predicate - never the cross-instance stale/idle decision.
 	lastActivity := w.prx.LastSeen(slug)
 	if lastActivity.IsZero() {
 		lastActivity = app.UpdatedAt
 	}
-	if now.Sub(lastActivity) < timeout {
+	if time.Since(lastActivity) < timeout {
 		return
 	}
 
 	// (B) Fleet-idle check: consult other instances via replica_sessions rows.
-	// Use ReplicaSessionStaleCutoff so rows from crashed/restarted instances
-	// drop out (conservative: can only delay hibernation, never wrongly trigger it).
-	staleCutoff := now.Add(-proxy.ReplicaSessionStaleCutoff).Unix()
-	otherActive, otherMaxLastActivity, err := w.store.AppFleetLoad(app.ID, staleCutoff, w.cfg.InstanceID)
+	// All freshness and idle comparisons are on the database clock (staleWindowSec
+	// and idleSinceSec), so the result is not affected by control-plane clock skew.
+	staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+	otherActive, otherIdleSinceSec, err := w.store.AppFleetLoad(app.ID, staleWindowSec, w.cfg.InstanceID)
 	if err != nil {
 		slog.Warn("watcher: fleet load for hibernation check failed", "slug", slug, "err", err)
 		return
@@ -618,10 +620,12 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 	if totalOtherActive > 0 {
 		return // another instance is actively serving; do not hibernate
 	}
-	// Check other instances' last_activity: if any peer had recent activity
+	// Check other instances' last_activity age: if any peer had recent activity
 	// within the timeout window, delay hibernation to let the peer's own idle
 	// check fire on its next tick without the active count double-counting.
-	if otherMaxLastActivity > 0 && otherMaxLastActivity > now.Add(-timeout).Unix() {
+	// otherIdleSinceSec is a pure duration (db_now - MAX(last_activity)) so this
+	// comparison involves no local wall clock.
+	if otherIdleSinceSec < int64(timeout.Seconds()) {
 		return
 	}
 

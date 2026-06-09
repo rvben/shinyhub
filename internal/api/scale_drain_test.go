@@ -103,10 +103,9 @@ func TestClusteredScaleDown_WaitsOnFleetCount(t *testing.T) {
 	srv.proxy.SetPoolSize("drain-fleet", 2)
 
 	// Seed a fleet session row for "other-instance" reporting 1 active session on
-	// replica index 1. Use a far-future updated_at so the row is never stale.
-	futureEpoch := time.Now().Add(24 * time.Hour).Unix()
-	if err := srv.store.UpsertReplicaSessions("other-instance", futureEpoch, []db.ReplicaSessionRow{
-		{AppID: app.ID, Idx: 1, Active: 1, LastActivity: futureEpoch},
+	// replica index 1. Rows are stamped with the DB clock (always fresh).
+	if err := srv.store.UpsertReplicaSessions("other-instance", []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 1, Active: 1, LastActivityAgeSec: 0},
 	}); err != nil {
 		t.Fatalf("seed other-instance sessions: %v", err)
 	}
@@ -117,8 +116,8 @@ func TestClusteredScaleDown_WaitsOnFleetCount(t *testing.T) {
 	cleared := make(chan struct{})
 	go func() {
 		time.Sleep(120 * time.Millisecond)
-		_ = srv.store.UpsertReplicaSessions("other-instance", futureEpoch, []db.ReplicaSessionRow{
-			{AppID: app.ID, Idx: 1, Active: 0, LastActivity: futureEpoch},
+		_ = srv.store.UpsertReplicaSessions("other-instance", []db.ReplicaSessionRow{
+			{AppID: app.ID, Idx: 1, Active: 0, LastActivityAgeSec: 0},
 		})
 		close(cleared)
 	}()
@@ -159,9 +158,8 @@ func TestClusteredScaleDown_ProceedsAfterGraceEvenWithFleetSessions(t *testing.T
 	srv.proxy.SetPoolSize("drain-grace", 2)
 
 	// Seed a fleet session that will NEVER be cleared, to verify the deadline.
-	futureEpoch := time.Now().Add(24 * time.Hour).Unix()
-	if err := srv.store.UpsertReplicaSessions("stubborn-instance", futureEpoch, []db.ReplicaSessionRow{
-		{AppID: app.ID, Idx: 1, Active: 1, LastActivity: futureEpoch},
+	if err := srv.store.UpsertReplicaSessions("stubborn-instance", []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 1, Active: 1, LastActivityAgeSec: 0},
 	}); err != nil {
 		t.Fatalf("seed stubborn sessions: %v", err)
 	}
@@ -376,9 +374,8 @@ func TestClusteredScaleDown_Race(t *testing.T) {
 	}
 	srv.proxy.SetPoolSize("race-drain", 2)
 
-	futureEpoch := time.Now().Add(24 * time.Hour).Unix()
-	if err := srv.store.UpsertReplicaSessions("peer", futureEpoch, []db.ReplicaSessionRow{
-		{AppID: app.ID, Idx: 1, Active: 1, LastActivity: futureEpoch},
+	if err := srv.store.UpsertReplicaSessions("peer", []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 1, Active: 1, LastActivityAgeSec: 0},
 	}); err != nil {
 		t.Fatalf("seed sessions: %v", err)
 	}
@@ -389,8 +386,8 @@ func TestClusteredScaleDown_Race(t *testing.T) {
 		defer wg.Done()
 		// Clear fleet sessions concurrently.
 		time.Sleep(30 * time.Millisecond)
-		_ = srv.store.UpsertReplicaSessions("peer", futureEpoch, []db.ReplicaSessionRow{
-			{AppID: app.ID, Idx: 1, Active: 0, LastActivity: futureEpoch},
+		_ = srv.store.UpsertReplicaSessions("peer", []db.ReplicaSessionRow{
+			{AppID: app.ID, Idx: 1, Active: 0, LastActivityAgeSec: 0},
 		})
 	}()
 
@@ -424,10 +421,9 @@ func TestClusteredScaleDown_DoesNotStopWhileFleetNonZero(t *testing.T) {
 	}
 	srv.proxy.SetPoolSize("no-early-stop", 2)
 
-	// Seed a non-zero fleet session with far-future timestamp.
-	futureEpoch := time.Now().Add(24 * time.Hour).Unix()
-	if err := srv.store.UpsertReplicaSessions("peer2", futureEpoch, []db.ReplicaSessionRow{
-		{AppID: app.ID, Idx: 1, Active: 1, LastActivity: futureEpoch},
+	// Seed a non-zero fleet session.
+	if err := srv.store.UpsertReplicaSessions("peer2", []db.ReplicaSessionRow{
+		{AppID: app.ID, Idx: 1, Active: 1, LastActivityAgeSec: 0},
 	}); err != nil {
 		t.Fatalf("seed sessions: %v", err)
 	}
@@ -436,8 +432,8 @@ func TestClusteredScaleDown_DoesNotStopWhileFleetNonZero(t *testing.T) {
 	clearAt := 200 * time.Millisecond
 	go func() {
 		time.Sleep(clearAt)
-		_ = srv.store.UpsertReplicaSessions("peer2", futureEpoch, []db.ReplicaSessionRow{
-			{AppID: app.ID, Idx: 1, Active: 0, LastActivity: futureEpoch},
+		_ = srv.store.UpsertReplicaSessions("peer2", []db.ReplicaSessionRow{
+			{AppID: app.ID, Idx: 1, Active: 0, LastActivityAgeSec: 0},
 		})
 	}()
 

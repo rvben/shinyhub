@@ -8,7 +8,7 @@ import (
 // fleetStore is the subset of *db.Store that FleetSignal needs.
 // A narrow interface keeps FleetSignal unit-testable without a real database.
 type fleetStore interface {
-	AppFleetLoad(appID int64, staleCutoffEpoch int64, excludeInstanceID string) (active []int64, maxLastActivity int64, err error)
+	AppFleetLoad(appID int64, staleWindowSec int64, excludeInstanceID string) (active []int64, idleSinceSec int64, err error)
 }
 
 // FleetSignal is an autoscale.Signal adapter that overrides ReplicaSessionCounts
@@ -23,9 +23,6 @@ type FleetSignal struct {
 	prx   *Proxy
 	store fleetStore
 	log   *slog.Logger
-	// nowFn returns the current time. Defaults to time.Now; overridden in
-	// tests to control staleness.
-	nowFn func() time.Time
 }
 
 // NewFleetSignal constructs a FleetSignal backed by prx for slug->appID
@@ -35,7 +32,7 @@ func NewFleetSignal(prx *Proxy, store fleetStore, log *slog.Logger) *FleetSignal
 	if log == nil {
 		log = slog.Default()
 	}
-	return &FleetSignal{prx: prx, store: store, log: log, nowFn: time.Now}
+	return &FleetSignal{prx: prx, store: store, log: log}
 }
 
 // fleetReplicaSessionCounts returns the per-index fleet-wide sum of active
@@ -50,8 +47,8 @@ func (f *FleetSignal) fleetReplicaSessionCounts(slug string) []int64 {
 	if !ok {
 		return nil
 	}
-	cutoff := f.nowFn().Add(-ReplicaSessionStaleCutoff).Unix()
-	active, _, err := f.store.AppFleetLoad(appID, cutoff, "")
+	staleWindowSec := int64(ReplicaSessionStaleCutoff.Seconds())
+	active, _, err := f.store.AppFleetLoad(appID, staleWindowSec, "")
 	if err != nil {
 		// DB errors are transient; treat as no signal (no action) rather than
 		// crashing or mis-scaling. Log at warn so a persistent failure is

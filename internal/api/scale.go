@@ -335,8 +335,8 @@ func (s *Server) clusteredFleetWait(appID int64, idx int) func() bool {
 		return nil
 	}
 	return func() bool {
-		cutoff := time.Now().Add(-proxy.ReplicaSessionStaleCutoff).Unix()
-		active, _, err := s.store.AppFleetLoad(appID, cutoff, s.instanceID)
+		staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+		active, _, err := s.store.AppFleetLoad(appID, staleWindowSec, s.instanceID)
 		if err != nil {
 			// Treat a store error as not-yet-drained (conservative); the
 			// deadline in waitForDrain ensures we do not block forever.
