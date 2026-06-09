@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -163,5 +164,52 @@ func TestDeleteUser_NonAdminAllowed(t *testing.T) {
 	dev, _ := store.GetUserByUsername("dev")
 	if err := store.DeleteUser(dev.ID); err != nil {
 		t.Fatalf("deleting a non-admin should succeed: %v", err)
+	}
+}
+
+// TestDeleteUser_ConcurrentDeletesCannotReachZeroAdmins is the reason the guard
+// is transactional: two admins deleting each other at the same time must not
+// both succeed. The advisory lock serializes the two DeleteUser transactions, so
+// the second sees only one admin left and is refused with ErrLastAdmin. Exactly
+// one delete succeeds and an admin always remains.
+func TestDeleteUser_ConcurrentDeletesCannotReachZeroAdmins(t *testing.T) {
+	store := dbtest.New(t)
+	a := seedUser(t, store, "admin-a", "admin")
+	b := seedUser(t, store, "admin-b", "admin")
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); errs[0] = store.DeleteUser(b) }()
+	go func() { defer wg.Done(); errs[1] = store.DeleteUser(a) }()
+	wg.Wait()
+
+	var ok, refused int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, db.ErrLastAdmin):
+			refused++
+		default:
+			t.Fatalf("unexpected DeleteUser error: %v", err)
+		}
+	}
+	if ok != 1 || refused != 1 {
+		t.Fatalf("want exactly one delete to succeed and one refused, got ok=%d refused=%d", ok, refused)
+	}
+
+	users, err := store.ListUsers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admins := 0
+	for _, u := range users {
+		if u.Role == "admin" {
+			admins++
+		}
+	}
+	if admins != 1 {
+		t.Fatalf("after concurrent deletes, want exactly 1 admin remaining, got %d", admins)
 	}
 }
