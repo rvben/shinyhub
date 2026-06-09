@@ -30,6 +30,8 @@ type OIDCConfig struct {
 	ClientSecret string
 	CallbackURL  string
 	DisplayName  string // e.g. "Sign in with Okta"
+	GroupsClaim  string // ID-token claim holding group names (default "groups")
+	GroupsScope  string // optional extra scope to request (e.g. "groups")
 }
 
 // GitHubOAuthConfig holds GitHub OAuth2 application credentials.
@@ -58,6 +60,8 @@ type rawOIDCConfig struct {
 	ClientSecret string `yaml:"client_secret"`
 	CallbackURL  string `yaml:"callback_url"`
 	DisplayName  string `yaml:"display_name"`
+	GroupsClaim  string `yaml:"groups_claim"`
+	GroupsScope  string `yaml:"groups_scope"`
 }
 
 type rawGitHubOAuthConfig struct {
@@ -289,14 +293,26 @@ type ServerConfig struct {
 	PIDFile string `yaml:"pid_file"`
 }
 
+// GroupRoleMapping maps an IdP group name to a global role. Shared by the OIDC
+// and forward-auth feeders; mirrored as auth.GroupRoleMapping at the boundary
+// (the auth package must not import config).
+type GroupRoleMapping struct {
+	Group string `yaml:"group"`
+	Role  string `yaml:"role"`
+}
+
 type AuthConfig struct {
 	Secret string `yaml:"secret"`
 	// OAuthDefaultRole is the role assigned to users created via just-in-time
 	// provisioning during OAuth/OIDC sign-in (i.e. first-time login). Allowed
 	// values: "viewer" (default), "developer", "operator". "admin" is
-	// intentionally not permitted — admin must be granted explicitly, never
+	// intentionally not permitted -- admin must be granted explicitly, never
 	// auto-provisioned from an external IdP.
 	OAuthDefaultRole string `yaml:"oauth_default_role"`
+
+	// GroupRoleMappings maps IdP groups to global roles. Applied by both OIDC and
+	// forward-auth. Highest-rank match wins. admin_groups merges in as role=admin.
+	GroupRoleMappings []GroupRoleMapping `yaml:"group_role_mappings"`
 
 	// DeployToken is a pre-shared bearer token sourced from
 	// SHINYHUB_DEPLOY_TOKEN. When non-empty it authenticates as the synthetic
@@ -747,6 +763,8 @@ func Load(path string) (*Config, error) {
 				ClientSecret: raw.OAuth.OIDC.ClientSecret,
 				CallbackURL:  raw.OAuth.OIDC.CallbackURL,
 				DisplayName:  raw.OAuth.OIDC.DisplayName,
+				GroupsClaim:  raw.OAuth.OIDC.GroupsClaim,
+				GroupsScope:  raw.OAuth.OIDC.GroupsScope,
 			},
 		},
 	}
@@ -844,6 +862,33 @@ func Load(path string) (*Config, error) {
 		case "viewer", "developer", "operator", "admin":
 		default:
 			return nil, fmt.Errorf("auth.forward_auth.default_role: invalid role %q", cfg.Auth.ForwardAuth.DefaultRole)
+		}
+	}
+	// Default the OIDC groups claim when OIDC is configured.
+	if cfg.OAuth.OIDC.IssuerURL != "" && cfg.OAuth.OIDC.GroupsClaim == "" {
+		cfg.OAuth.OIDC.GroupsClaim = "groups"
+	}
+	// Merge the deprecated forward_auth.admin_groups into group_role_mappings as
+	// role=admin (an explicit group_role_mappings entry for the same group wins).
+	for _, g := range cfg.Auth.ForwardAuth.AdminGroups {
+		exists := false
+		for _, m := range cfg.Auth.GroupRoleMappings {
+			if m.Group == g {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			cfg.Auth.GroupRoleMappings = append(cfg.Auth.GroupRoleMappings, GroupRoleMapping{Group: g, Role: "admin"})
+		}
+	}
+	// Validate every mapped role (all four global roles are allowed; groups may
+	// legitimately confer admin, unlike the JIT default).
+	for _, m := range cfg.Auth.GroupRoleMappings {
+		switch m.Role {
+		case "viewer", "developer", "operator", "admin":
+		default:
+			return nil, fmt.Errorf("auth.group_role_mappings: %q is not a valid role for group %q", m.Role, m.Group)
 		}
 	}
 	if cfg.Defaults.AppVisibility == "" {
@@ -1042,6 +1087,20 @@ func parseBoolEnv(v string) (bool, error) {
 	default:
 		return false, fmt.Errorf("%q is not a boolean (use true/false, yes/no, on/off, 1/0)", v)
 	}
+}
+
+// parseGroupRoleMappings parses "group:role,group2:role2" into mappings.
+func parseGroupRoleMappings(v string) ([]GroupRoleMapping, error) {
+	out := []GroupRoleMapping{}
+	for _, pair := range splitCSV(v) {
+		g, r, ok := strings.Cut(pair, ":")
+		g, r = strings.TrimSpace(g), strings.TrimSpace(r)
+		if !ok || g == "" || r == "" {
+			return nil, fmt.Errorf("invalid mapping %q (want group:role)", pair)
+		}
+		out = append(out, GroupRoleMapping{Group: g, Role: r})
+	}
+	return out, nil
 }
 
 // splitCSV splits a comma-separated env value into trimmed, non-empty entries.
@@ -1368,6 +1427,13 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE"); v != "" {
 		cfg.Auth.ForwardAuth.DefaultRole = v
 	}
+	if v := os.Getenv("SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS"); v != "" {
+		ms, err := parseGroupRoleMappings(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS: %w", err)
+		}
+		cfg.Auth.GroupRoleMappings = ms
+	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
 	}
@@ -1452,6 +1518,12 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_OIDC_DISPLAY_NAME"); v != "" {
 		cfg.OAuth.OIDC.DisplayName = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_GROUPS_CLAIM"); v != "" {
+		cfg.OAuth.OIDC.GroupsClaim = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_GROUPS_SCOPE"); v != "" {
+		cfg.OAuth.OIDC.GroupsScope = v
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_MODE"); v != "" {
 		cfg.Runtime.Mode = v
