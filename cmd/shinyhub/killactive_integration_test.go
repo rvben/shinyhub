@@ -363,4 +363,20 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 		t.Log("note: B already active immediately after kill (TTL elapsed faster than expected); " +
 			"data-plane reconnect above still proves independence")
 	}
+
+	// --- control-plane handover: B acquires the lease after the TTL expires ---
+	pollStatus(t, instB.url("/activez"), http.StatusOK, 15*time.Second)
+
+	// --- the killed instance is gone: its port refuses new connections ---
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if code, _, _ := get(t, instA.url("/readyz"), nil); code == 0 {
+			break // transport error = connection refused = A is down
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("instance A still answering on its port after kill + handover")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	instA.wait() // reap exactly once; the cleanup's stop() is then a no-op
 }
