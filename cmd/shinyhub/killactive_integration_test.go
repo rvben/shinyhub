@@ -260,4 +260,19 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 	// --- boot instance A and confirm it serves (/readyz=200) ---
 	instA := startInstance(t, "a", 18090, dsn, tmp)
 	pollStatus(t, instA.url("/readyz"), http.StatusOK, 30*time.Second)
+
+	// A is the sole instance -> it wins the lease and becomes active.
+	pollStatus(t, instA.url("/activez"), http.StatusOK, 15*time.Second)
+
+	// --- boot standby B; it serves (/readyz) but is NOT active (A holds lease) ---
+	instB := startInstance(t, "b", 18091, dsn, tmp)
+	pollStatus(t, instB.url("/readyz"), http.StatusOK, 30*time.Second)
+
+	if code, _, _ := get(t, instB.url("/activez"), nil); code != http.StatusServiceUnavailable {
+		t.Fatalf("standby B /activez = %d, want 503 while A holds the lease", code)
+	}
+	// LB contract: both ready, exactly one active.
+	if code, _, _ := get(t, instA.url("/readyz"), nil); code != http.StatusOK {
+		t.Fatalf("A /readyz = %d, want 200", code)
+	}
 }
