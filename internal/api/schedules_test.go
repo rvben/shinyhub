@@ -19,6 +19,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/jobs"
+	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -1081,13 +1082,14 @@ func TestSchedules_RevokeSharedData_NotMountedReturns404(t *testing.T) {
 	}
 }
 
-// newScheduleE2EServerWithJobs builds a test server with a real jobs.Manager
-// and NativeRuntime wired so run_on_register first-fires actually execute and
-// record runs. Returns the server, store, and an admin JWT bearer token.
-func newScheduleE2EServerWithJobs(t *testing.T) (*api.Server, *db.Store, string) {
+// buildScheduleE2EServer wires the shared pieces for the schedule API tests: an
+// admin user + token, a config, a native-runtime process manager, the server,
+// and a real jobs.Manager. It deliberately does NOT call SetJobs, so each caller
+// chooses how to wire the scheduler (nil, or a real not-started one).
+func buildScheduleE2EServer(t *testing.T) (srv *api.Server, store *db.Store, token string, jm *jobs.Manager) {
 	t.Helper()
 	appsDir := t.TempDir()
-	store := dbtest.New(t)
+	store = dbtest.New(t)
 
 	hash, _ := auth.HashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{
@@ -1096,23 +1098,58 @@ func newScheduleE2EServerWithJobs(t *testing.T) (*api.Server, *db.Store, string)
 		t.Fatal(err)
 	}
 	admin, _ := store.GetUserByUsername("admin")
-	token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
+	token, _ = auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
 
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir, VersionRetention: 5},
 	}
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
-	srv := api.New(cfg, store, mgr, proxy.New())
+	srv = api.New(cfg, store, mgr, proxy.New())
 
-	jm, err := jobs.NewManager(mgr, nil, process.DefaultTier, store, nil, appsDir, appsDir)
+	var err error
+	jm, err = jobs.NewManager(mgr, nil, process.DefaultTier, store, nil, appsDir, appsDir)
 	if err != nil {
 		t.Fatalf("jobs.NewManager: %v", err)
 	}
+	return srv, store, token, jm
+}
+
+func newScheduleE2EServerWithJobs(t *testing.T) (*api.Server, *db.Store, string) {
+	t.Helper()
+	srv, store, token, jm := buildScheduleE2EServer(t)
 	// Pass nil scheduler so s.scheduler is nil and Reload is skipped; s.jobs is
 	// non-nil so run_on_register dispatch is enabled.
 	srv.SetJobs(jm, nil)
 	return srv, store, token
+}
+
+// TestCreateSchedule_SchedulerNotStarted_Returns201 verifies that creating a
+// schedule while the cron engine has not started yet returns 201, not 500: the
+// row IS persisted and activates when the scheduler starts. This matches the
+// deploy path's soft handling of scheduler.ErrNotStarted (both go through
+// Server.reloadScheduler).
+func TestCreateSchedule_SchedulerNotStarted_Returns201(t *testing.T) {
+	srv, store, token, jm := buildScheduleE2EServer(t)
+	// A real scheduler that is NOT started: Reload returns scheduler.ErrNotStarted.
+	srv.SetJobs(jm, scheduler.New(jm, store, time.UTC))
+	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reqBody := `{"name":"warm","cron_expr":"0 5 * * *","command":["true"],"timeout_seconds":600,"overlap_policy":"skip","missed_policy":"skip"}`
+	req := httptest.NewRequest("POST", "/api/apps/warmapp/schedules", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (ErrNotStarted must be soft-handled, not 500); body=%s", rr.Code, rr.Body.String())
+	}
+	app, _ := store.GetAppBySlug("warmapp")
+	if id := scheduleIDBySlugAndName(t, store, app.ID, "warm"); id == 0 {
+		t.Errorf("schedule row was not persisted")
+	}
 }
 
 // scheduleIDBySlugAndName resolves a schedule ID by listing all schedules for

@@ -136,15 +136,8 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 		if err != nil {
 			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)
 		}
-		if s.scheduler != nil {
-			if err := s.scheduler.Reload(id); err != nil {
-				if errors.Is(err, scheduler.ErrNotStarted) {
-					slog.Warn("manifest: scheduler not started; row persisted, will activate on scheduler start",
-						"slug", app.Slug, "schedule", spec.Name)
-				} else {
-					return results, fmt.Errorf("scheduler reload (%s): %w", spec.Name, err)
-				}
-			}
+		if err := s.reloadScheduler(id, app.Slug, spec.Name); err != nil {
+			return results, fmt.Errorf("scheduler reload (%s): %w", spec.Name, err)
 		}
 		auditAction := "schedule_update"
 		resultAction := "updated"
@@ -196,6 +189,29 @@ func (s *Server) maybeFirstFire(scheduleID int64, runOnRegister, disabled bool, 
 		return nil
 	}
 	return &runID
+}
+
+// reloadScheduler re-registers a schedule with the cron engine after a create or
+// update. scheduler.ErrNotStarted is soft: the row is already persisted and will
+// activate when the scheduler starts, so it logs a warning and returns nil. A nil
+// scheduler is likewise a no-op. Any other error is returned to the caller.
+//
+// This is the single reload policy shared by the create/patch handlers and
+// manifest apply, so the brief "scheduler not started yet" startup window behaves
+// identically on every path (the row is persisted; the caller does not fail).
+func (s *Server) reloadScheduler(id int64, slug, name string) error {
+	if s.scheduler == nil {
+		return nil
+	}
+	if err := s.scheduler.Reload(id); err != nil {
+		if errors.Is(err, scheduler.ErrNotStarted) {
+			slog.Warn("scheduler not started; schedule row persisted, will activate on scheduler start",
+				"slug", slug, "schedule", name)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func derefOrZero(p *int) int {

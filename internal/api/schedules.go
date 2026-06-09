@@ -148,11 +148,9 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if s.scheduler != nil {
-		if err := s.scheduler.Reload(id); err != nil {
-			writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
-			return
-		}
+	if err := s.reloadScheduler(id, app.Slug, req.Name); err != nil {
+		writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
+		return
 	}
 	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location)))
 
@@ -299,11 +297,9 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if s.scheduler != nil {
-		if err := s.scheduler.Reload(id); err != nil {
-			writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
-			return
-		}
+	if err := s.reloadScheduler(id, app.Slug, sc.Name); err != nil {
+		writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
+		return
 	}
 	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), "")
 	fresh, _ := s.store.GetSchedule(id)
@@ -376,6 +372,12 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/apps/{slug}/schedules/{id}/runs
+//
+// Run metadata (status, exit code, timing, trigger) is intentionally readable by
+// any user with explicit access to the app. This is deliberately less restrictive
+// than the run LOG endpoint (handleScheduleRunLogs), which requires manage rights
+// because log content can echo secret env values; metadata cannot. The two guards
+// differ on purpose - do not "tidy" this into requireManageApp.
 func (s *Server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	app, _, ok := s.requireExplicitAppAccess(w, r, chi.URLParam(r, "slug"))
 	if !ok {
@@ -442,6 +444,11 @@ func (s *Server) handleCancelScheduleRun(w http.ResponseWriter, r *http.Request)
 }
 
 // GET /api/apps/{slug}/schedules/{id}/runs/{run_id}
+//
+// Like handleListScheduleRuns, run metadata uses requireExplicitAppAccess. The
+// run's log content (handleScheduleRunLogs) is the only schedule-run read that
+// requires manage rights, because logs can leak secret env values; the metadata
+// returned here (status, exit code, timing) cannot.
 func (s *Server) handleGetScheduleRun(w http.ResponseWriter, r *http.Request) {
 	app, _, ok := s.requireExplicitAppAccess(w, r, chi.URLParam(r, "slug"))
 	if !ok {
