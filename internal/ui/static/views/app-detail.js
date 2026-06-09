@@ -434,6 +434,7 @@ function renderAccess(panel, app, ctx) {
   ctx.setSettingsSlug(app.slug);
   ctx.populateAccessPanel(app);
   ctx.refreshMemberList();
+  ctx.refreshGroupAccessList();
 }
 
 // renderTraces polls /api/apps/<slug>/traces every 5 s and renders recent

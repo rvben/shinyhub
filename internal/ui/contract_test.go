@@ -1205,3 +1205,17 @@ func TestMemberRoleDropdownWiring(t *testing.T) {
 	assertContains(t, "app.js", "member-role-select",
 		"refreshMemberList must render an editable role <select> per member so managers can promote/demote")
 }
+
+// TestGroupAccessSectionWiring guards the Access-tab group-rules surface: the
+// markup section, the refresh function, and the CRUD wiring against
+// /api/apps/:slug/group-access. See internal/api/router.go handleGrantAppGroupAccess.
+func TestGroupAccessSectionWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="group-access-list"`,
+		"index.html must expose #group-access-list for the per-app group rules")
+	assertContains(t, "app.js", "async function refreshGroupAccessList",
+		"app.js must define refreshGroupAccessList to render group rules on the Access tab")
+	assertContains(t, "app.js", "/group-access",
+		"app.js must call /api/apps/:slug/group-access for group-rule CRUD")
+	assertContains(t, "views/app-detail.js", "refreshGroupAccessList",
+		"the Access tab must refresh the group-rules list when rendered")
+}
