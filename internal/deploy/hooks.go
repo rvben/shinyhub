@@ -91,11 +91,24 @@ type ScheduleSpec struct {
 	Command []string `toml:"-"`
 }
 
+// AppAccess declares per-app group access rules in the manifest. Groups in
+// viewer_groups get the viewer role; groups in manager_groups get manager.
+// These reconcile into app_group_access as source='manifest' on each deploy.
+type AppAccess struct {
+	ViewerGroups  []string `toml:"viewer_groups"`
+	ManagerGroups []string `toml:"manager_groups"`
+}
+
+func (a AppAccess) IsZero() bool {
+	return len(a.ViewerGroups) == 0 && len(a.ManagerGroups) == 0
+}
+
 // Manifest is the decoded shinyhub.toml.
 type Manifest struct {
 	App       AppSettings    `toml:"app"`
 	Hooks     []Hook         `toml:"hook"`
 	Schedules []ScheduleSpec `toml:"schedule"`
+	Access    AppAccess      `toml:"access"`
 }
 
 // defaultHookTimeout caps an individual hook's wall-clock runtime when the
@@ -151,6 +164,11 @@ func LoadManifest(bundleDir string) (*Manifest, error) {
 			return nil, fmt.Errorf("%s [[schedule]] #%d: duplicate name %q", ManifestFilename, i+1, name)
 		}
 		seen[name] = true
+	}
+	for _, g := range append(append([]string{}, m.Access.ViewerGroups...), m.Access.ManagerGroups...) {
+		if strings.TrimSpace(g) == "" {
+			return nil, fmt.Errorf("manifest [access]: group names must be non-empty")
+		}
 	}
 	return &m, nil
 }
