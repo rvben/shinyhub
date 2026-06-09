@@ -836,6 +836,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			cfg.OAuth.OIDC.ClientSecret,
 			cfg.OAuth.OIDC.CallbackURL,
 			cfg.OAuth.OIDC.DisplayName,
+			cfg.OAuth.OIDC.GroupsClaim,
+			cfg.OAuth.OIDC.GroupsScope,
 		)
 		oidcCancel()
 		if err != nil {
