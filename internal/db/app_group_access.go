@@ -159,9 +159,16 @@ func (s *Store) ReconcileAppGroupAccessFromManifest(slug string, rules []AppGrou
 			skipped = append(skipped, rule.Group)
 			continue
 		}
+		// The WHERE guard ensures a manifest reconcile cannot overwrite a manual
+		// row even if a concurrent GrantAppGroupAccess inserts one between the
+		// map read above and this statement. When the existing row has
+		// source='manual', DO UPDATE is a no-op and the manual row is preserved.
+		// This closes a Postgres READ-COMMITTED TOCTOU; on SQLite the serialised
+		// writer prevents the race, but the guard is correct on both dialects.
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO app_group_access (app_slug, group_name, role, source) VALUES (?, ?, ?, 'manifest')
-			 ON CONFLICT (app_slug, group_name) DO UPDATE SET role = excluded.role, source = 'manifest'`,
+			 ON CONFLICT (app_slug, group_name) DO UPDATE SET role = excluded.role, source = 'manifest'
+			 WHERE source = 'manifest'`,
 			slug, rule.Group, rule.Role); err != nil {
 			return nil, fmt.Errorf("reconcile manifest group access: upsert: %w", err)
 		}
