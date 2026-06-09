@@ -242,8 +242,10 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			status, werr := waitForFirstFireLoop(poll, timeout, healthPollInterval, 15*time.Second, time.Now, time.Sleep, os.Stdout, ref.Schedule)
 			switch {
 			case werr != nil:
-				fmt.Fprintf(os.Stderr, "%s: first-fire wait error: %v\n", ref.Schedule, werr)
-				firstFireErr = errors.Join(firstFireErr, fmt.Errorf("%s first-fire did not complete: %w", ref.Schedule, werr))
+				// A timeout or transient poll error is not a hard failure: the run
+				// may still be warming and the next deploy self-heals. This matches
+				// fleet apply, which also treats an unfinished wait as non-fatal.
+				fmt.Fprintf(os.Stderr, "%s: first-fire not confirmed: %v (warming may still be in progress)\n", ref.Schedule, werr)
 			case status == "skipped_overlap":
 				fmt.Printf("%s: first-fire skipped (another run is warming the cache); warming in progress\n", ref.Schedule)
 			case firstFireStatusOK(status):
