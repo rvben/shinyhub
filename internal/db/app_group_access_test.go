@@ -62,14 +62,17 @@ func TestGroupRoleForUserOnApp(t *testing.T) {
 	store.ReplaceUserGroups(alice.ID, []string{"finance", "finance-leads"})
 	store.GrantAppGroupAccess("app1", "finance", "viewer", "manual")
 	store.GrantAppGroupAccess("app1", "finance-leads", "manager", "manual")
-	role, ok := store.GroupRoleForUserOnApp("app1", alice.ID)
+	role, ok, err := store.GroupRoleForUserOnApp("app1", alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || role != "manager" {
 		t.Fatalf("got (%q,%v), want (manager,true)", role, ok)
 	}
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: "h", Role: "viewer"})
 	bob, _ := store.GetUserByUsername("bob")
 	store.ReplaceUserGroups(bob.ID, []string{"other"})
-	if _, ok := store.GroupRoleForUserOnApp("app1", bob.ID); ok {
+	if _, ok, err := store.GroupRoleForUserOnApp("app1", bob.ID); err != nil || ok {
 		t.Fatal("bob has no matching group; want ok=false")
 	}
 }

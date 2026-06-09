@@ -60,29 +60,30 @@ func (s *Store) ListAppGroupAccess(slug string) ([]AppGroupRule, error) {
 
 // GroupRoleForUserOnApp returns the highest-rank role granted to userID on slug
 // via any of the user's groups (joined through user_groups). ok=false when no
-// group rule matches.
-func (s *Store) GroupRoleForUserOnApp(slug string, userID int64) (string, bool) {
+// group rule matches. A non-nil error indicates a DB failure (callers should
+// surface it rather than treat it as "no access").
+func (s *Store) GroupRoleForUserOnApp(slug string, userID int64) (string, bool, error) {
 	rows, err := s.db.Query(`
 		SELECT aga.role
 		FROM app_group_access aga
 		JOIN user_groups ug ON ug.group_name = aga.group_name
 		WHERE aga.app_slug = ? AND ug.user_id = ?`, slug, userID)
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	defer rows.Close()
 	best := ""
 	for rows.Next() {
 		var role string
 		if err := rows.Scan(&role); err != nil {
-			return "", false
+			return "", false, err
 		}
 		best = HigherMemberRole(best, role)
 	}
 	if err := rows.Err(); err != nil {
-		return "", false
+		return "", false, err
 	}
-	return best, best != ""
+	return best, best != "", nil
 }
 
 // HigherMemberRole returns the higher-rank of two member roles ("manager" >
