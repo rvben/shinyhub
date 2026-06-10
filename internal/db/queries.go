@@ -421,6 +421,10 @@ type App struct {
 	// action on this app, or 0 if it has never been scaled. The controller reads
 	// it as the persisted cooldown so the cooldown survives restart and failover.
 	LastAutoscaleAt int64 `json:"last_autoscale_at"`
+	// IdentityHeaders is the per-app identity-forwarding override reconciled
+	// from the bundle manifest. nil = inherit the global config flag.
+	// Effective = global && (IdentityHeaders == nil || *IdentityHeaders).
+	IdentityHeaders *bool `json:"identity_headers"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -459,7 +463,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       created_at, updated_at,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
-		       last_autoscale_at,`
+		       last_autoscale_at, identity_headers,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -1959,7 +1963,8 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 // separate per-app lookup.
 type RoutableReplica struct {
 	Slug                  string
-	AppMaxSessionsPerRepl int // apps.max_sessions_per_replica
+	AppMaxSessionsPerRepl int   // apps.max_sessions_per_replica
+	AppIdentityHeaders    *bool // apps.identity_headers (nil = inherit global)
 	Replica               *Replica
 }
 
@@ -1971,7 +1976,7 @@ type RoutableReplica struct {
 // index.
 func (s *Store) ListRoutableReplicas() ([]RoutableReplica, error) {
 	rows, err := s.db.Query(`
-		SELECT a.slug, a.max_sessions_per_replica,
+		SELECT a.slug, a.max_sessions_per_replica, a.identity_headers,
 		       r.app_id, r.idx, r.pid, r.port, r.status, r.provider, r.tier,
 		       r.endpoint_url, r.worker_id, r.app_version, r.desired_state,
 		       r.deployment_id, r.updated_at
@@ -1987,16 +1992,17 @@ func (s *Store) ListRoutableReplicas() ([]RoutableReplica, error) {
 	for rows.Next() {
 		var slug string
 		var maxSess int
+		var identityHeaders *bool
 		var r Replica
 		var updatedAt int64
-		if err := rows.Scan(&slug, &maxSess,
+		if err := rows.Scan(&slug, &maxSess, &identityHeaders,
 			&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
 			return nil, fmt.Errorf("list routable replicas scan: %w", err)
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
-		out = append(out, RoutableReplica{Slug: slug, AppMaxSessionsPerRepl: maxSess, Replica: &r})
+		out = append(out, RoutableReplica{Slug: slug, AppMaxSessionsPerRepl: maxSess, AppIdentityHeaders: identityHeaders, Replica: &r})
 	}
 	if out == nil {
 		out = []RoutableReplica{}
@@ -2128,6 +2134,11 @@ type ApplyAppManifestSettingsParams struct {
 
 	SetMaxSessionsPerReplica bool
 	MaxSessionsPerReplica    int
+
+	// SetIdentityHeaders is true on every manifest apply (the field
+	// reconciles unconditionally: key removed => NULL => inherit global).
+	SetIdentityHeaders bool
+	IdentityHeaders    *bool
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -2178,6 +2189,15 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			p.MaxSessionsPerReplica, p.AppID,
 		); err != nil {
 			return fmt.Errorf("update max_sessions_per_replica: %w", err)
+		}
+	}
+
+	if p.SetIdentityHeaders {
+		if _, err := tx.Exec(
+			`UPDATE apps SET identity_headers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.IdentityHeaders, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update identity_headers: %w", err)
 		}
 	}
 
@@ -2348,7 +2368,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
-		&a.LastAutoscaleAt,
+		&a.LastAutoscaleAt, &a.IdentityHeaders,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
