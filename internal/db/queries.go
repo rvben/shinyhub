@@ -425,6 +425,9 @@ type App struct {
 	// from the bundle manifest. nil = inherit the global config flag.
 	// Effective = global && (IdentityHeaders == nil || *IdentityHeaders).
 	IdentityHeaders *bool `json:"identity_headers"`
+	// MinWarmReplicas is the pre-warming floor: replicas kept running
+	// through idle hibernation. 0 = hibernate fully (the default).
+	MinWarmReplicas int `json:"min_warm_replicas"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -463,7 +466,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       created_at, updated_at,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
-		       last_autoscale_at, identity_headers,`
+		       last_autoscale_at, identity_headers, min_warm_replicas,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -569,6 +572,33 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 	rows, err := s.db.Query(`
 		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status = 'running'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// ListWarmShrunkApps returns apps that currently have warm-parked replicas
+// (desired_state='warm') and are still serving (running or degraded). The
+// watcher's expansion check iterates exactly this set each tick.
+func (s *Store) ListWarmShrunkApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + appColumns + deploymentSummarySQL + `
+		FROM apps
+		WHERE EXISTS (
+			SELECT 1 FROM replicas r
+			WHERE r.app_id = apps.id AND r.desired_state = 'warm'
+		)
+		AND status IN ('running', 'degraded')`)
 	if err != nil {
 		return nil, err
 	}
@@ -1799,6 +1829,12 @@ const (
 	ReplicaStatusLost = "lost"
 )
 
+// ReplicaDesiredWarm marks a replica deliberately stopped by warm-shrink:
+// idle hibernation kept the app's warm floor running and parked this one.
+// Reconcile and recovery treat warm rows as healthy stopped capacity, and
+// warm expansion (not the crash watchdog) boots them back.
+const ReplicaDesiredWarm = "warm"
+
 // FleetReplicaCount is one (tier, provider, status) bucket of the replicas
 // table, used by the fleet-health overview to break replica counts down per
 // backend without an N+1 per-app scan.
@@ -2061,6 +2097,23 @@ func (s *Store) UpdateAppReplicas(appID int64, n int) error {
 	)
 	if err != nil {
 		return fmt.Errorf("update replicas: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateAppMinWarmReplicas sets the pre-warming floor for the app. The watcher
+// never hibernates more replicas than (apps.replicas - min_warm_replicas).
+func (s *Store) UpdateAppMinWarmReplicas(appID int64, n int) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		n, appID,
+	)
+	if err != nil {
+		return fmt.Errorf("update min_warm_replicas: %w", err)
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
@@ -2368,7 +2421,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
-		&a.LastAutoscaleAt, &a.IdentityHeaders,
+		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest,
 	)
 	if err != nil {
