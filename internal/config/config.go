@@ -346,8 +346,9 @@ type AuthConfig struct {
 	IdentityHeaders *bool `yaml:"identity_headers"`
 }
 
-// IdentityHeadersEnabled reports the global identity-forwarding flag.
-// nil (unset) means enabled.
+// IdentityHeadersEnabled reports whether identity headers (X-Shinyhub-* and
+// the signed identity token) are globally permitted to be forwarded to app
+// processes. Returns true when the field is absent (the default).
 func (a *AuthConfig) IdentityHeadersEnabled() bool {
 	return a.IdentityHeaders == nil || *a.IdentityHeaders
 }

@@ -2578,7 +2578,7 @@ oauth:
 	}
 }
 
-func TestIdentityHeadersFlag_DefaultOnEnvOverride(t *testing.T) {
+func TestIdentityHeadersEnabled_DefaultAndExplicitFalse(t *testing.T) {
 	var ac config.AuthConfig
 	if !ac.IdentityHeadersEnabled() {
 		t.Fatal("identity headers must default ON when unset")
