@@ -337,6 +337,19 @@ type AuthConfig struct {
 	DeployTokenRole string `yaml:"-"`
 
 	ForwardAuth ForwardAuthConfig `yaml:"forward_auth"`
+
+	// IdentityHeaders globally enables forwarding the authenticated user's
+	// identity (X-Shinyhub-* headers + signed identity token) to app
+	// processes. nil/absent = enabled (the default). Setting false is a hard
+	// operator kill switch: per-app manifest opt-ins cannot override it.
+	// Per-app `[app] identity_headers = false` opts a single app out.
+	IdentityHeaders *bool `yaml:"identity_headers"`
+}
+
+// IdentityHeadersEnabled reports the global identity-forwarding flag.
+// nil (unset) means enabled.
+func (a *AuthConfig) IdentityHeadersEnabled() bool {
+	return a.IdentityHeaders == nil || *a.IdentityHeaders
 }
 
 // ForwardAuthConfig configures trust of an upstream reverse proxy that has
@@ -1466,6 +1479,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS: %w", err)
 		}
 		cfg.Auth.GroupRoleMappings = ms
+	}
+	if v := os.Getenv("SHINYHUB_IDENTITY_HEADERS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_IDENTITY_HEADERS: %w", err)
+		}
+		cfg.Auth.IdentityHeaders = &b
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
