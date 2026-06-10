@@ -985,7 +985,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// storage failure that leaves the app in an inconsistent state — mark it
 	// degraded so the operator notices.
 	var manifestSummary ManifestApplied
-	if manifest != nil && !manifest.App.IsZero() {
+	if manifest != nil {
+		// applyManifestAppSettings reconciles identity_headers unconditionally
+		// (even when manifest.App.IsZero()) so that removing the key from the
+		// manifest reverts the column to NULL. The other fields (hibernate,
+		// replicas, max_sessions) keep declared-only semantics inside the
+		// function; IsZero manifests produce no DB writes for those fields and
+		// no audit event.
 		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
 			_ = s.store.FailDeployment(pendingDep.ID)

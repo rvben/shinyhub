@@ -345,6 +345,33 @@ func TestApplyManifestAppSettings_IdentityHeadersAlwaysReconciled(t *testing.T) 
 	}
 }
 
+// TestApplyManifestAppSettings_ZeroAppNoAuditEvent asserts that applying a
+// zero AppSettings (manifest present but [app] section empty/absent) reconciles
+// identity_headers to NULL but does NOT emit an update_app audit event. Audit
+// is gated on !m.IsZero() to avoid noise on every manifest-present deploy that
+// omits the [app] section.
+func TestApplyManifestAppSettings_ZeroAppNoAuditEvent(t *testing.T) {
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// identity_headers column must be NULL (written unconditionally).
+	got, _ := store.GetAppBySlug("alpha")
+	if got.IdentityHeaders != nil {
+		t.Errorf("identity_headers = %v, want nil (NULL)", got.IdentityHeaders)
+	}
+
+	// No update_app audit event must have been emitted for this no-op apply.
+	events, _ := store.ListAuditEvents("", 10, 0)
+	if auditEventsContain(events, "update_app", "alpha") {
+		t.Error("unexpected update_app audit event for zero-App manifest apply")
+	}
+}
+
 func TestApplyManifestSchedules_SchedulerNotStartedIsWarn(t *testing.T) {
 	// newServerWithOwnedApp wires a non-nil scheduler that has NOT been
 	// started, so scheduler.Reload → register returns scheduler.ErrNotStarted.
