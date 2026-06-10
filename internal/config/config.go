@@ -25,13 +25,14 @@ type OAuthConfig struct {
 
 // OIDCConfig holds generic OpenID Connect provider credentials and metadata.
 type OIDCConfig struct {
-	IssuerURL    string
-	ClientID     string
-	ClientSecret string
-	CallbackURL  string
-	DisplayName  string // e.g. "Sign in with Okta"
-	GroupsClaim  string // ID-token claim holding group names (default "groups")
-	GroupsScope  string // optional extra scope to request (e.g. "groups")
+	IssuerURL          string
+	ClientID           string
+	ClientSecret       string
+	CallbackURL        string
+	DisplayName        string // e.g. "Sign in with Okta"
+	GroupsClaim        string // ID-token claim holding group names (default "groups")
+	GroupsScope        string // optional extra scope to request (e.g. "groups")
+	RequireValidGroups bool   // when true, a malformed groups claim fails the login instead of being skipped
 }
 
 // GitHubOAuthConfig holds GitHub OAuth2 application credentials.
@@ -55,13 +56,14 @@ type rawOAuthConfig struct {
 }
 
 type rawOIDCConfig struct {
-	IssuerURL    string `yaml:"issuer_url"`
-	ClientID     string `yaml:"client_id"`
-	ClientSecret string `yaml:"client_secret"`
-	CallbackURL  string `yaml:"callback_url"`
-	DisplayName  string `yaml:"display_name"`
-	GroupsClaim  string `yaml:"groups_claim"`
-	GroupsScope  string `yaml:"groups_scope"`
+	IssuerURL          string `yaml:"issuer_url"`
+	ClientID           string `yaml:"client_id"`
+	ClientSecret       string `yaml:"client_secret"`
+	CallbackURL        string `yaml:"callback_url"`
+	DisplayName        string `yaml:"display_name"`
+	GroupsClaim        string `yaml:"groups_claim"`
+	GroupsScope        string `yaml:"groups_scope"`
+	RequireValidGroups bool   `yaml:"require_valid_groups"`
 }
 
 type rawGitHubOAuthConfig struct {
@@ -341,6 +343,11 @@ type ForwardAuthConfig struct {
 	GroupsHeader string   `yaml:"groups_header"`
 	AdminGroups  []string `yaml:"admin_groups"`
 	DefaultRole  string   `yaml:"default_role"`
+	// RequireGroupsHeader, when true and groups_header is configured, causes a
+	// forward-auth request that is missing the groups header to be refused (403)
+	// instead of being treated as no groups. Default false keeps the revoke
+	// behavior. Forces a misconfigured proxy to fail loudly.
+	RequireGroupsHeader bool `yaml:"require_groups_header"`
 }
 
 type StorageConfig struct {
@@ -758,13 +765,14 @@ func Load(path string) (*Config, error) {
 				CallbackURL:  raw.OAuth.Google.CallbackURL,
 			},
 			OIDC: OIDCConfig{
-				IssuerURL:    raw.OAuth.OIDC.IssuerURL,
-				ClientID:     raw.OAuth.OIDC.ClientID,
-				ClientSecret: raw.OAuth.OIDC.ClientSecret,
-				CallbackURL:  raw.OAuth.OIDC.CallbackURL,
-				DisplayName:  raw.OAuth.OIDC.DisplayName,
-				GroupsClaim:  raw.OAuth.OIDC.GroupsClaim,
-				GroupsScope:  raw.OAuth.OIDC.GroupsScope,
+				IssuerURL:          raw.OAuth.OIDC.IssuerURL,
+				ClientID:           raw.OAuth.OIDC.ClientID,
+				ClientSecret:       raw.OAuth.OIDC.ClientSecret,
+				CallbackURL:        raw.OAuth.OIDC.CallbackURL,
+				DisplayName:        raw.OAuth.OIDC.DisplayName,
+				GroupsClaim:        raw.OAuth.OIDC.GroupsClaim,
+				GroupsScope:        raw.OAuth.OIDC.GroupsScope,
+				RequireValidGroups: raw.OAuth.OIDC.RequireValidGroups,
 			},
 		},
 	}
@@ -1427,6 +1435,13 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE"); v != "" {
 		cfg.Auth.ForwardAuth.DefaultRole = v
 	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER: %w", err)
+		}
+		cfg.Auth.ForwardAuth.RequireGroupsHeader = b
+	}
 	if v := os.Getenv("SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS"); v != "" {
 		ms, err := parseGroupRoleMappings(v)
 		if err != nil {
@@ -1524,6 +1539,13 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_OIDC_GROUPS_SCOPE"); v != "" {
 		cfg.OAuth.OIDC.GroupsScope = v
+	}
+	if v := os.Getenv("SHINYHUB_OIDC_REQUIRE_VALID_GROUPS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OIDC_REQUIRE_VALID_GROUPS: %w", err)
+		}
+		cfg.OAuth.OIDC.RequireValidGroups = b
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_MODE"); v != "" {
 		cfg.Runtime.Mode = v

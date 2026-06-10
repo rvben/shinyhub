@@ -116,23 +116,6 @@ func (s *Store) ListUsers() ([]*User, error) {
 	return users, rows.Err()
 }
 
-// UpdateUserRole changes the role of a user identified by ID.
-// Returns ErrNotFound if no user with that ID exists.
-func (s *Store) UpdateUserRole(id int64, role string) error {
-	result, err := s.db.Exec(`UPDATE users SET role = ? WHERE id = ?`, role, id)
-	if err != nil {
-		return fmt.Errorf("update user role: %w", err)
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update user role rows: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 // GetForwardAuthUser returns the auth.ContextUser for a username, or
 // auth.ErrUserNotFound if no such user exists. Adapter for
 // auth.ForwardAuthUserStore.

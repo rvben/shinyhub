@@ -80,11 +80,17 @@ auth:
     groups_header: X-Forwarded-Groups  # when set, always emit - empty value for users with no groups
     admin_groups: ["shinyhub-admins"] # users in this group get admin role
     default_role: developer           # role for newly provisioned accounts
+    require_groups_header: false      # set true to REFUSE (403) any request missing the groups header
 ```
 
 When `groups_header` is set, always emit it - send an empty value for users with
 no groups - because ShinyHub treats an absent header as "no groups" and revokes
 group-derived roles on that request.
+
+Set `require_groups_header: true` to REFUSE (403) any forward-auth request that
+lacks the groups header instead of treating it as no groups. Use this when your
+proxy always sends the header and you want a misconfiguration to fail loudly
+rather than silently demote users.
 
 Or with environment variables:
 
@@ -95,6 +101,7 @@ SHINYHUB_FORWARD_AUTH_EMAIL_HEADER=X-Forwarded-Email
 SHINYHUB_FORWARD_AUTH_GROUPS_HEADER=X-Forwarded-Groups
 SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS=shinyhub-admins
 SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE=developer
+SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER=false
 ```
 
 ## Notes

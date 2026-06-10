@@ -107,6 +107,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if oidcUser.GroupsClaimMalformed && s.cfg.OAuth.OIDC.RequireValidGroups {
+		fmt.Fprintf(os.Stderr, "oidc: groups claim malformed for sub %s; refusing login (require_valid_groups)\n", oidcUser.Sub)
+		writeError(w, http.StatusBadGateway, "OIDC groups claim is malformed")
+		return
+	}
+
 	username := deriveOIDCUsername(oidcUser)
 	user, created, err := s.store.ProvisionOAuthUser(db.ProvisionOAuthUserParams{
 		Provider:   "oidc",
