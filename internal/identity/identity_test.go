@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,9 @@ func TestMintToken_RoundTripsWithDerivedKey(t *testing.T) {
 	}
 	claims := &TokenClaims{}
 	parsed, err := jwt.ParseWithClaims(tok, claims, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
+		}
 		return key, nil
 	}, jwt.WithAudience("demo"), jwt.WithIssuer(Issuer), jwt.WithLeeway(30*time.Second))
 	if err != nil || !parsed.Valid {
@@ -116,6 +120,9 @@ func TestMintToken_AppAKeyRejectsAppBToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = jwt.ParseWithClaims(tok, &TokenClaims{}, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
+		}
 		return keyA, nil
 	})
 	if err == nil {
@@ -127,9 +134,19 @@ func TestMintToken_AudMismatchRejected(t *testing.T) {
 	key := DeriveKey("secret", 1)
 	tok, _ := MintToken(key, TokenParams{UserID: 1, Username: "u", Role: "viewer", Slug: "appa"})
 	_, err := jwt.ParseWithClaims(tok, &TokenClaims{}, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
+		}
 		return key, nil
 	}, jwt.WithAudience("appb"))
 	if err == nil {
 		t.Fatal("aud mismatch must be rejected")
+	}
+}
+
+func TestSanitizeGroups_Empty(t *testing.T) {
+	h, c, trunc := SanitizeGroups(nil)
+	if h != "" || len(c) != 0 || trunc {
+		t.Fatalf("nil groups: header=%q claim=%v trunc=%v", h, c, trunc)
 	}
 }

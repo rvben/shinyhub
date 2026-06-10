@@ -4,15 +4,13 @@
 package identity
 
 import (
-	"crypto/sha256"
-	"io"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"golang.org/x/crypto/hkdf"
+	"github.com/rvben/shinyhub/internal/secrets"
 )
 
 // Header names injected by the proxy. The X-Shinyhub- prefix is stripped from
@@ -49,16 +47,9 @@ const TokenTTL = 5 * time.Minute
 const keyInfoPrefix = "shinyhub-identity-v1:"
 
 // DeriveKey derives the 32-byte per-app HMAC key from the auth secret.
-// Panics on failure (HKDF read of 32 bytes is infallible), matching the
-// existing derivation helpers in cmd/shinyhub.
+// The derivation cannot fail in practice; the underlying helper panics if it ever does.
 func DeriveKey(authSecret string, appID int64) []byte {
-	r := hkdf.New(sha256.New, []byte(authSecret), nil,
-		[]byte(keyInfoPrefix+strconv.FormatInt(appID, 10)))
-	key := make([]byte, 32)
-	if _, err := io.ReadFull(r, key); err != nil {
-		panic(err)
-	}
-	return key
+	return secrets.DeriveKeyWithInfo(authSecret, keyInfoPrefix+strconv.FormatInt(appID, 10))
 }
 
 // SanitizeGroups prepares a group list for transport: sorts (deterministic
@@ -67,6 +58,7 @@ func DeriveKey(authSecret string, appID int64) []byte {
 // apps that split the header). The JWT claim slice keeps comma-bearing names.
 // Returns (headerValue, claimGroups, truncated).
 func SanitizeGroups(groups []string) (string, []string, bool) {
+	// copy to avoid mutating the caller's slice
 	sorted := append([]string(nil), groups...)
 	sort.Strings(sorted)
 	truncated := false
