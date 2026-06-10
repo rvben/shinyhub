@@ -926,6 +926,18 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 
+	// Wire pre-warming ops: when an app has min_warm_replicas > 0 the watcher
+	// calls WarmShrink instead of fully hibernating. The drain grace matches
+	// the autoscaler's ScaleDown grace so replica drain behaviour is consistent
+	// across the two code paths. srv is constructed above, before the watcher.
+	const warmDrainGrace = 30 * time.Second
+	watcher.SetWarmOps(
+		func(slug string, floor int) (bool, error) {
+			return srv.WarmShrink(slug, floor, warmDrainGrace)
+		},
+		srv.WarmExpand,
+	)
+
 	// Wire the wake trigger on every instance at startup, independent of
 	// ownership. A standby issues the BeginWake CAS (hibernated->waking) on a
 	// proxy miss so the DB reflects the pending wake immediately; the active's

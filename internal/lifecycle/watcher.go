@@ -159,6 +159,15 @@ type Watcher struct {
 	// wakeWG tracks in-flight driveWakingApp goroutines so shutdown can wait
 	// for them to persist replica/PID rows before the store is closed.
 	wakeWG sync.WaitGroup
+
+	// warmShrink and warmExpand are the pre-warming executors injected via
+	// SetWarmOps. When warmShrink is non-nil and an app has MinWarmReplicas > 0,
+	// the idle path calls warmShrink instead of fully hibernating the app.
+	// Both run under the per-slug deploy lock inside the api.Server methods.
+	// nil leaves pre-warming disabled: apps hibernate fully regardless of their
+	// configured floor (safe degradation for unconfigured setups).
+	warmShrink func(slug string, floor int) (bool, error)
+	warmExpand func(slug string) (bool, error)
 }
 
 // wakeDrainTimeout bounds how long Start waits for outstanding wake
@@ -269,6 +278,15 @@ func (w *Watcher) recordRestart() {
 // traceOp helper gates every call site.
 func (w *Watcher) SetTracer(t trace.Tracer) {
 	w.tracer = t
+}
+
+// SetWarmOps wires the warm shrink/expand executors (api.Server.WarmShrink
+// and WarmExpand). Both run under the per-slug deploy lock. nil leaves
+// pre-warming disabled (apps hibernate fully regardless of their floor).
+// Call once at startup before Start.
+func (w *Watcher) SetWarmOps(shrink func(slug string, floor int) (bool, error), expand func(slug string) (bool, error)) {
+	w.warmShrink = shrink
+	w.warmExpand = expand
 }
 
 // traceOp starts an internal span named op for slug and returns a derived
@@ -541,6 +559,17 @@ func (w *Watcher) handleIdle(slug string) {
 		return
 	}
 
+	// Warm-shrink branch: when an app has a pre-warming floor and the shrink
+	// executor is wired, shrink to the floor instead of fully hibernating.
+	// The executor holds the per-slug deploy lock and is nil-safe: if it was
+	// never wired (warmShrink == nil) the app falls through to full hibernation.
+	if app.MinWarmReplicas > 0 && w.warmShrink != nil {
+		if _, err := w.warmShrink(slug, app.MinWarmReplicas); err != nil {
+			slog.Warn("watcher: warm shrink failed", "slug", slug, "err", err)
+		}
+		return
+	}
+
 	// CAS-style hibernate: atomically remove the pool from routing iff no
 	// activity has been recorded since the snapshot AND no request is in
 	// flight. If a request slipped in between LastSeen above and here, abort
@@ -633,6 +662,19 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 	// otherIdleSinceSec is a pure duration (db_now - MAX(last_activity)) so this
 	// comparison involves no local wall clock.
 	if otherIdleSinceSec < int64(timeout.Seconds()) {
+		return
+	}
+
+	// Warm-shrink branch: when an app has a pre-warming floor and the shrink
+	// executor is wired, shrink to the floor instead of fully hibernating.
+	// Owner-only execution is already guaranteed by the watcher's ownership
+	// gate at the call site. The executor holds the per-slug deploy lock and
+	// is nil-safe: if it was never wired (warmShrink == nil) the app falls
+	// through to full hibernation via the CAS path below.
+	if app.MinWarmReplicas > 0 && w.warmShrink != nil {
+		if _, err := w.warmShrink(slug, app.MinWarmReplicas); err != nil {
+			slog.Warn("watcher: warm shrink failed", "slug", slug, "err", err)
+		}
 		return
 	}
 
