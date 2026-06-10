@@ -38,6 +38,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.3](https://github.com/rvben/shinyhub/compare/v0.8.2...v0.8.3) - 2026-06-10
+
+### Fixed
+
+- **oauth**: treat malformed OIDC groups claim as unknown, not empty (no silent demotion) ([125ac5f](https://github.com/rvben/shinyhub/commit/125ac5f687a5a585387b84864406abc238ffdb53))
+- **auth**: mint CSRF token for forward-auth users instead of rejecting mutations ([6b604a8](https://github.com/rvben/shinyhub/commit/6b604a847e17d99ab6f2b01f5c16311e37329815))
+- **auth**: revoke group-derived roles when forward-auth groups header is absent ([8c79b67](https://github.com/rvben/shinyhub/commit/8c79b6799d2dcf77073bb4db444a2b232b282ab4))
+- **db**: keep manifest reconcile from clobbering manual group rules ([a670206](https://github.com/rvben/shinyhub/commit/a6702062467edb4d90f6a1e3665dde90efb91d37))
+- **db**: guard DeleteUser against deleting the last admin (concurrent-safe) ([feb26ca](https://github.com/rvben/shinyhub/commit/feb26ca758272e61e98ce1c18fdd3c013287a630))
+
 ## [0.8.2](https://github.com/rvben/shinyhub/compare/v0.8.1...v0.8.2) - 2026-06-09
 
 ### Added
