@@ -173,3 +173,97 @@ func TestTracing_EnabledEnvRejectsGarbage(t *testing.T) {
 		t.Errorf("error should name the offending env var: %v", err)
 	}
 }
+
+// Auto-instrumentation is opt-in and parses from YAML.
+func TestTracing_AutoInstrumentAppsParsed(t *testing.T) {
+	path := writeYAML(t, tracingSecret+`
+tracing:
+  enabled: true
+  otlp_endpoint: http://collector:4318
+  auto_instrument_apps: true
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Tracing.AutoInstrumentApps {
+		t.Error("auto_instrument_apps: true should parse")
+	}
+}
+
+// Default is off: today's behaviour is preserved exactly.
+func TestTracing_AutoInstrumentAppsDefaultsOff(t *testing.T) {
+	path := writeYAML(t, tracingSecret+`
+tracing:
+  enabled: true
+  otlp_endpoint: http://collector:4318
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tracing.AutoInstrumentApps {
+		t.Error("auto_instrument_apps should default to false")
+	}
+}
+
+// Env override, symmetric with the rest of the tracing surface.
+func TestTracing_AutoInstrumentAppsEnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_TRACING_ENABLED", "true")
+	t.Setenv("SHINYHUB_TRACING_OTLP_ENDPOINT", "http://collector:4318")
+	t.Setenv("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS", "true")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Tracing.AutoInstrumentApps {
+		t.Error("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS=true should enable auto-instrumentation")
+	}
+}
+
+// A garbage env value must fail loudly, not silently disable.
+func TestTracing_AutoInstrumentAppsEnvRejectsGarbage(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_TRACING_ENABLED", "true")
+	t.Setenv("SHINYHUB_TRACING_OTLP_ENDPOINT", "http://collector:4318")
+	t.Setenv("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS", "maybe")
+	_, err := config.Load("")
+	if err == nil {
+		t.Fatal("expected error for SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS=maybe")
+	}
+	if !strings.Contains(err.Error(), "SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS") {
+		t.Errorf("error should name the offending env var: %v", err)
+	}
+}
+
+// Env-only configs must hit the same validation: applyEnv runs before
+// normalizeTracing, so a forgotten SHINYHUB_TRACING_ENABLED is caught even
+// when auto-instrument arrives via env. Pins the Load ordering.
+func TestTracing_AutoInstrumentRequiresEnabledEnvOnly(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS", "true")
+	_, err := config.Load("")
+	if err == nil {
+		t.Fatal("expected error for env-only auto_instrument_apps without tracing enabled")
+	}
+	if !strings.Contains(err.Error(), "auto_instrument_apps") {
+		t.Errorf("error should mention auto_instrument_apps: %v", err)
+	}
+}
+
+// auto_instrument_apps with tracing disabled is a broken half-mode: apps would
+// be wrapped but export nowhere. Reject at startup like enabled-without-endpoint.
+func TestTracing_AutoInstrumentRequiresEnabled(t *testing.T) {
+	path := writeYAML(t, tracingSecret+`
+tracing:
+  auto_instrument_apps: true
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for auto_instrument_apps without tracing.enabled")
+	}
+	if !strings.Contains(err.Error(), "auto_instrument_apps") {
+		t.Errorf("error should mention auto_instrument_apps: %v", err)
+	}
+}

@@ -153,6 +153,15 @@ type TracingConfig struct {
 	// to the operator's tracing backend. The substring "{trace_id}" is
 	// replaced. Example: "https://grafana.example.com/explore?traceId={trace_id}".
 	TraceLinkTemplate string
+	// AutoInstrumentApps, when true, launches Python apps under
+	// opentelemetry-instrument with the OTEL SDK and transport-layer
+	// instrumentors layered into the app's environment via uv's --with
+	// overlay. Apps get inbound ASGI and outbound HTTP spans with no bundle
+	// changes; the app's own venv and lockfile are never modified. Per-app
+	// shinyhub.toml `[tracing] auto` overrides this default in both
+	// directions. Requires Enabled; R apps and custom-command apps are
+	// never wrapped.
+	AutoInstrumentApps bool
 }
 
 // MetricsConfig controls the Prometheus scrape endpoint for the ShinyHub server
@@ -621,10 +630,11 @@ type rawTracingConfig struct {
 	// Pointers so an explicit 0 (a documented, meaningful value: 0 disables
 	// sampling / disables the ring buffer / retains only error spans) is
 	// distinguishable from the key being absent (apply the safe default).
-	SampleRatio       *float64 `yaml:"sample_ratio"`
-	SlowRequestMS     *int     `yaml:"slow_request_ms"`
-	RingBufferSize    *int     `yaml:"ring_buffer_size"`
-	TraceLinkTemplate string   `yaml:"trace_link_template"`
+	SampleRatio        *float64 `yaml:"sample_ratio"`
+	SlowRequestMS      *int     `yaml:"slow_request_ms"`
+	RingBufferSize     *int     `yaml:"ring_buffer_size"`
+	TraceLinkTemplate  string   `yaml:"trace_link_template"`
+	AutoInstrumentApps bool     `yaml:"auto_instrument_apps"`
 }
 
 type rawLifecycleConfig struct {
@@ -742,10 +752,11 @@ func Load(path string) (*Config, error) {
 			OTLPHeaders:  raw.Tracing.OTLPHeaders,
 			// Defaults applied here (not in normalizeTracing) so an explicit 0
 			// from YAML survives; an env override is layered on top afterwards.
-			SampleRatio:       derefOr(raw.Tracing.SampleRatio, 0.1),
-			SlowRequestMS:     derefOr(raw.Tracing.SlowRequestMS, 1000),
-			RingBufferSize:    derefOr(raw.Tracing.RingBufferSize, 200),
-			TraceLinkTemplate: raw.Tracing.TraceLinkTemplate,
+			SampleRatio:        derefOr(raw.Tracing.SampleRatio, 0.1),
+			SlowRequestMS:      derefOr(raw.Tracing.SlowRequestMS, 1000),
+			RingBufferSize:     derefOr(raw.Tracing.RingBufferSize, 200),
+			TraceLinkTemplate:  raw.Tracing.TraceLinkTemplate,
+			AutoInstrumentApps: raw.Tracing.AutoInstrumentApps,
 		},
 		Metrics: MetricsConfig{
 			Enabled: raw.Metrics.Enabled,
@@ -1022,6 +1033,13 @@ func Load(path string) (*Config, error) {
 // round-trips through Load (callers should not read fields without checking
 // Enabled).
 func normalizeTracing(t *TracingConfig) error {
+	// Auto-instrumentation with tracing disabled is a broken half-mode: apps
+	// would be wrapped in opentelemetry-instrument but receive no OTEL_*
+	// env and export nowhere. Reject it loudly (checked before the Enabled
+	// early-return below, which skips the rest of this validation).
+	if t.AutoInstrumentApps && !t.Enabled {
+		return fmt.Errorf("tracing.auto_instrument_apps requires tracing.enabled (SHINYHUB_TRACING_ENABLED)")
+	}
 	if !t.Enabled {
 		return nil
 	}
@@ -1731,6 +1749,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_TRACING_ENABLED: %w", err)
 		}
 		cfg.Tracing.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS: %w", err)
+		}
+		cfg.Tracing.AutoInstrumentApps = b
 	}
 	if v := os.Getenv("SHINYHUB_METRICS_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

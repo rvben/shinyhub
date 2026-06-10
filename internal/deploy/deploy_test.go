@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1121,5 +1122,143 @@ func TestBootRegistersRuntimeEndpoint(t *testing.T) {
 	}
 	if r.WorkerID == "" {
 		t.Fatal("WorkerID must be non-empty (native runtime stamps it with the PID)")
+	}
+}
+
+// Auto-instrumentation must reach the command builder through every inferred-
+// command Python boot, resolved as fleet default overridden by the manifest.
+func TestRun_AutoInstrumentResolution(t *testing.T) {
+	cases := []struct {
+		name     string
+		fleet    bool
+		manifest string
+		want     bool
+	}{
+		{"fleet default applies", true, "", true},
+		{"manifest opts out of fleet default", true, "[tracing]\nauto = false\n", false},
+		{"manifest opts in against fleet default", false, "[tracing]\nauto = true\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte("# app"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.manifest != "" {
+				if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(tc.manifest), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restoreSync := deploy.SetSyncHooksForTest(func(string) error { return nil }, func(string) error { return nil })
+			defer restoreSync()
+
+			var mu sync.Mutex
+			var autos []bool
+			restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto bool) []string {
+				mu.Lock()
+				autos = append(autos, auto)
+				mu.Unlock()
+				return []string{"sleep", "30"}
+			})
+			defer restoreCmd()
+
+			mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+			mgr.SetAutoInstrumentAppsDefault(tc.fleet)
+			defer mgr.Stop("auto-res")
+			prx := proxy.New()
+
+			_, err := deploy.Run(deploy.Params{
+				Slug: "auto-res", BundleDir: bundle,
+				Manager: mgr, Proxy: prx,
+				HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+			})
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(autos) != 1 || autos[0] != tc.want {
+				t.Errorf("builder calls = %v, want one call with %v", autos, tc.want)
+			}
+		})
+	}
+}
+
+// A custom Params.Command bypasses command inference entirely; the wrapper
+// must never be applied to user-supplied commands.
+func TestRun_AutoInstrumentSkipsCustomCommand(t *testing.T) {
+	bundle := t.TempDir()
+	restoreCmd := deploy.SetBuildCommandForTest(func(string, int, int, string, bool) []string {
+		t.Error("buildCommand must not be called for a custom Command")
+		return nil
+	})
+	defer restoreCmd()
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.SetAutoInstrumentAppsDefault(true)
+	defer mgr.Stop("auto-custom")
+	prx := proxy.New()
+
+	_, err := deploy.Run(deploy.Params{
+		Slug: "auto-custom", BundleDir: bundle,
+		Command: []string{"sleep", "30"},
+		Manager: mgr, Proxy: prx,
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+// A bad instrumentation overlay (dep conflict, broken instrumentor) is an
+// observability regression, not an outage: the replica must come up
+// uninstrumented after the instrumented attempt fails.
+func TestRun_InstrumentedFailureFallsBackUninstrumented(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte("# app"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restoreSync := deploy.SetSyncHooksForTest(func(string) error { return nil }, func(string) error { return nil })
+	defer restoreSync()
+
+	var mu sync.Mutex
+	var autos []bool
+	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto bool) []string {
+		mu.Lock()
+		autos = append(autos, auto)
+		mu.Unlock()
+		return []string{"sleep", "30"}
+	})
+	defer restoreCmd()
+
+	// The instrumented attempt fails its health check; the fallback passes.
+	var calls atomic.Int32
+	hc := func(string, time.Duration, http.RoundTripper) error {
+		if calls.Add(1) == 1 {
+			return fmt.Errorf("simulated instrumented-launch failure")
+		}
+		return nil
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.SetAutoInstrumentAppsDefault(true)
+	defer mgr.Stop("auto-fallback")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug: "auto-fallback", BundleDir: bundle,
+		Manager: mgr, Proxy: prx,
+		HealthCheck: hc,
+	})
+	if err != nil {
+		t.Fatalf("run should succeed via uninstrumented fallback: %v", err)
+	}
+	if len(result.Replicas) != 1 {
+		t.Fatalf("want 1 replica, got %d", len(result.Replicas))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []bool{true, false}; !reflect.DeepEqual(autos, want) {
+		t.Errorf("builder calls = %v, want %v (instrumented then fallback)", autos, want)
 	}
 }

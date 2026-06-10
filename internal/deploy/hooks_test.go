@@ -589,3 +589,65 @@ bogus_key = ["x"]
 		t.Fatal("strict-mode parsing must reject an unknown key under [access]")
 	}
 }
+
+func TestLoadManifest_TracingAutoTrue(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[tracing]
+auto = true
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.Tracing.Auto == nil || !*m.Tracing.Auto {
+		t.Errorf("Tracing.Auto = %v, want explicit true", m.Tracing.Auto)
+	}
+}
+
+func TestLoadManifest_TracingAutoFalse(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[tracing]
+auto = false
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.Tracing.Auto == nil || *m.Tracing.Auto {
+		t.Errorf("Tracing.Auto = %v, want explicit false", m.Tracing.Auto)
+	}
+}
+
+// Absent [tracing] means "inherit the fleet default": the pointer stays nil.
+func TestLoadManifest_TracingAbsentIsNil(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+replicas = 2
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.Tracing.Auto != nil {
+		t.Errorf("Tracing.Auto = %v, want nil (inherit)", *m.Tracing.Auto)
+	}
+}
+
+// Strict mode must keep catching typos inside the new section.
+func TestLoadManifest_TracingUnknownKeyRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[tracing]
+autoo = true
+`)
+	_, err := LoadManifest(dir)
+	if err == nil {
+		t.Fatal("expected unknown-field error for [tracing] autoo")
+	}
+	if !strings.Contains(err.Error(), "tracing.autoo") {
+		t.Errorf("error should name the unknown key: %v", err)
+	}
+}

@@ -103,12 +103,22 @@ func (a AppAccess) IsZero() bool {
 	return len(a.ViewerGroups) == 0 && len(a.ManagerGroups) == 0
 }
 
+// TracingSettings mirrors the [tracing] section. Auto overrides the fleet's
+// tracing.auto_instrument_apps default in either direction; nil (section or
+// key absent) means "inherit the fleet default". The override is re-read from
+// the bundle at every boot, so it travels with each deployed version,
+// including rollbacks.
+type TracingSettings struct {
+	Auto *bool `toml:"auto"`
+}
+
 // Manifest is the decoded shinyhub.toml.
 type Manifest struct {
-	App       AppSettings    `toml:"app"`
-	Hooks     []Hook         `toml:"hook"`
-	Schedules []ScheduleSpec `toml:"schedule"`
-	Access    AppAccess      `toml:"access"`
+	App       AppSettings     `toml:"app"`
+	Hooks     []Hook          `toml:"hook"`
+	Schedules []ScheduleSpec  `toml:"schedule"`
+	Access    AppAccess       `toml:"access"`
+	Tracing   TracingSettings `toml:"tracing"`
 }
 
 // defaultHookTimeout caps an individual hook's wall-clock runtime when the
