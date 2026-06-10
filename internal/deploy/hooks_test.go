@@ -651,3 +651,76 @@ autoo = true
 		t.Errorf("error should name the unknown key: %v", err)
 	}
 }
+
+func TestLoadManifest_AppCommandAndIdentityHeaders(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+identity_headers = false
+command = ["uv", "run", "streamlit", "run", "app.py", "--server.port", "{port}", "--server.address", "{host}"]
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.App.IdentityHeaders == nil {
+		t.Fatal("IdentityHeaders = nil, want explicit false")
+	}
+	if *m.App.IdentityHeaders != false {
+		t.Errorf("IdentityHeaders = %v, want false", *m.App.IdentityHeaders)
+	}
+	if len(m.App.Command) != 9 {
+		t.Errorf("Command len = %d, want 9; Command = %v", len(m.App.Command), m.App.Command)
+	}
+}
+
+func TestLoadManifest_CommandRejectsUnknownPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+command = ["serve", "--port", "{prot}"]
+`)
+	_, err := LoadManifest(dir)
+	if err == nil || !strings.Contains(err.Error(), "{prot}") {
+		t.Errorf("expected error mentioning {prot}, got %v", err)
+	}
+}
+
+func TestLoadManifest_CommandRejectsEmptyForms(t *testing.T) {
+	// empty array
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+command = []
+`)
+	if _, err := LoadManifest(dir); err == nil {
+		t.Error("expected error for command = [], got nil")
+	}
+
+	// array with an empty element
+	dir2 := t.TempDir()
+	writeManifest(t, dir2, `
+[app]
+command = ["run", ""]
+`)
+	if _, err := LoadManifest(dir2); err == nil {
+		t.Error("expected error for command containing empty element, got nil")
+	}
+}
+
+func TestLoadManifest_CommandAllowsInertBraces(t *testing.T) {
+	dir := t.TempDir()
+	// ${VAR} - uppercase, {1..5} - digits, {Key: - no closing brace after word;
+	// none match the \{[a-z_]+\} grammar, so all are inert and must parse fine.
+	writeManifest(t, dir, `
+[app]
+command = ["sh-free", "${VAR}", "{1..5}", "{Key:"]
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("expected inert braces to parse fine, got: %v", err)
+	}
+	if len(m.App.Command) != 4 {
+		t.Errorf("Command len = %d, want 4", len(m.App.Command))
+	}
+}
