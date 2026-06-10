@@ -2032,3 +2032,144 @@ func TestHandleWarmExpand_RunOnceWiringExpands(t *testing.T) {
 		t.Errorf("runOnce: expected warmExpand called once, got %d", n)
 	}
 }
+
+// --- WakeTrigger warm-expand path tests ---
+
+// TestWakeTrigger_RunningAppWithWarmRows_CallsWarmExpand verifies that
+// WakeTrigger on a running app that has warm-parked replicas calls warmExpand
+// once instead of attempting a hibernate->waking wake flow.
+func TestWakeTrigger_RunningAppWithWarmRows_CallsWarmExpand(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"warm": {ID: 1, Slug: "warm", Status: "running", Replicas: 2, MinWarmReplicas: 1}},
+		[]*db.Deployment{{BundleDir: "/tmp/warm"}},
+	)
+	// One warm-parked replica.
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+		},
+	}
+
+	var expandCalls []string
+	var mu sync.Mutex
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st, nil)
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			mu.Lock()
+			expandCalls = append(expandCalls, slug)
+			mu.Unlock()
+			return true, nil
+		},
+	)
+
+	w.WakeTrigger("warm")
+
+	// WakeTrigger may call warmExpand synchronously or via a goroutine.
+	// Give it a short window.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(expandCalls)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	calls := append([]string(nil), expandCalls...)
+	mu.Unlock()
+	if len(calls) != 1 || calls[0] != "warm" {
+		t.Errorf("expected warmExpand called once with 'warm', got %v", calls)
+	}
+
+	// The BeginWake CAS must NOT have advanced the status (app is running, not hibernated).
+	st.mu.Lock()
+	status := st.apps["warm"].Status
+	st.mu.Unlock()
+	if status != "running" {
+		t.Errorf("WakeTrigger on running app must not change status; got %q", status)
+	}
+}
+
+// TestWakeTrigger_RunningAppWithoutWarmRows_DoesNothing verifies that
+// WakeTrigger on a running app with no warm-parked replicas is a silent no-op.
+func TestWakeTrigger_RunningAppWithoutWarmRows_DoesNothing(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", Replicas: 2}},
+		[]*db.Deployment{{BundleDir: "/tmp/app"}},
+	)
+	// Both replicas fully running (no warm rows).
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "running", DesiredState: "running"},
+		},
+	}
+
+	var expandCalled bool
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st, nil)
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expandCalled = true; return false, nil },
+	)
+
+	w.WakeTrigger("app")
+	// Give any async paths time to run.
+	time.Sleep(20 * time.Millisecond)
+
+	if expandCalled {
+		t.Error("warmExpand must not be called when no warm-parked replicas exist")
+	}
+	st.mu.Lock()
+	status := st.apps["app"].Status
+	st.mu.Unlock()
+	if status != "running" {
+		t.Errorf("WakeTrigger on fully-running app must not change status; got %q", status)
+	}
+}
+
+// TestWakeTrigger_HibernatedApp_PerformsWakeFlowNotWarmExpand verifies that
+// WakeTrigger on a hibernated app performs the existing hibernated->waking CAS
+// and does NOT call warmExpand. This pins the pre-existing wake behavior.
+func TestWakeTrigger_HibernatedApp_PerformsWakeFlowNotWarmExpand(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+
+	var expandCalled bool
+	var deployCount int32
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
+		func(slug, dir string, idx int) (*deploy.Result, error) {
+			atomic.AddInt32(&deployCount, 1)
+			return &deploy.Result{Index: idx, PID: 42, Port: 20042}, nil
+		})
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expandCalled = true; return false, nil },
+	)
+
+	w.WakeTrigger("app")
+	waitNotWaking(t, st, "app")
+
+	if expandCalled {
+		t.Error("warmExpand must NOT be called for a hibernated app wake — use the existing wake flow")
+	}
+	// BeginWake CAS must have been attempted (status transitions: hibernated->waking->running).
+	st.mu.Lock()
+	finalStatus := st.apps["app"].Status
+	st.mu.Unlock()
+	if finalStatus != "running" {
+		t.Errorf("hibernated app must reach 'running' after WakeTrigger; got %q", finalStatus)
+	}
+	if n := atomic.LoadInt32(&deployCount); n == 0 {
+		t.Error("expected at least one deploy call for hibernated app wake; got 0")
+	}
+}

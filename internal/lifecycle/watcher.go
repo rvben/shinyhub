@@ -827,6 +827,13 @@ func (w *Watcher) handleWarmExpand() {
 // which instance holds the lease. If this instance is the active owner, it also
 // drives the wake inline via driveWakingApp; a standby leaves the app in the
 // 'waking' state for the active's runOnce reconciler to pick up.
+//
+// When the BeginWake CAS fails because the app is already running (not
+// hibernated), the trigger checks whether any warm-parked replicas exist and
+// calls warmExpand immediately. This drives the burst-expand path: a request
+// shed with ReasonPoolDegraded fires this trigger so the warm-shrunk pool is
+// restored without waiting for the next tick. Duplicate triggers are safe
+// because warmExpand is idempotent and deploy-lock-guarded.
 func (w *Watcher) WakeTrigger(slug string) {
 	won, err := w.store.BeginWake(slug)
 	if err != nil {
@@ -834,7 +841,30 @@ func (w *Watcher) WakeTrigger(slug string) {
 		return
 	}
 	if !won {
-		return // not hibernated, or another caller already won the CAS
+		// The app is not hibernated (running, degraded, or another caller
+		// already won the CAS). Check for warm-parked replicas and expand
+		// immediately if any exist.
+		if w.warmExpand == nil {
+			return
+		}
+		app, err := w.store.GetAppBySlug(slug)
+		if err != nil {
+			return // app not found or DB error; safe to skip
+		}
+		reps, err := w.store.ListReplicas(app.ID)
+		if err != nil {
+			slog.Warn("watcher: wake trigger: list replicas failed", "slug", slug, "err", err)
+			return
+		}
+		for _, r := range reps {
+			if r.DesiredState == db.ReplicaDesiredWarm {
+				if _, err := w.warmExpand(slug); err != nil {
+					slog.Warn("watcher: wake trigger: warm expand failed", "slug", slug, "err", err)
+				}
+				return
+			}
+		}
+		return
 	}
 	// Only the active owner drives the wake inline. A standby leaves the
 	// app in 'waking'; the active's runOnce reconciler drives it on the next
