@@ -1,7 +1,11 @@
 package api
 
 import (
+	"context"
+	"io"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -10,30 +14,84 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 )
 
+// recordingRuntime wraps any Runtime and records the PID of every SIGTERM
+// delivered via Signal. Calls are serialized by mu so the slice is safe to
+// read from the test goroutine after WarmShrink returns.
+type recordingRuntime struct {
+	inner process.Runtime
+	mu    sync.Mutex
+	pids  []int // PIDs in the order Signal was called
+}
+
+func (r *recordingRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
+	if sig == syscall.SIGTERM {
+		r.mu.Lock()
+		r.pids = append(r.pids, h.PID)
+		r.mu.Unlock()
+	}
+	return r.inner.Signal(h, sig)
+}
+func (r *recordingRuntime) Start(ctx context.Context, p process.StartParams, w io.Writer) (process.ReplicaEndpoint, error) {
+	return r.inner.Start(ctx, p, w)
+}
+func (r *recordingRuntime) Wait(ctx context.Context, h process.RunHandle) error {
+	return r.inner.Wait(ctx, h)
+}
+func (r *recordingRuntime) Stats(ctx context.Context, h process.RunHandle) (float64, uint64, error) {
+	return r.inner.Stats(ctx, h)
+}
+func (r *recordingRuntime) RunOnce(ctx context.Context, p process.StartParams, w io.Writer) (process.ExitInfo, error) {
+	return r.inner.RunOnce(ctx, p, w)
+}
+func (r *recordingRuntime) HostPreparesDeps() bool    { return r.inner.HostPreparesDeps() }
+func (r *recordingRuntime) AppBindHost() string       { return r.inner.AppBindHost() }
+func (r *recordingRuntime) HostProvidesAppData() bool { return r.inner.HostProvidesAppData() }
+
+// stoppedPIDs returns the recorded PIDs, safe to call after WarmShrink returns.
+func (r *recordingRuntime) stoppedPIDs() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]int, len(r.pids))
+	copy(out, r.pids)
+	return out
+}
+
 // TestWarmShrink_DrainsToFloor proves WarmShrink drains every running replica
-// above the floor (indices 1 and 2) in descending order, deregisters their
-// proxy slots, marks the rows stopped/warm, leaves the floor replica untouched,
-// does NOT change app.Replicas, and records exactly one audit event.
+// above the floor (indices 1 and 2) in descending index order, deregisters
+// their proxy slots, marks the rows stopped/warm, leaves the floor replica
+// untouched, does NOT change app.Replicas, and records exactly one audit event
+// with the correct from/to values.
 func TestWarmShrink_DrainsToFloor(t *testing.T) {
 	srv, app := newScaleTestServer(t, "demo", 3, &config.Config{})
 
+	// Replace the default tier's runtime with a recording wrapper so we can
+	// observe the order in which StopReplica delivers SIGTERM.
+	rec := &recordingRuntime{inner: process.NewNativeRuntime()}
+	srv.manager.RegisterRuntime("default", rec)
+
 	srv.proxy.SetPoolSize("demo", 3)
 	for i := 0; i < 3; i++ {
-		if err := srv.proxy.RegisterReplica("demo", i, "http://127.0.0.1:"+warmItoa(9000+i), nil, 0); err != nil {
+		if err := srv.proxy.RegisterReplica("demo", i, "http://127.0.0.1:"+itoa10(9000+i), nil, 0); err != nil {
 			t.Fatalf("register replica %d: %v", i, err)
 		}
 	}
-	// Start real processes at victim indices so StopReplica has something to stop.
+
+	// Start real processes at victim indices and record their PIDs so we can
+	// map recorded SIGTERM PIDs back to replica indices.
+	pidToIndex := map[int]int{}
 	for _, idx := range []int{1, 2} {
-		if _, err := srv.manager.Start(process.StartParams{
+		info, err := srv.manager.Start(process.StartParams{
 			Slug:    "demo",
 			Index:   idx,
+			Tier:    "default",
 			Dir:     t.TempDir(),
 			Command: []string{"sleep", "30"},
 			Port:    19400 + idx,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("seed process %d: %v", idx, err)
 		}
+		pidToIndex[info.PID] = idx
 	}
 
 	shrunk, err := srv.WarmShrink("demo", 1, 200*time.Millisecond)
@@ -42,6 +100,21 @@ func TestWarmShrink_DrainsToFloor(t *testing.T) {
 	}
 	if !shrunk {
 		t.Fatal("WarmShrink returned false; want true (2 victims above floor)")
+	}
+
+	// Descending stop order: index 2 must be stopped before index 1.
+	stopped := rec.stoppedPIDs()
+	var stoppedIndices []int
+	for _, pid := range stopped {
+		if idx, ok := pidToIndex[pid]; ok {
+			stoppedIndices = append(stoppedIndices, idx)
+		}
+	}
+	if len(stoppedIndices) != 2 {
+		t.Fatalf("expected 2 stop calls; got %d (indices %v)", len(stoppedIndices), stoppedIndices)
+	}
+	if stoppedIndices[0] != 2 || stoppedIndices[1] != 1 {
+		t.Errorf("stop order = %v; want [2 1] (descending)", stoppedIndices)
 	}
 
 	// app.Replicas must not change — warm state is runtime, not config.
@@ -97,10 +170,10 @@ func TestWarmShrink_DrainsToFloor(t *testing.T) {
 	if ev.ResourceType != "app" || ev.ResourceID != "demo" {
 		t.Errorf("audit event resource = %s/%s; want app/demo", ev.ResourceType, ev.ResourceID)
 	}
-	if !warmContains(ev.Detail, `"from":3`) {
+	if !strings.Contains(ev.Detail, `"from":3`) {
 		t.Errorf("audit detail %q does not contain \"from\":3", ev.Detail)
 	}
-	if !warmContains(ev.Detail, `"to":1`) {
+	if !strings.Contains(ev.Detail, `"to":1`) {
 		t.Errorf("audit detail %q does not contain \"to\":1", ev.Detail)
 	}
 }
@@ -171,7 +244,7 @@ func TestWarmShrink_SkipsAlreadyStoppedVictims(t *testing.T) {
 	// Only register live backends for the floor (0) and the running victim (2).
 	// Index 1 is already stopped so it has no backend.
 	for _, idx := range []int{0, 2} {
-		if err := srv.proxy.RegisterReplica("demo", idx, "http://127.0.0.1:"+warmItoa(9000+idx), nil, 0); err != nil {
+		if err := srv.proxy.RegisterReplica("demo", idx, "http://127.0.0.1:"+itoa10(9000+idx), nil, 0); err != nil {
 			t.Fatalf("register replica %d: %v", idx, err)
 		}
 	}
@@ -214,83 +287,120 @@ func TestWarmShrink_SkipsAlreadyStoppedVictims(t *testing.T) {
 }
 
 // TestWarmShrink_HoldsDeployLock proves WarmShrink holds the per-slug deploy
-// lock for the entire duration: a concurrent goroutine cannot acquire the lock
-// while WarmShrink is executing.
+// lock for the entire duration of the operation. A blocking drain stub keeps
+// WarmShrink inside the lock; while blocked, TryLock must fail. After unblocking,
+// TryLock must succeed.
 func TestWarmShrink_HoldsDeployLock(t *testing.T) {
 	srv, _ := newScaleTestServer(t, "demo", 2, &config.Config{})
+
+	// A drain-blocking runtime: Signal succeeds but the process never exits
+	// until we close the unblock channel, so waitForDrain spins until grace.
+	// We use a very short grace so the test does not stall, but we observe the
+	// lock state before unblocking by intercepting Signal.
+	signaled := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+
+	blockingRT := &blockOnWaitRuntime{
+		inner:    process.NewNativeRuntime(),
+		signaled: signaled,
+		unblock:  unblock,
+	}
+	srv.manager.RegisterRuntime("spy", blockingRT)
+
+	// Start the victim on the spy tier.
 	srv.proxy.SetPoolSize("demo", 2)
-	if err := srv.proxy.RegisterReplica("demo", 1, "http://127.0.0.1:19301", nil, 0); err != nil {
+	if err := srv.proxy.RegisterReplica("demo", 1, "http://127.0.0.1:19302", nil, 0); err != nil {
 		t.Fatalf("register replica 1: %v", err)
 	}
-	if _, err := srv.manager.Start(process.StartParams{
-		Slug: "demo", Index: 1, Dir: t.TempDir(),
-		Command: []string{"sleep", "30"}, Port: 19301,
-	}); err != nil {
+	_, err := srv.manager.Start(process.StartParams{
+		Slug: "demo", Index: 1, Tier: "spy", Dir: t.TempDir(),
+		Command: []string{"sleep", "30"}, Port: 19302,
+	})
+	if err != nil {
 		t.Fatalf("seed victim process: %v", err)
 	}
 
-	// Block the drain so WarmShrink holds the lock long enough to be observed.
-	// We use a long grace and then release by stopping the backend session.
-	lockHeld := make(chan struct{})
-	var lockObserved bool
-	var observeMu sync.Mutex
-
-	// Start WarmShrink in a goroutine. It will acquire the deploy lock, drain,
-	// stop the victim, and release the lock.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		srv.WarmShrink("demo", 1, 5*time.Second) //nolint:errcheck
+		// Use a short grace so WarmShrink does not block forever after we
+		// unblock the spy runtime.
+		srv.WarmShrink("demo", 1, 50*time.Millisecond) //nolint:errcheck
 	}()
 
-	// Signal after a brief yield that we want to check the lock.
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		close(lockHeld)
-	}()
-
-	<-lockHeld
-	// The deploy lock should be held by WarmShrink (or already released after a
-	// fast drain). Either is a valid outcome; what we prove here is that the
-	// operation runs under the lock infrastructure at all and returns.
-	mu := srv.deployLockFor("demo")
-	if !mu.TryLock() {
-		// Lock IS held: exactly the case we want to prove.
-		observeMu.Lock()
-		lockObserved = true
-		observeMu.Unlock()
-	} else {
-		// Lock already released (fast drain): WarmShrink already finished.
-		mu.Unlock()
+	// Wait until Signal has been called (WarmShrink is inside waitForDrain,
+	// holding the deploy lock).
+	select {
+	case <-signaled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WarmShrink never called Signal; lock observation window missed")
 	}
+
+	// Deploy lock must be held by WarmShrink right now.
+	mu := srv.deployLockFor("demo")
+	if mu.TryLock() {
+		mu.Unlock()
+		t.Error("TryLock succeeded while WarmShrink should be holding the deploy lock")
+	}
+
+	// Unblock the spy runtime so WarmShrink can finish.
+	close(unblock)
 
 	select {
 	case <-done:
-	case <-time.After(6 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("WarmShrink goroutine did not finish within timeout")
 	}
 
-	observeMu.Lock()
-	_ = lockObserved // observed value is informational; either path is valid
-	observeMu.Unlock()
+	// After completion the lock must be released.
+	if !mu.TryLock() {
+		t.Error("TryLock failed after WarmShrink completed; lock was not released")
+	} else {
+		mu.Unlock()
+	}
 }
 
-// warmContains reports whether substr appears in s.
-func warmContains(s, substr string) bool {
-	if len(substr) == 0 {
-		return true
-	}
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+// blockOnWaitRuntime wraps a real runtime but blocks Wait until unblock is
+// closed. Signal sends on signaled (non-blocking, capacity 1) so the test can
+// observe when Signal was called. This pins WarmShrink inside waitForDrain,
+// ensuring the deploy lock is observable as held.
+type blockOnWaitRuntime struct {
+	inner    process.Runtime
+	signaled chan<- struct{}
+	unblock  <-chan struct{}
 }
 
-// warmItoa converts a small non-negative int to a decimal string without
-// importing strconv.
-func warmItoa(n int) string {
+func (r *blockOnWaitRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
+	err := r.inner.Signal(h, sig)
+	// Non-blocking send: only the first SIGTERM notification matters.
+	select {
+	case r.signaled <- struct{}{}:
+	default:
+	}
+	return err
+}
+func (r *blockOnWaitRuntime) Wait(ctx context.Context, h process.RunHandle) error {
+	select {
+	case <-r.unblock:
+	case <-ctx.Done():
+	}
+	return r.inner.Wait(ctx, h)
+}
+func (r *blockOnWaitRuntime) Start(ctx context.Context, p process.StartParams, w io.Writer) (process.ReplicaEndpoint, error) {
+	return r.inner.Start(ctx, p, w)
+}
+func (r *blockOnWaitRuntime) Stats(ctx context.Context, h process.RunHandle) (float64, uint64, error) {
+	return r.inner.Stats(ctx, h)
+}
+func (r *blockOnWaitRuntime) RunOnce(ctx context.Context, p process.StartParams, w io.Writer) (process.ExitInfo, error) {
+	return r.inner.RunOnce(ctx, p, w)
+}
+func (r *blockOnWaitRuntime) HostPreparesDeps() bool    { return r.inner.HostPreparesDeps() }
+func (r *blockOnWaitRuntime) AppBindHost() string       { return r.inner.AppBindHost() }
+func (r *blockOnWaitRuntime) HostProvidesAppData() bool { return r.inner.HostProvidesAppData() }
+
+// itoa10 converts a non-negative int to its decimal string representation.
+func itoa10(n int) string {
 	if n == 0 {
 		return "0"
 	}

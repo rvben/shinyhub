@@ -17,10 +17,10 @@ import (
 // runtime state changes. Runs under the per-slug deploy lock, serializing
 // against deploys, ScaleDown, and restarts.
 //
-// Returns (false, nil) when nothing above the (replica-clamped) floor is
-// running. On a partial failure the loop stops and returns the error; rows
-// already written as stopped/warm survive so a re-run can complete
-// idempotently.
+// Returns (false, nil) when the app is not running/degraded, or when nothing
+// above the (replica-clamped) floor is running. On a partial failure the loop
+// stops and returns the error; rows already written as stopped/warm survive so
+// a re-run can complete idempotently.
 func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, error) {
 	release := s.acquireDeployLock(slug)
 	defer release()
@@ -28,6 +28,11 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		return false, fmt.Errorf("warm shrink %s: get app: %w", slug, err)
+	}
+	// Honour a concurrent stop/delete that won the lock first: a torn-down app
+	// must not have its replica rows mutated.
+	if app.Status != "running" && app.Status != "degraded" {
+		return false, nil
 	}
 
 	// Clamp the floor to the app's configured replica count so a stale or
@@ -60,13 +65,25 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 
 	// Drain and stop in descending order so the highest index goes first.
 	// Descending order mirrors ScaleDown's single-victim pattern and ensures
-	// the proxy pool stays contiguous down to the floor.
+	// the proxy pool drains from the trailing end toward the floor.
 	for i := len(victims) - 1; i >= 0; i-- {
 		v := victims[i]
 		idx := v.index
 
 		if s.proxy != nil {
 			s.proxy.DrainReplica(slug, idx)
+		}
+		// In clustered mode, persist the drain intent to the DB immediately after
+		// the local CAS so remote pool syncers observe it and stop routing new
+		// sessions to this slot before the drain wait completes. Mirrors
+		// ScaleDown's pre-drain write exactly.
+		if s.clustered {
+			if err := s.store.SetReplicaDesiredState(app.ID, idx, "draining"); err != nil {
+				// Advisory for remote instances; local drain and stop proceed.
+				slog.Warn("warm shrink: set desired_state draining", "slug", slug, "index", idx, "err", err)
+			}
+		}
+		if s.proxy != nil {
 			s.waitForDrain(slug, idx, grace, s.clusteredFleetWait(app.ID, idx))
 		}
 
@@ -74,12 +91,17 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 			if stopErr := s.manager.StopReplica(slug, idx); stopErr != nil {
 				if !errors.Is(stopErr, process.ErrReplicaNotFound) {
 					// A genuine stop failure: the replica may still be running.
-					// Undrain it so it resumes serving and return the error. The
-					// rows already written as stopped/warm in this loop stay that
-					// way; a re-run will skip them (already stopped) and retry the
-					// remaining victims.
+					// Undrain it so it resumes serving, and in clustered mode revert
+					// the desired_state row so remote syncers restore full routing.
+					// Rows already written as stopped/warm in earlier loop iterations
+					// survive; a re-run skips them and retries the remaining victims.
 					if s.proxy != nil {
 						s.proxy.UndrainReplica(slug, idx)
+					}
+					if s.clustered {
+						if rerr := s.store.SetReplicaDesiredState(app.ID, idx, "running"); rerr != nil {
+							slog.Warn("warm shrink: revert desired_state running", "slug", slug, "index", idx, "err", rerr)
+						}
 					}
 					return false, fmt.Errorf("warm shrink %s: stop replica %d: %w", slug, idx, stopErr)
 				}
@@ -93,7 +115,7 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 		// not shrink the pool size (app.Replicas is unchanged, and the pool must
 		// keep its slots so a later warm-expansion can register new backends at
 		// the same indices without resizing). We use DeregisterReplicaIfTarget to
-		// remove only the slot that belonged to this victim.
+		// null out only the slot that belonged to this victim.
 		if s.proxy != nil {
 			url := s.proxy.ReplicaTargetURL(slug, idx)
 			if url != "" {
