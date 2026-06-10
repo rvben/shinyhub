@@ -610,3 +610,41 @@ func TestForwardAuth_RequireGroupsHeaderFalse_AbsentRevokes(t *testing.T) {
 		t.Errorf("reconcile must be called with empty groups to revoke elevation, got %v", store.reconcileCalls[0].groups)
 	}
 }
+
+// TestForwardAuth_RequireGroupsHeaderNoGroupsHeaderConfigured pins the contract
+// that require_groups_header only takes effect when groups_header is configured.
+// With an empty GroupsHeader the whole group block is skipped, so the strict-mode
+// 403 never fires even when RequireGroupsHeader is true and no header is sent.
+func TestForwardAuth_RequireGroupsHeaderNoGroupsHeaderConfigured(t *testing.T) {
+	store := newFakeStore()
+	store.users["erin"] = &ContextUser{ID: 4, Username: "erin", Role: "developer"}
+
+	cfg := ForwardAuthConfig{
+		Enabled:             true,
+		UserHeader:          "X-Forwarded-User",
+		GroupsHeader:        "", // groups not used; strict mode has nothing to enforce
+		RequireGroupsHeader: true,
+		DefaultRole:         "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "erin")
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if w.Code == http.StatusForbidden {
+		t.Fatal("strict mode must not refuse when groups_header is unconfigured")
+	}
+	if !h.called {
+		t.Fatal("inner handler must be called when groups_header is unconfigured")
+	}
+	if len(store.reconcileCalls) != 0 {
+		t.Fatalf("no group reconcile should run when groups_header is unconfigured, got %d", len(store.reconcileCalls))
+	}
+}

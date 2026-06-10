@@ -348,7 +348,7 @@ func TestAccess_PrivateApp_DemotedAdmin_LosesBypass(t *testing.T) {
 	store := makeStore(t)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
 	// exadmin holds a stale JWT minted while they were an admin, but their live
-	// DB role is now developer (e.g. they were since demoted). We model that
+	// DB role is now developer (e.g. they have since been demoted). We model that
 	// divergence directly: the row is developer, the token still claims admin.
 	store.CreateUser(db.CreateUserParams{Username: "exadmin", PasswordHash: "h", Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
