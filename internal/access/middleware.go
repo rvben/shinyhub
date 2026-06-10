@@ -49,6 +49,12 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 			}
 
 			if app.Access == "public" {
+				// Resolve the optional identity so the proxy can forward it to
+				// the app (public apps can still personalize for signed-in
+				// users). Anonymous requests pass through with no context user.
+				if user := ResolveOptionalUser(r, jwtSecret, revoked, userLookup); user != nil {
+					r = r.WithContext(auth.WithUser(r.Context(), user))
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -62,6 +68,9 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app")
 				return
 			}
+
+			// The proxy Director reads this identity to forward it to the app.
+			r = r.WithContext(auth.WithUser(r.Context(), user))
 
 			// admin, operator, and any authenticated user for shared apps bypass membership check.
 			if user.Role == "admin" || user.Role == "operator" || app.Access == "shared" {

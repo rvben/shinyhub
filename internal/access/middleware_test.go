@@ -590,3 +590,178 @@ func TestAccess_PrivateApp_ForwardAuthContextUser(t *testing.T) {
 		t.Errorf("forward-auth context admin: expected 200, got %d — access middleware must honour context users set by ForwardAuthMiddleware", rec.Code)
 	}
 }
+
+// TestMiddleware_PropagatesUserToContext_PrivateApp verifies that when an
+// authenticated member accesses a private app, the resolved user is attached
+// to the request context seen by the downstream handler.
+func TestMiddleware_PropagatesUserToContext_PrivateApp(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	alice, _ := store.GetUserByUsername("alice")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+	store.GrantAppAccess("priv", alice.ID)
+
+	token, _ := auth.IssueJWT(alice.ID, "alice", "developer", "test-secret")
+
+	mw := access.Middleware(store, "test-secret", nil, nil)
+
+	var gotUser *auth.ContextUser
+	capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = auth.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := mw(capture)
+
+	req := httptest.NewRequest("GET", "/app/priv/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if gotUser == nil {
+		t.Fatal("auth.UserFromContext returned nil in next handler — user must be propagated into context")
+	}
+	if gotUser.Username != "alice" {
+		t.Errorf("expected Username %q, got %q", "alice", gotUser.Username)
+	}
+}
+
+// TestMiddleware_PropagatesUserToContext_SharedAndAdminBypass verifies that
+// the admin/operator/shared bypass paths also propagate the user into context.
+func TestMiddleware_PropagatesUserToContext_SharedAndAdminBypass(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: "h", Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "adminuser", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	stranger, _ := store.GetUserByUsername("stranger")
+	adminuser, _ := store.GetUserByUsername("adminuser")
+	store.CreateApp(db.CreateAppParams{Slug: "shared-app", Name: "Shared", OwnerID: owner.ID})
+	store.SetAppAccess("shared-app", "shared")
+	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
+
+	t.Run("shared app plain user", func(t *testing.T) {
+		token, _ := auth.IssueJWT(stranger.ID, "stranger", "developer", "test-secret")
+		mw := access.Middleware(store, "test-secret", nil, nil)
+		var gotUser *auth.ContextUser
+		capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotUser = auth.UserFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		})
+		handler := mw(capture)
+		req := httptest.NewRequest("GET", "/app/shared-app/", nil)
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if gotUser == nil {
+			t.Fatal("shared app bypass: auth.UserFromContext returned nil — user must be in context")
+		}
+		if gotUser.Username != "stranger" {
+			t.Errorf("expected Username %q, got %q", "stranger", gotUser.Username)
+		}
+	})
+
+	t.Run("private app admin bypass", func(t *testing.T) {
+		token, _ := auth.IssueJWT(adminuser.ID, "adminuser", "admin", "test-secret")
+		mw := access.Middleware(store, "test-secret", nil, nil)
+		var gotUser *auth.ContextUser
+		capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotUser = auth.UserFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		})
+		handler := mw(capture)
+		req := httptest.NewRequest("GET", "/app/priv/", nil)
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if gotUser == nil {
+			t.Fatal("admin bypass: auth.UserFromContext returned nil — user must be in context")
+		}
+		if gotUser.Username != "adminuser" {
+			t.Errorf("expected Username %q, got %q", "adminuser", gotUser.Username)
+		}
+	})
+}
+
+// TestMiddleware_PublicApp_AuthenticatedUserInContext verifies that a public app
+// request with a valid session cookie results in the user being propagated into
+// the context seen by the downstream handler.
+func TestMiddleware_PublicApp_AuthenticatedUserInContext(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: "h", Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	viewer, _ := store.GetUserByUsername("viewer")
+	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: owner.ID})
+	store.SetAppAccess("pub", "public")
+
+	token, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")
+
+	mw := access.Middleware(store, "test-secret", nil, nil)
+
+	var gotUser *auth.ContextUser
+	capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = auth.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := mw(capture)
+
+	req := httptest.NewRequest("GET", "/app/pub/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if gotUser == nil {
+		t.Fatal("public app + authenticated user: auth.UserFromContext returned nil — user must be propagated into context")
+	}
+	if gotUser.Username != "viewer" {
+		t.Errorf("expected Username %q, got %q", "viewer", gotUser.Username)
+	}
+}
+
+// TestMiddleware_PublicApp_AnonymousNilUser verifies that a public app request
+// with no session cookie still passes through (200) and leaves the context user nil.
+func TestMiddleware_PublicApp_AnonymousNilUser(t *testing.T) {
+	store := makeStore(t)
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: owner.ID})
+	store.SetAppAccess("pub", "public")
+
+	mw := access.Middleware(store, "test-secret", nil, nil)
+
+	var gotUser *auth.ContextUser
+	capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = auth.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := mw(capture)
+
+	req := httptest.NewRequest("GET", "/app/pub/", nil)
+	// No cookie — anonymous request.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anonymous public app: expected 200, got %d", rec.Code)
+	}
+	if gotUser != nil {
+		t.Errorf("anonymous request: expected nil context user, got %+v", gotUser)
+	}
+}
