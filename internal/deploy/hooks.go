@@ -60,6 +60,10 @@ type AppSettings struct {
 	// key reverts to NULL (inherit). The global false kill switch always wins.
 	IdentityHeaders *bool `toml:"identity_headers"`
 
+	// MinWarmReplicas sets the pre-warming floor: replicas kept running
+	// through idle hibernation. nil = leave the stored value unchanged.
+	MinWarmReplicas *int `toml:"min_warm_replicas"`
+
 	// Command overrides launch-command inference. Validated at parse time
 	// (and again at boot, covering rollbacks); placeholders {port}, {host},
 	// {data_dir} are substituted per replica at boot. With a command set,
@@ -75,6 +79,7 @@ func (a AppSettings) IsZero() bool {
 		a.Replicas == nil &&
 		a.MaxSessionsPerReplica == nil &&
 		a.IdentityHeaders == nil &&
+		a.MinWarmReplicas == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -234,6 +239,9 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.MaxSessionsPerReplica != nil && (*a.MaxSessionsPerReplica < 0 || *a.MaxSessionsPerReplica > 1000) {
 		return fmt.Errorf("max_sessions_per_replica must be between 0 and 1000, got %d", *a.MaxSessionsPerReplica)
+	}
+	if a.MinWarmReplicas != nil && (*a.MinWarmReplicas < 0 || *a.MinWarmReplicas > 1000) {
+		return fmt.Errorf("min_warm_replicas must be between 0 and 1000, got %d", *a.MinWarmReplicas)
 	}
 	if a.Command != nil {
 		if err := validateCommandTemplate(a.Command); err != nil {

@@ -724,3 +724,56 @@ command = ["sh-free", "${VAR}", "{1..5}", "{Key:"]
 		t.Errorf("Command len = %d, want 4", len(m.App.Command))
 	}
 }
+
+// TestLoadManifest_ParsesMinWarmReplicas confirms that min_warm_replicas = 2 in
+// the [app] section is parsed into AppSettings.MinWarmReplicas.
+func TestLoadManifest_ParsesMinWarmReplicas(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+min_warm_replicas = 2
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.App.MinWarmReplicas == nil || *m.App.MinWarmReplicas != 2 {
+		t.Errorf("MinWarmReplicas = %v, want 2", m.App.MinWarmReplicas)
+	}
+}
+
+// TestLoadManifest_MinWarmReplicasRejectsNegative rejects a negative value.
+func TestLoadManifest_MinWarmReplicasRejectsNegative(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+min_warm_replicas = -1
+`)
+	_, err := LoadManifest(dir)
+	if err == nil || !strings.Contains(err.Error(), "min_warm_replicas must be between 0 and 1000") {
+		t.Errorf("expected bound error, got %v", err)
+	}
+}
+
+// TestLoadManifest_MinWarmReplicasRejectsAboveMax rejects a value above 1000.
+func TestLoadManifest_MinWarmReplicasRejectsAboveMax(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+min_warm_replicas = 1001
+`)
+	_, err := LoadManifest(dir)
+	if err == nil || !strings.Contains(err.Error(), "min_warm_replicas must be between 0 and 1000") {
+		t.Errorf("expected bound error, got %v", err)
+	}
+}
+
+// TestAppSettings_IsZero_MinWarmReplicasAlone confirms that IsZero returns false
+// when only MinWarmReplicas is set.
+func TestAppSettings_IsZero_MinWarmReplicasAlone(t *testing.T) {
+	n := 2
+	a := AppSettings{MinWarmReplicas: &n}
+	if a.IsZero() {
+		t.Error("IsZero should be false when MinWarmReplicas is set")
+	}
+}

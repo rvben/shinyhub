@@ -1286,3 +1286,36 @@ func TestAppsShow_OmitsRejectsWhenAbsent(t *testing.T) {
 		t.Errorf("rejects section should be omitted when server sends no rejects_by_reason block\nfull output:\n%s", out)
 	}
 }
+
+// TestAppsSet_MinWarmReplicas sends --min-warm-replicas 2 and asserts the PATCH
+// body contains min_warm_replicas=2 and no other fields.
+func TestAppsSet_MinWarmReplicas(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--min-warm-replicas", "2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	req := (*reqs)[0]
+	if req.Method != "PATCH" || req.Path != "/api/apps/demo" {
+		t.Errorf("unexpected %s %s", req.Method, req.Path)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := body["min_warm_replicas"]; got != float64(2) {
+		t.Errorf("expected min_warm_replicas=2, got %v (%T)", got, got)
+	}
+	if _, present := body["replicas"]; present {
+		t.Errorf("expected replicas to be absent when only min_warm_replicas changed")
+	}
+	if _, present := body["max_sessions_per_replica"]; present {
+		t.Errorf("expected max_sessions_per_replica to be absent when only min_warm_replicas changed")
+	}
+}

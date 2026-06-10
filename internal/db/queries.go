@@ -2192,6 +2192,9 @@ type ApplyAppManifestSettingsParams struct {
 	// reconciles unconditionally: key removed => NULL => inherit global).
 	SetIdentityHeaders bool
 	IdentityHeaders    *bool
+
+	SetMinWarmReplicas bool
+	MinWarmReplicas    int
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -2254,6 +2257,15 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 		}
 	}
 
+	if p.SetMinWarmReplicas {
+		if _, err := tx.Exec(
+			`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.MinWarmReplicas, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update min_warm_replicas: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -2288,6 +2300,9 @@ type PatchAppSettingsParams struct {
 
 	SetMaxSessions bool
 	MaxSessions    int
+
+	SetMinWarmReplicas bool
+	MinWarmReplicas    int
 }
 
 // PatchAppSettings applies any subset of the user-editable app settings in a
@@ -2376,6 +2391,15 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			p.MaxSessions, appID,
 		); err != nil {
 			return "", 0, fmt.Errorf("update max_sessions_per_replica: %w", err)
+		}
+	}
+
+	if p.SetMinWarmReplicas {
+		if _, err := tx.Exec(
+			`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.MinWarmReplicas, appID,
+		); err != nil {
+			return "", 0, fmt.Errorf("update min_warm_replicas: %w", err)
 		}
 	}
 

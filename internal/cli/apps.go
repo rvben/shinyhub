@@ -530,6 +530,7 @@ type appsSetFlags struct {
 	hibernateTimeout      int
 	replicas              int
 	maxSessionsPerReplica int
+	minWarmReplicas       int
 	tiers                 []string
 	autoscale             bool
 	autoscaleMin          int
@@ -556,6 +557,8 @@ func newAppsSetCmd() *cobra.Command {
 		"Number of replica processes serving this app (>= 1)")
 	cmd.Flags().IntVar(&f.maxSessionsPerReplica, "max-sessions-per-replica", 0,
 		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
+	cmd.Flags().IntVar(&f.minWarmReplicas, "min-warm-replicas", 0,
+		"Pre-warming floor: replicas kept running during idle hibernation (0..1000)")
 	cmd.Flags().StringArrayVar(&f.tiers, "tier", nil,
 		"Per-tier replica placement as name=count (repeatable, e.g. --tier local=2 --tier burst=1); mutually exclusive with --replicas")
 	cmd.Flags().BoolVar(&f.autoscale, "autoscale", false,
@@ -579,6 +582,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	hibernateChanged := cmd.Flags().Changed("hibernate-timeout")
 	replicasChanged := cmd.Flags().Changed("replicas")
 	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
+	minWarmReplicasChanged := cmd.Flags().Changed("min-warm-replicas")
 	tierChanged := cmd.Flags().Changed("tier")
 	autoscaleChanged := cmd.Flags().Changed("autoscale")
 	autoscaleMinChanged := cmd.Flags().Changed("autoscale-min")
@@ -586,14 +590,17 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	autoscaleTargetChanged := cmd.Flags().Changed("autoscale-target")
 	anyAutoscaleChanged := autoscaleChanged || autoscaleMinChanged || autoscaleMaxChanged || autoscaleTargetChanged
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !tierChanged && !anyAutoscaleChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --autoscale)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --autoscale)")
 	}
 	if replicasChanged && f.replicas < 1 {
 		return fmt.Errorf("--replicas must be >= 1")
 	}
 	if capChanged && (f.maxSessionsPerReplica < 0 || f.maxSessionsPerReplica > 1000) {
 		return fmt.Errorf("--max-sessions-per-replica must be between 0 and 1000")
+	}
+	if minWarmReplicasChanged && (f.minWarmReplicas < 0 || f.minWarmReplicas > 1000) {
+		return fmt.Errorf("--min-warm-replicas must be between 0 and 1000")
 	}
 	if hibernateChanged && f.hibernateTimeout < -1 {
 		return fmt.Errorf("--hibernate-timeout must be -1 (reset to global default), 0 (disable), or a positive number of minutes")
@@ -680,6 +687,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	if capChanged {
 		payload["max_sessions_per_replica"] = f.maxSessionsPerReplica
 	}
+	if minWarmReplicasChanged {
+		payload["min_warm_replicas"] = f.minWarmReplicas
+	}
 	if anyAutoscaleChanged {
 		// Send only the fields the caller changed; the server merges them over
 		// the stored values so each field can be updated independently.
@@ -749,6 +759,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		} else {
 			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, f.maxSessionsPerReplica)
 		}
+	}
+	if minWarmReplicasChanged {
+		fmt.Printf("%s: min-warm-replicas set to %d\n", slug, f.minWarmReplicas)
 	}
 	if anyAutoscaleChanged {
 		if autoscaleChanged {
