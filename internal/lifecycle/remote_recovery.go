@@ -51,6 +51,10 @@ func recoverRemoteReplica(
 	store *db.Store, mgr *process.Manager, prx *proxy.Proxy,
 	app *db.App, r *db.Replica, items []process.InventoryItem,
 ) bool {
+	if r.DesiredState == db.ReplicaDesiredWarm {
+		// Warm-parked by the idle shrink: deliberately stopped; expansion boots it, not recovery.
+		return false
+	}
 	if r.Index >= app.Replicas {
 		slog.Warn("recovery: remote replica index beyond pool; skipping",
 			"slug", app.Slug, "idx", r.Index, "pool", app.Replicas)

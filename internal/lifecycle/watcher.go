@@ -513,14 +513,21 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 	if err != nil {
 		return
 	}
-	running := 0
+	running, warm := 0, 0
 	for _, r := range reps {
-		if r.Index < app.Replicas && r.Status == db.ReplicaStatusRunning {
+		if r.Index >= app.Replicas {
+			continue
+		}
+		switch {
+		case r.Status == db.ReplicaStatusRunning:
 			running++
+		case r.DesiredState == db.ReplicaDesiredWarm:
+			// Warm victims are deliberately stopped capacity, not failures.
+			warm++
 		}
 	}
 	want := "running"
-	if running < app.Replicas {
+	if running < app.Replicas-warm {
 		want = "degraded"
 	}
 	if want != app.Status {

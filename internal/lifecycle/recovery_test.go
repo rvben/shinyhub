@@ -879,6 +879,82 @@ func TestRecoverProcesses_RemoteLostReplicaSkipped(t *testing.T) {
 	}
 }
 
+// TestRecoverProcesses_SkipsWarmRows is the recovery pin for warm-shrunk apps.
+// After a server restart: replica 0 is a live native process that should be
+// adopted; replicas 1 and 2 are warm-parked (status=stopped, desired_state='warm').
+// Recovery must NOT crash-mark warm rows and must NOT register them into the
+// proxy pool. Only slot 0 should be adopted; the app stays running.
+func TestRecoverProcesses_SkipsWarmRows(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "warm-shrunk")
+
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=3 WHERE slug='warm-shrunk'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replica 0: alive (current process PID) with a real listener.
+	pidAlive, port0 := os.Getpid(), liveListener(t)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pidAlive, Port: &port0,
+		Status: "running", DesiredState: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replicas 1 and 2: warm-parked — status=stopped, desired_state='warm', no PID.
+	for _, idx := range []int{1, 2} {
+		if err := store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: idx,
+			Status: "stopped", DesiredState: db.ReplicaDesiredWarm,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
+
+	// Only replica 0 should be adopted by the manager.
+	if _, ok := mgr.GetReplica("warm-shrunk", 0); !ok {
+		t.Error("expected replica 0 to be adopted")
+	}
+	if _, ok := mgr.GetReplica("warm-shrunk", 1); ok {
+		t.Error("replica 1 was adopted; warm rows must not be adopted")
+	}
+	if _, ok := mgr.GetReplica("warm-shrunk", 2); ok {
+		t.Error("replica 2 was adopted; warm rows must not be adopted")
+	}
+
+	// Warm rows must retain their status=stopped/desired_state='warm'; they must
+	// NOT be crash-marked. A crashed mark would cause the watcher to restart them,
+	// defeating the pre-warming feature.
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatalf("ListReplicas: %v", err)
+	}
+	for _, r := range reps {
+		switch r.Index {
+		case 1, 2:
+			if r.Status != "stopped" {
+				t.Errorf("warm replica %d: status = %q, want stopped (must not be crash-marked)", r.Index, r.Status)
+			}
+			if r.DesiredState != db.ReplicaDesiredWarm {
+				t.Errorf("warm replica %d: desired_state = %q, want %q", r.Index, r.DesiredState, db.ReplicaDesiredWarm)
+			}
+		}
+	}
+
+	// App stays running (replica 0 is alive).
+	a, err := store.GetAppBySlug("warm-shrunk")
+	if err != nil {
+		t.Fatalf("GetAppBySlug: %v", err)
+	}
+	if a.Status != "running" {
+		t.Errorf("app status = %q, want running (at least one live replica)", a.Status)
+	}
+}
+
 // TestReconcileInflightDeployments verifies a deploy interrupted before
 // promotion is failed at startup so the previous good deployment remains the
 // authoritative live bundle.
