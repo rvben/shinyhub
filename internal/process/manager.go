@@ -163,6 +163,8 @@ type Manager struct {
 	platformEnv   PlatformDefaultEnvResolver
 	mountResolver SharedMountResolver
 	appDataRoot   string
+
+	autoInstrumentApps bool
 }
 
 // SetEnvResolver sets the function used to inject per-app environment variables
@@ -176,6 +178,21 @@ func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
 // Must be called before Start; not safe to call concurrently with Start.
 func (m *Manager) SetPlatformDefaultEnvResolver(r PlatformDefaultEnvResolver) {
 	m.platformEnv = r
+}
+
+// SetAutoInstrumentAppsDefault sets the fleet-wide default for launching
+// Python apps under opentelemetry-instrument. Wired once at startup from
+// tracing.auto_instrument_apps, before any deploys run, like the platform
+// default env resolver. Must be called before Start; not safe to call
+// concurrently with boots.
+func (m *Manager) SetAutoInstrumentAppsDefault(v bool) {
+	m.autoInstrumentApps = v
+}
+
+// AutoInstrumentAppsDefault reports the fleet-wide auto-instrumentation
+// default. Per-app shinyhub.toml [tracing] auto overrides it at boot time.
+func (m *Manager) AutoInstrumentAppsDefault() bool {
+	return m.autoInstrumentApps
 }
 
 // SetSharedMountResolver sets the function used to resolve shared mounts during

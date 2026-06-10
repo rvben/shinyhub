@@ -1127,3 +1127,17 @@ func TestManager_TransportForWorker(t *testing.T) {
 		t.Errorf("TransportForWorker for non-transporter = %v, want nil", got)
 	}
 }
+
+// The fleet auto-instrument default rides on the Manager so every boot path
+// (deploy, watchdog restart, hibernation wake, scale) resolves the same value
+// from one wiring point.
+func TestManager_AutoInstrumentAppsDefault(t *testing.T) {
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	if m.AutoInstrumentAppsDefault() {
+		t.Error("auto-instrument default should be false on a fresh manager")
+	}
+	m.SetAutoInstrumentAppsDefault(true)
+	if !m.AutoInstrumentAppsDefault() {
+		t.Error("SetAutoInstrumentAppsDefault(true) not reflected")
+	}
+}

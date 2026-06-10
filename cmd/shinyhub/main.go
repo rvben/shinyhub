@@ -594,6 +594,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	mgr.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
 		return tracing.EnvFor(cfg.Tracing, slug, replica)
 	})
+	// The Enabled conjunct is belt-and-braces on top of config validation:
+	// wrapping apps that would export nowhere must be impossible.
+	mgr.SetAutoInstrumentAppsDefault(cfg.Tracing.Enabled && cfg.Tracing.AutoInstrumentApps)
 
 	prx := proxy.New()
 	prx.SetTracing(cfg.Tracing, traceBuffer)
