@@ -734,6 +734,7 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          prev.ID,
 		AppVersion:            prev.Version,
@@ -984,7 +985,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// storage failure that leaves the app in an inconsistent state — mark it
 	// degraded so the operator notices.
 	var manifestSummary ManifestApplied
-	if manifest != nil && !manifest.App.IsZero() {
+	if manifest != nil {
+		// applyManifestAppSettings reconciles identity_headers unconditionally
+		// (even when manifest.App.IsZero()) so that removing the key from the
+		// manifest reverts the column to NULL. The other fields (hibernate,
+		// replicas, max_sessions) keep declared-only semantics inside the
+		// function; IsZero manifests produce no DB writes for those fields and
+		// no audit event.
 		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
 			_ = s.store.FailDeployment(pendingDep.ID)
@@ -1010,6 +1017,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, deployDefaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
 		ContentDigest:         digest,
 		DeploymentID:          pendingDep.ID,
 		AppVersion:            version,
@@ -1034,6 +1042,16 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			if s.proxy != nil {
 				s.proxy.SetPoolCap(slug,
 					deploy.ResolveMaxSessionsPerReplica(preManifestApp.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
+			}
+			if rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+				AppID: preManifestApp.ID, Slug: slug,
+				SetIdentityHeaders: true, IdentityHeaders: preManifestApp.IdentityHeaders,
+			}); rerr != nil {
+				slog.Error("deploy: revert identity_headers after failed deploy", "slug", slug, "err", rerr)
+			}
+			if s.proxy != nil {
+				s.proxy.SetPoolIdentityHeaders(slug,
+					deploy.ResolveIdentityHeaders(preManifestApp.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()))
 			}
 		}
 		s.restorePreviousPool(slug, &preManifestApp, prevActive)
@@ -1307,6 +1325,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, rollbackDefaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, rollbackDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          pendingDep.ID,
 		AppVersion:            prev.Version,
@@ -1438,6 +1457,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, restartDefaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, restartDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,

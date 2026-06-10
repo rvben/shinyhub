@@ -27,6 +27,9 @@ type Config struct {
 	// DefaultMaxSessionsPerReplica is the runtime-wide session cap fallback
 	// applied on wake when an app has max_sessions_per_replica == 0.
 	DefaultMaxSessionsPerReplica int
+	// IdentityHeadersGlobal is the global auth.identity_headers enabled flag.
+	// Used to resolve each app's effective identity-forwarding setting on wake.
+	IdentityHeadersGlobal bool
 	// Clustered must be true when the deployment uses a shared Postgres
 	// database (isClustered). When true the watcher reaps stale
 	// replica_sessions rows on every tick and uses the conservative fleet-idle
@@ -65,6 +68,10 @@ type proxyBackend interface {
 	// A zero appID is ignored. Called alongside SetPoolSize wherever the app
 	// object is available.
 	SetPoolAppID(slug string, appID int64)
+	// SetPoolIdentityHeaders sets the per-pool identity-forwarding flag.
+	// Called alongside SetPoolSize and SetPoolCap wherever the app object is
+	// available.
+	SetPoolIdentityHeaders(slug string, enabled bool)
 }
 
 // MetricsRecorder records lifecycle business metrics. A nil recorder disables
@@ -772,6 +779,7 @@ func (w *Watcher) driveWakingApp(slug string) {
 		w.prx.SetPoolSize(slug, app.Replicas)
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 		w.prx.SetPoolAppID(slug, app.ID)
+		w.prx.SetPoolIdentityHeaders(slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
 
 		deploymentID := deployments[0].ID
 		var wg sync.WaitGroup

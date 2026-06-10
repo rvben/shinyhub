@@ -266,6 +266,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, envDefaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, envDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,

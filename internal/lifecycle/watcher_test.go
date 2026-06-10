@@ -91,7 +91,8 @@ func (f *fakeProxy) SetPoolCap(slug string, max int) {
 	f.poolCaps[slug] = max
 	f.mu.Unlock()
 }
-func (f *fakeProxy) SetPoolAppID(_ string, _ int64) {}
+func (f *fakeProxy) SetPoolAppID(_ string, _ int64)          {}
+func (f *fakeProxy) SetPoolIdentityHeaders(_ string, _ bool) {}
 
 type fakeStore struct {
 	mu               sync.Mutex

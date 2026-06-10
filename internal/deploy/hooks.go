@@ -54,13 +54,27 @@ type AppSettings struct {
 	Replicas                *int `toml:"replicas"`
 	MaxSessionsPerReplica   *int `toml:"max_sessions_per_replica"`
 
+	// IdentityHeaders opts this app out of (or explicitly into) identity
+	// forwarding. nil = inherit the global auth.identity_headers flag.
+	// Reconciled into apps.identity_headers on every deploy; removing the
+	// key reverts to NULL (inherit). The global false kill switch always wins.
+	IdentityHeaders *bool `toml:"identity_headers"`
+
+	// Command overrides launch-command inference. Validated at parse time
+	// (and again at boot, covering rollbacks); placeholders {port}, {host},
+	// {data_dir} are substituted per replica at boot. With a command set,
+	// type detection, uv-sync, and tracing auto-instrumentation are skipped.
+	Command []string `toml:"command"`
+
 	HibernateResetToDefault bool `toml:"-"`
 }
 
+// Command is not part of IsZero: it is read at boot, not reconciled into the DB.
 func (a AppSettings) IsZero() bool {
 	return a.HibernateTimeoutMinutes == nil &&
 		a.Replicas == nil &&
 		a.MaxSessionsPerReplica == nil &&
+		a.IdentityHeaders == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -220,6 +234,11 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.MaxSessionsPerReplica != nil && (*a.MaxSessionsPerReplica < 0 || *a.MaxSessionsPerReplica > 1000) {
 		return fmt.Errorf("max_sessions_per_replica must be between 0 and 1000, got %d", *a.MaxSessionsPerReplica)
+	}
+	if a.Command != nil {
+		if err := validateCommandTemplate(a.Command); err != nil {
+			return err
+		}
 	}
 	return nil
 }

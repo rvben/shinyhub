@@ -129,6 +129,7 @@ func (s *Server) redeployApp(slug string) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, redeployDefaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, redeployDefaultCPU),
 		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,

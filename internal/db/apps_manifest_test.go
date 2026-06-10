@@ -176,3 +176,145 @@ func TestApplyAppManifestSettings_AbsentFieldsUntouched(t *testing.T) {
 		t.Errorf("max_sessions_per_replica clobbered: %d", got.MaxSessionsPerReplica)
 	}
 }
+
+// TestApplyAppManifestSettings_IdentityHeadersTriState verifies the tri-state
+// reconcile semantics for identity_headers:
+//   - SetIdentityHeaders=true + non-nil false => column set to false
+//   - SetIdentityHeaders=true + nil => column reset to NULL (inherit global)
+//   - SetIdentityHeaders=false => column untouched
+func TestApplyAppManifestSettings_IdentityHeadersTriState(t *testing.T) {
+	store := mustOpenDB(t)
+	u := mustCreateUser(t, store, "owner", "developer")
+	app := mustCreateApp(t, store, "alpha", u.ID)
+
+	// Set to explicit false.
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID:              app.ID,
+		Slug:               "alpha",
+		SetIdentityHeaders: true,
+		IdentityHeaders:    ptrBool(false),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IdentityHeaders == nil || *got.IdentityHeaders != false {
+		t.Errorf("identity_headers = %v, want non-nil false", got.IdentityHeaders)
+	}
+
+	// Reset to NULL (key removed from manifest => inherit global).
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID:              app.ID,
+		Slug:               "alpha",
+		SetIdentityHeaders: true,
+		IdentityHeaders:    nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IdentityHeaders != nil {
+		t.Errorf("identity_headers = %v, want nil (NULL)", got.IdentityHeaders)
+	}
+
+	// With SetIdentityHeaders=false the column must not be touched.
+	// First write a known value, then call without the flag, then verify.
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID:              app.ID,
+		Slug:               "alpha",
+		SetIdentityHeaders: true,
+		IdentityHeaders:    ptrBool(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID:              app.ID,
+		Slug:               "alpha",
+		SetIdentityHeaders: false,
+		// IdentityHeaders intentionally omitted; column must survive.
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IdentityHeaders == nil || *got.IdentityHeaders != true {
+		t.Errorf("identity_headers clobbered: %v, want non-nil true", got.IdentityHeaders)
+	}
+}
+
+// TestListRoutableReplicas_CarriesIdentityHeaders verifies that
+// ListRoutableReplicas carries apps.identity_headers through the JOIN so the
+// pool syncer can apply per-app overrides without a second query.
+func TestListRoutableReplicas_CarriesIdentityHeaders(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "owner", "admin")
+
+	// appWith: identity_headers = false (explicit override via reconcile)
+	appWith := mustCreateApp(t, store, "with-identity", owner.ID)
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID:              appWith.ID,
+		Slug:               "with-identity",
+		SetIdentityHeaders: true,
+		IdentityHeaders:    ptrBool(false),
+	}); err != nil {
+		t.Fatalf("set identity_headers: %v", err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:       appWith.ID,
+		Index:       0,
+		Status:      db.ReplicaStatusRunning,
+		EndpointURL: "http://192.0.2.1:9000",
+		Provider:    "fargate",
+		Tier:        "fargate",
+	}); err != nil {
+		t.Fatalf("UpsertReplica (appWith): %v", err)
+	}
+
+	// appNull: identity_headers = NULL (inherit global)
+	appNull := mustCreateApp(t, store, "null-identity", owner.ID)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:       appNull.ID,
+		Index:       0,
+		Status:      db.ReplicaStatusRunning,
+		EndpointURL: "http://192.0.2.2:9000",
+		Provider:    "fargate",
+		Tier:        "fargate",
+	}); err != nil {
+		t.Fatalf("UpsertReplica (appNull): %v", err)
+	}
+
+	rows, err := store.ListRoutableReplicas()
+	if err != nil {
+		t.Fatalf("ListRoutableReplicas: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 routable replicas, got %d", len(rows))
+	}
+
+	bySlug := map[string]db.RoutableReplica{}
+	for _, rr := range rows {
+		bySlug[rr.Slug] = rr
+	}
+
+	withRR, ok := bySlug["with-identity"]
+	if !ok {
+		t.Fatal("with-identity replica missing from routable set")
+	}
+	if withRR.AppIdentityHeaders == nil || *withRR.AppIdentityHeaders != false {
+		t.Errorf("with-identity AppIdentityHeaders = %v, want non-nil false", withRR.AppIdentityHeaders)
+	}
+
+	nullRR, ok := bySlug["null-identity"]
+	if !ok {
+		t.Fatal("null-identity replica missing from routable set")
+	}
+	if nullRR.AppIdentityHeaders != nil {
+		t.Errorf("null-identity AppIdentityHeaders = %v, want nil", nullRR.AppIdentityHeaders)
+	}
+}

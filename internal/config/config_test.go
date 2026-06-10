@@ -2577,3 +2577,53 @@ oauth:
 		t.Fatal("RequireValidGroups should be true when set in YAML")
 	}
 }
+
+func TestIdentityHeadersEnabled_DefaultAndExplicitFalse(t *testing.T) {
+	var ac config.AuthConfig
+	if !ac.IdentityHeadersEnabled() {
+		t.Fatal("identity headers must default ON when unset")
+	}
+	f := false
+	ac.IdentityHeaders = &f
+	if ac.IdentityHeadersEnabled() {
+		t.Fatal("explicit false must disable")
+	}
+}
+
+func TestIdentityHeadersEnvVar(t *testing.T) {
+	t.Run("false disables", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		t.Setenv("SHINYHUB_IDENTITY_HEADERS", "false")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Auth.IdentityHeadersEnabled() {
+			t.Fatal("expected SHINYHUB_IDENTITY_HEADERS=false to disable identity headers")
+		}
+	})
+
+	t.Run("true keeps enabled", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		t.Setenv("SHINYHUB_IDENTITY_HEADERS", "true")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Auth.IdentityHeadersEnabled() {
+			t.Fatal("expected SHINYHUB_IDENTITY_HEADERS=true to keep identity headers enabled")
+		}
+	})
+
+	t.Run("invalid value returns error naming the variable", func(t *testing.T) {
+		t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		t.Setenv("SHINYHUB_IDENTITY_HEADERS", "notabool")
+		_, err := config.Load("")
+		if err == nil {
+			t.Fatal("expected error for invalid bool value, got nil")
+		}
+		if !strings.Contains(err.Error(), "SHINYHUB_IDENTITY_HEADERS") {
+			t.Fatalf("error should name the variable; got: %v", err)
+		}
+	})
+}

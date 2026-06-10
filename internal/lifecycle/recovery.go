@@ -105,8 +105,10 @@ type ContainerLister interface {
 // validating the recorded PID. A single app's replicas may therefore span a
 // native default tier and a container-backed burst tier. defaultMaxSessions is
 // the runtime-wide session-cap fallback applied when an app has
-// max_sessions_per_replica == 0.
-func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int) {
+// max_sessions_per_replica == 0. identityGlobal is the global
+// auth.identity_headers enabled flag used to resolve each app's effective
+// identity-forwarding setting.
+func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool) {
 	apps, err := store.ListRunningApps()
 	if err != nil {
 		slog.Error("process recovery: list running apps", "err", err)
@@ -177,6 +179,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		prx.SetPoolSize(app.Slug, app.Replicas)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
 		prx.SetPoolAppID(app.Slug, app.ID)
+		prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, identityGlobal))
 		bundleDir := activeBundleDir(store, app.ID)
 
 		anyAlive := false

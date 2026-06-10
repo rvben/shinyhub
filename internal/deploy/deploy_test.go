@@ -1210,6 +1210,179 @@ func TestRun_AutoInstrumentSkipsCustomCommand(t *testing.T) {
 	}
 }
 
+// recordingRuntime is a minimal Runtime that captures every StartParams it
+// receives. It never spawns a real process, acting as a lightweight fake
+// suitable for testing the command-substitution path without real OS overhead.
+type recordingRuntime struct {
+	mu     sync.Mutex
+	starts []process.StartParams
+}
+
+func (r *recordingRuntime) record(p process.StartParams) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts = append(r.starts, p)
+}
+
+func (r *recordingRuntime) recorded() []process.StartParams {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]process.StartParams, len(r.starts))
+	copy(out, r.starts)
+	return out
+}
+
+func (r *recordingRuntime) HostPreparesDeps() bool    { return false }
+func (r *recordingRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (r *recordingRuntime) HostProvidesAppData() bool { return false }
+func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	r.record(p)
+	id := fmt.Sprintf("rec-%s-%d", p.Slug, p.Index)
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "recording",
+		WorkerID: id,
+		Handle:   process.RunHandle{ContainerID: id},
+	}, nil
+}
+func (r *recordingRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
+func (r *recordingRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
+func (r *recordingRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (r *recordingRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+
+// TestRun_ManifestCommand_EachReplicaGetsOwnPort drives deploy.Run with two
+// replicas and a manifest [app] command template containing {port} and {host}.
+// It verifies:
+//   - both replicas are booted with fully substituted commands (no {port}/{host})
+//   - each replica gets the port that matches its StartParams.Port
+//   - the two command slices carry distinct ports
+//   - the two command slices do not share a backing array (the template is not mutated)
+//   - reloading the manifest afterwards still yields the raw {port} template
+func TestRun_ManifestCommand_EachReplicaGetsOwnPort(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(
+		"[app]\ncommand = [\"serve\", \"--port\", \"{port}\", \"--host\", \"{host}\"]\n",
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &recordingRuntime{}
+	mgr := process.NewManager(t.TempDir(), rt)
+	defer mgr.Stop("cmd-tpl")
+	prx := proxy.New()
+
+	result, err := deploy.Run(deploy.Params{
+		Slug:      "cmd-tpl",
+		BundleDir: bundle,
+		Replicas:  2,
+		Manager:   mgr,
+		Proxy:     prx,
+		// No Params.Command — the manifest [app] command is the template under test.
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if len(result.Replicas) != 2 {
+		t.Fatalf("want 2 replicas, got %d", len(result.Replicas))
+	}
+
+	starts := rt.recorded()
+	if len(starts) != 2 {
+		t.Fatalf("want 2 recorded Start calls, got %d", len(starts))
+	}
+
+	// Index by replica index for deterministic assertions regardless of
+	// goroutine scheduling order.
+	byIndex := map[int]process.StartParams{}
+	for _, s := range starts {
+		byIndex[s.Index] = s
+	}
+
+	cmdA := byIndex[0].Command
+	cmdB := byIndex[1].Command
+	portA := byIndex[0].Port
+	portB := byIndex[1].Port
+
+	// Both commands must begin with "serve".
+	if len(cmdA) == 0 || cmdA[0] != "serve" {
+		t.Errorf("replica 0 command = %v; want first element \"serve\"", cmdA)
+	}
+	if len(cmdB) == 0 || cmdB[0] != "serve" {
+		t.Errorf("replica 1 command = %v; want first element \"serve\"", cmdB)
+	}
+
+	// Helper: find the argument following --port.
+	portArg := func(cmd []string) string {
+		for i, arg := range cmd {
+			if arg == "--port" && i+1 < len(cmd) {
+				return cmd[i+1]
+			}
+		}
+		return ""
+	}
+
+	portArgA := portArg(cmdA)
+	portArgB := portArg(cmdB)
+
+	// The --port argument must equal the recorded Port for each replica.
+	if portArgA != fmt.Sprintf("%d", portA) {
+		t.Errorf("replica 0: --port arg %q != StartParams.Port %d", portArgA, portA)
+	}
+	if portArgB != fmt.Sprintf("%d", portB) {
+		t.Errorf("replica 1: --port arg %q != StartParams.Port %d", portArgB, portB)
+	}
+
+	// The two replicas must have different ports.
+	if portA == portB {
+		t.Errorf("replicas share the same port %d; each must get its own", portA)
+	}
+
+	// No unsubstituted placeholder must remain in either command.
+	for _, tok := range []string{"{port}", "{host}"} {
+		for i, cmd := range [][]string{cmdA, cmdB} {
+			for _, arg := range cmd {
+				if strings.Contains(arg, tok) {
+					t.Errorf("replica %d command still contains placeholder %q: %v", i, tok, cmd)
+				}
+			}
+		}
+	}
+
+	// The two command slices must not share a backing array: the template must
+	// never be mutated in place. Comparing the address of the first element
+	// catches a copy(dst, src) reuse — substituteCommand always allocates a
+	// fresh make([]string, len(tpl)), so this must differ.
+	if len(cmdA) > 0 && len(cmdB) > 0 &&
+		fmt.Sprintf("%p", &cmdA[0]) == fmt.Sprintf("%p", &cmdB[0]) {
+		t.Error("cmdA and cmdB share a backing array; the template was mutated or reused instead of copied per-replica")
+	}
+
+	// The on-disk manifest must still contain the raw {port} template — the
+	// boot path must not overwrite the bundle file.
+	m, err := deploy.LoadManifest(bundle)
+	if err != nil {
+		t.Fatalf("LoadManifest after deploy: %v", err)
+	}
+	if m == nil || len(m.App.Command) == 0 {
+		t.Fatal("manifest is missing [app] command after deploy")
+	}
+	found := false
+	for _, arg := range m.App.Command {
+		if arg == "{port}" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("manifest [app] command no longer contains {port} after deploy: %v — template was modified on disk", m.App.Command)
+	}
+}
+
 // A bad instrumentation overlay (dep conflict, broken instrumentor) is an
 // observability regression, not an outage: the replica must come up
 // uninstrumented after the instrumented attempt fails.

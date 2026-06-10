@@ -156,6 +156,10 @@ type Params struct {
 	// 503 + Retry-After. 0 = unlimited (caller should resolve the runtime
 	// default before calling).
 	MaxSessionsPerReplica int
+	// IdentityHeaders is the app's resolved effective identity-forwarding
+	// flag (ResolveIdentityHeaders over the app column + global config).
+	// Run pushes it to the proxy pool alongside the session cap.
+	IdentityHeaders bool
 	// HealthCheck is called after each replica starts to verify it is ready.
 	// It receives the runtime-returned endpoint URL (e.g. http://127.0.0.1:PORT).
 	// If nil, the default HTTP health poller (waitHealthy) is used.
@@ -277,38 +281,66 @@ func (p Params) hostPreparesDeps(tiers ...string) bool {
 // tiers). Returns the resolved base command, detected app type, the effective
 // auto-instrumentation setting (meaningful only for inferred-command Python
 // boots), the effective health-check func, and the effective timeout.
+//
+// Command resolution order:
+//  1. Params.Command (API-supplied override) — skip manifest and type detection.
+//  2. shinyhub.toml [app] command — manifest absent = nil manifest, inferred path;
+//     manifest present but unparseable = fatal (deploys already reject bad manifests,
+//     so an unreadable on-disk one is a pre-validation bundle or a hand-edit, and
+//     silently ignoring a declared command could boot the wrong server).
+//  3. Type detection (app.py / app.R) — falls through when no manifest command.
 func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration, err error) {
 	if len(p.Command) > 0 {
 		baseCmd = p.Command
 	} else {
-		appType = DetectAppType(p.BundleDir)
-		// Container runtimes prepare dependencies inside the image/container, so
-		// running uv sync / renv::restore on the host would leak host state into
-		// what is supposed to be an isolated boot path (and fail outright on
-		// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
-		// caller from the tiers this boot touches.
-		switch appType {
-		case "python":
-			if hostDeps {
-				if err = pythonSyncFn(p.BundleDir); err != nil {
-					return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
-				}
-			}
-			// Only inferred-command Python boots resolve auto-instrumentation:
-			// opentelemetry-instrument is Python-only, and user-supplied
-			// commands are never rewritten.
-			autoInstrument = resolveAutoInstrument(p)
-		case "r":
-			if hostDeps {
-				if err = rSyncFn(p.BundleDir); err != nil {
-					return nil, "", false, nil, 0, fmt.Errorf("renv restore: %w", err)
-				}
-			}
-		default:
-			return nil, "", false, nil, 0, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
+		// One manifest load per boot, shared by the command override and the
+		// [tracing] auto override. File absent = nil manifest (inferred
+		// path, fleet defaults). Present but unparseable = fatal: deploys
+		// already reject bad manifests, so an unreadable on-disk manifest is
+		// a pre-validation bundle or a hand-edit, and silently ignoring a
+		// declared command could boot the wrong server.
+		m, merr := LoadManifest(p.BundleDir)
+		if merr != nil {
+			return nil, "", false, nil, 0, fmt.Errorf("read manifest: %w", merr)
 		}
-		// baseCmd remains nil — bootReplica constructs the per-replica command
-		// using the real port once it is allocated.
+		if m != nil && len(m.App.Command) > 0 {
+			// Boot-time re-validation covers rollbacks to bundles deployed
+			// before stricter rules. The template is stored UNSUBSTITUTED:
+			// {port} is per-replica and substituted in bootReplicaAttempt.
+			if verr := validateCommandTemplate(m.App.Command); verr != nil {
+				return nil, "", false, nil, 0, fmt.Errorf("manifest [app] command: %w", verr)
+			}
+			baseCmd = m.App.Command
+		} else {
+			appType = DetectAppType(p.BundleDir)
+			// Container runtimes prepare dependencies inside the image/container, so
+			// running uv sync / renv::restore on the host would leak host state into
+			// what is supposed to be an isolated boot path (and fail outright on
+			// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
+			// caller from the tiers this boot touches.
+			switch appType {
+			case "python":
+				if hostDeps {
+					if err = pythonSyncFn(p.BundleDir); err != nil {
+						return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
+					}
+				}
+				// Only inferred-command Python boots resolve auto-instrumentation:
+				// opentelemetry-instrument is Python-only, and user-supplied
+				// commands are never rewritten.
+				autoInstrument = resolveAutoInstrument(p, m)
+			case "r":
+				if hostDeps {
+					if err = rSyncFn(p.BundleDir); err != nil {
+						return nil, "", false, nil, 0, fmt.Errorf("renv restore: %w", err)
+					}
+				}
+			default:
+				return nil, "", false, nil, 0, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", p.BundleDir)
+			}
+		}
+		// baseCmd remains nil for inferred-command boots — bootReplica constructs
+		// the per-replica command using the real port once it is allocated.
 	}
 
 	hc = p.HealthCheck
@@ -324,19 +356,12 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 
 // resolveAutoInstrument resolves the effective auto-instrumentation setting
 // for a boot: the fleet default carried on the Manager, overridden in either
-// direction by the bundle manifest's [tracing] auto. The manifest was
-// validated at deploy time; if it cannot be re-read now, the boot proceeds on
-// the fleet default - resolution must never take an app down.
-func resolveAutoInstrument(p Params) bool {
+// direction by the bundle manifest's [tracing] auto. The caller supplies the
+// already-loaded manifest (nil when the bundle has none).
+func resolveAutoInstrument(p Params, m *Manifest) bool {
 	auto := false
 	if p.Manager != nil {
 		auto = p.Manager.AutoInstrumentAppsDefault()
-	}
-	m, err := LoadManifest(p.BundleDir)
-	if err != nil {
-		slog.Warn("deploy: read manifest for auto-instrument override; using fleet default",
-			"slug", p.Slug, "default", auto, "err", err)
-		return auto
 	}
 	if m != nil && m.Tracing.Auto != nil {
 		auto = *m.Tracing.Auto
@@ -358,6 +383,7 @@ func Run(p Params) (*PoolResult, error) {
 	p.Proxy.SetPoolSize(p.Slug, total)
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
 	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
+	p.Proxy.SetPoolIdentityHeaders(p.Slug, p.IdentityHeaders)
 
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.
@@ -537,13 +563,17 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	port := AllocatePort()
 
 	var cmd []string
+	bindHost := "127.0.0.1"
+	if p.Manager != nil {
+		bindHost = p.Manager.AppBindHostFor(tier)
+	}
 	if baseCmd != nil {
-		cmd = baseCmd
+		// Per-replica substitution on a FRESH slice: the template is shared
+		// across replica goroutines and each replica gets its own port.
+		// A no-placeholder command (e.g. an API-supplied Params.Command)
+		// passes through unchanged but still gets its own copy.
+		cmd = substituteCommand(baseCmd, port, bindHost)
 	} else {
-		bindHost := "127.0.0.1"
-		if p.Manager != nil {
-			bindHost = p.Manager.AppBindHostFor(tier)
-		}
 		switch appType {
 		case "python":
 			workers := p.Workers
@@ -901,6 +931,13 @@ func ResolveCPUQuotaPercent(perAppPct *int, defaultPct int) int {
 		return *perAppPct
 	}
 	return defaultPct
+}
+
+// ResolveIdentityHeaders resolves an app's effective identity-forwarding
+// flag: the global config false is a hard kill switch a manifest cannot
+// override; otherwise the per-app column applies (nil = inherit = on).
+func ResolveIdentityHeaders(col *bool, globalEnabled bool) bool {
+	return globalEnabled && (col == nil || *col)
 }
 
 // ResolveMaxSessionsPerReplica returns perApp if non-zero, otherwise defaultVal.

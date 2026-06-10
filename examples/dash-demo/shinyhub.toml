@@ -1,0 +1,5 @@
+[app]
+command = ["uv", "run", "--with-requirements", "requirements.txt",
+           "python", "app.py",
+           "--port", "{port}",
+           "--host", "{host}"]

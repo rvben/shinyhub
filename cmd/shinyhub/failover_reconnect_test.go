@@ -124,11 +124,11 @@ func TestFailoverReconnect_StandbyServesSameReplica(t *testing.T) {
 	// --- proxy A and proxy B, each with their own PoolSyncer over the shared store ---
 	prxA := proxy.New()
 	prxA.SetStickySecret(stickyKey)
-	syncerA := proxy.NewPoolSyncer(prxA, store, noopTransportBuilder{}, logger)
+	syncerA := proxy.NewPoolSyncer(prxA, store, noopTransportBuilder{}, logger, true)
 
 	prxB := proxy.New()
 	prxB.SetStickySecret(stickyKey)
-	syncerB := proxy.NewPoolSyncer(prxB, store, noopTransportBuilder{}, logger)
+	syncerB := proxy.NewPoolSyncer(prxB, store, noopTransportBuilder{}, logger, true)
 
 	ctx := context.Background()
 

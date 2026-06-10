@@ -185,7 +185,13 @@ type backendPool struct {
 	replicas    []*replicaBackend
 	rrCounter   atomic.Int64
 	maxSessions int
-	appID       int64
+	// appID is atomic because the Director closure reads it outside p.mu
+	// for identity-key derivation; it is written under p.mu by SetPoolAppID.
+	appID atomic.Int64
+	// identityHeaders gates identity injection per pool. Atomic: the
+	// Director runs inside picked.rp.ServeHTTP AFTER p.mu is released,
+	// while SetPoolIdentityHeaders performs live updates under p.mu.
+	identityHeaders atomic.Bool
 }
 
 // AccessLogEntry describes a single proxied request. It is passed to the
@@ -257,8 +263,9 @@ type Proxy struct {
 	// atomic pointer so the hot-path Director reads it lock-free.
 	trustedProxies atomic.Pointer[[]*net.IPNet]
 
-	accessLog atomic.Pointer[accessLogFn]
-	clientIP  atomic.Pointer[clientIPFn]
+	accessLog        atomic.Pointer[accessLogFn]
+	clientIP         atomic.Pointer[clientIPFn]
+	identityProvider atomic.Pointer[identityProviderFn]
 
 	// tracing holds the active tracing config + ring buffer. When traceBuffer
 	// is nil the proxy is a no-op for trace propagation: no traceparent header
@@ -667,7 +674,7 @@ func (p *Proxy) SetPoolAppID(slug string, appID int64) {
 		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
 		p.pools[slug] = pool
 	}
-	pool.appID = appID
+	pool.appID.Store(appID)
 }
 
 // EnableImmediateFlush wires the channel that the session reporter reads to
@@ -773,6 +780,9 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		// Never leak ShinyHub's own auth/session/sticky cookies to the
 		// (deployer-controlled) app backend.
 		stripInternalCookies(req)
+		// Strip inbound platform identity headers and (when enabled for
+		// this pool and a user is authenticated) inject the real ones.
+		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -1016,8 +1026,10 @@ func (p *Proxy) ReplicaSessionCounts(slug string) []int64 {
 func (p *Proxy) appIDForSlug(slug string) (int64, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if pool := p.pools[slug]; pool != nil && pool.appID != 0 {
-		return pool.appID, true
+	if pool := p.pools[slug]; pool != nil {
+		if id := pool.appID.Load(); id != 0 {
+			return id, true
+		}
 	}
 	return 0, false
 }

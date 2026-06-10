@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fargate"
+	"github.com/rvben/shinyhub/internal/identity"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/leader"
 	"github.com/rvben/shinyhub/internal/lifecycle"
@@ -592,7 +594,24 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// is false.
 	traceBuffer := tracing.NewBuffer(cfg.Tracing.RingBufferSize, time.Duration(cfg.Tracing.SlowRequestMS)*time.Millisecond)
 	mgr.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
-		return tracing.EnvFor(cfg.Tracing, slug, replica)
+		env := tracing.EnvFor(cfg.Tracing, slug, replica)
+		// Identity: every app receives its verification key and its own
+		// slug, unconditionally (the key alone discloses nothing - it only
+		// verifies tokens that are never minted while forwarding is
+		// disabled - and unconditional injection means enabling the flag
+		// later doesn't strand running apps without a key). The numeric ID
+		// scopes the key so a delete-and-recreate under the same slug
+		// cannot inherit its predecessor's key.
+		app, err := store.GetApp(slug)
+		if err != nil {
+			slog.Warn("identity: resolve app for key derivation; skipping identity env", "slug", slug, "err", err)
+			return env
+		}
+		key := identity.DeriveKey(cfg.Auth.Secret, app.ID)
+		return append(env,
+			"SHINYHUB_IDENTITY_KEY="+hex.EncodeToString(key),
+			"SHINYHUB_APP_SLUG="+slug,
+		)
 	})
 	// The Enabled conjunct is belt-and-braces on top of config validation:
 	// wrapping apps that would export nowhere must be impossible.
@@ -607,6 +626,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Sign the sticky-routing cookie so a client cannot forge it to pin a
 	// replica and bypass the per-replica session cap.
 	prx.SetStickySecret(deriveStickyCookieKey(cfg.Auth.Secret))
+	// Identity forwarding: the proxy injects the authenticated user's
+	// identity headers + per-app signed token. The provider owns the groups
+	// TTL cache and minting; the proxy holds no secret and no store.
+	identityProvider := identity.NewProvider(cfg.Auth.Secret, store)
+	prx.SetIdentityProvider(identityProvider.PayloadFor)
 	// On single-node deployments there is no pool syncer, so pre-seed the
 	// first-sync gate as satisfied. This keeps /readyz behaviour unchanged
 	// from before the gate was added (a clustered deployment leaves it false
@@ -660,7 +684,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	var syncerCancel context.CancelFunc
 	if isClustered(cfg) {
 		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
-		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default())
+		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default(), cfg.Auth.IdentityHeadersEnabled())
 		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
 		syncerCancel = cancelSyncer
 		syncerWG.Add(1)
@@ -877,6 +901,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, deployDefaultMem),
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
+			IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, cfg.Auth.IdentityHeadersEnabled()),
 			// Pin a shared-mount consumer's restarted replica to the worker set
 			// hosting its source data, matching the full-deploy placement so a
 			// recovered replica lands beside the data it mounts.
@@ -895,6 +920,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		RestartMaxAttempts:           cfg.Lifecycle.RestartMaxAttempts,
 		HibernateTimeout:             cfg.Lifecycle.HibernateTimeout,
 		DefaultMaxSessionsPerReplica: cfg.Runtime.DefaultMaxSessionsPerReplica,
+		IdentityHeadersGlobal:        cfg.Auth.IdentityHeadersEnabled(),
 		Clustered:                    isClustered(cfg),
 		InstanceID:                   cfg.Server.InstanceID,
 	}
@@ -1085,7 +1111,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// Re-adopt any processes that survived a server restart. Must run after
 		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
 		// not a half-applied one.
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica)
+		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled())
 		// Remove ShinyHub-managed containers no live replica re-adopted.
 		if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
 			lifecycle.SweepOrphanContainers(mgr, sweeper)

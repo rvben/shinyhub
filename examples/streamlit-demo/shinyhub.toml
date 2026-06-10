@@ -1,0 +1,8 @@
+[app]
+command = ["uv", "run", "--with-requirements", "requirements.txt",
+           "streamlit", "run", "app.py",
+           "--server.port", "{port}",
+           "--server.address", "{host}",
+           "--server.headless", "true",
+           "--server.enableCORS", "false",
+           "--server.enableXsrfProtection", "false"]

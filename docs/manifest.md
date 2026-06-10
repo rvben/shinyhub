@@ -77,8 +77,10 @@ starts.
 | `hibernate_timeout_minutes` | int | Idle minutes before the watcher hibernates the app. `0` disables hibernation. `-1` resets the field to the server default (the same convention as `shinyhub apps set --hibernate-timeout -1`). |
 | `replicas` | int ≥ 1 | Number of identical replica processes serving this app. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int 0..1000 | Per-replica admission cap for new cookieless sessions. `0` means "use the runtime default". |
+| `command` | array of strings | Launch-command override. See [`[app] command`](#app-command) below. |
+| `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
 
-All three fields are optional. Omitted fields are left untouched: the
+All fields are optional. Omitted fields are left untouched: the
 manifest does not assert a complete state, so existing values set via the
 UI or CLI survive across deploys unless the manifest explicitly overrides
 them.
@@ -92,6 +94,89 @@ and wins over the value set here. The full order is fleet manifest > bundle
 Settings are applied in a single SQLite transaction. Shrinking `replicas`
 removes the now-out-of-range rows from the `replicas` table in the same
 transaction; no half-applied state is reachable.
+
+### `[app] command`
+
+Override the platform's automatic launch-command inference. When set, the
+platform exec's this command directly (no shell) instead of detecting the app
+type and building its own invocation.
+
+```toml
+[app]
+command = ["uv", "run", "streamlit", "run", "app.py",
+           "--server.port", "{port}", "--server.address", "{host}"]
+```
+
+#### Placeholders
+
+The command is a template. Three tokens are substituted per replica at boot:
+
+| Token | Substituted with |
+|---|---|
+| `{port}` | The replica's assigned TCP port. Each replica gets its own port. |
+| `{host}` | The bind address the platform expects: `127.0.0.1` under the native runtime, `0.0.0.0` inside Docker containers. Never hardcode an address; use this placeholder so the command works correctly under both runtimes. |
+| `{data_dir}` | The persistent data directory relative to the app's working directory. Resolves to `data` (a symlink the platform provisions). Use this instead of a hardcoded path to stay portable across app slugs and host layouts. |
+
+The placeholder grammar is exactly `{lowercase_word}` (regex `\{[a-z_]+\}`).
+Anything else that contains braces (`${VAR}`, `{1..5}`, `{Key:`) is passed
+through unchanged. There is no escaping mechanism: a literal lowercase
+`{word}` argument cannot be expressed in a command template.
+
+Validation runs at deploy time and again at boot (which covers rollbacks to
+bundles that were deployed before stricter rules). An unknown token such as
+`{prot}` (likely a typo for `{port}`) fails the deploy with an error naming
+the offending token rather than passing a silent mistyping through.
+
+#### Semantics
+
+- **Type detection is skipped.** A bundle with neither `app.py` nor `app.R`
+  becomes deployable once `command` is set.
+- **Dependency sync is skipped.** The platform does not run `uv sync` or
+  `renv::restore`. To install Python dependencies, include a `uv run` prefix
+  with a `requirements.txt` (e.g. `uv run --with-requirements requirements.txt
+  python app.py ...`) or manage dependencies in your own entrypoint.
+- **Tracing auto-instrumentation is skipped.** The `[tracing] auto` flag and
+  the fleet default have no effect on command-mode apps. Add the
+  `opentelemetry-instrument` wrapper explicitly in your command if you want
+  instrumentation.
+- **Health check is unchanged.** The platform polls `GET /` and waits for a
+  non-5xx response, same as for inferred-command apps.
+- **The command versions with the bundle.** Rolling back to an earlier
+  deployment boots the command that was in that deployment's `shinyhub.toml`.
+- **Commands are exec'd without a shell.** No environment-variable expansion
+  happens in the command array. Use placeholders for the values the platform
+  controls (`{port}`, `{host}`, `{data_dir}`); use `shinyhub env set` for
+  app-level env vars.
+- **An unparseable manifest at boot is fatal.** The platform does not fall
+  back to type detection if the manifest is present but unreadable. This is
+  intentional: silently booting the wrong server on a hand-edited bundle is
+  worse than a clear error.
+
+### `[app] identity_headers`
+
+Opt this app out of (or explicitly into) identity forwarding.
+
+```toml
+[app]
+identity_headers = false   # opt out: proxy does not inject X-Shinyhub-* headers
+```
+
+The field has tri-state semantics because it is stored as a nullable boolean:
+
+| Value | Effect |
+|---|---|
+| absent (key not in manifest) | Inherit the global `auth.identity_headers` setting (the default). |
+| `false` | Opt this app out. The proxy strips and does not inject `X-Shinyhub-*` headers for this app, regardless of the global setting. |
+| `true` | Explicit opt-in. Equivalent to the absent case when the global setting is `true`; has no effect when the global setting is `false`. |
+
+Removing the `identity_headers` key (or the entire `[app]` section) reverts
+the app to inheriting the global default on the next deploy.
+
+The global `auth.identity_headers: false` kill switch always wins. If the
+operator has disabled identity forwarding globally, setting
+`identity_headers = true` in a manifest has no effect. See
+[Identity Forwarding](identity.md) for the full semantics, header reference,
+and JWT verification examples.
 
 ### Sentinel: reset hibernate to default
 

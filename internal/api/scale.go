@@ -88,9 +88,11 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	}
 
 	sessionCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	identityEnabled := deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled())
 	if s.proxy != nil {
 		s.proxy.SetPoolSize(slug, total)
 		s.proxy.SetPoolCap(slug, sessionCap)
+		s.proxy.SetPoolIdentityHeaders(slug, identityEnabled)
 	}
 
 	scaleDefaultMem, scaleDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
@@ -103,6 +105,7 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, scaleDefaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, scaleDefaultCPU),
 		MaxSessionsPerReplica: sessionCap,
+		IdentityHeaders:       identityEnabled,
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,

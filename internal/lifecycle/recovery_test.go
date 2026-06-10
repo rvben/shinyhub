@@ -110,7 +110,7 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	// App should now be stopped in the DB.
 	a, err := store.GetAppBySlug("myapp")
@@ -131,7 +131,7 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0) // must not panic
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false) // must not panic
 
 	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
@@ -156,7 +156,7 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	// App should still be running in the DB.
 	a, err := store.GetAppBySlug("myapp")
@@ -203,7 +203,7 @@ func TestRecovery_PartialPool(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	// Replica 0 adopted, replica 1 not.
 	if _, ok := mgr.GetReplica("partial-pool", 0); !ok {
@@ -261,7 +261,7 @@ func TestRecoverDockerProcesses(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	info, ok := mgr.GetReplica("docker-app", 0)
 	if !ok {
@@ -316,7 +316,7 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	// "alive-app" should be adopted.
 	if _, ok := mgr.GetReplica("alive-app", 0); !ok {
@@ -361,7 +361,7 @@ func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	if _, ok := mgr.GetReplica("multi-docker", 0); !ok {
 		t.Error("want replica 0 adopted")
@@ -385,7 +385,7 @@ func TestRecovery_NilPIDMarkedCrashed(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	reps, _ := store.ListReplicas(app.ID)
 	if len(reps) != 1 || reps[0].Status != "crashed" {
@@ -420,7 +420,7 @@ func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	// idx 0 is within the pool of 1 → adopted.
 	if _, ok := mgr.GetReplica("shrunk-docker", 0); !ok {
@@ -472,7 +472,7 @@ func TestRecoverProcesses_MixedTier(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("burst", burst)
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	if info, ok := mgr.GetReplica("mixed-tier", 0); !ok {
 		t.Error("expected native replica 0 to be adopted")
@@ -521,7 +521,7 @@ func TestRecoveryRegistersPersistedEndpointURL(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	if got := prx.ReplicaTargetURL("rec-endpoint", 0); got != endpoint {
 		t.Fatalf("recovered replica registered %q; want stored endpoint %q", got, endpoint)
@@ -579,7 +579,7 @@ func TestRecoverProcesses_RemoteTierAdoptsByDeploymentID(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	info, ok := mgr.GetReplica("remote-app", 0)
 	if !ok {
@@ -637,7 +637,7 @@ func TestRecoverProcesses_UnreachableUpWorkerLeavesReplicaRunning(t *testing.T) 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	a, _ := store.GetAppBySlug("partial-app")
 	if a.Status == "stopped" {
@@ -682,7 +682,7 @@ func TestRecoverProcesses_UnreachableDownWorkerMarksReplicaLost(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	a, _ := store.GetAppBySlug("down-worker-app")
 	if a.Status == "stopped" {
@@ -733,7 +733,7 @@ func TestRecoverProcesses_TotalInventoryOutageLeavesUpWorkerRunning(t *testing.T
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	a, _ := store.GetAppBySlug("outage-app")
 	if a.Status == "stopped" {
@@ -784,7 +784,7 @@ func TestRecoverProcesses_DownSiblingWorkerReplicaMarkedLost(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	reps, _ := store.ListReplicas(app.ID)
 	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
@@ -839,7 +839,7 @@ func TestRecoverProcesses_RemoteStaleDeploymentNotAdopted(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	if _, ok := mgr.GetReplica("stale-app", 0); ok {
 		t.Error("stale-deployment container must not be adopted as current")
@@ -872,7 +872,7 @@ func TestRecoverProcesses_RemoteLostReplicaSkipped(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
 	if _, ok := mgr.GetReplica("lost-app", 0); ok {
 		t.Error("lost replica must not be adopted")
