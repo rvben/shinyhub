@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -412,4 +414,319 @@ func itoa10(n int) string {
 		n /= 10
 	}
 	return string(buf[pos:])
+}
+
+// fakeBootRuntime is a minimal Runtime whose Start succeeds and records which
+// indices were booted. It also supports configuring a per-index failure so
+// partial-failure tests can be exercised without real OS processes.
+type fakeBootRuntime struct {
+	mu          sync.Mutex
+	boostedPIDs []int
+	nextPID     int
+	failIndex   int // if >= 0, Start returns an error when p.Index == failIndex
+}
+
+func (r *fakeBootRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failIndex >= 0 && p.Index == r.failIndex {
+		return process.ReplicaEndpoint{}, fmt.Errorf("simulated boot failure for index %d", p.Index)
+	}
+	r.nextPID++
+	pid := 70000 + r.nextPID
+	r.boostedPIDs = append(r.boostedPIDs, pid)
+	return process.ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: "native",
+		WorkerID: fmt.Sprintf("w%d", pid),
+		Handle:   process.RunHandle{PID: pid},
+	}, nil
+}
+func (r *fakeBootRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
+func (r *fakeBootRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
+func (r *fakeBootRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
+	return 0, 0, nil
+}
+func (r *fakeBootRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (r *fakeBootRuntime) HostPreparesDeps() bool    { return false }
+func (r *fakeBootRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (r *fakeBootRuntime) HostProvidesAppData() bool { return false }
+
+func (r *fakeBootRuntime) boosted() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]int, len(r.boostedPIDs))
+	copy(out, r.boostedPIDs)
+	return out
+}
+
+// newWarmExpandServer seeds a server with `total` replicas where indices in
+// warmIndices are stopped/warm, indices in stoppedIndices are stopped/stopped,
+// and the rest are running/running. A current deployment is always present.
+func newWarmExpandServer(t *testing.T, slug string, total int, warmIndices, stoppedIndices []int) (*Server, *db.App, *fakeBootRuntime) {
+	t.Helper()
+	srv, app := newScaleTestServer(t, slug, total, &config.Config{})
+
+	// Override the replica rows seeded by newScaleTestServer.
+	warmSet := map[int]bool{}
+	stoppedSet := map[int]bool{}
+	for _, i := range warmIndices {
+		warmSet[i] = true
+	}
+	for _, i := range stoppedIndices {
+		stoppedSet[i] = true
+	}
+
+	dep, err := srv.store.ListDeployments(app.ID)
+	if err != nil || len(dep) == 0 {
+		t.Fatal("no deployments seeded")
+	}
+	depID := dep[0].ID
+	for i := 0; i < total; i++ {
+		pid, port := 1000+i, 9000+i
+		params := db.UpsertReplicaParams{
+			AppID:        app.ID,
+			Index:        i,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     "native",
+			Tier:         "default",
+			AppVersion:   "v1",
+			DesiredState: "running",
+			DeploymentID: &depID,
+		}
+		if warmSet[i] {
+			params.Status = "stopped"
+			params.DesiredState = db.ReplicaDesiredWarm
+		} else if stoppedSet[i] {
+			params.Status = "stopped"
+			params.DesiredState = "stopped"
+		}
+		if err := srv.store.UpsertReplica(params); err != nil {
+			t.Fatalf("seed replica %d: %v", i, err)
+		}
+	}
+
+	rt := &fakeBootRuntime{failIndex: -1}
+	srv.manager.RegisterRuntime("default", rt)
+
+	// Replace deployReplica with a fake that drives the fakeBootRuntime and
+	// returns a Result that mirrors what a real boot would produce.
+	srv.deployReplica = func(p deploy.Params, index int) (*deploy.Result, error) {
+		ep, err := rt.Start(context.Background(), process.StartParams{
+			Slug:  slug,
+			Index: index,
+			Port:  9000 + index,
+			Dir:   p.BundleDir,
+		}, io.Discard)
+		if err != nil {
+			return nil, err
+		}
+		return &deploy.Result{
+			Index:       index,
+			PID:         ep.Handle.PID,
+			Port:        9000 + index,
+			Provider:    ep.Provider,
+			Tier:        "default",
+			EndpointURL: ep.URL,
+			WorkerID:    ep.WorkerID,
+		}, nil
+	}
+
+	return srv, app, rt
+}
+
+// TestWarmExpand_BootsWarmVictims proves WarmExpand boots all stopped/warm
+// replicas back to running, writes running/running rows for each, and emits a
+// warm_expand audit event with the correct from/to counts.
+func TestWarmExpand_BootsWarmVictims(t *testing.T) {
+	srv, app, rt := newWarmExpandServer(t, "demo", 3, []int{1, 2}, nil)
+
+	expanded, err := srv.WarmExpand("demo")
+	if err != nil {
+		t.Fatalf("WarmExpand: %v", err)
+	}
+	if !expanded {
+		t.Fatal("WarmExpand returned false; want true (2 warm victims exist)")
+	}
+
+	// Both warm indices must have been booted.
+	if booted := rt.boosted(); len(booted) != 2 {
+		t.Errorf("expected 2 boot calls; got %d", len(booted))
+	}
+
+	// Replica rows must be running/running.
+	reps, err := srv.store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range reps {
+		if r.Status != "running" || r.DesiredState != "running" {
+			t.Errorf("replica %d: status=%s desired_state=%s; want running/running", r.Index, r.Status, r.DesiredState)
+		}
+	}
+
+	// Exactly one warm_expand audit event with from:1 and to:3.
+	events, err := srv.store.ListAuditEvents("warm_expand", 10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("audit events count = %d; want 1", len(events))
+	}
+	ev := events[0]
+	if ev.ResourceType != "app" || ev.ResourceID != "demo" {
+		t.Errorf("audit event resource = %s/%s; want app/demo", ev.ResourceType, ev.ResourceID)
+	}
+	if !strings.Contains(ev.Detail, `"from":1`) {
+		t.Errorf("audit detail %q does not contain \"from\":1", ev.Detail)
+	}
+	if !strings.Contains(ev.Detail, `"to":3`) {
+		t.Errorf("audit detail %q does not contain \"to\":3", ev.Detail)
+	}
+}
+
+// TestWarmExpand_IgnoresManualStops proves WarmExpand does not touch replicas
+// with desired_state='stopped' (manual stops), returning (false, nil) and
+// recording no audit event.
+func TestWarmExpand_IgnoresManualStops(t *testing.T) {
+	srv, _, rt := newWarmExpandServer(t, "demo", 2, nil, []int{1})
+
+	expanded, err := srv.WarmExpand("demo")
+	if err != nil {
+		t.Fatalf("WarmExpand: %v", err)
+	}
+	if expanded {
+		t.Error("WarmExpand returned true; want false (only manual stops, no warm victims)")
+	}
+	if booted := rt.boosted(); len(booted) != 0 {
+		t.Errorf("expected 0 boot calls; got %d", len(booted))
+	}
+	events, err := srv.store.ListAuditEvents("warm_expand", 10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("audit events = %d; want 0 (no warm victims, no audit)", len(events))
+	}
+}
+
+// TestWarmExpand_NoWarmRows proves WarmExpand returns (false, nil) when every
+// replica is already running.
+func TestWarmExpand_NoWarmRows(t *testing.T) {
+	srv, _, rt := newWarmExpandServer(t, "demo", 3, nil, nil)
+
+	expanded, err := srv.WarmExpand("demo")
+	if err != nil {
+		t.Fatalf("WarmExpand: %v", err)
+	}
+	if expanded {
+		t.Error("WarmExpand returned true; want false (no warm rows)")
+	}
+	if booted := rt.boosted(); len(booted) != 0 {
+		t.Errorf("expected 0 boot calls; got %d", len(booted))
+	}
+}
+
+// TestWarmExpand_PartialBootFailure proves WarmExpand continues booting after a
+// single replica failure. The failed victim's row is written as crashed/running
+// (watchdog bait), the successful victim's row is running/running, and the
+// function returns (true, err) - some capacity was restored and the error is
+// surfaced.
+func TestWarmExpand_PartialBootFailure(t *testing.T) {
+	srv, app, rt := newWarmExpandServer(t, "demo", 3, []int{1, 2}, nil)
+	rt.failIndex = 1 // lowest warm index fails
+
+	expanded, err := srv.WarmExpand("demo")
+	if err == nil {
+		t.Fatal("WarmExpand returned nil error; want an error because replica 1 failed to boot")
+	}
+	if !expanded {
+		t.Error("WarmExpand returned false; want true (replica 2 was restored)")
+	}
+
+	reps, err2 := srv.store.ListReplicas(app.ID)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	for _, r := range reps {
+		switch r.Index {
+		case 0:
+			if r.Status != "running" || r.DesiredState != "running" {
+				t.Errorf("floor replica 0: status=%s desired_state=%s; want running/running", r.Status, r.DesiredState)
+			}
+		case 1:
+			// Failed victim: must be watchdog bait (crashed/running).
+			if r.Status != "crashed" || r.DesiredState != "running" {
+				t.Errorf("failed replica 1: status=%s desired_state=%s; want crashed/running", r.Status, r.DesiredState)
+			}
+		case 2:
+			// Successful victim: must be running.
+			if r.Status != "running" || r.DesiredState != "running" {
+				t.Errorf("successful replica 2: status=%s desired_state=%s; want running/running", r.Status, r.DesiredState)
+			}
+		}
+	}
+}
+
+// TestWarmExpand_HoldsDeployLock proves WarmExpand holds the per-slug deploy
+// lock for the entire operation. We install a deployReplica stub that blocks
+// until we release it, then verify TryLock fails while WarmExpand is in flight
+// and succeeds after it returns.
+func TestWarmExpand_HoldsDeployLock(t *testing.T) {
+	srv, _, _ := newWarmExpandServer(t, "demo", 2, []int{1}, nil)
+
+	bootStarted := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+
+	srv.deployReplica = func(p deploy.Params, index int) (*deploy.Result, error) {
+		select {
+		case bootStarted <- struct{}{}:
+		default:
+		}
+		<-unblock
+		return &deploy.Result{
+			Index:       index,
+			PID:         9999,
+			Port:        9000 + index,
+			Provider:    "native",
+			Tier:        "default",
+			EndpointURL: fmt.Sprintf("http://127.0.0.1:%d", 9000+index),
+		}, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.WarmExpand("demo") //nolint:errcheck
+	}()
+
+	select {
+	case <-bootStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WarmExpand never entered deployReplica; lock observation window missed")
+	}
+
+	mu := srv.deployLockFor("demo")
+	if mu.TryLock() {
+		mu.Unlock()
+		t.Error("TryLock succeeded while WarmExpand should be holding the deploy lock")
+	}
+
+	close(unblock)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WarmExpand goroutine did not finish within timeout")
+	}
+
+	if !mu.TryLock() {
+		t.Error("TryLock failed after WarmExpand completed; lock was not released")
+	} else {
+		mu.Unlock()
+	}
 }

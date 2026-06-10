@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -153,4 +154,158 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 	})
 
 	return true, nil
+}
+
+// WarmExpand boots every warm-parked replica (desired_state='warm') back to
+// running, restoring full configured capacity after a warm shrink. Runs
+// under the per-slug deploy lock. Manual stops (desired_state='stopped')
+// are never touched. A victim that fails to boot is handed to the watchdog
+// (row marked crashed/running) and the error is returned alongside any
+// successfully restored capacity. Returns (false, nil) when no warm rows
+// exist.
+func (s *Server) WarmExpand(slug string) (bool, error) {
+	release := s.acquireDeployLock(slug)
+	defer release()
+
+	app, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		return false, fmt.Errorf("warm expand %s: get app: %w", slug, err)
+	}
+
+	reps, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return false, fmt.Errorf("warm expand %s: list replicas: %w", slug, err)
+	}
+
+	// Collect warm victims: stopped rows that were parked by WarmShrink.
+	// Manual stops (desired_state='stopped') are deliberately excluded.
+	type victim struct {
+		index int
+		rep   *db.Replica
+	}
+	var victims []victim
+	for _, r := range reps {
+		if r.DesiredState == db.ReplicaDesiredWarm && r.Status == "stopped" {
+			victims = append(victims, victim{index: r.Index, rep: r})
+		}
+	}
+	if len(victims) == 0 {
+		return false, nil
+	}
+
+	// Count live replicas before expansion for the audit detail.
+	liveBefore := 0
+	for _, r := range reps {
+		if r.Status == "running" {
+			liveBefore++
+		}
+	}
+
+	deployments, err := s.store.ListDeployments(app.ID)
+	if err != nil || len(deployments) == 0 {
+		return false, fmt.Errorf("warm expand %s: no deployments", slug)
+	}
+	current := deployments[0]
+
+	// Build deploy params using the same field set as ScaleUp, reusing the
+	// current deployment's bundle dir and all resource/session config from the
+	// live app row. withTierPlacement maps each index to its configured tier.
+	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+	p := s.withTierPlacement(deploy.Params{
+		Slug:                  slug,
+		BundleDir:             current.BundleDir,
+		Replicas:              app.Replicas,
+		Manager:               s.manager,
+		Proxy:                 s.proxy,
+		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem),
+		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU),
+		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
+		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
+		ContentDigest:         current.ContentDigest,
+		DeploymentID:          current.ID,
+		AppVersion:            current.Version,
+	}, app)
+
+	// Boot warm victims in ascending index order, mirroring the order a full
+	// deploy would use. Continue past individual failures so every victim gets
+	// an attempt; accumulate the first error to surface to the caller.
+	var firstErr error
+	anyRestored := false
+	for _, v := range victims {
+		idx := v.index
+		r, bootErr := s.deployReplica(p, idx)
+		if bootErr != nil {
+			// Hand the failed victim to the watchdog: crashed/running causes
+			// reconcileReplicas to restart it on the next tick.
+			if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{
+				AppID:        app.ID,
+				Index:        idx,
+				Status:       "crashed",
+				Provider:     v.rep.Provider,
+				Tier:         v.rep.Tier,
+				AppVersion:   v.rep.AppVersion,
+				DesiredState: "running",
+				DeploymentID: v.rep.DeploymentID,
+			}); upsertErr != nil {
+				slog.Warn("warm expand: persist crashed victim", "slug", slug, "index", idx, "err", upsertErr)
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("warm expand %s: boot replica %d: %w", slug, idx, bootErr)
+			}
+			continue
+		}
+
+		// Boot succeeded: register the backend and persist the running row.
+		if s.proxy != nil {
+			if regErr := s.proxy.RegisterReplica(slug, idx, r.EndpointURL, nil, 0); regErr != nil {
+				slog.Warn("warm expand: register replica", "slug", slug, "index", idx, "err", regErr)
+			}
+		}
+		pid, port := r.PID, r.Port
+		depID := current.ID
+		if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:        app.ID,
+			Index:        idx,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     r.Provider,
+			Tier:         r.Tier,
+			EndpointURL:  r.EndpointURL,
+			WorkerID:     r.WorkerID,
+			AppVersion:   current.Version,
+			DesiredState: "running",
+			DeploymentID: &depID,
+		}); upsertErr != nil {
+			// The process is running but the row is stale - log and continue so
+			// the watchdog can observe and reconcile.
+			slog.Warn("warm expand: persist running replica", "slug", slug, "index", idx, "err", upsertErr)
+		}
+		anyRestored = true
+	}
+
+	// Recount live replicas after expansion for the audit detail.
+	liveAfter := liveBefore
+	if anyRestored {
+		updatedReps, listErr := s.store.ListReplicas(app.ID)
+		if listErr == nil {
+			liveAfter = 0
+			for _, r := range updatedReps {
+				if r.Status == "running" {
+					liveAfter++
+				}
+			}
+		}
+	}
+
+	// Emit one audit event regardless of partial failures, so operators can
+	// observe the expansion attempt and its result.
+	s.store.LogAuditEvent(db.AuditEventParams{
+		Action:       "warm_expand",
+		ResourceType: "app",
+		ResourceID:   slug,
+		Detail:       fmt.Sprintf(`{"from":%d,"to":%d}`, liveBefore, liveAfter),
+	})
+
+	return anyRestored, firstErr
 }
