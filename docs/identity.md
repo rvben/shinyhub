@@ -103,7 +103,7 @@ The identity token is a standard JWT signed with HS256. Its claims are:
 | Claim | Type | Value |
 |-------|------|-------|
 | `iss` | string | `"shinyhub"` |
-| `aud` | string | The app slug (also available as `SHINYHUB_APP_SLUG` in the process env) |
+| `aud` | string (serialized as a one-element array) | The app slug (also available as `SHINYHUB_APP_SLUG` in the process env) |
 | `sub` | string | Decimal user ID |
 | `preferred_username` | string | Username |
 | `role` | string | One of `viewer`, `developer`, `operator`, `admin` |
@@ -162,18 +162,18 @@ A runnable demo is in `examples/identity-demo/`.
 ## Verifying in R
 
 Install the [`jose`](https://cran.r-project.org/package=jose) and
-[`openssl`](https://cran.r-project.org/package=openssl) packages:
+[`sodium`](https://cran.r-project.org/package=sodium) packages:
 
 ```r
-install.packages(c("jose", "openssl"))
+install.packages(c("jose", "sodium"))
 ```
 
 ```r
 library(jose)
-library(openssl)
+library(sodium)
 
 # Decode the hex key injected by ShinyHub into the process environment.
-identity_key <- openssl::hex2bin(Sys.getenv("SHINYHUB_IDENTITY_KEY"))
+identity_key <- sodium::hex2bin(Sys.getenv("SHINYHUB_IDENTITY_KEY"))
 app_slug     <- Sys.getenv("SHINYHUB_APP_SLUG")
 
 current_user <- function(session) {
@@ -186,12 +186,10 @@ current_user <- function(session) {
   )
   if (is.null(claims)) return(NULL)
 
-  # jose verifies the signature; assert the remaining claims explicitly.
-  now <- as.numeric(Sys.time())
-  leeway <- 30  # seconds
-  if (!identical(claims$iss, "shinyhub"))       return(NULL)
-  if (!identical(claims$aud, app_slug))         return(NULL)
-  if (is.null(claims$exp) || claims$exp + leeway < now) return(NULL)
+  # jose validates signature, exp, and nbf (with a 60-second grace period).
+  # Manually assert iss and aud, which jose does not check.
+  if (!identical(claims$iss, "shinyhub"))  return(NULL)
+  if (!identical(claims$aud, app_slug))    return(NULL)
 
   claims
 }
