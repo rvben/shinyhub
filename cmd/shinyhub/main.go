@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fargate"
+	"github.com/rvben/shinyhub/internal/identity"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/leader"
 	"github.com/rvben/shinyhub/internal/lifecycle"
@@ -592,7 +594,24 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// is false.
 	traceBuffer := tracing.NewBuffer(cfg.Tracing.RingBufferSize, time.Duration(cfg.Tracing.SlowRequestMS)*time.Millisecond)
 	mgr.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
-		return tracing.EnvFor(cfg.Tracing, slug, replica)
+		env := tracing.EnvFor(cfg.Tracing, slug, replica)
+		// Identity: every app receives its verification key and its own
+		// slug, unconditionally (the key alone discloses nothing - it only
+		// verifies tokens that are never minted while forwarding is
+		// disabled - and unconditional injection means enabling the flag
+		// later doesn't strand running apps without a key). The numeric ID
+		// scopes the key so a delete-and-recreate under the same slug
+		// cannot inherit its predecessor's key.
+		app, err := store.GetApp(slug)
+		if err != nil {
+			slog.Warn("identity: resolve app for key derivation; skipping identity env", "slug", slug, "err", err)
+			return env
+		}
+		key := identity.DeriveKey(cfg.Auth.Secret, app.ID)
+		return append(env,
+			"SHINYHUB_IDENTITY_KEY="+hex.EncodeToString(key),
+			"SHINYHUB_APP_SLUG="+slug,
+		)
 	})
 	// The Enabled conjunct is belt-and-braces on top of config validation:
 	// wrapping apps that would export nowhere must be impossible.
@@ -607,6 +626,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Sign the sticky-routing cookie so a client cannot forge it to pin a
 	// replica and bypass the per-replica session cap.
 	prx.SetStickySecret(deriveStickyCookieKey(cfg.Auth.Secret))
+	// Identity forwarding: the proxy injects the authenticated user's
+	// identity headers + per-app signed token. The provider owns the groups
+	// TTL cache and minting; the proxy holds no secret and no store.
+	identityProvider := identity.NewProvider(cfg.Auth.Secret, store)
+	prx.SetIdentityProvider(identityProvider.PayloadFor)
 	// On single-node deployments there is no pool syncer, so pre-seed the
 	// first-sync gate as satisfied. This keeps /readyz behaviour unchanged
 	// from before the gate was added (a clustered deployment leaves it false
