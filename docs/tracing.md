@@ -157,14 +157,15 @@ the overlay is gone.
 
 ### Failure semantics
 
-Instrumentation can never take an app down. If the overlay cannot resolve
-(for example the app pins a conflicting `opentelemetry-sdk`) or the wrapped
-process fails its health check, ShinyHub retries the boot **uninstrumented**
-and logs a warning (`instrumented launch failed; retrying without
-auto-instrumentation`) in the server log; uv's resolution error is visible in
-the app's own log. Persistent offenders should set `[tracing] auto = false`
-in their manifest. Note the failed instrumented attempt costs up to one
-health-check timeout before the fallback boots.
+Instrumentation can never take an app down. If the overlay cannot resolve,
+or the wrapped process crashes at startup (for example the app pins an old
+`opentelemetry-api` that breaks `opentelemetry-instrument`'s imports), or it
+fails its health check, ShinyHub retries the boot **uninstrumented** and logs
+a warning (`instrumented launch failed; retrying without
+auto-instrumentation`) in the server log; the uv resolution error or Python
+traceback is visible in the app's own log. Persistent offenders should set
+`[tracing] auto = false` in their manifest. Note the failed instrumented
+attempt costs up to one health-check timeout before the fallback boots.
 
 Scope and caveats:
 
