@@ -39,6 +39,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.4](https://github.com/rvben/shinyhub/compare/v0.8.3...v0.8.4) - 2026-06-10
+
+### Added
+
+- **oauth**: add oidc.require_valid_groups strict mode for malformed groups claim ([5ed4943](https://github.com/rvben/shinyhub/commit/5ed494385d13a92b85fc7314f6590b6d7a651591))
+- **auth**: add forward_auth.require_groups_header strict mode ([67c2b3c](https://github.com/rvben/shinyhub/commit/67c2b3c14f2447949e7327a2d0c7a43275dbb5a9))
+
 ## [0.8.3](https://github.com/rvben/shinyhub/compare/v0.8.2...v0.8.3) - 2026-06-10
 
 ### Fixed
