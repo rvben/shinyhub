@@ -165,10 +165,15 @@ func (s *Store) ReconcileAppGroupAccessFromManifest(slug string, rules []AppGrou
 		// source='manual', DO UPDATE is a no-op and the manual row is preserved.
 		// This closes a Postgres READ-COMMITTED TOCTOU; on SQLite the serialised
 		// writer prevents the race, but the guard is correct on both dialects.
+		//
+		// The guard must qualify the column as app_group_access.source: in an
+		// ON CONFLICT DO UPDATE ... WHERE clause both the target row and the
+		// excluded pseudo-row are in scope, so Postgres rejects a bare `source`
+		// as ambiguous (42702). The guard reads the EXISTING row's source.
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO app_group_access (app_slug, group_name, role, source) VALUES (?, ?, ?, 'manifest')
 			 ON CONFLICT (app_slug, group_name) DO UPDATE SET role = excluded.role, source = 'manifest'
-			 WHERE source = 'manifest'`,
+			 WHERE app_group_access.source = 'manifest'`,
 			slug, rule.Group, rule.Role); err != nil {
 			return nil, fmt.Errorf("reconcile manifest group access: upsert: %w", err)
 		}
