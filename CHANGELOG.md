@@ -40,6 +40,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.5](https://github.com/rvben/shinyhub/compare/v0.8.4...v0.8.5) - 2026-06-10
+
+### Added
+
+- **deploy**: launch Python apps under opentelemetry-instrument when auto-instrumentation is on ([c487bbf](https://github.com/rvben/shinyhub/commit/c487bbf14f7d4d55d897f2ea66191662af6620db))
+- **process**: carry fleet auto-instrument default on the manager ([a56b311](https://github.com/rvben/shinyhub/commit/a56b311a4d9f2ed6e53227ac0a655d99044a800c))
+- **deploy**: parse [tracing] auto manifest override ([f63e5d4](https://github.com/rvben/shinyhub/commit/f63e5d4303ec2254c29718b2f0727f806305bb80))
+- **config**: add tracing.auto_instrument_apps option ([432cbab](https://github.com/rvben/shinyhub/commit/432cbab0e52751f65adcfcacffc2aeac4b48ddc6))
+
+### Fixed
+
+- **db**: qualify ambiguous source column in group-access reconcile upsert ([3b093bf](https://github.com/rvben/shinyhub/commit/3b093bf4c735e98e0822fe7e349279faa132fe6f))
+
 ## [0.8.4](https://github.com/rvben/shinyhub/compare/v0.8.3...v0.8.4) - 2026-06-10
 
 ### Added
