@@ -44,13 +44,16 @@ func (p *Proxy) SetPoolIdentityHeaders(slug string, enabled bool) {
 // First, UNCONDITIONALLY (before any flag check or early return) it deletes
 // every inbound X-Shinyhub-* header: these are platform-internal and no
 // client or upstream proxy may supply them, regardless of trusted_proxies
-// (which governs only X-Forwarded-* trust). Then, when the pool's flag is
-// on and the request carries an authenticated user, it injects the identity
-// headers and the per-app signed token.
+// (which governs only X-Forwarded-* trust). The strip matches raw map keys
+// case-insensitively (delete by raw key, not Header.Del which canonicalizes)
+// so non-canonical keys written directly to the map by in-binary middleware
+// are also removed. Then, when the pool's flag is on and the request carries
+// an authenticated user, it injects the identity headers and the per-app
+// signed token.
 func applyIdentityHeaders(req *http.Request, pool *backendPool, slug string, provider *atomic.Pointer[identityProviderFn]) {
 	for k := range req.Header {
-		if strings.HasPrefix(k, identity.HeaderPrefix) {
-			req.Header.Del(k)
+		if len(k) >= len(identity.HeaderPrefix) && strings.EqualFold(k[:len(identity.HeaderPrefix)], identity.HeaderPrefix) {
+			delete(req.Header, k)
 		}
 	}
 	if !pool.identityHeaders.Load() {

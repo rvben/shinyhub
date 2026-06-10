@@ -1026,8 +1026,10 @@ func (p *Proxy) ReplicaSessionCounts(slug string) []int64 {
 func (p *Proxy) appIDForSlug(slug string) (int64, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if pool := p.pools[slug]; pool != nil && pool.appID.Load() != 0 {
-		return pool.appID.Load(), true
+	if pool := p.pools[slug]; pool != nil {
+		if id := pool.appID.Load(); id != 0 {
+			return id, true
+		}
 	}
 	return 0, false
 }

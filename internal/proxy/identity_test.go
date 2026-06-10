@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -87,6 +88,19 @@ func TestIdentityHeaders_InboundSpoofStrippedAlways(t *testing.T) {
 		h := got()
 		if h.Get(identity.HeaderUser) != "" || h.Get(identity.HeaderRole) != "" {
 			t.Fatalf("enabled=%v: spoofed headers must be stripped, got %v", enabled, h)
+		}
+	}
+
+	// Non-canonical direct map write (cannot arrive from the wire; guards
+	// against in-binary middleware inserting a bypass key).
+	srv, got := startEchoBackend(t)
+	p := newIdentityProxy(t, srv.URL, true)
+	r := httptest.NewRequest("GET", "/app/demo/", nil)
+	r.Header["x-shinyhub-bypass"] = []string{"internal-set"}
+	p.ServeHTTP(httptest.NewRecorder(), r)
+	for k := range got() {
+		if strings.HasPrefix(strings.ToLower(k), "x-shinyhub-") {
+			t.Fatalf("header %q reached the backend", k)
 		}
 	}
 }
