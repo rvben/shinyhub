@@ -341,6 +341,11 @@ type ForwardAuthConfig struct {
 	GroupsHeader string   `yaml:"groups_header"`
 	AdminGroups  []string `yaml:"admin_groups"`
 	DefaultRole  string   `yaml:"default_role"`
+	// RequireGroupsHeader, when true and groups_header is configured, causes a
+	// forward-auth request that is missing the groups header to be refused (403)
+	// instead of being treated as no groups. Default false keeps the revoke
+	// behavior. Forces a misconfigured proxy to fail loudly.
+	RequireGroupsHeader bool `yaml:"require_groups_header"`
 }
 
 type StorageConfig struct {
@@ -1426,6 +1431,13 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE"); v != "" {
 		cfg.Auth.ForwardAuth.DefaultRole = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER: %w", err)
+		}
+		cfg.Auth.ForwardAuth.RequireGroupsHeader = b
 	}
 	if v := os.Getenv("SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS"); v != "" {
 		ms, err := parseGroupRoleMappings(v)

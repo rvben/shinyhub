@@ -1202,12 +1202,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	var rootHandler http.Handler = mux
 	if cfg.Auth.ForwardAuth.Enabled {
 		faCfg := auth.ForwardAuthConfig{
-			Enabled:           true,
-			UserHeader:        cfg.Auth.ForwardAuth.UserHeader,
-			EmailHeader:       cfg.Auth.ForwardAuth.EmailHeader,
-			GroupsHeader:      cfg.Auth.ForwardAuth.GroupsHeader,
-			DefaultRole:       cfg.Auth.ForwardAuth.DefaultRole,
-			GroupRoleMappings: api.AuthMappings(cfg.Auth.GroupRoleMappings),
+			Enabled:             true,
+			UserHeader:          cfg.Auth.ForwardAuth.UserHeader,
+			EmailHeader:         cfg.Auth.ForwardAuth.EmailHeader,
+			GroupsHeader:        cfg.Auth.ForwardAuth.GroupsHeader,
+			DefaultRole:         cfg.Auth.ForwardAuth.DefaultRole,
+			GroupRoleMappings:   api.AuthMappings(cfg.Auth.GroupRoleMappings),
+			RequireGroupsHeader: cfg.Auth.ForwardAuth.RequireGroupsHeader,
 		}
 		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(mux)
 	}

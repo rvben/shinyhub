@@ -470,3 +470,143 @@ func TestForwardAuth_ReconcileError_Returns500(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 }
+
+// TestForwardAuth_RequireGroupsHeader_AbsentRefused verifies that in strict mode
+// (RequireGroupsHeader: true), a forward-auth request that is missing the groups
+// header is refused with 403, the inner handler is never called, and no
+// reconcile is triggered.
+func TestForwardAuth_RequireGroupsHeader_AbsentRefused(t *testing.T) {
+	store := newFakeStore()
+	store.users["carol"] = &ContextUser{ID: 2, Username: "carol", Role: "admin"}
+	store.storedGroups = []string{"admins"}
+
+	cfg := ForwardAuthConfig{
+		Enabled:             true,
+		UserHeader:          "X-Forwarded-User",
+		GroupsHeader:        "X-Forwarded-Groups",
+		RequireGroupsHeader: true,
+		DefaultRole:         "developer",
+		GroupRoleMappings:   []GroupRoleMapping{{Group: "admins", Role: "admin"}},
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "carol")
+	// Deliberately NOT setting X-Forwarded-Groups - simulates proxy misconfiguration
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 in strict mode for missing groups header, got %d", w.Code)
+	}
+	if h.called {
+		t.Fatal("inner handler must not be called when groups header is required but absent")
+	}
+	if len(store.reconcileCalls) != 0 {
+		t.Fatalf("strict mode refusal must not trigger reconcile, got %d calls", len(store.reconcileCalls))
+	}
+	if UserFromContext(r.Context()) != nil {
+		t.Fatal("no user should be attached to the request context")
+	}
+}
+
+// TestForwardAuth_RequireGroupsHeader_PresentEmptyAllowed verifies that in strict
+// mode, a request that sends the groups header with an EMPTY value is allowed
+// through. A present-but-empty header is the authoritative signal that the user
+// has no groups; it is not a missing header. The middleware reconciles with an
+// empty group list (stripping any prior group-derived roles).
+func TestForwardAuth_RequireGroupsHeader_PresentEmptyAllowed(t *testing.T) {
+	store := newFakeStore()
+	store.users["dave"] = &ContextUser{ID: 3, Username: "dave", Role: "admin"}
+	store.storedGroups = []string{"admins"} // user currently has admin via group
+
+	cfg := ForwardAuthConfig{
+		Enabled:             true,
+		UserHeader:          "X-Forwarded-User",
+		GroupsHeader:        "X-Forwarded-Groups",
+		RequireGroupsHeader: true,
+		DefaultRole:         "developer",
+		GroupRoleMappings:   []GroupRoleMapping{{Group: "admins", Role: "admin"}},
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "dave")
+	// Present but empty - authoritative "user has no groups"
+	r.Header.Set("X-Forwarded-Groups", "")
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if w.Code == http.StatusForbidden {
+		t.Fatal("strict mode must allow a present-but-empty groups header, got 403")
+	}
+	if !h.called {
+		t.Fatal("inner handler must be called when groups header is present (even if empty)")
+	}
+	// storedGroups has ["admins"] but incoming is [] - changed, so reconcile fires
+	if len(store.reconcileCalls) != 1 {
+		t.Fatalf("expected exactly 1 reconcile call for present-empty header, got %d", len(store.reconcileCalls))
+	}
+	if len(store.reconcileCalls[0].groups) != 0 {
+		t.Errorf("reconcile must be called with empty groups, got %v", store.reconcileCalls[0].groups)
+	}
+}
+
+// TestForwardAuth_RequireGroupsHeaderFalse_AbsentRevokes verifies that the
+// default behavior (RequireGroupsHeader: false) is unchanged: a missing groups
+// header causes reconcile to be called with an empty group list (revoking any
+// group-derived roles), and the inner handler is still called.
+//
+// This test covers the same code path as
+// TestForwardAuth_GroupsHeaderAbsent_RevokesStaleGroups, which predates the
+// strict-mode feature. Both are kept because the older test uses "carol" and
+// this one explicitly names RequireGroupsHeader: false to document the contract.
+func TestForwardAuth_RequireGroupsHeaderFalse_AbsentRevokes(t *testing.T) {
+	store := newFakeStore()
+	store.users["carol"] = &ContextUser{ID: 2, Username: "carol", Role: "admin"}
+	store.storedGroups = []string{"admins"}
+
+	cfg := ForwardAuthConfig{
+		Enabled:             true,
+		UserHeader:          "X-Forwarded-User",
+		GroupsHeader:        "X-Forwarded-Groups",
+		RequireGroupsHeader: false, // explicit: preserve revoke behavior
+		DefaultRole:         "developer",
+		GroupRoleMappings:   []GroupRoleMapping{{Group: "admins", Role: "admin"}},
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "carol")
+	// No X-Forwarded-Groups - default mode should revoke, not refuse
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("default mode (RequireGroupsHeader: false) must not refuse absent groups header, got 403")
+	}
+	if !h.called {
+		t.Fatal("inner handler must be called in default mode")
+	}
+	if len(store.reconcileCalls) != 1 {
+		t.Fatalf("absent header in default mode must trigger reconcile with empty groups, got %d calls", len(store.reconcileCalls))
+	}
+	if len(store.reconcileCalls[0].groups) != 0 {
+		t.Errorf("reconcile must be called with empty groups to revoke elevation, got %v", store.reconcileCalls[0].groups)
+	}
+}

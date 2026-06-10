@@ -23,6 +23,10 @@ type ForwardAuthConfig struct {
 	GroupsHeader      string
 	GroupRoleMappings []GroupRoleMapping
 	DefaultRole       string
+	// RequireGroupsHeader, when true, causes the middleware to refuse (403) any
+	// request that is missing the configured groups header instead of treating it
+	// as no groups. Default false preserves the fail-secure revoke behavior.
+	RequireGroupsHeader bool
 }
 
 // ForwardAuthUserStore is the narrow store interface the middleware needs.
@@ -43,6 +47,10 @@ type ForwardAuthUserStore interface {
 // When disabled, header missing, or peer untrusted, the middleware passes the
 // request through unchanged so subsequent middleware (BearerMiddleware) can run. It
 // never writes a 401 - it either authenticates or falls through.
+//
+// When cfg.RequireGroupsHeader is true and a groups header is configured, any
+// request that omits the groups header is refused with 403 so that a proxy
+// misconfiguration fails loudly instead of silently demoting users.
 func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, trustedProxies []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,14 +78,17 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			}
 
 			if cfg.GroupsHeader != "" {
-				// With groups_header configured the proxy is the authoritative source of
-				// the user's groups on every request. An absent header is treated as an
-				// empty group list so group-derived role elevation is revoked when the
-				// user's groups go away. The break-glass manual_role override and the
-				// transactional last-admin guard inside ReconcileUserFromGroups prevent
-				// accidental admin lockout. The proxy MUST therefore always send this
-				// header, empty when the user has no groups.
-				vals := r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]
+				vals, present := r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]
+				if !present && cfg.RequireGroupsHeader {
+					// Strict mode: the operator requires the proxy to assert group
+					// membership on every request. A missing header is a proxy
+					// misconfiguration, so refuse rather than silently revoke.
+					http.Error(w, "forward auth: groups header required but missing", http.StatusForbidden)
+					return
+				}
+				// Default mode: an absent header means no groups, so we reconcile and
+				// revoke group-derived roles. A present (even empty) header is the
+				// authoritative current membership.
 				groups := parseGroups(strings.Join(vals, ","))
 				changed, err := groupsChanged(store, user.ID, groups)
 				if err != nil {

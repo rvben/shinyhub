@@ -2433,6 +2433,22 @@ auth:
 	}
 }
 
+func TestForwardAuth_RequireGroupsHeaderEnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER", "true")
+	yaml := `
+auth:
+  secret: ` + strings.Repeat("a", 32) + `
+`
+	f := writeYAML(t, yaml)
+	cfg, err := config.Load(f)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Auth.ForwardAuth.RequireGroupsHeader {
+		t.Fatal("expected RequireGroupsHeader to be true when env var is set to 'true'")
+	}
+}
+
 func TestLoad_NormalizesStorageRootsToAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
