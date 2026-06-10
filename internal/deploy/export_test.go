@@ -17,6 +17,15 @@ func SetSyncHooksForTest(py, r func(string) error) (restore func()) {
 	return func() { pythonSyncFn, rSyncFn = origPy, origR }
 }
 
+// SetBuildCommandForTest swaps the package's python launch-command builder so
+// tests can observe the auto-instrument decision and substitute runnable
+// commands. Returns a restore func — pair with defer. Test use only.
+func SetBuildCommandForTest(f func(bundleDir string, port, workers int, bindHost string, autoInstrument bool) []string) (restore func()) {
+	orig := buildCommandFn
+	buildCommandFn = f
+	return func() { buildCommandFn = orig }
+}
+
 // HookRunnerFunc matches the unexported hookRunner signature. Exported so
 // external _test packages can substitute a recorder without spawning real
 // processes.

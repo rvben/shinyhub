@@ -36,6 +36,26 @@ var (
 	rSyncFn      = process.SyncR
 )
 
+// autoInstrumentPackages is the overlay layered into a Python app's
+// environment (uv run --with) when auto-instrumentation is on. distro wires
+// the SDK and OTLP auto-configuration from the injected OTEL_* env;
+// opentelemetry-instrument activates the installed instrumentors at startup.
+// Coverage is the transport layer: inbound ASGI requests (Shiny for Python
+// runs on Starlette) and outbound requests/httpx calls. The reactive graph is
+// not a library boundary and is not covered; apps add manual spans for that
+// (docs/tracing.md). The overlay never touches the app's venv or lockfile.
+var autoInstrumentPackages = []string{
+	"opentelemetry-distro",
+	"opentelemetry-exporter-otlp",
+	"opentelemetry-instrumentation-starlette",
+	"opentelemetry-instrumentation-requests",
+	"opentelemetry-instrumentation-httpx",
+}
+
+// buildCommandFn is a package-level indirection so tests can observe the
+// auto-instrument decision and substitute runnable commands.
+var buildCommandFn = buildCommand
+
 // AllocatePort returns an unused TCP port in the 20000–60000 range.
 //
 // Each candidate is verified with a short-lived bind on 127.0.0.1 so we never
@@ -255,8 +275,9 @@ func (p Params) hostPreparesDeps(tiers ...string) bool {
 // HealthTimeout defaults for a pool/replica boot. hostDeps reports whether
 // host-side dependency installation should run (false under container-only
 // tiers). Returns the resolved base command, detected app type, the effective
-// health-check func, and the effective timeout.
-func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration, err error) {
+// auto-instrumentation setting (meaningful only for inferred-command Python
+// boots), the effective health-check func, and the effective timeout.
+func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration, err error) {
 	if len(p.Command) > 0 {
 		baseCmd = p.Command
 	} else {
@@ -270,17 +291,21 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 		case "python":
 			if hostDeps {
 				if err = pythonSyncFn(p.BundleDir); err != nil {
-					return nil, "", nil, 0, fmt.Errorf("uv sync: %w", err)
+					return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
 				}
 			}
+			// Only inferred-command Python boots resolve auto-instrumentation:
+			// opentelemetry-instrument is Python-only, and user-supplied
+			// commands are never rewritten.
+			autoInstrument = resolveAutoInstrument(p)
 		case "r":
 			if hostDeps {
 				if err = rSyncFn(p.BundleDir); err != nil {
-					return nil, "", nil, 0, fmt.Errorf("renv restore: %w", err)
+					return nil, "", false, nil, 0, fmt.Errorf("renv restore: %w", err)
 				}
 			}
 		default:
-			return nil, "", nil, 0, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
+			return nil, "", false, nil, 0, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
 		}
 		// baseCmd remains nil — bootReplica constructs the per-replica command
 		// using the real port once it is allocated.
@@ -294,7 +319,29 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 	if timeout == 0 {
 		timeout = 120 * time.Second
 	}
-	return baseCmd, appType, hc, timeout, nil
+	return baseCmd, appType, autoInstrument, hc, timeout, nil
+}
+
+// resolveAutoInstrument resolves the effective auto-instrumentation setting
+// for a boot: the fleet default carried on the Manager, overridden in either
+// direction by the bundle manifest's [tracing] auto. The manifest was
+// validated at deploy time; if it cannot be re-read now, the boot proceeds on
+// the fleet default - resolution must never take an app down.
+func resolveAutoInstrument(p Params) bool {
+	auto := false
+	if p.Manager != nil {
+		auto = p.Manager.AutoInstrumentAppsDefault()
+	}
+	m, err := LoadManifest(p.BundleDir)
+	if err != nil {
+		slog.Warn("deploy: read manifest for auto-instrument override; using fleet default",
+			"slug", p.Slug, "default", auto, "err", err)
+		return auto
+	}
+	if m != nil && m.Tracing.Auto != nil {
+		auto = *m.Tracing.Auto
+	}
+	return auto
 }
 
 // Run orchestrates a parallel pool deploy: spawns N replicas concurrently,
@@ -316,7 +363,7 @@ func Run(p Params) (*PoolResult, error) {
 	// any assigned tier prepares deps on the host.
 	hostDeps := p.hostPreparesDeps(distinctTiers(asn)...)
 
-	baseCmd, appType, hc, timeout, err := resolveBootParams(p, hostDeps)
+	baseCmd, appType, autoInstrument, hc, timeout, err := resolveBootParams(p, hostDeps)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +392,7 @@ func Run(p Params) (*PoolResult, error) {
 		wg.Add(1)
 		go func(a process.TierAssignment) {
 			defer wg.Done()
-			r, err := bootReplica(p, a.Index, a.Tier, targets[a.Index], baseCmd, appType, hc, timeout)
+			r, err := bootReplica(p, a.Index, a.Tier, targets[a.Index], baseCmd, appType, autoInstrument, hc, timeout)
 			results <- bootResult{idx: a.Index, res: r, err: err}
 		}(a)
 	}
@@ -463,12 +510,30 @@ func planPoolWorkers(p Params, asn []process.TierAssignment) map[int]string {
 	return out
 }
 
-// bootReplica starts a single replica: allocates a port, starts the process,
-// health-checks it, and registers it with the proxy. baseCmd == nil signals
-// that the command should be built from appType using the allocated port.
+// bootReplica starts a single replica, retrying once without
+// auto-instrumentation if the instrumented launch fails to start or pass its
+// health check. A bad overlay (dependency conflict with the app's pins, a
+// broken instrumentor) is an observability regression, not an outage: the uv
+// resolution error is visible in the app's own log, and the fallback is
+// flagged in the server log.
+func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
+	instrumented := autoInstrument && baseCmd == nil && appType == "python"
+	res, err := bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, appType, instrumented, hc, timeout)
+	if err != nil && instrumented {
+		slog.Warn("deploy: instrumented launch failed; retrying without auto-instrumentation",
+			"slug", p.Slug, "index", idx, "err", err)
+		res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, appType, false, hc, timeout)
+	}
+	return res, err
+}
+
+// bootReplicaAttempt starts a single replica: allocates a port, starts the
+// process, health-checks it, and registers it with the proxy. baseCmd == nil
+// signals that the command should be built from appType using the allocated
+// port; instrument wraps that inferred command in the OTEL overlay.
 // targetWorker pins the replica to a pre-planned worker (empty means the runtime
 // self-places, e.g. a single-replica watchdog restart or a worker-agnostic tier).
-func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
+func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, instrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
 	port := AllocatePort()
 
 	var cmd []string
@@ -485,7 +550,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 			if workers <= 0 {
 				workers = 1
 			}
-			cmd = buildCommand(p.BundleDir, port, workers, bindHost)
+			cmd = buildCommandFn(p.BundleDir, port, workers, bindHost, instrument)
 		case "r":
 			cmd = BuildRCommand(p.BundleDir, port, bindHost)
 		default:
@@ -550,7 +615,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 // Used by the watchdog's per-replica crash-restart path.
 func RunReplica(p Params, index int) (*Result, error) {
 	tier := p.tierForIndex(index)
-	baseCmd, appType, hc, timeout, err := resolveBootParams(p, p.hostPreparesDeps(tier))
+	baseCmd, appType, autoInstrument, hc, timeout, err := resolveBootParams(p, p.hostPreparesDeps(tier))
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +628,7 @@ func RunReplica(p Params, index int) (*Result, error) {
 	if len(p.ColocateWorkers) > 0 {
 		target = p.ColocateWorkers[index%len(p.ColocateWorkers)]
 	}
-	r, err := bootReplica(p, index, tier, target, baseCmd, appType, hc, timeout)
+	r, err := bootReplica(p, index, tier, target, baseCmd, appType, autoInstrument, hc, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -595,14 +660,23 @@ func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 // If a pyproject.toml is present, uv sync has already prepared the environment
 // and we use plain `uv run`. If only requirements.txt is present, we pass
 // --with-requirements so uv installs deps into an ephemeral environment.
-// bindHost has the same meaning as in BuildRCommand.
-func buildCommand(bundleDir string, port, workers int, bindHost string) []string {
+// When autoInstrument is set, the OTEL overlay is layered in via --with and
+// the entrypoint is wrapped with opentelemetry-instrument; the app's own
+// environment is never modified. bindHost has the same meaning as in
+// BuildRCommand.
+func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument bool) []string {
 	base := []string{"uv", "run", "--no-project"}
 	if _, err := os.Stat(filepath.Join(bundleDir, "pyproject.toml")); err == nil {
 		// Project mode: environment was synced by process.Sync.
 		base = []string{"uv", "run"}
 	} else if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
 		base = append(base, "--with-requirements", "requirements.txt")
+	}
+	if autoInstrument {
+		for _, pkg := range autoInstrumentPackages {
+			base = append(base, "--with", pkg)
+		}
+		base = append(base, "opentelemetry-instrument")
 	}
 	return append(base,
 		"shiny", "run", "app.py",
