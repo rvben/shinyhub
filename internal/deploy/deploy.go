@@ -156,6 +156,10 @@ type Params struct {
 	// 503 + Retry-After. 0 = unlimited (caller should resolve the runtime
 	// default before calling).
 	MaxSessionsPerReplica int
+	// IdentityHeaders is the app's resolved effective identity-forwarding
+	// flag (ResolveIdentityHeaders over the app column + global config).
+	// Run pushes it to the proxy pool alongside the session cap.
+	IdentityHeaders bool
 	// HealthCheck is called after each replica starts to verify it is ready.
 	// It receives the runtime-returned endpoint URL (e.g. http://127.0.0.1:PORT).
 	// If nil, the default HTTP health poller (waitHealthy) is used.
@@ -358,6 +362,7 @@ func Run(p Params) (*PoolResult, error) {
 	p.Proxy.SetPoolSize(p.Slug, total)
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
 	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
+	p.Proxy.SetPoolIdentityHeaders(p.Slug, p.IdentityHeaders)
 
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.
@@ -901,6 +906,13 @@ func ResolveCPUQuotaPercent(perAppPct *int, defaultPct int) int {
 		return *perAppPct
 	}
 	return defaultPct
+}
+
+// ResolveIdentityHeaders resolves an app's effective identity-forwarding
+// flag: the global config false is a hard kill switch a manifest cannot
+// override; otherwise the per-app column applies (nil = inherit = on).
+func ResolveIdentityHeaders(col *bool, globalEnabled bool) bool {
+	return globalEnabled && (col == nil || *col)
 }
 
 // ResolveMaxSessionsPerReplica returns perApp if non-zero, otherwise defaultVal.

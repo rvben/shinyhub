@@ -877,6 +877,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, deployDefaultMem),
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
+			IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, cfg.Auth.IdentityHeadersEnabled()),
 			// Pin a shared-mount consumer's restarted replica to the worker set
 			// hosting its source data, matching the full-deploy placement so a
 			// recovered replica lands beside the data it mounts.
@@ -895,6 +896,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		RestartMaxAttempts:           cfg.Lifecycle.RestartMaxAttempts,
 		HibernateTimeout:             cfg.Lifecycle.HibernateTimeout,
 		DefaultMaxSessionsPerReplica: cfg.Runtime.DefaultMaxSessionsPerReplica,
+		IdentityHeadersGlobal:        cfg.Auth.IdentityHeadersEnabled(),
 		Clustered:                    isClustered(cfg),
 		InstanceID:                   cfg.Server.InstanceID,
 	}
@@ -1085,7 +1087,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// Re-adopt any processes that survived a server restart. Must run after
 		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
 		// not a half-applied one.
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica)
+		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled())
 		// Remove ShinyHub-managed containers no live replica re-adopted.
 		if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
 			lifecycle.SweepOrphanContainers(mgr, sweeper)

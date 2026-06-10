@@ -52,22 +52,25 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 //   - manager.Stop(app.Slug) has already run, so no process holds a
 //     replica index that may be deleted.
 //
+// identity_headers is reconciled UNCONDITIONALLY (even when m.IsZero()): nil
+// reverts the column to NULL so removing the key from the manifest restores
+// the app to the global default. This function is only called when a manifest
+// is present; the call site in apps.go gates on manifest != nil.
+//
 // Returns wrapped DB errors on storage failure (handler → 500 + degraded).
 func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy.AppSettings) error {
-	if m.IsZero() {
-		return nil
-	}
-
 	if err := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:                    app.ID,
 		Slug:                     app.Slug,
 		SetHibernate:             m.HibernateTimeoutMinutes != nil || m.HibernateResetToDefault,
-		HibernateMinutes:         m.HibernateTimeoutMinutes, // nil ⇒ NULL (reset to default)
+		HibernateMinutes:         m.HibernateTimeoutMinutes, // nil => NULL (reset to default)
 		SetReplicas:              m.Replicas != nil,
 		Replicas:                 derefOrZero(m.Replicas),
 		PreviousReplicas:         app.Replicas,
 		SetMaxSessionsPerReplica: m.MaxSessionsPerReplica != nil,
 		MaxSessionsPerReplica:    derefOrZero(m.MaxSessionsPerReplica),
+		SetIdentityHeaders:       true,
+		IdentityHeaders:          m.IdentityHeaders,
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -76,8 +79,16 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		s.proxy.SetPoolCap(app.Slug,
 			deploy.ResolveMaxSessionsPerReplica(*m.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
+	// Unconditional: a removed key must revert the live pool too (an
+	// atomic store; unconditional costs nothing).
+	if s.proxy != nil {
+		s.proxy.SetPoolIdentityHeaders(app.Slug,
+			deploy.ResolveIdentityHeaders(m.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()))
+	}
 
-	s.audit(r, "update_app", "app", app.Slug, manifestAppDetail(m))
+	if !m.IsZero() {
+		s.audit(r, "update_app", "app", app.Slug, manifestAppDetail(m))
+	}
 	return nil
 }
 
@@ -294,6 +305,12 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.MaxSessionsPerReplica != nil {
 		d["max_sessions_per_replica"] = *m.MaxSessionsPerReplica
 	}
+	if m.IdentityHeaders != nil {
+		d["identity_headers"] = *m.IdentityHeaders
+	}
+	if len(m.Command) > 0 {
+		d["command"] = m.Command
+	}
 	return d
 }
 
@@ -309,6 +326,12 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.MaxSessionsPerReplica != nil {
 		d["max_sessions_per_replica"] = *m.MaxSessionsPerReplica
+	}
+	if m.IdentityHeaders != nil {
+		d["identity_headers"] = *m.IdentityHeaders
+	}
+	if len(m.Command) > 0 {
+		d["command"] = m.Command
 	}
 	b, _ := json.Marshal(d)
 	return string(b)

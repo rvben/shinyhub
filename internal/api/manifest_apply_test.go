@@ -319,6 +319,32 @@ func TestApplyManifestSchedules_LeavesOrphansAlone(t *testing.T) {
 	}
 }
 
+func TestApplyManifestAppSettings_IdentityHeadersAlwaysReconciled(t *testing.T) {
+	f := false
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	// Declared: identity_headers = false => column must be written non-nil false.
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{IdentityHeaders: &f}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetAppBySlug("alpha")
+	if got.IdentityHeaders == nil || *got.IdentityHeaders != false {
+		t.Errorf("after declare false: identity_headers = %v, want non-nil false", got.IdentityHeaders)
+	}
+
+	// Absent on next apply (empty AppSettings) => column must revert to NULL.
+	app, _ = store.GetAppBySlug("alpha")
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetAppBySlug("alpha")
+	if got.IdentityHeaders != nil {
+		t.Errorf("after absent key: identity_headers = %v, want nil (NULL)", got.IdentityHeaders)
+	}
+}
+
 func TestApplyManifestSchedules_SchedulerNotStartedIsWarn(t *testing.T) {
 	// newServerWithOwnedApp wires a non-nil scheduler that has NOT been
 	// started, so scheduler.Reload → register returns scheduler.ErrNotStarted.
