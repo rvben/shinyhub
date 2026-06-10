@@ -2519,3 +2519,61 @@ func TestOIDCGroupsClaimDefault(t *testing.T) {
 		t.Fatalf("GroupsClaim = %q, want default \"groups\"", cfg.OAuth.OIDC.GroupsClaim)
 	}
 }
+
+func TestOIDCRequireValidGroupsEnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_OIDC_ISSUER_URL", "https://idp.example.com")
+
+	t.Run("default is false", func(t *testing.T) {
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.OAuth.OIDC.RequireValidGroups {
+			t.Fatal("RequireValidGroups should default to false")
+		}
+	})
+
+	t.Run("env true sets true", func(t *testing.T) {
+		t.Setenv("SHINYHUB_OIDC_REQUIRE_VALID_GROUPS", "true")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.OAuth.OIDC.RequireValidGroups {
+			t.Fatal("RequireValidGroups should be true when SHINYHUB_OIDC_REQUIRE_VALID_GROUPS=true")
+		}
+	})
+
+	t.Run("invalid value returns error", func(t *testing.T) {
+		t.Setenv("SHINYHUB_OIDC_REQUIRE_VALID_GROUPS", "maybe")
+		_, err := config.Load("")
+		if err == nil {
+			t.Fatal("expected error for invalid bool value, got nil")
+		}
+	})
+}
+
+func TestOIDCRequireValidGroupsYAML(t *testing.T) {
+	yaml := `
+auth:
+  secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+oauth:
+  oidc:
+    issuer_url: "https://idp.example.com"
+    client_id: "client"
+    client_secret: "secret"
+    require_valid_groups: true
+`
+	tmp := t.TempDir() + "/config.yml"
+	if err := os.WriteFile(tmp, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(tmp)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.OAuth.OIDC.RequireValidGroups {
+		t.Fatal("RequireValidGroups should be true when set in YAML")
+	}
+}

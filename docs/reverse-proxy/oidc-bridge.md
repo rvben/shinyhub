@@ -104,7 +104,33 @@ that ShinyHub exchanges via the standard authorization code flow. The
 | `SHINYHUB_OIDC_CLIENT_SECRET` | Client secret |
 | `SHINYHUB_OIDC_CALLBACK_URL` | Must match a redirect URI registered with the IdP. Path is always `/api/auth/oidc/callback`. |
 | `SHINYHUB_OIDC_DISPLAY_NAME` | Text shown on the login button (default: "Sign in with SSO") |
+| `SHINYHUB_OIDC_GROUPS_CLAIM` | ID-token claim holding group names (default: `groups`) |
+| `SHINYHUB_OIDC_GROUPS_SCOPE` | Optional extra scope to request from the IdP (e.g. `groups`) |
+| `SHINYHUB_OIDC_REQUIRE_VALID_GROUPS` | `true` to fail login on a malformed groups claim (default: `false` - logs and skips) |
 | `SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE` | Role assigned to users on first OIDC login (default: viewer) |
+
+## OIDC YAML config reference
+
+The same options are available via `shinyhub.yml` under `oauth.oidc`:
+
+```yaml
+oauth:
+  oidc:
+    issuer_url: "https://auth.example.com"
+    client_id: "shinyhub"
+    client_secret: "your-client-secret"
+    callback_url: "https://shiny.example.com/api/auth/oidc/callback"
+    display_name: "Sign in with SSO"
+    groups_claim: "groups"        # ID-token claim holding group names
+    groups_scope: "groups"        # extra scope to request (optional)
+    require_valid_groups: false   # set to true to fail login on malformed groups claim
+```
+
+Set `require_valid_groups: true` to FAIL the login (HTTP 502) when the IdP
+sends a malformed groups claim, instead of the default behavior of logging and
+skipping group reconciliation (which leaves the user's existing role unchanged).
+Use this if you would rather a misconfigured IdP block sign-in than silently
+keep stale roles.
 
 ## Notes
 
