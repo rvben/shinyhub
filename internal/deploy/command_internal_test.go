@@ -83,14 +83,20 @@ func TestResolveAutoInstrument_ManifestOverridesFleetDefault(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			var m *Manifest
 			if tc.manifest != "" {
 				if err := os.WriteFile(filepath.Join(dir, ManifestFilename), []byte(tc.manifest), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				var err error
+				m, err = LoadManifest(dir)
+				if err != nil {
+					t.Fatalf("LoadManifest: %v", err)
+				}
 			}
 			mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 			mgr.SetAutoInstrumentAppsDefault(tc.fleet)
-			got := resolveAutoInstrument(Params{Slug: "x", BundleDir: dir, Manager: mgr})
+			got := resolveAutoInstrument(Params{Slug: "x", BundleDir: dir, Manager: mgr}, m)
 			if got != tc.want {
 				t.Errorf("resolveAutoInstrument = %v, want %v", got, tc.want)
 			}
@@ -98,18 +104,16 @@ func TestResolveAutoInstrument_ManifestOverridesFleetDefault(t *testing.T) {
 	}
 }
 
-// A manifest that fails to re-read at boot (validated at deploy time, but
-// disk trouble happens) must fall back to the fleet default, never error.
-func TestResolveAutoInstrument_UnreadableManifestFallsBackToFleet(t *testing.T) {
-	dir := t.TempDir()
-	// A directory named shinyhub.toml makes os.ReadFile fail with a
-	// non-NotExist error.
-	if err := os.Mkdir(filepath.Join(dir, ManifestFilename), 0o755); err != nil {
-		t.Fatal(err)
-	}
+// An unparseable manifest is now fatal at boot (via resolveBootParams). The
+// old warn-and-fallback behavior was in resolveAutoInstrument; the new contract
+// is that the caller (resolveBootParams) never reaches resolveAutoInstrument
+// when the manifest cannot be parsed. This test pins the new contract: a
+// nil manifest (absent file) still uses the fleet default, and the unreadable
+// case is covered by TestResolveBootParams_UnparseableManifestIsFatal.
+func TestResolveAutoInstrument_NilManifestUsesFleetDefault(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.SetAutoInstrumentAppsDefault(true)
-	if got := resolveAutoInstrument(Params{Slug: "x", BundleDir: dir, Manager: mgr}); !got {
-		t.Error("unreadable manifest should fall back to fleet default true")
+	if got := resolveAutoInstrument(Params{Slug: "x", Manager: mgr}, nil); !got {
+		t.Error("nil manifest should use fleet default true")
 	}
 }
