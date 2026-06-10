@@ -171,6 +171,11 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("warm expand %s: get app: %w", slug, err)
 	}
+	// Honour a concurrent stop/delete that won the lock first: do not resurrect
+	// a pool that the operator just tore down.
+	if app.Status != "running" && app.Status != "degraded" {
+		return false, nil
+	}
 
 	reps, err := s.store.ListReplicas(app.ID)
 	if err != nil {
@@ -210,6 +215,15 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 	// Build deploy params using the same field set as ScaleUp, reusing the
 	// current deployment's bundle dir and all resource/session config from the
 	// live app row. withTierPlacement maps each index to its configured tier.
+	sessionCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	identityEnabled := deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled())
+	// Refresh the pool's session cap and identity-header flag before booting:
+	// a config change between the shrink and this expand would otherwise be
+	// invisible to the proxy until the next full redeploy.
+	if s.proxy != nil {
+		s.proxy.SetPoolCap(slug, sessionCap)
+		s.proxy.SetPoolIdentityHeaders(slug, identityEnabled)
+	}
 	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	p := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
@@ -219,8 +233,8 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		Proxy:                 s.proxy,
 		MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem),
 		CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU),
-		MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica),
-		IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()),
+		MaxSessionsPerReplica: sessionCap,
+		IdentityHeaders:       identityEnabled,
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,
@@ -255,12 +269,10 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 			continue
 		}
 
-		// Boot succeeded: register the backend and persist the running row.
-		if s.proxy != nil {
-			if regErr := s.proxy.RegisterReplica(slug, idx, r.EndpointURL, nil, 0); regErr != nil {
-				slog.Warn("warm expand: register replica", "slug", slug, "index", idx, "err", regErr)
-			}
-		}
+		// deployReplica (RunReplica) already called RegisterReplica inside
+		// bootReplicaAttempt with the correct mTLS transport and DeploymentID.
+		// Do not call it again: a second registration would overwrite both with
+		// nil/0, breaking sticky-cookie matching and mTLS for remote-worker tiers.
 		pid, port := r.PID, r.Port
 		depID := current.ID
 		if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{

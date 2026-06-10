@@ -510,11 +510,18 @@ func newWarmExpandServer(t *testing.T, slug string, total int, warmIndices, stop
 		}
 	}
 
+	// Set the proxy pool size to the total replica count so RegisterReplica
+	// calls inside the fake deployReplica closure can succeed.
+	srv.proxy.SetPoolSize(slug, total)
+
 	rt := &fakeBootRuntime{failIndex: -1}
 	srv.manager.RegisterRuntime("default", rt)
 
-	// Replace deployReplica with a fake that drives the fakeBootRuntime and
-	// returns a Result that mirrors what a real boot would produce.
+	// Replace deployReplica with a fake that mirrors the production contract:
+	// it calls RegisterReplica with the deployment's ID (non-zero) so the proxy
+	// slot carries the correct DeploymentID for sticky-cookie matching. This is
+	// what bootReplicaAttempt does inside RunReplica; callers must NOT call
+	// RegisterReplica again after deployReplica returns.
 	srv.deployReplica = func(p deploy.Params, index int) (*deploy.Result, error) {
 		ep, err := rt.Start(context.Background(), process.StartParams{
 			Slug:  slug,
@@ -524,6 +531,13 @@ func newWarmExpandServer(t *testing.T, slug string, total int, warmIndices, stop
 		}, io.Discard)
 		if err != nil {
 			return nil, err
+		}
+		// Register with the real DeploymentID so tests can assert the proxy slot
+		// was not overwritten by a second nil/0 registration.
+		if srv.proxy != nil {
+			if regErr := srv.proxy.RegisterReplica(slug, index, ep.URL, nil, p.DeploymentID); regErr != nil {
+				return nil, fmt.Errorf("fake deployReplica: register: %w", regErr)
+			}
 		}
 		return &deploy.Result{
 			Index:       index,
@@ -541,9 +555,19 @@ func newWarmExpandServer(t *testing.T, slug string, total int, warmIndices, stop
 
 // TestWarmExpand_BootsWarmVictims proves WarmExpand boots all stopped/warm
 // replicas back to running, writes running/running rows for each, and emits a
-// warm_expand audit event with the correct from/to counts.
+// warm_expand audit event with the correct from/to counts. It also asserts
+// that the proxy slots for the victims carry a non-zero DeploymentID (set by
+// the fake deployReplica which mirrors the production RegisterReplica contract)
+// and that WarmExpand does NOT overwrite them with a second nil/0 registration.
 func TestWarmExpand_BootsWarmVictims(t *testing.T) {
 	srv, app, rt := newWarmExpandServer(t, "demo", 3, []int{1, 2}, nil)
+
+	// Fetch the deployment ID so we can assert it survives on the proxy slot.
+	deps, err := srv.store.ListDeployments(app.ID)
+	if err != nil || len(deps) == 0 {
+		t.Fatal("no deployments")
+	}
+	wantDepID := deps[0].ID
 
 	expanded, err := srv.WarmExpand("demo")
 	if err != nil {
@@ -566,6 +590,17 @@ func TestWarmExpand_BootsWarmVictims(t *testing.T) {
 	for _, r := range reps {
 		if r.Status != "running" || r.DesiredState != "running" {
 			t.Errorf("replica %d: status=%s desired_state=%s; want running/running", r.Index, r.Status, r.DesiredState)
+		}
+	}
+
+	// Proxy slots for the warm victims must carry the deployment's ID, proving
+	// WarmExpand did not overwrite the registration with a second nil/0 call.
+	for _, idx := range []int{1, 2} {
+		if url := srv.proxy.ReplicaTargetURL("demo", idx); url == "" {
+			t.Errorf("proxy slot %d has no URL after WarmExpand", idx)
+		}
+		if got := srv.proxy.ReplicaDeploymentID("demo", idx); got != wantDepID {
+			t.Errorf("proxy slot %d DeploymentID = %d; want %d (must not be overwritten with 0)", idx, got, wantDepID)
 		}
 	}
 
@@ -628,6 +663,37 @@ func TestWarmExpand_NoWarmRows(t *testing.T) {
 	}
 	if booted := rt.boosted(); len(booted) != 0 {
 		t.Errorf("expected 0 boot calls; got %d", len(booted))
+	}
+}
+
+// TestWarmExpand_StoppedAppSkipped proves WarmExpand is a no-op when the app
+// is not running or degraded (e.g. manually stopped), even when warm rows
+// exist. This mirrors the WarmShrink status guard and prevents resurrections
+// of a pool the operator tore down.
+func TestWarmExpand_StoppedAppSkipped(t *testing.T) {
+	srv, _, rt := newWarmExpandServer(t, "demo", 2, []int{1}, nil)
+
+	// Force app status to stopped after seeding the warm row.
+	if err := srv.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "demo", Status: "stopped"}); err != nil {
+		t.Fatalf("set app status stopped: %v", err)
+	}
+
+	expanded, err := srv.WarmExpand("demo")
+	if err != nil {
+		t.Fatalf("WarmExpand: %v", err)
+	}
+	if expanded {
+		t.Error("WarmExpand returned true; want false (app is stopped)")
+	}
+	if booted := rt.boosted(); len(booted) != 0 {
+		t.Errorf("expected 0 boot calls; got %d (must not boot when app is stopped)", len(booted))
+	}
+	events, err := srv.store.ListAuditEvents("warm_expand", 10, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("audit events = %d; want 0 (no-op must not audit)", len(events))
 	}
 }
 
