@@ -347,18 +347,16 @@ func TestAccess_SharedApp_AuthenticatedUser(t *testing.T) {
 func TestAccess_PrivateApp_DemotedAdmin_LosesBypass(t *testing.T) {
 	store := makeStore(t)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"})
-	store.CreateUser(db.CreateUserParams{Username: "exadmin", PasswordHash: "h", Role: "admin"})
+	// exadmin holds a stale JWT minted while they were an admin, but their live
+	// DB role is now developer (e.g. they were since demoted). We model that
+	// divergence directly: the row is developer, the token still claims admin.
+	store.CreateUser(db.CreateUserParams{Username: "exadmin", PasswordHash: "h", Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	exadmin, _ := store.GetUserByUsername("exadmin")
 	store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Private", OwnerID: owner.ID})
 
-	// JWT was minted while exadmin was still admin.
+	// JWT was minted while exadmin was still an admin; the token is unchanged.
 	token, _ := auth.IssueJWT(exadmin.ID, "exadmin", "admin", "test-secret")
-
-	// Demote the admin in the DB. The token is unchanged.
-	if err := store.UpdateUserRole(exadmin.ID, "developer"); err != nil {
-		t.Fatalf("demote: %v", err)
-	}
 
 	// Live lookup: read the current role from DB on every request.
 	live := func(id int64) (*auth.ContextUser, error) {
