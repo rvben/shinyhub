@@ -214,13 +214,69 @@ func TestForwardAuth_GroupsHeaderPresent_ReconcilesCalled(t *testing.T) {
 	}
 }
 
-// TestForwardAuth_GroupsHeaderAbsent_NoReconcile verifies that when the
-// groups header is NOT present, ReconcileUserFromGroups is NOT called.
-// This is the "trusted IdP always sends the header" contract: absence means
-// the IdP intentionally omitted groups, so we must not reconcile.
-func TestForwardAuth_GroupsHeaderAbsent_NoReconcile(t *testing.T) {
+// TestForwardAuth_GroupsHeaderAbsent_RevokesStaleGroups verifies that when
+// groups_header is configured and the header is absent from the request,
+// ReconcileUserFromGroups is still called with an empty group list.
+//
+// When groups_header is configured, the reverse proxy is the authoritative
+// source of the user's group membership on every request. An absent header
+// means the user has no groups on this request - group-derived role elevation
+// must be revoked. The break-glass manual_role override and the transactional
+// last-admin guard inside ReconcileUserFromGroups prevent accidental admin
+// lockout. The proxy MUST always send this header, empty when the user has no
+// groups.
+func TestForwardAuth_GroupsHeaderAbsent_RevokesStaleGroups(t *testing.T) {
+	store := newFakeStore()
+	store.users["carol"] = &ContextUser{ID: 2, Username: "carol", Role: "admin"}
+	store.storedGroups = []string{"admins"} // user currently has admin via group
+
+	cfg := ForwardAuthConfig{
+		Enabled:           true,
+		UserHeader:        "X-Forwarded-User",
+		GroupsHeader:      "X-Forwarded-Groups",
+		DefaultRole:       "developer",
+		GroupRoleMappings: []GroupRoleMapping{{Group: "admins", Role: "admin"}},
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "carol")
+	// Deliberately NOT setting X-Forwarded-Groups - simulates removal from IdP
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if !h.called {
+		t.Fatal("inner handler not called")
+	}
+	if len(store.reconcileCalls) != 1 {
+		t.Fatalf("absent groups header with stored groups must trigger reconcile, got %d calls", len(store.reconcileCalls))
+	}
+	call := store.reconcileCalls[0]
+	if len(call.groups) != 0 {
+		t.Errorf("reconcile must be called with empty groups to revoke elevation, got %v", call.groups)
+	}
+	if call.defRole != "developer" {
+		t.Errorf("reconcile defaultRole: got %q want developer", call.defRole)
+	}
+	if len(call.mappings) != 1 || call.mappings[0].Group != "admins" {
+		t.Errorf("reconcile mappings not forwarded: %v", call.mappings)
+	}
+}
+
+// TestForwardAuth_GroupsHeaderAbsentNoStoredGroups_NoReconcile verifies that
+// when groups_header is configured, the header is absent, and the user has no
+// stored groups, ReconcileUserFromGroups is NOT called. The incoming empty list
+// already matches the stored empty list, so groupsChanged short-circuits and
+// there is nothing to revoke - no needless DB write.
+func TestForwardAuth_GroupsHeaderAbsentNoStoredGroups_NoReconcile(t *testing.T) {
 	store := newFakeStore()
 	store.users["carol"] = &ContextUser{ID: 2, Username: "carol", Role: "developer"}
+	// storedGroups is nil (no groups stored) - matches the incoming empty list
 
 	cfg := ForwardAuthConfig{
 		Enabled:           true,
@@ -246,7 +302,44 @@ func TestForwardAuth_GroupsHeaderAbsent_NoReconcile(t *testing.T) {
 		t.Fatal("inner handler not called")
 	}
 	if len(store.reconcileCalls) != 0 {
-		t.Fatalf("absent groups header must not trigger reconcile, got %d calls", len(store.reconcileCalls))
+		t.Fatalf("no stored groups + absent header = no change, got %d reconcile calls", len(store.reconcileCalls))
+	}
+}
+
+// TestForwardAuth_GroupsHeaderNotConfigured_AbsentHeader_NoReconcile verifies
+// that when groups_header is NOT configured (group-driven roles are disabled),
+// a user with stored groups receives no reconcile call even when the header is
+// absent. Revocation only applies when groups_header is configured; otherwise
+// group state is never touched by the middleware.
+func TestForwardAuth_GroupsHeaderNotConfigured_AbsentHeader_NoReconcile(t *testing.T) {
+	store := newFakeStore()
+	store.users["carol"] = &ContextUser{ID: 2, Username: "carol", Role: "admin"}
+	store.storedGroups = []string{"admins"} // stored groups, but feature disabled
+
+	cfg := ForwardAuthConfig{
+		Enabled:      true,
+		UserHeader:   "X-Forwarded-User",
+		GroupsHeader: "", // not configured
+		DefaultRole:  "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "carol")
+	// No groups header
+	w := httptest.NewRecorder()
+
+	mw.ServeHTTP(w, r)
+
+	if !h.called {
+		t.Fatal("inner handler not called")
+	}
+	if len(store.reconcileCalls) != 0 {
+		t.Fatalf("groups_header not configured must never trigger reconcile, got %d calls", len(store.reconcileCalls))
 	}
 }
 

@@ -24,11 +24,16 @@ var csrfSafeMethods = map[string]struct{}{
 // CSRFMiddleware implements the double-submit-cookie CSRF pattern.
 //
 //   - Safe methods (GET/HEAD/OPTIONS) pass through and, when a session cookie
-//     is present without a csrf_token cookie, the middleware mints one.
+//     is present (or the request is authenticated via forward-auth) without a
+//     csrf_token cookie, the middleware mints one.
 //   - Unsafe methods (POST/PUT/PATCH/DELETE) require the csrf_token cookie
 //     value to match the X-CSRF-Token header.
 //   - Requests with an Authorization header (Bearer/Token) bypass CSRF checks:
 //     token auth is not vulnerable to CSRF.
+//   - Forward-auth-authenticated requests (no session cookie, user injected by
+//     ForwardAuthMiddleware) receive a csrf_token on safe methods and must
+//     present the double-submit token on unsafe methods, giving them the same
+//     CSRF protection as session users.
 //
 // trustedNets is the configured list of trusted-proxy CIDRs; it gates whether
 // X-Forwarded-Proto is honoured when deciding the Secure flag on the minted
@@ -63,9 +68,20 @@ func CSRFMiddleware(trustedNets []*net.IPNet) func(http.Handler) http.Handler {
 }
 
 // ensureCSRFCookie sets a csrf_token cookie on the response when the request
-// has a session cookie but no csrf_token cookie yet.
+// has a session cookie or is authenticated via forward-auth, and no csrf_token
+// cookie is present yet. Forward-auth users have no session cookie, so checking
+// for UserFromContext covers both authentication paths without bypassing the
+// double-submit check for unsafe methods.
 func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, trustedNets []*net.IPNet) {
-	if _, err := r.Cookie(SessionCookieName); err != nil {
+	// Mint a token when the request carries a ShinyHub session cookie or is
+	// authenticated via forward-auth (a trusted-proxy header). Forward-auth users
+	// have no session cookie, so without this branch they could never obtain a
+	// csrf_token and every mutating request would be rejected. Minting here gives
+	// them the same double-submit-cookie protection as session users, rather than
+	// bypassing CSRF (which would push the whole defense onto the proxy cookie's
+	// SameSite configuration).
+	_, sessErr := r.Cookie(SessionCookieName)
+	if sessErr != nil && UserFromContext(r.Context()) == nil {
 		return
 	}
 	if c, err := r.Cookie(CSRFCookieName); err == nil && c.Value != "" {

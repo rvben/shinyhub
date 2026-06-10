@@ -183,20 +183,54 @@ func (s *Store) UpdateUserPassword(id int64, hash string) error {
 }
 
 // DeleteUser permanently removes a user and all their associated data
-// (FK cascades handle oauth_accounts and api_keys).
+// (FK cascades handle oauth_accounts and api_keys). It refuses (ErrLastAdmin)
+// to delete the final admin, in one transaction under the role-mutation lock so
+// concurrent deletes cannot race the system to zero admins.
 // Returns ErrNotFound if no user with that ID exists.
 func (s *Store) DeleteUser(id int64) error {
-	result, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), roleMutationLockKey)
+	if err != nil {
+		return fmt.Errorf("delete user: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var role string
+	err = tx.QueryRowContext(ctx, `SELECT role FROM users WHERE id = ?`, id).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("delete user: read role: %w", err)
+	}
+	if role == "admin" {
+		others, err := countAdminsExceptTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if others == 0 {
+			return ErrLastAdmin
+		}
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
-	n, err := result.RowsAffected()
+	n, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("delete user rows: %w", err)
 	}
 	if n == 0 {
 		return ErrNotFound
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete user: commit: %w", err)
+	}
+	committed = true
 	return nil
 }
 

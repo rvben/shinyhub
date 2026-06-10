@@ -185,7 +185,7 @@ func BearerMiddleware(secret string, keyLookup APIKeyLookup, userLookup UserLook
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), userContextKey, user)
+			ctx := WithUser(r.Context(), user)
 			if token != nil {
 				ctx = context.WithValue(ctx, tokenContextKey, token)
 			}

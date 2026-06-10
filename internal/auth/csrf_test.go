@@ -76,3 +76,44 @@ func TestCSRF_POSTMismatchedTokenRejected(t *testing.T) {
 		t.Fatalf("want 403, got %d", rr.Code)
 	}
 }
+
+func TestCSRF_GETForwardAuthUserMintsToken(t *testing.T) {
+	h := auth.CSRFMiddleware(nil)(okHandler())
+	req := httptest.NewRequest("GET", "/api/apps", nil)
+	// Forward-auth user on context, NO session cookie.
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{ID: 7, Username: "fa-user", Role: "developer"}))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Header().Get("Set-Cookie"), "csrf_token=") {
+		t.Fatal("expected csrf_token cookie minted for forward-auth user on GET")
+	}
+}
+
+func TestCSRF_POSTForwardAuthUserMissingTokenRejected(t *testing.T) {
+	// We mint a token rather than bypass: a forward-auth POST with no csrf cookie
+	// is still rejected. This pins the secure choice (no blanket bypass).
+	h := auth.CSRFMiddleware(nil)(okHandler())
+	req := httptest.NewRequest("POST", "/api/apps", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{ID: 7, Username: "fa-user", Role: "developer"}))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("forward-auth POST without csrf token must be 403, got %d", rr.Code)
+	}
+}
+
+func TestCSRF_POSTForwardAuthUserMatchingTokenAllowed(t *testing.T) {
+	h := auth.CSRFMiddleware(nil)(okHandler())
+	req := httptest.NewRequest("POST", "/api/apps", nil)
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{ID: 7, Username: "fa-user", Role: "developer"}))
+	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "matching-token"})
+	req.Header.Set("X-CSRF-Token", "matching-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("forward-auth POST with matching double-submit token must be 200, got %d", rr.Code)
+	}
+}

@@ -132,6 +132,9 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Authoritative role reconciliation from IdP groups. Only when the provider
 	// actually sent the groups claim - an absent claim must not demote the user.
+	if oidcUser.GroupsClaimMalformed {
+		fmt.Fprintf(os.Stderr, "oidc: groups claim present but unparseable for user %s; skipping group reconciliation to avoid demotion\n", user.Username)
+	}
 	if oidcUser.GroupsClaimPresent {
 		if err := s.store.ReconcileUserFromGroups(
 			user.ID, oidcUser.Groups,

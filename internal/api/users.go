@@ -311,10 +311,6 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if s.refuseSystemUser(w, id) {
 		return
 	}
-	// No last-admin guard is needed here: requireAdmin means the caller is an
-	// admin, and self-delete is blocked below, so the caller always remains an
-	// admin after any delete - the count can never reach zero.
-	//
 	// An admin cannot delete their own account via the API (the UI also blocks
 	// it): self-deletion can strand the instance with no admin.
 	if admin.ID == id {
@@ -325,6 +321,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DeleteUser(id); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		if errors.Is(err, db.ErrLastAdmin) {
+			writeError(w, http.StatusConflict, "cannot remove the last admin")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
