@@ -156,6 +156,80 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 	return true, nil
 }
 
+// warmVictim is an index + its DB row, used by the shared boot loop.
+type warmVictim struct {
+	index int
+	rep   *db.Replica
+}
+
+// bootWarmVictims boots every entry in victims in ascending index order,
+// writing running/running rows for successes and crashed/running (watchdog
+// bait) for failures. It returns the count of successfully restored replicas
+// and the first boot error encountered (nil when all succeed). Callers must
+// be holding the per-slug deploy lock and must have verified the app is still
+// running/degraded before calling. The callerName prefix is included in error
+// messages for attribution.
+func (s *Server) bootWarmVictims(
+	callerName string,
+	app *db.App,
+	current *db.Deployment,
+	p deploy.Params,
+	victims []warmVictim,
+) (restored int, firstErr error) {
+	slug := app.Slug
+	for _, v := range victims {
+		idx := v.index
+		r, bootErr := s.deployReplica(p, idx)
+		if bootErr != nil {
+			// Hand the failed victim to the watchdog: crashed/running causes
+			// reconcileReplicas to restart it on the next tick.
+			if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{
+				AppID:        app.ID,
+				Index:        idx,
+				Status:       "crashed",
+				Provider:     v.rep.Provider,
+				Tier:         v.rep.Tier,
+				AppVersion:   v.rep.AppVersion,
+				DesiredState: "running",
+				DeploymentID: v.rep.DeploymentID,
+			}); upsertErr != nil {
+				slog.Warn(callerName+": persist crashed victim", "slug", slug, "index", idx, "err", upsertErr)
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s %s: boot replica %d: %w", callerName, slug, idx, bootErr)
+			}
+			continue
+		}
+
+		// deployReplica (RunReplica) already called RegisterReplica inside
+		// bootReplicaAttempt with the correct mTLS transport and DeploymentID.
+		// Do not call it again: a second registration would overwrite both with
+		// nil/0, breaking sticky-cookie matching and mTLS for remote-worker tiers.
+		pid, port := r.PID, r.Port
+		depID := current.ID
+		if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID:        app.ID,
+			Index:        idx,
+			PID:          &pid,
+			Port:         &port,
+			Status:       "running",
+			Provider:     r.Provider,
+			Tier:         r.Tier,
+			EndpointURL:  r.EndpointURL,
+			WorkerID:     r.WorkerID,
+			AppVersion:   current.Version,
+			DesiredState: "running",
+			DeploymentID: &depID,
+		}); upsertErr != nil {
+			// The process is running but the row is stale - log and continue so
+			// the watchdog can observe and reconcile.
+			slog.Warn(callerName+": persist running replica", "slug", slug, "index", idx, "err", upsertErr)
+		}
+		restored++
+	}
+	return restored, firstErr
+}
+
 // WarmExpand boots every warm-parked replica (desired_state='warm') back to
 // running, restoring full configured capacity after a warm shrink. Runs
 // under the per-slug deploy lock. Manual stops (desired_state='stopped')
@@ -184,14 +258,10 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 
 	// Collect warm victims: stopped rows that were parked by WarmShrink.
 	// Manual stops (desired_state='stopped') are deliberately excluded.
-	type victim struct {
-		index int
-		rep   *db.Replica
-	}
-	var victims []victim
+	var victims []warmVictim
 	for _, r := range reps {
 		if r.DesiredState == db.ReplicaDesiredWarm && r.Status == "stopped" {
-			victims = append(victims, victim{index: r.Index, rep: r})
+			victims = append(victims, warmVictim{index: r.Index, rep: r})
 		}
 	}
 	if len(victims) == 0 {
@@ -243,62 +313,11 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 	// Boot warm victims in ascending index order, mirroring the order a full
 	// deploy would use. Continue past individual failures so every victim gets
 	// an attempt; accumulate the first error to surface to the caller.
-	var firstErr error
-	anyRestored := false
-	for _, v := range victims {
-		idx := v.index
-		r, bootErr := s.deployReplica(p, idx)
-		if bootErr != nil {
-			// Hand the failed victim to the watchdog: crashed/running causes
-			// reconcileReplicas to restart it on the next tick.
-			if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{
-				AppID:        app.ID,
-				Index:        idx,
-				Status:       "crashed",
-				Provider:     v.rep.Provider,
-				Tier:         v.rep.Tier,
-				AppVersion:   v.rep.AppVersion,
-				DesiredState: "running",
-				DeploymentID: v.rep.DeploymentID,
-			}); upsertErr != nil {
-				slog.Warn("warm expand: persist crashed victim", "slug", slug, "index", idx, "err", upsertErr)
-			}
-			if firstErr == nil {
-				firstErr = fmt.Errorf("warm expand %s: boot replica %d: %w", slug, idx, bootErr)
-			}
-			continue
-		}
-
-		// deployReplica (RunReplica) already called RegisterReplica inside
-		// bootReplicaAttempt with the correct mTLS transport and DeploymentID.
-		// Do not call it again: a second registration would overwrite both with
-		// nil/0, breaking sticky-cookie matching and mTLS for remote-worker tiers.
-		pid, port := r.PID, r.Port
-		depID := current.ID
-		if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:        app.ID,
-			Index:        idx,
-			PID:          &pid,
-			Port:         &port,
-			Status:       "running",
-			Provider:     r.Provider,
-			Tier:         r.Tier,
-			EndpointURL:  r.EndpointURL,
-			WorkerID:     r.WorkerID,
-			AppVersion:   current.Version,
-			DesiredState: "running",
-			DeploymentID: &depID,
-		}); upsertErr != nil {
-			// The process is running but the row is stale - log and continue so
-			// the watchdog can observe and reconcile.
-			slog.Warn("warm expand: persist running replica", "slug", slug, "index", idx, "err", upsertErr)
-		}
-		anyRestored = true
-	}
+	anyRestored, firstErr := s.bootWarmVictims("warm expand", app, current, p, victims)
 
 	// Recount live replicas after expansion for the audit detail.
 	liveAfter := liveBefore
-	if anyRestored {
+	if anyRestored > 0 {
 		updatedReps, listErr := s.store.ListReplicas(app.ID)
 		if listErr == nil {
 			liveAfter = 0
@@ -319,5 +338,5 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		Detail:       fmt.Sprintf(`{"from":%d,"to":%d}`, liveBefore, liveAfter),
 	})
 
-	return anyRestored, firstErr
+	return anyRestored > 0, firstErr
 }

@@ -63,6 +63,54 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		return false, fmt.Errorf("scale up %s: %w", slug, err)
 	}
 
+	// Defragment before adding: if warm rows exist (desired_state='warm',
+	// status='stopped'), boot them all first and return immediately. This keeps
+	// the pool contiguous - no stopped row sits below a running one - and avoids
+	// adding a new index N when capacity is already parked at lower indices.
+	reps, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return false, fmt.Errorf("scale up %s: list replicas: %w", slug, err)
+	}
+	var warmVictims []warmVictim
+	for _, r := range reps {
+		if r.DesiredState == db.ReplicaDesiredWarm && r.Status == "stopped" {
+			warmVictims = append(warmVictims, warmVictim{index: r.Index, rep: r})
+		}
+	}
+	if len(warmVictims) > 0 {
+		sessionCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+		identityEnabled := deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled())
+		if s.proxy != nil {
+			s.proxy.SetPoolCap(slug, sessionCap)
+			s.proxy.SetPoolIdentityHeaders(slug, identityEnabled)
+		}
+		defragMem, defragCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+		p := s.withTierPlacement(deploy.Params{
+			Slug:                  slug,
+			BundleDir:             current.BundleDir,
+			Replicas:              app.Replicas,
+			Manager:               s.manager,
+			Proxy:                 s.proxy,
+			MemoryLimitMB:         deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defragMem),
+			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defragCPU),
+			MaxSessionsPerReplica: sessionCap,
+			IdentityHeaders:       identityEnabled,
+			ContentDigest:         current.ContentDigest,
+			DeploymentID:          current.ID,
+			AppVersion:            current.Version,
+		}, app)
+		restored, bootErr := s.bootWarmVictims("scale up", app, current, p, warmVictims)
+		if restored > 0 {
+			s.store.LogAuditEvent(db.AuditEventParams{
+				Action:       "scale_up",
+				ResourceType: "app",
+				ResourceID:   slug,
+				Detail:       fmt.Sprintf(`{"defrag":true,"restored":%d}`, restored),
+			})
+		}
+		return restored > 0, bootErr
+	}
+
 	newIndex := app.Replicas
 	total := newIndex + 1
 
@@ -200,16 +248,20 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 	if app.Status != "running" && app.Status != "degraded" {
 		return false, nil
 	}
-	if app.Replicas <= 1 {
-		return false, nil
+	// Unified floor: max(autoscale min when enabled, min_warm_replicas, 1).
+	// Re-enforced under the lock (same reason ScaleUp re-checks the ceiling):
+	// the controller clamps against an unlocked snapshot; re-reading the live row
+	// closes the race where a concurrent config change raised the floor after the
+	// decision was made, so a queued shrink can never take the pool below any of
+	// the three lower bounds.
+	floor := 1
+	if app.AutoscaleEnabled && app.AutoscaleMinReplicas > floor {
+		floor = app.AutoscaleMinReplicas
 	}
-	// Re-enforce the app's own autoscale floor under the lock, for the same
-	// reason ScaleUp re-checks the ceiling: the controller clamps to this when it
-	// decides, but against an unlocked snapshot. Re-reading the live row closes
-	// the race where a concurrent config change raised the minimum after the
-	// decision was made, so a queued shrink can never take an autoscaled pool
-	// below its configured minimum.
-	if app.AutoscaleEnabled && app.Replicas <= app.AutoscaleMinReplicas {
+	if app.MinWarmReplicas > floor {
+		floor = app.MinWarmReplicas
+	}
+	if app.Replicas <= floor {
 		return false, nil
 	}
 	victim := app.Replicas - 1

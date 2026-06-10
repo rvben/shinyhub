@@ -652,3 +652,188 @@ func TestScaleDown_RefusesBelowOne(t *testing.T) {
 		t.Errorf("replica count changed to %d at the floor; want 1", got.Replicas)
 	}
 }
+
+// TestScaleDown_RefusesBelowMinWarmReplicas proves ScaleDown treats
+// min_warm_replicas as an additional lower bound, independent of autoscale.
+// An app at exactly its min_warm_replicas floor must never be shrunk further.
+func TestScaleDown_RefusesBelowMinWarmReplicas(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	// Two replicas, min_warm_replicas=2 => floor is 2; ScaleDown must refuse.
+	srv, app := newScaleTestServer(t, "demo", 2, cfg)
+	if err := srv.store.UpdateAppMinWarmReplicas(app.ID, 2); err != nil {
+		t.Fatalf("UpdateAppMinWarmReplicas: %v", err)
+	}
+
+	scaled, err := srv.ScaleDown("demo", 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("ScaleDown: %v", err)
+	}
+	if scaled {
+		t.Error("ScaleDown removed a replica below min_warm_replicas=2; want refused")
+	}
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 2 {
+		t.Errorf("replica count changed to %d; want 2 (min_warm floor)", got.Replicas)
+	}
+}
+
+// TestScaleDown_AllowedAboveMinWarmFloor proves ScaleDown allows one removal
+// when replicas > min_warm_replicas, then refuses the second attempt (now at the
+// floor). This validates the "allowed once then refused" behavior.
+func TestScaleDown_AllowedAboveMinWarmFloor(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	// Three replicas, min_warm_replicas=2 => first ScaleDown => 2; second refused.
+	srv, app := newScaleTestServer(t, "demo", 3, cfg)
+	if err := srv.store.UpdateAppMinWarmReplicas(app.ID, 2); err != nil {
+		t.Fatalf("UpdateAppMinWarmReplicas: %v", err)
+	}
+
+	// Start a real process at index 2 (the victim) so StopReplica succeeds.
+	if _, err := srv.manager.Start(process.StartParams{
+		Slug: "demo", Index: 2, Dir: t.TempDir(),
+		Command: []string{"sleep", "30"}, Port: 19900,
+	}); err != nil {
+		t.Fatalf("seed victim process: %v", err)
+	}
+	srv.proxy.SetPoolSize("demo", 3)
+
+	scaled, err := srv.ScaleDown("demo", 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("first ScaleDown: %v", err)
+	}
+	if !scaled {
+		t.Fatal("first ScaleDown refused; want true (3 > min_warm_replicas=2)")
+	}
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 2 {
+		t.Errorf("replica count = %d after first ScaleDown; want 2", got.Replicas)
+	}
+
+	// Second ScaleDown: app is now at floor 2; must be refused.
+	scaled, err = srv.ScaleDown("demo", 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("second ScaleDown: %v", err)
+	}
+	if scaled {
+		t.Error("second ScaleDown succeeded; want refused (at min_warm floor 2)")
+	}
+	got, _ = srv.store.GetAppBySlug("demo")
+	if got.Replicas != 2 {
+		t.Errorf("replica count = %d after second ScaleDown; want 2 (floor)", got.Replicas)
+	}
+}
+
+// TestScaleDown_MinWarmBeatsAutoscaleMin proves that when both autoscale and
+// min_warm_replicas are configured, the effective floor is max(autoscale_min,
+// min_warm). An app with autoscale_min=1 and min_warm=2 must refuse at 2.
+func TestScaleDown_MinWarmBeatsAutoscaleMin(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	srv, app := newScaleTestServer(t, "demo", 2, cfg)
+	if err := srv.store.SetAppAutoscale(db.SetAppAutoscaleParams{
+		AppID: app.ID, Enabled: true, MinReplicas: 1, MaxReplicas: 8, Target: 0.8,
+	}); err != nil {
+		t.Fatalf("SetAppAutoscale: %v", err)
+	}
+	if err := srv.store.UpdateAppMinWarmReplicas(app.ID, 2); err != nil {
+		t.Fatalf("UpdateAppMinWarmReplicas: %v", err)
+	}
+
+	// With autoscale_min=1, the old code would allow removal (floor was 1).
+	// With min_warm=2 the effective floor is 2; must be refused.
+	scaled, err := srv.ScaleDown("demo", 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("ScaleDown: %v", err)
+	}
+	if scaled {
+		t.Error("ScaleDown succeeded despite min_warm_replicas=2 floor; want refused")
+	}
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 2 {
+		t.Errorf("replica count = %d; want 2 (min_warm floor beats autoscale_min=1)", got.Replicas)
+	}
+}
+
+// TestScaleUp_DefragmentsWarmPoolBeforeAdding proves that when warm rows exist,
+// ScaleUp boots ALL warm victims first (restoring them to running) and returns
+// true without adding a new trailing index. Only when no warm rows remain does
+// ScaleUp add index N. This keeps pools contiguous.
+func TestScaleUp_DefragmentsWarmPoolBeforeAdding(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	// App: 3 configured replicas; index 0 running, indices 1+2 warm (stopped/warm).
+	srv, app, rt := newWarmExpandServer(t, "demo", 3, []int{1, 2}, nil)
+	srv.proxy.SetPoolSize("demo", 3)
+
+	// ScaleUp must boot the warm victims (indices 1 and 2) and NOT add index 3.
+	scaled, err := srv.ScaleUp("demo")
+	if err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+	if !scaled {
+		t.Fatal("ScaleUp returned false; warm victims exist, so capacity grew")
+	}
+
+	// Exactly 2 boots (indices 1 and 2), NOT a new trailing index 3.
+	if booted := rt.boosted(); len(booted) != 2 {
+		t.Errorf("ScaleUp booted %d replicas; want 2 (the warm victims, not a new index 3)", len(booted))
+	}
+
+	// app.Replicas must remain 3 (no new index was added; pool was defragmented).
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 3 {
+		t.Errorf("app.Replicas = %d; want 3 (defrag restores warm rows, does not add)", got.Replicas)
+	}
+
+	// Both warm rows must now be running/running (no row left desired_state=warm
+	// with a lower index than a running row - contiguity pinned).
+	reps, err := srv.store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range reps {
+		if r.DesiredState == db.ReplicaDesiredWarm && r.Status == "stopped" {
+			t.Errorf("replica %d still warm/stopped after ScaleUp defrag; want running/running", r.Index)
+		}
+	}
+}
+
+// TestScaleUp_NoWarmRowsAddsNewIndex pins the existing behavior: when the pool
+// has no warm rows, ScaleUp boots a new trailing index as before.
+func TestScaleUp_NoWarmRowsAddsNewIndex(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.MaxReplicas = 8
+	srv, _ := newScaleTestServer(t, "demo", 2, cfg)
+
+	var bootedIndex = -1
+	srv.deployReplica = func(p deploy.Params, index int) (*deploy.Result, error) {
+		bootedIndex = index
+		return &deploy.Result{
+			Index:       index,
+			PID:         4242,
+			Port:        9100 + index,
+			Provider:    "native",
+			Tier:        "default",
+			EndpointURL: "http://127.0.0.1:9100",
+		}, nil
+	}
+	srv.proxy.SetPoolSize("demo", 2)
+
+	scaled, err := srv.ScaleUp("demo")
+	if err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+	if !scaled {
+		t.Fatal("ScaleUp reported no change for an app below the ceiling")
+	}
+	// No warm rows => new trailing index 2 booted.
+	if bootedIndex != 2 {
+		t.Errorf("ScaleUp booted index %d; want trailing index 2 (no warm rows)", bootedIndex)
+	}
+	got, _ := srv.store.GetAppBySlug("demo")
+	if got.Replicas != 3 {
+		t.Errorf("app.Replicas = %d; want 3", got.Replicas)
+	}
+}
