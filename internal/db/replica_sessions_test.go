@@ -355,3 +355,73 @@ func TestReplicaSessions_DBClockStamps(t *testing.T) {
 		t.Errorf("second updated_at (%d) must be greater than first (%d); DB clock did not advance", ts2, ts1)
 	}
 }
+
+// TestAppFleetLastActivity verifies that AppFleetLastActivity returns the
+// MAX(last_activity) epoch across non-stale, non-excluded rows, and 0 when no
+// fresh rows exist. The semantics mirror AppFleetLoad's staleness/exclusion.
+func TestAppFleetLastActivity(t *testing.T) {
+	s := dbtest.New(t)
+	owner := mustCreateUser(t, s, "fla-owner", "developer")
+	app := mustCreateApp(t, s, "fla-app", owner.ID)
+	appID := app.ID
+	const staleWindowSec = int64(15)
+
+	// No rows yet: expect 0.
+	got, err := s.AppFleetLastActivity(appID, staleWindowSec, "")
+	if err != nil {
+		t.Fatalf("AppFleetLastActivity (empty): %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0 with no rows, got %d", got)
+	}
+
+	// Insert two instances: instA with older last_activity, instB with newer.
+	rowsA := []db.ReplicaSessionRow{
+		{AppID: appID, Idx: 0, Active: 1, LastActivityAgeSec: 20}, // older activity
+	}
+	if err := s.UpsertReplicaSessions("fla-instA", rowsA); err != nil {
+		t.Fatalf("upsert instA: %v", err)
+	}
+	rowsB := []db.ReplicaSessionRow{
+		{AppID: appID, Idx: 0, Active: 1, LastActivityAgeSec: 5}, // newer activity
+	}
+	if err := s.UpsertReplicaSessions("fla-instB", rowsB); err != nil {
+		t.Fatalf("upsert instB: %v", err)
+	}
+
+	// Both instances fresh: AppFleetLastActivity must return a non-zero epoch.
+	got, err = s.AppFleetLastActivity(appID, staleWindowSec, "")
+	if err != nil {
+		t.Fatalf("AppFleetLastActivity (both): %v", err)
+	}
+	if got == 0 {
+		t.Error("expected non-zero epoch with fresh rows, got 0")
+	}
+
+	// Excluding instB must still return a non-zero epoch (instA remains).
+	gotExcluded, err := s.AppFleetLastActivity(appID, staleWindowSec, "fla-instB")
+	if err != nil {
+		t.Fatalf("AppFleetLastActivity (exclude instB): %v", err)
+	}
+	if gotExcluded == 0 {
+		t.Error("expected non-zero epoch after excluding instB (instA still present), got 0")
+	}
+	// instA has older activity (LastActivityAgeSec=20 vs 5), so its epoch < instB's.
+	if gotExcluded >= got {
+		t.Errorf("excluded instB: expected epoch (%d) < full (%d) since instA's activity is older", gotExcluded, got)
+	}
+
+	// Stale all rows by backdating updated_at.
+	if _, err := s.DB().Exec(
+		`UPDATE replica_sessions SET updated_at = 0 WHERE app_id = ?`, appID,
+	); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
+	got, err = s.AppFleetLastActivity(appID, staleWindowSec, "")
+	if err != nil {
+		t.Fatalf("AppFleetLastActivity (stale): %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0 after all rows staled, got %d", got)
+	}
+}

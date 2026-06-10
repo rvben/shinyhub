@@ -109,6 +109,15 @@ type appStore interface {
 	// both measured on the database clock. Used by the clustered hibernation
 	// path to confirm that no other instance is currently serving traffic.
 	AppFleetLoad(appID int64, staleWindowSec int64, excludeInstanceID string) (active []int64, idleSinceSec int64, err error)
+	// AppFleetLastActivity returns the MAX(last_activity) Unix epoch across
+	// non-stale, non-excluded replica_sessions rows. Returns 0 when no fresh
+	// rows exist. Used by the clustered warm-expand path to compare fleet
+	// activity against the shrink moment entirely on the database clock.
+	AppFleetLastActivity(appID int64, staleWindowSec int64, excludeInstanceID string) (int64, error)
+	// ListWarmShrunkApps returns running/degraded apps that have at least one
+	// replica parked with desired_state='warm'. The watcher expand check
+	// iterates this set each tick.
+	ListWarmShrunkApps() ([]*db.App, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -330,6 +339,7 @@ func (w *Watcher) runOnce() {
 	}
 	w.reconcileReplicas(handled)
 	w.reconcileStatuses()
+	w.handleWarmExpand()
 	// Reap stale replica_sessions rows only in clustered mode. Single-node
 	// deployments never write replica_sessions rows, so this DELETE is both
 	// unnecessary and a behavioral change we must avoid.
@@ -717,6 +727,91 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 	// the status. Calling it again would be redundant and would unconditionally
 	// overwrite any concurrent status change (e.g. an immediate wake).
 	w.recordTransition("hibernate")
+}
+
+// handleWarmExpand checks every warm-shrunk app each tick and re-expands any
+// whose traffic has resumed since the shrink. It is the expand counterpart of
+// the warm-shrink path in handleIdle/handleIdleClustered.
+//
+// Skipped entirely when warmExpand is nil (pre-warming not configured).
+//
+// Activity predicate:
+//   - Single-node: compares the proxy's wall-clock LastSeen against the
+//     shrink moment (the newest updated_at among the app's 'warm' replica rows).
+//     Both values are on the same host clock, so the comparison is sound. After
+//     a server restart LastSeen is zero, which is before any real shrink moment,
+//     so no spurious expansion occurs until real traffic resumes.
+//   - Clustered: compares the fleet's MAX(last_activity) epoch (from
+//     AppFleetLastActivity, on the database clock) against the shrink moment's
+//     Unix epoch. Either the owner's own local LastSeen (also on the local wall
+//     clock - the owner proxies traffic too) OR the fleet predicate suffice: the
+//     OR covers both paths.
+func (w *Watcher) handleWarmExpand() {
+	if w.warmExpand == nil {
+		return
+	}
+
+	apps, err := w.store.ListWarmShrunkApps()
+	if err != nil {
+		slog.Warn("watcher: list warm-shrunk apps failed", "err", err)
+		return
+	}
+
+	for _, app := range apps {
+		reps, err := w.store.ListReplicas(app.ID)
+		if err != nil {
+			slog.Warn("watcher: list replicas for warm-expand check failed", "slug", app.Slug, "err", err)
+			continue
+		}
+
+		// Compute the shrink moment as the newest updated_at among warm-parked rows.
+		var shrinkMoment time.Time
+		for _, r := range reps {
+			if r.DesiredState == db.ReplicaDesiredWarm && r.UpdatedAt.After(shrinkMoment) {
+				shrinkMoment = r.UpdatedAt
+			}
+		}
+		if shrinkMoment.IsZero() {
+			// No warm rows found (race with another tick that expanded); skip.
+			continue
+		}
+
+		// Determine whether traffic has resumed since the shrink.
+		shouldExpand := false
+		if !w.cfg.Clustered {
+			// Single-node: compare proxy LastSeen (wall clock) against shrink moment.
+			// LastSeen is zero after a restart => no expansion until real traffic,
+			// which is the desired safe default.
+			lastSeen := w.prx.LastSeen(app.Slug)
+			shouldExpand = lastSeen.After(shrinkMoment)
+		} else {
+			// Clustered: use DB-clock fleet activity OR local LastSeen.
+			// The owner proxies traffic as well, so its own LastSeen counts as
+			// activity. The fleet predicate covers other instances.
+			lastSeen := w.prx.LastSeen(app.Slug)
+			if lastSeen.After(shrinkMoment) {
+				shouldExpand = true
+			} else {
+				staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+				fleetLastActivity, err := w.store.AppFleetLastActivity(app.ID, staleWindowSec, w.cfg.InstanceID)
+				if err != nil {
+					slog.Warn("watcher: fleet last activity check failed", "slug", app.Slug, "err", err)
+					continue
+				}
+				// fleetLastActivity is a Unix epoch on the DB clock; shrinkMoment is
+				// also derived from the DB clock (written by UpsertReplica's nowEpoch).
+				shouldExpand = fleetLastActivity > shrinkMoment.Unix()
+			}
+		}
+
+		if !shouldExpand {
+			continue
+		}
+
+		if _, err := w.warmExpand(app.Slug); err != nil {
+			slog.Warn("watcher: warm expand failed", "slug", app.Slug, "err", err)
+		}
+	}
 }
 
 // WakeTrigger is the callback wired on the proxy as the wake trigger. It runs

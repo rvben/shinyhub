@@ -117,6 +117,10 @@ type fakeStore struct {
 	// block it.
 	fleetActive       int64
 	fleetIdleSinceSec int64
+
+	// fleetLastActivity is the Unix epoch returned by AppFleetLastActivity.
+	// 0 means no fleet rows; a value > shrinkMoment.Unix() triggers expansion.
+	fleetLastActivity int64
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -302,6 +306,34 @@ func (f *fakeStore) AppFleetLoad(_ int64, _ int64, _ string) ([]int64, int64, er
 		return []int64{}, f.fleetIdleSinceSec, nil
 	}
 	return []int64{f.fleetActive}, f.fleetIdleSinceSec, nil
+}
+
+// AppFleetLastActivity returns the pre-configured fleetLastActivity epoch.
+// 0 means no fleet rows; a value > shrinkMoment.Unix() triggers expansion.
+func (f *fakeStore) AppFleetLastActivity(_ int64, _ int64, _ string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fleetLastActivity, nil
+}
+
+// ListWarmShrunkApps returns apps in the store whose replicas include at least
+// one with desired_state='warm' and whose app status is 'running' or 'degraded'.
+func (f *fakeStore) ListWarmShrunkApps() ([]*db.App, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*db.App
+	for _, app := range f.apps {
+		if app.Status != "running" && app.Status != "degraded" {
+			continue
+		}
+		for _, r := range f.replicas[app.ID] {
+			if r.DesiredState == db.ReplicaDesiredWarm {
+				out = append(out, app)
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
@@ -1783,5 +1815,220 @@ func TestHandleIdle_ClusteredWarmShrinkReplacesHibernate(t *testing.T) {
 	mgr.mu.Unlock()
 	if len(stopped) != 0 {
 		t.Errorf("clustered: mgr.Stop must NOT be called when warmShrink is wired, got %v", stopped)
+	}
+}
+
+// --- warm-expand tests ---
+
+// warmExpandSetup builds a watcher and store with one warm-shrunk running app.
+// shrinkTime is the UpdatedAt on the warm replica row (the shrink moment).
+func warmExpandSetup(t *testing.T, shrinkTime time.Time) (*fakeManager, *fakeProxy, *fakeStore, *Watcher) {
+	t.Helper()
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "warm", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"warm": {
+			ID:              1,
+			Slug:            "warm",
+			Status:          "running",
+			Replicas:        2,
+			MinWarmReplicas: 1,
+			UpdatedAt:       shrinkTime.Add(-10 * time.Minute),
+		}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	// Warm replica at index 1 parked at shrinkTime.
+	pid0 := 100
+	port0 := 20100
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running", PID: &pid0, Port: &port0},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm, UpdatedAt: shrinkTime},
+		},
+	}
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	return mgr, prx, st, w
+}
+
+// TestHandleWarmExpand_ActivityAfterShrinkExpands (single-node): LastSeen after
+// the shrink moment must trigger warmExpand with the correct slug.
+func TestHandleWarmExpand_ActivityAfterShrinkExpands(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, prx, _, w := warmExpandSetup(t, shrinkTime)
+
+	// Proxy saw traffic 2 minutes after the shrink.
+	prx.seen["warm"] = shrinkTime.Add(2 * time.Minute)
+
+	var expandCalls []string
+	var mu sync.Mutex
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			mu.Lock()
+			expandCalls = append(expandCalls, slug)
+			mu.Unlock()
+			return true, nil
+		},
+	)
+
+	w.runOnce()
+
+	mu.Lock()
+	calls := append([]string(nil), expandCalls...)
+	mu.Unlock()
+	if len(calls) != 1 || calls[0] != "warm" {
+		t.Errorf("expected warmExpand called once with 'warm', got %v", calls)
+	}
+}
+
+// TestHandleWarmExpand_NoActivityNoExpand: LastSeen before shrink moment (or
+// equal) must NOT trigger warmExpand.
+func TestHandleWarmExpand_NoActivityNoExpand(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, prx, _, w := warmExpandSetup(t, shrinkTime)
+
+	// Proxy last saw traffic 2 minutes BEFORE the shrink.
+	prx.seen["warm"] = shrinkTime.Add(-2 * time.Minute)
+
+	var expanded bool
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expanded = true; return false, nil },
+	)
+
+	w.runOnce()
+
+	if expanded {
+		t.Error("warmExpand must NOT be called when LastSeen is before the shrink moment")
+	}
+}
+
+// TestHandleWarmExpand_RestartZeroLastSeen: LastSeen zero value (server restart,
+// no traffic yet) must NOT trigger warmExpand.
+func TestHandleWarmExpand_RestartZeroLastSeen(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, _, _, w := warmExpandSetup(t, shrinkTime)
+	// prx.seen["warm"] is zero (never set after restart).
+
+	var expanded bool
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expanded = true; return false, nil },
+	)
+
+	w.runOnce()
+
+	if expanded {
+		t.Error("warmExpand must NOT be called when LastSeen is zero (server restart)")
+	}
+}
+
+// TestHandleWarmExpand_NilOpsSkips: when warmExpand is nil, no store calls
+// should be made for warm expansion (method exits early).
+func TestHandleWarmExpand_NilOpsSkips(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, prx, st, w := warmExpandSetup(t, shrinkTime)
+
+	// Proxy has fresh activity; would expand if ops were wired.
+	prx.seen["warm"] = shrinkTime.Add(time.Minute)
+
+	// warmExpand is nil; do not call SetWarmOps.
+	w.runOnce()
+
+	// Verify no UpsertReplica was called as part of expansion (only baseline
+	// reconcile calls are expected, none for the expand path itself).
+	// The key invariant: no panic and the app remains unchanged.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, ur := range st.upsertedReplicas {
+		if ur.DesiredState == "running" && ur.Index == 1 {
+			t.Error("unexpected replica upsert for warm-expand when warmExpand is nil")
+		}
+	}
+}
+
+// TestHandleWarmExpand_ClusteredFleetActivityExpands: clustered mode with fleet
+// last_activity epoch after the shrink moment must trigger warmExpand.
+func TestHandleWarmExpand_ClusteredFleetActivityExpands(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, _, st, w := warmExpandSetup(t, shrinkTime)
+	w.cfg.Clustered = true
+	w.cfg.InstanceID = "self"
+
+	// Fleet last_activity is 2 minutes after the shrink moment.
+	st.fleetLastActivity = shrinkTime.Add(2 * time.Minute).Unix()
+
+	var expandCalls []string
+	var mu sync.Mutex
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			mu.Lock()
+			expandCalls = append(expandCalls, slug)
+			mu.Unlock()
+			return true, nil
+		},
+	)
+
+	w.runOnce()
+
+	mu.Lock()
+	calls := append([]string(nil), expandCalls...)
+	mu.Unlock()
+	if len(calls) != 1 || calls[0] != "warm" {
+		t.Errorf("clustered: expected warmExpand called once with 'warm', got %v", calls)
+	}
+}
+
+// TestHandleWarmExpand_ClusteredNoFleetActivityNoExpand: clustered mode with
+// fleet last_activity epoch at or before the shrink moment must NOT expand.
+func TestHandleWarmExpand_ClusteredNoFleetActivityNoExpand(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, _, st, w := warmExpandSetup(t, shrinkTime)
+	w.cfg.Clustered = true
+	w.cfg.InstanceID = "self"
+
+	// Fleet last_activity was 2 minutes BEFORE the shrink moment.
+	st.fleetLastActivity = shrinkTime.Add(-2 * time.Minute).Unix()
+
+	var expanded bool
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expanded = true; return false, nil },
+	)
+
+	w.runOnce()
+
+	if expanded {
+		t.Error("clustered: warmExpand must NOT be called when fleet activity is before shrink moment")
+	}
+}
+
+// TestHandleWarmExpand_RunOnceWiringExpands: integration through runOnce confirms
+// that a warm-shrunk app with fresh proxy activity results in warmExpand being
+// called (tests the wiring from runOnce into handleWarmExpand).
+func TestHandleWarmExpand_RunOnceWiringExpands(t *testing.T) {
+	shrinkTime := time.Now().Add(-10 * time.Minute)
+	_, prx, _, w := warmExpandSetup(t, shrinkTime)
+
+	// Traffic arrived 3 minutes after shrink.
+	prx.seen["warm"] = shrinkTime.Add(3 * time.Minute)
+
+	var expandCount int32
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			atomic.AddInt32(&expandCount, 1)
+			return true, nil
+		},
+	)
+
+	w.runOnce()
+
+	if n := atomic.LoadInt32(&expandCount); n != 1 {
+		t.Errorf("runOnce: expected warmExpand called once, got %d", n)
 	}
 }

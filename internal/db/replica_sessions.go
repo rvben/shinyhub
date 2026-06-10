@@ -140,6 +140,27 @@ func (s *Store) AppFleetLoad(appID int64, staleWindowSec int64, excludeInstanceI
 	return out, globalMaxAgeSec, nil
 }
 
+// AppFleetLastActivity returns the MAX(last_activity) Unix epoch across all
+// non-stale, non-excluded replica_sessions rows for appID. It uses the same
+// staleness and exclusion semantics as AppFleetLoad. Returns 0 when no fresh
+// rows exist (no live peer data). All values are on the database clock so
+// cross-instance comparisons are robust to control-plane clock skew.
+func (s *Store) AppFleetLastActivity(appID int64, staleWindowSec int64, excludeInstanceID string) (int64, error) {
+	dbNow := s.d.nowEpoch()
+	q := s.d.rebind(`
+		SELECT COALESCE(MAX(last_activity), 0)
+		FROM replica_sessions
+		WHERE app_id   = ?
+		  AND updated_at >= (` + dbNow + ` - ?)
+		  AND (? = '' OR instance_id != ?)`)
+	var maxLastActivity int64
+	err := s.db.QueryRow(q, appID, staleWindowSec, excludeInstanceID, excludeInstanceID).Scan(&maxLastActivity)
+	if err != nil {
+		return 0, fmt.Errorf("app fleet last activity: %w", err)
+	}
+	return maxLastActivity, nil
+}
+
 // ReapStaleReplicaSessions deletes rows whose updated_at is older than
 // staleWindowSec seconds ago on the database clock. This removes the footprint
 // of crashed or restarted instances that are no longer reporting. All time
