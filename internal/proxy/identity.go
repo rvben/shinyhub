@@ -40,6 +40,18 @@ func (p *Proxy) SetPoolIdentityHeaders(slug string, enabled bool) {
 	pool.identityHeaders.Store(enabled)
 }
 
+// PoolIdentityHeaders reports the current identityHeaders flag for slug.
+// Returns false when the pool does not exist. Used in tests.
+func (p *Proxy) PoolIdentityHeaders(slug string) bool {
+	p.mu.RLock()
+	pool := p.pools[slug]
+	p.mu.RUnlock()
+	if pool == nil {
+		return false
+	}
+	return pool.identityHeaders.Load()
+}
+
 // applyIdentityHeaders runs in the Director, after stripInternalCookies.
 // First, UNCONDITIONALLY (before any flag check or early return) it deletes
 // every inbound X-Shinyhub-* header: these are platform-internal and no

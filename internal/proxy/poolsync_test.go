@@ -94,7 +94,7 @@ func TestPoolSyncer_BuildsPoolFromRows(t *testing.T) {
 
 	prx := proxy.New()
 	prx.MarkSynced() // normally done after first sync, but mark now to avoid readyz interference
-	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -133,7 +133,7 @@ func TestPoolSyncer_DegradedAppIncluded(t *testing.T) {
 	src := &staticSource{rows: []db.RoutableReplica{rr}}
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -164,7 +164,7 @@ func TestPoolSyncer_DiffPreservesWSReady(t *testing.T) {
 	src := &staticSource{rows: []db.RoutableReplica{rr}}
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -213,7 +213,7 @@ func TestPoolSyncer_DeregistersMissingSlot(t *testing.T) {
 	src.set([]db.RoutableReplica{rr})
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, &src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, &src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -261,7 +261,7 @@ func TestPoolSyncer_DrainState(t *testing.T) {
 	src.set([]db.RoutableReplica{makeRow("running")})
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, &src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, &src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -315,7 +315,7 @@ func TestPoolSyncer_DeploymentIDAndTransport(t *testing.T) {
 	src := &staticSource{rows: []db.RoutableReplica{rr}}
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, src, builder, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, src, builder, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -349,7 +349,7 @@ func TestPoolSyncer_OnMissSync_Clustered(t *testing.T) {
 	src := &staticSource{rows: []db.RoutableReplica{rr}}
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default(), true)
 
 	// Wire on-miss sync (clustered-only).
 	prx.SetOnMissSync(func(slug string) {
@@ -379,7 +379,7 @@ func TestPoolSyncer_SyncedOnce(t *testing.T) {
 	}
 
 	src := &staticSource{rows: nil}
-	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -429,7 +429,7 @@ func TestPoolSyncer_DeregistersGoneSlug(t *testing.T) {
 	src.set([]db.RoutableReplica{rr})
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, &src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, &src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -471,7 +471,7 @@ func TestPoolSyncer_RaceClean(t *testing.T) {
 	src := &staticSource{rows: []db.RoutableReplica{rr}}
 
 	prx := proxy.New()
-	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default())
+	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default(), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -486,4 +486,56 @@ func TestPoolSyncer_RaceClean(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	<-ctx.Done()
+}
+
+// makeReplicaWithIdentity returns a RoutableReplica with the given
+// AppIdentityHeaders column value (nil = inherit global).
+func makeReplicaWithIdentity(slug string, appID int64, identityCol *bool) db.RoutableReplica {
+	depID := int64(1)
+	return db.RoutableReplica{
+		Slug:                  slug,
+		AppMaxSessionsPerRepl: 0,
+		AppIdentityHeaders:    identityCol,
+		Replica: &db.Replica{
+			AppID:        appID,
+			Index:        0,
+			Status:       db.ReplicaStatusRunning,
+			EndpointURL:  "http://127.0.0.1:19999",
+			DeploymentID: &depID,
+			DesiredState: "running",
+			Provider:     "fargate",
+		},
+	}
+}
+
+// TestReconcileSlug_PushesEffectiveIdentityFlag asserts that reconcileSlug
+// resolves the tri-state column against the syncer's global flag and stores
+// the result on the pool's identityHeaders atomic.
+func TestReconcileSlug_PushesEffectiveIdentityFlag(t *testing.T) {
+	f := false
+	cases := []struct {
+		name           string
+		col            *bool
+		identityGlobal bool
+		want           bool
+	}{
+		{"column false overrides global on", &f, true, false},
+		{"column NULL inherits global on", nil, true, true},
+		{"column NULL inherits global off", nil, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := proxy.New()
+			src := &staticSource{rows: []db.RoutableReplica{makeReplicaWithIdentity("demo", 1, c.col)}}
+			syncer := proxy.NewPoolSyncer(p, src, noopTransport{}, slog.Default(), c.identityGlobal)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			syncer.RunOnce(ctx)
+
+			if got := p.PoolIdentityHeaders("demo"); got != c.want {
+				t.Errorf("flag = %v, want %v", got, c.want)
+			}
+		})
+	}
 }

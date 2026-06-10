@@ -39,17 +39,23 @@ type PoolSyncer struct {
 	transport TransportBuilder
 	interval  time.Duration
 	log       *slog.Logger
+	// identityGlobal is this instance's resolved auth.identity_headers global
+	// flag. Each instance resolves NULL app columns against its LOCAL config,
+	// so operators must keep the flag consistent across control-plane instances.
+	identityGlobal bool
 }
 
 // NewPoolSyncer constructs a syncer. interval is the reconcile tick period;
-// pass 0 to use PoolSyncInterval.
-func NewPoolSyncer(prx *Proxy, store RoutableSource, transport TransportBuilder, log *slog.Logger) *PoolSyncer {
+// pass 0 to use PoolSyncInterval. identityGlobal is the resolved global
+// auth.identity_headers flag for this instance.
+func NewPoolSyncer(prx *Proxy, store RoutableSource, transport TransportBuilder, log *slog.Logger, identityGlobal bool) *PoolSyncer {
 	return &PoolSyncer{
-		prx:       prx,
-		store:     store,
-		transport: transport,
-		interval:  PoolSyncInterval,
-		log:       log,
+		prx:            prx,
+		store:          store,
+		transport:      transport,
+		interval:       PoolSyncInterval,
+		log:            log,
+		identityGlobal: identityGlobal,
 	}
 }
 
@@ -148,12 +154,13 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 	}
 
 	// Determine pool size: maxIdx+1 across all routable rows.
-	// All rows for a slug share the same appID and max_sessions_per_replica
-	// (they come from the same parent app row in the JOIN), so taking both
-	// values from the first row encountered is correct.
+	// All rows for a slug share the same appID, max_sessions_per_replica, and
+	// identity_headers column (they come from the same parent app row in the
+	// JOIN), so taking all three values from the first row encountered is correct.
 	var maxIdx int
 	var appID int64
 	var maxSess int
+	var identityCol *bool
 	for _, rr := range rows {
 		r := rr.Replica
 		if r.Index > maxIdx {
@@ -162,6 +169,7 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 		if appID == 0 {
 			appID = r.AppID
 			maxSess = rr.AppMaxSessionsPerRepl
+			identityCol = rr.AppIdentityHeaders
 		}
 	}
 	poolSize := maxIdx + 1
@@ -171,6 +179,9 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 	s.prx.SetPoolSize(slug, poolSize)
 	s.prx.SetPoolAppID(slug, appID)
 	s.prx.SetPoolCap(slug, maxSess)
+	// Resolve the per-app tri-state column against this instance's global flag.
+	// NULL inherits global; an explicit false or true overrides it.
+	s.prx.SetPoolIdentityHeaders(slug, s.identityGlobal && (identityCol == nil || *identityCol))
 
 	// Build a quick index of the desired state for O(1) lookup.
 	type desired struct {

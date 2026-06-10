@@ -660,7 +660,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	var syncerCancel context.CancelFunc
 	if isClustered(cfg) {
 		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
-		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default())
+		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default(), cfg.Auth.IdentityHeadersEnabled())
 		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
 		syncerCancel = cancelSyncer
 		syncerWG.Add(1)
