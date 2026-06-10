@@ -2,6 +2,7 @@ package identity
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,10 +52,10 @@ func TestProvider_GroupsCachedWithinTTL(t *testing.T) {
 func TestProvider_CacheExpires(t *testing.T) {
 	src := &fakeGroups{groups: []string{"eng"}}
 	p := NewProvider("secret", src)
-	p.cacheTTL = 10 * time.Millisecond
+	p.cacheTTL = time.Millisecond
 	u := &auth.ContextUser{ID: 9, Username: "u", Role: "viewer"}
 	p.PayloadFor(u, "demo", 1)
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	p.PayloadFor(u, "demo", 1)
 	if got := src.calls.Load(); got != 2 {
 		t.Fatalf("DB calls = %d, want 2 (expired)", got)
@@ -68,6 +69,29 @@ func TestProvider_LookupErrorYieldsEmptyGroupsNotFailure(t *testing.T) {
 	pl := p.PayloadFor(&auth.ContextUser{ID: 1, Username: "u", Role: "viewer"}, "demo", 1)
 	if pl == nil || pl.GroupsHeader != "" || pl.Token == "" {
 		t.Fatalf("payload = %+v; want token minted with no groups", pl)
+	}
+}
+
+func TestProvider_SingleFlight_ConcurrentWaiters(t *testing.T) {
+	src := &fakeGroups{groups: []string{"eng"}}
+	p := NewProvider("secret", src)
+	u := &auth.ContextUser{ID: 7, Username: "u", Role: "viewer"}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if pl := p.PayloadFor(u, "demo", 1); pl.GroupsHeader != "eng" {
+				t.Errorf("groups header = %q", pl.GroupsHeader)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := src.calls.Load(); got != 1 {
+		t.Fatalf("DB calls = %d, want 1 (single-flight)", got)
 	}
 }
 

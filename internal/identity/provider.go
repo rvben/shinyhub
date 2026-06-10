@@ -75,6 +75,7 @@ func NewProvider(authSecret string, src GroupsSource) *Provider {
 // an empty Token (logged).
 func (p *Provider) PayloadFor(user *auth.ContextUser, slug string, appID int64) *Payload {
 	groups := p.groupsFor(user.ID)
+	// warn on the raw list (pre-cap) so omissions past the group cap still surface
 	p.warnCommaGroups(groups)
 	header, claim, truncated := SanitizeGroups(groups)
 	tok, err := MintToken(DeriveKey(p.secret, appID), TokenParams{
@@ -113,6 +114,15 @@ func (p *Provider) groupsFor(userID int64) []string {
 		p.inflight[userID] = wg
 		p.mu.Unlock()
 
+		// Guaranteed cleanup even if the source panics: waiters wake, see a
+		// cache miss, and one becomes the next owner (correct retry behavior).
+		defer func() {
+			p.mu.Lock()
+			delete(p.inflight, userID)
+			p.mu.Unlock()
+			wg.Done()
+		}()
+
 		groups, err := p.src.GetUserGroups(userID)
 		if err != nil {
 			slog.Warn("identity: resolve groups", "user_id", userID, "err", err)
@@ -124,15 +134,14 @@ func (p *Provider) groupsFor(userID int64) []string {
 			p.evictLocked()
 		}
 		p.cache[userID] = cachedGroups{groups: groups, expires: time.Now().Add(p.cacheTTL)}
-		delete(p.inflight, userID)
 		p.mu.Unlock()
-		wg.Done()
 		return groups
 	}
 }
 
 // evictLocked drops expired entries; if none expired, drops an arbitrary
-// entry to stay bounded. Caller holds p.mu.
+// entry to stay bounded. Caller holds p.mu. The caller always inserts one
+// entry immediately after this returns.
 func (p *Provider) evictLocked() {
 	now := time.Now()
 	for id, c := range p.cache {
