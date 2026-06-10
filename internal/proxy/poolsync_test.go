@@ -513,6 +513,7 @@ func makeReplicaWithIdentity(slug string, appID int64, identityCol *bool) db.Rou
 // the result on the pool's identityHeaders atomic.
 func TestReconcileSlug_PushesEffectiveIdentityFlag(t *testing.T) {
 	f := false
+	tr := true
 	cases := []struct {
 		name           string
 		col            *bool
@@ -522,6 +523,8 @@ func TestReconcileSlug_PushesEffectiveIdentityFlag(t *testing.T) {
 		{"column false overrides global on", &f, true, false},
 		{"column NULL inherits global on", nil, true, true},
 		{"column NULL inherits global off", nil, false, false},
+		{"column true with global on", &tr, true, true},
+		{"column true with global off", &tr, false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
