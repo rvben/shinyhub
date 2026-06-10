@@ -147,7 +147,7 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 	p.mu.RLock()
 	snaps := make([]poolSnap, 0, len(p.pools))
 	for slug, pool := range p.pools {
-		if pool.appID == 0 {
+		if pool.appID.Load() == 0 {
 			continue // not wired for clustering; skip
 		}
 		if slugFilter != nil {
@@ -155,7 +155,7 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 				continue
 			}
 		}
-		ps := poolSnap{slug: slug, appID: pool.appID}
+		ps := poolSnap{slug: slug, appID: pool.appID.Load()}
 		for _, rep := range pool.replicas {
 			if rep != nil {
 				ps.replicas = append(ps.replicas, rep)
