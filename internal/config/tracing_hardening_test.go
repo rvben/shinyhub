@@ -237,6 +237,21 @@ func TestTracing_AutoInstrumentAppsEnvRejectsGarbage(t *testing.T) {
 	}
 }
 
+// Env-only configs must hit the same validation: applyEnv runs before
+// normalizeTracing, so a forgotten SHINYHUB_TRACING_ENABLED is caught even
+// when auto-instrument arrives via env. Pins the Load ordering.
+func TestTracing_AutoInstrumentRequiresEnabledEnvOnly(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS", "true")
+	_, err := config.Load("")
+	if err == nil {
+		t.Fatal("expected error for env-only auto_instrument_apps without tracing enabled")
+	}
+	if !strings.Contains(err.Error(), "auto_instrument_apps") {
+		t.Errorf("error should mention auto_instrument_apps: %v", err)
+	}
+}
+
 // auto_instrument_apps with tracing disabled is a broken half-mode: apps would
 // be wrapped but export nowhere. Reject at startup like enabled-without-endpoint.
 func TestTracing_AutoInstrumentRequiresEnabled(t *testing.T) {
