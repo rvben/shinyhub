@@ -109,6 +109,9 @@ type fakeStore struct {
 	// hibernateAppCalls tracks every HibernateApp call (slug).
 	hibernateAppCalls []string
 
+	// listReplicasCalls counts how many times ListReplicas has been called.
+	listReplicasCalls int
+
 	// fleetActive and fleetIdleSinceSec are returned by AppFleetLoad.
 	// fleetActive is the sum of other-instance active counts (0 = fleet idle).
 	// fleetIdleSinceSec is the seconds since the most recent fleet activity on
@@ -268,6 +271,7 @@ func (f *fakeStore) ListWakingApps() ([]*db.App, error) {
 func (f *fakeStore) ListReplicas(appID int64) ([]*db.Replica, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listReplicasCalls++
 	return f.replicas[appID], nil
 }
 
@@ -341,14 +345,15 @@ func (f *fakeStore) ListWarmShrunkApps() ([]*db.App, error) {
 func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
 	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
-		cfg:       cfg,
-		mgr:       mgr,
-		prx:       prx,
-		store:     st,
-		deploy:    deployFn,
-		attempts:  make(map[replicaKey]int),
-		nextRetry: make(map[replicaKey]time.Time),
-		driving:   make(map[string]bool),
+		cfg:           cfg,
+		mgr:           mgr,
+		prx:           prx,
+		store:         st,
+		deploy:        deployFn,
+		attempts:      make(map[replicaKey]int),
+		nextRetry:     make(map[replicaKey]time.Time),
+		driving:       make(map[string]bool),
+		expandingWarm: make(map[string]bool),
 	}
 }
 
@@ -2171,5 +2176,86 @@ func TestWakeTrigger_HibernatedApp_PerformsWakeFlowNotWarmExpand(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&deployCount); n == 0 {
 		t.Error("expected at least one deploy call for hibernated app wake; got 0")
+	}
+}
+
+// TestWakeTrigger_BurstOnWarmApp_OnlyOneExpand verifies that a burst of
+// concurrent WakeTrigger calls on a warm-shrunk running app results in exactly
+// one warmExpand call and bounded store reads: the in-flight guard must
+// short-circuit all but the first trigger so N goroutines do not each issue
+// GetAppBySlug+ListReplicas and each call warmExpand.
+//
+// Synchronisation design: the first goroutine to enter warmExpand holds the
+// guard and blocks until it receives a signal that all other goroutines have
+// finished their WakeTrigger calls (quickly rejected by the guard). Only then
+// does warmExpand return. This guarantees the guard window covers the entire
+// burst, so no late-arriving goroutine can slip through after the guard clears.
+func TestWakeTrigger_BurstOnWarmApp_OnlyOneExpand(t *testing.T) {
+	const burst = 20
+
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"warm": {ID: 1, Slug: "warm", Status: "running", Replicas: 2, MinWarmReplicas: 1}},
+		[]*db.Deployment{{BundleDir: "/tmp/warm"}},
+	)
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+		},
+	}
+
+	// othersFinished is a channel buffered for (burst-1) sends; warmExpand
+	// reads (burst-1) signals from it before returning, ensuring the guard is
+	// held for the full duration of all concurrent WakeTrigger calls.
+	othersFinished := make(chan struct{}, burst)
+
+	var expandCalls atomic.Int32
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st, nil)
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			expandCalls.Add(1)
+			// Block until all other goroutines have returned from WakeTrigger
+			// (either guard-rejected or this is the only caller). This holds
+			// the in-flight guard open across the full burst window.
+			for i := 0; i < burst-1; i++ {
+				select {
+				case <-othersFinished:
+				case <-time.After(5 * time.Second):
+					// Unblock rather than deadlock; the assertion will catch the error.
+					return false, fmt.Errorf("timed out waiting for burst completions")
+				}
+			}
+			return true, nil
+		},
+	)
+
+	// Barrier gate: hold all goroutines until all are ready, then release
+	// simultaneously to maximise guard contention.
+	gate := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-gate
+			w.WakeTrigger("warm")
+			// Signal completion to warmExpand (the winning goroutine reads these).
+			othersFinished <- struct{}{}
+		}()
+	}
+	close(gate) // start all goroutines simultaneously
+	wg.Wait()
+
+	if n := expandCalls.Load(); n != 1 {
+		t.Errorf("warmExpand called %d times; want exactly 1 (in-flight guard must debounce burst)", n)
+	}
+
+	st.mu.Lock()
+	replicaReads := st.listReplicasCalls
+	st.mu.Unlock()
+	if replicaReads >= burst {
+		t.Errorf("ListReplicas called %d times; want < %d (guard must prevent per-trigger store reads)", replicaReads, burst)
 	}
 }

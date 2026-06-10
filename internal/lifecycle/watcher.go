@@ -165,6 +165,12 @@ type Watcher struct {
 	// BeginWake's DB CAS prevents it across processes.
 	driving map[string]bool
 
+	// expandingWarm tracks slugs for which a burst-triggered warm expansion is
+	// already in flight. When a pool-degraded reject fires WakeTrigger concurrently
+	// from many goroutines, only the first wins the guard; the rest return
+	// immediately without issuing store reads or calling warmExpand again.
+	expandingWarm map[string]bool
+
 	// wakeWG tracks in-flight driveWakingApp goroutines so shutdown can wait
 	// for them to persist replica/PID rows before the store is closed.
 	wakeWG sync.WaitGroup
@@ -190,14 +196,15 @@ const wakeDrainTimeout = 15 * time.Second
 func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
-		cfg:       cfg,
-		mgr:       mgr,
-		prx:       prx,
-		store:     st,
-		deploy:    deployFn,
-		attempts:  make(map[replicaKey]int),
-		nextRetry: make(map[replicaKey]time.Time),
-		driving:   make(map[string]bool),
+		cfg:           cfg,
+		mgr:           mgr,
+		prx:           prx,
+		store:         st,
+		deploy:        deployFn,
+		attempts:      make(map[replicaKey]int),
+		nextRetry:     make(map[replicaKey]time.Time),
+		driving:       make(map[string]bool),
+		expandingWarm: make(map[string]bool),
 	}
 }
 
@@ -847,6 +854,24 @@ func (w *Watcher) WakeTrigger(slug string) {
 		if w.warmExpand == nil {
 			return
 		}
+		// In-flight guard: a pool-degraded 503 burst fires this trigger from
+		// many goroutines simultaneously. Only the first winner proceeds to
+		// the store reads and warmExpand call; the rest return immediately so
+		// the burst does not generate N×(GetAppBySlug+ListReplicas+warmExpand).
+		w.mu.Lock()
+		if w.expandingWarm[slug] {
+			w.mu.Unlock()
+			return
+		}
+		w.expandingWarm[slug] = true
+		w.mu.Unlock()
+
+		defer func() {
+			w.mu.Lock()
+			delete(w.expandingWarm, slug)
+			w.mu.Unlock()
+		}()
+
 		app, err := w.store.GetAppBySlug(slug)
 		if err != nil {
 			return // app not found or DB error; safe to skip
