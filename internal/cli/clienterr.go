@@ -36,6 +36,12 @@ type httpStatusError struct {
 
 func (e *httpStatusError) Error() string { return e.msg }
 
+// loginFailedError types the login-failure path; 401 here means bad
+// credentials, not an expired session.
+func loginFailedError(resp *http.Response) error {
+	return &httpStatusError{Status: resp.StatusCode, msg: fmt.Sprintf("login failed: %s", resp.Status)}
+}
+
 // httpError builds the error returned for a failed (>= 400) HTTP response.
 // op names the action being attempted (e.g. "list apps", "rollback") so the
 // non-session message keeps its context.

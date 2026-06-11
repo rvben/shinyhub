@@ -44,6 +44,7 @@ func TestClassify(t *testing.T) {
 		// The typed HTTP status is more specific than the aggregate legacy code;
 		// the typed-status branch fires first.
 		{"wrapped http status outranks legacy code", &ExitCodeError{Code: 4, Err: &httpStatusError{Status: 401, msg: "x"}}, KindAuth, 3},
+		{"conflict error type", &conflictError{slug: "app", msg: "re-run plan"}, KindConflict, 5},
 		{"plain error", errors.New("something odd"), KindInternal, 1},
 	}
 	for _, tc := range cases {

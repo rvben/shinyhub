@@ -88,7 +88,10 @@ func revokeServerSession(cfg *cliConfig) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s", resp.Status)
+		return &httpStatusError{
+			Status: resp.StatusCode,
+			msg:    fmt.Sprintf("server returned %s", resp.Status),
+		}
 	}
 	return nil
 }

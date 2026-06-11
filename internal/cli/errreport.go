@@ -21,6 +21,10 @@ func classify(err error) (Kind, int) {
 	if hasECE && ece.Kind != "" {
 		return ece.Kind, exitCode(err)
 	}
+	var ce *conflictError
+	if errors.As(err, &ce) {
+		return KindConflict, 5
+	}
 	var hse *httpStatusError
 	if errors.As(err, &hse) {
 		switch {

@@ -184,3 +184,13 @@ func TestHTTPError_SessionExpiredKeepsTypedStatus(t *testing.T) {
 		t.Errorf("Error() = %q", got)
 	}
 }
+
+// TestLoginFailedError_IsTyped verifies the login 401 path returns a typed
+// status error so login failures classify as auth, not internal.
+func TestLoginFailedError_IsTyped(t *testing.T) {
+	err := loginFailedError(&http.Response{StatusCode: 401, Status: "401 Unauthorized"})
+	var hse *httpStatusError
+	if !errors.As(err, &hse) || hse.Status != 401 {
+		t.Fatalf("login failure not typed: %T %v", err, err)
+	}
+}
