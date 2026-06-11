@@ -64,6 +64,7 @@ func AddCommandsTo(root *cobra.Command) {
 		newShareCmd(),
 		newFleetCmd(),
 		newManifestCmd(),
+		newSchemaCmd(),
 	)
 	silenceUsageOnError(root)
 }

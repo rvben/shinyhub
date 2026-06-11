@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"os"
 	"testing"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -113,4 +118,60 @@ func findSub(t *testing.T, c schemaCommand, name string) schemaCommand {
 	}
 	t.Fatalf("subcommand %q not in %q", name, c.Name)
 	return schemaCommand{}
+}
+
+func TestSchemaCommand_EmitsValidJSON(t *testing.T) {
+	root := testRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"schema"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("schema command failed: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("schema output is not JSON: %v", err)
+	}
+}
+
+func TestSchemaCommand_RejectsTableFormat(t *testing.T) {
+	root := testRoot()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"schema", "-o", "table"})
+	err := root.Execute()
+	var ece *ExitCodeError
+	if err == nil || !errors.As(err, &ece) || ece.Kind != KindValidation {
+		t.Fatalf("want validation error, got %v", err)
+	}
+}
+
+// TestSchemaDocument_ValidatesAgainstClispecV02 validates the emitted
+// document against the vendored published schema.
+func TestSchemaDocument_ValidatesAgainstClispecV02(t *testing.T) {
+	compiler := jsonschema.NewCompiler()
+	f, err := os.Open("testdata/clispec-v0.2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	rawSchema, err := jsonschema.UnmarshalJSON(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compiler.AddResource("clispec-v0.2.json", rawSchema); err != nil {
+		t.Fatal(err)
+	}
+	sch, err := compiler.Compile("clispec-v0.2.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(generateSchema(testRoot()))
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("schema document does not validate against clispec v0.2: %v", err)
+	}
 }
