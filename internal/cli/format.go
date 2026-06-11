@@ -46,14 +46,7 @@ func isTTY(f *os.File) bool {
 }
 
 func validationErr(msg, hint string) error {
-	return &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("%s%s", msg, hintSuffix(hint))}
-}
-
-func hintSuffix(hint string) string {
-	if hint == "" {
-		return ""
-	}
-	return " (" + hint + ")"
+	return &ExitCodeError{Code: 1, Kind: KindValidation, Err: &hintedMsgError{msg: msg, hint: hint}}
 }
 
 // resolveFormat resolves the effective output format for a command. legacyJSON

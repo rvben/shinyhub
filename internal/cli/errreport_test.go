@@ -138,3 +138,44 @@ func TestReport_NilIsZero(t *testing.T) {
 		t.Errorf("nil error: code=%d stderr=%q", code, stderr.String())
 	}
 }
+
+// TestReport_ValidationErrHintInEnvelopeAndProse verifies that validationErr
+// errors carry the hint in the envelope's dedicated hint field (not baked into
+// the message) and that the TTY prose line shows both message and hint.
+func TestReport_ValidationErrHintInEnvelopeAndProse(t *testing.T) {
+	err := validationErr("unknown output format \"yaml\"", "valid formats: table, json, ndjson")
+
+	// JSON mode: hint appears in the envelope field, not in the message.
+	var jsonStderr bytes.Buffer
+	code := reportTo(&jsonStderr, false, formatJSON, err)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	var env struct {
+		Error struct {
+			Kind    string `json:"kind"`
+			Message string `json:"message"`
+			Hint    string `json:"hint"`
+		} `json:"error"`
+	}
+	if jerr := json.Unmarshal([]byte(strings.TrimRight(jsonStderr.String(), "\n")), &env); jerr != nil {
+		t.Fatalf("envelope not valid JSON: %v\nraw: %q", jerr, jsonStderr.String())
+	}
+	if env.Error.Kind != "validation" {
+		t.Errorf("kind = %q, want validation", env.Error.Kind)
+	}
+	if env.Error.Message == "" || strings.Contains(env.Error.Message, "valid formats") {
+		t.Errorf("message must not contain hint text: %q", env.Error.Message)
+	}
+	if env.Error.Hint != "valid formats: table, json, ndjson" {
+		t.Errorf("hint = %q, want the hint string", env.Error.Hint)
+	}
+
+	// TTY table mode: prose line shows message AND hint for humans.
+	var ttyStderr bytes.Buffer
+	reportTo(&ttyStderr, true, formatTable, err)
+	lines := strings.Split(strings.TrimRight(ttyStderr.String(), "\n"), "\n")
+	if len(lines) < 1 || !strings.Contains(lines[0], "valid formats") {
+		t.Errorf("TTY prose line must contain hint, got %q", ttyStderr.String())
+	}
+}

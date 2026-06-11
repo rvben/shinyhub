@@ -100,6 +100,16 @@ type errEnvelope struct {
 // Errors that carry no hint render without one.
 type hintedError interface{ Hint() string }
 
+// hintedMsgError pairs a message with an actionable hint; the renderer
+// surfaces Hint() in the envelope's hint field.
+type hintedMsgError struct {
+	msg  string
+	hint string
+}
+
+func (e *hintedMsgError) Error() string { return e.msg }
+func (e *hintedMsgError) Hint() string  { return e.hint }
+
 // reportTo renders err to w and returns the process exit code. Pure function
 // of its inputs for testability; Report wires the real stderr/TTY/format.
 func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int {
@@ -112,14 +122,19 @@ func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int
 	}
 	var ece *ExitCodeError
 	reported := errors.As(err, &ece) && ece.Reported
+	var he hintedError
+	errors.As(err, &he)
 	if stderrIsTTY && format == formatTable && !reported {
-		fmt.Fprintf(w, "Error: %s\n", err.Error())
+		if he != nil && he.Hint() != "" {
+			fmt.Fprintf(w, "Error: %s (%s)\n", err.Error(), he.Hint())
+		} else {
+			fmt.Fprintf(w, "Error: %s\n", err.Error())
+		}
 	}
 	var env errEnvelope
 	env.Error.Kind = string(kind)
 	env.Error.Message = err.Error()
-	var he hintedError
-	if errors.As(err, &he) {
+	if he != nil {
 		env.Error.Hint = he.Hint()
 	}
 	if kind != KindJobFailed {

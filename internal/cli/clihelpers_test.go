@@ -38,6 +38,7 @@ func execCLI(t *testing.T, args ...string) (string, error) {
 // machine-readable envelope on stdout and routes human progress to stderr.
 func execCLISplit(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	resetFormatState(t)
 	root := &cobra.Command{Use: "shinyhub", SilenceErrors: true}
 	AddCommandsTo(root)
 	var outBuf, errBuf bytes.Buffer
@@ -67,6 +68,7 @@ func allSubcommands(cmd *cobra.Command) []*cobra.Command {
 // it on the fresh root reaches the leaf without touching a package singleton.
 func execCLIStdin(t *testing.T, stdin io.Reader, args ...string) (string, error) {
 	t.Helper()
+	resetFormatState(t)
 	root := &cobra.Command{Use: "shinyhub", SilenceErrors: true}
 	AddCommandsTo(root)
 	var buf bytes.Buffer
