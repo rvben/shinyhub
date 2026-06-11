@@ -278,6 +278,13 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "content_digest", Type: "string"},
 		{Name: "access", Type: "string"},
 		{Name: "status", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
+		{Name: "schema_version", Type: "integer"},
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+		{Name: "summary", Type: "object"},
 	}},
 
 	// ── manifest ──────────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ import (
 // fleetStatusSchemaVersion is the stable --json envelope version for
 // `fleet status`. It is independent of the plan/apply envelopes because the
 // shape differs; consumers pin on this field.
-const fleetStatusSchemaVersion = 1
+const fleetStatusSchemaVersion = 2
 
 // fleetStatusApp is one row of the read-only overview.
 type fleetStatusApp struct {
@@ -36,7 +36,10 @@ type fleetStatusEnvelope struct {
 	SchemaVersion int                `json:"schema_version"`
 	Server        string             `json:"server"`
 	GeneratedAt   string             `json:"generated_at"`
-	Apps          []fleetStatusApp   `json:"apps"`
+	Apps          []fleetStatusApp   `json:"items"`
+	Total         int                `json:"total"`
+	Limit         int                `json:"limit"`
+	Offset        int                `json:"offset"`
 	Summary       fleetStatusSummary `json:"summary"`
 }
 
@@ -71,6 +74,7 @@ func buildFleetStatus(host string, apps []db.App) fleetStatusEnvelope {
 		Server:        host,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
 		Apps:          rows,
+		Total:         len(rows),
 		Summary: fleetStatusSummary{
 			Total:        len(rows),
 			FleetManaged: managed,
@@ -125,6 +129,9 @@ func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
 
 type fleetStatusFlags struct {
 	jsonOutput bool
+	limit      int
+	offset     int
+	fields     string
 }
 
 func newFleetStatusCmd() *cobra.Command {
@@ -144,6 +151,9 @@ func newFleetStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
+	cmd.Flags().IntVar(&f.limit, "limit", 0, "Maximum number of items to return (0 = all)")
+	cmd.Flags().IntVar(&f.offset, "offset", 0, "Number of items to skip")
+	cmd.Flags().StringVar(&f.fields, "fields", "", "Comma-separated item fields to include")
 	return cmd
 }
 
@@ -159,10 +169,57 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
 		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
+	// buildFleetStatus computes summary over ALL apps; slicing happens after.
 	st := buildFleetStatus(cfg.Host, apps)
 	out := cmd.OutOrStdout()
 	if f.jsonOutput {
-		return writeFleetStatusJSON(out, st)
+		// Convert to maps so sliceAndProject can apply limit/offset/fields.
+		items := make([]map[string]any, len(st.Apps))
+		for i, a := range st.Apps {
+			items[i] = map[string]any{
+				"slug":           a.Slug,
+				"managed_by":     a.ManagedBy,
+				"fleet_managed":  a.FleetManaged,
+				"content_digest": a.ContentDigest,
+				"access":         a.Access,
+				"status":         a.Status,
+			}
+		}
+		lf := &listFlags{limit: f.limit, offset: f.offset, fields: f.fields}
+		sliced, serr := sliceAndProject(items, lf)
+		if serr != nil {
+			return serr
+		}
+		st.Limit = f.limit
+		st.Offset = f.offset
+		env := map[string]any{
+			"schema_version": st.SchemaVersion,
+			"server":         st.Server,
+			"generated_at":   st.GeneratedAt,
+			"items":          sliced,
+			"total":          st.Total,
+			"limit":          st.Limit,
+			"offset":         st.Offset,
+			"summary":        st.Summary,
+		}
+		b, merr := json.Marshal(env)
+		if merr != nil {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("marshal status json: %w", merr)}
+		}
+		_, werr := out.Write(append(b, '\n'))
+		return werr
+	}
+	// Table mode: apply limit/offset but not fields (table renders fixed columns).
+	if f.limit > 0 || f.offset > 0 {
+		start := f.offset
+		if start > len(st.Apps) {
+			start = len(st.Apps)
+		}
+		end := len(st.Apps)
+		if f.limit > 0 && start+f.limit < end {
+			end = start + f.limit
+		}
+		st.Apps = st.Apps[start:end]
 	}
 	renderFleetStatus(out, st, quietFlag)
 	return nil

@@ -55,8 +55,8 @@ func TestWriteFleetStatusJSON_StableShape(t *testing.T) {
 	if got["schema_version"].(float64) != float64(fleetStatusSchemaVersion) {
 		t.Fatalf("schema_version missing/wrong: %v", got["schema_version"])
 	}
-	apps := got["apps"].([]any)
-	row := apps[0].(map[string]any)
+	items := got["items"].([]any)
+	row := items[0].(map[string]any)
 	for _, k := range []string{"slug", "managed_by", "fleet_managed", "content_digest", "access", "status"} {
 		if _, ok := row[k]; !ok {
 			t.Fatalf("app row missing key %q: %v", k, row)
@@ -166,6 +166,46 @@ func TestFleetStatusCmd_JSON(t *testing.T) {
 	}
 	if env["schema_version"].(float64) != float64(fleetStatusSchemaVersion) {
 		t.Fatalf("schema_version wrong: %v", env["schema_version"])
+	}
+}
+
+func TestFleetStatus_V2Envelope(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[
+		{"slug":"alpha","access":"public","status":"running","managed_by":"fleet:eu"},
+		{"slug":"beta","access":"private","status":"stopped","managed_by":null},
+		{"slug":"gamma","access":"shared","status":"running","managed_by":"fleet:eu"}
+	]`)
+
+	out, err := execCLI(t, "fleet", "status", "--json", "--limit", "1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", jerr, out)
+	}
+	if env["schema_version"].(float64) != 2 {
+		t.Fatalf("schema_version = %v, want 2", env["schema_version"])
+	}
+	if _, hasApps := env["apps"]; hasApps {
+		t.Fatalf("old 'apps' key must be renamed to 'items'")
+	}
+	items, ok := env["items"].([]any)
+	if !ok {
+		t.Fatalf("'items' key missing or not an array: %v", env["items"])
+	}
+	if len(items) != 1 {
+		t.Fatalf("items len = %d, want 1 (--limit 1)", len(items))
+	}
+	if env["total"].(float64) != 3 {
+		t.Fatalf("total = %v, want 3 (full fleet pre-slice)", env["total"])
+	}
+	if env["limit"].(float64) != 1 {
+		t.Fatalf("limit = %v, want 1", env["limit"])
+	}
+	if _, ok := env["summary"]; !ok {
+		t.Fatalf("summary missing from envelope")
 	}
 }
 
