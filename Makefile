@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke iac-validate
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -104,6 +104,16 @@ goreleaser-check:
 # deployments. Requires Docker.
 build-runner-image:
 	docker build -t shinyhub-fargate-runner:latest build/fargate-runner/
+
+# iac-validate runs terraform fmt -check, init -backend=false, and validate on
+# the aws-ecs module and its minimal example. No AWS credentials are required.
+# All steps are also valid locally (make philosophy: CI runs make targets).
+iac-validate:
+	terraform -chdir=deploy/terraform/aws-ecs fmt -check -recursive
+	terraform -chdir=deploy/terraform/aws-ecs init -backend=false
+	terraform -chdir=deploy/terraform/aws-ecs validate
+	terraform -chdir=deploy/terraform/aws-ecs/examples/minimal init -backend=false
+	terraform -chdir=deploy/terraform/aws-ecs/examples/minimal validate
 
 # Release workflow:
 #   make release-patch   (or release-minor / release-major)
