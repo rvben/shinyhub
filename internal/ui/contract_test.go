@@ -1251,3 +1251,23 @@ func TestAuditKnownActionsIncludeGroupAccess(t *testing.T) {
 			"app.js knownActions must include "+a+" so the audit badge is labelled")
 	}
 }
+
+// TestMinWarmReplicasUIContract guards the pre-warming knob on the Configuration
+// tab. PATCH /api/apps/:slug accepts min_warm_replicas (int 0..1000); the General
+// panel must expose the setting so operators can configure the idle floor without
+// using the CLI.
+//
+// index.html must carry the input and warning elements; app.js must read
+// app.min_warm_replicas when populating the tab and include min_warm_replicas in
+// the PATCH body sent by the hibernate save handler. If either side renames or
+// drops these identifiers the knob silently stops working.
+func TestMinWarmReplicasUIContract(t *testing.T) {
+	assertContains(t, "index.html", `id="min-warm-replicas"`,
+		"index.html must keep #min-warm-replicas so the keep-warm number input is reachable via getElementById")
+	assertContains(t, "index.html", `id="min-warm-warning"`,
+		"index.html must keep #min-warm-warning so the self-clamp warning line can be shown/hidden")
+	assertContains(t, "app.js", "app.min_warm_replicas",
+		"populateGeneralTab must read app.min_warm_replicas to seed the keep-warm input from PATCH /api/apps/:slug")
+	assertContains(t, "app.js", "min_warm_replicas",
+		"saveHibernateSettings must include min_warm_replicas in its PATCH body so the keep-warm floor is persisted")
+}

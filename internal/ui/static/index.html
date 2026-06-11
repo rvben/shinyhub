@@ -235,6 +235,15 @@
                 </span>
               </label>
             </fieldset>
+            <label class="scaling-row access-level" style="margin-top:1rem">
+              <span>
+                <span class="scaling-option-title">Keep warm</span>
+                <span class="scaling-option-help">Replicas kept running when the app idles. 0 stops all (full hibernation).</span>
+                <span id="min-warm-warning" class="scaling-option-help" style="color:var(--color-warning,#b45309)" hidden>Configured replicas is below the keep-warm floor; the floor self-clamps to the replica count.</span>
+              </span>
+              <input id="min-warm-replicas" type="number" min="0" max="1000" step="1"
+                     inputmode="numeric" autocomplete="off" aria-label="Minimum warm replicas when idle">
+            </label>
             <div class="env-form-actions">
               <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden>Save</button>
               <span id="hibernate-status" class="hibernate-status" hidden></span>
