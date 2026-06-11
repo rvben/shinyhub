@@ -216,8 +216,11 @@ func applyManifest(t *testing.T, fake *fleetFakeServer, manifest string, args ..
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "src", "app.py"), "print(1)\n")
 	mustWrite(t, filepath.Join(dir, "shinyhub-fleet.toml"), manifest)
+	// Force table mode: execCLI is piped (not a TTY) so the default would be
+	// JSON now that fleet apply calls resolveFormat. These acceptance tests
+	// verify the human-readable report strings ("1 created", "1 deleted", etc.).
 	full := append([]string{"--config", cfgFile, "fleet", "apply",
-		"-f", filepath.Join(dir, "shinyhub-fleet.toml")}, args...)
+		"-f", filepath.Join(dir, "shinyhub-fleet.toml"), "-o", "table"}, args...)
 	return execCLI(t, full...)
 }
 

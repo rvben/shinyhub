@@ -64,6 +64,13 @@ func newFleetApplyCmd() *cobra.Command {
 }
 
 func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
+	// fleet apply is a document command; NDJSON is not a valid output mode.
+	// -o json behaves like --json (both select the machine-readable envelope).
+	if format, err := resolveFormat(f.jsonOutput, false); err != nil {
+		return err
+	} else if format == formatJSON {
+		f.jsonOutput = true
+	}
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 

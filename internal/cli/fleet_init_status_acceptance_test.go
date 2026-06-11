@@ -88,7 +88,7 @@ func TestAcceptance_StatusNoManifestSegmentsOwnership(t *testing.T) {
 		{"slug":"loose","access":"private","status":"stopped","managed_by":null}
 	]`)
 
-	out, err := execCLI(t, "fleet", "status")
+	out, err := execCLI(t, "fleet", "status", "-o", "table")
 	if err != nil {
 		t.Fatalf("status failed: %v\n%s", err, out)
 	}

@@ -768,6 +768,51 @@ func TestScheduleAdd_NoFirstFire_NoTriggerLine(t *testing.T) {
 	}
 }
 
+// FORMAT-5: schedule add --run-on-register --follow must stream NDJSON log
+// objects on stdout when piped, and route the creation notice to stderr.
+// This verifies that the streaming format (resolved once for the follow path)
+// is not corrupted by the creation envelope logic.
+func TestScheduleAdd_RunOnRegister_Follow_NdjsonStream(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":7,"name":"warm","first_fire_run_id":42}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/42/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: warming up\n\ndata: done\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/42": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	stdout, stderr, err := execCLISplit(t, "schedule", "add", "demo",
+		"--name", "warm", "--cron", "0 5 * * *", "--cmd", "true",
+		"--run-on-register", "--follow")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	// The creation notice must appear on stderr, not stdout.
+	if !strings.Contains(stderr, "created") && !strings.Contains(stderr, "following") {
+		t.Errorf("creation notice missing from stderr; stderr=%q stdout=%q", stderr, stdout)
+	}
+
+	// Stdout must be NDJSON log objects, not an action envelope.
+	// Each log line is wrapped as {"line":"..."} in NDJSON mode.
+	if strings.Contains(stdout, `"status"`) {
+		t.Errorf("stdout must not contain action envelope in follow mode; stdout=%q", stdout)
+	}
+	// The log content must appear on stdout wrapped in NDJSON.
+	if !strings.Contains(stdout, `"line"`) {
+		t.Errorf("stdout missing NDJSON log objects; stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "warming up") {
+		t.Errorf("stdout missing log content 'warming up'; stdout=%q", stdout)
+	}
+}
+
 // TestShareCmd_RegisteredWithRoot verifies share is registered with the root command.
 func TestShareCmd_RegisteredWithRoot(t *testing.T) {
 	root := &cobra.Command{Use: "root"}

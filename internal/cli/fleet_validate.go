@@ -41,6 +41,10 @@ func newFleetValidateCmd() *cobra.Command {
 }
 
 func runFleetValidate(cmd *cobra.Command, f *fleetValidateFlags) error {
+	// fleet validate is a document command; NDJSON is not a valid output mode.
+	if _, err := resolveFormat(false, false); err != nil {
+		return err
+	}
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 

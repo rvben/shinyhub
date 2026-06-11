@@ -158,6 +158,13 @@ func newFleetStatusCmd() *cobra.Command {
 }
 
 func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
+	// fleet status is a document command; NDJSON is not a valid output mode.
+	// -o json behaves like --json (both select the machine-readable envelope).
+	if format, err := resolveFormat(f.jsonOutput, false); err != nil {
+		return err
+	} else if format == formatJSON {
+		f.jsonOutput = true
+	}
 	errOut := cmd.ErrOrStderr()
 	cfg, err := loadConfig()
 	if err != nil {

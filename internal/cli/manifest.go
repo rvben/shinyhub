@@ -30,6 +30,10 @@ The manifest is optional: a directory without a shinyhub.toml validates cleanly.
 With no [dir] argument, the current directory is used.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// manifest validate is a document command; NDJSON is not valid.
+			if _, err := resolveFormat(false, false); err != nil {
+				return err
+			}
 			dir := "."
 			if len(args) == 1 {
 				dir = args[0]

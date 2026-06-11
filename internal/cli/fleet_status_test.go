@@ -138,7 +138,7 @@ func TestFleetStatusCmd_ListsManagedAndUnmanaged(t *testing.T) {
 		{"slug":"loose-app","access":"private","status":"stopped","managed_by":null}
 	]`)
 
-	out, err := execCLI(t, "fleet", "status")
+	out, err := execCLI(t, "fleet", "status", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v\n%s", err, out)
 	}
@@ -167,6 +167,58 @@ func TestFleetStatusCmd_JSON(t *testing.T) {
 	}
 	if env["schema_version"].(float64) != float64(fleetStatusSchemaVersion) {
 		t.Fatalf("schema_version wrong: %v", env["schema_version"])
+	}
+}
+
+// FORMAT-3: -o json must produce identical output to --json for fleet status so
+// the global flag is a drop-in alias for the command-specific flag.
+func TestFleetStatusCmd_OutputJsonEqualsLegacyJson(t *testing.T) {
+	const body = `[{"slug":"a","access":"public","status":"running","managed_by":"fleet:eu"}]`
+
+	_, _, setResp := setupCLITest(t)
+	setResp(200, body)
+	withLegacy, err := execCLI(t, "fleet", "status", "--json")
+	if err != nil {
+		t.Fatalf("--json: %v", err)
+	}
+
+	_, _, setResp2 := setupCLITest(t)
+	setResp2(200, body)
+	withOutputFlag, err := execCLI(t, "fleet", "status", "-o", "json")
+	if err != nil {
+		t.Fatalf("-o json: %v", err)
+	}
+
+	// Both must parse as valid JSON with the same schema_version. The
+	// generated_at timestamp differs between runs, so compare the structural
+	// shape rather than the raw string.
+	var env1, env2 map[string]any
+	if jerr := json.Unmarshal([]byte(withLegacy), &env1); jerr != nil {
+		t.Fatalf("--json output not JSON: %v", jerr)
+	}
+	if jerr := json.Unmarshal([]byte(withOutputFlag), &env2); jerr != nil {
+		t.Fatalf("-o json output not JSON: %v", jerr)
+	}
+	if env1["schema_version"] != env2["schema_version"] {
+		t.Errorf("schema_version mismatch: --json=%v, -o json=%v",
+			env1["schema_version"], env2["schema_version"])
+	}
+	if _, ok := env2["items"]; !ok {
+		t.Error("-o json output missing items key")
+	}
+}
+
+// FORMAT-4: -o ndjson is rejected for fleet status (document command, not a stream).
+func TestFleetStatusCmd_NdjsonRejected(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"a","access":"public","status":"running","managed_by":"fleet:eu"}]`)
+
+	_, err := execCLI(t, "fleet", "status", "-o", "ndjson")
+	if err == nil {
+		t.Fatal("want error for -o ndjson on fleet status, got nil")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Errorf("exit code = %d, want 1 (validation)", code)
 	}
 }
 

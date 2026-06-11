@@ -201,10 +201,13 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 
-		if flags.follow {
-			if _, err := resolveFormat(false, true); err != nil {
-				return err
-			}
+		// Validate the output format at command start. When --follow is set the
+		// log stream is the primary data (streaming), so NDJSON is accepted and
+		// -o json is rejected. When not following, this is a document command.
+		// We resolve early only to catch invalid -o values before any network
+		// call; the resolved format is re-derived at emit time (see below).
+		if _, err := resolveFormat(false, flags.follow); err != nil {
+			return err
 		}
 
 		cfg, err := loadConfig()
@@ -277,14 +280,24 @@ func newScheduleAddCmd() *cobra.Command {
 				fields["first_fire_run_id"] = *created.FirstFireRunID
 				prose += fmt.Sprintf("\nfirst-fire triggered (run #%d)", *created.FirstFireRunID)
 			}
-			if err := renderAction(cmd, "created", fields, prose); err != nil {
-				return err
-			}
-			if created.FirstFireRunID != nil && flags.follow {
+			if flags.follow && created.FirstFireRunID != nil {
+				// In follow mode the run's log stream is the primary data on
+				// stdout; its format was resolved as streaming at command start.
+				// Route the creation acknowledgment to stderr so it does not
+				// interleave with the NDJSON log objects.
+				fmt.Fprintf(cmd.ErrOrStderr(), "created schedule %q (id %d), following run #%d\n",
+					created.Name, created.ID, *created.FirstFireRunID)
 				if err := streamRunLogs(cfg, slug, created.ID, *created.FirstFireRunID, true, cmd); err != nil {
 					return err
 				}
 				return runFinalExitError(cfg, slug, created.ID, *created.FirstFireRunID)
+			}
+			// Non-follow path: the creation envelope is a single document.
+			// Re-resolve as non-streaming so -o json is honoured and NDJSON
+			// resolvedFormat set for the follow path is replaced with the
+			// correct document format.
+			if err := renderAction(cmd, "created", fields, prose); err != nil {
+				return err
 			}
 		} else {
 			if err := renderAction(cmd, "created",
@@ -546,10 +559,12 @@ func newScheduleRunCmd() *cobra.Command {
 	runCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
 
-		if follow {
-			if _, err := resolveFormat(false, true); err != nil {
-				return err
-			}
+		// Resolve format once at command start: streaming=true when following
+		// (the log stream is the data), non-streaming when not following
+		// (a single action envelope is emitted). This ensures -o ndjson is
+		// rejected on the non-follow path and accepted only on the follow path.
+		if _, err := resolveFormat(false, follow); err != nil {
+			return err
 		}
 
 		cfg, err := loadConfig()

@@ -27,7 +27,7 @@ func TestFleetApply_DryRunIsPlan(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, dir+"/a/app.py", "print(1)\n")
 	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\n")
-	out, err := execCLI(t, "fleet", "apply", "--dry-run", "-f", dir+"/shinyhub-fleet.toml")
+	out, err := execCLI(t, "fleet", "apply", "--dry-run", "-f", dir+"/shinyhub-fleet.toml", "-o", "table")
 	if err != nil {
 		t.Fatalf("dry-run should be a clean plan: %v\n%s", err, out)
 	}

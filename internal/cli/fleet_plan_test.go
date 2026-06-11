@@ -137,7 +137,7 @@ slug = "ops-metrics"
 source = "./a"
 visibility = "private"
 `)
-	out, err := execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--no-color")
+	out, err := execCLI(t, "fleet", "plan", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "--no-color", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v\n%s", err, out)
 	}
