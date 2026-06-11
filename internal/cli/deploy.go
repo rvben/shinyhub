@@ -419,7 +419,7 @@ func (e *deployHTTPError) fatal() bool {
 // `defer` inside the loop would keep bodies open for the lifetime of the
 // command on long --wait-timeout values.
 //
-// A non-2xx response is returned as an *httpStatusError so the caller can
+// A non-2xx response is returned as a *deployHTTPError so the caller can
 // distinguish "permanent" failures (401/403/404) from transient ones (5xx).
 func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
