@@ -51,9 +51,18 @@ func TestRenderList_FieldsProjection(t *testing.T) {
 	var env struct {
 		Items []map[string]any `json:"items"`
 	}
-	_ = json.Unmarshal(out.Bytes(), &env)
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out.Bytes())
+	}
 	if _, has := env.Items[0]["deploy_count"]; has {
 		t.Error("--fields did not project away deploy_count")
+	}
+	// Requested fields must be present in the projected items.
+	if _, has := env.Items[0]["slug"]; !has {
+		t.Error("--fields projected away slug which was requested")
+	}
+	if _, has := env.Items[0]["status"]; !has {
+		t.Error("--fields projected away status which was requested")
 	}
 }
 
@@ -78,9 +87,27 @@ func TestRenderList_ExtraEnvelopeKeysPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	var env map[string]any
-	_ = json.Unmarshal(out.Bytes(), &env)
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out.Bytes())
+	}
 	if env["quota_mb"] != float64(512) {
 		t.Errorf("extra envelope key lost: %v", env)
+	}
+	if env["used_bytes"] != float64(1024) {
+		t.Errorf("extra envelope key lost: %v", env)
+	}
+	// Standard envelope keys must still hold their expected values after the merge.
+	if env["total"] != float64(3) {
+		t.Errorf("total corrupted by extra-key merge: %v", env["total"])
+	}
+	if env["limit"] != float64(0) {
+		t.Errorf("limit corrupted by extra-key merge: %v", env["limit"])
+	}
+	if env["offset"] != float64(0) {
+		t.Errorf("offset corrupted by extra-key merge: %v", env["offset"])
+	}
+	if items, ok := env["items"].([]any); !ok || len(items) != 3 {
+		t.Errorf("items corrupted by extra-key merge: %v", env["items"])
 	}
 }
 

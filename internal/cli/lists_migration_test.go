@@ -65,7 +65,7 @@ func newDataLsServer(t *testing.T, slug string) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"files":[{"path":"a.csv","size":10,"sha256":"abc","modified_at":1735689600}],"quota_mb":512,"used_bytes":10}`))
+		w.Write([]byte(`{"files":[{"path":"a.csv","size":10,"sha256":"abc","modified_at":1735689600},{"path":"b.csv","size":20,"sha256":"def","modified_at":1735689601}],"quota_mb":512,"used_bytes":30}`))
 	}))
 }
 
@@ -78,7 +78,7 @@ func TestDataLs_JSONEnvelopeWithLimit(t *testing.T) {
 	root := testRoot()
 	var out bytes.Buffer
 	root.SetOut(&out)
-	root.SetArgs([]string{"data", "ls", "myapp", "--json"})
+	root.SetArgs([]string{"data", "ls", "myapp", "--json", "--limit", "1"})
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +93,8 @@ func TestDataLs_JSONEnvelopeWithLimit(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
 		t.Fatalf("not the standard envelope: %s", out.String())
 	}
-	if env.Total != 1 || len(env.Items) != 1 {
-		t.Errorf("total=%d items=%d", env.Total, len(env.Items))
+	if env.Total != 2 || len(env.Items) != 1 || env.Limit != 1 {
+		t.Errorf("total=%d items=%d limit=%d", env.Total, len(env.Items), env.Limit)
 	}
 	if env.Items[0]["path"] != "a.csv" {
 		t.Errorf("unexpected first item: %v", env.Items[0])
@@ -121,7 +121,7 @@ func TestDataLs_PreservesQuotaEnvelopeKeys(t *testing.T) {
 	if env["quota_mb"] != float64(512) {
 		t.Errorf("quota_mb not preserved in envelope: got %v", env["quota_mb"])
 	}
-	if env["used_bytes"] != float64(10) {
+	if env["used_bytes"] != float64(30) {
 		t.Errorf("used_bytes not preserved in envelope: got %v", env["used_bytes"])
 	}
 	// items, total, limit, offset must all be present.

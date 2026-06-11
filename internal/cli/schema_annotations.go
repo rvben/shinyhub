@@ -65,6 +65,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "status", Type: "string", Desc: "running | stopped | hibernated | failed"},
 		{Name: "deploy_count", Type: "integer"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -101,6 +102,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "bundle_dir", Type: "string"},
 		{Name: "content_digest", Type: "string"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -133,6 +135,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "username", Type: "string"},
 		{Name: "role", Type: "string"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -148,6 +151,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "group", Type: "string"},
 		{Name: "role", Type: "string"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -162,6 +166,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "name", Type: "string"},
 		{Name: "created_at", Type: "string"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -179,6 +184,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "set", Type: "boolean"},
 		{Name: "updated_at", Type: "integer"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -196,6 +202,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "sha256", Type: "string"},
 		{Name: "modified_at", Type: "integer", Desc: "Unix timestamp"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -219,6 +226,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "effective_timezone", Type: "string"},
 		{Name: "timezone_inherited", Type: "boolean"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
@@ -248,6 +256,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "source_slug", Type: "string"},
 		{Name: "source_id", Type: "integer"},
 	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},

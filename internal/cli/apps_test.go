@@ -616,8 +616,8 @@ func TestAppsDelete_PromptGoesToStderr(t *testing.T) {
 }
 
 // TestAppsDeployments lists deployment history.
-// Non-TTY output is the bounded JSON envelope; table rendering is tested
-// explicitly in the new envelope tests (apps_list_test.go).
+// Non-TTY output is the bounded JSON envelope; table rendering is preserved
+// verbatim inside the tableFn closure in runAppsDeployments.
 func TestAppsDeployments(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}]`)

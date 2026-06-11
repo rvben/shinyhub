@@ -71,27 +71,6 @@ func lookupSchedule(cfg *cliConfig, slug, name string) (scheduleDTO, error) {
 	return scheduleDTO{}, fmt.Errorf("schedule %q not found for app %q", name, slug)
 }
 
-// listSchedulesRaw returns the raw JSON response body for an app's schedules.
-func listSchedulesRaw(cfg *cliConfig, slug string) ([]byte, error) {
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, httpError(cfg.Token, "get schedules", resp, body)
-	}
-	return body, nil
-}
-
 // listSchedules fetches all schedules for the given app slug.
 func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)

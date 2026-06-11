@@ -114,15 +114,11 @@ func TestDataPush_QuotaError(t *testing.T) {
 }
 
 func TestDataLs(t *testing.T) {
+	resetFormatState(t)
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"files":[{"path":"a.txt","size":2,"sha256":"abc","modified_at":1735689600}],"quota_mb":1024,"used_bytes":2}`)
 
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := runDataLs(cfg.Host, cfg.Token, "demo")
+	out, err := execCLI(t, "data", "ls", "demo", "--output", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
