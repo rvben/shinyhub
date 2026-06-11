@@ -1,0 +1,151 @@
+# ShinyHub docker-compose reference deployment
+#
+# Requirements:
+#   export SHINYHUB_AUTH_SECRET=$(openssl rand -hex 32)
+#
+#   Linux:
+#     export DOCKER_GID=$(stat -c %g /var/run/docker.sock)
+#     export SHINYHUB_DATA_ROOT=/srv/shinyhub   # or any writable absolute path
+#
+#   macOS (OrbStack / Docker Desktop):
+#     Leave DOCKER_GID unset -- the in-VM socket is root:root 0660, and the
+#     container joins group 0 (root) by default, which is sufficient.
+#     For the data root, use a path the VM maps into the guest filesystem.
+#     Docker Desktop maps /Users automatically; OrbStack maps $HOME.
+#     /srv does NOT exist in the VM by default and will fail. Use:
+#       export SHINYHUB_DATA_ROOT=$HOME/.shinyhub-data
+#
+#   docker compose up -d
+#
+# Network topology: network_mode: host
+#   The shinyhub server listens on the host network directly (port 8080 from
+#   shinyhub.yaml). App containers spawned by the docker runtime also bind on
+#   the host loopback (127.0.0.1:<port>), which is how the server reaches them.
+#   Bridge mode cannot work here: internal/process/docker.go hardcodes replica
+#   endpoint URLs to http://127.0.0.1:<port>, and bridge mode publishes those
+#   ports on the HOST loopback -- unreachable from inside the server container.
+#   Host networking collapses the boundary and makes the loopback reachable.
+#
+# Path parity (apps / app-data):
+#   The docker runtime passes app bundle directories directly to the Docker
+#   daemon as bind-mount sources when starting app containers. The daemon
+#   resolves these paths on the HOST, not inside the shinyhub container.
+#   Therefore the apps_dir and app_data_dir must exist at the SAME absolute
+#   path on both the host and inside the shinyhub container. A named volume
+#   (opaque, daemon-managed) cannot satisfy this: the path the daemon assigns
+#   internally is not the same as what shinyhub sees. The fix is a host bind
+#   at an identical path: ${SHINYHUB_DATA_ROOT} on the host is mounted at the
+#   same path inside the container. The DB stays in a named volume (the daemon
+#   never needs to reach it).
+#
+# Container healthcheck: skipped.
+#   The shinyhub image is distroless (no shell, no curl). The /healthz HTTP
+#   endpoint is available for external monitors (see README).
+#
+# Profiles:
+#   (default) SQLite only.
+#   postgres  Also starts a PostgreSQL 16 container. Uncomment SHINYHUB_DB_DSN
+#             in the shinyhub environment block before using this profile.
+
+services:
+  # One-shot helper: creates and chowns the data root directories before
+  # shinyhub starts. The shinyhub image runs as uid 65532 (nonroot distroless),
+  # so the directories must be owned by that uid. Runs on every stack start but
+  # completes instantly when the ownership is already correct (idempotent).
+  init-perms:
+    image: busybox:1.36
+    restart: "no"
+    volumes:
+      - ${SHINYHUB_DATA_ROOT:-/srv/shinyhub}:${SHINYHUB_DATA_ROOT:-/srv/shinyhub}
+      - shinyhub-db:/data/db
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/apps" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-data"
+        chown -R 65532:65532 \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/apps" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-data" \
+                 /data/db
+    environment:
+      SHINYHUB_DATA_ROOT: "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}"
+
+  shinyhub:
+    image: ghcr.io/rvben/shinyhub:${SHINYHUB_TAG:-latest}
+
+    # Uncomment to build from source instead of pulling the published image:
+    # build:
+    #   context: ../..
+    #   dockerfile: Dockerfile
+
+    network_mode: host
+
+    restart: unless-stopped
+
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
+
+    group_add:
+      - "${DOCKER_GID:-0}"
+
+    volumes:
+      # Config file (bind-mount from this directory)
+      - ./shinyhub.yaml:/etc/shinyhub/shinyhub.yaml:ro
+      # Docker socket for spawning app containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Data root: same absolute path on host and in container so the Docker
+      # daemon can resolve app bundle bind-mount sources correctly.
+      - ${SHINYHUB_DATA_ROOT:-/srv/shinyhub}:${SHINYHUB_DATA_ROOT:-/srv/shinyhub}
+      # DB in a named volume (daemon never needs to reach it directly).
+      - shinyhub-db:/data/db
+
+    environment:
+      SHINYHUB_AUTH_SECRET: "${SHINYHUB_AUTH_SECRET:?SHINYHUB_AUTH_SECRET is required}"
+
+      # Storage: pass as env vars (single source of truth; shinyhub.yaml omits
+      # these keys so the env override is always authoritative).
+      # SHINYHUB_APPS_DIR and SHINYHUB_APP_DATA_DIR (internal/config applyEnv).
+      SHINYHUB_APPS_DIR: "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/apps"
+      SHINYHUB_APP_DATA_DIR: "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-data"
+
+      # Optional: bootstrap an admin account on first start.
+      # Comment out after the first run; the env var has no effect once the
+      # user exists in the database.
+      SHINYHUB_ADMIN_USER: "${SHINYHUB_ADMIN_USER:-}"
+      SHINYHUB_ADMIN_PASSWORD: "${SHINYHUB_ADMIN_PASSWORD:-}"
+
+      # Optional: point at the postgres service (requires the postgres profile).
+      # When set, also set database.driver: postgres in shinyhub.yaml.
+      # SHINYHUB_DB_DSN: "postgres://shinyhub:shinyhub@127.0.0.1:5432/shinyhub?sslmode=disable"
+
+  # Postgres service (optional -- enable with: docker compose --profile postgres up -d)
+  # Provides a HA-grade database backend on a single node.
+  postgres:
+    profiles:
+      - postgres
+    image: postgres:16-alpine
+    restart: unless-stopped
+
+    # With host networking the container binds directly on the host loopback.
+    # The shinyhub service reaches it at 127.0.0.1:5432 (no DNS name needed).
+    network_mode: host
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    environment:
+      POSTGRES_USER: shinyhub
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-shinyhub}"
+      POSTGRES_DB: shinyhub
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shinyhub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  shinyhub-db:
+  postgres-data:
