@@ -44,11 +44,14 @@ func silenceUsageOnError(cmd *cobra.Command) {
 var configPathOverride string
 
 // AddCommandsTo registers every CLI subcommand onto the supplied root command
-// and attaches the global `--config` flag so any subcommand can be retargeted
-// at a different credential file without re-running `login`.
+// and attaches global persistent flags shared by all subcommands.
 func AddCommandsTo(root *cobra.Command) {
 	root.PersistentFlags().StringVar(&configPathOverride, "config", "",
 		"Path to credentials file (overrides $SHINYHUB_CONFIG and the default)")
+	root.PersistentFlags().StringVarP(&outputFlagValue, "output", "o", "",
+		"Output format: table, json, or ndjson (default: table on a terminal, json/ndjson when piped)")
+	root.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false,
+		"Suppress non-essential output")
 	root.AddCommand(
 		newLoginCmd(),
 		newLogoutCmd(),
@@ -71,9 +74,9 @@ type cliConfig struct {
 }
 
 // configPath returns the effective credentials path, honouring (in order):
-//   1. the --config persistent flag,
-//   2. the SHINYHUB_CONFIG environment variable,
-//   3. ~/.config/shinyhub/config.json (default).
+//  1. the --config persistent flag,
+//  2. the SHINYHUB_CONFIG environment variable,
+//  3. ~/.config/shinyhub/config.json (default).
 func configPath() string {
 	if configPathOverride != "" {
 		return configPathOverride

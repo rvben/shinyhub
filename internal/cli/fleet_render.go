@@ -140,7 +140,7 @@ func pending(diff []fleet.AppDiff) bool {
 // shellQuote returns s safe to paste as a single POSIX-shell argv word. A
 // string built only from unreserved characters (alphanumerics and the path
 // punctuation a manifest path normally uses) is returned bare; anything else is
-// wrapped in single quotes with embedded single quotes escaped as '\'' so a
+// wrapped in single quotes with embedded single quotes escaped as '\” so a
 // path with spaces or shell metacharacters survives a copy-paste intact.
 func shellQuote(s string) string {
 	if s == "" {
@@ -220,7 +220,7 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 		"Plan: %d to create, %d to update, %d to adopt, %d to delete, %d unchanged.",
 		c.Create, c.Update, c.Adopt, c.Delete, c.Unchanged)
 
-	if f.quiet {
+	if quietFlag {
 		fmt.Fprintln(out, summary)
 		return planExit(f, diff)
 	}

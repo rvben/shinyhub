@@ -16,7 +16,6 @@ type fleetPlanFlags struct {
 	detailedExitcode bool
 	jsonOutput       bool
 	noColor          bool
-	quiet            bool
 	waitForServer    time.Duration
 }
 
@@ -43,7 +42,6 @@ func newFleetPlanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.detailedExitcode, "detailed-exitcode", false, "Exit 2 when changes are pending, 0 when none")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit machine-readable JSON")
 	cmd.Flags().BoolVar(&f.noColor, "no-color", false, "Disable ANSI color (glyphs/words remain)")
-	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the summary line only")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	return cmd
 }

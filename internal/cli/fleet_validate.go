@@ -11,8 +11,7 @@ import (
 )
 
 type fleetValidateFlags struct {
-	file  string
-	quiet bool
+	file string
 }
 
 func newFleetValidateCmd() *cobra.Command {
@@ -38,7 +37,6 @@ func newFleetValidateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&f.file, "file", "f", defaultFleetManifest, "Path to the fleet manifest")
-	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the summary line only")
 	return cmd
 }
 
@@ -67,7 +65,7 @@ func runFleetValidate(cmd *cobra.Command, f *fleetValidateFlags) error {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", len(probs)), Reported: true}
 	}
 
-	if f.quiet {
+	if quietFlag {
 		fmt.Fprintf(out, "%s: OK (%d app(s))\n", f.file, len(m.Apps))
 		return nil
 	}

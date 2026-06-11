@@ -125,7 +125,6 @@ func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
 
 type fleetStatusFlags struct {
 	jsonOutput bool
-	quiet      bool
 }
 
 func newFleetStatusCmd() *cobra.Command {
@@ -145,7 +144,6 @@ func newFleetStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
-	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the one-line summary")
 	return cmd
 }
 
@@ -166,6 +164,6 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 	if f.jsonOutput {
 		return writeFleetStatusJSON(out, st)
 	}
-	renderFleetStatus(out, st, f.quiet)
+	renderFleetStatus(out, st, quietFlag)
 	return nil
 }
