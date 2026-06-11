@@ -96,7 +96,10 @@ func TestIntegration_OpaqueDeployTokenAuthenticatesRealCLI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("apps list failed under opaque deploy token: %v\noutput: %s", err, out)
 			}
-			if !strings.Contains(out, "No apps.") {
+			// Non-TTY execution produces the JSON envelope; an empty store
+			// returns total=0 with no items. Confirm JSON was returned (not a
+			// 401 error body) to prove authentication succeeded.
+			if !strings.Contains(out, `"total"`) {
 				t.Fatalf("apps list did not authenticate cleanly; output: %q", out)
 			}
 

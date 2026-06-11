@@ -47,24 +47,20 @@ func newTokensCmd() *cobra.Command {
 
 // ── apps list ───────────────────────────────────────────────────────────────
 
-type appsListFlags struct {
-	jsonOutput bool
-}
-
 func newAppsListCmd() *cobra.Command {
-	f := &appsListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all apps",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAppsList(cmd, args, f)
+			return runAppsList(cmd, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsList(cmd *cobra.Command, args []string, f *appsListFlags) error {
+func runAppsList(cmd *cobra.Command, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -83,27 +79,21 @@ func runAppsList(cmd *cobra.Command, args []string, f *appsListFlags) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list apps", resp, out)
 	}
-
-	if f.jsonOutput {
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
-	}
-
 	var apps []map[string]any
 	if err := json.Unmarshal(out, &apps); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
-	if len(apps) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No apps.")
-		return nil
-	}
-	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-20s %-10s %-12s\n", "SLUG", "STATUS", "DEPLOYS")
-	for _, a := range apps {
-		row := fmt.Sprintf("%-20s %-10s %-12v", a["slug"], a["status"], a["deploy_count"])
-		fmt.Fprintln(w, strings.TrimRight(row, " "))
-	}
-	return nil
+	return renderList(cmd, f, apps, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintln(w, "No apps.")
+			return
+		}
+		fmt.Fprintf(w, "%-20s %-10s %-12s\n", "SLUG", "STATUS", "DEPLOYS")
+		for _, a := range items {
+			row := fmt.Sprintf("%-20s %-10s %-12v", a["slug"], a["status"], a["deploy_count"])
+			fmt.Fprintln(w, strings.TrimRight(row, " "))
+		}
+	})
 }
 
 // ── apps show ───────────────────────────────────────────────────────────────

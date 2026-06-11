@@ -64,6 +64,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "slug", Type: "string"},
 		{Name: "status", Type: "string", Desc: "running | stopped | hibernated | failed"},
 		{Name: "deploy_count", Type: "integer"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 	"apps show": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "slug", Type: "string"},
