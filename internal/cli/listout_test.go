@@ -111,6 +111,72 @@ func TestRenderList_ExtraEnvelopeKeysPreserved(t *testing.T) {
 	}
 }
 
+// TestSliceAndProject_NegativeOffsetValidationError verifies that a negative
+// --offset is rejected with a KindValidation error rather than causing a
+// negative-slice-index panic.
+func TestSliceAndProject_NegativeOffsetValidationError(t *testing.T) {
+	f := &listFlags{offset: -1}
+	_, err := sliceAndProject(sampleItems(), f)
+	if err == nil {
+		t.Fatal("want validation error for negative offset, got nil")
+	}
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) || ece.Kind != KindValidation {
+		t.Errorf("want KindValidation, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "offset") {
+		t.Errorf("error should name the --offset flag, got: %v", err)
+	}
+}
+
+// TestSliceAndProject_NegativeLimitValidationError verifies that a negative
+// --limit is rejected with a KindValidation error rather than silently passing
+// through (f.limit > 0 check treats -1 as "no limit" which is wrong).
+func TestSliceAndProject_NegativeLimitValidationError(t *testing.T) {
+	f := &listFlags{limit: -1}
+	_, err := sliceAndProject(sampleItems(), f)
+	if err == nil {
+		t.Fatal("want validation error for negative limit, got nil")
+	}
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) || ece.Kind != KindValidation {
+		t.Errorf("want KindValidation, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "limit") {
+		t.Errorf("error should name the --limit flag, got: %v", err)
+	}
+}
+
+// TestSliceAndProject_ZeroOffsetAndLimitAreValid verifies that 0 values for
+// both flags are treated as "no bound" (the documented default) and don't
+// error. This ensures the negative check doesn't accidentally reject 0.
+func TestSliceAndProject_ZeroOffsetAndLimitAreValid(t *testing.T) {
+	items := sampleItems()
+	f := &listFlags{offset: 0, limit: 0}
+	got, err := sliceAndProject(items, f)
+	if err != nil {
+		t.Fatalf("offset=0 limit=0 should succeed, got error: %v", err)
+	}
+	if len(got) != len(items) {
+		t.Errorf("got %d items, want %d (no bound applied)", len(got), len(items))
+	}
+}
+
+// TestSliceAndProject_EmptyItemsWithFieldsSkipsValidation verifies that when
+// the items list is empty, --fields does not error on "unknown fields" (there
+// is no schema to validate against; empty is empty). This allows paginated
+// responses on the last page to use --fields without error.
+func TestSliceAndProject_EmptyItemsWithFieldsSkipsValidation(t *testing.T) {
+	f := &listFlags{fields: "slug,status"}
+	got, err := sliceAndProject([]map[string]any{}, f)
+	if err != nil {
+		t.Fatalf("empty items + --fields should succeed, got: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("want empty result, got %d items", len(got))
+	}
+}
+
 func TestRenderList_TableTruncationNotice(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	f := &listFlags{limit: 1}

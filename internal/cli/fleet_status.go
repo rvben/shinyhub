@@ -209,17 +209,26 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 		_, werr := out.Write(append(b, '\n'))
 		return werr
 	}
-	// Table mode: apply limit/offset but not fields (table renders fixed columns).
-	if f.limit > 0 || f.offset > 0 {
-		start := f.offset
-		if start > len(st.Apps) {
-			start = len(st.Apps)
+	// Table mode: apply limit/offset (fields are ignored; table renders fixed columns).
+	// Validate bounds via sliceAndProject to share the same error contract.
+	lf := &listFlags{limit: f.limit, offset: f.offset}
+	if f.limit != 0 || f.offset != 0 {
+		// Dummy single-key items so sliceAndProject can validate and slice.
+		dummy := make([]map[string]any, len(st.Apps))
+		for i := range st.Apps {
+			dummy[i] = map[string]any{"i": i}
 		}
-		end := len(st.Apps)
-		if f.limit > 0 && start+f.limit < end {
-			end = start + f.limit
+		sliced, serr := sliceAndProject(dummy, lf)
+		if serr != nil {
+			return serr
 		}
-		st.Apps = st.Apps[start:end]
+		filtered := make([]fleetStatusApp, 0, len(sliced))
+		for _, it := range sliced {
+			if idx, ok := it["i"].(int); ok {
+				filtered = append(filtered, st.Apps[idx])
+			}
+		}
+		st.Apps = filtered
 	}
 	renderFleetStatus(out, st, quietFlag)
 	return nil

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -206,6 +207,40 @@ func TestFleetStatus_V2Envelope(t *testing.T) {
 	}
 	if _, ok := env["summary"]; !ok {
 		t.Fatalf("summary missing from envelope")
+	}
+}
+
+// TestFleetStatus_NegativeOffsetValidationError verifies that --offset -1 on
+// fleet status (table mode) returns a KindValidation error rather than
+// panicking on a negative slice index. The table path previously had its own
+// open-coded slice logic that did not guard against negative values.
+func TestFleetStatus_NegativeOffsetValidationError(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"a","access":"public","status":"running","managed_by":null}]`)
+
+	_, err := execCLI(t, "fleet", "status", "--offset", "-1")
+	if err == nil {
+		t.Fatal("want error for --offset -1, got nil")
+	}
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) || ece.Kind != KindValidation {
+		t.Errorf("want KindValidation, got %v", err)
+	}
+}
+
+// TestFleetStatus_NegativeLimitValidationError verifies that --limit -1 on
+// fleet status returns a KindValidation error in table mode.
+func TestFleetStatus_NegativeLimitValidationError(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"a","access":"public","status":"running","managed_by":null}]`)
+
+	_, err := execCLI(t, "fleet", "status", "--limit", "-1")
+	if err == nil {
+		t.Fatal("want error for --limit -1, got nil")
+	}
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) || ece.Kind != KindValidation {
+		t.Errorf("want KindValidation, got %v", err)
 	}
 }
 
