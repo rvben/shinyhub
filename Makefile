@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -104,6 +104,37 @@ goreleaser-check:
 # deployments. Requires Docker.
 build-runner-image:
 	docker build -t shinyhub-fargate-runner:latest build/fargate-runner/
+
+# load-test runs k6 scenarios against a running ShinyHub server.
+# LT_SLUG is required. LT_SCENARIO controls which scenario runs:
+#   sessions    (default) - ramp to LT_SESSIONS concurrent WebSocket sessions
+#   cold-start            - measure wake latency for a hibernated app
+#   both                  - run cold-start then sessions
+# Set ASSERT=1 to enable k6 thresholds (cold start p95<15s, session rate>99%).
+# See docs/load-testing.md for the full parameter reference.
+load-test: ## Run k6 load tests (LT_SLUG required; see docs/load-testing.md)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not found. Install: brew install k6 (https://k6.io/docs/get-started/installation/)"; exit 1; }
+	@test -n "$(LT_SLUG)" || { echo "LT_SLUG is required, e.g. make load-test LT_SLUG=myapp"; exit 1; }
+	@mkdir -p loadtest/results
+	@K6_FLAGS="-e LT_HOST=$(or $(LT_HOST),http://127.0.0.1:8080)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_SLUG=$(LT_SLUG)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_SESSIONS=$(or $(LT_SESSIONS),100)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_RAMP=$(or $(LT_RAMP),30s)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_HOLD=$(or $(LT_HOLD),30)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_WS_PATH=$(or $(LT_WS_PATH),/websocket/)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_FIRST_MSG_TIMEOUT=$(or $(LT_FIRST_MSG_TIMEOUT),5)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_COLDSTART_TIMEOUT=$(or $(LT_COLDSTART_TIMEOUT),120)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_AUTH_COOKIE=$(or $(LT_AUTH_COOKIE),)"; \
+	K6_FLAGS="$$K6_FLAGS -e ASSERT=$(or $(ASSERT),0)"; \
+	scenario="$(or $(LT_SCENARIO),sessions)"; \
+	if [ "$$scenario" = "cold-start" ] || [ "$$scenario" = "both" ]; then \
+	  echo "==> cold-start scenario (slug=$(LT_SLUG))"; \
+	  k6 run $$K6_FLAGS loadtest/coldstart.js; \
+	fi; \
+	if [ "$$scenario" = "sessions" ] || [ "$$scenario" = "both" ]; then \
+	  echo "==> sessions scenario (slug=$(LT_SLUG), VUs=$(or $(LT_SESSIONS),100))"; \
+	  k6 run $$K6_FLAGS loadtest/sessions.js; \
+	fi
 
 # Release workflow:
 #   make release-patch   (or release-minor / release-major)
