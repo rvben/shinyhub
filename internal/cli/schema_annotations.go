@@ -100,6 +100,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "created_at", Type: "string"},
 		{Name: "bundle_dir", Type: "string"},
 		{Name: "content_digest", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 	"apps rollback": {Mutating: mut},
 	"apps restart":  {Mutating: mut},
@@ -128,6 +132,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "user_id", Type: "integer"},
 		{Name: "username", Type: "string"},
 		{Name: "role", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 	"apps access group-grant": {
 		Mutating: mut,
@@ -139,6 +147,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"apps access group-list": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "group", Type: "string"},
 		{Name: "role", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 
 	// ── tokens ───────────────────────────────────────────────────────────────
@@ -149,6 +161,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "id", Type: "integer"},
 		{Name: "name", Type: "string"},
 		{Name: "created_at", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 	"tokens revoke": {Mutating: mut},
 

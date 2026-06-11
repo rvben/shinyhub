@@ -932,12 +932,8 @@ func runAppsAccessRevoke(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-type appsAccessListFlags struct {
-	jsonOutput bool
-}
-
 func newAppsAccessListCmd() *cobra.Command {
-	f := &appsAccessListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "list <slug>",
 		Short: "List members granted access to an app",
@@ -946,11 +942,11 @@ func newAppsAccessListCmd() *cobra.Command {
 			return runAppsAccessList(cmd, args, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsAccessList(cmd *cobra.Command, args []string, f *appsAccessListFlags) error {
+func runAppsAccessList(cmd *cobra.Command, args []string, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -970,26 +966,21 @@ func runAppsAccessList(cmd *cobra.Command, args []string, f *appsAccessListFlags
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list members", resp, out)
 	}
-	if f.jsonOutput {
-		fmt.Println(string(out))
-		return nil
-	}
-	var members []struct {
-		UserID   int64  `json:"user_id"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
-	}
+	var members []map[string]any
 	if err := json.Unmarshal(out, &members); err != nil {
 		return fmt.Errorf("parse response: %w", err)
 	}
-	if len(members) == 0 {
-		fmt.Printf("%s: no members\n", slug)
-		return nil
-	}
-	for _, m := range members {
-		fmt.Printf("%-20s %s\n", m.Username, m.Role)
-	}
-	return nil
+	return renderList(cmd, f, members, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintf(w, "%s: no members\n", slug)
+			return
+		}
+		for _, m := range items {
+			username := fmt.Sprintf("%v", m["username"])
+			role := fmt.Sprintf("%v", m["role"])
+			fmt.Fprintf(w, "%-20s %s\n", username, role)
+		}
+	})
 }
 
 // ── apps access group-grant / group-revoke / group-list ─────────────────────
@@ -1077,12 +1068,8 @@ func runAppsAccessGroupRevoke(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-type appsAccessGroupListFlags struct {
-	jsonOutput bool
-}
-
 func newAppsAccessGroupListCmd() *cobra.Command {
-	f := &appsAccessGroupListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "group-list <slug>",
 		Short: "List IdP group access rules for an app",
@@ -1091,11 +1078,11 @@ func newAppsAccessGroupListCmd() *cobra.Command {
 			return runAppsAccessGroupList(cmd, args, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *appsAccessGroupListFlags) error {
+func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -1115,25 +1102,21 @@ func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *appsAccessGrou
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list group access", resp, out)
 	}
-	if f.jsonOutput {
-		fmt.Println(string(out))
-		return nil
-	}
-	var rules []struct {
-		Group string `json:"group"`
-		Role  string `json:"role"`
-	}
+	var rules []map[string]any
 	if err := json.Unmarshal(out, &rules); err != nil {
 		return fmt.Errorf("parse response: %w", err)
 	}
-	if len(rules) == 0 {
-		fmt.Printf("%s: no group rules\n", slug)
-		return nil
-	}
-	for _, r := range rules {
-		fmt.Printf("%-20s %s\n", r.Group, r.Role)
-	}
-	return nil
+	return renderList(cmd, f, rules, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintf(w, "%s: no group rules\n", slug)
+			return
+		}
+		for _, r := range items {
+			group := fmt.Sprintf("%v", r["group"])
+			role := fmt.Sprintf("%v", r["role"])
+			fmt.Fprintf(w, "%-20s %s\n", group, role)
+		}
+	})
 }
 
 // ── tokens create ───────────────────────────────────────────────────────────
@@ -1319,12 +1302,8 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 
 // ── apps deployments ────────────────────────────────────────────────────────
 
-type appsDeploymentsFlags struct {
-	jsonOutput bool
-}
-
 func newAppsDeploymentsCmd() *cobra.Command {
-	f := &appsDeploymentsFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "deployments <slug>",
 		Short: "List deployment history for an app",
@@ -1333,11 +1312,11 @@ func newAppsDeploymentsCmd() *cobra.Command {
 			return runAppsDeployments(cmd, args, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsDeployments(cmd *cobra.Command, args []string, f *appsDeploymentsFlags) error {
+func runAppsDeployments(cmd *cobra.Command, args []string, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -1357,36 +1336,28 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *appsDeploymentsFla
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list deployments", resp, out)
 	}
-
-	if f.jsonOutput {
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
-	}
-
-	var deployments []struct {
-		ID        int64  `json:"id"`
-		Version   string `json:"version"`
-		Status    string `json:"status"`
-		CreatedAt string `json:"created_at"`
-	}
+	var deployments []map[string]any
 	if err := json.Unmarshal(out, &deployments); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
-	if len(deployments) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No deployments.")
-		return nil
-	}
-	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-6s %-20s %-12s %s\n", "ID", "VERSION", "STATUS", "CREATED")
-	for _, d := range deployments {
-		created := d.CreatedAt
-		if len(created) > 19 {
-			created = created[:19]
+	return renderList(cmd, f, deployments, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintln(w, "No deployments.")
+			return
 		}
-		row := fmt.Sprintf("%-6d %-20s %-12s %s", d.ID, d.Version, d.Status, created)
-		fmt.Fprintln(w, strings.TrimRight(row, " "))
-	}
-	return nil
+		fmt.Fprintf(w, "%-6s %-20s %-12s %s\n", "ID", "VERSION", "STATUS", "CREATED")
+		for _, d := range items {
+			id := fmt.Sprintf("%v", d["id"])
+			version := fmt.Sprintf("%v", d["version"])
+			status := fmt.Sprintf("%v", d["status"])
+			created := fmt.Sprintf("%v", d["created_at"])
+			if len(created) > 19 {
+				created = created[:19]
+			}
+			row := fmt.Sprintf("%-6s %-20s %-12s %s", id, version, status, created)
+			fmt.Fprintln(w, strings.TrimRight(row, " "))
+		}
+	})
 }
 
 // ── tokens list ─────────────────────────────────────────────────────────────
@@ -1421,67 +1392,59 @@ func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
 	return tokens, nil
 }
 
-type tokensListFlags struct {
-	jsonOutput bool
-}
-
 func newTokensListCmd() *cobra.Command {
-	f := &tokensListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List your API tokens",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTokensList(cmd, args, f)
+			return runTokensList(cmd, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runTokensList(cmd *cobra.Command, args []string, f *tokensListFlags) error {
+func runTokensList(cmd *cobra.Command, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-
-	if f.jsonOutput {
-		req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "list tokens", resp, out)
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
+	req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
 	}
-
-	tokens, err := fetchTokens(cfg)
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
-	if len(tokens) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No tokens.")
-		return nil
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "list tokens", resp, out)
 	}
-	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-6s %-24s %s\n", "ID", "NAME", "CREATED")
-	for _, t := range tokens {
-		created := t.CreatedAt
-		if len(created) > 19 {
-			created = created[:19]
+	var tokens []map[string]any
+	if err := json.Unmarshal(out, &tokens); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return renderList(cmd, f, tokens, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintln(w, "No tokens.")
+			return
 		}
-		row := fmt.Sprintf("%-6d %-24s %s", t.ID, t.Name, created)
-		fmt.Fprintln(w, strings.TrimRight(row, " "))
-	}
-	return nil
+		fmt.Fprintf(w, "%-6s %-24s %s\n", "ID", "NAME", "CREATED")
+		for _, t := range items {
+			id := fmt.Sprintf("%v", t["id"])
+			name := fmt.Sprintf("%v", t["name"])
+			created := fmt.Sprintf("%v", t["created_at"])
+			if len(created) > 19 {
+				created = created[:19]
+			}
+			row := fmt.Sprintf("%-6s %-24s %s", id, name, created)
+			fmt.Fprintln(w, strings.TrimRight(row, " "))
+		}
+	})
 }
 
 // ── tokens revoke ───────────────────────────────────────────────────────────

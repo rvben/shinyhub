@@ -616,6 +616,8 @@ func TestAppsDelete_PromptGoesToStderr(t *testing.T) {
 }
 
 // TestAppsDeployments lists deployment history.
+// Non-TTY output is the bounded JSON envelope; table rendering is tested
+// explicitly in the new envelope tests (apps_list_test.go).
 func TestAppsDeployments(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}]`)
@@ -625,11 +627,12 @@ func TestAppsDeployments(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(out, "ID") {
-		t.Errorf("expected header row with ID, got: %q", out)
+	// Non-TTY output is the standard envelope.
+	if !strings.Contains(out, `"items"`) {
+		t.Errorf("expected envelope with items, got: %q", out)
 	}
-	if !strings.Contains(out, "3") {
-		t.Errorf("expected deployment ID 3, got: %q", out)
+	if !strings.Contains(out, `"total"`) {
+		t.Errorf("expected envelope with total, got: %q", out)
 	}
 }
 
