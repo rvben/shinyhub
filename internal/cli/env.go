@@ -91,8 +91,9 @@ func newEnvCmd() *cobra.Command {
 			return httpError(cfg.Token, "set env", resp, out)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: set %s\n", slug, key)
-		return nil
+		return renderAction(cmd, "set",
+			map[string]any{"slug": slug, "key": key},
+			fmt.Sprintf("%s: set %s", slug, key))
 	}
 
 	lsF := &listFlags{}
@@ -197,8 +198,9 @@ func newEnvCmd() *cobra.Command {
 			return httpError(cfg.Token, "remove env", resp, out)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: removed %s\n", slug, key)
-		return nil
+		return renderAction(cmd, "removed",
+			map[string]any{"slug": slug, "key": key},
+			fmt.Sprintf("%s: removed %s", slug, key))
 	}
 
 	envCmd.AddCommand(envSetCmd, envLsCmd, envRmCmd, newEnvApplyCmd())

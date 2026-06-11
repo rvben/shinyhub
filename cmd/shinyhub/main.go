@@ -98,8 +98,9 @@ var backupCmd = &cobra.Command{
 		if err := backup.Create(cfg, version, backupOut); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "backup written to %s\n", backupOut)
-		return nil
+		return cli.RenderAction(cmd, "written",
+			map[string]any{"path": backupOut},
+			fmt.Sprintf("backup written to %s", backupOut))
 	},
 }
 
@@ -117,13 +118,14 @@ var restoreCmd = &cobra.Command{
 		}
 		moved, err := backup.Restore(cfg, args[0])
 		for _, p := range moved {
-			fmt.Fprintf(os.Stdout, "previous state preserved at %s\n", p)
+			fmt.Fprintf(cmd.ErrOrStderr(), "previous state preserved at %s\n", p)
 		}
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stdout, "restore complete; start the server to apply any pending migrations")
-		return nil
+		return cli.RenderAction(cmd, "restored",
+			map[string]any{"archive": args[0]},
+			"restore complete; start the server to apply any pending migrations")
 	},
 }
 

@@ -69,6 +69,26 @@ func resolveFormat(legacyJSON bool, streaming bool) (outputFormat, error) {
 	return f, err
 }
 
+// resolveLegacyTextJSON resolves the output format for commands with a
+// --format text|json flag. "json" maps to the JSON format; "text" maps to
+// table. Conflicts with -o/--output are treated as validation errors. The
+// resolved format is cached so the error renderer matches.
+func resolveLegacyTextJSON(legacyFmt string) (outputFormat, error) {
+	switch legacyFmt {
+	case "json":
+		return resolveFormat(true, false)
+	default: // "text"
+		if outputFormat(outputFlagValue) == formatJSON {
+			return "", validationErr("--format text conflicts with --output json", "drop one of the two flags")
+		}
+		if outputFormat(outputFlagValue) == formatNDJSON {
+			return "", validationErr("--format text conflicts with --output ndjson", "drop one of the two flags")
+		}
+		resolvedFormat = formatTable
+		return formatTable, nil
+	}
+}
+
 func resolveFormatWith(flagValue string, legacyJSON, stdoutTTY, streaming bool) (outputFormat, error) {
 	explicit := outputFormat(flagValue)
 	switch explicit {

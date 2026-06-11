@@ -117,6 +117,10 @@ func newAppsShowCmd() *cobra.Command {
 }
 
 func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
+	format, err := resolveFormat(f.jsonOutput, false)
+	if err != nil {
+		return err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -137,7 +141,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 		return httpError(cfg.Token, "show app", resp, out)
 	}
 
-	if f.jsonOutput {
+	if format == formatJSON {
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
 	}
@@ -447,12 +451,15 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "rollback", resp, out)
 	}
+	fields := map[string]any{"slug": slug}
+	var prose string
 	if cmd.Flags().Changed("to") {
-		fmt.Printf("%s: rolled back to deployment %d\n", slug, f.deploymentID)
+		fields["deployment_id"] = f.deploymentID
+		prose = fmt.Sprintf("%s: rolled back to deployment %d", slug, f.deploymentID)
 	} else {
-		fmt.Printf("%s: rolled back to previous deployment\n", slug)
+		prose = fmt.Sprintf("%s: rolled back to previous deployment", slug)
 	}
-	return nil
+	return renderAction(cmd, "rolled_back", fields, prose)
 }
 
 // ── apps restart / start ────────────────────────────────────────────────────
@@ -502,8 +509,9 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 		if resp.StatusCode >= 400 {
 			return httpError(cfg.Token, "start app", resp, out)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", slug, pastTense)
-		return nil
+		return renderAction(cmd, "running",
+			map[string]any{"slug": slug},
+			fmt.Sprintf("%s: %s", slug, pastTense))
 	}
 }
 
@@ -528,8 +536,9 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 		if resp.StatusCode >= 400 {
 			return httpError(cfg.Token, action, resp, out)
 		}
-		fmt.Printf("%s: %s\n", slug, action+"ed")
-		return nil
+		return renderAction(cmd, "running",
+			map[string]any{"slug": slug},
+			fmt.Sprintf("%s: %s", slug, action+"ed"))
 	}
 }
 
@@ -729,19 +738,20 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		return httpError(cfg.Token, "update app", resp, out)
 	}
 
+	var lines []string
 	if hibernateChanged {
 		minutes, _ := payload["hibernate_timeout_minutes"].(*int)
 		switch {
 		case minutes == nil:
-			fmt.Printf("%s: hibernate-timeout reset to global default\n", slug)
+			lines = append(lines, fmt.Sprintf("%s: hibernate-timeout reset to global default", slug))
 		case *minutes == 0:
-			fmt.Printf("%s: hibernation disabled\n", slug)
+			lines = append(lines, fmt.Sprintf("%s: hibernation disabled", slug))
 		default:
-			fmt.Printf("%s: hibernate-timeout set to %d minutes\n", slug, *minutes)
+			lines = append(lines, fmt.Sprintf("%s: hibernate-timeout set to %d minutes", slug, *minutes))
 		}
 	}
 	if replicasChanged {
-		fmt.Printf("%s: replicas set to %d\n", slug, f.replicas)
+		lines = append(lines, fmt.Sprintf("%s: replicas set to %d", slug, f.replicas))
 	}
 	if tierChanged {
 		parts := make([]string, 0, len(f.tiers))
@@ -750,36 +760,39 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			parts = append(parts, fmt.Sprintf("%s=%d", name, placement[name]))
 			total += placement[name]
 		}
-		fmt.Printf("%s: placement set to %s (%d replicas)\n", slug, strings.Join(parts, ", "), total)
+		lines = append(lines, fmt.Sprintf("%s: placement set to %s (%d replicas)", slug, strings.Join(parts, ", "), total))
 	}
 	if capChanged {
 		if f.maxSessionsPerReplica == 0 {
-			fmt.Printf("%s: max-sessions-per-replica reset to runtime default\n", slug)
+			lines = append(lines, fmt.Sprintf("%s: max-sessions-per-replica reset to runtime default", slug))
 		} else {
-			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, f.maxSessionsPerReplica)
+			lines = append(lines, fmt.Sprintf("%s: max-sessions-per-replica set to %d", slug, f.maxSessionsPerReplica))
 		}
 	}
 	if anyAutoscaleChanged {
 		if autoscaleChanged {
 			if f.autoscale {
-				fmt.Printf("%s: autoscale enabled\n", slug)
+				lines = append(lines, fmt.Sprintf("%s: autoscale enabled", slug))
 			} else {
-				fmt.Printf("%s: autoscale disabled\n", slug)
+				lines = append(lines, fmt.Sprintf("%s: autoscale disabled", slug))
 			}
 		}
 		if autoscaleMinChanged {
-			fmt.Printf("%s: autoscale-min set to %d\n", slug, f.autoscaleMin)
+			lines = append(lines, fmt.Sprintf("%s: autoscale-min set to %d", slug, f.autoscaleMin))
 		}
 		if autoscaleMaxChanged {
-			fmt.Printf("%s: autoscale-max set to %d\n", slug, f.autoscaleMax)
+			lines = append(lines, fmt.Sprintf("%s: autoscale-max set to %d", slug, f.autoscaleMax))
 		}
 		if autoscaleTargetChanged {
 			if f.autoscaleTarget == 0 {
-				fmt.Printf("%s: autoscale-target reset to runtime default\n", slug)
+				lines = append(lines, fmt.Sprintf("%s: autoscale-target reset to runtime default", slug))
 			} else {
-				fmt.Printf("%s: autoscale-target set to %.0f%%\n", slug, f.autoscaleTarget*100)
+				lines = append(lines, fmt.Sprintf("%s: autoscale-target set to %.0f%%", slug, f.autoscaleTarget*100))
 			}
 		}
+	}
+	if err := renderAction(cmd, "updated", map[string]any{"slug": slug}, strings.Join(lines, "\n")); err != nil {
+		return err
 	}
 
 	if f.wait {
@@ -852,8 +865,9 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "set access", resp, out)
 	}
-	fmt.Printf("%s: access set to %s\n", slug, accessLevel)
-	return nil
+	return renderAction(cmd, "updated",
+		map[string]any{"slug": slug, "access": accessLevel},
+		fmt.Sprintf("%s: access set to %s", slug, accessLevel))
 }
 
 type appsAccessGrantFlags struct {
@@ -905,12 +919,15 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "grant access", resp, out)
 	}
+	fields := map[string]any{"slug": slug, "username": username}
+	var prose string
 	if cmd.Flags().Changed("role") {
-		fmt.Printf("%s: granted %s access to %s\n", slug, f.role, username)
+		fields["role"] = f.role
+		prose = fmt.Sprintf("%s: granted %s access to %s", slug, f.role, username)
 	} else {
-		fmt.Printf("%s: granted access to %s\n", slug, username)
+		prose = fmt.Sprintf("%s: granted access to %s", slug, username)
 	}
-	return nil
+	return renderAction(cmd, "granted", fields, prose)
 }
 
 func newAppsAccessRevokeCmd() *cobra.Command {
@@ -947,8 +964,9 @@ func runAppsAccessRevoke(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "revoke access", resp, out)
 	}
-	fmt.Printf("%s: revoked access for %s\n", slug, username)
-	return nil
+	return renderAction(cmd, "revoked",
+		map[string]any{"slug": slug, "username": username},
+		fmt.Sprintf("%s: revoked access for %s", slug, username))
 }
 
 func newAppsAccessListCmd() *cobra.Command {
@@ -1050,8 +1068,9 @@ func runAppsAccessGroupGrant(cmd *cobra.Command, args []string, f *appsAccessGro
 	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
-	fmt.Printf("%s: granted %s access to group %s\n", slug, f.role, group)
-	return nil
+	return renderAction(cmd, "granted",
+		map[string]any{"slug": slug, "group": group, "role": f.role},
+		fmt.Sprintf("%s: granted %s access to group %s", slug, f.role, group))
 }
 
 func newAppsAccessGroupRevokeCmd() *cobra.Command {
@@ -1083,8 +1102,9 @@ func runAppsAccessGroupRevoke(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "revoke group access", resp, out)
 	}
-	fmt.Printf("%s: revoked access for group %s\n", slug, group)
-	return nil
+	return renderAction(cmd, "revoked",
+		map[string]any{"slug": slug, "group": group},
+		fmt.Sprintf("%s: revoked access for group %s", slug, group))
 }
 
 func newAppsAccessGroupListCmd() *cobra.Command {
@@ -1173,7 +1193,15 @@ func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) er
 	case "text", "json":
 		// valid
 	default:
-		return fmt.Errorf("--format must be %q or %q, got %q", "text", "json", f.format)
+		return validationErr(fmt.Sprintf("--format must be %q or %q, got %q", "text", "json", f.format), "")
+	}
+	// --format text/json is a legacy selector that maps onto the global output
+	// format. Treat --format json like --json (legacy alias) and --format text
+	// like --output table (explicit table request). Conflicts follow the same
+	// rule as --json vs --output table: error on mismatch.
+	format, err := resolveLegacyTextJSON(f.format)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := loadConfig()
@@ -1203,7 +1231,7 @@ func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) er
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
-	if f.format == "json" {
+	if format == formatJSON {
 		out, err := json.Marshal(result)
 		if err != nil {
 			return err
@@ -1280,8 +1308,9 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "delete app", resp, out)
 	}
-	fmt.Printf("%s: deleted\n", slug)
-	return nil
+	return renderAction(cmd, "deleted",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: deleted", slug))
 }
 
 // ── apps stop ───────────────────────────────────────────────────────────────
@@ -1315,8 +1344,9 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "stop app", resp, out)
 	}
-	fmt.Printf("%s: stopped\n", slug)
-	return nil
+	return renderAction(cmd, "stopped",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: stopped", slug))
 }
 
 // ── apps deployments ────────────────────────────────────────────────────────
@@ -1540,6 +1570,7 @@ func runTokensRevoke(cmd *cobra.Command, args []string, f *tokensRevokeFlags) er
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "revoke token", resp, out)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "token %s: revoked\n", tokenID)
-	return nil
+	return renderAction(cmd, "revoked",
+		map[string]any{"token_id": tokenID},
+		fmt.Sprintf("token %s: revoked", tokenID))
 }

@@ -735,7 +735,8 @@ func TestScheduleAdd_RunOnRegister_ReportsFirstFire(t *testing.T) {
 	if gotBody["run_on_register"] != true {
 		t.Errorf("run_on_register in body = %v, want true", gotBody["run_on_register"])
 	}
-	if !strings.Contains(out.String(), "run #42") {
+	// In piped mode the output is a JSON envelope; check for the run id value.
+	if !strings.Contains(out.String(), "42") {
 		t.Errorf("output missing first-fire run id; got: %s", out.String())
 	}
 }
@@ -761,8 +762,9 @@ func TestScheduleAdd_NoFirstFire_NoTriggerLine(t *testing.T) {
 	if strings.Contains(out.String(), "first-fire") {
 		t.Errorf("unexpected first-fire line when server returned no run id; got: %s", out.String())
 	}
-	if !strings.Contains(out.String(), "created schedule") {
-		t.Errorf("missing normal created output; got: %s", out.String())
+	// In piped mode the output is a JSON envelope with status "created".
+	if !strings.Contains(out.String(), `"created"`) {
+		t.Errorf("missing created status in output; got: %s", out.String())
 	}
 }
 

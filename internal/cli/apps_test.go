@@ -656,11 +656,10 @@ func TestAppsStart(t *testing.T) {
 	if req.Method != "POST" || req.Path != "/api/apps/demo/restart" {
 		t.Errorf("expected POST /api/apps/demo/restart, got %s %s", req.Method, req.Path)
 	}
-	if !strings.Contains(out, "demo: started") {
-		t.Errorf("expected output to contain 'demo: started', got %q", out)
-	}
-	if strings.Contains(out, "restarted") {
-		t.Errorf("output should say 'started', not 'restarted', got %q", out)
+	// In piped mode the output is a JSON envelope; verify the success envelope
+	// contains the slug and the running status.
+	if !strings.Contains(out, `"slug"`) || !strings.Contains(out, `"running"`) {
+		t.Errorf("expected JSON envelope with slug and running status, got %q", out)
 	}
 }
 
@@ -684,7 +683,7 @@ func TestAppsShow(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo App","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":15,"deploy_count":3,"hibernate_timeout_minutes":null,"memory_limit_mb":512,"cpu_quota_percent":100,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"running","pid":1235,"port":34568}]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -720,7 +719,7 @@ func TestAppsShow_InheritedCapShowsRuntimeDefaultAndCeiling(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -737,7 +736,7 @@ func TestAppsShow_ExplicitCapShowsCeiling(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":3,"max_sessions_per_replica":5,"deploy_count":1},"effective_max_sessions_per_replica":5,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -752,7 +751,7 @@ func TestAppsShow_UnlimitedCap(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":0,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -769,7 +768,7 @@ func TestAppsShow_MissingEffectiveCapFallsBackToAppCap(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":7,"deploy_count":1},"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -788,7 +787,7 @@ func TestAppsShow_MissingEffectiveCapInheritedOmitsCeiling(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1197,7 +1196,7 @@ func TestAppsShow_RendersRejectsByReason(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":1,"deploy_count":1,"hibernate_timeout_minutes":null,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"effective_max_sessions_per_replica":1,"replicas_status":[],"rejects_by_reason":{"window_seconds":600,"counts":{"pool-saturated":4103,"app-not-ready":12}}}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1219,7 +1218,7 @@ func TestAppsShow_RendersLostReplicaReason(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"degraded","replicas":2,"max_sessions_per_replica":1,"deploy_count":1},"effective_max_sessions_per_replica":1,"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"lost","reason":"worker unavailable"}]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1240,7 +1239,7 @@ func TestAppsShow_RendersAutoscaleEnabled(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":true,"autoscale_min_replicas":1,"autoscale_max_replicas":4,"autoscale_target":0.7},"effective_autoscale_target":0.7,"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1255,7 +1254,7 @@ func TestAppsShow_RendersAutoscaleInheritedTarget(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":true,"autoscale_min_replicas":2,"autoscale_max_replicas":6,"autoscale_target":0},"effective_autoscale_target":0.8,"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1268,7 +1267,7 @@ func TestAppsShow_RendersAutoscaleOff(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":false},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1283,7 +1282,7 @@ func TestAppsShow_OmitsRejectsWhenAbsent(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":1,"deploy_count":1,"hibernate_timeout_minutes":null,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"effective_max_sessions_per_replica":1,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

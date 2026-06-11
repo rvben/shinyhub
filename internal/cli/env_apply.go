@@ -433,7 +433,11 @@ func newEnvApplyCmd() *cobra.Command {
 		switch flags.format {
 		case "text", "json":
 		default:
-			return fmt.Errorf("--format must be text or json, got %q", flags.format)
+			return validationErr(fmt.Sprintf("--format must be text or json, got %q", flags.format), "")
+		}
+		envApplyFormat, fmtErr := resolveLegacyTextJSON(flags.format)
+		if fmtErr != nil {
+			return fmtErr
 		}
 
 		f, err := os.Open(path)
@@ -487,7 +491,7 @@ func newEnvApplyCmd() *cobra.Command {
 
 		w := cmd.OutOrStdout()
 		if flags.dryRun {
-			if flags.format == "json" {
+			if envApplyFormat == formatJSON {
 				return json.NewEncoder(w).Encode(plan)
 			}
 			renderEnvPlanText(w, plan, true, 0)
@@ -495,7 +499,7 @@ func newEnvApplyCmd() *cobra.Command {
 		}
 
 		applied, applyErr := applyEnvPlan(cfg, slug, plan, desiredByKey, flags.restart)
-		if flags.format == "json" {
+		if envApplyFormat == formatJSON {
 			out := struct {
 				envApplyPlan
 				Applied int    `json:"applied"`

@@ -86,8 +86,9 @@ func TestShare_Add_PrintsReadOnlyWarning(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(out.String(), "mounted data from") {
-		t.Errorf("expected success line on stdout, got: %s", out.String())
+	// In piped mode the output is a JSON envelope; check for the mounted status.
+	if !strings.Contains(out.String(), `"mounted"`) {
+		t.Errorf("expected mounted status on stdout, got: %s", out.String())
 	}
 	if !strings.Contains(errBuf.String(), "Read-only is a convention") {
 		t.Errorf("expected read-only warning on stderr, got: %s", errBuf.String())

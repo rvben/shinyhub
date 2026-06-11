@@ -268,21 +268,30 @@ func newScheduleAddCmd() *cobra.Command {
 
 		var created scheduleDTO
 		if err := json.Unmarshal(out, &created); err == nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "created schedule %q (id %d)\n", created.Name, created.ID)
 			if created.DSTAdvisory != nil && *created.DSTAdvisory != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+*created.DSTAdvisory)
 			}
+			fields := map[string]any{"slug": slug, "name": created.Name, "id": created.ID}
+			prose := fmt.Sprintf("created schedule %q (id %d)", created.Name, created.ID)
 			if created.FirstFireRunID != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "first-fire triggered (run #%d)\n", *created.FirstFireRunID)
-				if flags.follow {
-					if err := streamRunLogs(cfg, slug, created.ID, *created.FirstFireRunID, true, cmd); err != nil {
-						return err
-					}
-					return runFinalExitError(cfg, slug, created.ID, *created.FirstFireRunID)
+				fields["first_fire_run_id"] = *created.FirstFireRunID
+				prose += fmt.Sprintf("\nfirst-fire triggered (run #%d)", *created.FirstFireRunID)
+			}
+			if err := renderAction(cmd, "created", fields, prose); err != nil {
+				return err
+			}
+			if created.FirstFireRunID != nil && flags.follow {
+				if err := streamRunLogs(cfg, slug, created.ID, *created.FirstFireRunID, true, cmd); err != nil {
+					return err
 				}
+				return runFinalExitError(cfg, slug, created.ID, *created.FirstFireRunID)
 			}
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q created\n", slug, flags.name)
+			if err := renderAction(cmd, "created",
+				map[string]any{"slug": slug, "name": flags.name},
+				fmt.Sprintf("%s: schedule %q created", slug, flags.name)); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -412,8 +421,9 @@ Timezone is tri-state:
 			return httpError(cfg.Token, "update schedule", resp, out)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: updated schedule %q\n", slug, name)
-		return nil
+		return renderAction(cmd, "updated",
+			map[string]any{"slug": slug, "name": name},
+			fmt.Sprintf("%s: updated schedule %q", slug, name))
 	}
 	return updateCmd
 }
@@ -454,8 +464,9 @@ func newScheduleRmCmd() *cobra.Command {
 				return httpError(cfg.Token, "remove schedule", resp, out)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: removed schedule %q\n", slug, name)
-			return nil
+			return renderAction(cmd, "removed",
+				map[string]any{"slug": slug, "name": name},
+				fmt.Sprintf("%s: removed schedule %q", slug, name))
 		},
 	}
 }
@@ -516,8 +527,9 @@ func patchScheduleEnabled(enabled bool) func(*cobra.Command, []string) error {
 		if !enabled {
 			state = "disabled"
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q %s\n", slug, name, state)
-		return nil
+		return renderAction(cmd, state,
+			map[string]any{"slug": slug, "name": name},
+			fmt.Sprintf("%s: schedule %q %s", slug, name, state))
 	}
 }
 
@@ -576,10 +588,10 @@ func newScheduleRunCmd() *cobra.Command {
 				"note: schedule %q is disabled; manual trigger proceeded anyway\n", name)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q started\n", slug, name)
-
 		if !follow {
-			return nil
+			return renderAction(cmd, "started",
+				map[string]any{"slug": slug, "name": name},
+				fmt.Sprintf("%s: schedule %q started", slug, name))
 		}
 
 		// Follow the exact run that was just admitted, using the run_id from

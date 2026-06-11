@@ -40,10 +40,16 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	},
 
 	// ── server-side commands ─────────────────────────────────────────────────
-	"serve":   {Mutating: mut, Streaming: true},
-	"backup":  {Mutating: mut, ArgTypes: map[string]string{"--out": "path"}},
-	"restore": {Mutating: mut},
-	"worker":  {Mutating: mut, Streaming: true},
+	"serve": {Mutating: mut, Streaming: true},
+	"backup": {Mutating: mut, ArgTypes: map[string]string{"--out": "path"}, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "written"},
+		{Name: "path", Type: "string"},
+	}},
+	"restore": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "restored"},
+		{Name: "archive", Type: "string"},
+	}},
+	"worker": {Mutating: mut, Streaming: true},
 
 	// ── auth ─────────────────────────────────────────────────────────────────
 	"login":  {Mutating: mut},
@@ -113,12 +119,31 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 	}},
-	"apps rollback": {Mutating: mut},
-	"apps restart":  {Mutating: mut},
-	"apps start":    {Mutating: mut},
-	"apps stop":     {Mutating: mut},
-	"apps delete":   {Mutating: mut},
-	"apps set":      {Mutating: mut},
+	"apps rollback": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "rolled_back"},
+		{Name: "slug", Type: "string"},
+		{Name: "deployment_id", Type: "integer", Desc: "Target deployment ID when --to is specified"},
+	}},
+	"apps restart": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "running"},
+		{Name: "slug", Type: "string"},
+	}},
+	"apps start": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "running"},
+		{Name: "slug", Type: "string"},
+	}},
+	"apps stop": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "stopped"},
+		{Name: "slug", Type: "string"},
+	}},
+	"apps delete": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "deleted"},
+		{Name: "slug", Type: "string"},
+	}},
+	"apps set": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "updated"},
+		{Name: "slug", Type: "string"},
+	}},
 
 	// ── apps access (container) ───────────────────────────────────────────────
 	"apps access": {Mutating: ro},
@@ -128,14 +153,29 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		ArgEnums: map[string][]string{
 			"level": {"private", "shared", "public"},
 		},
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string", Desc: "updated"},
+			{Name: "slug", Type: "string"},
+			{Name: "access", Type: "string"},
+		},
 	},
 	"apps access grant": {
 		Mutating: mut,
 		ArgEnums: map[string][]string{
 			"--role": {"viewer", "manager"},
 		},
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string", Desc: "granted"},
+			{Name: "slug", Type: "string"},
+			{Name: "username", Type: "string"},
+			{Name: "role", Type: "string", Desc: "Present when --role was specified"},
+		},
 	},
-	"apps access revoke": {Mutating: mut},
+	"apps access revoke": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "revoked"},
+		{Name: "slug", Type: "string"},
+		{Name: "username", Type: "string"},
+	}},
 	"apps access list": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "user_id", Type: "integer"},
 		{Name: "username", Type: "string"},
@@ -151,8 +191,18 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		ArgEnums: map[string][]string{
 			"--role": {"viewer", "manager"},
 		},
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string", Desc: "granted"},
+			{Name: "slug", Type: "string"},
+			{Name: "group", Type: "string"},
+			{Name: "role", Type: "string"},
+		},
 	},
-	"apps access group-revoke": {Mutating: mut},
+	"apps access group-revoke": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "revoked"},
+		{Name: "slug", Type: "string"},
+		{Name: "group", Type: "string"},
+	}},
 	"apps access group-list": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "group", Type: "string"},
 		{Name: "role", Type: "string"},
@@ -166,7 +216,12 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	// ── tokens ───────────────────────────────────────────────────────────────
 	"tokens": {Mutating: ro},
 
-	"tokens create": {Mutating: mut},
+	"tokens create": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "id", Type: "integer"},
+		{Name: "name", Type: "string"},
+		{Name: "token", Type: "string", Desc: "The token value (shown once)"},
+		{Name: "created_at", Type: "string"},
+	}},
 	"tokens list": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "id", Type: "integer"},
 		{Name: "name", Type: "string"},
@@ -177,12 +232,19 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 	}},
-	"tokens revoke": {Mutating: mut},
+	"tokens revoke": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "revoked"},
+		{Name: "token_id", Type: "string"},
+	}},
 
 	// ── env ───────────────────────────────────────────────────────────────────
 	"env": {Mutating: ro},
 
-	"env set": {Mutating: mut},
+	"env set": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "set"},
+		{Name: "slug", Type: "string"},
+		{Name: "key", Type: "string"},
+	}},
 	"env ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "key", Type: "string"},
 		{Name: "value", Type: "string"},
@@ -195,13 +257,21 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 	}},
-	"env rm":    {Mutating: mut},
+	"env rm": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "removed"},
+		{Name: "slug", Type: "string"},
+		{Name: "key", Type: "string"},
+	}},
 	"env apply": {Mutating: mut},
 
 	// ── data ─────────────────────────────────────────────────────────────────
 	"data": {Mutating: ro},
 
-	"data push": {Mutating: mut},
+	"data push": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "uploaded"},
+		{Name: "slug", Type: "string"},
+		{Name: "path", Type: "string"},
+	}},
 	"data ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "path", Type: "string"},
 		{Name: "size", Type: "integer"},
@@ -215,7 +285,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "quota_mb", Type: "integer", Desc: "Storage quota in megabytes (0 = no quota)"},
 		{Name: "used_bytes", Type: "integer", Desc: "Total bytes used across all files"},
 	}},
-	"data rm": {Mutating: mut},
+	"data rm": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "removed"},
+		{Name: "slug", Type: "string"},
+		{Name: "path", Type: "string"},
+	}},
 
 	// ── schedule ─────────────────────────────────────────────────────────────
 	"schedule": {Mutating: ro},
@@ -240,14 +314,42 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"schedule add": {
 		Mutating:            mut,
 		ExitCodePassthrough: true,
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string", Desc: "created"},
+			{Name: "slug", Type: "string"},
+			{Name: "name", Type: "string"},
+			{Name: "id", Type: "integer"},
+			{Name: "first_fire_run_id", Type: "integer", Desc: "Present when --run-on-register triggered a first run"},
+		},
 	},
-	"schedule update":  {Mutating: mut},
-	"schedule rm":      {Mutating: mut},
-	"schedule enable":  {Mutating: mut},
-	"schedule disable": {Mutating: mut},
+	"schedule update": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "updated"},
+		{Name: "slug", Type: "string"},
+		{Name: "name", Type: "string"},
+	}},
+	"schedule rm": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "removed"},
+		{Name: "slug", Type: "string"},
+		{Name: "name", Type: "string"},
+	}},
+	"schedule enable": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "enabled"},
+		{Name: "slug", Type: "string"},
+		{Name: "name", Type: "string"},
+	}},
+	"schedule disable": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "disabled"},
+		{Name: "slug", Type: "string"},
+		{Name: "name", Type: "string"},
+	}},
 	"schedule run": {
 		Mutating:            mut,
 		ExitCodePassthrough: true,
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string", Desc: "started"},
+			{Name: "slug", Type: "string"},
+			{Name: "name", Type: "string"},
+		},
 	},
 	"schedule logs": {
 		Mutating:            ro,
@@ -267,8 +369,16 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 	}},
-	"share add": {Mutating: mut},
-	"share rm":  {Mutating: mut},
+	"share add": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "mounted"},
+		{Name: "slug", Type: "string"},
+		{Name: "source_slug", Type: "string"},
+	}},
+	"share rm": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "unmounted"},
+		{Name: "slug", Type: "string"},
+		{Name: "source_slug", Type: "string"},
+	}},
 
 	// ── fleet ─────────────────────────────────────────────────────────────────
 	"fleet": {Mutating: ro},

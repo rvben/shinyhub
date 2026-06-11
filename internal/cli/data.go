@@ -51,8 +51,9 @@ func newDataPushCmd() *cobra.Command {
 		if err := runDataPush(cfg.Host, cfg.Token, slug, localFile, dest, flags.restart); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: uploaded %s\n", slug, dest)
-		return nil
+		return renderAction(cmd, "uploaded",
+			map[string]any{"slug": slug, "path": dest},
+			fmt.Sprintf("%s: uploaded %s", slug, dest))
 	}
 	return pushCmd
 }
@@ -145,8 +146,9 @@ func newDataRmCmd() *cobra.Command {
 		if err := runDataRm(cfg.Host, cfg.Token, slug, dest); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: removed %s\n", slug, dest)
-		return nil
+		return renderAction(cmd, "removed",
+			map[string]any{"slug": slug, "path": dest},
+			fmt.Sprintf("%s: removed %s", slug, dest))
 	}
 	return rmCmd
 }

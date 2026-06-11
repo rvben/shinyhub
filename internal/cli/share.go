@@ -123,13 +123,13 @@ func newShareAddCmd() *cobra.Command {
 			return httpError(cfg.Token, "add shared-data", resp, out)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: mounted data from %q\n", slug, from)
-
 		var dto sharedDataDTO
 		if err := json.Unmarshal(out, &dto); err == nil && dto.Warning != "" {
 			fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+dto.Warning)
 		}
-		return nil
+		return renderAction(cmd, "mounted",
+			map[string]any{"slug": slug, "source_slug": from},
+			fmt.Sprintf("%s: mounted data from %q", slug, from))
 	}
 	return addCmd
 }
@@ -165,8 +165,9 @@ func newShareRmCmd() *cobra.Command {
 				return httpError(cfg.Token, "remove shared-data", resp, out)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: removed shared-data mount %q\n", slug, sourceSlug)
-			return nil
+			return renderAction(cmd, "unmounted",
+				map[string]any{"slug": slug, "source_slug": sourceSlug},
+				fmt.Sprintf("%s: removed shared-data mount %q", slug, sourceSlug))
 		},
 	}
 }
