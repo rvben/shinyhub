@@ -9,17 +9,19 @@ import (
 // inspects the returned error chain for this type via errors.As and exits
 // with Code; without it, cobra's default non-nil-error exit (1) applies.
 //
-// Codes follow the fleet spec: 0 success/report, 1 usage/manifest, 2
+// Codes: 0 success/report, 1 usage/manifest/validation, 2
 // plan-detailed-exitcode changes-pending, 3 transport/auth, 4 partial
-// convergence, 5 conflicts.
+// convergence, 5 conflicts, 6 server not ready. schedule --follow commands
+// propagate the remote job's own exit code (exit_code_passthrough).
 type ExitCodeError struct {
 	Code int
 	Err  error
-	// Reported is set when the command already wrote a contextual, user-facing
-	// message for this error (e.g. a "✗ ..." preflight box or a full apply
-	// report). The fleet RunE wrapper then stays silent so the message is not
-	// duplicated; cobra's generic "Error:" line is suppressed independently via
-	// SilenceErrors on the fleet subcommand tree.
+	// Kind is the structured error kind for the envelope. Empty means
+	// classify() derives it from Code (legacy fleet paths) or falls back.
+	Kind Kind
+	// Reported is set when the command already wrote a contextual,
+	// user-facing message for this error. The renderer then skips the prose
+	// duplication; the structured envelope is still emitted.
 	Reported bool
 }
 
