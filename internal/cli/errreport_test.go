@@ -164,6 +164,36 @@ func TestClassify_CobraArgErrors(t *testing.T) {
 	}
 }
 
+// TestReport_JobFailedPassthrough pins three invariants of the KindJobFailed
+// contract: the process exit code is the job's own code, the envelope kind is
+// "job_failed", and the envelope omits exit_code (clispec v0.2 passthrough).
+func TestReport_JobFailedPassthrough(t *testing.T) {
+	err := &ExitCodeError{Code: 7, Kind: KindJobFailed, Err: fmt.Errorf("run failed")}
+
+	var stderr bytes.Buffer
+	code := reportTo(&stderr, false, formatJSON, err)
+
+	if code != 7 {
+		t.Fatalf("exit code = %d, want 7 (job's own code)", code)
+	}
+
+	line := strings.TrimRight(stderr.String(), "\n")
+	var env map[string]any
+	if err2 := json.Unmarshal([]byte(line), &env); err2 != nil {
+		t.Fatalf("envelope is not JSON: %v\nraw: %q", err2, line)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj == nil {
+		t.Fatalf("missing error object in envelope: %v", env)
+	}
+	if errObj["kind"] != "job_failed" {
+		t.Errorf("envelope kind = %q, want job_failed", errObj["kind"])
+	}
+	if _, has := errObj["exit_code"]; has {
+		t.Errorf("job_failed envelope must omit exit_code (passthrough contract), got %v", errObj["exit_code"])
+	}
+}
+
 // TestReport_ValidationErrHintInEnvelopeAndProse verifies that validationErr
 // errors carry the hint in the envelope's dedicated hint field (not baked into
 // the message) and that the TTY prose line shows both message and hint.

@@ -486,6 +486,60 @@ func TestScheduleRun_DisabledScheduleFailureNoProceededNote(t *testing.T) {
 	}
 }
 
+// EXIT-4: runFinalExitError must set Kind=KindJobFailed so the error envelope
+// carries kind=job_failed, the process exit mirrors the job's own code, and the
+// envelope omits exit_code (passthrough contract). The test drives the full
+// --follow code path with a server that returns exit_code=7 and status=failed,
+// then pipes the returned error through reportTo to assert the envelope shape.
+func TestScheduleRun_FollowJobFailedEnvelopeOmitsExitCode(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":true}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":11}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/11/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: error output\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/11": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"failed","exit_code":7}`)
+		},
+	})
+
+	_, _, runErr := execCLISplit(t, "schedule", "run", "demo", "job", "--follow")
+	if runErr == nil {
+		t.Fatal("expected non-nil error for a failed run")
+	}
+	if exitCode(runErr) != 7 {
+		t.Errorf("exit code = %d, want 7 (job's own exit code)", exitCode(runErr))
+	}
+
+	// Verify the error classifies as KindJobFailed so Report() emits the right
+	// envelope. Drive reportTo directly: it is the same code path main() calls.
+	var stderrBuf bytes.Buffer
+	code := reportTo(&stderrBuf, false, formatJSON, runErr)
+	if code != 7 {
+		t.Errorf("reportTo exit code = %d, want 7", code)
+	}
+	line := strings.TrimRight(stderrBuf.String(), "\n")
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(line), &env); jerr != nil {
+		t.Fatalf("reportTo output is not JSON: %v\nraw: %q", jerr, line)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj == nil {
+		t.Fatalf("envelope missing error object: %v", env)
+	}
+	if errObj["kind"] != "job_failed" {
+		t.Errorf("envelope kind = %q, want job_failed", errObj["kind"])
+	}
+	if _, has := errObj["exit_code"]; has {
+		t.Errorf("job_failed envelope must omit exit_code (passthrough), got %v", errObj["exit_code"])
+	}
+}
+
 // SCH-1: `schedule update` changes a schedule in place (preserving run history)
 // by PATCHing only the fields the operator actually supplied. A lone --cron must
 // not clobber the command, timeout, or any other stored field.

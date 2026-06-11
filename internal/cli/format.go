@@ -31,6 +31,14 @@ func currentFormat() outputFormat {
 	if resolvedFormat != "" {
 		return resolvedFormat
 	}
+	// An explicit -o flag must override TTY detection so the error renderer
+	// matches the format the user requested. Only valid values are forwarded;
+	// an invalid -o will be rejected later by resolveFormat, and for that error
+	// path the TTY fallback is the right choice.
+	switch outputFormat(outputFlagValue) {
+	case formatTable, formatJSON, formatNDJSON:
+		return outputFormat(outputFlagValue)
+	}
 	if isTTY(os.Stdout) {
 		return formatTable
 	}

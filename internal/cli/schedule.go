@@ -751,5 +751,5 @@ func runFinalExitError(cfg *cliConfig, slug string, schedID, runID int64) error 
 	if code == 0 {
 		code = 1
 	}
-	return &ExitCodeError{Code: code, Err: fmt.Errorf("run %s", run.Status)}
+	return &ExitCodeError{Code: code, Kind: KindJobFailed, Err: fmt.Errorf("run %s", run.Status)}
 }

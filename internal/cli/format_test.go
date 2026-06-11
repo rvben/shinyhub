@@ -57,3 +57,56 @@ func resetFormatState(t *testing.T) {
 		resolvedFormat = ""
 	})
 }
+
+// TestCurrentFormat_ExplicitOutputFlagBeforeTTYFallback verifies that when
+// outputFlagValue holds a valid format string and resolvedFormat is empty
+// (error occurred before command resolution), currentFormat returns the
+// explicit value rather than falling through to TTY detection. This ensures
+// -o json causes JSON error envelopes even when stdout is a TTY.
+func TestCurrentFormat_ExplicitOutputFlagBeforeTTYFallback(t *testing.T) {
+	resetFormatState(t)
+
+	outputFlagValue = "json"
+	// resolvedFormat stays "" (simulating an error before resolveFormat ran)
+	got := currentFormat()
+	if got != formatJSON {
+		t.Errorf("currentFormat() = %q, want json when -o json is set", got)
+	}
+}
+
+// TestCurrentFormat_InvalidOutputFlagFallsBackToTTY verifies that an invalid
+// -o value does NOT propagate through currentFormat (currentFormat must return
+// something valid for the TTY path; the invalid value will be rejected later
+// by resolveFormat). When both resolvedFormat and outputFlagValue are invalid,
+// we fall back to TTY detection. Use resolvedFormat="" and an invalid flag
+// value, then confirm currentFormat returns formatJSON (stdout not a TTY).
+func TestCurrentFormat_InvalidOutputFlagFallsBackToTTYPath(t *testing.T) {
+	resetFormatState(t)
+
+	outputFlagValue = "bogus"
+	// resolvedFormat stays "" and stdout is not a TTY in tests.
+	got := currentFormat()
+	// Expect TTY fallback: not a TTY in CI/test => formatJSON
+	if got != formatJSON && got != formatTable {
+		t.Errorf("currentFormat() = %q, want table or json (TTY-based), not the invalid flag value", got)
+	}
+	// The invalid value must NOT appear as the returned format.
+	if got == outputFormat("bogus") {
+		t.Errorf("currentFormat() returned the invalid flag value %q", got)
+	}
+}
+
+// TestCurrentFormat_ResolvedFormatWinsOverExplicitFlag verifies the priority
+// order: resolvedFormat (set by a successful resolveFormat call) always wins
+// over outputFlagValue, even when outputFlagValue differs. This is the
+// normal success path: a command's resolveFormat runs and caches the result.
+func TestCurrentFormat_ResolvedFormatWinsOverExplicitFlag(t *testing.T) {
+	resetFormatState(t)
+
+	resolvedFormat = formatNDJSON
+	outputFlagValue = "json" // would conflict, but resolvedFormat takes priority
+	got := currentFormat()
+	if got != formatNDJSON {
+		t.Errorf("currentFormat() = %q, want ndjson (resolvedFormat priority)", got)
+	}
+}
