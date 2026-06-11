@@ -55,6 +55,12 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		ArgEnums: map[string][]string{
 			"--visibility": {"private", "shared", "public"},
 		},
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string", Desc: "deployed"},
+			{Name: "slug", Type: "string"},
+			{Name: "deploy_count", Type: "integer", Desc: "Cumulative deployment number"},
+			{Name: "version", Type: "string", Desc: "Version string from the deployment"},
+		},
 	},
 
 	// ── apps (container) ─────────────────────────────────────────────────────

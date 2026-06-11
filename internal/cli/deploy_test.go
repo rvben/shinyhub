@@ -650,8 +650,9 @@ func TestWaitForHealthy_StoppedIsNotTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForHealthyWithOutput: unexpected error for stopped→running transition: %v", err)
 	}
-	if stderrBuf.Len() > 0 {
-		t.Errorf("stderr should be empty on success, got %q", stderrBuf.String())
+	// Progress is written to errOut (stderr); " ready." terminates the line.
+	if !strings.Contains(stderrBuf.String(), "ready") {
+		t.Errorf("expected 'ready' in progress output, got %q", stderrBuf.String())
 	}
 }
 
@@ -700,8 +701,10 @@ func TestWaitForHealthy_SuccessEmitsNoLogTail(t *testing.T) {
 	if logRequested {
 		t.Error("log endpoint should not be called on success")
 	}
-	if stderrBuf.Len() > 0 {
-		t.Errorf("stderr should be empty on success, got %q", stderrBuf.String())
+	// Progress ("Waiting for ... ready.") is written to errOut; only the log tail
+	// must be absent. The progress line itself is expected.
+	if strings.Contains(stderrBuf.String(), "some log line") {
+		t.Errorf("log tail should not appear on success, got %q", stderrBuf.String())
 	}
 }
 

@@ -1048,7 +1048,7 @@ func runAppsAccessGroupGrant(cmd *cobra.Command, args []string, f *appsAccessGro
 		return httpError(cfg.Token, "grant group access", resp, out)
 	}
 	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
-		fmt.Printf("warning: %s\n", warn)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
 	fmt.Printf("%s: granted %s access to group %s\n", slug, f.role, group)
 	return nil
