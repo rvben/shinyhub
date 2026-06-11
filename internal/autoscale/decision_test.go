@@ -103,3 +103,42 @@ func TestDesiredReplicas_ReasonSessionLoad(t *testing.T) {
 		t.Fatalf("reason = %q, want session_load", reason)
 	}
 }
+
+// TestDesiredReplicas_MinWarmFloor exercises the unified lower-bound logic added
+// when min_warm_replicas is populated. The floor must be max(min, minWarm, 1).
+func TestDesiredReplicas_MinWarmFloor(t *testing.T) {
+	cases := []struct {
+		name    string
+		min     int
+		minWarm int
+		want    int
+	}{
+		// minWarm beats min: floor is minWarm.
+		{"minWarm above min", 1, 3, 3},
+		// min beats minWarm: floor is min.
+		{"min above minWarm", 4, 2, 4},
+		// both zero => absolute floor 1.
+		{"both zero floor one", 0, 0, 1},
+		// minWarm respected when autoscale min is 0.
+		{"minWarm with zero autoscale min", 0, 2, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// idle load so the math alone would produce 0 (floor-enforced to 1).
+			in := scaleInput{
+				activeSessions: 0,
+				current:        5,
+				cap:            10,
+				target:         0.8,
+				min:            tc.min,
+				minWarm:        tc.minWarm,
+				max:            8,
+				runtimeMax:     32,
+			}
+			if got, _ := desiredReplicas(in); got != tc.want {
+				t.Fatalf("desiredReplicas(min=%d minWarm=%d) = %d, want %d",
+					tc.min, tc.minWarm, got, tc.want)
+			}
+		})
+	}
+}

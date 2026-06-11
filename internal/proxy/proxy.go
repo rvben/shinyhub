@@ -1254,6 +1254,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// client retries once the drain completes and a fresh slot lands.
 		p.mu.RUnlock()
 		p.recordReject(rec, slug, ReasonPoolDegraded, true)
+		// Fire the wake trigger so a warm-shrunk pool is expanded immediately
+		// rather than waiting for the next watcher tick. Duplicate triggers are
+		// safe: warm expansion is idempotent and deploy-lock-guarded.
+		if trigger != nil {
+			go trigger(slug)
+		}
 		rec.Header().Set("Retry-After", "5")
 		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 		return
@@ -1277,6 +1283,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		p.mu.RUnlock()
 		p.recordReject(rec, slug, reason, true)
+		// When degraded (fewer live replicas than configured), fire the wake
+		// trigger to expand a warm-shrunk pool immediately. A full healthy pool
+		// at cap (saturated) needs autoscaling, not warm expansion, so only the
+		// degraded branch fires. Duplicate triggers are safe: expansion is
+		// idempotent and deploy-lock-guarded.
+		if reason == ReasonPoolDegraded && trigger != nil {
+			go trigger(slug)
+		}
 		rec.Header().Set("Retry-After", "5")
 		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 		return

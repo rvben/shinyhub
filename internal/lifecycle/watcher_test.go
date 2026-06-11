@@ -109,6 +109,9 @@ type fakeStore struct {
 	// hibernateAppCalls tracks every HibernateApp call (slug).
 	hibernateAppCalls []string
 
+	// listReplicasCalls counts how many times ListReplicas has been called.
+	listReplicasCalls int
+
 	// fleetActive and fleetIdleSinceSec are returned by AppFleetLoad.
 	// fleetActive is the sum of other-instance active counts (0 = fleet idle).
 	// fleetIdleSinceSec is the seconds since the most recent fleet activity on
@@ -117,6 +120,10 @@ type fakeStore struct {
 	// block it.
 	fleetActive       int64
 	fleetIdleSinceSec int64
+
+	// fleetLastActivity is the Unix epoch returned by AppFleetLastActivity.
+	// 0 means no fleet rows; a value > shrinkMoment.Unix() triggers expansion.
+	fleetLastActivity int64
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -264,6 +271,7 @@ func (f *fakeStore) ListWakingApps() ([]*db.App, error) {
 func (f *fakeStore) ListReplicas(appID int64) ([]*db.Replica, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listReplicasCalls++
 	return f.replicas[appID], nil
 }
 
@@ -304,19 +312,48 @@ func (f *fakeStore) AppFleetLoad(_ int64, _ int64, _ string) ([]int64, int64, er
 	return []int64{f.fleetActive}, f.fleetIdleSinceSec, nil
 }
 
+// AppFleetLastActivity returns the pre-configured fleetLastActivity epoch.
+// 0 means no fleet rows; a value > shrinkMoment.Unix() triggers expansion.
+func (f *fakeStore) AppFleetLastActivity(_ int64, _ int64, _ string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fleetLastActivity, nil
+}
+
+// ListWarmShrunkApps returns apps in the store whose replicas include at least
+// one with desired_state='warm' and whose app status is 'running' or 'degraded'.
+func (f *fakeStore) ListWarmShrunkApps() ([]*db.App, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*db.App
+	for _, app := range f.apps {
+		if app.Status != "running" && app.Status != "degraded" {
+			continue
+		}
+		for _, r := range f.replicas[app.ID] {
+			if r.DesiredState == db.ReplicaDesiredWarm {
+				out = append(out, app)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
 // call runOnce() directly without starting the background goroutine.
 func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
 	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
-		cfg:       cfg,
-		mgr:       mgr,
-		prx:       prx,
-		store:     st,
-		deploy:    deployFn,
-		attempts:  make(map[replicaKey]int),
-		nextRetry: make(map[replicaKey]time.Time),
-		driving:   make(map[string]bool),
+		cfg:           cfg,
+		mgr:           mgr,
+		prx:           prx,
+		store:         st,
+		deploy:        deployFn,
+		attempts:      make(map[replicaKey]int),
+		nextRetry:     make(map[replicaKey]time.Time),
+		driving:       make(map[string]bool),
+		expandingWarm: make(map[string]bool),
 	}
 }
 
@@ -1475,4 +1512,887 @@ func (m *orderCheckingManager) Stop(slug string) error {
 		m.onStop(slug)
 	}
 	return m.inner.Stop(slug)
+}
+
+// --- warm-shrink replaces hibernation tests ---
+
+// TestHandleIdle_WarmShrinkReplacesHibernate: an app with MinWarmReplicas=2
+// and Replicas=3 that is idle past the timeout must have warmShrink called
+// with (slug, 2) and must NOT have BeginHibernate called on the proxy.
+func TestHandleIdle_WarmShrinkReplacesHibernate(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "warm", Index: 0, Status: process.StatusRunning},
+		{Slug: "warm", Index: 1, Status: process.StatusRunning},
+		{Slug: "warm", Index: 2, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["warm"] = time.Now().Add(-2 * time.Hour) // idle 2h > 30m timeout
+
+	st := newFakeStore(
+		map[string]*db.App{"warm": {
+			ID:              1,
+			Slug:            "warm",
+			Status:          "running",
+			Replicas:        3,
+			MinWarmReplicas: 2,
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	var shrinkCalls []struct {
+		slug  string
+		floor int
+	}
+	var mu sync.Mutex
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) {
+			mu.Lock()
+			shrinkCalls = append(shrinkCalls, struct {
+				slug  string
+				floor int
+			}{slug, floor})
+			mu.Unlock()
+			return true, nil
+		},
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	mu.Lock()
+	calls := append([]struct {
+		slug  string
+		floor int
+	}(nil), shrinkCalls...)
+	mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected warmShrink called once, got %d calls", len(calls))
+	}
+	if calls[0].slug != "warm" || calls[0].floor != 2 {
+		t.Errorf("warmShrink called with (%q, %d), want (\"warm\", 2)", calls[0].slug, calls[0].floor)
+	}
+	// BeginHibernate must NOT be called.
+	prx.mu.Lock()
+	hibernated := append([]string(nil), prx.hibernated...)
+	prx.mu.Unlock()
+	if len(hibernated) != 0 {
+		t.Errorf("BeginHibernate must NOT be called when warmShrink is wired, got %v", hibernated)
+	}
+	// mgr.Stop must NOT be called.
+	mgr.mu.Lock()
+	stopped := append([]string(nil), mgr.stopped...)
+	mgr.mu.Unlock()
+	if len(stopped) != 0 {
+		t.Errorf("mgr.Stop must NOT be called when warmShrink is wired, got %v", stopped)
+	}
+	// App status must not be set to hibernated.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, upd := range st.statusUpdates {
+		if upd.Slug == "warm" && upd.Status == "hibernated" {
+			t.Errorf("app status must not be set to hibernated when warm shrinking, got %+v", upd)
+		}
+	}
+}
+
+// TestHandleIdle_ZeroFloorHibernatesExactlyAsToday: an app with
+// MinWarmReplicas=0 idle past the timeout must follow the original full
+// hibernate path (BeginHibernate + mgr.Stop + status=hibernated).
+// This pins against the existing TestHibernation_StopsIdleApp behaviour.
+func TestHandleIdle_ZeroFloorHibernatesExactlyAsToday(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
+
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:              1,
+			Slug:            "app",
+			Status:          "running",
+			Replicas:        1,
+			MinWarmReplicas: 0, // zero floor = full hibernate
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	var shrinkCalled bool
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if shrinkCalled {
+		t.Error("warmShrink must not be called when MinWarmReplicas=0")
+	}
+	if len(mgr.stopped) == 0 || mgr.stopped[0] != "app" {
+		t.Errorf("expected manager.Stop('app') for W=0, got %v", mgr.stopped)
+	}
+	if len(prx.hibernated) == 0 || prx.hibernated[0] != "app" {
+		t.Errorf("expected proxy.BeginHibernate('app') for W=0, got %v", prx.hibernated)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	found := false
+	for _, upd := range st.statusUpdates {
+		if upd.Slug == "app" && upd.Status == "hibernated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected UpdateAppStatus(hibernated) for W=0, got %v", st.statusUpdates)
+	}
+}
+
+// TestHandleIdle_NotIdleNoShrink: an app with MinWarmReplicas=2 but recent
+// activity must trigger neither warmShrink nor BeginHibernate.
+func TestHandleIdle_NotIdleNoShrink(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "active", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["active"] = time.Now().Add(-5 * time.Minute) // recent activity
+
+	st := newFakeStore(
+		map[string]*db.App{"active": {
+			ID:              1,
+			Slug:            "active",
+			Status:          "running",
+			Replicas:        3,
+			MinWarmReplicas: 2,
+			UpdatedAt:       time.Now().Add(-10 * time.Minute),
+		}},
+		nil,
+	)
+
+	var shrinkCalled, hibernateCalled bool
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if shrinkCalled {
+		t.Error("warmShrink must not be called when app is not idle")
+	}
+	prx.mu.Lock()
+	hibernateCalled = len(prx.hibernated) > 0
+	prx.mu.Unlock()
+	if hibernateCalled {
+		t.Error("BeginHibernate must not be called when app is not idle")
+	}
+}
+
+// TestHandleIdle_NilWarmOpsFallsBackToHibernate: an app with MinWarmReplicas=2
+// idle past the timeout, but SetWarmOps was never called (warmShrink==nil).
+// The app must fully hibernate as if MinWarmReplicas were 0.
+func TestHandleIdle_NilWarmOpsFallsBackToHibernate(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "fallback", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["fallback"] = time.Now().Add(-2 * time.Hour)
+
+	st := newFakeStore(
+		map[string]*db.App{"fallback": {
+			ID:              1,
+			Slug:            "fallback",
+			Status:          "running",
+			Replicas:        3,
+			MinWarmReplicas: 2, // floor set, but warmShrink is nil
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	// No SetWarmOps call: warmShrink remains nil.
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	if len(mgr.stopped) == 0 || mgr.stopped[0] != "fallback" {
+		t.Errorf("nil warmShrink: expected manager.Stop('fallback'), got %v", mgr.stopped)
+	}
+	if len(prx.hibernated) == 0 || prx.hibernated[0] != "fallback" {
+		t.Errorf("nil warmShrink: expected proxy.BeginHibernate('fallback'), got %v", prx.hibernated)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	found := false
+	for _, upd := range st.statusUpdates {
+		if upd.Slug == "fallback" && upd.Status == "hibernated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("nil warmShrink: expected UpdateAppStatus(hibernated), got %v", st.statusUpdates)
+	}
+}
+
+// TestHandleIdle_ClusteredWarmShrinkReplacesHibernate: in clustered mode, an
+// app with MinWarmReplicas=2 idle past the timeout (fleet-idle predicate
+// satisfied) must call warmShrink and must NOT call HibernateApp CAS.
+// The manager has 3 running replicas (> floor=2) so the floor guard passes.
+func TestHandleIdle_ClusteredWarmShrinkReplacesHibernate(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "cwarm", Index: 0, Status: process.StatusRunning},
+		{Slug: "cwarm", Index: 1, Status: process.StatusRunning},
+		{Slug: "cwarm", Index: 2, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["cwarm"] = time.Now().Add(-2 * time.Hour) // idle 2h > 30m
+
+	st := newFakeStore(
+		map[string]*db.App{"cwarm": {
+			ID:              42,
+			Slug:            "cwarm",
+			Status:          "running",
+			Replicas:        3,
+			MinWarmReplicas: 2,
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	// Fleet idle: no other instances, no recent activity.
+	st.fleetActive = 0
+	st.fleetIdleSinceSec = db.NoFleetActivity
+
+	var shrinkCalls []struct {
+		slug  string
+		floor int
+	}
+	var mu sync.Mutex
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) {
+			mu.Lock()
+			shrinkCalls = append(shrinkCalls, struct {
+				slug  string
+				floor int
+			}{slug, floor})
+			mu.Unlock()
+			return true, nil
+		},
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	mu.Lock()
+	calls := append([]struct {
+		slug  string
+		floor int
+	}(nil), shrinkCalls...)
+	mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("clustered: expected warmShrink called once, got %d calls", len(calls))
+	}
+	if calls[0].slug != "cwarm" || calls[0].floor != 2 {
+		t.Errorf("clustered: warmShrink called with (%q, %d), want (\"cwarm\", 2)", calls[0].slug, calls[0].floor)
+	}
+	// HibernateApp CAS must NOT be called.
+	st.mu.Lock()
+	casCalls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+	if len(casCalls) != 0 {
+		t.Errorf("clustered: HibernateApp CAS must NOT fire when warmShrink is wired, got %v", casCalls)
+	}
+	// mgr.Stop must NOT be called.
+	mgr.mu.Lock()
+	stopped := append([]string(nil), mgr.stopped...)
+	mgr.mu.Unlock()
+	if len(stopped) != 0 {
+		t.Errorf("clustered: mgr.Stop must NOT be called when warmShrink is wired, got %v", stopped)
+	}
+}
+
+// --- warm-expand tests ---
+
+// warmExpandSetup builds a watcher and store with one warm-shrunk running app.
+// shrinkTime is the UpdatedAt on the warm replica row (the shrink moment).
+func warmExpandSetup(t *testing.T, shrinkTime time.Time) (*fakeManager, *fakeProxy, *fakeStore, *Watcher) {
+	t.Helper()
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "warm", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"warm": {
+			ID:              1,
+			Slug:            "warm",
+			Status:          "running",
+			Replicas:        2,
+			MinWarmReplicas: 1,
+			UpdatedAt:       shrinkTime.Add(-10 * time.Minute),
+		}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	// Warm replica at index 1 parked at shrinkTime.
+	pid0 := 100
+	port0 := 20100
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running", PID: &pid0, Port: &port0},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm, UpdatedAt: shrinkTime},
+		},
+	}
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	return mgr, prx, st, w
+}
+
+// TestHandleWarmExpand_ActivityAfterShrinkExpands (single-node): LastSeen after
+// the shrink moment must trigger warmExpand with the correct slug.
+func TestHandleWarmExpand_ActivityAfterShrinkExpands(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, prx, _, w := warmExpandSetup(t, shrinkTime)
+
+	// Proxy saw traffic 2 minutes after the shrink.
+	prx.seen["warm"] = shrinkTime.Add(2 * time.Minute)
+
+	var expandCalls []string
+	var mu sync.Mutex
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			mu.Lock()
+			expandCalls = append(expandCalls, slug)
+			mu.Unlock()
+			return true, nil
+		},
+	)
+
+	w.runOnce()
+
+	mu.Lock()
+	calls := append([]string(nil), expandCalls...)
+	mu.Unlock()
+	if len(calls) != 1 || calls[0] != "warm" {
+		t.Errorf("expected warmExpand called once with 'warm', got %v", calls)
+	}
+}
+
+// TestHandleWarmExpand_NoActivityNoExpand: LastSeen before shrink moment (or
+// equal) must NOT trigger warmExpand.
+func TestHandleWarmExpand_NoActivityNoExpand(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, prx, _, w := warmExpandSetup(t, shrinkTime)
+
+	// Proxy last saw traffic 2 minutes BEFORE the shrink.
+	prx.seen["warm"] = shrinkTime.Add(-2 * time.Minute)
+
+	var expanded bool
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expanded = true; return false, nil },
+	)
+
+	w.runOnce()
+
+	if expanded {
+		t.Error("warmExpand must NOT be called when LastSeen is before the shrink moment")
+	}
+}
+
+// TestHandleWarmExpand_RestartZeroLastSeen: LastSeen zero value (server restart,
+// no traffic yet) must NOT trigger warmExpand.
+func TestHandleWarmExpand_RestartZeroLastSeen(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, _, _, w := warmExpandSetup(t, shrinkTime)
+	// prx.seen["warm"] is zero (never set after restart).
+
+	var expanded bool
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expanded = true; return false, nil },
+	)
+
+	w.runOnce()
+
+	if expanded {
+		t.Error("warmExpand must NOT be called when LastSeen is zero (server restart)")
+	}
+}
+
+// TestHandleWarmExpand_NilOpsSkips: when warmExpand is nil, no store calls
+// should be made for warm expansion (method exits early).
+func TestHandleWarmExpand_NilOpsSkips(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, prx, st, w := warmExpandSetup(t, shrinkTime)
+
+	// Proxy has fresh activity; would expand if ops were wired.
+	prx.seen["warm"] = shrinkTime.Add(time.Minute)
+
+	// warmExpand is nil; do not call SetWarmOps.
+	w.runOnce()
+
+	// Verify no UpsertReplica was called as part of expansion (only baseline
+	// reconcile calls are expected, none for the expand path itself).
+	// The key invariant: no panic and the app remains unchanged.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, ur := range st.upsertedReplicas {
+		if ur.DesiredState == "running" && ur.Index == 1 {
+			t.Error("unexpected replica upsert for warm-expand when warmExpand is nil")
+		}
+	}
+}
+
+// TestHandleWarmExpand_ClusteredFleetActivityExpands: clustered mode with fleet
+// last_activity epoch after the shrink moment must trigger warmExpand.
+func TestHandleWarmExpand_ClusteredFleetActivityExpands(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, _, st, w := warmExpandSetup(t, shrinkTime)
+	w.cfg.Clustered = true
+	w.cfg.InstanceID = "self"
+
+	// Fleet last_activity is 2 minutes after the shrink moment.
+	st.fleetLastActivity = shrinkTime.Add(2 * time.Minute).Unix()
+
+	var expandCalls []string
+	var mu sync.Mutex
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			mu.Lock()
+			expandCalls = append(expandCalls, slug)
+			mu.Unlock()
+			return true, nil
+		},
+	)
+
+	w.runOnce()
+
+	mu.Lock()
+	calls := append([]string(nil), expandCalls...)
+	mu.Unlock()
+	if len(calls) != 1 || calls[0] != "warm" {
+		t.Errorf("clustered: expected warmExpand called once with 'warm', got %v", calls)
+	}
+}
+
+// TestHandleWarmExpand_ClusteredNoFleetActivityNoExpand: clustered mode with
+// fleet last_activity epoch at or before the shrink moment must NOT expand.
+func TestHandleWarmExpand_ClusteredNoFleetActivityNoExpand(t *testing.T) {
+	shrinkTime := time.Now().Add(-5 * time.Minute)
+	_, _, st, w := warmExpandSetup(t, shrinkTime)
+	w.cfg.Clustered = true
+	w.cfg.InstanceID = "self"
+
+	// Fleet last_activity was 2 minutes BEFORE the shrink moment.
+	st.fleetLastActivity = shrinkTime.Add(-2 * time.Minute).Unix()
+
+	var expanded bool
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expanded = true; return false, nil },
+	)
+
+	w.runOnce()
+
+	if expanded {
+		t.Error("clustered: warmExpand must NOT be called when fleet activity is before shrink moment")
+	}
+}
+
+// TestHandleWarmExpand_RunOnceWiringExpands: integration through runOnce confirms
+// that a warm-shrunk app with fresh proxy activity results in warmExpand being
+// called (tests the wiring from runOnce into handleWarmExpand).
+func TestHandleWarmExpand_RunOnceWiringExpands(t *testing.T) {
+	shrinkTime := time.Now().Add(-10 * time.Minute)
+	_, prx, _, w := warmExpandSetup(t, shrinkTime)
+
+	// Traffic arrived 3 minutes after shrink.
+	prx.seen["warm"] = shrinkTime.Add(3 * time.Minute)
+
+	var expandCount int32
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			atomic.AddInt32(&expandCount, 1)
+			return true, nil
+		},
+	)
+
+	w.runOnce()
+
+	if n := atomic.LoadInt32(&expandCount); n != 1 {
+		t.Errorf("runOnce: expected warmExpand called once, got %d", n)
+	}
+}
+
+// --- WakeTrigger warm-expand path tests ---
+
+// TestWakeTrigger_RunningAppWithWarmRows_CallsWarmExpand verifies that
+// WakeTrigger on a running app that has warm-parked replicas calls warmExpand
+// once instead of attempting a hibernate->waking wake flow.
+func TestWakeTrigger_RunningAppWithWarmRows_CallsWarmExpand(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"warm": {ID: 1, Slug: "warm", Status: "running", Replicas: 2, MinWarmReplicas: 1}},
+		[]*db.Deployment{{BundleDir: "/tmp/warm"}},
+	)
+	// One warm-parked replica.
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+		},
+	}
+
+	var expandCalls []string
+	var mu sync.Mutex
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st, nil)
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			mu.Lock()
+			expandCalls = append(expandCalls, slug)
+			mu.Unlock()
+			return true, nil
+		},
+	)
+
+	w.WakeTrigger("warm")
+
+	// WakeTrigger may call warmExpand synchronously or via a goroutine.
+	// Give it a short window.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(expandCalls)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	calls := append([]string(nil), expandCalls...)
+	mu.Unlock()
+	if len(calls) != 1 || calls[0] != "warm" {
+		t.Errorf("expected warmExpand called once with 'warm', got %v", calls)
+	}
+
+	// The BeginWake CAS must NOT have advanced the status (app is running, not hibernated).
+	st.mu.Lock()
+	status := st.apps["warm"].Status
+	st.mu.Unlock()
+	if status != "running" {
+		t.Errorf("WakeTrigger on running app must not change status; got %q", status)
+	}
+}
+
+// TestWakeTrigger_RunningAppWithoutWarmRows_DoesNothing verifies that
+// WakeTrigger on a running app with no warm-parked replicas is a silent no-op.
+func TestWakeTrigger_RunningAppWithoutWarmRows_DoesNothing(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", Replicas: 2}},
+		[]*db.Deployment{{BundleDir: "/tmp/app"}},
+	)
+	// Both replicas fully running (no warm rows).
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "running", DesiredState: "running"},
+		},
+	}
+
+	var expandCalled bool
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st, nil)
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expandCalled = true; return false, nil },
+	)
+
+	w.WakeTrigger("app")
+	// Give any async paths time to run.
+	time.Sleep(20 * time.Millisecond)
+
+	if expandCalled {
+		t.Error("warmExpand must not be called when no warm-parked replicas exist")
+	}
+	st.mu.Lock()
+	status := st.apps["app"].Status
+	st.mu.Unlock()
+	if status != "running" {
+		t.Errorf("WakeTrigger on fully-running app must not change status; got %q", status)
+	}
+}
+
+// TestWakeTrigger_HibernatedApp_PerformsWakeFlowNotWarmExpand verifies that
+// WakeTrigger on a hibernated app performs the existing hibernated->waking CAS
+// and does NOT call warmExpand. This pins the pre-existing wake behavior.
+func TestWakeTrigger_HibernatedApp_PerformsWakeFlowNotWarmExpand(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+
+	var expandCalled bool
+	var deployCount int32
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
+		func(slug, dir string, idx int) (*deploy.Result, error) {
+			atomic.AddInt32(&deployCount, 1)
+			return &deploy.Result{Index: idx, PID: 42, Port: 20042}, nil
+		})
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) { expandCalled = true; return false, nil },
+	)
+
+	w.WakeTrigger("app")
+	waitNotWaking(t, st, "app")
+
+	if expandCalled {
+		t.Error("warmExpand must NOT be called for a hibernated app wake — use the existing wake flow")
+	}
+	// BeginWake CAS must have been attempted (status transitions: hibernated->waking->running).
+	st.mu.Lock()
+	finalStatus := st.apps["app"].Status
+	st.mu.Unlock()
+	if finalStatus != "running" {
+		t.Errorf("hibernated app must reach 'running' after WakeTrigger; got %q", finalStatus)
+	}
+	if n := atomic.LoadInt32(&deployCount); n == 0 {
+		t.Error("expected at least one deploy call for hibernated app wake; got 0")
+	}
+}
+
+// TestWakeTrigger_BurstOnWarmApp_OnlyOneExpand verifies that a burst of
+// concurrent WakeTrigger calls on a warm-shrunk running app results in exactly
+// one warmExpand call and bounded store reads: the in-flight guard must
+// short-circuit all but the first trigger so N goroutines do not each issue
+// GetAppBySlug+ListReplicas and each call warmExpand.
+//
+// Synchronisation design: the first goroutine to enter warmExpand holds the
+// guard and blocks until it receives a signal that all other goroutines have
+// finished their WakeTrigger calls (quickly rejected by the guard). Only then
+// does warmExpand return. This guarantees the guard window covers the entire
+// burst, so no late-arriving goroutine can slip through after the guard clears.
+func TestWakeTrigger_BurstOnWarmApp_OnlyOneExpand(t *testing.T) {
+	const burst = 20
+
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"warm": {ID: 1, Slug: "warm", Status: "running", Replicas: 2, MinWarmReplicas: 1}},
+		[]*db.Deployment{{BundleDir: "/tmp/warm"}},
+	)
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "running", DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+		},
+	}
+
+	// othersFinished is a channel buffered for (burst-1) sends; warmExpand
+	// reads (burst-1) signals from it before returning, ensuring the guard is
+	// held for the full duration of all concurrent WakeTrigger calls.
+	othersFinished := make(chan struct{}, burst)
+
+	var expandCalls atomic.Int32
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st, nil)
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { return false, nil },
+		func(slug string) (bool, error) {
+			expandCalls.Add(1)
+			// Block until all other goroutines have returned from WakeTrigger
+			// (either guard-rejected or this is the only caller). This holds
+			// the in-flight guard open across the full burst window.
+			for i := 0; i < burst-1; i++ {
+				select {
+				case <-othersFinished:
+				case <-time.After(5 * time.Second):
+					// Unblock rather than deadlock; the assertion will catch the error.
+					return false, fmt.Errorf("timed out waiting for burst completions")
+				}
+			}
+			return true, nil
+		},
+	)
+
+	// Barrier gate: hold all goroutines until all are ready, then release
+	// simultaneously to maximise guard contention.
+	gate := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-gate
+			w.WakeTrigger("warm")
+			// Signal completion to warmExpand (the winning goroutine reads these).
+			othersFinished <- struct{}{}
+		}()
+	}
+	close(gate) // start all goroutines simultaneously
+	wg.Wait()
+
+	if n := expandCalls.Load(); n != 1 {
+		t.Errorf("warmExpand called %d times; want exactly 1 (in-flight guard must debounce burst)", n)
+	}
+
+	st.mu.Lock()
+	replicaReads := st.listReplicasCalls
+	st.mu.Unlock()
+	if replicaReads >= burst {
+		t.Errorf("ListReplicas called %d times; want < %d (guard must prevent per-trigger store reads)", replicaReads, burst)
+	}
+}
+
+// --- warm-shrink floor guard tests ---
+
+// TestHandleIdle_AlreadyAtFloorSkipsWarmShrink: an app with MinWarmReplicas=1
+// and exactly 1 running process in the manager must NOT trigger warmShrink on
+// an idle tick — it is already at its floor.
+func TestHandleIdle_AlreadyAtFloorSkipsWarmShrink(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "floor", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["floor"] = time.Now().Add(-2 * time.Hour) // idle 2h > 30m timeout
+
+	st := newFakeStore(
+		map[string]*db.App{"floor": {
+			ID:              1,
+			Slug:            "floor",
+			Status:          "running",
+			Replicas:        1,
+			MinWarmReplicas: 1, // floor == running count; already at floor
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	var shrinkCalled bool
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if shrinkCalled {
+		t.Error("warmShrink must NOT be called when running count equals the floor")
+	}
+	// BeginHibernate must also NOT be called: the floor guard returns early
+	// before reaching the full-hibernate path.
+	prx.mu.Lock()
+	hibernated := append([]string(nil), prx.hibernated...)
+	prx.mu.Unlock()
+	if len(hibernated) != 0 {
+		t.Errorf("BeginHibernate must NOT be called when already at floor, got %v", hibernated)
+	}
+}
+
+// TestHandleIdle_AboveFloorCallsWarmShrink: an app with MinWarmReplicas=1 and
+// 2 running processes IS above its floor and must invoke warmShrink on an idle
+// tick. This is the regression guard for the floor check.
+func TestHandleIdle_AboveFloorCallsWarmShrink(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "above", Index: 0, Status: process.StatusRunning},
+		{Slug: "above", Index: 1, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["above"] = time.Now().Add(-2 * time.Hour)
+
+	st := newFakeStore(
+		map[string]*db.App{"above": {
+			ID:              1,
+			Slug:            "above",
+			Status:          "running",
+			Replicas:        2,
+			MinWarmReplicas: 1, // floor=1, running=2: above floor, should shrink
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	var shrinkCalled bool
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return true, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if !shrinkCalled {
+		t.Error("warmShrink must be called when running count exceeds the floor")
+	}
+}
+
+// TestHandleIdle_ClusteredAlreadyAtFloorSkipsWarmShrink: same floor guard in
+// clustered mode. Fleet is idle, local is idle, but running == floor => skip.
+func TestHandleIdle_ClusteredAlreadyAtFloorSkipsWarmShrink(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "cfloor", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["cfloor"] = time.Now().Add(-2 * time.Hour)
+
+	st := newFakeStore(
+		map[string]*db.App{"cfloor": {
+			ID:              42,
+			Slug:            "cfloor",
+			Status:          "running",
+			Replicas:        1,
+			MinWarmReplicas: 1,
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	st.fleetActive = 0
+	st.fleetIdleSinceSec = db.NoFleetActivity
+
+	var shrinkCalled bool
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if shrinkCalled {
+		t.Error("clustered: warmShrink must NOT be called when running count equals the floor")
+	}
+	// HibernateApp CAS must NOT fire either.
+	st.mu.Lock()
+	casCalls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+	if len(casCalls) != 0 {
+		t.Errorf("clustered: HibernateApp must NOT fire when already at floor, got %v", casCalls)
+	}
 }

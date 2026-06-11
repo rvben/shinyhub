@@ -296,6 +296,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setReplicas         bool
 		newMaxSessions      int
 		setMaxSessions      bool
+		newMinWarmReplicas  int
+		setMinWarmReplicas  bool
 		newManagedBy        *string
 		setManagedBy        bool
 		placementKeyPresent bool
@@ -403,6 +405,19 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newMaxSessions, setMaxSessions = n, true
+	}
+
+	if rawVal, present := raw["min_warm_replicas"]; present {
+		var n int
+		if err := json.Unmarshal(rawVal, &n); err != nil {
+			writeError(w, http.StatusBadRequest, "min_warm_replicas must be an integer")
+			return
+		}
+		if n < 0 || n > 1000 {
+			writeError(w, http.StatusBadRequest, "min_warm_replicas must be between 0 and 1000")
+			return
+		}
+		newMinWarmReplicas, setMinWarmReplicas = n, true
 	}
 
 	if rawVal, present := raw["managed_by"]; present {
@@ -614,6 +629,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		Replicas:           newReplicas,
 		SetMaxSessions:     setMaxSessions,
 		MaxSessions:        newMaxSessions,
+		SetMinWarmReplicas: setMinWarmReplicas,
+		MinWarmReplicas:    newMinWarmReplicas,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -697,12 +714,28 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
+		detail := patchAppAuditDetail(setMinWarmReplicas, newMinWarmReplicas)
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
-			ResourceID: slug, IPAddress: s.ClientIP(r),
+			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, app)
+}
+
+// patchAppAuditDetail builds a JSON detail blob for the update_app audit event,
+// including only the fields that were actually changed in this PATCH. Currently
+// records the pre-warming floor when it is the changed field.
+func patchAppAuditDetail(setMinWarmReplicas bool, minWarmReplicas int) string {
+	d := map[string]any{}
+	if setMinWarmReplicas {
+		d["min_warm_replicas"] = minWarmReplicas
+	}
+	if len(d) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(d)
+	return string(b)
 }
 
 // restorePreviousPool brings the previous live bundle back up after a failed
