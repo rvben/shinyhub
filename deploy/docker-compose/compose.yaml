@@ -26,6 +26,21 @@
 #             using this profile.
 
 services:
+  # One-shot helper: named volumes are created root-owned by Docker. The
+  # shinyhub image is distroless and runs as uid 65532 (nonroot), so it
+  # cannot write to a freshly-created volume. This service chowns the three
+  # data directories before shinyhub starts, then exits. It runs only when
+  # the volume is new or empty; subsequent restarts complete instantly because
+  # the ownership is already correct (idempotent).
+  init-perms:
+    image: busybox:1.36
+    restart: "no"
+    volumes:
+      - shinyhub-apps:/data/apps
+      - shinyhub-app-data:/data/app-data
+      - shinyhub-db:/data/db
+    command: ["sh", "-c", "chown -R 65532:65532 /data/db /data/apps /data/app-data"]
+
   shinyhub:
     image: ghcr.io/rvben/shinyhub:${SHINYHUB_TAG:-latest}
 
@@ -37,6 +52,10 @@ services:
     network_mode: host
 
     restart: unless-stopped
+
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
 
     group_add:
       - "${DOCKER_GID:-0}"

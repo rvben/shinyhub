@@ -46,6 +46,10 @@ them out after the first start.
 docker compose up -d
 ```
 
+On first start an `init-perms` helper (busybox) runs once to chown the named
+volumes to the distroless nonroot user (uid 65532). It exits immediately and
+subsequent restarts skip the work because the ownership is already correct.
+
 **5. Open the dashboard**
 
 Navigate to `http://localhost:8080` and log in with the admin credentials you
