@@ -103,6 +103,8 @@ var cobraErrorPrefixes = []string{
 	"unknown flag:",
 	"unknown shorthand flag:",
 	"invalid argument",
+	// The trailing space is load-bearing: cobra's arg-count errors read
+	// "accepts N arg(s)", and the space avoids matching unrelated words.
 	"accepts ",
 }
 

@@ -110,7 +110,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"apps access set": {
 		Mutating: mut,
 		ArgEnums: map[string][]string{
-			"level": {"public", "private", "shared"},
+			"level": {"private", "shared", "public"},
 		},
 	},
 	"apps access grant": {
