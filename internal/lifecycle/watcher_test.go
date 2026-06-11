@@ -1746,9 +1746,12 @@ func TestHandleIdle_NilWarmOpsFallsBackToHibernate(t *testing.T) {
 // TestHandleIdle_ClusteredWarmShrinkReplacesHibernate: in clustered mode, an
 // app with MinWarmReplicas=2 idle past the timeout (fleet-idle predicate
 // satisfied) must call warmShrink and must NOT call HibernateApp CAS.
+// The manager has 3 running replicas (> floor=2) so the floor guard passes.
 func TestHandleIdle_ClusteredWarmShrinkReplacesHibernate(t *testing.T) {
 	mgr := &fakeManager{entries: []*process.ProcessInfo{
 		{Slug: "cwarm", Index: 0, Status: process.StatusRunning},
+		{Slug: "cwarm", Index: 1, Status: process.StatusRunning},
+		{Slug: "cwarm", Index: 2, Status: process.StatusRunning},
 	}}
 	prx := newFakeProxy()
 	prx.seen["cwarm"] = time.Now().Add(-2 * time.Hour) // idle 2h > 30m
@@ -2257,5 +2260,139 @@ func TestWakeTrigger_BurstOnWarmApp_OnlyOneExpand(t *testing.T) {
 	st.mu.Unlock()
 	if replicaReads >= burst {
 		t.Errorf("ListReplicas called %d times; want < %d (guard must prevent per-trigger store reads)", replicaReads, burst)
+	}
+}
+
+// --- warm-shrink floor guard tests ---
+
+// TestHandleIdle_AlreadyAtFloorSkipsWarmShrink: an app with MinWarmReplicas=1
+// and exactly 1 running process in the manager must NOT trigger warmShrink on
+// an idle tick — it is already at its floor.
+func TestHandleIdle_AlreadyAtFloorSkipsWarmShrink(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "floor", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["floor"] = time.Now().Add(-2 * time.Hour) // idle 2h > 30m timeout
+
+	st := newFakeStore(
+		map[string]*db.App{"floor": {
+			ID:              1,
+			Slug:            "floor",
+			Status:          "running",
+			Replicas:        1,
+			MinWarmReplicas: 1, // floor == running count; already at floor
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	var shrinkCalled bool
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if shrinkCalled {
+		t.Error("warmShrink must NOT be called when running count equals the floor")
+	}
+	// BeginHibernate must also NOT be called: the floor guard returns early
+	// before reaching the full-hibernate path.
+	prx.mu.Lock()
+	hibernated := append([]string(nil), prx.hibernated...)
+	prx.mu.Unlock()
+	if len(hibernated) != 0 {
+		t.Errorf("BeginHibernate must NOT be called when already at floor, got %v", hibernated)
+	}
+}
+
+// TestHandleIdle_AboveFloorCallsWarmShrink: an app with MinWarmReplicas=1 and
+// 2 running processes IS above its floor and must invoke warmShrink on an idle
+// tick. This is the regression guard for the floor check.
+func TestHandleIdle_AboveFloorCallsWarmShrink(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "above", Index: 0, Status: process.StatusRunning},
+		{Slug: "above", Index: 1, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["above"] = time.Now().Add(-2 * time.Hour)
+
+	st := newFakeStore(
+		map[string]*db.App{"above": {
+			ID:              1,
+			Slug:            "above",
+			Status:          "running",
+			Replicas:        2,
+			MinWarmReplicas: 1, // floor=1, running=2: above floor, should shrink
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+
+	var shrinkCalled bool
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return true, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if !shrinkCalled {
+		t.Error("warmShrink must be called when running count exceeds the floor")
+	}
+}
+
+// TestHandleIdle_ClusteredAlreadyAtFloorSkipsWarmShrink: same floor guard in
+// clustered mode. Fleet is idle, local is idle, but running == floor => skip.
+func TestHandleIdle_ClusteredAlreadyAtFloorSkipsWarmShrink(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "cfloor", Index: 0, Status: process.StatusRunning},
+	}}
+	prx := newFakeProxy()
+	prx.seen["cfloor"] = time.Now().Add(-2 * time.Hour)
+
+	st := newFakeStore(
+		map[string]*db.App{"cfloor": {
+			ID:              42,
+			Slug:            "cfloor",
+			Status:          "running",
+			Replicas:        1,
+			MinWarmReplicas: 1,
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	st.fleetActive = 0
+	st.fleetIdleSinceSec = db.NoFleetActivity
+
+	var shrinkCalled bool
+	w := newTestWatcher(Config{
+		HibernateTimeout:   30 * time.Minute,
+		RestartMaxAttempts: 5,
+		Clustered:          true,
+		InstanceID:         "self",
+	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetWarmOps(
+		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
+		func(slug string) (bool, error) { return false, nil },
+	)
+
+	w.runOnce()
+
+	if shrinkCalled {
+		t.Error("clustered: warmShrink must NOT be called when running count equals the floor")
+	}
+	// HibernateApp CAS must NOT fire either.
+	st.mu.Lock()
+	casCalls := append([]string(nil), st.hibernateAppCalls...)
+	st.mu.Unlock()
+	if len(casCalls) != 0 {
+		t.Errorf("clustered: HibernateApp must NOT fire when already at floor, got %v", casCalls)
 	}
 }

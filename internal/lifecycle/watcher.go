@@ -330,9 +330,21 @@ func (w *Watcher) traceOp(ctx context.Context, op, slug string) (context.Context
 // As the active (owner) instance it also reaps stale replica_sessions rows so
 // counts from crashed or restarted peers do not linger in the fleet view.
 func (w *Watcher) runOnce() {
+	// Snapshot the manager once and derive both the crash set and the per-slug
+	// running count in a single pass. runningCounts feeds the warm-shrink floor
+	// guard in handleIdle: when runningCount <= app.MinWarmReplicas the app is
+	// already at its floor and the warmShrink call is skipped at zero DB cost.
+	all := w.mgr.All()
+	runningCounts := make(map[string]int, len(all))
+	for _, info := range all {
+		if info.Status == process.StatusRunning {
+			runningCounts[info.Slug]++
+		}
+	}
+
 	idleChecked := make(map[string]bool)
 	handled := make(map[replicaKey]bool)
-	for _, info := range w.mgr.All() {
+	for _, info := range all {
 		switch info.Status {
 		case process.StatusCrashed:
 			handled[replicaKey{info.Slug, info.Index}] = true
@@ -340,7 +352,7 @@ func (w *Watcher) runOnce() {
 		case process.StatusRunning:
 			if !idleChecked[info.Slug] {
 				idleChecked[info.Slug] = true
-				w.handleIdle(info.Slug)
+				w.handleIdle(info.Slug, runningCounts[info.Slug])
 			}
 		}
 	}
@@ -547,10 +559,16 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 // handleIdle checks whether a running app has been idle past its configured
 // timeout and hibernates it if so. It stops all replicas and zeroes replica rows.
 //
+// runningCount is the number of replicas the manager currently reports as running
+// for this slug (derived from the same mgr.All() snapshot as the caller's loop).
+// It is used by the warm-shrink branch to skip the warmShrink call when the app
+// is already at or below its floor, avoiding a lock acquisition and DB read for
+// a no-op.
+//
 // Single-node (!w.cfg.Clustered): the original path is taken byte-for-byte.
 // Clustered (w.cfg.Clustered): a conservative fleet-idle CAS is used. See
 // handleIdleClustered for the exact predicate and ordering.
-func (w *Watcher) handleIdle(slug string) {
+func (w *Watcher) handleIdle(slug string, runningCount int) {
 	app, err := w.store.GetAppBySlug(slug)
 	if err != nil {
 		return
@@ -570,7 +588,7 @@ func (w *Watcher) handleIdle(slug string) {
 	}
 
 	if w.cfg.Clustered {
-		w.handleIdleClustered(app, timeout)
+		w.handleIdleClustered(app, timeout, runningCount)
 		return
 	}
 
@@ -585,9 +603,13 @@ func (w *Watcher) handleIdle(slug string) {
 
 	// Warm-shrink branch: when an app has a pre-warming floor and the shrink
 	// executor is wired, shrink to the floor instead of fully hibernating.
-	// The executor holds the per-slug deploy lock and is nil-safe: if it was
-	// never wired (warmShrink == nil) the app falls through to full hibernation.
+	// Skip when already at or below the floor: the manager's in-memory running
+	// count is the cheapest signal available and avoids a deploy-lock acquisition
+	// and DB reads for a no-op shrink.
 	if app.MinWarmReplicas > 0 && w.warmShrink != nil {
+		if runningCount <= app.MinWarmReplicas {
+			return
+		}
 		if _, err := w.warmShrink(slug, app.MinWarmReplicas); err != nil {
 			slog.Warn("watcher: warm shrink failed", "slug", slug, "err", err)
 		}
@@ -649,7 +671,7 @@ func (w *Watcher) handleIdle(slug string) {
 //     an app that the other is actively serving.
 //
 // No owner-epoch fence is added to the CAS; it would be dead complexity.
-func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
+func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration, runningCount int) {
 	slug := app.Slug
 
 	// (A) Time-idle check: compare local last-seen against the local clock.
@@ -691,11 +713,14 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 
 	// Warm-shrink branch: when an app has a pre-warming floor and the shrink
 	// executor is wired, shrink to the floor instead of fully hibernating.
+	// Skip when already at or below the floor: the manager's in-memory running
+	// count avoids a deploy-lock acquisition and DB reads for a no-op shrink.
 	// Owner-only execution is already guaranteed by the watcher's ownership
-	// gate at the call site. The executor holds the per-slug deploy lock and
-	// is nil-safe: if it was never wired (warmShrink == nil) the app falls
-	// through to full hibernation via the CAS path below.
+	// gate at the call site.
 	if app.MinWarmReplicas > 0 && w.warmShrink != nil {
+		if runningCount <= app.MinWarmReplicas {
+			return
+		}
 		if _, err := w.warmShrink(slug, app.MinWarmReplicas); err != nil {
 			slog.Warn("watcher: warm shrink failed", "slug", slug, "err", err)
 		}
