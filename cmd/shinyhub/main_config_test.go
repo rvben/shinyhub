@@ -92,10 +92,10 @@ func TestServeCmd_ConfigFlagPositionIndependent(t *testing.T) {
 			configPath = ""
 			t.Cleanup(func() {
 				configPath = prev
-				rootCmd.SetArgs(nil)
+				buildRoot().SetArgs(nil)
 			})
-			rootCmd.SetArgs(tc.args)
-			err := rootCmd.Execute()
+			buildRoot().SetArgs(tc.args)
+			err := buildRoot().Execute()
 			if err == nil || !strings.Contains(err.Error(), sentinel) {
 				t.Fatalf("[%s] expected the flag's config file to be loaded "+
 					"(error naming %q), got: %v", tc.name, sentinel, err)

@@ -149,16 +149,28 @@ func serverConfigPath() string {
 func init() {
 	cli.SetVersion(version)
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
+	_ = backupCmd.MarkFlagRequired("out")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
 	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
-	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd())
-	cli.AddCommandsTo(rootCmd)
+}
+
+var buildRootOnce sync.Once
+
+// buildRoot wires the complete command tree: server-side commands plus the
+// client CLI. The sync.Once guard makes it safe for main() and any number of
+// tests to call; registration happens exactly once per process.
+func buildRoot() *cobra.Command {
+	buildRootOnce.Do(func() {
+		rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd())
+		cli.AddCommandsTo(rootCmd)
+	})
+	return rootCmd
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
+	if err := buildRoot().Execute(); err != nil {
 		os.Exit(cli.Report(err))
 	}
 }

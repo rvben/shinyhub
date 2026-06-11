@@ -53,6 +53,12 @@ type schemaError struct {
 // different meaning, so the walk emits it per command instead.
 var globalArgNames = map[string]bool{"output": true, "quiet": true}
 
+// GenerateSchemaDoc exposes schema generation for the cmd/shinyhub conformance
+// tests, which exercise the full tree including server commands. The return
+// type is any so schemaDoc stays unexported; callers consume it via
+// json.Marshal.
+func GenerateSchemaDoc(root *cobra.Command) any { return generateSchema(root) }
+
 func generateSchema(root *cobra.Command) schemaDoc {
 	doc := schemaDoc{
 		Clispec:     "0.2",
