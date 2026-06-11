@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"os"
 )
 
 // classify maps any error returned by a command to its stable kind and
@@ -63,4 +67,59 @@ func classify(err error) (Kind, int) {
 		}
 	}
 	return KindInternal, 1
+}
+
+// errEnvelope is the structured failure record. Per clispec v0.2 it is
+// written as a single line of JSON, as the last line of stderr, on every
+// failure, in every output mode.
+type errEnvelope struct {
+	Error struct {
+		Kind     string `json:"kind"`
+		Message  string `json:"message"`
+		Hint     string `json:"hint,omitempty"`
+		ExitCode int    `json:"exit_code,omitempty"`
+	} `json:"error"`
+}
+
+// hintedError is satisfied by errors that carry an actionable remedy string.
+// Errors that carry no hint render without one.
+type hintedError interface{ Hint() string }
+
+// reportTo renders err to w and returns the process exit code. Pure function
+// of its inputs for testability; Report wires the real stderr/TTY/format.
+func reportTo(w io.Writer, stderrIsTTY bool, format string, err error) int {
+	if err == nil {
+		return 0
+	}
+	kind, code := classify(err)
+	if kind == "" {
+		return code // report outcome (fleet plan --detailed-exitcode): no envelope
+	}
+	var ece *ExitCodeError
+	reported := errors.As(err, &ece) && ece.Reported
+	if stderrIsTTY && format == string(formatTable) && !reported {
+		fmt.Fprintf(w, "Error: %s\n", err.Error())
+	}
+	var env errEnvelope
+	env.Error.Kind = string(kind)
+	env.Error.Message = err.Error()
+	var he hintedError
+	if errors.As(err, &he) {
+		env.Error.Hint = he.Hint()
+	}
+	if kind != KindJobFailed {
+		env.Error.ExitCode = code
+	}
+	line, marshalErr := json.Marshal(env)
+	if marshalErr != nil {
+		fmt.Fprintf(w, `{"error":{"kind":"internal","message":"failed to encode error envelope"}}`+"\n")
+		return code
+	}
+	fmt.Fprintln(w, string(line))
+	return code
+}
+
+// Report is the root error boundary: main() calls os.Exit(cli.Report(err)).
+func Report(err error) int {
+	return reportTo(os.Stderr, isTTY(os.Stderr), string(currentFormat()), err)
 }

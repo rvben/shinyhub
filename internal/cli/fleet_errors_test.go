@@ -14,7 +14,7 @@ import (
 // error as a generic "Error:" line). Returns combined stdout+stderr.
 func execFleetRealRoot(t *testing.T, args ...string) string {
 	t.Helper()
-	root := &cobra.Command{Use: "shinyhub"} // no SilenceErrors, like the real binary
+	root := &cobra.Command{Use: "shinyhub", SilenceErrors: true} // matches rootCmd: Report() owns all error output
 	AddCommandsTo(root)
 	var buf bytes.Buffer
 	forceWriters(root, &buf)

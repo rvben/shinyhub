@@ -65,9 +65,10 @@ import (
 var version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:     "shinyhub",
-	Short:   "ShinyHub — self-hosted platform for deploying and managing Shiny apps",
-	Version: version,
+	Use:           "shinyhub",
+	Short:         "ShinyHub — self-hosted platform for deploying and managing Shiny apps",
+	Version:       version,
+	SilenceErrors: true,
 }
 
 var serveCmd = &cobra.Command{
@@ -158,7 +159,7 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(cli.ExitCode(err))
+		os.Exit(cli.Report(err))
 	}
 }
 

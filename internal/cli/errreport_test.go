@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -59,5 +62,76 @@ func TestClassify_DetailedExitCodeIsNotAnError(t *testing.T) {
 	kind, code := classify(&ExitCodeError{Code: 2, Err: errors.New("changes pending")})
 	if kind != "" || code != 2 {
 		t.Errorf("classify(exit 2) = (%q, %d), want (\"\", 2)", kind, code)
+	}
+}
+
+func TestReport_EnvelopeIsLastStderrLine(t *testing.T) {
+	var stderr bytes.Buffer
+	code := reportTo(&stderr, false /* stderrIsTTY */, "json",
+		&httpStatusError{Status: 401, msg: "session expired - run `shinyhub login` to sign in again"})
+	if code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+	last := lines[len(lines)-1]
+	var env struct {
+		Error struct {
+			Kind     string `json:"kind"`
+			Message  string `json:"message"`
+			Hint     string `json:"hint"`
+			ExitCode int    `json:"exit_code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(last), &env); err != nil {
+		t.Fatalf("last stderr line is not a JSON envelope: %q: %v", last, err)
+	}
+	if env.Error.Kind != "auth" || env.Error.ExitCode != 3 {
+		t.Errorf("envelope = %+v", env.Error)
+	}
+	// JSON mode: the envelope is the ONLY error output.
+	if len(lines) != 1 {
+		t.Errorf("json mode should emit exactly one stderr line, got %d: %q", len(lines), stderr.String())
+	}
+}
+
+func TestReport_TableTTYProseThenEnvelope(t *testing.T) {
+	var stderr bytes.Buffer
+	code := reportTo(&stderr, true /* stderrIsTTY */, "table", errors.New("plain failure"))
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want prose line + envelope line, got %d lines: %q", len(lines), stderr.String())
+	}
+	if !strings.Contains(lines[0], "plain failure") {
+		t.Errorf("prose line = %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], `{"error":`) {
+		t.Errorf("last line is not the envelope: %q", lines[1])
+	}
+}
+
+func TestReport_ReportedSkipsProseKeepsEnvelope(t *testing.T) {
+	var stderr bytes.Buffer
+	reportTo(&stderr, true, "table", &ExitCodeError{Code: 4, Err: errors.New("2 apps failed"), Reported: true})
+	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], `{"error":`) {
+		t.Errorf("Reported error should emit envelope only, got %q", stderr.String())
+	}
+}
+
+func TestReport_DetailedExitCodeEmitsNothing(t *testing.T) {
+	var stderr bytes.Buffer
+	code := reportTo(&stderr, false, "json", &ExitCodeError{Code: 2, Err: errors.New("changes pending"), Reported: true})
+	if code != 2 || stderr.Len() != 0 {
+		t.Errorf("exit 2 should be silent: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestReport_NilIsZero(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := reportTo(&stderr, false, "json", nil); code != 0 || stderr.Len() != 0 {
+		t.Errorf("nil error: code=%d stderr=%q", code, stderr.String())
 	}
 }
