@@ -32,7 +32,7 @@
 
 import http from 'k6/http';
 import ws from 'k6/ws';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 import { appURL, wsURL, cookieHeaderFromJar } from './lib.js';
 
@@ -106,6 +106,16 @@ export default function () {
 
   check(httpRes, { 'http root 200': (r) => r.status === 200 });
 
+  // Failure backoff: without it a failing target makes every VU spin in a
+  // tight reconnect loop, exhausting the load generator's ephemeral ports
+  // and DDoSing the very host being measured. One second per failed
+  // iteration keeps the VU count honest while staying gentle.
+  if (httpRes.status !== 200) {
+    wsFailed.add(1);
+    sleep(1);
+    return;
+  }
+
   // Build merged Cookie header for the WS upgrade.
   const cookieHeader = cookieHeaderFromJar(jar, rootURL, AUTH_COOKIE);
 
@@ -166,6 +176,12 @@ export default function () {
   check(null, {
     established: () => established,
   }, { tag: 'established' });
+
+  // Same backoff for WS-level failures (refused upgrade, no first frame):
+  // a non-established iteration must not retry hot.
+  if (!established) {
+    sleep(1);
+  }
 }
 
 // ---- summary -------------------------------------------------------------------
