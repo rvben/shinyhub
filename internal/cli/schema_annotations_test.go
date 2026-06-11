@@ -3,7 +3,8 @@ package cli
 import "testing"
 
 // TestAnnotations_KnownCommandShape spot-checks representative entries so the
-// registry types stay honest before the full-tree coverage test (Task 10).
+// registry types stay honest. Full-tree coverage is enforced by the
+// conformance tests in cmd/shinyhub.
 func TestAnnotations_KnownCommandShape(t *testing.T) {
 	a, ok := schemaAnnotations["apps list"]
 	if !ok {

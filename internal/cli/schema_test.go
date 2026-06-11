@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -44,8 +45,10 @@ func TestGenerateSchema_TopLevel(t *testing.T) {
 		t.Errorf("global_args = %v", names)
 	}
 	// --output must carry its three valid values as an enum.
+	found := false
 	for _, a := range doc.GlobalArgs {
 		if a.Name == "--output" {
+			found = true
 			wantEnum := []string{"table", "json", "ndjson"}
 			if len(a.Enum) != len(wantEnum) {
 				t.Errorf("--output enum = %v, want %v", a.Enum, wantEnum)
@@ -56,10 +59,12 @@ func TestGenerateSchema_TopLevel(t *testing.T) {
 					t.Errorf("--output enum[%d] = %q, want %q", i, a.Enum[i], v)
 				}
 			}
-			return
+			break
 		}
 	}
-	t.Error("--output not found in global_args")
+	if !found {
+		t.Error("--output not found in global_args")
+	}
 }
 
 func TestPositionalsFromUse(t *testing.T) {
@@ -166,6 +171,43 @@ func findSub(t *testing.T, c schemaCommand, name string) schemaCommand {
 	}
 	t.Fatalf("subcommand %q not in %q", name, c.Name)
 	return schemaCommand{}
+}
+
+// TestGenerateSchema_NoRawUseCharsInPositionalNames asserts that no emitted
+// positional or flag name contains cobra Use-string punctuation. This catches
+// future Use strings like "set <slug> <a|b|c>" before they reach the schema.
+// TestGenerateSchema_StreamingAnnotationWired verifies that Streaming:true in
+// the registry propagates to the emitted JSON document.
+func TestGenerateSchema_StreamingAnnotationWired(t *testing.T) {
+	doc := generateSchema(testRoot())
+	apps := findCommand(t, doc.Commands, "apps")
+	logs := findSub(t, apps, "logs")
+	if !logs.Streaming {
+		t.Error("apps logs must have streaming=true in the schema document")
+	}
+}
+
+func TestGenerateSchema_NoRawUseCharsInPositionalNames(t *testing.T) {
+	doc := generateSchema(testRoot())
+	bad := "|<>[] "
+	var checkArgs func(cmdName string, args []schemaArg)
+	checkArgs = func(cmdName string, args []schemaArg) {
+		for _, a := range args {
+			for _, ch := range bad {
+				if strings.ContainsRune(a.Name, ch) {
+					t.Errorf("command %q arg %q contains illegal char %q", cmdName, a.Name, ch)
+				}
+			}
+		}
+	}
+	var walk func(cmds []schemaCommand)
+	walk = func(cmds []schemaCommand) {
+		for _, c := range cmds {
+			checkArgs(c.Name, c.Args)
+			walk(c.Subcommands)
+		}
+	}
+	walk(doc.Commands)
 }
 
 func TestSchemaCommand_EmitsValidJSON(t *testing.T) {

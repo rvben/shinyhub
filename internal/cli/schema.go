@@ -103,7 +103,11 @@ func walkCommand(c *cobra.Command, parentPath string) schemaCommand {
 		if ann.ArgTypes != nil && ann.ArgTypes[pos.name] != "" {
 			typ = ann.ArgTypes[pos.name]
 		}
-		sc.Args = append(sc.Args, schemaArg{Name: pos.name, Type: typ, Required: pos.required})
+		arg := schemaArg{Name: pos.name, Type: typ, Required: pos.required}
+		if ann.ArgEnums != nil {
+			arg.Enum = ann.ArgEnums[pos.name]
+		}
+		sc.Args = append(sc.Args, arg)
 	}
 	addFlag := func(f *pflag.Flag) {
 		if f.Name == "help" || globalArgNames[f.Name] {

@@ -811,8 +811,8 @@ func newAppsAccessCmd() *cobra.Command {
 
 func newAppsAccessSetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "set <slug> <public|private|shared>",
-		Short: "Set access level for an app",
+		Use:   "set <slug> <level>",
+		Short: "Set access level for an app (level: public, private, or shared)",
 		Args:  cobra.ExactArgs(2),
 		RunE:  runAppsAccessSet,
 	}

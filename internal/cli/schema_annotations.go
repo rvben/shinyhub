@@ -8,12 +8,12 @@ type fieldSpec struct {
 }
 
 // cmdAnnotation supplies what the cobra tree cannot know about a command.
-// Mutating is a *bool because clispec v0.2 treats omitted as UNKNOWN; the
-// registry must state it explicitly for every command (enforced by the
-// coverage test in cmd/shinyhub).
+// Mutating is a *bool because clispec v0.2 treats omitted as UNKNOWN; every
+// command must state it explicitly. The conformance tests in cmd/shinyhub
+// enforce full-tree coverage.
 type cmdAnnotation struct {
 	Mutating            *bool
-	Stability           string // "" means stable
+	Stability           string // absent (empty) means unspecified; omitted from document
 	OutputFields        []fieldSpec
 	EnvelopeFields      []fieldSpec       // list commands: envelope-level keys
 	Streaming           bool              // stdout is a line stream (ndjson mode)
@@ -31,12 +31,10 @@ var mut = boolp(true) // mutating
 // schemaAnnotations is keyed by command path: space-joined command names
 // below the root, e.g. "apps list", "schedule add", "serve".
 var schemaAnnotations = map[string]cmdAnnotation{
-	// Root-level pseudo entry: type and enum overrides for flags that apply
-	// to every command. --config is a filesystem path; --output documents its
-	// three valid values so the schema is self-describing without per-command
-	// repetition.
+	// Root pseudo-entry: only ArgTypes and ArgEnums are read from this entry
+	// (walkCommand never looks up ""); Mutating is not set here. Used to
+	// propagate inherited-flag overrides to every command without repetition.
 	"": {
-		Mutating: ro,
 		ArgTypes: map[string]string{"--config": "path"},
 		ArgEnums: map[string][]string{"--output": {"table", "json", "ndjson"}},
 	},
