@@ -28,52 +28,57 @@ type sharedDataDTO struct {
 }
 
 func newShareLsCmd() *cobra.Command {
-	return &cobra.Command{
+	f := &listFlags{}
+	cmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List shared-data mounts for an app",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			slug := args[0]
-
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
-
-			req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/shared-data", nil)
-			if err != nil {
-				return fmt.Errorf("build request: %w", err)
-			}
-			req.Header.Set("Authorization", authHeader(cfg.Token))
-
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode >= 400 {
-				out, _ := io.ReadAll(resp.Body)
-				return httpError(cfg.Token, "list shared-data", resp, out)
-			}
-
-			var mounts []sharedDataDTO
-			if err := json.NewDecoder(resp.Body).Decode(&mounts); err != nil {
-				return fmt.Errorf("decode response: %w", err)
-			}
-
-			if len(mounts) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No shared-data mounts.")
-				return nil
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "%-32s  %s\n", "SOURCE SLUG", "SOURCE ID")
-			for _, m := range mounts {
-				fmt.Fprintf(cmd.OutOrStdout(), "%-32s  %d\n", m.SourceSlug, m.SourceID)
-			}
-			return nil
-		},
 	}
+	addListFlags(cmd, f)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		slug := args[0]
+
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/shared-data", nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return httpError(cfg.Token, "list shared-data", resp, out)
+		}
+
+		var mounts []map[string]any
+		if err := json.Unmarshal(out, &mounts); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+
+		return renderList(cmd, f, mounts, nil, func(w io.Writer, items []map[string]any) {
+			if len(items) == 0 {
+				fmt.Fprintln(w, "No shared-data mounts.")
+				return
+			}
+			fmt.Fprintf(w, "%-32s  %s\n", "SOURCE SLUG", "SOURCE ID")
+			for _, m := range items {
+				sourceSlug := fmt.Sprintf("%v", m["source_slug"])
+				sourceID := fmt.Sprintf("%v", m["source_id"])
+				fmt.Fprintf(w, "%-32s  %s\n", sourceSlug, sourceID)
+			}
+		})
+	}
+	return cmd
 }
 
 func newShareAddCmd() *cobra.Command {

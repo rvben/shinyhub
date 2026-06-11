@@ -95,16 +95,14 @@ func newEnvCmd() *cobra.Command {
 		return nil
 	}
 
-	var lsFlags struct {
-		jsonOutput bool
-	}
+	lsF := &listFlags{}
 
 	envLsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List environment variables for an app",
 		Args:  cobra.ExactArgs(1),
 	}
-	envLsCmd.Flags().BoolVar(&lsFlags.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(envLsCmd, lsF)
 	envLsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 
@@ -130,38 +128,32 @@ func newEnvCmd() *cobra.Command {
 			return httpError(cfg.Token, "list env", resp, out)
 		}
 
-		if lsFlags.jsonOutput {
-			fmt.Fprintln(cmd.OutOrStdout(), string(out))
-			return nil
-		}
-
+		// The server wraps env entries under {"env": [...]}.
 		var result struct {
-			Env []struct {
-				Key       string `json:"key"`
-				Value     string `json:"value"`
-				Secret    bool   `json:"secret"`
-				Set       bool   `json:"set"`
-				UpdatedAt int64  `json:"updated_at"`
-			} `json:"env"`
+			Env []map[string]any `json:"env"`
 		}
 		if err := json.Unmarshal(out, &result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 
-		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "%-24s %s\n", "KEY", "VALUE")
-		for _, v := range result.Env {
-			displayValue := v.Value
-			switch {
-			case v.Secret:
-				displayValue = "••••••"
-			case v.Set && v.Value == "":
-				displayValue = "(empty)"
+		return renderList(cmd, lsF, result.Env, nil, func(w io.Writer, items []map[string]any) {
+			fmt.Fprintf(w, "%-24s %s\n", "KEY", "VALUE")
+			for _, v := range items {
+				key := fmt.Sprintf("%v", v["key"])
+				value := fmt.Sprintf("%v", v["value"])
+				secret, _ := v["secret"].(bool)
+				set, _ := v["set"].(bool)
+				displayValue := value
+				switch {
+				case secret:
+					displayValue = "••••••"
+				case set && value == "":
+					displayValue = "(empty)"
+				}
+				row := fmt.Sprintf("%-24s %s", key, displayValue)
+				fmt.Fprintln(w, strings.TrimRight(row, " "))
 			}
-			row := fmt.Sprintf("%-24s %s", v.Key, displayValue)
-			fmt.Fprintln(w, strings.TrimRight(row, " "))
-		}
-		return nil
+		})
 	}
 
 	var rmFlags struct {

@@ -178,6 +178,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "secret", Type: "boolean"},
 		{Name: "set", Type: "boolean"},
 		{Name: "updated_at", Type: "integer"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 	"env rm":    {Mutating: mut},
 	"env apply": {Mutating: mut},
@@ -189,7 +193,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"data ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "path", Type: "string"},
 		{Name: "size", Type: "integer"},
-		{Name: "modified_at", Type: "string"},
+		{Name: "sha256", Type: "string"},
+		{Name: "modified_at", Type: "integer", Desc: "Unix timestamp"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+		{Name: "quota_mb", Type: "integer", Desc: "Storage quota in megabytes (0 = no quota)"},
+		{Name: "used_bytes", Type: "integer", Desc: "Total bytes used across all files"},
 	}},
 	"data rm": {Mutating: mut},
 
@@ -200,10 +211,17 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "id", Type: "integer"},
 		{Name: "name", Type: "string"},
 		{Name: "cron_expr", Type: "string"},
+		{Name: "command", Type: "array"},
 		{Name: "enabled", Type: "boolean"},
 		{Name: "timeout_seconds", Type: "integer"},
 		{Name: "overlap_policy", Type: "string"},
 		{Name: "missed_policy", Type: "string"},
+		{Name: "effective_timezone", Type: "string"},
+		{Name: "timezone_inherited", Type: "boolean"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 	"schedule add": {
 		Mutating:            mut,
@@ -229,6 +247,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"share ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "source_slug", Type: "string"},
 		{Name: "source_id", Type: "integer"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
 	}},
 	"share add": {Mutating: mut},
 	"share rm":  {Mutating: mut},

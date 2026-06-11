@@ -219,14 +219,17 @@ func TestEnvSet_RestartFlag(t *testing.T) {
 }
 
 func TestEnvLs_MasksSecrets(t *testing.T) {
+	resetFormatState(t)
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"env":[{"key":"AWS_REGION","value":"eu-west-1","secret":false,"set":true,"updated_at":1},{"key":"DB_PASS","value":"","secret":true,"set":true,"updated_at":2}]}`)
 
-	cmd := newEnvCmd()
-	cmd.SetArgs([]string{"ls", "demo"})
+	// Use --output table to force table rendering and verify secret masking.
+	// Non-TTY runs default to JSON; the masking is a table-mode display choice.
+	root := testRoot()
 	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	if err := cmd.Execute(); err != nil {
+	root.SetOut(&buf)
+	root.SetArgs([]string{"env", "ls", "demo", "--output", "table"})
+	if err := root.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -240,7 +243,7 @@ func TestEnvLs_MasksSecrets(t *testing.T) {
 	if !strings.Contains(out, "DB_PASS") {
 		t.Error("expected output to contain DB_PASS")
 	}
-	// Secret values should be masked
+	// Secret values should be masked in table mode.
 	if !strings.Contains(out, "••••••") {
 		t.Error("expected output to contain secret mask ••••••")
 	}

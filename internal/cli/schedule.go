@@ -119,54 +119,66 @@ func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 }
 
 func newScheduleLsCmd() *cobra.Command {
-	var flags struct {
-		jsonOutput bool
-	}
+	f := &listFlags{}
 	lsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List scheduled jobs for an app",
 		Args:  cobra.ExactArgs(1),
 	}
-	lsCmd.Flags().BoolVar(&flags.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(lsCmd, f)
 	lsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
 
-		if flags.jsonOutput {
-			raw, err := listSchedulesRaw(cfg, args[0])
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), string(raw))
-			return nil
-		}
-
 		schedules, err := listSchedules(cfg, args[0])
 		if err != nil {
 			return err
 		}
-		if len(schedules) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "No schedules.")
-			return nil
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
-			"ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND")
-		for _, s := range schedules {
-			cmdStr := strings.Join(s.Command, " ")
-			enabled := "true"
-			if !s.Enabled {
-				enabled = "false"
+
+		// Convert to []map[string]any for the shared list helper.
+		items := make([]map[string]any, len(schedules))
+		for i, s := range schedules {
+			items[i] = map[string]any{
+				"id":                 s.ID,
+				"name":               s.Name,
+				"cron_expr":          s.CronExpr,
+				"command":            s.Command,
+				"enabled":            s.Enabled,
+				"timeout_seconds":    s.TimeoutSeconds,
+				"overlap_policy":     s.OverlapPolicy,
+				"missed_policy":      s.MissedPolicy,
+				"effective_timezone": s.EffectiveTimezone,
+				"timezone_inherited": s.TimezoneInherited,
 			}
-			tzDisplay := s.EffectiveTimezone
-			if s.TimezoneInherited {
-				tzDisplay += " (inherited)"
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%-6d  %-24s  %-20s  %-8s  %-28s  %s\n",
-				s.ID, s.Name, s.CronExpr, enabled, tzDisplay, cmdStr)
 		}
-		return nil
+
+		return renderList(cmd, f, items, nil, func(w io.Writer, rendered []map[string]any) {
+			if len(rendered) == 0 {
+				fmt.Fprintln(w, "No schedules.")
+				return
+			}
+			fmt.Fprintf(w, "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
+				"ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND")
+			for _, item := range rendered {
+				id := fmt.Sprintf("%v", item["id"])
+				name := fmt.Sprintf("%v", item["name"])
+				cron := fmt.Sprintf("%v", item["cron_expr"])
+				enabled := "true"
+				if b, ok := item["enabled"].(bool); ok && !b {
+					enabled = "false"
+				}
+				tzDisplay := fmt.Sprintf("%v", item["effective_timezone"])
+				if inherited, ok := item["timezone_inherited"].(bool); ok && inherited {
+					tzDisplay += " (inherited)"
+				}
+				cmdParts, _ := item["command"].([]string)
+				cmdStr := strings.Join(cmdParts, " ")
+				fmt.Fprintf(w, "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
+					id, name, cron, enabled, tzDisplay, cmdStr)
+			}
+		})
 	}
 	return lsCmd
 }
