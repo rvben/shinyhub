@@ -139,16 +139,19 @@ type positional struct {
 	required bool
 }
 
-// positionalsFromUse parses "<slug>" (required) and "[dir]" (optional)
-// tokens out of a cobra Use string.
+// positionalsFromUse parses "<slug>" (required) and "[dir]" or "[<id>]"
+// (optional) tokens out of a cobra Use string. Both bracket layers are
+// stripped so "[<id>]" yields name "id", not "<id>".
 func positionalsFromUse(use string) []positional {
 	var out []positional
 	for _, tok := range strings.Fields(use)[1:] {
 		switch {
 		case strings.HasPrefix(tok, "<") && strings.HasSuffix(tok, ">"):
-			out = append(out, positional{name: strings.Trim(tok, "<>"), required: true})
+			name := strings.Trim(tok, "<>")
+			out = append(out, positional{name: name, required: true})
 		case strings.HasPrefix(tok, "[") && strings.HasSuffix(tok, "]"):
-			out = append(out, positional{name: strings.Trim(tok, "[]"), required: false})
+			name := strings.Trim(strings.Trim(tok, "[]"), "<>")
+			out = append(out, positional{name: name, required: false})
 		}
 	}
 	return out
@@ -177,11 +180,18 @@ func flagToArg(f *pflag.Flag, cmdPath string) schemaArg {
 			a.Enum = e
 		}
 	}
-	// Fall back to the root annotation for inherited flags (e.g. --config -> path).
-	if a.Type == "string" {
-		if rootAnn, ok := schemaAnnotations[""]; ok {
+	// Fall back to the root annotation for inherited flags (e.g. --config ->
+	// path, --output -> enum). Only applies when the command-path lookup above
+	// did not already set a value.
+	if rootAnn, ok := schemaAnnotations[""]; ok {
+		if a.Type == "string" {
 			if t := rootAnn.ArgTypes["--"+f.Name]; t != "" {
 				a.Type = t
+			}
+		}
+		if len(a.Enum) == 0 {
+			if e := rootAnn.ArgEnums["--"+f.Name]; len(e) > 0 {
+				a.Enum = e
 			}
 		}
 	}

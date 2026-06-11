@@ -43,6 +43,54 @@ func TestGenerateSchema_TopLevel(t *testing.T) {
 	if len(names) != 2 {
 		t.Errorf("global_args = %v", names)
 	}
+	// --output must carry its three valid values as an enum.
+	for _, a := range doc.GlobalArgs {
+		if a.Name == "--output" {
+			wantEnum := []string{"table", "json", "ndjson"}
+			if len(a.Enum) != len(wantEnum) {
+				t.Errorf("--output enum = %v, want %v", a.Enum, wantEnum)
+				break
+			}
+			for i, v := range wantEnum {
+				if a.Enum[i] != v {
+					t.Errorf("--output enum[%d] = %q, want %q", i, a.Enum[i], v)
+				}
+			}
+			return
+		}
+	}
+	t.Error("--output not found in global_args")
+}
+
+func TestPositionalsFromUse(t *testing.T) {
+	cases := []struct {
+		use      string
+		wantName string
+		wantReq  bool
+	}{
+		{"revoke [<id>]", "id", false},
+		{"update <slug> <name>", "slug", true},
+		{"deploy [dir]", "dir", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.use, func(t *testing.T) {
+			got := positionalsFromUse(tc.use)
+			if len(got) == 0 {
+				t.Fatalf("positionalsFromUse(%q) returned nothing", tc.use)
+			}
+			if got[0].name != tc.wantName {
+				t.Errorf("name = %q, want %q", got[0].name, tc.wantName)
+			}
+			if got[0].required != tc.wantReq {
+				t.Errorf("required = %v, want %v", got[0].required, tc.wantReq)
+			}
+		})
+	}
+	// "update <slug> <name>" must yield both positionals.
+	all := positionalsFromUse("update <slug> <name>")
+	if len(all) != 2 || all[1].name != "name" || !all[1].required {
+		t.Errorf("second positional = %+v, want {name:\"name\" required:true}", all)
+	}
 }
 
 func TestGenerateSchema_CommandsAndFlags(t *testing.T) {

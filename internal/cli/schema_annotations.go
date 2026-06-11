@@ -31,9 +31,15 @@ var mut = boolp(true) // mutating
 // schemaAnnotations is keyed by command path: space-joined command names
 // below the root, e.g. "apps list", "schedule add", "serve".
 var schemaAnnotations = map[string]cmdAnnotation{
-	// Root-level pseudo entry: type overrides for inherited flags that apply
-	// to every command (e.g. --config is a filesystem path).
-	"": {Mutating: ro, ArgTypes: map[string]string{"--config": "path"}},
+	// Root-level pseudo entry: type and enum overrides for flags that apply
+	// to every command. --config is a filesystem path; --output documents its
+	// three valid values so the schema is self-describing without per-command
+	// repetition.
+	"": {
+		Mutating: ro,
+		ArgTypes: map[string]string{"--config": "path"},
+		ArgEnums: map[string][]string{"--output": {"table", "json", "ndjson"}},
+	},
 
 	// apps list
 	"apps list": {Mutating: ro, OutputFields: []fieldSpec{
