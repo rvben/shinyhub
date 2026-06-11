@@ -1,0 +1,56 @@
+# ShinyHub configuration for the docker-compose reference deployment.
+# Mount this file at /etc/shinyhub/shinyhub.yaml inside the container
+# (already done by the compose.yaml volume bind).
+#
+# Volume paths below match the named volumes declared in compose.yaml:
+#   shinyhub-apps      -> /data/apps
+#   shinyhub-app-data  -> /data/app-data
+#   shinyhub-db        -> /data/db
+
+database:
+  driver: sqlite
+  dsn: /data/db/shinyhub.db    # SHINYHUB_DB_DSN
+
+server:
+  host: 0.0.0.0                # binds directly on the host interface (host networking)
+  port: 8080                   # reachable at http://<host-ip>:8080
+  # No `ports:` mapping needed with network_mode: host -- the server binds
+  # the host port directly from this config.
+  trusted_proxies:             # CIDRs that may set X-Forwarded-For
+    - 127.0.0.0/8              # loopback only (no upstream proxy in this topology)
+    - ::1/128
+  shutdown_apps: adopt         # leave app containers running across restarts
+
+auth:
+  # REQUIRED. Provided via SHINYHUB_AUTH_SECRET env var in compose.yaml.
+  # The placeholder below is rejected at startup -- the env override takes effect.
+  secret: change-me-to-a-random-string
+
+storage:
+  apps_dir: /data/apps         # SHINYHUB_APPS_DIR
+  app_data_dir: /data/app-data # SHINYHUB_APP_DATA_DIR
+  version_retention: 5
+
+runtime:
+  mode: docker
+
+  docker:
+    socket: /var/run/docker.sock
+    # host networking: the server and app containers share the host network stack.
+    # App processes bind on 127.0.0.1:<port>; the server reaches them on that
+    # loopback address. This matches the hardcoded endpoint URLs in
+    # internal/process/docker.go and is required for correct proxy routing.
+    network_mode: host          # SHINYHUB_RUNTIME_DOCKER_NETWORK_MODE
+    images:
+      python: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+      r: rocker/r-base
+    default_memory_mb: 512      # per-replica container memory limit (MiB); 0 = no limit
+    default_cpu_percent: 100    # 100 = one full core; 0 = no limit
+
+lifecycle:
+  watch_interval: 15s
+  restart_max_attempts: 5
+  hibernate_timeout: 30m
+
+defaults:
+  app_visibility: private

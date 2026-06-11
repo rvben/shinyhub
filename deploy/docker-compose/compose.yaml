@@ -1,0 +1,97 @@
+# ShinyHub docker-compose reference deployment
+#
+# Requirements:
+#   export SHINYHUB_AUTH_SECRET=$(openssl rand -hex 32)
+#   export DOCKER_GID=$(stat -c %g /var/run/docker.sock)   # Linux
+#   # macOS Docker Desktop: the socket is world-accessible; DOCKER_GID is not needed.
+#   docker compose up -d
+#
+# Network topology: network_mode: host
+#   The shinyhub server listens on the host network directly (port 8080 from
+#   shinyhub.yaml). App containers spawned by the docker runtime also bind on
+#   the host loopback (127.0.0.1:<port>), which is how the server reaches them.
+#   Bridge mode cannot work here: internal/process/docker.go hardcodes replica
+#   endpoint URLs to http://127.0.0.1:<port>, and bridge mode publishes those
+#   ports on the HOST loopback -- unreachable from inside the server container.
+#   Host networking collapses the boundary and makes the loopback reachable.
+#
+# Container healthcheck: skipped.
+#   The shinyhub image is distroless (no shell, no curl). The /healthz HTTP
+#   endpoint is available for external monitors (see README).
+#
+# Profiles:
+#   (default) SQLite only.
+#   postgres  Also starts a PostgreSQL 16 container. Set SHINYHUB_DB_DSN in the
+#             shinyhub environment block and uncomment the line below before
+#             using this profile.
+
+services:
+  shinyhub:
+    image: ghcr.io/rvben/shinyhub:${SHINYHUB_TAG:-latest}
+
+    # Uncomment to build from source instead of pulling the published image:
+    # build:
+    #   context: ../..
+    #   dockerfile: Dockerfile
+
+    network_mode: host
+
+    restart: unless-stopped
+
+    group_add:
+      - "${DOCKER_GID:-0}"
+
+    volumes:
+      # Config file (bind-mount from this directory)
+      - ./shinyhub.yaml:/etc/shinyhub/shinyhub.yaml:ro
+      # Docker socket for spawning app containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent named volumes
+      - shinyhub-apps:/data/apps
+      - shinyhub-app-data:/data/app-data
+      - shinyhub-db:/data/db
+
+    environment:
+      SHINYHUB_AUTH_SECRET: "${SHINYHUB_AUTH_SECRET:?SHINYHUB_AUTH_SECRET is required}"
+
+      # Optional: bootstrap an admin account on first start.
+      # Comment out after the first run; the env var has no effect once the
+      # user exists in the database.
+      SHINYHUB_ADMIN_USER: "${SHINYHUB_ADMIN_USER:-}"
+      SHINYHUB_ADMIN_PASSWORD: "${SHINYHUB_ADMIN_PASSWORD:-}"
+
+      # Optional: point at the postgres service (requires the postgres profile).
+      # When set, also set database.driver: postgres in shinyhub.yaml.
+      # SHINYHUB_DB_DSN: "postgres://shinyhub:shinyhub@127.0.0.1:5432/shinyhub?sslmode=disable"
+
+  # Postgres service (optional -- enable with: docker compose --profile postgres up -d)
+  # Provides a HA-grade database backend on a single node.
+  postgres:
+    profiles:
+      - postgres
+    image: postgres:16-alpine
+    restart: unless-stopped
+
+    # With host networking the container binds directly on the host loopback.
+    # The shinyhub service reaches it at 127.0.0.1:5432 (no DNS name needed).
+    network_mode: host
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    environment:
+      POSTGRES_USER: shinyhub
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-shinyhub}"
+      POSTGRES_DB: shinyhub
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shinyhub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  shinyhub-apps:
+  shinyhub-app-data:
+  shinyhub-db:
+  postgres-data:
