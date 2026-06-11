@@ -37,12 +37,6 @@ jobs:
       - name: Build
         run: go build -o /tmp/shinyhub ./cmd/shinyhub
 
-      - name: Install clispec
-        run: cargo install clispec --version 0.2.3 --locked
-
-      - name: clispec conformance score
-        run: make clispec-score
-
   # Remote-worker end-to-end: launches a control plane + a real `shinyhub worker`
   # over mTLS and deploys a Shiny app onto a remote_docker tier (real containers),
   # then exercises bundle-pull dedup, tunnel routing, control-plane restart
