@@ -403,7 +403,7 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", resp.Status)
 		return
 	}
-	lines := parseSSELines(resp.Body, tailLines)
+	lines := parsePlainLines(resp.Body, tailLines)
 	if len(lines) == 0 {
 		return
 	}
@@ -414,15 +414,16 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 	fmt.Fprintf(w, "--- run `shinyhub apps logs %s` for full logs ---\n", slug)
 }
 
-// parseSSELines reads Server-Sent Events from r and returns the last n
-// non-empty data lines. Comment lines (starting with ':') are ignored.
-func parseSSELines(r io.Reader, n int) []string {
+// parsePlainLines reads a plain-text response body (one log line per line,
+// as returned by GET /api/apps/{slug}/logs?follow=false) and returns the last
+// n non-empty lines.
+func parsePlainLines(r io.Reader, n int) []string {
 	var all []string
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			all = append(all, strings.TrimPrefix(line, "data: "))
+		if line != "" {
+			all = append(all, line)
 		}
 	}
 	if len(all) <= n {

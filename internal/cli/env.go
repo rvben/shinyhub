@@ -120,10 +120,14 @@ func newEnvCmd() *cobra.Command {
 			restartReq.Header.Set("Authorization", authHeader(cfg.Token))
 			restartResp, err := httpClient.Do(restartReq)
 			if err != nil {
-				return fmt.Errorf("restart after env set: %w", err)
+				return fmt.Errorf("env var saved, but restart failed: %w", err)
 			}
 			defer restartResp.Body.Close()
-			// Non-fatal: the value is already saved; ignore restart errors here.
+			if restartResp.StatusCode >= 400 {
+				restartBody, _ := io.ReadAll(restartResp.Body)
+				return fmt.Errorf("env var saved, but restart failed: %w",
+					httpError(cfg.Token, "restart", restartResp, restartBody))
+			}
 		}
 
 		return renderAction(cmd, "set",

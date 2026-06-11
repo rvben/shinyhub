@@ -1414,9 +1414,12 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// When ?if_not_running=true is set (sent by `apps start`), skip the cycle
-	// if the app is already running. Return 200 with a note so the CLI can
-	// render a no-op message without treating it as an error.
-	if r.URL.Query().Get("if_not_running") == "true" && app.Status == "running" {
+	// if the app is already running AND at least one replica process is alive.
+	// Trusting the DB status alone is not enough: the hibernation watchdog stops
+	// processes before persisting the updated status, so there is a window where
+	// status="running" in the DB but no live replica exists. In that case we
+	// fall through to the normal restart path to bring the app back up.
+	if r.URL.Query().Get("if_not_running") == "true" && app.Status == "running" && s.hasLiveReplica(slug) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status": "running",
 			"note":   "already running",
@@ -2388,4 +2391,21 @@ func (s *Server) allTiersFargate() bool {
 		}
 	}
 	return true
+}
+
+// hasLiveReplica reports whether at least one replica process for slug is
+// currently alive in the manager. When no manager is configured it returns
+// true so callers that need a conservative default (e.g. the no-op branch of
+// if_not_running) treat a missing manager as "running" and do not spuriously
+// re-start the app.
+func (s *Server) hasLiveReplica(slug string) bool {
+	if s.manager == nil {
+		return true
+	}
+	for _, p := range s.manager.AllForSlug(slug) {
+		if p != nil {
+			return true
+		}
+	}
+	return false
 }

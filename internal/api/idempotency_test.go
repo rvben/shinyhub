@@ -9,6 +9,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 // setupIdempotencyApp creates the standard test user + app and returns the
@@ -50,16 +51,23 @@ func TestStopApp_AlreadyStopped_Returns200(t *testing.T) {
 
 // TestRestartApp_WithIfNotRunning_WhenAlreadyRunning_Returns200NoOp verifies
 // that POST /api/apps/{slug}/restart?if_not_running=true returns 200 with
-// {"status":"running","note":"already running"} when the app has a current
-// deployment and is already in running state, without cycling the pool.
+// {"status":"running","note":"already running"} when the DB status is "running"
+// AND at least one live replica exists in the manager.
 func TestRestartApp_WithIfNotRunning_AlreadyDeployed_Returns200NoOp(t *testing.T) {
-	srv, store, _ := newManagerTestServer(t)
+	srv, store, mgr := newManagerTestServer(t)
 	token := setupIdempotencyApp(t, store, "live-app")
 
-	// Manually mark the app as running so the handler sees it.
+	// Mark the app as running in the DB.
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "live-app", Status: "running"}); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
+	// Inject a live replica so the liveness check confirms the process is up.
+	mgr.ForceEntry("live-app", process.ProcessInfo{
+		Slug:   "live-app",
+		Index:  0,
+		PID:    99999,
+		Status: process.StatusRunning,
+	})
 
 	req := authedRequest(t, "POST", "/api/apps/live-app/restart?if_not_running=true", nil, token)
 	rec := httptest.NewRecorder()
@@ -77,6 +85,39 @@ func TestRestartApp_WithIfNotRunning_AlreadyDeployed_Returns200NoOp(t *testing.T
 	}
 	if note, _ := body["note"].(string); note != "already running" {
 		t.Errorf("note = %q, want already running", note)
+	}
+}
+
+// TestRestartApp_WithIfNotRunning_StaleRunningStatus_FallsThroughToStart verifies
+// that when the DB status is "running" but no live replica exists in the manager
+// (the hibernation window: process stopped before DB updated), the no-op branch
+// is skipped and the handler falls through to start the app. The test app has no
+// prior deployment, so the handler returns 409 "app has never been deployed" -
+// the important thing is it did NOT return the no-op 200 with "already running".
+func TestRestartApp_WithIfNotRunning_StaleRunningStatus_FallsThroughToStart(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	token := setupIdempotencyApp(t, store, "stale-app")
+
+	// Set DB status to running but leave the manager pool empty (no live process).
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "stale-app", Status: "running"}); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+	// Manager has no entries for "stale-app", so AllForSlug returns an empty slice.
+
+	req := authedRequest(t, "POST", "/api/apps/stale-app/restart?if_not_running=true", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	// Must not return 200 with note="already running" - that would be the stale no-op.
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err == nil {
+		if note, _ := body["note"].(string); note == "already running" {
+			t.Errorf("handler returned stale no-op (already running) despite no live process")
+		}
+	}
+	// The handler must have fallen through: with no deployment it hits 409.
+	if rec.Code == http.StatusOK {
+		t.Errorf("expected non-200 response when status=running but no live process, got 200: %s", rec.Body.String())
 	}
 }
 

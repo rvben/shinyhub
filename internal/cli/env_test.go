@@ -317,3 +317,39 @@ func TestEnvCmd_ServerError(t *testing.T) {
 		t.Errorf("expected error to contain server error text, got: %v", err)
 	}
 }
+
+// TestEnvSet_RestartFlag_RestartFailure verifies that when the env var is saved
+// (PUT returns changed:true) but the restart endpoint returns 500, the CLI
+// exits non-zero with an error that both mentions the value was saved and
+// classifies as server_error.
+func TestEnvSet_RestartFlag_RestartFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PUT":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"changed":true}`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/restart"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"process manager unavailable"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	writeTestCLIConfig(t, srv.URL)
+
+	cmd := newEnvCmd()
+	cmd.SetArgs([]string{"set", "demo", "FOO=bar", "--restart"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when restart returns 500, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(strings.ToLower(msg), "saved") {
+		t.Errorf("error should mention that the value was saved, got: %q", msg)
+	}
+	kind, _ := classify(err)
+	if kind != KindServerError {
+		t.Errorf("error kind = %q, want server_error", kind)
+	}
+}
