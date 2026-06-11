@@ -10,6 +10,28 @@ import (
 	"os"
 )
 
+// statusKind maps an HTTP status code to its stable error kind and process
+// exit code. Shared by the *httpStatusError and *deployHTTPError arms of
+// classify so both typed-HTTP error types use identical mapping logic.
+func statusKind(status int) (Kind, int) {
+	switch {
+	case status == 400:
+		return KindValidation, 1
+	case status == 401 || status == 403:
+		return KindAuth, 3
+	case status == 404:
+		return KindNotFound, 1
+	case status == 409:
+		return KindConflict, 5
+	case status == 429:
+		return KindRateLimit, 3
+	case status >= 500:
+		return KindServerError, 3
+	default:
+		return KindInternal, 1
+	}
+}
+
 // classify maps any error returned by a command to its stable kind and
 // process exit code. Order matters: explicit kinds win, then typed HTTP
 // status, then network shapes, then legacy exit codes, then the internal
@@ -27,22 +49,11 @@ func classify(err error) (Kind, int) {
 	}
 	var hse *httpStatusError
 	if errors.As(err, &hse) {
-		switch {
-		case hse.Status == 400:
-			return KindValidation, 1
-		case hse.Status == 401 || hse.Status == 403:
-			return KindAuth, 3
-		case hse.Status == 404:
-			return KindNotFound, 1
-		case hse.Status == 409:
-			return KindConflict, 5
-		case hse.Status == 429:
-			return KindRateLimit, 3
-		case hse.Status >= 500:
-			return KindServerError, 3
-		default:
-			return KindInternal, 1
-		}
+		return statusKind(hse.Status)
+	}
+	var dhe *deployHTTPError
+	if errors.As(err, &dhe) {
+		return statusKind(dhe.statusCode)
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {

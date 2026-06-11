@@ -45,6 +45,8 @@ func TestClassify(t *testing.T) {
 		// the typed-status branch fires first.
 		{"wrapped http status outranks legacy code", &ExitCodeError{Code: 4, Err: &httpStatusError{Status: 401, msg: "x"}}, KindAuth, 3},
 		{"conflict error type", &conflictError{slug: "app", msg: "re-run plan"}, KindConflict, 5},
+		{"deploy http 401", &deployHTTPError{statusCode: 401, body: "unauthorized"}, KindAuth, 3},
+		{"deploy http 503 wrapped", fmt.Errorf("checking demo: %w", &deployHTTPError{statusCode: 503, body: "service unavailable"}), KindServerError, 3},
 		{"plain error", errors.New("something odd"), KindInternal, 1},
 	}
 	for _, tc := range cases {
