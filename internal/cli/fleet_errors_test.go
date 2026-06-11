@@ -65,9 +65,10 @@ func TestFleet_FlagParseErrorIsStillReported(t *testing.T) {
 	}
 }
 
-// ERR-6: a flag error on the (unsilenced) fleet parent itself must appear
-// exactly once. The parent prints via cobra's own line, so the FlagErrorFunc
-// must stay quiet there to avoid reintroducing the duplicate.
+// ERR-6: a flag error on the fleet parent must appear exactly once. With
+// SilenceErrors set globally, cobra never prints flag errors itself, so the
+// FlagErrorFunc is the sole printer and printing unconditionally cannot
+// double-report.
 func TestFleet_ParentFlagParseErrorNotDuplicated(t *testing.T) {
 	_, _, _ = setupCLITest(t)
 	out := execFleetRealRoot(t, "fleet", "--nonexistent-flag")

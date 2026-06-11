@@ -70,7 +70,7 @@ func TestClassify_DetailedExitCodeIsNotAnError(t *testing.T) {
 
 func TestReport_EnvelopeIsLastStderrLine(t *testing.T) {
 	var stderr bytes.Buffer
-	code := reportTo(&stderr, false /* stderrIsTTY */, "json",
+	code := reportTo(&stderr, false /* stderrIsTTY */, formatJSON,
 		&httpStatusError{Status: 401, msg: "session expired - run `shinyhub login` to sign in again"})
 	if code != 3 {
 		t.Fatalf("exit code = %d, want 3", code)
@@ -99,7 +99,7 @@ func TestReport_EnvelopeIsLastStderrLine(t *testing.T) {
 
 func TestReport_TableTTYProseThenEnvelope(t *testing.T) {
 	var stderr bytes.Buffer
-	code := reportTo(&stderr, true /* stderrIsTTY */, "table", errors.New("plain failure"))
+	code := reportTo(&stderr, true /* stderrIsTTY */, formatTable, errors.New("plain failure"))
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -117,7 +117,7 @@ func TestReport_TableTTYProseThenEnvelope(t *testing.T) {
 
 func TestReport_ReportedSkipsProseKeepsEnvelope(t *testing.T) {
 	var stderr bytes.Buffer
-	reportTo(&stderr, true, "table", &ExitCodeError{Code: 4, Err: errors.New("2 apps failed"), Reported: true})
+	reportTo(&stderr, true, formatTable, &ExitCodeError{Code: 4, Err: errors.New("2 apps failed"), Reported: true})
 	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
 	if len(lines) != 1 || !strings.HasPrefix(lines[0], `{"error":`) {
 		t.Errorf("Reported error should emit envelope only, got %q", stderr.String())
@@ -126,7 +126,7 @@ func TestReport_ReportedSkipsProseKeepsEnvelope(t *testing.T) {
 
 func TestReport_DetailedExitCodeEmitsNothing(t *testing.T) {
 	var stderr bytes.Buffer
-	code := reportTo(&stderr, false, "json", &ExitCodeError{Code: 2, Err: errors.New("changes pending"), Reported: true})
+	code := reportTo(&stderr, false, formatJSON, &ExitCodeError{Code: 2, Err: errors.New("changes pending"), Reported: false})
 	if code != 2 || stderr.Len() != 0 {
 		t.Errorf("exit 2 should be silent: code=%d stderr=%q", code, stderr.String())
 	}
@@ -134,7 +134,7 @@ func TestReport_DetailedExitCodeEmitsNothing(t *testing.T) {
 
 func TestReport_NilIsZero(t *testing.T) {
 	var stderr bytes.Buffer
-	if code := reportTo(&stderr, false, "json", nil); code != 0 || stderr.Len() != 0 {
+	if code := reportTo(&stderr, false, formatJSON, nil); code != 0 || stderr.Len() != 0 {
 		t.Errorf("nil error: code=%d stderr=%q", code, stderr.String())
 	}
 }

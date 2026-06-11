@@ -102,7 +102,7 @@ type hintedError interface{ Hint() string }
 
 // reportTo renders err to w and returns the process exit code. Pure function
 // of its inputs for testability; Report wires the real stderr/TTY/format.
-func reportTo(w io.Writer, stderrIsTTY bool, format string, err error) int {
+func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int {
 	if err == nil {
 		return 0
 	}
@@ -112,7 +112,7 @@ func reportTo(w io.Writer, stderrIsTTY bool, format string, err error) int {
 	}
 	var ece *ExitCodeError
 	reported := errors.As(err, &ece) && ece.Reported
-	if stderrIsTTY && format == string(formatTable) && !reported {
+	if stderrIsTTY && format == formatTable && !reported {
 		fmt.Fprintf(w, "Error: %s\n", err.Error())
 	}
 	var env errEnvelope
@@ -136,5 +136,5 @@ func reportTo(w io.Writer, stderrIsTTY bool, format string, err error) int {
 
 // Report is the root error boundary: main() calls os.Exit(cli.Report(err)).
 func Report(err error) int {
-	return reportTo(os.Stderr, isTTY(os.Stderr), string(currentFormat()), err)
+	return reportTo(os.Stderr, isTTY(os.Stderr), currentFormat(), err)
 }
