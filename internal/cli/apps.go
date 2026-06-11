@@ -652,18 +652,24 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		}
 	}
 
+	// A replica or tier change restarts the app and drops active sessions.
+	// --yes bypasses the interactive prompt. On a non-TTY without --yes,
+	// refuse before any config or network access so the error is the first
+	// thing the caller sees, not a config-not-found or auth failure.
+	if (replicasChanged || tierChanged) && !f.yes && !isStdinTTY() {
+		return confirmationRequiredError(
+			"changing the replica pool restarts the app and drops active sessions",
+			"--yes")
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	slug := args[0]
 
-	// A replica change restarts the app and drops active sessions, so an
-	// interactive caller must confirm first (mirrors the dashboard's guard).
-	// The prompt is tty-gated: a non-interactive caller (CI, cron, piped
-	// script) proceeds without prompting so automation that scales via the CLI
-	// keeps working. --yes skips the prompt explicitly.
-	if (replicasChanged || tierChanged) && !f.yes && isStdinTTY() {
+	// On a TTY without --yes, prompt interactively before proceeding.
+	if (replicasChanged || tierChanged) && !f.yes {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Changing the replica pool restarts %q and drops active sessions. Continue? [y/N]: ", slug)
 		var confirm string
@@ -1270,12 +1276,13 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 
 	if !f.yes {
 		// Without --yes the destructive `apps delete` flow REQUIRES a
-		// confirmation. When stdin isn't a tty (CI, cron, `< /dev/null`,
-		// piped scripts) the previous code blocked forever on the read or
-		// surfaced a confusing "read confirmation: EOF". Refuse fast with
-		// a message that points at --yes so automation has a clear path.
+		// confirmation. When stdin is not a TTY (CI, cron, `< /dev/null`,
+		// piped scripts) refuse with a structured error that names --yes so
+		// automation has a clear, actionable path.
 		if !isStdinTTY() {
-			return fmt.Errorf("apps delete requires interactive confirmation; pass --yes to skip the prompt for non-interactive use")
+			return confirmationRequiredError(
+				"apps delete requires interactive confirmation",
+				"--yes")
 		}
 		// Prompt goes to stderr so a `shinyhub apps delete foo | tee log`
 		// pipeline keeps stdout for the success line only.

@@ -145,8 +145,10 @@ func runFleetInit(cmd *cobra.Command, f *fleetInitFlags) error {
 	id := strings.TrimSpace(f.fleetID)
 	if id == "" {
 		if !isStdinTTY() {
-			return &ExitCodeError{Code: 1, Err: fmt.Errorf(
-				"--fleet-id is required in a non-interactive shell (e.g. --fleet-id prod-eu)")}
+			return &ExitCodeError{Code: 1, Kind: KindValidation,
+				Err: &hintedMsgError{
+					msg:  "--fleet-id is required in a non-interactive shell",
+					hint: "pass --fleet-id (e.g. --fleet-id prod-eu)"}}
 		}
 		fmt.Fprint(errOut, "fleet_id (ownership scope, [a-z0-9-], 1-64): ")
 		var entered string

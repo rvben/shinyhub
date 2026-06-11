@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ func TestAppsSet_ReplicasOnly(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{}`)
 
-	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3"); err != nil {
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3", "--yes"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -93,6 +94,7 @@ func TestAppsSet_CombinedFlags(t *testing.T) {
 		"--replicas", "2",
 		"--max-sessions-per-replica", "15",
 		"--hibernate-timeout", "45",
+		"--yes",
 	); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -615,8 +617,8 @@ func TestAppsDelete_WrongConfirmation(t *testing.T) {
 // TestAppsDelete_NonTtyWithoutYesReturnsClearError pins the tty gate. Before
 // the gate, `shinyhub apps delete demo < /dev/null` (a CI/cron pattern) hung
 // on the prompt or surfaced a confusing "read confirmation: EOF". The fix
-// must short-circuit with an error pointing at `--yes` and must NOT issue any
-// DELETE request.
+// must short-circuit with a confirmation_required error whose hint names
+// --yes, and must NOT issue any DELETE request.
 func TestAppsDelete_NonTtyWithoutYesReturnsClearError(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, "")
@@ -629,8 +631,13 @@ func TestAppsDelete_NonTtyWithoutYesReturnsClearError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-tty error pointing at --yes, got nil")
 	}
-	if !strings.Contains(err.Error(), "--yes") {
-		t.Errorf("error should mention `--yes` so automation has a clear path, got: %v", err)
+	kind, _ := classify(err)
+	if kind != KindConfirmationRequired {
+		t.Errorf("error kind = %q, want %q", kind, KindConfirmationRequired)
+	}
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "--yes") {
+		t.Errorf("hint must mention --yes so automation has a clear path, got: %v", err)
 	}
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests when refusing non-tty without --yes, got %d", len(*reqs))
@@ -1157,10 +1164,10 @@ func TestAppsSet_ReplicaChange_YesFlagSkipsPrompt(t *testing.T) {
 	}
 }
 
-// The confirm is TTY-gated: a non-interactive caller (CI, cron, piped script)
-// must proceed without prompting so automation that scales via the CLI keeps
-// working.
-func TestAppsSet_ReplicaChange_NonTTYProceedsWithoutPrompt(t *testing.T) {
+// Non-TTY without --yes must refuse with confirmation_required and make no
+// network call. Automation that wants to scale via the CLI must pass --yes
+// explicitly; this makes the restart side-effect an intentional opt-in.
+func TestAppsSet_ReplicaChange_NonTTYRefusesWithoutYes(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{}`)
 
@@ -1168,11 +1175,19 @@ func TestAppsSet_ReplicaChange_NonTTYProceedsWithoutPrompt(t *testing.T) {
 	t.Cleanup(func() { isStdinTTY = origIsTTY })
 	isStdinTTY = func() bool { return false }
 
-	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3"); err != nil {
-		t.Fatalf("unexpected error in non-tty mode: %v", err)
+	_, err := execCLI(t, "apps", "set", "demo", "--replicas", "3")
+	if err == nil {
+		t.Fatal("expected confirmation_required error on non-TTY without --yes, got nil")
 	}
-	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
-		t.Fatalf("expected one PATCH in non-tty mode, got %#v", *reqs)
+	kind, code := classify(err)
+	if kind != KindConfirmationRequired {
+		t.Errorf("classify(err).kind = %q, want %q", kind, KindConfirmationRequired)
+	}
+	if code != 1 {
+		t.Errorf("classify(err).code = %d, want 1", code)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no PATCH before the refusal, got %d requests", len(*reqs))
 	}
 }
 

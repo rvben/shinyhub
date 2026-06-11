@@ -134,6 +134,24 @@ type hintedMsgError struct {
 func (e *hintedMsgError) Error() string { return e.msg }
 func (e *hintedMsgError) Hint() string  { return e.hint }
 
+// confirmationRequiredError returns a KindConfirmationRequired error for
+// interactive-only operations run without a TTY. bypassFlag names the flag
+// that skips the prompt (e.g. "--yes"), surfaced in the envelope hint field.
+func confirmationRequiredError(msg, bypassFlag string) error {
+	return &ExitCodeError{Code: 1, Kind: KindConfirmationRequired,
+		Err: &hintedMsgError{msg: msg, hint: "pass " + bypassFlag + " to proceed without a prompt"}}
+}
+
+// loginMissingCredsError returns a KindValidation error when a non-TTY login
+// attempt is missing username or password. The hint names the flags that
+// supply credentials non-interactively.
+func loginMissingCredsError() error {
+	return &ExitCodeError{Code: 1, Kind: KindValidation,
+		Err: &hintedMsgError{
+			msg:  "username and password required",
+			hint: "pass --username and --password, or --token, for non-interactive login"}}
+}
+
 // reportTo renders err to w and returns the process exit code. Pure function
 // of its inputs for testability; Report wires the real stderr/TTY/format.
 func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int {

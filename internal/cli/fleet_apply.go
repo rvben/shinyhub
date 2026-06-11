@@ -116,8 +116,9 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 				invocation = "shinyhub fleet apply --prune --yes -f " + shellQuote(f.file)
 			}
 			if !isStdinTTY() {
-				fmt.Fprintf(errOut, "--prune needs interactive confirmation; re-run non-interactively with: %s\n", invocation)
-				return &ExitCodeError{Code: 1, Err: fmt.Errorf("--prune in non-interactive shell requires --yes"), Reported: true}
+				return confirmationRequiredError(
+					fmt.Sprintf("--prune will permanently delete %d fleet-owned app(s); pass --yes to proceed non-interactively: %s", len(candidates), invocation),
+					"--yes")
 			}
 			fmt.Fprintf(errOut,
 				"This will PERMANENTLY delete %d fleet-owned app(s) and their persistent\n"+

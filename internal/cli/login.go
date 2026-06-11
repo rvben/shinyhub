@@ -85,6 +85,11 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 			}
 			f.password = p
 		}
+	} else if f.username == "" || f.password == "" {
+		// Non-TTY with missing credentials: fail fast with a structured
+		// validation error that names the flags needed for non-interactive
+		// login, rather than forwarding empty values to the server.
+		return loginMissingCredsError()
 	}
 
 	body, _ := json.Marshal(map[string]string{"username": f.username, "password": f.password})
