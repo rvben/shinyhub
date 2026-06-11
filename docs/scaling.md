@@ -110,6 +110,72 @@ climbs from ~350 ms at 10 sessions to multi-second tails by 30+
 sessions on a single replica. Horizontal scaling fixes this;
 vertical cap-raising makes it worse.
 
+## Pre-warming
+
+By default a hibernated app restarts on demand: the first request after an idle
+period waits for Python (or R) to start, and that user sees the "Loading..."
+page. `min_warm_replicas` changes this: instead of stopping every replica when
+the app goes idle, the platform keeps at least N replicas running. The first
+user after an idle period gets an instant response because at least one warm
+process is already listening.
+
+### What it does
+
+- **Idle floor.** When the watcher would normally stop all replicas, it stops
+  only enough to bring the pool down to `min_warm_replicas`. Those replicas stay
+  alive and accepting connections.
+- **Instant first response.** A user hitting a warm idle app skips the loading
+  page entirely. Burst traffic re-expands the pool to full capacity (up to
+  `replicas`) through the same admission logic as a running app; a single
+  rejected request triggers burst expansion within one request cycle.
+- **Unified scale-down floor.** Manual scale-down (`shinyhub apps set
+  --replicas`) and autoscale both treat `min_warm_replicas` as a hard floor:
+  neither path reduces the pool below it. When autoscale is enabled, the
+  effective floor is the larger of `autoscale_min` and `min_warm_replicas`.
+- **Reset interactions.** Deploying a new bundle or manually scaling up restores
+  full capacity and boots any parked replicas. Setting `min_warm_replicas = 0`
+  re-enables full hibernation (the platform reverts to stopping all replicas on
+  idle). If the stored replica count is below the keep-warm floor, the platform
+  self-clamps the floor to the replica count; the Configuration tab shows a
+  warning when this condition is detected.
+
+### Observability
+
+- `warm_shrink` and `warm_expand` audit events are recorded whenever the
+  watcher crosses the warm floor in either direction.
+- Replicas that are stopped but parked (warm-floor slots) appear in
+  `shinyhub apps show <slug>` so operators can see the pool state at a glance.
+
+### High-availability note
+
+In a multi-instance deployment the owning instance manages the shrink/expand
+cycle; other instances converge to the same pool size through the shared replica
+registry.
+
+### Configuration
+
+**Via manifest (`shinyhub.toml`):**
+
+```toml
+[app]
+min_warm_replicas = 1
+```
+
+**Via CLI:**
+
+```bash
+shinyhub apps set <slug> --min-warm-replicas 1
+```
+
+**Via API:**
+
+```bash
+curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"min_warm_replicas": 1}'
+```
+
 ## Interaction with other features
 
 ### Output caching

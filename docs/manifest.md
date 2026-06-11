@@ -77,6 +77,7 @@ starts.
 | `hibernate_timeout_minutes` | int | Idle minutes before the watcher hibernates the app. `0` disables hibernation. `-1` resets the field to the server default (the same convention as `shinyhub apps set --hibernate-timeout -1`). |
 | `replicas` | int ≥ 1 | Number of identical replica processes serving this app. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int 0..1000 | Per-replica admission cap for new cookieless sessions. `0` means "use the runtime default". |
+| `min_warm_replicas` | int 0..1000 | Minimum number of replicas kept running when the app idles. `0` (default) allows full hibernation. When set above `0`, the watcher stops only enough replicas to reach this floor so the first post-idle request hits a warm process. If the stored `replicas` value is less than `min_warm_replicas`, the floor self-clamps to `replicas`. Absent key leaves the stored value unchanged (same declared-only semantics as `replicas`). See [Pre-warming](scaling.md#pre-warming). |
 | `command` | array of strings | Launch-command override. See [`[app] command`](#app-command) below. |
 | `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
 
