@@ -1186,6 +1186,94 @@ func TestReaperGate_SingleNodeSkipsReap(t *testing.T) {
 	}
 }
 
+// TestWakingReconcile_SingleNodeDrivesStuckWake asserts that a single runOnce
+// tick with Clustered:false still drives apps left in the 'waking' status.
+// This is the safety net for wakes interrupted by a process handoff (ZDT
+// upgrade): the old process may have died mid-driveWakingApp; BeginWake's CAS
+// leaves the app in 'waking'; the successor process must recover it on its
+// first tick even though it is not clustered.
+//
+// Pre-fix this test FAILS: the waking-app reconcile block is gated
+// `if w.cfg.Clustered`, so single-node skips it and the app stays stuck.
+func TestWakingReconcile_SingleNodeDrivesStuckWake(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"stuck": {ID: 1, Slug: "stuck", Status: "waking", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+
+	var deployed []string
+	var mu sync.Mutex
+	w := newTestWatcher(Config{
+		RestartMaxAttempts: 5,
+		Clustered:          false, // single-node
+	}, &fakeManager{}, prx, st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			mu.Lock()
+			deployed = append(deployed, slug)
+			mu.Unlock()
+			return &deploy.Result{Index: idx, PID: 77, Port: 20077}, nil
+		})
+	// The watcher is the owner (isOwner == nil => always-owner).
+
+	w.runOnce()
+	waitNotWaking(t, st, "stuck")
+
+	mu.Lock()
+	gotDeployed := append([]string(nil), deployed...)
+	mu.Unlock()
+
+	if len(gotDeployed) == 0 {
+		t.Fatal("single-node runOnce must drive waking apps stuck after a handoff; got 0 deploys (fix: remove Clustered gate on waking-app reconcile)")
+	}
+	if gotDeployed[0] != "stuck" {
+		t.Errorf("expected deploy for 'stuck', got %v", gotDeployed)
+	}
+	st.mu.Lock()
+	status := st.apps["stuck"].Status
+	st.mu.Unlock()
+	if status != "running" {
+		t.Errorf("app status after runOnce = %q, want running", status)
+	}
+}
+
+// TestWakingReconcile_ClusteredBehaviorUnchanged asserts that clustered mode
+// still drives waking apps on runOnce (guards against regression).
+func TestWakingReconcile_ClusteredBehaviorUnchanged(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"clust-stuck": {ID: 2, Slug: "clust-stuck", Status: "waking", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+
+	var deployed []string
+	var mu sync.Mutex
+	w := newTestWatcher(Config{
+		RestartMaxAttempts: 5,
+		Clustered:          true, // clustered
+	}, &fakeManager{}, prx, st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			mu.Lock()
+			deployed = append(deployed, slug)
+			mu.Unlock()
+			return &deploy.Result{Index: idx, PID: 78, Port: 20078}, nil
+		})
+
+	w.runOnce()
+	waitNotWaking(t, st, "clust-stuck")
+
+	mu.Lock()
+	gotDeployed := append([]string(nil), deployed...)
+	mu.Unlock()
+
+	if len(gotDeployed) == 0 {
+		t.Fatal("clustered runOnce must drive waking apps")
+	}
+	if gotDeployed[0] != "clust-stuck" {
+		t.Errorf("expected deploy for 'clust-stuck', got %v", gotDeployed)
+	}
+}
+
 // --- clustered hibernation tests ---
 
 // idleApp builds a running app in the store that has been idle for 2 hours, with
