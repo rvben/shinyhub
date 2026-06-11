@@ -84,7 +84,7 @@ func waitForFirstFireLoop(poll func() (string, error), timeout, pollEvery, progr
 				return status, nil
 			}
 		} else {
-			var he *httpStatusError
+			var he *deployHTTPError
 			if errors.As(err, &he) && he.fatal() {
 				return lastStatus, err
 			}
@@ -118,7 +118,7 @@ func pollScheduleRunStatus(cfg *cliConfig, slug string, scheduleID, runID int64)
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+		return "", &deployHTTPError{statusCode: resp.StatusCode, body: string(body)}
 	}
 	var run struct {
 		Status string `json:"status"`

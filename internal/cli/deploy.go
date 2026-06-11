@@ -303,7 +303,7 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 		lastPollOK = err == nil
 		if err != nil {
 			lastErr = err
-			var he *httpStatusError
+			var he *deployHTTPError
 			if errors.As(err, &he) && he.fatal() {
 				fmt.Println()
 				return fmt.Errorf("checking %s: %w", slug, err)
@@ -392,24 +392,24 @@ func parseSSELines(r io.Reader, n int) []string {
 	return all[len(all)-n:]
 }
 
-// httpStatusError carries the response status code and body so callers can
+// deployHTTPError carries the response status code and body so callers can
 // distinguish fatal (4xx) from transient (5xx) HTTP failures while still
 // surfacing the server's error envelope to the user.
-type httpStatusError struct {
+type deployHTTPError struct {
 	statusCode int
 	body       string
 }
 
-func (e *httpStatusError) Error() string {
+func (e *deployHTTPError) Error() string {
 	if e.body != "" {
 		return fmt.Sprintf("HTTP %d: %s", e.statusCode, strings.TrimSpace(e.body))
 	}
 	return fmt.Sprintf("HTTP %d", e.statusCode)
 }
 
-// fatal returns true for 4xx codes — auth, not-found, forbidden — which won't
+// fatal returns true for 4xx codes - auth, not-found, forbidden - which won't
 // resolve themselves on retry. 5xx is treated as transient.
-func (e *httpStatusError) fatal() bool {
+func (e *deployHTTPError) fatal() bool {
 	return e.statusCode >= 400 && e.statusCode < 500
 }
 
@@ -434,7 +434,7 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return false, "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+		return false, "", &deployHTTPError{statusCode: resp.StatusCode, body: string(body)}
 	}
 	var result struct {
 		App struct {

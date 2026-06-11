@@ -25,6 +25,17 @@ func unwrapServerError(body []byte, fallback string) string {
 	return fallback
 }
 
+// httpStatusError is the required error type for every non-2xx HTTP response
+// in the CLI. It carries the status code so the root classifier maps it to a
+// stable error kind without parsing message strings. msg is the fully
+// formatted human message.
+type httpStatusError struct {
+	Status int
+	msg    string
+}
+
+func (e *httpStatusError) Error() string { return e.msg }
+
 // httpError builds the error returned for a failed (>= 400) HTTP response.
 // op names the action being attempted (e.g. "list apps", "rollback") so the
 // non-session message keeps its context.
@@ -39,7 +50,13 @@ func unwrapServerError(body []byte, fallback string) string {
 // the operation, the server's status, and its error envelope.
 func httpError(token, op string, resp *http.Response, body []byte) error {
 	if resp.StatusCode == http.StatusUnauthorized && looksLikeJWT(token) {
-		return fmt.Errorf("session expired - run `shinyhub login` to sign in again")
+		return &httpStatusError{
+			Status: resp.StatusCode,
+			msg:    "session expired - run `shinyhub login` to sign in again",
+		}
 	}
-	return fmt.Errorf("%s (%s): %s", op, resp.Status, unwrapServerError(body, "no error body"))
+	return &httpStatusError{
+		Status: resp.StatusCode,
+		msg:    fmt.Sprintf("%s (%s): %s", op, resp.Status, unwrapServerError(body, "no error body")),
+	}
 }

@@ -66,8 +66,8 @@ func TestWaitForFirstFireLoop_TransientErrorThenSucceeds(t *testing.T) {
 		status string
 		err    error
 	}{
-		{"", &httpStatusError{statusCode: 503}},
-		{"", &httpStatusError{statusCode: 503}},
+		{"", &deployHTTPError{statusCode: 503}},
+		{"", &deployHTTPError{statusCode: 503}},
 		{"succeeded", nil},
 	}
 	poll := func() (string, error) {
@@ -90,7 +90,7 @@ func TestWaitForFirstFireLoop_TransientErrorThenSucceeds(t *testing.T) {
 }
 
 func TestWaitForFirstFireLoop_FatalErrorAborts(t *testing.T) {
-	fatalErr := &httpStatusError{statusCode: 401}
+	fatalErr := &deployHTTPError{statusCode: 401}
 	poll := func() (string, error) { return "", fatalErr }
 	cur := time.Unix(0, 0)
 	now := func() time.Time { return cur }
@@ -102,9 +102,9 @@ func TestWaitForFirstFireLoop_FatalErrorAborts(t *testing.T) {
 	if errors.Is(err, errFirstFireTimeout) {
 		t.Fatal("err = errFirstFireTimeout, want the 401 error (should abort immediately)")
 	}
-	var he *httpStatusError
+	var he *deployHTTPError
 	if !errors.As(err, &he) || he.statusCode != 401 {
-		t.Errorf("err = %v, want *httpStatusError with statusCode 401", err)
+		t.Errorf("err = %v, want *deployHTTPError with statusCode 401", err)
 	}
 	// Clock must not have advanced to the deadline (abort was immediate).
 	if cur != time.Unix(0, 0) {

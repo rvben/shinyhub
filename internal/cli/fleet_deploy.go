@@ -171,7 +171,7 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		}
 		if err != nil {
 			lastErr = err
-			var he *httpStatusError
+			var he *deployHTTPError
 			if errors.As(err, &he) && he.fatal() {
 				return fmt.Errorf("checking %s: %w", slug, err)
 			}

@@ -404,7 +404,7 @@ func TestPollAppStatus_RunningAndStarting(t *testing.T) {
 // behaviour where any non-2xx response (token expired, app gone, server 500)
 // silently decoded into a zero-value status and degraded to ready=false.
 // waitForHealthy then polled until --wait-timeout for an outcome that was
-// already decided. pollAppStatus must surface *httpStatusError so the caller
+// already decided. pollAppStatus must surface *deployHTTPError so the caller
 // can distinguish fatal (4xx) vs transient (5xx).
 func TestPollAppStatus_NonOKStatusReturnsHTTPError(t *testing.T) {
 	cases := []struct {
@@ -433,18 +433,18 @@ func TestPollAppStatus_NonOKStatusReturnsHTTPError(t *testing.T) {
 			if ready {
 				t.Errorf("ready = true, want false on HTTP %d", tc.statusCode)
 			}
-			var he *httpStatusError
+			var he *deployHTTPError
 			if !errors.As(err, &he) {
-				t.Fatalf("pollAppStatus: error %v is not *httpStatusError; waitForHealthy can't classify it", err)
+				t.Fatalf("pollAppStatus: error %v is not *deployHTTPError; waitForHealthy can't classify it", err)
 			}
 			if he.statusCode != tc.statusCode {
-				t.Errorf("httpStatusError.statusCode = %d, want %d", he.statusCode, tc.statusCode)
+				t.Errorf("deployHTTPError.statusCode = %d, want %d", he.statusCode, tc.statusCode)
 			}
 			if he.fatal() != tc.fatal {
-				t.Errorf("httpStatusError.fatal() = %v, want %v for HTTP %d", he.fatal(), tc.fatal, tc.statusCode)
+				t.Errorf("deployHTTPError.fatal() = %v, want %v for HTTP %d", he.fatal(), tc.fatal, tc.statusCode)
 			}
 			if tc.body != "" && !strings.Contains(he.Error(), strings.TrimSpace(tc.body)) {
-				t.Errorf("httpStatusError.Error() = %q, want it to surface server body %q", he.Error(), tc.body)
+				t.Errorf("deployHTTPError.Error() = %q, want it to surface server body %q", he.Error(), tc.body)
 			}
 		})
 	}
