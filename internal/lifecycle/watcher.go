@@ -109,6 +109,15 @@ type appStore interface {
 	// both measured on the database clock. Used by the clustered hibernation
 	// path to confirm that no other instance is currently serving traffic.
 	AppFleetLoad(appID int64, staleWindowSec int64, excludeInstanceID string) (active []int64, idleSinceSec int64, err error)
+	// AppFleetLastActivity returns the MAX(last_activity) Unix epoch across
+	// non-stale, non-excluded replica_sessions rows. Returns 0 when no fresh
+	// rows exist. Used by the clustered warm-expand path to compare fleet
+	// activity against the shrink moment entirely on the database clock.
+	AppFleetLastActivity(appID int64, staleWindowSec int64, excludeInstanceID string) (int64, error)
+	// ListWarmShrunkApps returns running/degraded apps that have at least one
+	// replica parked with desired_state='warm'. The watcher expand check
+	// iterates this set each tick.
+	ListWarmShrunkApps() ([]*db.App, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -156,9 +165,24 @@ type Watcher struct {
 	// BeginWake's DB CAS prevents it across processes.
 	driving map[string]bool
 
+	// expandingWarm tracks slugs for which a burst-triggered warm expansion is
+	// already in flight. When a pool-degraded reject fires WakeTrigger concurrently
+	// from many goroutines, only the first wins the guard; the rest return
+	// immediately without issuing store reads or calling warmExpand again.
+	expandingWarm map[string]bool
+
 	// wakeWG tracks in-flight driveWakingApp goroutines so shutdown can wait
 	// for them to persist replica/PID rows before the store is closed.
 	wakeWG sync.WaitGroup
+
+	// warmShrink and warmExpand are the pre-warming executors injected via
+	// SetWarmOps. When warmShrink is non-nil and an app has MinWarmReplicas > 0,
+	// the idle path calls warmShrink instead of fully hibernating the app.
+	// Both run under the per-slug deploy lock inside the api.Server methods.
+	// nil leaves pre-warming disabled: apps hibernate fully regardless of their
+	// configured floor (safe degradation for unconfigured setups).
+	warmShrink func(slug string, floor int) (bool, error)
+	warmExpand func(slug string) (bool, error)
 }
 
 // wakeDrainTimeout bounds how long Start waits for outstanding wake
@@ -172,14 +196,15 @@ const wakeDrainTimeout = 15 * time.Second
 func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
-		cfg:       cfg,
-		mgr:       mgr,
-		prx:       prx,
-		store:     st,
-		deploy:    deployFn,
-		attempts:  make(map[replicaKey]int),
-		nextRetry: make(map[replicaKey]time.Time),
-		driving:   make(map[string]bool),
+		cfg:           cfg,
+		mgr:           mgr,
+		prx:           prx,
+		store:         st,
+		deploy:        deployFn,
+		attempts:      make(map[replicaKey]int),
+		nextRetry:     make(map[replicaKey]time.Time),
+		driving:       make(map[string]bool),
+		expandingWarm: make(map[string]bool),
 	}
 }
 
@@ -271,6 +296,15 @@ func (w *Watcher) SetTracer(t trace.Tracer) {
 	w.tracer = t
 }
 
+// SetWarmOps wires the warm shrink/expand executors (api.Server.WarmShrink
+// and WarmExpand). Both run under the per-slug deploy lock. nil leaves
+// pre-warming disabled (apps hibernate fully regardless of their floor).
+// Call once at startup before Start.
+func (w *Watcher) SetWarmOps(shrink func(slug string, floor int) (bool, error), expand func(slug string) (bool, error)) {
+	w.warmShrink = shrink
+	w.warmExpand = expand
+}
+
 // traceOp starts an internal span named op for slug and returns a derived
 // context plus an end func that records the operation's error (if any) and ends
 // the span. A no-op when tracing is disabled. Background operations are
@@ -296,9 +330,21 @@ func (w *Watcher) traceOp(ctx context.Context, op, slug string) (context.Context
 // As the active (owner) instance it also reaps stale replica_sessions rows so
 // counts from crashed or restarted peers do not linger in the fleet view.
 func (w *Watcher) runOnce() {
+	// Snapshot the manager once and derive both the crash set and the per-slug
+	// running count in a single pass. runningCounts feeds the warm-shrink floor
+	// guard in handleIdle: when runningCount <= app.MinWarmReplicas the app is
+	// already at its floor and the warmShrink call is skipped at zero DB cost.
+	all := w.mgr.All()
+	runningCounts := make(map[string]int, len(all))
+	for _, info := range all {
+		if info.Status == process.StatusRunning {
+			runningCounts[info.Slug]++
+		}
+	}
+
 	idleChecked := make(map[string]bool)
 	handled := make(map[replicaKey]bool)
-	for _, info := range w.mgr.All() {
+	for _, info := range all {
 		switch info.Status {
 		case process.StatusCrashed:
 			handled[replicaKey{info.Slug, info.Index}] = true
@@ -306,12 +352,13 @@ func (w *Watcher) runOnce() {
 		case process.StatusRunning:
 			if !idleChecked[info.Slug] {
 				idleChecked[info.Slug] = true
-				w.handleIdle(info.Slug)
+				w.handleIdle(info.Slug, runningCounts[info.Slug])
 			}
 		}
 	}
 	w.reconcileReplicas(handled)
 	w.reconcileStatuses()
+	w.handleWarmExpand()
 	// Reap stale replica_sessions rows only in clustered mode. Single-node
 	// deployments never write replica_sessions rows, so this DELETE is both
 	// unnecessary and a behavioral change we must avoid.
@@ -485,14 +532,21 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 	if err != nil {
 		return
 	}
-	running := 0
+	running, warm := 0, 0
 	for _, r := range reps {
-		if r.Index < app.Replicas && r.Status == db.ReplicaStatusRunning {
+		if r.Index >= app.Replicas {
+			continue
+		}
+		switch {
+		case r.Status == db.ReplicaStatusRunning:
 			running++
+		case r.DesiredState == db.ReplicaDesiredWarm:
+			// Warm victims are deliberately stopped capacity, not failures.
+			warm++
 		}
 	}
 	want := "running"
-	if running < app.Replicas {
+	if running < app.Replicas-warm {
 		want = "degraded"
 	}
 	if want != app.Status {
@@ -505,10 +559,16 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 // handleIdle checks whether a running app has been idle past its configured
 // timeout and hibernates it if so. It stops all replicas and zeroes replica rows.
 //
+// runningCount is the number of replicas the manager currently reports as running
+// for this slug (derived from the same mgr.All() snapshot as the caller's loop).
+// It is used by the warm-shrink branch to skip the warmShrink call when the app
+// is already at or below its floor, avoiding a lock acquisition and DB read for
+// a no-op.
+//
 // Single-node (!w.cfg.Clustered): the original path is taken byte-for-byte.
 // Clustered (w.cfg.Clustered): a conservative fleet-idle CAS is used. See
 // handleIdleClustered for the exact predicate and ordering.
-func (w *Watcher) handleIdle(slug string) {
+func (w *Watcher) handleIdle(slug string, runningCount int) {
 	app, err := w.store.GetAppBySlug(slug)
 	if err != nil {
 		return
@@ -528,7 +588,7 @@ func (w *Watcher) handleIdle(slug string) {
 	}
 
 	if w.cfg.Clustered {
-		w.handleIdleClustered(app, timeout)
+		w.handleIdleClustered(app, timeout, runningCount)
 		return
 	}
 
@@ -538,6 +598,21 @@ func (w *Watcher) handleIdle(slug string) {
 		lastActivity = app.UpdatedAt // freshly deployed, never served
 	}
 	if time.Since(lastActivity) < timeout {
+		return
+	}
+
+	// Warm-shrink branch: when an app has a pre-warming floor and the shrink
+	// executor is wired, shrink to the floor instead of fully hibernating.
+	// Skip when already at or below the floor: the manager's in-memory running
+	// count is the cheapest signal available and avoids a deploy-lock acquisition
+	// and DB reads for a no-op shrink.
+	if app.MinWarmReplicas > 0 && w.warmShrink != nil {
+		if runningCount <= app.MinWarmReplicas {
+			return
+		}
+		if _, err := w.warmShrink(slug, app.MinWarmReplicas); err != nil {
+			slog.Warn("watcher: warm shrink failed", "slug", slug, "err", err)
+		}
 		return
 	}
 
@@ -596,7 +671,7 @@ func (w *Watcher) handleIdle(slug string) {
 //     an app that the other is actively serving.
 //
 // No owner-epoch fence is added to the CAS; it would be dead complexity.
-func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
+func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration, runningCount int) {
 	slug := app.Slug
 
 	// (A) Time-idle check: compare local last-seen against the local clock.
@@ -633,6 +708,22 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 	// otherIdleSinceSec is a pure duration (db_now - MAX(last_activity)) so this
 	// comparison involves no local wall clock.
 	if otherIdleSinceSec < int64(timeout.Seconds()) {
+		return
+	}
+
+	// Warm-shrink branch: when an app has a pre-warming floor and the shrink
+	// executor is wired, shrink to the floor instead of fully hibernating.
+	// Skip when already at or below the floor: the manager's in-memory running
+	// count avoids a deploy-lock acquisition and DB reads for a no-op shrink.
+	// Owner-only execution is already guaranteed by the watcher's ownership
+	// gate at the call site.
+	if app.MinWarmReplicas > 0 && w.warmShrink != nil {
+		if runningCount <= app.MinWarmReplicas {
+			return
+		}
+		if _, err := w.warmShrink(slug, app.MinWarmReplicas); err != nil {
+			slog.Warn("watcher: warm shrink failed", "slug", slug, "err", err)
+		}
 		return
 	}
 
@@ -677,12 +768,104 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration) {
 	w.recordTransition("hibernate")
 }
 
+// handleWarmExpand checks every warm-shrunk app each tick and re-expands any
+// whose traffic has resumed since the shrink. It is the expand counterpart of
+// the warm-shrink path in handleIdle/handleIdleClustered.
+//
+// Skipped entirely when warmExpand is nil (pre-warming not configured).
+//
+// Activity predicate:
+//   - Single-node: compares the proxy's wall-clock LastSeen against the
+//     shrink moment (the newest updated_at among the app's 'warm' replica rows).
+//     Both values are on the same host clock, so the comparison is sound. After
+//     a server restart LastSeen is zero, which is before any real shrink moment,
+//     so no spurious expansion occurs until real traffic resumes.
+//   - Clustered: compares the fleet's MAX(last_activity) epoch (from
+//     AppFleetLastActivity, on the database clock) against the shrink moment's
+//     Unix epoch. Either the owner's own local LastSeen (also on the local wall
+//     clock - the owner proxies traffic too) OR the fleet predicate suffice: the
+//     OR covers both paths.
+func (w *Watcher) handleWarmExpand() {
+	if w.warmExpand == nil {
+		return
+	}
+
+	apps, err := w.store.ListWarmShrunkApps()
+	if err != nil {
+		slog.Warn("watcher: list warm-shrunk apps failed", "err", err)
+		return
+	}
+
+	for _, app := range apps {
+		reps, err := w.store.ListReplicas(app.ID)
+		if err != nil {
+			slog.Warn("watcher: list replicas for warm-expand check failed", "slug", app.Slug, "err", err)
+			continue
+		}
+
+		// Compute the shrink moment as the newest updated_at among warm-parked rows.
+		var shrinkMoment time.Time
+		for _, r := range reps {
+			if r.DesiredState == db.ReplicaDesiredWarm && r.UpdatedAt.After(shrinkMoment) {
+				shrinkMoment = r.UpdatedAt
+			}
+		}
+		if shrinkMoment.IsZero() {
+			// No warm rows found (race with another tick that expanded); skip.
+			continue
+		}
+
+		// Determine whether traffic has resumed since the shrink.
+		shouldExpand := false
+		if !w.cfg.Clustered {
+			// Single-node: compare proxy LastSeen (wall clock) against shrink moment.
+			// LastSeen is zero after a restart => no expansion until real traffic,
+			// which is the desired safe default.
+			lastSeen := w.prx.LastSeen(app.Slug)
+			shouldExpand = lastSeen.After(shrinkMoment)
+		} else {
+			// Clustered: use DB-clock fleet activity OR local LastSeen.
+			// The owner proxies traffic as well, so its own LastSeen counts as
+			// activity. The fleet predicate covers other instances.
+			lastSeen := w.prx.LastSeen(app.Slug)
+			if lastSeen.After(shrinkMoment) {
+				shouldExpand = true
+			} else {
+				staleWindowSec := int64(proxy.ReplicaSessionStaleCutoff.Seconds())
+				fleetLastActivity, err := w.store.AppFleetLastActivity(app.ID, staleWindowSec, w.cfg.InstanceID)
+				if err != nil {
+					slog.Warn("watcher: fleet last activity check failed", "slug", app.Slug, "err", err)
+					continue
+				}
+				// fleetLastActivity is a Unix epoch on the DB clock; shrinkMoment is
+				// also derived from the DB clock (written by UpsertReplica's nowEpoch).
+				shouldExpand = fleetLastActivity > shrinkMoment.Unix()
+			}
+		}
+
+		if !shouldExpand {
+			continue
+		}
+
+		if _, err := w.warmExpand(app.Slug); err != nil {
+			slog.Warn("watcher: warm expand failed", "slug", app.Slug, "err", err)
+		}
+	}
+}
+
 // WakeTrigger is the callback wired on the proxy as the wake trigger. It runs
 // on EVERY instance (active and standby alike). It issues the BeginWake CAS
 // (hibernated->waking) so the DB state reflects the wake intent regardless of
 // which instance holds the lease. If this instance is the active owner, it also
 // drives the wake inline via driveWakingApp; a standby leaves the app in the
 // 'waking' state for the active's runOnce reconciler to pick up.
+//
+// When the BeginWake CAS fails because the app is already running (not
+// hibernated), the trigger checks whether any warm-parked replicas exist and
+// calls warmExpand immediately. This drives the burst-expand path: a request
+// shed with ReasonPoolDegraded fires this trigger so the warm-shrunk pool is
+// restored without waiting for the next tick. Duplicate triggers are safe
+// because warmExpand is idempotent and deploy-lock-guarded.
 func (w *Watcher) WakeTrigger(slug string) {
 	won, err := w.store.BeginWake(slug)
 	if err != nil {
@@ -690,7 +873,48 @@ func (w *Watcher) WakeTrigger(slug string) {
 		return
 	}
 	if !won {
-		return // not hibernated, or another caller already won the CAS
+		// The app is not hibernated (running, degraded, or another caller
+		// already won the CAS). Check for warm-parked replicas and expand
+		// immediately if any exist.
+		if w.warmExpand == nil {
+			return
+		}
+		// In-flight guard: a pool-degraded 503 burst fires this trigger from
+		// many goroutines simultaneously. Only the first winner proceeds to
+		// the store reads and warmExpand call; the rest return immediately so
+		// the burst does not generate N×(GetAppBySlug+ListReplicas+warmExpand).
+		w.mu.Lock()
+		if w.expandingWarm[slug] {
+			w.mu.Unlock()
+			return
+		}
+		w.expandingWarm[slug] = true
+		w.mu.Unlock()
+
+		defer func() {
+			w.mu.Lock()
+			delete(w.expandingWarm, slug)
+			w.mu.Unlock()
+		}()
+
+		app, err := w.store.GetAppBySlug(slug)
+		if err != nil {
+			return // app not found or DB error; safe to skip
+		}
+		reps, err := w.store.ListReplicas(app.ID)
+		if err != nil {
+			slog.Warn("watcher: wake trigger: list replicas failed", "slug", slug, "err", err)
+			return
+		}
+		for _, r := range reps {
+			if r.DesiredState == db.ReplicaDesiredWarm {
+				if _, err := w.warmExpand(slug); err != nil {
+					slog.Warn("watcher: wake trigger: warm expand failed", "slug", slug, "err", err)
+				}
+				return
+			}
+		}
+		return
 	}
 	// Only the active owner drives the wake inline. A standby leaves the
 	// app in 'waking'; the active's runOnce reconciler drives it on the next

@@ -71,6 +71,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		MaxSessionsPerReplica:    derefOrZero(m.MaxSessionsPerReplica),
 		SetIdentityHeaders:       true,
 		IdentityHeaders:          m.IdentityHeaders,
+		SetMinWarmReplicas:       m.MinWarmReplicas != nil,
+		MinWarmReplicas:          derefOrZero(m.MinWarmReplicas),
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -308,6 +310,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.IdentityHeaders != nil {
 		d["identity_headers"] = *m.IdentityHeaders
 	}
+	if m.MinWarmReplicas != nil {
+		d["min_warm_replicas"] = *m.MinWarmReplicas
+	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command
 	}
@@ -329,6 +334,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.IdentityHeaders != nil {
 		d["identity_headers"] = *m.IdentityHeaders
+	}
+	if m.MinWarmReplicas != nil {
+		d["min_warm_replicas"] = *m.MinWarmReplicas
 	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command

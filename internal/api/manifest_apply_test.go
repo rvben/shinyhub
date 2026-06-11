@@ -402,3 +402,47 @@ func TestApplyManifestSchedules_SchedulerNotStartedIsWarn(t *testing.T) {
 		t.Errorf("expected schedule row to be persisted; got %d rows", len(rows))
 	}
 }
+
+// TestApplyManifestAppSettings_MinWarmReplicasPersisted confirms that
+// min_warm_replicas declared in the [app] section is written to the DB.
+func TestApplyManifestAppSettings_MinWarmReplicasPersisted(t *testing.T) {
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{
+		MinWarmReplicas: ptrIntAPI(2),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := store.GetAppBySlug("alpha")
+	if got.MinWarmReplicas != 2 {
+		t.Errorf("MinWarmReplicas = %d, want 2", got.MinWarmReplicas)
+	}
+}
+
+// TestApplyManifestAppSettings_MinWarmReplicasAbsentLeavesStoredValue confirms
+// declared-only semantics: when min_warm_replicas is absent from the manifest,
+// a previously stored value is not cleared.
+func TestApplyManifestAppSettings_MinWarmReplicasAbsentLeavesStoredValue(t *testing.T) {
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	// Persist an initial value via the store directly.
+	if err := store.UpdateAppMinWarmReplicas(app.ID, 3); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	app, _ = store.GetAppBySlug("alpha")
+
+	// Apply with min_warm_replicas absent; the stored value must be untouched.
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := store.GetAppBySlug("alpha")
+	if got.MinWarmReplicas != 3 {
+		t.Errorf("MinWarmReplicas = %d after absent-key apply, want 3 (untouched)", got.MinWarmReplicas)
+	}
+}

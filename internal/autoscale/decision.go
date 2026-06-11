@@ -10,7 +10,8 @@ type scaleInput struct {
 	current        int     // current replica count
 	cap            int     // effective per-replica session cap
 	target         float64 // effective target fraction of cap, in (0,1]
-	min            int     // per-app lower bound
+	min            int     // per-app autoscale lower bound
+	minWarm        int     // per-app warm floor (min_warm_replicas); 0 = disabled
 	max            int     // per-app upper bound
 	runtimeMax     int     // runtime-wide replica ceiling
 	saturated      bool    // pool-saturated rejections observed in the window
@@ -43,17 +44,22 @@ func desiredReplicas(in scaleInput) (desired int, reason string) {
 		reason = "pool_saturated"
 	}
 
-	if desired < in.min {
-		desired = in.min
+	// Unified floor: max(autoscale min, warm floor, absolute minimum of 1).
+	floor := in.min
+	if in.minWarm > floor {
+		floor = in.minWarm
+	}
+	if floor < 1 {
+		floor = 1
+	}
+	if desired < floor {
+		desired = floor
 	}
 	if desired > in.max {
 		desired = in.max
 	}
 	if in.runtimeMax > 0 && desired > in.runtimeMax {
 		desired = in.runtimeMax
-	}
-	if desired < 1 {
-		desired = 1
 	}
 	return desired, reason
 }

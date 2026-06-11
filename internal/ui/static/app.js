@@ -1210,6 +1210,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!canEdit) customInput.disabled = true;
     document.getElementById('hibernate-save-btn').hidden = !canEdit;
 
+    // Keep-warm floor: min_warm_replicas.
+    const minWarmInput = document.getElementById('min-warm-replicas');
+    minWarmInput.value = String(app.min_warm_replicas ?? 0);
+    minWarmInput.disabled = !canEdit;
+    updateMinWarmWarning(app.replicas ?? 1, app.min_warm_replicas ?? 0);
+
     setError(document.getElementById('hibernate-error'), '');
     setHidden(document.getElementById('hibernate-status'), true);
 
@@ -1227,6 +1233,12 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(document.getElementById('scaling-error'), '');
     setHidden(document.getElementById('scaling-status'), true);
     updateScalingCeiling();
+  }
+
+  function updateMinWarmWarning(replicas, minWarm) {
+    const el = document.getElementById('min-warm-warning');
+    if (!el) return;
+    el.hidden = !(replicas < minWarm);
   }
 
   function updateScalingCeiling() {
@@ -1282,6 +1294,16 @@ document.addEventListener('DOMContentLoaded', () => {
       payload = { hibernate_timeout_minutes: n };
     }
 
+    // Always include min_warm_replicas so the keep-warm floor is persisted
+    // alongside any hibernation-mode change.
+    const minWarmRaw = document.getElementById('min-warm-replicas').value.trim();
+    const minWarm = parseInt(minWarmRaw, 10);
+    if (!Number.isFinite(minWarm) || minWarm < 0 || minWarm > 1000) {
+      setError(errEl, 'Keep warm must be a whole number between 0 and 1000.');
+      return;
+    }
+    payload.min_warm_replicas = Number(minWarm);
+
     const btn = document.getElementById('hibernate-save-btn');
     btn.disabled = true;
     let resp;
@@ -1307,6 +1329,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
+    // Re-evaluate the keep-warm warning using the values just saved.
+    const savedReplicas = parseInt(document.getElementById('scaling-replicas').value, 10);
+    const savedMinWarm = minWarm;
+    updateMinWarmWarning(Number.isFinite(savedReplicas) ? savedReplicas : 1, savedMinWarm);
     await loadApps();
   }
 

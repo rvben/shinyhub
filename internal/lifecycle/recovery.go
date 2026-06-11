@@ -323,6 +323,10 @@ func workerDeclaredGone(store *db.Store, workerID string) bool {
 // when the replica was adopted, and marks crashed (so the watcher restarts it)
 // when the PID is missing, dead, or fails the stale-process identity check.
 func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir string) bool {
+	if r.DesiredState == db.ReplicaDesiredWarm {
+		// Warm-parked by the idle shrink: deliberately stopped; expansion boots it, not recovery.
+		return false
+	}
 	if r.PID == nil {
 		// No PID recorded → treat as crashed so the watcher can restart it.
 		markReplicaCrashed(store, app, r.Index, "no PID recorded")
@@ -393,6 +397,10 @@ func derefInt64(p *int64) int64 {
 // out-of-pool index, or a missing port row leaves the replica unadopted so the
 // watcher relaunches it.
 func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, lister ContainerLister, containers []process.ContainerInfo) bool {
+	if r.DesiredState == db.ReplicaDesiredWarm {
+		// Warm-parked by the idle shrink: deliberately stopped; expansion boots it, not recovery.
+		return false
+	}
 	if r.Index >= app.Replicas {
 		slog.Warn("recovery: replica index beyond current pool; skipping", "slug", app.Slug, "idx", r.Index, "pool", app.Replicas)
 		return false

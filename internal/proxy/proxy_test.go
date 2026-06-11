@@ -1439,6 +1439,124 @@ func TestProxy_AllDrainingPool_ShedsWithoutPanic(t *testing.T) {
 	}
 }
 
+// TestProxy_PoolDegraded_FiresWakeTrigger verifies that when a request is shed
+// with ReasonPoolDegraded (fewer live replicas than configured), the wake
+// trigger is fired asynchronously with the correct slug. This lets a burst on
+// a warm-shrunk pool trigger immediate expansion instead of waiting for the
+// next watcher tick.
+func TestProxy_PoolDegraded_FiresWakeTrigger(t *testing.T) {
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer b.Close()
+
+	p := proxy.New()
+	// Pool size 2, only replica 0 registered: live < size => pool degraded.
+	p.SetPoolSize("demo", 2)
+	if err := p.RegisterReplica("demo", 0, b.URL, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Set cap to 1 so the single live replica saturates immediately.
+	p.SetPoolCap("demo", 1)
+
+	// Pin a request in the backend so replica 0 hits the cap.
+	release := make(chan struct{})
+	pinBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer pinBackend.Close()
+	if err := p.RegisterReplica("demo", 0, pinBackend.URL, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+		p.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	// Wait until replica 0 has an in-flight request.
+	waitForCount(p, "demo", func(c []int64) bool { return len(c) > 0 && c[0] >= 1 })
+
+	done := make(chan string, 1)
+	p.SetWakeTrigger(func(slug string) { done <- slug })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		close(release)
+		wg.Wait()
+		t.Fatalf("expected 503 on degraded pool, got %d", rec.Code)
+	}
+
+	select {
+	case slug := <-done:
+		if slug != "demo" {
+			t.Errorf("wake trigger fired with slug %q, want %q", slug, "demo")
+		}
+	case <-time.After(time.Second):
+		t.Error("wake trigger was not fired within 1s for pool-degraded shed")
+	}
+
+	close(release)
+	wg.Wait()
+}
+
+// TestProxy_PoolSaturated_DoesNotFireWakeTrigger verifies that when all
+// configured replicas are live but at cap (ReasonPoolSaturated), the wake
+// trigger is NOT fired. Warm expansion is unnecessary when the pool is healthy
+// and full; autoscaling (not warm-expand) handles genuine saturation.
+func TestProxy_PoolSaturated_DoesNotFireWakeTrigger(t *testing.T) {
+	release := make(chan struct{})
+	b0 := blockingBackend(release)
+	defer b0.Close()
+	b1 := blockingBackend(release)
+	defer b1.Close()
+
+	p := proxy.New()
+	// Pool size 2, both replicas registered: live == size => saturated (not degraded).
+	p.SetPoolSize("demo", 2)
+	_ = p.RegisterReplica("demo", 0, b0.URL, nil, 0)
+	_ = p.RegisterReplica("demo", 1, b1.URL, nil, 0)
+	p.SetPoolCap("demo", 1) // 1 in-flight per replica
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+			p.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+	}
+	waitForCount(p, "demo", func(c []int64) bool {
+		return len(c) == 2 && c[0] >= 1 && c[1] >= 1
+	})
+
+	var triggerFired bool
+	p.SetWakeTrigger(func(string) { triggerFired = true })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		close(release)
+		wg.Wait()
+		t.Fatalf("expected 503 on saturated pool, got %d", rec.Code)
+	}
+
+	// Give the goroutine a moment to fire if it incorrectly would.
+	time.Sleep(20 * time.Millisecond)
+	if triggerFired {
+		t.Error("wake trigger must NOT fire for ReasonPoolSaturated (healthy full pool)")
+	}
+
+	close(release)
+	wg.Wait()
+}
+
 // TestProxy_ReplicaSessionCounts_ReflectsInFlight verifies that
 // ReplicaSessionCounts returns -1 for empty slots and tracks live connections.
 func TestProxy_ReplicaSessionCounts_ReflectsInFlight(t *testing.T) {

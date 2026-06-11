@@ -278,6 +278,87 @@ func TestRestartSlot_PersistsDeploymentID(t *testing.T) {
 	}
 }
 
+// TestReconcileAppStatus_WarmRowsKeepRunning pins the oscillation blocker: an
+// app with N=3 replicas where two are warm-parked must stay "running" across
+// consecutive reconcile ticks, never oscillating to "degraded".
+// Warm rows are deliberately stopped capacity; they are not failures.
+func TestReconcileAppStatus_WarmRowsKeepRunning(t *testing.T) {
+	st := newFakeStore(map[string]*db.App{
+		"app": {ID: 1, Slug: "app", Status: "running", Replicas: 3},
+	}, nil)
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+			{AppID: 1, Index: 2, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+		},
+	}
+	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
+
+	// Run twice to prove no oscillation.
+	w.reconcileAppStatus(st.apps["app"])
+	if st.appStatus["app"] != "running" {
+		t.Errorf("tick 1: status = %q, want running (warm victims are healthy stopped capacity)", st.appStatus["app"])
+	}
+	w.reconcileAppStatus(st.apps["app"])
+	if st.appStatus["app"] != "running" {
+		t.Errorf("tick 2: status = %q, want running (oscillation detected)", st.appStatus["app"])
+	}
+}
+
+// TestReconcileAppStatus_CrashStillDegrades verifies that a genuinely missing
+// replica (not warm-parked) still drives the app to "degraded" even when other
+// replicas are warm-parked.
+func TestReconcileAppStatus_CrashStillDegrades(t *testing.T) {
+	st := newFakeStore(map[string]*db.App{
+		"app": {ID: 1, Slug: "app", Status: "running", Replicas: 3},
+	}, nil)
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: "crashed", DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+			{AppID: 1, Index: 2, Status: db.ReplicaStatusRunning, DesiredState: "running"},
+		},
+	}
+	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
+
+	w.reconcileAppStatus(st.apps["app"])
+
+	if st.appStatus["app"] != "degraded" {
+		t.Errorf("status = %q, want degraded (one genuinely missing replica)", st.appStatus["app"])
+	}
+}
+
+// TestReconcileReplicas_NeverRestartsWarm verifies that a warm-parked replica
+// (status=stopped, desired_state='warm') passes through reconcileReplicas
+// without triggering restartSlot. The switch only handles crashed/lost rows;
+// warm rows are status=stopped which is not a matched case.
+func TestReconcileReplicas_NeverRestartsWarm(t *testing.T) {
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", Replicas: 3}},
+		[]*db.Deployment{{ID: 7, BundleDir: "/bundles/v1"}},
+	)
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+			{AppID: 1, Index: 2, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+		},
+	}
+	var deployCount int32
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
+		func(slug, dir string, idx int) (*deploy.Result, error) {
+			atomic.AddInt32(&deployCount, 1)
+			return &deploy.Result{Index: idx, PID: 100, Port: 9000}, nil
+		})
+
+	w.reconcileReplicas(map[replicaKey]bool{})
+
+	if n := atomic.LoadInt32(&deployCount); n != 0 {
+		t.Errorf("expected no restart for warm rows, got %d deploy calls", n)
+	}
+}
+
 // Test 13: with healing disabled (nil gate) lost slots are left alone, but
 // crashed slots are still recovered.
 func TestReconcileReplicas_HealingDisabledSkipsLostButStillHandlesCrashed(t *testing.T) {

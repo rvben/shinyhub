@@ -2830,3 +2830,91 @@ func TestGroupAccess_RevokeManifestRuleRejected(t *testing.T) {
 		t.Fatalf("manifest rule was deleted: %v", rules)
 	}
 }
+
+// TestPatchApp_SetMinWarmReplicas sets min_warm_replicas via PATCH, reads it
+// back from the DB, and confirms the audit event detail carries the field.
+func TestPatchApp_SetMinWarmReplicas(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body, _ := json.Marshal(map[string]any{"min_warm_replicas": 2})
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["min_warm_replicas"] != float64(2) {
+		t.Errorf("expected min_warm_replicas=2 in response, got %v", resp["min_warm_replicas"])
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	if app.MinWarmReplicas != 2 {
+		t.Errorf("DB not updated: got %d", app.MinWarmReplicas)
+	}
+
+	events, _ := store.ListAuditEvents("", 10, 0)
+	var found bool
+	for _, e := range events {
+		if e.Action == "update_app" && e.ResourceID == "myapp" {
+			if !strings.Contains(e.Detail, `"min_warm_replicas":2`) {
+				t.Errorf("audit detail missing min_warm_replicas: %q", e.Detail)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("no update_app audit event found")
+	}
+}
+
+// TestPatchApp_MinWarmReplicasRejectsNegative rejects a negative value with 400.
+func TestPatchApp_MinWarmReplicasRejectsNegative(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body := []byte(`{"min_warm_replicas": -1}`)
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for negative min_warm_replicas, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "min_warm_replicas must be between 0 and 1000") {
+		t.Errorf("expected bound error message, got %q", rec.Body.String())
+	}
+}
+
+// TestPatchApp_MinWarmReplicasRejectsAboveMax rejects a value above 1000 with 400.
+func TestPatchApp_MinWarmReplicasRejectsAboveMax(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("bob")
+	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	body := []byte(`{"min_warm_replicas": 1001}`)
+	req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for min_warm_replicas=1001, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "min_warm_replicas must be between 0 and 1000") {
+		t.Errorf("expected bound error message, got %q", rec.Body.String())
+	}
+}

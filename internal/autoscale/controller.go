@@ -197,6 +197,7 @@ func (c *Controller) reconcileApp(a *db.App, now time.Time) {
 		cap:        sessionCap,
 		target:     target,
 		min:        a.AutoscaleMinReplicas,
+		minWarm:    a.MinWarmReplicas,
 		max:        a.AutoscaleMaxReplicas,
 		runtimeMax: c.cfg.RuntimeMax,
 		saturated:  saturated,
