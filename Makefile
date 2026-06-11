@@ -116,24 +116,24 @@ load-test: ## Run k6 load tests (LT_SLUG required; see docs/load-testing.md)
 	@command -v k6 >/dev/null 2>&1 || { echo "k6 not found. Install: brew install k6 (https://k6.io/docs/get-started/installation/)"; exit 1; }
 	@test -n "$(LT_SLUG)" || { echo "LT_SLUG is required, e.g. make load-test LT_SLUG=myapp"; exit 1; }
 	@mkdir -p loadtest/results
-	@scenario="$(or $(LT_SCENARIO),sessions)"; \
-	lt_flags="-e LT_HOST=$(or $(LT_HOST),http://127.0.0.1:8080) \
-	          -e LT_SLUG=$(LT_SLUG) \
-	          -e LT_SESSIONS=$(or $(LT_SESSIONS),100) \
-	          -e LT_RAMP=$(or $(LT_RAMP),30s) \
-	          -e LT_HOLD=$(or $(LT_HOLD),30) \
-	          -e LT_WS_PATH=$(or $(LT_WS_PATH),/websocket/) \
-	          -e LT_FIRST_MSG_TIMEOUT=$(or $(LT_FIRST_MSG_TIMEOUT),5) \
-	          -e LT_COLDSTART_TIMEOUT=$(or $(LT_COLDSTART_TIMEOUT),120) \
-	          -e LT_AUTH_COOKIE=$(or $(LT_AUTH_COOKIE),) \
-	          -e ASSERT=$(or $(ASSERT),0)"; \
+	@K6_FLAGS="-e LT_HOST=$(or $(LT_HOST),http://127.0.0.1:8080)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_SLUG=$(LT_SLUG)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_SESSIONS=$(or $(LT_SESSIONS),100)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_RAMP=$(or $(LT_RAMP),30s)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_HOLD=$(or $(LT_HOLD),30)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_WS_PATH=$(or $(LT_WS_PATH),/websocket/)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_FIRST_MSG_TIMEOUT=$(or $(LT_FIRST_MSG_TIMEOUT),5)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_COLDSTART_TIMEOUT=$(or $(LT_COLDSTART_TIMEOUT),120)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_AUTH_COOKIE=$(or $(LT_AUTH_COOKIE),)"; \
+	K6_FLAGS="$$K6_FLAGS -e ASSERT=$(or $(ASSERT),0)"; \
+	scenario="$(or $(LT_SCENARIO),sessions)"; \
 	if [ "$$scenario" = "cold-start" ] || [ "$$scenario" = "both" ]; then \
 	  echo "==> cold-start scenario (slug=$(LT_SLUG))"; \
-	  k6 run $$lt_flags loadtest/coldstart.js; \
+	  k6 run $$K6_FLAGS loadtest/coldstart.js; \
 	fi; \
 	if [ "$$scenario" = "sessions" ] || [ "$$scenario" = "both" ]; then \
 	  echo "==> sessions scenario (slug=$(LT_SLUG), VUs=$(or $(LT_SESSIONS),100))"; \
-	  k6 run $$lt_flags loadtest/sessions.js; \
+	  k6 run $$K6_FLAGS loadtest/sessions.js; \
 	fi
 
 # Release workflow:

@@ -42,6 +42,14 @@ export const options = {
     : {},
 };
 
+// ---- setup: log effective params -----------------------------------------------
+
+export function setup() {
+  console.log(
+    `[coldstart] host=${HOST} slug=${SLUG} timeout=${TIMEOUT}s assert=${ASSERT}`
+  );
+}
+
 // ---- main ----------------------------------------------------------------------
 
 export default function () {

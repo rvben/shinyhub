@@ -153,7 +153,7 @@ Each scenario prints a single headline line to stdout:
 
 ```
 COLD START: 3.42s (slug=demo, host=http://127.0.0.1:8080)
-SESSIONS: established 198/200 (99.0%), connect p95=47ms
+SESSIONS: established 198/200 (99.0%), established p95=4ms
 ```
 
 The cold-start time is the total elapsed from first GET to `/.shinyhub/ready`
@@ -164,6 +164,16 @@ The sessions line shows how many VUs received the first server WebSocket frame
 within `LT_FIRST_MSG_TIMEOUT`. A mere TCP connection is not counted as
 established - the first server message must arrive. This matches the real user
 experience: a Shiny session is not active until the server sends its init frame.
+
+Two timing metrics are recorded per VU:
+- `ws_connect_ms`: time from `connectStart` to the 101 Upgrade (open event)
+- `ws_established_ms`: time from `connectStart` to the first server frame
+
+The headline prints `established p95` from `ws_established_ms` - the more
+meaningful number for real users. Both metrics use `k6/ws` (blocking callback
+API) which drives the event loop inline, giving accurate sub-millisecond
+local timings. The newer `k6/websockets` async module fires callbacks only
+after a blocking sleep returns, making connect timings unreliable.
 
 ### JSON results
 
