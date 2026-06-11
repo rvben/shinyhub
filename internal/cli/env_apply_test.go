@@ -374,6 +374,24 @@ func TestEnvApply_RestartFiresOnce(t *testing.T) {
 	}
 }
 
+// TestEnvApply_FormatTextConflictsWithOutputJson verifies the
+// resolveLegacyTextJSON conflict path: --format text combined with -o json
+// is a validation error so consumers receive a predictable error envelope
+// rather than one flag silently overriding the other.
+func TestEnvApply_FormatTextConflictsWithOutputJson(t *testing.T) {
+	srv := newEnvApplyServer(t, nil)
+	setupCLIConfig(t, srv.srv.URL)
+	path := writeEnvFile(t, "FOO=1\n")
+
+	_, err := execCLI(t, "env", "apply", "demo", path, "--format", "text", "-o", "json")
+	if err == nil {
+		t.Fatal("want error for --format text -o json conflict, got nil")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Errorf("exit code = %d, want 1 (validation)", code)
+	}
+}
+
 // lastPathSegment returns the segment after the final "/".
 func lastPathSegment(p string) string {
 	if i := strings.LastIndex(p, "/"); i >= 0 {

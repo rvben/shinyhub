@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -460,6 +461,48 @@ func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("error should contain status code 404, got: %v", err)
+	}
+}
+
+// FORMAT-6: apps logs piped without -o must emit NDJSON log objects (the
+// streaming default for a piped context). Each line from the server is wrapped
+// as {"line":"..."} so consumers can parse structured records. This uses
+// httptest so http.DefaultClient (used for SSE) reaches a real server.
+func TestAppsLogs_Piped_EmitsNDJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: hello world\n\ndata: second line\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	// No -o flag: piped context resolves to NDJSON for streaming commands.
+	out, err := execCLI(t, "apps", "logs", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+
+	// Each log line must be a JSON object with a "line" key.
+	for _, raw := range strings.Split(strings.TrimSpace(out), "\n") {
+		if raw == "" {
+			continue
+		}
+		var obj map[string]any
+		if jerr := json.Unmarshal([]byte(raw), &obj); jerr != nil {
+			t.Fatalf("output line is not JSON: %v\nline=%q\nfull output=%q", jerr, raw, out)
+		}
+		if _, ok := obj["line"]; !ok {
+			t.Errorf("NDJSON object missing 'line' key: %v", obj)
+		}
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Errorf("log content missing from output; got: %q", out)
 	}
 }
 
@@ -942,6 +985,25 @@ func TestTokensCreate_FormatBogus(t *testing.T) {
 	}
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests for invalid format, got %d", len(*reqs))
+	}
+}
+
+// TestTokensCreate_FormatTextConflictsWithOutputJson verifies that the
+// resolveLegacyTextJSON conflict path works: --format text (force table mode)
+// combined with -o json (force JSON) is a validation error, not silent
+// override of one flag by the other.
+func TestTokensCreate_FormatTextConflictsWithOutputJson(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "tokens", "create", "--name", "ci", "--format", "text", "-o", "json")
+	if err == nil {
+		t.Fatal("want error for --format text -o json conflict, got nil")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Errorf("exit code = %d, want 1 (validation)", code)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests on conflict error, got %d", len(*reqs))
 	}
 }
 

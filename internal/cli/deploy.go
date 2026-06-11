@@ -293,15 +293,14 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 
 	if format == formatJSON {
+		// deploy_count and version are always present so consumers can rely on
+		// these keys existing. deploy_count is 0 when the server omits it (older
+		// servers); version is "" when the server does not report one.
 		result := map[string]any{
-			"status": "deployed",
-			"slug":   slug,
-		}
-		if deployCount > 0 {
-			result["deploy_count"] = deployCount
-		}
-		if currentVersion != "" {
-			result["version"] = currentVersion
+			"status":       "deployed",
+			"slug":         slug,
+			"deploy_count": deployCount,
+			"version":      currentVersion,
 		}
 		if err := json.NewEncoder(stdOut).Encode(result); err != nil {
 			return err

@@ -64,8 +64,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		OutputFields: []fieldSpec{
 			{Name: "status", Type: "string", Desc: "deployed"},
 			{Name: "slug", Type: "string"},
-			{Name: "deploy_count", Type: "integer", Desc: "Cumulative deployment number"},
-			{Name: "version", Type: "string", Desc: "Version string from the deployment"},
+			{Name: "deploy_count", Type: "integer", Desc: "Cumulative deployment number; 0 when the server does not report one"},
+			{Name: "version", Type: "string", Desc: "Version string from the deployment; empty when the server does not report one"},
 		},
 	},
 
