@@ -152,13 +152,29 @@ sticky-routing cookie) and the WebSocket upgrade.
 Each scenario prints a single headline line to stdout:
 
 ```
-COLD START: 3.42s (slug=demo, host=http://127.0.0.1:8080)
+COLD START: http=3.42s, session=3.45s (slug=demo, host=http://127.0.0.1:8080)
 SESSIONS: established 198/200 (99.0%), established p95=4ms
 ```
 
-The cold-start time is the total elapsed from first GET to `/.shinyhub/ready`
-returning `{"ready":true}` and the app root returning real content. For a
-warm app (min_warm_replicas >= 1) this is one round-trip latency.
+The cold-start scenario reports two numbers:
+- `http`: time from first GET (wake trigger) until the app root returns a real
+  200 response whose body is NOT the ShinyHub loading page. This is the point
+  at which a browser user would see actual app content.
+- `session`: time from first GET through a completed WebSocket handshake and
+  first server frame received. This is time-to-usable-session - the evaluation
+  claim threshold applies here.
+
+Why the ready probe is not used for polling: `/.shinyhub/ready` returns
+`{"ready":true}` only after a completed WebSocket handshake
+(`IsWSReady` in `internal/proxy/proxy.go`). A freshly woken app serving HTTP
+content but without any WS handshake will return 503 indefinitely if nothing
+opens a WS, so polling the ready probe alone cannot work. The probe IS used
+once at startup as a fast existence check - it correctly returns 404 for
+unknown slugs regardless of WS state.
+
+For a warm app (min_warm_replicas >= 1), stage 1 completes in one round trip
+(sub-100ms) and stage 2 is one WS connect - both numbers give the warm-floor
+baseline.
 
 The sessions line shows how many VUs received the first server WebSocket frame
 within `LT_FIRST_MSG_TIMEOUT`. A mere TCP connection is not counted as
@@ -185,7 +201,7 @@ analysis or to share results without re-running.
 
 | Claim | How to reproduce |
 |---|---|
-| Initial app load < 15 s (p95) | Hibernate the app, run `make load-test LT_SCENARIO=cold-start LT_SLUG=<slug> ASSERT=1` |
+| Initial app load < 15 s (p95) | Hibernate the app, run `make load-test LT_SCENARIO=cold-start LT_SLUG=<slug> ASSERT=1` (threshold on `coldstart_total_ms`) |
 | 1 000 concurrent sessions | `make load-test LT_SLUG=<slug> LT_SESSIONS=1000 LT_RAMP=60s LT_HOLD=30s ASSERT=1` on hardware with sufficient open-file limits |
 
 For the 1 000-session run, ensure the OS open-file limit is high enough:
