@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -78,6 +79,62 @@ func TestValidateNativeProcess(t *testing.T) {
 			t.Error("expected rejection with empty bundleDir + dead port, got nil")
 		}
 	})
+}
+
+// TestValidateNativeProcess_SymlinkBundleDir is the symlink regression guard:
+// on macOS /tmp is a symlink to /private/tmp, so p.Cwd() returns the
+// OS-resolved path (/private/tmp/...) while the configured bundle_dir column
+// was written with the unresolved symlinked path (/tmp/...). A bare
+// filepath.Abs comparison rejects healthy processes as "pid reuse", leaving
+// them unmanaged across every ZDT handoff.
+//
+// The fix: normalize BOTH sides with filepath.EvalSymlinks before comparing.
+//
+// This test creates a symlink that points at the real test-process cwd, then
+// passes the symlinked path as bundleDir. Pre-fix the comparison fails (the
+// symlink path != the resolved cwd); post-fix both sides resolve to the same
+// real path and the process is accepted.
+func TestValidateNativeProcess_SymlinkBundleDir(t *testing.T) {
+	realCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	// Resolve any symlinks in the real cwd so we have a canonical path.
+	resolvedCwd, err := filepath.EvalSymlinks(realCwd)
+	if err != nil {
+		t.Fatalf("eval symlinks cwd: %v", err)
+	}
+
+	// Create a symlink in t.TempDir() that points at the resolved real cwd.
+	// The temp dir itself may be under /tmp (symlinked to /private/tmp on macOS),
+	// so place the symlink in a dir we know is resolvable, and have it target
+	// the already-resolved path to keep the setup simple.
+	symlinkPath := filepath.Join(t.TempDir(), "bundle-via-symlink")
+	if err := os.Symlink(resolvedCwd, symlinkPath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	// Verify the symlink really is different from the resolved target
+	// (i.e. that filepath.Abs alone would not canonicalize it on this platform).
+	// symlinkPath is an absolute path ending in "bundle-via-symlink", which is
+	// never equal to resolvedCwd, so the pre-fix comparison always fails.
+	if symlinkPath == resolvedCwd {
+		t.Skip("symlink path accidentally equals real cwd - skip on this platform")
+	}
+
+	pid := os.Getpid()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	// Post-fix: validateNativeProcess must accept the symlinked bundleDir because
+	// EvalSymlinks(symlinkPath) == resolvedCwd == the process's real cwd.
+	if err := validateNativeProcess(pid, port, symlinkPath); err != nil {
+		t.Errorf("symlink bundleDir rejected a healthy process (pre-fix behavior): %v", err)
+	}
 }
 
 // TestWorkerDeclaredGone_JoiningIsNotGone pins the worker-gone contract recovery

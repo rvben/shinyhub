@@ -64,8 +64,20 @@ func validateNativeProcess(pid, port int, bundleDir string) error {
 			slog.Warn("recovery: cannot read process cwd; skipping identity check",
 				"pid", pid, "err", cwdErr)
 		default:
+			// Normalize both sides with EvalSymlinks before comparing. On macOS
+			// /tmp is a symlink to /private/tmp: p.Cwd() returns the OS-resolved
+			// path while the stored bundle_dir may use the unresolved symlinked
+			// prefix. A bare filepath.Abs comparison would reject the healthy
+			// process as a PID reuse. Fall back to the raw Abs values when
+			// EvalSymlinks errors (e.g. the dir was deleted mid-check).
 			want, _ := filepath.Abs(bundleDir)
 			got, _ := filepath.Abs(cwd)
+			if rw, err := filepath.EvalSymlinks(want); err == nil {
+				want = rw
+			}
+			if rg, err := filepath.EvalSymlinks(got); err == nil {
+				got = rg
+			}
 			if want != got {
 				return fmt.Errorf("pid %d cwd %q does not match bundle %q (pid reuse?)", pid, got, want)
 			}
