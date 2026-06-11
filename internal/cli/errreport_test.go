@@ -31,9 +31,16 @@ func TestClassify(t *testing.T) {
 		{"wrapped http", fmt.Errorf("deploy: %w", &httpStatusError{Status: 503, msg: "u"}), KindServerError, 3},
 		{"net timeout", fakeTimeoutErr{}, KindTimeout, 3},
 		{"url error", &url.Error{Op: "Get", URL: "http://x", Err: errors.New("connection refused")}, KindNetwork, 3},
+		// url.Error wrapping a timeout implements net.Error; the timeout branch
+		// must fire before the url.Error-network branch for real http.Client shapes.
+		{"url error wrapping timeout", &url.Error{Op: "Get", URL: "http://x", Err: fakeTimeoutErr{}}, KindTimeout, 3},
+		{"legacy exit 3", &ExitCodeError{Code: 3, Err: errors.New("not logged in")}, KindAuth, 3},
 		{"legacy exit 4", &ExitCodeError{Code: 4, Err: errors.New("partial")}, KindPartialConvergence, 4},
 		{"legacy exit 5", &ExitCodeError{Code: 5, Err: errors.New("conflict")}, KindConflict, 5},
 		{"legacy exit 6", &ExitCodeError{Code: 6, Err: errors.New("not ready")}, KindServerNotReady, 6},
+		// The typed HTTP status is more specific than the aggregate legacy code;
+		// the typed-status branch fires first.
+		{"wrapped http status outranks legacy code", &ExitCodeError{Code: 4, Err: &httpStatusError{Status: 401, msg: "x"}}, KindAuth, 3},
 		{"plain error", errors.New("something odd"), KindInternal, 1},
 	}
 	for _, tc := range cases {

@@ -48,6 +48,12 @@ func classify(err error) (Kind, int) {
 		switch ece.Code {
 		case 2:
 			return "", 2
+		case 3:
+			// Typed transport errors (httpStatusError, url.Error, net.Error) are
+			// classified earlier in the chain, so an untyped error carrying legacy
+			// code 3 is a credential or auth-state failure (missing login, bad
+			// config) rather than a network error.
+			return KindAuth, 3
 		case 4:
 			return KindPartialConvergence, 4
 		case 5:

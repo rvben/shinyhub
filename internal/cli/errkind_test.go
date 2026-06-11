@@ -2,9 +2,9 @@ package cli
 
 import "testing"
 
-// TestKindTable_CoversSpecKinds pins the exact kind set and exit codes from
-// the design spec. The schema generator and the error renderer both read
-// this table, so it is the single source of truth.
+// TestKindTable_CoversSpecKinds pins the exact kind set and exit codes this
+// binary emits. The schema generator and the error renderer both read this
+// table, so it is the single source of truth.
 func TestKindTable_CoversSpecKinds(t *testing.T) {
 	want := map[Kind]int{
 		KindValidation:           1,
