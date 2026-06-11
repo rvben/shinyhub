@@ -91,9 +91,6 @@ var backupCmd = &cobra.Command{
 	Long: "Creates a .tar.gz containing a transactionally consistent SQLite\n" +
 		"snapshot plus the apps and app-data dirs. Safe to run on a live server.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if backupOut == "" {
-			return fmt.Errorf("--out is required")
-		}
 		cfg, err := config.Load(serverConfigPath())
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)

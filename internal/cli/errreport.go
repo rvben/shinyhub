@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 )
 
 // statusKind maps an HTTP status code to its stable error kind and process
@@ -81,7 +82,28 @@ func classify(err error) (Kind, int) {
 			return KindServerNotReady, 6
 		}
 	}
+	// cobra generates plain errors (no typed wrapper) for argument/flag
+	// validation failures. Classify them by message prefix rather than type
+	// so callers receive kind=validation instead of the internal fallback.
+	msg := err.Error()
+	for _, prefix := range cobraErrorPrefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return KindValidation, 1
+		}
+	}
 	return KindInternal, 1
+}
+
+// cobraErrorPrefixes lists the fixed message prefixes cobra uses for
+// argument and flag validation failures. These errors carry no typed wrapper,
+// so classification falls back to prefix matching.
+var cobraErrorPrefixes = []string{
+	"required flag(s)",
+	"unknown command",
+	"unknown flag:",
+	"unknown shorthand flag:",
+	"invalid argument",
+	"accepts ",
 }
 
 // errEnvelope is the structured failure record. Per clispec v0.2 it is

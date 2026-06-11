@@ -66,6 +66,12 @@ func AddCommandsTo(root *cobra.Command) {
 		newManifestCmd(),
 		newSchemaCmd(),
 	)
+	// Wrap flag-parse errors as KindValidation so the error envelope carries
+	// kind=validation instead of the internal fallback. This applies to all
+	// subcommands unless a subcommand sets its own FlagErrorFunc (e.g. fleet).
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return &ExitCodeError{Code: 1, Kind: KindValidation, Err: err}
+	})
 	silenceUsageOnError(root)
 }
 

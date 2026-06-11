@@ -139,6 +139,31 @@ func TestReport_NilIsZero(t *testing.T) {
 	}
 }
 
+// TestClassify_CobraArgErrors verifies that cobra's plain-string argument and
+// flag validation errors are classified as KindValidation rather than the
+// internal fallback.
+func TestClassify_CobraArgErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"required flag", `required flag(s) "out" not set`},
+		{"unknown command", `unknown command "bogus" for "shinyhub"`},
+		{"unknown flag", `unknown flag: --bogus`},
+		{"unknown shorthand", `unknown shorthand flag: 'x' in -x`},
+		{"invalid argument", `invalid argument "notanint" for "--replicas" flag`},
+		{"accepts N args", `accepts 1 arg(s), received 0`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, code := classify(errors.New(tc.msg))
+			if kind != KindValidation || code != 1 {
+				t.Errorf("classify(%q) = (%q, %d), want (%q, 1)", tc.msg, kind, code, KindValidation)
+			}
+		})
+	}
+}
+
 // TestReport_ValidationErrHintInEnvelopeAndProse verifies that validationErr
 // errors carry the hint in the envelope's dedicated hint field (not baked into
 // the message) and that the TTY prose line shows both message and hint.
