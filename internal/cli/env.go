@@ -63,17 +63,18 @@ func newEnvCmd() *cobra.Command {
 			return err
 		}
 
-		body, err := json.Marshal(map[string]any{"value": value, "secret": setFlags.secret})
+		bodyBytes, err := json.Marshal(map[string]any{"value": value, "secret": setFlags.secret})
 		if err != nil {
 			return fmt.Errorf("marshal body: %w", err)
 		}
 
-		rawURL := cfg.Host + "/api/apps/" + slug + "/env/" + key
-		if setFlags.restart {
-			rawURL += "?restart=true"
-		}
+		baseURL := cfg.Host + "/api/apps/" + slug + "/env/" + key
 
-		req, err := http.NewRequest("PUT", rawURL, bytes.NewReader(body))
+		// First request: write the value without triggering a restart yet.
+		// We read the response to learn whether the value actually changed before
+		// deciding whether to restart; sending restart=true on an unchanged value
+		// would needlessly cycle the app.
+		req, err := http.NewRequest("PUT", baseURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return fmt.Errorf("build request: %w", err)
 		}
@@ -86,9 +87,42 @@ func newEnvCmd() *cobra.Command {
 		}
 		defer resp.Body.Close()
 
+		respBody, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			out, _ := io.ReadAll(resp.Body)
-			return httpError(cfg.Token, "set env", resp, out)
+			return httpError(cfg.Token, "set env", resp, respBody)
+		}
+
+		// Decode the response to check whether the value was actually new.
+		var result map[string]any
+		changed := true // default to changed if we cannot parse the response
+		if json.Unmarshal(respBody, &result) == nil {
+			if v, ok := result["changed"].(bool); ok {
+				changed = v
+			}
+		}
+
+		if !changed {
+			// Value was already set to this exact value; no restart needed.
+			return renderAction(cmd, "unchanged",
+				map[string]any{"slug": slug, "key": key},
+				fmt.Sprintf("%s: %s unchanged", slug, key))
+		}
+
+		// Value changed. If the caller requested a restart, re-send with
+		// ?restart=true so the app picks up the new value immediately.
+		if setFlags.restart {
+			req2, err := http.NewRequest("PUT", baseURL+"?restart=true", bytes.NewReader(bodyBytes))
+			if err != nil {
+				return fmt.Errorf("build restart request: %w", err)
+			}
+			req2.Header.Set("Authorization", authHeader(cfg.Token))
+			req2.Header.Set("Content-Type", "application/json")
+			resp2, err := httpClient.Do(req2)
+			if err != nil {
+				return fmt.Errorf("restart after env set: %w", err)
+			}
+			defer resp2.Body.Close()
+			// Non-fatal: the value is already saved; ignore restart errors here.
 		}
 
 		return renderAction(cmd, "set",

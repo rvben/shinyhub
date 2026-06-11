@@ -473,21 +473,58 @@ func newAppsRestartCmd() *cobra.Command {
 	}
 }
 
-// newAppsStartCmd is a friendlier alias for `apps restart`. The server's
-// restart endpoint redeploys the current bundle whether the app is running or
-// stopped, so it is also the right verb for "bring this stopped app back up".
+// newAppsStartCmd starts a stopped app without cycling a running one. It sends
+// ?if_not_running=true so the server skips the restart when the app is already
+// running, making the operation idempotent. `apps restart` always cycles the
+// pool regardless of current state.
 func newAppsStartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start <slug>",
-		Short: "Start a stopped app (alias for `restart`)",
+		Short: "Start a stopped app (no-op if already running)",
 		Args:  cobra.ExactArgs(1),
-		RunE:  callRestartAs("started"),
+		RunE:  runAppsStart,
 	}
 }
 
-// callRestartAs hits POST /api/apps/{slug}/restart but reports the action
-// using a different past-tense verb (e.g. "started" instead of "restarted")
-// so `apps start` reads naturally without duplicating the HTTP plumbing.
+func runAppsStart(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart?if_not_running=true", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "start app", resp, body)
+	}
+	// The server returns {"status":"running","note":"already running"} when the
+	// app was already up. Surface the note field so the caller can distinguish
+	// a fresh start from a no-op.
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err == nil {
+		if note, _ := result["note"].(string); note != "" {
+			return renderAction(cmd, "running",
+				map[string]any{"slug": slug, "note": note},
+				fmt.Sprintf("%s: %s", slug, note))
+		}
+	}
+	return renderAction(cmd, "running",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: started", slug))
+}
+
+// callRestartAs hits POST /api/apps/{slug}/restart and reports the action using
+// the given past-tense verb. Unlike runAppsStart it does NOT send
+// ?if_not_running=true, so restart always cycles the pool.
 func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -1312,6 +1349,15 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// The app does not exist; the desired outcome (absent) is already in
+		// place. Write a notice to stderr so a typo'd slug is visible to the
+		// caller, then exit 0 with status "absent".
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: app %q did not exist\n", slug)
+		return renderAction(cmd, "absent",
+			map[string]any{"slug": slug},
+			fmt.Sprintf("%s: already absent", slug))
+	}
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "delete app", resp, out)
 	}

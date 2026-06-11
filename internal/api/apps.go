@@ -1413,6 +1413,17 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When ?if_not_running=true is set (sent by `apps start`), skip the cycle
+	// if the app is already running. Return 200 with a note so the CLI can
+	// render a no-op message without treating it as an error.
+	if r.URL.Query().Get("if_not_running") == "true" && app.Status == "running" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "running",
+			"note":   "already running",
+		})
+		return
+	}
+
 	if s.manager == nil {
 		writeError(w, http.StatusServiceUnavailable, "process manager not available")
 		return
@@ -1853,7 +1864,9 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.RevokeAppAccess(slug, userID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "member not found")
+			// The outcome (user has no access) is already in place; the repeat is
+			// idempotent. Return 204 so callers can safely re-run revoke.
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")

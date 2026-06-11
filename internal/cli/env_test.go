@@ -202,6 +202,10 @@ func TestEnvSet_RejectsInvalidKey(t *testing.T) {
 }
 
 func TestEnvSet_RestartFlag(t *testing.T) {
+	// The env set --restart implementation uses two requests: the first write to
+	// check whether the value changed, and a second with ?restart=true only when
+	// the value was new (changed:true). The default mock returns {} which the CLI
+	// treats as changed=true, so two requests are expected.
 	_, reqs, _ := setupCLITest(t)
 
 	cmd := newEnvCmd()
@@ -210,11 +214,16 @@ func TestEnvSet_RestartFlag(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(*reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	if len(*reqs) != 2 {
+		t.Fatalf("expected 2 requests (write + restart), got %d", len(*reqs))
 	}
-	if !strings.Contains((*reqs)[0].Query, "restart=true") {
-		t.Errorf("expected query to contain restart=true, got %q", (*reqs)[0].Query)
+	// The first request must NOT have restart=true; it is the value-write probe.
+	if strings.Contains((*reqs)[0].Query, "restart=true") {
+		t.Errorf("first request must not contain restart=true, got %q", (*reqs)[0].Query)
+	}
+	// The second request must include restart=true to trigger the app cycle.
+	if !strings.Contains((*reqs)[1].Query, "restart=true") {
+		t.Errorf("expected second request query to contain restart=true, got %q", (*reqs)[1].Query)
 	}
 }
 

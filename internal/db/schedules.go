@@ -126,6 +126,16 @@ func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 	return scanSchedule(row)
 }
 
+// GetScheduleByName returns the schedule with the given name for the given app,
+// or ErrNotFound when no such schedule exists.
+func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
+	row := s.db.QueryRow(`
+		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+		       overlap_policy, missed_policy, timezone, created_at, updated_at
+		FROM app_schedules WHERE app_id = ? AND name = ?`, appID, name)
+	return scanSchedule(row)
+}
+
 func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,

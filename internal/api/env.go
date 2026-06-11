@@ -120,50 +120,72 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	storedValue := []byte(body.Value)
-	if body.Secret {
-		ct, err := secrets.Encrypt(s.secretsKey, []byte(body.Value))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "encrypt")
+	// Detect an identical set: when the key already exists with the same
+	// value and secret flag, return changed:false so the CLI can skip
+	// --restart side effects when nothing actually changed.
+	changed := true
+	if existing != nil && existing.IsSecret == body.Secret {
+		if body.Secret {
+			// For secret values the stored bytes are encrypted; decrypt to compare.
+			if plain, err := secrets.Decrypt(s.secretsKey, existing.Value); err == nil {
+				changed = string(plain) != body.Value
+			}
+		} else {
+			changed = string(existing.Value) != body.Value
+		}
+	}
+
+	if changed {
+		storedValue := []byte(body.Value)
+		if body.Secret {
+			ct, err := secrets.Encrypt(s.secretsKey, []byte(body.Value))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "encrypt")
+				return
+			}
+			storedValue = ct
+		}
+
+		if err := s.store.UpsertAppEnvVar(app.ID, key, storedValue, body.Secret); err != nil {
+			writeError(w, http.StatusInternalServerError, "store")
 			return
 		}
-		storedValue = ct
+
+		action := "created"
+		if existing != nil {
+			action = "updated"
+		}
+		detail, _ := json.Marshal(map[string]any{
+			"key":    key,
+			"secret": body.Secret,
+			"action": action,
+		})
+
+		u := auth.UserFromContext(r.Context())
+		var userID *int64
+		if u != nil {
+			userID = &u.ID
+		}
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       userID,
+			Action:       "env.set",
+			ResourceType: "app",
+			ResourceID:   slug,
+			Detail:       string(detail),
+			IPAddress:    s.ClientIP(r),
+		})
 	}
 
-	if err := s.store.UpsertAppEnvVar(app.ID, key, storedValue, body.Secret); err != nil {
-		writeError(w, http.StatusInternalServerError, "store")
-		return
+	restarted := false
+	var restartErr error
+	if changed {
+		restarted, restartErr = s.maybeRestartForChange(r, app, slug)
 	}
-
-	action := "created"
-	if existing != nil {
-		action = "updated"
-	}
-	detail, _ := json.Marshal(map[string]any{
-		"key":    key,
-		"secret": body.Secret,
-		"action": action,
-	})
-
-	u := auth.UserFromContext(r.Context())
-	var userID *int64
-	if u != nil {
-		userID = &u.ID
-	}
-	s.store.LogAuditEvent(db.AuditEventParams{
-		UserID:       userID,
-		Action:       "env.set",
-		ResourceType: "app",
-		ResourceID:   slug,
-		Detail:       string(detail),
-		IPAddress:    s.ClientIP(r),
-	})
-
-	restarted, restartErr := s.maybeRestartForChange(r, app, slug)
 	resp := map[string]any{
 		"key":       key,
 		"secret":    body.Secret,
 		"set":       true,
+		"changed":   changed,
 		"restarted": restarted,
 	}
 	if restartErr != nil {

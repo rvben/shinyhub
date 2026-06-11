@@ -269,6 +269,20 @@ func newScheduleAddCmd() *cobra.Command {
 			return httpError(cfg.Token, "create schedule", resp, out)
 		}
 
+		// A 200 (as opposed to 201) means the schedule already existed with the
+		// exact same configuration; the repeat is a no-op.
+		if resp.StatusCode == http.StatusOK {
+			var existing scheduleDTO
+			if json.Unmarshal(out, &existing) == nil {
+				return renderAction(cmd, "unchanged",
+					map[string]any{"slug": slug, "name": existing.Name, "id": existing.ID},
+					fmt.Sprintf("schedule %q already exists with identical config (id %d)", existing.Name, existing.ID))
+			}
+			return renderAction(cmd, "unchanged",
+				map[string]any{"slug": slug, "name": flags.name},
+				fmt.Sprintf("schedule %q already exists with identical config", flags.name))
+		}
+
 		var created scheduleDTO
 		if err := json.Unmarshal(out, &created); err == nil {
 			if created.DSTAdvisory != nil && *created.DSTAdvisory != "" {
