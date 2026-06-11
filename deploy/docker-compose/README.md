@@ -6,7 +6,7 @@ and spawns R Shiny app processes as sibling Docker containers via the
 
 ## Prerequisites
 
-- Docker Engine 20.10+ (or Docker Desktop)
+- Docker Engine 20.10+ (or Docker Desktop / OrbStack)
 - Docker Compose v2 (`docker compose` subcommand)
 
 ## Quickstart
@@ -17,45 +17,62 @@ and spawns R Shiny app processes as sibling Docker containers via the
 export SHINYHUB_AUTH_SECRET=$(openssl rand -hex 32)
 ```
 
-**2. Set the Docker group id (Linux only)**
+**2. Set the data root**
 
-The ShinyHub image runs as a non-root user. On Linux, `/var/run/docker.sock` is
-owned by the `docker` group. Pass the group id so the container can open the
-socket:
+The apps and app-data directories must exist at the same absolute path on the
+host and inside the container (see "Path parity" below).
+
+Linux:
+```sh
+export SHINYHUB_DATA_ROOT=/srv/shinyhub
+```
+
+macOS (OrbStack or Docker Desktop): `/srv` does not exist inside the VM by
+default. Use a path that is mapped into the guest filesystem. Docker Desktop
+maps `/Users` automatically; OrbStack maps `$HOME`.
+```sh
+export SHINYHUB_DATA_ROOT=$HOME/.shinyhub-data
+```
+
+**3. Set the Docker group id (Linux only)**
+
+On Linux, `/var/run/docker.sock` is owned by the `docker` group. The ShinyHub
+container must be a member of that group to open the socket:
 
 ```sh
 export DOCKER_GID=$(stat -c %g /var/run/docker.sock)
 ```
 
-On macOS with Docker Desktop the VM socket is world-accessible, so the group
-id does not matter. Leave `DOCKER_GID` unset or set it to `0`.
+On macOS with OrbStack or Docker Desktop the in-VM socket is `root:root 0660`.
+The container joins group `0` (root) by default, which is correct. Leave
+`DOCKER_GID` unset on macOS.
 
-**3. (Optional) Set an admin account for first boot**
+**4. (Optional) Set an admin account for first boot**
 
 ```sh
 export SHINYHUB_ADMIN_USER=admin
 export SHINYHUB_ADMIN_PASSWORD=changeme
 ```
 
-These have no effect once the user already exists in the database. Comment
-them out after the first start.
+These have no effect once the user already exists in the database.
 
-**4. Start the stack**
+**5. Start the stack**
 
 ```sh
 docker compose up -d
 ```
 
-On first start an `init-perms` helper (busybox) runs once to chown the named
-volumes to the distroless nonroot user (uid 65532). It exits immediately and
-subsequent restarts skip the work because the ownership is already correct.
+On first start an `init-perms` helper (busybox) runs once to create the data
+directories under `SHINYHUB_DATA_ROOT` and chown them to the distroless nonroot
+user (uid 65532). It exits immediately; subsequent restarts complete instantly
+because the ownership is already correct (idempotent).
 
-**5. Open the dashboard**
+**6. Open the dashboard**
 
 Navigate to `http://localhost:8080` and log in with the admin credentials you
 set above.
 
-**6. Deploy your first app**
+**7. Deploy your first app**
 
 ```sh
 # Install the shinyhub CLI (one-time)
@@ -68,6 +85,20 @@ shinyhub login --host http://localhost:8080 --username admin --password changeme
 shinyhub deploy /path/to/my-app --slug my-app
 ```
 
+## Path parity (why apps use a host bind-mount, not a named volume)
+
+When ShinyHub starts an app container it passes the app's bundle directory to
+the Docker daemon as a bind-mount source path. The daemon resolves that path on
+the **host filesystem**, not inside the ShinyHub container. A named Docker
+volume would give the shinyhub container a private path (e.g.
+`/var/lib/docker/volumes/…`) that the daemon cannot match to what the server
+recorded, so the bind would fail with "bind source path does not exist".
+
+The fix is path parity: `SHINYHUB_DATA_ROOT` is bind-mounted at the same
+absolute path inside the container (`${SHINYHUB_DATA_ROOT}:${SHINYHUB_DATA_ROOT}`),
+so the path the server writes is the same path the daemon reads. The SQLite
+database stays in a named volume because the daemon never needs to reach it.
+
 ## Network topology (why host networking)
 
 The shinyhub service uses `network_mode: host`. This is required by the docker
@@ -79,20 +110,21 @@ runtime backend:
 - In bridge mode, the ShinyHub container cannot reach the host loopback;
   requests to app replicas would fail with connection refused.
 - With host networking, the ShinyHub process and the app containers share the
-  host network stack. The loopback address is the same for all of them, so
-  the proxy can reach every app replica.
+  host network stack. The loopback address is the same for all of them.
 
 There is no `ports:` mapping in the compose file. The server binds directly
-on the host port specified in `shinyhub.yaml` (`server.port: 8080`). Change
-that value to pick a different host port.
+on the host port specified in `shinyhub.yaml` (`server.port: 8080`).
 
 ## Configuration
 
-Edit `shinyhub.yaml` in this directory before starting (or restart with
-`docker compose up -d` after changes). The file is bind-mounted read-only at
-`/etc/shinyhub/shinyhub.yaml` inside the container.
+Edit `shinyhub.yaml` in this directory before starting (or restart after
+changes). The file is bind-mounted read-only at `/etc/shinyhub/shinyhub.yaml`.
 
-The most commonly changed settings:
+The storage paths (`apps_dir`, `app_data_dir`) are set via `SHINYHUB_APPS_DIR`
+and `SHINYHUB_APP_DATA_DIR` environment variables in `compose.yaml`, derived
+from `SHINYHUB_DATA_ROOT`. Do not set them in `shinyhub.yaml`.
+
+Other commonly changed settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -134,17 +166,11 @@ The server adopts running app containers across restarts
 
 ## Backups
 
-All state lives in three named volumes:
-
-| Volume | Contents |
-|--------|----------|
-| `shinyhub-apps` | Deployed app bundle directories |
-| `shinyhub-app-data` | Persistent per-app data (`shinyhub data push`) |
-| `shinyhub-db` | SQLite database (`shinyhub.db`) |
-
-Back them up with `docker run --rm -v <volume>:/data -v $(pwd):/backup alpine
-tar czf /backup/<volume>.tar.gz /data` or use a volume backup tool of your
-choice.
+| Data | Location | How to back up |
+|------|----------|----------------|
+| App bundles | `$SHINYHUB_DATA_ROOT/apps/` | `tar czf apps.tar.gz $SHINYHUB_DATA_ROOT/apps` |
+| Per-app data | `$SHINYHUB_DATA_ROOT/app-data/` | `tar czf app-data.tar.gz $SHINYHUB_DATA_ROOT/app-data` |
+| SQLite DB | named volume `shinyhub-db` | `docker run --rm -v shinyhub-db:/data -v $(pwd):/backup alpine tar czf /backup/shinyhub-db.tar.gz /data` |
 
 ## Health monitoring
 
@@ -159,9 +185,10 @@ curl -fsS http://localhost:8080/healthz
 ## Stopping and cleaning up
 
 ```sh
-# Stop the stack (volumes are preserved)
+# Stop the stack (data preserved)
 docker compose down
 
-# Stop and remove all volumes (destroys all data)
+# Stop and remove all state (named volume + data root)
 docker compose down -v
+rm -rf $SHINYHUB_DATA_ROOT
 ```

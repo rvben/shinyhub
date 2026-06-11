@@ -2,10 +2,11 @@
 # Mount this file at /etc/shinyhub/shinyhub.yaml inside the container
 # (already done by the compose.yaml volume bind).
 #
-# Volume paths below match the named volumes declared in compose.yaml:
-#   shinyhub-apps      -> /data/apps
-#   shinyhub-app-data  -> /data/app-data
-#   shinyhub-db        -> /data/db
+# Storage paths (apps_dir, app_data_dir) are NOT set here. They are passed
+# as SHINYHUB_APPS_DIR and SHINYHUB_APP_DATA_DIR env vars in compose.yaml,
+# derived from SHINYHUB_DATA_ROOT, making compose.yaml the single source of
+# truth. The DB path is hardcoded below because it lives in a named volume
+# that never needs path parity with the host.
 
 database:
   driver: sqlite
@@ -27,8 +28,9 @@ auth:
   secret: change-me-to-a-random-string
 
 storage:
-  apps_dir: /data/apps         # SHINYHUB_APPS_DIR
-  app_data_dir: /data/app-data # SHINYHUB_APP_DATA_DIR
+  # apps_dir and app_data_dir are set via SHINYHUB_APPS_DIR / SHINYHUB_APP_DATA_DIR
+  # in compose.yaml (derived from SHINYHUB_DATA_ROOT) for path-parity correctness.
+  # Do not set them here; the env override takes precedence anyway.
   version_retention: 5
 
 runtime:
