@@ -367,12 +367,14 @@ func TestAppsSet_RejectsInvalidNegativeHibernateTimeout(t *testing.T) {
 // --no-follow:
 //   - sends ?follow=false on the wire (so the server returns plain text and
 //     closes the connection rather than starting an SSE stream), and
-//   - prints the server response body verbatim with no SSE re-parsing.
+//   - in table mode (-o table) prints one line per server line.
 func TestAppsLogs_NoFollow_PassesFollowFalseAndPrintsBody(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, "alpha\nbeta\ngamma\n")
 
-	out, err := execCLI(t, "apps", "logs", "demo", "--tail", "50", "--no-follow")
+	// Pass -o table explicitly: tests run without a TTY so the default would be
+	// NDJSON (streaming command piped). Table mode is the human-readable path.
+	out, err := execCLI(t, "apps", "logs", "demo", "--tail", "50", "--no-follow", "-o", "table")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

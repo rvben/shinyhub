@@ -323,6 +323,11 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 		return fmt.Errorf("--tail must be between 1 and 10000")
 	}
 
+	format, err := resolveFormat(false, true)
+	if err != nil {
+		return err
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -362,14 +367,28 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 		return httpError(cfg.Token, "stream logs", resp, out)
 	}
 
-	w := cmd.OutOrStdout()
+	sw := newStreamWriter(cmd.OutOrStdout(), format, f.replica)
 	if f.noFollow {
-		_, err := io.Copy(w, resp.Body)
-		return err
+		// Plain-text response: scan lines and route through the stream writer
+		// so NDJSON mode wraps each line correctly.
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			sw.WriteLine(scanner.Text())
+		}
+		return scanner.Err()
 	}
+	// SSE stream: strip framing before handing each line to the writer.
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		fmt.Fprintln(w, scanner.Text())
+		line := scanner.Text()
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue // blank separator or heartbeat comment
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue // ignore non-data SSE fields (event:, id:, retry:)
+		}
+		line = strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
+		sw.WriteLine(line)
 	}
 	return scanner.Err()
 }

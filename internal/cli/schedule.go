@@ -201,6 +201,12 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 
+		if flags.follow {
+			if _, err := resolveFormat(false, true); err != nil {
+				return err
+			}
+		}
+
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -528,6 +534,12 @@ func newScheduleRunCmd() *cobra.Command {
 	runCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
 
+		if follow {
+			if _, err := resolveFormat(false, true); err != nil {
+				return err
+			}
+		}
+
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -606,6 +618,10 @@ func newScheduleLogsCmd() *cobra.Command {
 
 	logsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
+
+		if _, err := resolveFormat(false, true); err != nil {
+			return err
+		}
 
 		cfg, err := loadConfig()
 		if err != nil {
@@ -688,6 +704,7 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 		return httpError(cfg.Token, "stream schedule logs", resp, out)
 	}
 
+	sw := newStreamWriter(cmd.OutOrStdout(), currentFormat(), 0)
 	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -701,7 +718,7 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 			}
 			line = strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), line)
+		sw.WriteLine(line)
 	}
 	return scanner.Err()
 }
