@@ -68,13 +68,12 @@ func newEnvCmd() *cobra.Command {
 			return fmt.Errorf("marshal body: %w", err)
 		}
 
-		baseURL := cfg.Host + "/api/apps/" + slug + "/env/" + key
+		envURL := cfg.Host + "/api/apps/" + slug + "/env/" + key
 
-		// First request: write the value without triggering a restart yet.
-		// We read the response to learn whether the value actually changed before
-		// deciding whether to restart; sending restart=true on an unchanged value
-		// would needlessly cycle the app.
-		req, err := http.NewRequest("PUT", baseURL, bytes.NewReader(bodyBytes))
+		// Write the env var. The response carries changed:true/false so we can
+		// skip the restart side effect when the value was already set to this
+		// exact value.
+		req, err := http.NewRequest("PUT", envURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return fmt.Errorf("build request: %w", err)
 		}
@@ -108,20 +107,22 @@ func newEnvCmd() *cobra.Command {
 				fmt.Sprintf("%s: %s unchanged", slug, key))
 		}
 
-		// Value changed. If the caller requested a restart, re-send with
-		// ?restart=true so the app picks up the new value immediately.
+		// Value changed. If the caller requested a restart, hit the restart
+		// endpoint directly. Re-PUTing the env var would trigger changed=false
+		// (the value is now identical to what we just stored) and skip the
+		// restart inside maybeRestartForChange.
 		if setFlags.restart {
-			req2, err := http.NewRequest("PUT", baseURL+"?restart=true", bytes.NewReader(bodyBytes))
+			restartReq, err := http.NewRequest("POST",
+				cfg.Host+"/api/apps/"+slug+"/restart", nil)
 			if err != nil {
 				return fmt.Errorf("build restart request: %w", err)
 			}
-			req2.Header.Set("Authorization", authHeader(cfg.Token))
-			req2.Header.Set("Content-Type", "application/json")
-			resp2, err := httpClient.Do(req2)
+			restartReq.Header.Set("Authorization", authHeader(cfg.Token))
+			restartResp, err := httpClient.Do(restartReq)
 			if err != nil {
 				return fmt.Errorf("restart after env set: %w", err)
 			}
-			defer resp2.Body.Close()
+			defer restartResp.Body.Close()
 			// Non-fatal: the value is already saved; ignore restart errors here.
 		}
 

@@ -202,10 +202,9 @@ func TestEnvSet_RejectsInvalidKey(t *testing.T) {
 }
 
 func TestEnvSet_RestartFlag(t *testing.T) {
-	// The env set --restart implementation uses two requests: the first write to
-	// check whether the value changed, and a second with ?restart=true only when
-	// the value was new (changed:true). The default mock returns {} which the CLI
-	// treats as changed=true, so two requests are expected.
+	// env set --restart uses two requests: a PUT to write the value (response
+	// carries changed:true/false) and, when changed, a POST to the restart
+	// endpoint. The default mock returns {} which the CLI treats as changed=true.
 	_, reqs, _ := setupCLITest(t)
 
 	cmd := newEnvCmd()
@@ -215,15 +214,21 @@ func TestEnvSet_RestartFlag(t *testing.T) {
 	}
 
 	if len(*reqs) != 2 {
-		t.Fatalf("expected 2 requests (write + restart), got %d", len(*reqs))
+		t.Fatalf("expected 2 requests (PUT env + POST restart), got %d", len(*reqs))
 	}
-	// The first request must NOT have restart=true; it is the value-write probe.
-	if strings.Contains((*reqs)[0].Query, "restart=true") {
-		t.Errorf("first request must not contain restart=true, got %q", (*reqs)[0].Query)
+	// First request: the env write (PUT, no restart param).
+	if (*reqs)[0].Method != "PUT" {
+		t.Errorf("first request method = %s, want PUT", (*reqs)[0].Method)
 	}
-	// The second request must include restart=true to trigger the app cycle.
-	if !strings.Contains((*reqs)[1].Query, "restart=true") {
-		t.Errorf("expected second request query to contain restart=true, got %q", (*reqs)[1].Query)
+	if strings.Contains((*reqs)[0].Query, "restart") {
+		t.Errorf("env PUT must not carry restart param; got query %q", (*reqs)[0].Query)
+	}
+	// Second request: the app restart (POST to /restart endpoint, no query param).
+	if (*reqs)[1].Method != "POST" {
+		t.Errorf("second request method = %s, want POST", (*reqs)[1].Method)
+	}
+	if !strings.HasSuffix((*reqs)[1].Path, "/restart") {
+		t.Errorf("second request path = %q, want .../restart", (*reqs)[1].Path)
 	}
 }
 

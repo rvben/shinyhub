@@ -269,21 +269,23 @@ func TestShareRm_NotMounted_ExitsZero(t *testing.T) {
 
 // ── env set (unchanged = skip restart) ─────────────────────────────────────
 
-// TestEnvSet_Unchanged_SkipsRestartSideEffect verifies that when the server
-// reports {"changed":false}, the CLI does not attempt a restart even with
+// TestEnvSet_Unchanged_SkipsRestart verifies that when the server reports
+// {"changed":false}, the CLI does not call the restart endpoint even with
 // --restart, and renders status="unchanged".
 func TestEnvSet_Unchanged_SkipsRestart(t *testing.T) {
 	resetFormatState(t)
 	restartCalled := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "PUT" && strings.Contains(r.URL.Path, "/env/") {
-			// The query must NOT have restart=true when the CLI skips the restart.
-			if r.URL.Query().Get("restart") == "true" {
-				restartCalled = true
-			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, `{"key":"PORT","secret":false,"set":true,"changed":false,"restarted":false}`)
+			return
+		}
+		// Any POST to the restart endpoint would mean the CLI tried to restart.
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/restart") {
+			restartCalled = true
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		http.NotFound(w, r)
@@ -299,9 +301,9 @@ func TestEnvSet_Unchanged_SkipsRestart(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("env set unchanged: unexpected error: %v", err)
 	}
-	// When response is changed:false, the CLI must NOT include restart=true in the query.
+	// When changed:false, the CLI must NOT call the restart endpoint.
 	if restartCalled {
-		t.Error("CLI should not send restart=true when server reports changed=false")
+		t.Error("CLI should not call restart endpoint when server reports changed=false")
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(out.Bytes(), &obj); err != nil {
@@ -312,15 +314,17 @@ func TestEnvSet_Unchanged_SkipsRestart(t *testing.T) {
 	}
 }
 
-// TestEnvSet_Changed_IncludesRestartParam verifies that when the value changes,
-// the CLI sends restart=true when --restart is given.
-func TestEnvSet_Changed_IncludesRestartParam(t *testing.T) {
+// TestEnvSet_Changed_CallsRestartEndpoint verifies that when the value changes
+// and --restart is given, the CLI calls POST /api/apps/{slug}/restart (not a
+// second PUT). The env write and the restart are two separate requests.
+func TestEnvSet_Changed_CallsRestartEndpoint(t *testing.T) {
 	resetFormatState(t)
-	var gotQuery string
+	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.RawQuery
+		paths = append(paths, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		// Both the PUT env and POST restart return 200 in this mock.
 		fmt.Fprint(w, `{"key":"PORT","secret":false,"set":true,"changed":true,"restarted":true}`)
 	}))
 	defer srv.Close()
@@ -332,8 +336,14 @@ func TestEnvSet_Changed_IncludesRestartParam(t *testing.T) {
 	root.SetArgs([]string{"env", "set", "my-app", "PORT=9090", "--restart"})
 	_ = root.Execute()
 
-	if !strings.Contains(gotQuery, "restart=true") {
-		t.Errorf("expected restart=true in query; got %q", gotQuery)
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 requests, got %d: %v", len(paths), paths)
+	}
+	if paths[0] != "PUT /api/apps/my-app/env/PORT" {
+		t.Errorf("first request = %q, want PUT .../env/PORT", paths[0])
+	}
+	if paths[1] != "POST /api/apps/my-app/restart" {
+		t.Errorf("second request = %q, want POST .../restart", paths[1])
 	}
 }
 

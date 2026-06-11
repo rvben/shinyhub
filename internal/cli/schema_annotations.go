@@ -131,13 +131,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"apps start": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "running"},
 		{Name: "slug", Type: "string"},
+		{Name: "note", Type: "string", Desc: "Present on already-running no-op; value is already running"},
 	}},
 	"apps stop": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "stopped"},
 		{Name: "slug", Type: "string"},
 	}},
 	"apps delete": {Mutating: mut, OutputFields: []fieldSpec{
-		{Name: "status", Type: "string", Desc: "deleted"},
+		{Name: "status", Type: "string", Desc: "deleted | absent"},
 		{Name: "slug", Type: "string"},
 	}},
 	"apps set": {Mutating: mut, OutputFields: []fieldSpec{
@@ -241,7 +242,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"env": {Mutating: ro},
 
 	"env set": {Mutating: mut, OutputFields: []fieldSpec{
-		{Name: "status", Type: "string", Desc: "set"},
+		{Name: "status", Type: "string", Desc: "set | unchanged"},
 		{Name: "slug", Type: "string"},
 		{Name: "key", Type: "string"},
 	}},
@@ -315,7 +316,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		Mutating:            mut,
 		ExitCodePassthrough: true,
 		OutputFields: []fieldSpec{
-			{Name: "status", Type: "string", Desc: "created"},
+			{Name: "status", Type: "string", Desc: "created | unchanged"},
 			{Name: "slug", Type: "string"},
 			{Name: "name", Type: "string"},
 			{Name: "id", Type: "integer"},

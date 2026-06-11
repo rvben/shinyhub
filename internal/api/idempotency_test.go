@@ -98,10 +98,10 @@ func TestDeleteApp_Missing_Returns404(t *testing.T) {
 	}
 }
 
-// TestRevokeAppAccess_NonMember_Returns200 verifies that revoking access for a
-// user who is not a member returns 200 no-op instead of 404. This makes the
+// TestRevokeAppAccess_NonMember_Returns204 verifies that revoking access for a
+// user who is not a member returns 204 no-op instead of 404. This makes the
 // revoke path idempotent: the outcome (user has no access) is already in place.
-func TestRevokeAppAccess_NonMember_Returns200(t *testing.T) {
+func TestRevokeAppAccess_NonMember_Returns204(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 	token := setupIdempotencyApp(t, store, "my-app")
 
@@ -331,6 +331,49 @@ func TestEnvSet_NewKey_ReturnsChangedTrue(t *testing.T) {
 	}
 	if changed, _ := resp["changed"].(bool); !changed {
 		t.Errorf("changed = false, want true for new key")
+	}
+}
+
+// TestEnvSet_SequentialIdempotency drives the real handler twice on the same
+// key via the router to cover the full production code path. The first PUT must
+// return changed:true; the repeat with the identical value must return
+// changed:false, exercising the comparison branch that enables the CLI to skip
+// its restart side effect.
+func TestEnvSet_SequentialIdempotency(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	token := setupIdempotencyApp(t, store, "my-app")
+
+	body, _ := json.Marshal(map[string]any{"value": "8080", "secret": false})
+
+	// First PUT: key is new, must be changed:true.
+	req := authedRequest(t, "PUT", "/api/apps/my-app/env/PORT", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var first map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if changed, _ := first["changed"].(bool); !changed {
+		t.Errorf("first PUT: changed = false, want true for new key")
+	}
+
+	// Second PUT: identical value. The handler must detect no change and return
+	// changed:false. This is the response the CLI uses to skip --restart.
+	req = authedRequest(t, "PUT", "/api/apps/my-app/env/PORT", bytes.Clone(body), token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var second map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if changed, _ := second["changed"].(bool); changed {
+		t.Errorf("second PUT identical value: changed = true, want false")
 	}
 }
 
