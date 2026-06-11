@@ -36,9 +36,11 @@ func newFleetCmd() *cobra.Command {
 	// main() emits afterwards is the structured record; this is the human line.
 	// Subcommands inherit this via the parent walk in (*cobra.Command).FlagErrorFunc.
 	// Wrapping as KindValidation ensures the error envelope carries the right kind.
+	// Reported=true prevents reportTo from printing a second prose line on top of
+	// the one already written here.
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 		fmt.Fprintf(c.ErrOrStderr(), "error: %v\n", err)
-		return &ExitCodeError{Code: 1, Kind: KindValidation, Err: err}
+		return &ExitCodeError{Code: 1, Kind: KindValidation, Err: err, Reported: true}
 	})
 	ownFleetErrors(cmd)
 	return cmd
