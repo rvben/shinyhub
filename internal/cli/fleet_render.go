@@ -140,7 +140,7 @@ func pending(diff []fleet.AppDiff) bool {
 // shellQuote returns s safe to paste as a single POSIX-shell argv word. A
 // string built only from unreserved characters (alphanumerics and the path
 // punctuation a manifest path normally uses) is returned bare; anything else is
-// wrapped in single quotes with embedded single quotes escaped as '\” so a
+// wrapped in single quotes with embedded single quotes escaped as '\'' so a
 // path with spaces or shell metacharacters survives a copy-paste intact.
 func shellQuote(s string) string {
 	if s == "" {
