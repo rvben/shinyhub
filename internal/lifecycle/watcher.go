@@ -367,18 +367,21 @@ func (w *Watcher) runOnce() {
 		if err := w.store.ReapStaleReplicaSessions(staleWindowSec); err != nil {
 			slog.Warn("watcher: reap stale replica sessions failed", "err", err)
 		}
-		// Drive any apps left in 'waking' by a standby's trigger. A standby
-		// issues BeginWake (hibernated->waking) on a miss but cannot deploy
-		// because it is not the active owner. The active's reconciler picks
-		// these up here and drives them to running. Single-node skips this path:
-		// the inline trigger drive in the wake trigger already handles it.
-		wakingApps, err := w.store.ListWakingApps()
-		if err != nil {
-			slog.Warn("watcher: list waking apps failed", "err", err)
-		} else {
-			for _, app := range wakingApps {
-				w.driveWakingApp(app.Slug)
-			}
+	}
+	// Drive any apps left in 'waking'. In clustered mode a standby issues
+	// BeginWake (hibernated->waking) on a miss but cannot deploy; the active's
+	// reconciler picks them up here. In single-node mode this reconcile is the
+	// safety net for wakes interrupted by a process handoff (ZDT upgrade): the
+	// old process may have died mid-driveWakingApp; BeginWake's CAS prevents
+	// re-triggering (status != hibernated); and the inline trigger drive in
+	// WakeTrigger does not run across a process boundary. The watcher already
+	// runs inside ownerWork, so this block is owner-gated on both paths.
+	wakingApps, err := w.store.ListWakingApps()
+	if err != nil {
+		slog.Warn("watcher: list waking apps failed", "err", err)
+	} else {
+		for _, app := range wakingApps {
+			w.driveWakingApp(app.Slug)
 		}
 	}
 }

@@ -460,6 +460,51 @@ func TestPoolSyncer_DeregistersGoneSlug(t *testing.T) {
 	}
 }
 
+// TestPoolSyncer_StartupAdoption asserts that a single RunOnce pass on a fresh
+// proxy with no existing pool registers routable replicas from the DB and calls
+// MarkSynced. This is the startup pool adoption path: a successor process after
+// a zero-downtime handoff calls RunOnce once before the watcher takes ownership,
+// so the data plane is populated immediately rather than waiting ~10s for the
+// ownership lease.
+func TestPoolSyncer_StartupAdoption(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("adopted"))
+	}))
+	defer backend.Close()
+
+	rr := makeReplica("adopted-app", 1, 0, backend.URL, 77)
+	src := &staticSource{rows: []db.RoutableReplica{rr}}
+
+	prx := proxy.New()
+	// Do NOT call prx.MarkSynced() - we are testing that RunOnce does it.
+	if prx.SyncedOnce() {
+		t.Fatal("SyncedOnce must be false before RunOnce")
+	}
+
+	syncer := proxy.NewPoolSyncer(prx, src, noopTransport{}, slog.Default(), false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	syncer.RunOnce(ctx)
+
+	// MarkSynced must have been called by RunOnce.
+	if !prx.SyncedOnce() {
+		t.Error("RunOnce must call MarkSynced so /readyz is not blocked after startup adoption")
+	}
+
+	// The replica must be registered and routable immediately.
+	req := httptest.NewRequest("GET", "/app/adopted-app/", nil)
+	rec := httptest.NewRecorder()
+	prx.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 after startup adoption, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "adopted" {
+		t.Errorf("body = %q, want adopted", rec.Body.String())
+	}
+}
+
 // TestPoolSyncer_RaceClean exercises the syncer goroutine under -race.
 func TestPoolSyncer_RaceClean(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1267,6 +1267,29 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
+	// Startup pool adoption (single-node only): populate the proxy pool from
+	// routable DB replica rows before the listener starts serving, so a ZDT
+	// successor process can route requests to already-running app processes
+	// immediately. Without this the pool is empty until RecoverProcesses runs
+	// inside ownerWork (~10s after boot), causing 10-18s of loading-page
+	// degradation on every handoff.
+	//
+	// Clustered deployments already have a periodic PoolSyncer that runs from
+	// the first tick (and calls RunOnce via its Run loop). Single-node has no
+	// periodic syncer, so a one-shot call here covers the ZDT gap without
+	// changing any other single-node behaviour.
+	//
+	// prx.MarkSynced() was already called above (single-node pre-seeds the
+	// first-sync gate so /readyz is not blocked). RunOnce calls MarkSynced
+	// again, which is idempotent.
+	if !isClustered(cfg) {
+		startupSyncer := proxy.NewPoolSyncer(prx, store,
+			worker.NewReplicaTransportBuilder(nil, store),
+			slog.Default(), cfg.Auth.IdentityHeadersEnabled())
+		startupSyncer.RunOnce(context.Background())
+		slog.Info("startup pool adoption complete (single-node)")
+	}
+
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("listening", "version", version, "addr", addr)
