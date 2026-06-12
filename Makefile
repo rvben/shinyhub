@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test iac-validate
+.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test iac-validate clispec-score
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -152,3 +152,16 @@ iac-validate:
 #   GitHub Actions picks up the v* tag and runs GoReleaser.
 #   Binaries are attached to the GitHub release automatically.
 #   The install script at scripts/install.sh always pulls the latest release.
+
+# clispec-score builds the binary and scores it against The CLI Spec v0.2.
+# Requires clispec >= 0.2.0 installed (cargo install clispec --force).
+# Exits 0 only when score == max. Note: the runtime probes execute a real
+# list command, so full marks requires SHINYHUB_HOST/SHINYHUB_TOKEN pointing
+# at a reachable server; unauthenticated runs lose the four probe checks.
+# The authoritative conformance gate is the local test suite
+# (internal/cli/schema_test.go, cmd/shinyhub/schema_conformance_test.go);
+# this target is an outside-in floor. Pass the probe subcommand explicitly
+# because nested subcommand discovery varies by clispec version.
+clispec-score: build ## Score the binary against clispec (requires clispec >= 0.2.0)
+	@clispec score ./bin/shinyhub apps list --json > /tmp/clispec-score.json || true
+	@python3 -c "import json; d=json.load(open('/tmp/clispec-score.json')); s,m=d['score'],d['max']; print(f'clispec score: {s}/{m}'); raise SystemExit(0 if s==m else 1)"

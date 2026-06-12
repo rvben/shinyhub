@@ -63,17 +63,17 @@ func newEnvCmd() *cobra.Command {
 			return err
 		}
 
-		body, err := json.Marshal(map[string]any{"value": value, "secret": setFlags.secret})
+		bodyBytes, err := json.Marshal(map[string]any{"value": value, "secret": setFlags.secret})
 		if err != nil {
 			return fmt.Errorf("marshal body: %w", err)
 		}
 
-		rawURL := cfg.Host + "/api/apps/" + slug + "/env/" + key
-		if setFlags.restart {
-			rawURL += "?restart=true"
-		}
+		envURL := cfg.Host + "/api/apps/" + slug + "/env/" + key
 
-		req, err := http.NewRequest("PUT", rawURL, bytes.NewReader(body))
+		// Write the env var. The response carries changed:true/false so we can
+		// skip the restart side effect when the value was already set to this
+		// exact value.
+		req, err := http.NewRequest("PUT", envURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return fmt.Errorf("build request: %w", err)
 		}
@@ -86,25 +86,63 @@ func newEnvCmd() *cobra.Command {
 		}
 		defer resp.Body.Close()
 
+		respBody, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			out, _ := io.ReadAll(resp.Body)
-			return httpError(cfg.Token, "set env", resp, out)
+			return httpError(cfg.Token, "set env", resp, respBody)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: set %s\n", slug, key)
-		return nil
+		// Decode the response to check whether the value was actually new.
+		var result map[string]any
+		changed := true // default to changed if we cannot parse the response
+		if json.Unmarshal(respBody, &result) == nil {
+			if v, ok := result["changed"].(bool); ok {
+				changed = v
+			}
+		}
+
+		if !changed {
+			// Value was already set to this exact value; no restart needed.
+			return renderAction(cmd, "unchanged",
+				map[string]any{"slug": slug, "key": key},
+				fmt.Sprintf("%s: %s unchanged", slug, key))
+		}
+
+		// Value changed. If the caller requested a restart, hit the restart
+		// endpoint directly. Re-PUTing the env var would trigger changed=false
+		// (the value is now identical to what we just stored) and skip the
+		// restart inside maybeRestartForChange.
+		if setFlags.restart {
+			restartReq, err := http.NewRequest("POST",
+				cfg.Host+"/api/apps/"+slug+"/restart", nil)
+			if err != nil {
+				return fmt.Errorf("build restart request: %w", err)
+			}
+			restartReq.Header.Set("Authorization", authHeader(cfg.Token))
+			restartResp, err := httpClient.Do(restartReq)
+			if err != nil {
+				return fmt.Errorf("env var saved, but restart failed: %w", err)
+			}
+			defer restartResp.Body.Close()
+			if restartResp.StatusCode >= 400 {
+				restartBody, _ := io.ReadAll(restartResp.Body)
+				return fmt.Errorf("env var saved, but restart failed: %w",
+					httpError(cfg.Token, "restart", restartResp, restartBody))
+			}
+		}
+
+		return renderAction(cmd, "set",
+			map[string]any{"slug": slug, "key": key},
+			fmt.Sprintf("%s: set %s", slug, key))
 	}
 
-	var lsFlags struct {
-		jsonOutput bool
-	}
+	lsF := &listFlags{}
 
 	envLsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List environment variables for an app",
 		Args:  cobra.ExactArgs(1),
 	}
-	envLsCmd.Flags().BoolVar(&lsFlags.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(envLsCmd, lsF)
 	envLsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 
@@ -130,38 +168,32 @@ func newEnvCmd() *cobra.Command {
 			return httpError(cfg.Token, "list env", resp, out)
 		}
 
-		if lsFlags.jsonOutput {
-			fmt.Fprintln(cmd.OutOrStdout(), string(out))
-			return nil
-		}
-
+		// The server wraps env entries under {"env": [...]}.
 		var result struct {
-			Env []struct {
-				Key       string `json:"key"`
-				Value     string `json:"value"`
-				Secret    bool   `json:"secret"`
-				Set       bool   `json:"set"`
-				UpdatedAt int64  `json:"updated_at"`
-			} `json:"env"`
+			Env []map[string]any `json:"env"`
 		}
 		if err := json.Unmarshal(out, &result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 
-		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "%-24s %s\n", "KEY", "VALUE")
-		for _, v := range result.Env {
-			displayValue := v.Value
-			switch {
-			case v.Secret:
-				displayValue = "••••••"
-			case v.Set && v.Value == "":
-				displayValue = "(empty)"
+		return renderList(cmd, lsF, result.Env, nil, func(w io.Writer, items []map[string]any) {
+			fmt.Fprintf(w, "%-24s %s\n", "KEY", "VALUE")
+			for _, v := range items {
+				key := fmt.Sprintf("%v", v["key"])
+				value := fmt.Sprintf("%v", v["value"])
+				secret, _ := v["secret"].(bool)
+				set, _ := v["set"].(bool)
+				displayValue := value
+				switch {
+				case secret:
+					displayValue = "••••••"
+				case set && value == "":
+					displayValue = "(empty)"
+				}
+				row := fmt.Sprintf("%-24s %s", key, displayValue)
+				fmt.Fprintln(w, strings.TrimRight(row, " "))
 			}
-			row := fmt.Sprintf("%-24s %s", v.Key, displayValue)
-			fmt.Fprintln(w, strings.TrimRight(row, " "))
-		}
-		return nil
+		})
 	}
 
 	var rmFlags struct {
@@ -205,8 +237,9 @@ func newEnvCmd() *cobra.Command {
 			return httpError(cfg.Token, "remove env", resp, out)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: removed %s\n", slug, key)
-		return nil
+		return renderAction(cmd, "removed",
+			map[string]any{"slug": slug, "key": key},
+			fmt.Sprintf("%s: removed %s", slug, key))
 	}
 
 	envCmd.AddCommand(envSetCmd, envLsCmd, envRmCmd, newEnvApplyCmd())

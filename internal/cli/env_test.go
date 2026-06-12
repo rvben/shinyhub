@@ -202,6 +202,9 @@ func TestEnvSet_RejectsInvalidKey(t *testing.T) {
 }
 
 func TestEnvSet_RestartFlag(t *testing.T) {
+	// env set --restart uses two requests: a PUT to write the value (response
+	// carries changed:true/false) and, when changed, a POST to the restart
+	// endpoint. The default mock returns {} which the CLI treats as changed=true.
 	_, reqs, _ := setupCLITest(t)
 
 	cmd := newEnvCmd()
@@ -210,23 +213,37 @@ func TestEnvSet_RestartFlag(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(*reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	if len(*reqs) != 2 {
+		t.Fatalf("expected 2 requests (PUT env + POST restart), got %d", len(*reqs))
 	}
-	if !strings.Contains((*reqs)[0].Query, "restart=true") {
-		t.Errorf("expected query to contain restart=true, got %q", (*reqs)[0].Query)
+	// First request: the env write (PUT, no restart param).
+	if (*reqs)[0].Method != "PUT" {
+		t.Errorf("first request method = %s, want PUT", (*reqs)[0].Method)
+	}
+	if strings.Contains((*reqs)[0].Query, "restart") {
+		t.Errorf("env PUT must not carry restart param; got query %q", (*reqs)[0].Query)
+	}
+	// Second request: the app restart (POST to /restart endpoint, no query param).
+	if (*reqs)[1].Method != "POST" {
+		t.Errorf("second request method = %s, want POST", (*reqs)[1].Method)
+	}
+	if !strings.HasSuffix((*reqs)[1].Path, "/restart") {
+		t.Errorf("second request path = %q, want .../restart", (*reqs)[1].Path)
 	}
 }
 
 func TestEnvLs_MasksSecrets(t *testing.T) {
+	resetFormatState(t)
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"env":[{"key":"AWS_REGION","value":"eu-west-1","secret":false,"set":true,"updated_at":1},{"key":"DB_PASS","value":"","secret":true,"set":true,"updated_at":2}]}`)
 
-	cmd := newEnvCmd()
-	cmd.SetArgs([]string{"ls", "demo"})
+	// Use --output table to force table rendering and verify secret masking.
+	// Non-TTY runs default to JSON; the masking is a table-mode display choice.
+	root := testRoot()
 	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	if err := cmd.Execute(); err != nil {
+	root.SetOut(&buf)
+	root.SetArgs([]string{"env", "ls", "demo", "--output", "table"})
+	if err := root.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -240,7 +257,7 @@ func TestEnvLs_MasksSecrets(t *testing.T) {
 	if !strings.Contains(out, "DB_PASS") {
 		t.Error("expected output to contain DB_PASS")
 	}
-	// Secret values should be masked
+	// Secret values should be masked in table mode.
 	if !strings.Contains(out, "••••••") {
 		t.Error("expected output to contain secret mask ••••••")
 	}
@@ -298,5 +315,41 @@ func TestEnvCmd_ServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid key") {
 		t.Errorf("expected error to contain server error text, got: %v", err)
+	}
+}
+
+// TestEnvSet_RestartFlag_RestartFailure verifies that when the env var is saved
+// (PUT returns changed:true) but the restart endpoint returns 500, the CLI
+// exits non-zero with an error that both mentions the value was saved and
+// classifies as server_error.
+func TestEnvSet_RestartFlag_RestartFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PUT":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"changed":true}`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/restart"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"process manager unavailable"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	writeTestCLIConfig(t, srv.URL)
+
+	cmd := newEnvCmd()
+	cmd.SetArgs([]string{"set", "demo", "FOO=bar", "--restart"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when restart returns 500, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(strings.ToLower(msg), "saved") {
+		t.Errorf("error should mention that the value was saved, got: %q", msg)
+	}
+	kind, _ := classify(err)
+	if kind != KindServerError {
+		t.Errorf("error kind = %q, want server_error", kind)
 	}
 }

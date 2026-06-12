@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +16,7 @@ func TestAppsSet_ReplicasOnly(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{}`)
 
-	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3"); err != nil {
+	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3", "--yes"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -92,6 +94,7 @@ func TestAppsSet_CombinedFlags(t *testing.T) {
 		"--replicas", "2",
 		"--max-sessions-per-replica", "15",
 		"--hibernate-timeout", "45",
+		"--yes",
 	); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -367,12 +370,14 @@ func TestAppsSet_RejectsInvalidNegativeHibernateTimeout(t *testing.T) {
 // --no-follow:
 //   - sends ?follow=false on the wire (so the server returns plain text and
 //     closes the connection rather than starting an SSE stream), and
-//   - prints the server response body verbatim with no SSE re-parsing.
+//   - in table mode (-o table) prints one line per server line.
 func TestAppsLogs_NoFollow_PassesFollowFalseAndPrintsBody(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, "alpha\nbeta\ngamma\n")
 
-	out, err := execCLI(t, "apps", "logs", "demo", "--tail", "50", "--no-follow")
+	// Pass -o table explicitly: tests run without a TTY so the default would be
+	// NDJSON (streaming command piped). Table mode is the human-readable path.
+	out, err := execCLI(t, "apps", "logs", "demo", "--tail", "50", "--no-follow", "-o", "table")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -458,6 +463,48 @@ func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("error should contain status code 404, got: %v", err)
+	}
+}
+
+// FORMAT-6: apps logs piped without -o must emit NDJSON log objects (the
+// streaming default for a piped context). Each line from the server is wrapped
+// as {"line":"..."} so consumers can parse structured records. This uses
+// httptest so http.DefaultClient (used for SSE) reaches a real server.
+func TestAppsLogs_Piped_EmitsNDJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: hello world\n\ndata: second line\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	// No -o flag: piped context resolves to NDJSON for streaming commands.
+	out, err := execCLI(t, "apps", "logs", "demo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, out)
+	}
+
+	// Each log line must be a JSON object with a "line" key.
+	for _, raw := range strings.Split(strings.TrimSpace(out), "\n") {
+		if raw == "" {
+			continue
+		}
+		var obj map[string]any
+		if jerr := json.Unmarshal([]byte(raw), &obj); jerr != nil {
+			t.Fatalf("output line is not JSON: %v\nline=%q\nfull output=%q", jerr, raw, out)
+		}
+		if _, ok := obj["line"]; !ok {
+			t.Errorf("NDJSON object missing 'line' key: %v", obj)
+		}
+	}
+	if !strings.Contains(out, "hello world") {
+		t.Errorf("log content missing from output; got: %q", out)
 	}
 }
 
@@ -570,8 +617,8 @@ func TestAppsDelete_WrongConfirmation(t *testing.T) {
 // TestAppsDelete_NonTtyWithoutYesReturnsClearError pins the tty gate. Before
 // the gate, `shinyhub apps delete demo < /dev/null` (a CI/cron pattern) hung
 // on the prompt or surfaced a confusing "read confirmation: EOF". The fix
-// must short-circuit with an error pointing at `--yes` and must NOT issue any
-// DELETE request.
+// must short-circuit with a confirmation_required error whose hint names
+// --yes, and must NOT issue any DELETE request.
 func TestAppsDelete_NonTtyWithoutYesReturnsClearError(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, "")
@@ -584,8 +631,13 @@ func TestAppsDelete_NonTtyWithoutYesReturnsClearError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-tty error pointing at --yes, got nil")
 	}
-	if !strings.Contains(err.Error(), "--yes") {
-		t.Errorf("error should mention `--yes` so automation has a clear path, got: %v", err)
+	kind, _ := classify(err)
+	if kind != KindConfirmationRequired {
+		t.Errorf("error kind = %q, want %q", kind, KindConfirmationRequired)
+	}
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "--yes") {
+		t.Errorf("hint must mention --yes so automation has a clear path, got: %v", err)
 	}
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests when refusing non-tty without --yes, got %d", len(*reqs))
@@ -616,6 +668,8 @@ func TestAppsDelete_PromptGoesToStderr(t *testing.T) {
 }
 
 // TestAppsDeployments lists deployment history.
+// Non-TTY output is the bounded JSON envelope; table rendering is preserved
+// verbatim inside the tableFn closure in runAppsDeployments.
 func TestAppsDeployments(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}]`)
@@ -625,11 +679,12 @@ func TestAppsDeployments(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(out, "ID") {
-		t.Errorf("expected header row with ID, got: %q", out)
+	// Non-TTY output is the standard envelope.
+	if !strings.Contains(out, `"items"`) {
+		t.Errorf("expected envelope with items, got: %q", out)
 	}
-	if !strings.Contains(out, "3") {
-		t.Errorf("expected deployment ID 3, got: %q", out)
+	if !strings.Contains(out, `"total"`) {
+		t.Errorf("expected envelope with total, got: %q", out)
 	}
 }
 
@@ -651,11 +706,10 @@ func TestAppsStart(t *testing.T) {
 	if req.Method != "POST" || req.Path != "/api/apps/demo/restart" {
 		t.Errorf("expected POST /api/apps/demo/restart, got %s %s", req.Method, req.Path)
 	}
-	if !strings.Contains(out, "demo: started") {
-		t.Errorf("expected output to contain 'demo: started', got %q", out)
-	}
-	if strings.Contains(out, "restarted") {
-		t.Errorf("output should say 'started', not 'restarted', got %q", out)
+	// In piped mode the output is a JSON envelope; verify the success envelope
+	// contains the slug and the running status.
+	if !strings.Contains(out, `"slug"`) || !strings.Contains(out, `"running"`) {
+		t.Errorf("expected JSON envelope with slug and running status, got %q", out)
 	}
 }
 
@@ -679,7 +733,7 @@ func TestAppsShow(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo App","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":15,"deploy_count":3,"hibernate_timeout_minutes":null,"memory_limit_mb":512,"cpu_quota_percent":100,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"running","pid":1235,"port":34568}]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -715,7 +769,7 @@ func TestAppsShow_InheritedCapShowsRuntimeDefaultAndCeiling(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -732,7 +786,7 @@ func TestAppsShow_ExplicitCapShowsCeiling(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":3,"max_sessions_per_replica":5,"deploy_count":1},"effective_max_sessions_per_replica":5,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -747,7 +801,7 @@ func TestAppsShow_UnlimitedCap(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"effective_max_sessions_per_replica":0,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -764,7 +818,7 @@ func TestAppsShow_MissingEffectiveCapFallsBackToAppCap(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":7,"deploy_count":1},"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -783,7 +837,7 @@ func TestAppsShow_MissingEffectiveCapInheritedOmitsCeiling(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":0,"deploy_count":1},"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -941,6 +995,25 @@ func TestTokensCreate_FormatBogus(t *testing.T) {
 	}
 }
 
+// TestTokensCreate_FormatTextConflictsWithOutputJson verifies that the
+// resolveLegacyTextJSON conflict path works: --format text (force table mode)
+// combined with -o json (force JSON) is a validation error, not silent
+// override of one flag by the other.
+func TestTokensCreate_FormatTextConflictsWithOutputJson(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "tokens", "create", "--name", "ci", "--format", "text", "-o", "json")
+	if err == nil {
+		t.Fatal("want error for --format text -o json conflict, got nil")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Errorf("exit code = %d, want 1 (validation)", code)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests on conflict error, got %d", len(*reqs))
+	}
+}
+
 // TestTokensRevoke_ByName_OneMatch verifies that --name resolves to the correct
 // token ID and issues a single DELETE request.
 func TestTokensRevoke_ByName_OneMatch(t *testing.T) {
@@ -1091,10 +1164,10 @@ func TestAppsSet_ReplicaChange_YesFlagSkipsPrompt(t *testing.T) {
 	}
 }
 
-// The confirm is TTY-gated: a non-interactive caller (CI, cron, piped script)
-// must proceed without prompting so automation that scales via the CLI keeps
-// working.
-func TestAppsSet_ReplicaChange_NonTTYProceedsWithoutPrompt(t *testing.T) {
+// Non-TTY without --yes must refuse with confirmation_required and make no
+// network call. Automation that wants to scale via the CLI must pass --yes
+// explicitly; this makes the restart side-effect an intentional opt-in.
+func TestAppsSet_ReplicaChange_NonTTYRefusesWithoutYes(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{}`)
 
@@ -1102,11 +1175,19 @@ func TestAppsSet_ReplicaChange_NonTTYProceedsWithoutPrompt(t *testing.T) {
 	t.Cleanup(func() { isStdinTTY = origIsTTY })
 	isStdinTTY = func() bool { return false }
 
-	if _, err := execCLI(t, "apps", "set", "demo", "--replicas", "3"); err != nil {
-		t.Fatalf("unexpected error in non-tty mode: %v", err)
+	_, err := execCLI(t, "apps", "set", "demo", "--replicas", "3")
+	if err == nil {
+		t.Fatal("expected confirmation_required error on non-TTY without --yes, got nil")
 	}
-	if len(*reqs) != 1 || (*reqs)[0].Method != "PATCH" {
-		t.Fatalf("expected one PATCH in non-tty mode, got %#v", *reqs)
+	kind, code := classify(err)
+	if kind != KindConfirmationRequired {
+		t.Errorf("classify(err).kind = %q, want %q", kind, KindConfirmationRequired)
+	}
+	if code != 1 {
+		t.Errorf("classify(err).code = %d, want 1", code)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no PATCH before the refusal, got %d requests", len(*reqs))
 	}
 }
 
@@ -1192,7 +1273,7 @@ func TestAppsShow_RendersRejectsByReason(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":1,"deploy_count":1,"hibernate_timeout_minutes":null,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"effective_max_sessions_per_replica":1,"replicas_status":[],"rejects_by_reason":{"window_seconds":600,"counts":{"pool-saturated":4103,"app-not-ready":12}}}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1214,7 +1295,7 @@ func TestAppsShow_RendersLostReplicaReason(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"degraded","replicas":2,"max_sessions_per_replica":1,"deploy_count":1},"effective_max_sessions_per_replica":1,"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"lost","reason":"worker unavailable"}]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1235,7 +1316,7 @@ func TestAppsShow_RendersAutoscaleEnabled(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":true,"autoscale_min_replicas":1,"autoscale_max_replicas":4,"autoscale_target":0.7},"effective_autoscale_target":0.7,"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1250,7 +1331,7 @@ func TestAppsShow_RendersAutoscaleInheritedTarget(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":true,"autoscale_min_replicas":2,"autoscale_max_replicas":6,"autoscale_target":0},"effective_autoscale_target":0.8,"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1263,7 +1344,7 @@ func TestAppsShow_RendersAutoscaleOff(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":10,"deploy_count":1,"autoscale_enabled":false},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1278,7 +1359,7 @@ func TestAppsShow_OmitsRejectsWhenAbsent(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":1,"deploy_count":1,"hibernate_timeout_minutes":null,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"effective_max_sessions_per_replica":1,"replicas_status":[]}`)
 
-	out, err := execCLI(t, "apps", "show", "demo")
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -65,9 +65,10 @@ import (
 var version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:     "shinyhub",
-	Short:   "ShinyHub — self-hosted platform for deploying and managing Shiny apps",
-	Version: version,
+	Use:           "shinyhub",
+	Short:         "ShinyHub — self-hosted platform for deploying and managing Shiny apps",
+	Version:       version,
+	SilenceErrors: true,
 }
 
 var serveCmd = &cobra.Command{
@@ -90,9 +91,6 @@ var backupCmd = &cobra.Command{
 	Long: "Creates a .tar.gz containing a transactionally consistent SQLite\n" +
 		"snapshot plus the apps and app-data dirs. Safe to run on a live server.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if backupOut == "" {
-			return fmt.Errorf("--out is required")
-		}
 		cfg, err := config.Load(serverConfigPath())
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
@@ -100,8 +98,9 @@ var backupCmd = &cobra.Command{
 		if err := backup.Create(cfg, version, backupOut); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "backup written to %s\n", backupOut)
-		return nil
+		return cli.RenderAction(cmd, "written",
+			map[string]any{"path": backupOut},
+			fmt.Sprintf("backup written to %s", backupOut))
 	},
 }
 
@@ -119,13 +118,14 @@ var restoreCmd = &cobra.Command{
 		}
 		moved, err := backup.Restore(cfg, args[0])
 		for _, p := range moved {
-			fmt.Fprintf(os.Stdout, "previous state preserved at %s\n", p)
+			fmt.Fprintf(cmd.ErrOrStderr(), "previous state preserved at %s\n", p)
 		}
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stdout, "restore complete; start the server to apply any pending migrations")
-		return nil
+		return cli.RenderAction(cmd, "restored",
+			map[string]any{"archive": args[0]},
+			"restore complete; start the server to apply any pending migrations")
 	},
 }
 
@@ -148,17 +148,29 @@ func serverConfigPath() string {
 func init() {
 	cli.SetVersion(version)
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
+	_ = backupCmd.MarkFlagRequired("out")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
 	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
-	rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd())
-	cli.AddCommandsTo(rootCmd)
+}
+
+var buildRootOnce sync.Once
+
+// buildRoot wires the complete command tree: server-side commands plus the
+// client CLI. The sync.Once guard makes it safe for main() and any number of
+// tests to call; registration happens exactly once per process.
+func buildRoot() *cobra.Command {
+	buildRootOnce.Do(func() {
+		rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd())
+		cli.AddCommandsTo(rootCmd)
+	})
+	return rootCmd
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(cli.ExitCode(err))
+	if err := buildRoot().Execute(); err != nil {
+		os.Exit(cli.Report(err))
 	}
 }
 

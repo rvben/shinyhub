@@ -220,7 +220,7 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 		"Plan: %d to create, %d to update, %d to adopt, %d to delete, %d unchanged.",
 		c.Create, c.Update, c.Adopt, c.Delete, c.Unchanged)
 
-	if f.quiet {
+	if quietFlag {
 		fmt.Fprintln(out, summary)
 		return planExit(f, diff)
 	}

@@ -10,7 +10,7 @@ import (
 
 func TestWorkerCommandRegistered(t *testing.T) {
 	var found bool
-	for _, c := range rootCmd.Commands() {
+	for _, c := range buildRoot().Commands() {
 		if c.Name() == "worker" {
 			found = true
 			// Required flags must exist.

@@ -47,24 +47,20 @@ func newTokensCmd() *cobra.Command {
 
 // ── apps list ───────────────────────────────────────────────────────────────
 
-type appsListFlags struct {
-	jsonOutput bool
-}
-
 func newAppsListCmd() *cobra.Command {
-	f := &appsListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all apps",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAppsList(cmd, args, f)
+			return runAppsList(cmd, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsList(cmd *cobra.Command, args []string, f *appsListFlags) error {
+func runAppsList(cmd *cobra.Command, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -83,27 +79,21 @@ func runAppsList(cmd *cobra.Command, args []string, f *appsListFlags) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list apps", resp, out)
 	}
-
-	if f.jsonOutput {
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
-	}
-
 	var apps []map[string]any
 	if err := json.Unmarshal(out, &apps); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
-	if len(apps) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No apps.")
-		return nil
-	}
-	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-20s %-10s %-12s\n", "SLUG", "STATUS", "DEPLOYS")
-	for _, a := range apps {
-		row := fmt.Sprintf("%-20s %-10s %-12v", a["slug"], a["status"], a["deploy_count"])
-		fmt.Fprintln(w, strings.TrimRight(row, " "))
-	}
-	return nil
+	return renderList(cmd, f, apps, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintln(w, "No apps.")
+			return
+		}
+		fmt.Fprintf(w, "%-20s %-10s %-12s\n", "SLUG", "STATUS", "DEPLOYS")
+		for _, a := range items {
+			row := fmt.Sprintf("%-20s %-10s %-12v", a["slug"], a["status"], a["deploy_count"])
+			fmt.Fprintln(w, strings.TrimRight(row, " "))
+		}
+	})
 }
 
 // ── apps show ───────────────────────────────────────────────────────────────
@@ -127,6 +117,10 @@ func newAppsShowCmd() *cobra.Command {
 }
 
 func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
+	format, err := resolveFormat(f.jsonOutput, false)
+	if err != nil {
+		return err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -147,7 +141,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 		return httpError(cfg.Token, "show app", resp, out)
 	}
 
-	if f.jsonOutput {
+	if format == formatJSON {
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
 	}
@@ -333,6 +327,11 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 		return fmt.Errorf("--tail must be between 1 and 10000")
 	}
 
+	format, err := resolveFormat(false, true)
+	if err != nil {
+		return err
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -372,14 +371,28 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 		return httpError(cfg.Token, "stream logs", resp, out)
 	}
 
-	w := cmd.OutOrStdout()
+	sw := newStreamWriter(cmd.OutOrStdout(), format, f.replica)
 	if f.noFollow {
-		_, err := io.Copy(w, resp.Body)
-		return err
+		// Plain-text response: scan lines and route through the stream writer
+		// so NDJSON mode wraps each line correctly.
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			sw.WriteLine(scanner.Text())
+		}
+		return scanner.Err()
 	}
+	// SSE stream: strip framing before handing each line to the writer.
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		fmt.Fprintln(w, scanner.Text())
+		line := scanner.Text()
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue // blank separator or heartbeat comment
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue // ignore non-data SSE fields (event:, id:, retry:)
+		}
+		line = strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
+		sw.WriteLine(line)
 	}
 	return scanner.Err()
 }
@@ -438,12 +451,15 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "rollback", resp, out)
 	}
+	fields := map[string]any{"slug": slug}
+	var prose string
 	if cmd.Flags().Changed("to") {
-		fmt.Printf("%s: rolled back to deployment %d\n", slug, f.deploymentID)
+		fields["deployment_id"] = f.deploymentID
+		prose = fmt.Sprintf("%s: rolled back to deployment %d", slug, f.deploymentID)
 	} else {
-		fmt.Printf("%s: rolled back to previous deployment\n", slug)
+		prose = fmt.Sprintf("%s: rolled back to previous deployment", slug)
 	}
-	return nil
+	return renderAction(cmd, "rolled_back", fields, prose)
 }
 
 // ── apps restart / start ────────────────────────────────────────────────────
@@ -457,21 +473,58 @@ func newAppsRestartCmd() *cobra.Command {
 	}
 }
 
-// newAppsStartCmd is a friendlier alias for `apps restart`. The server's
-// restart endpoint redeploys the current bundle whether the app is running or
-// stopped, so it is also the right verb for "bring this stopped app back up".
+// newAppsStartCmd starts a stopped app without cycling a running one. It sends
+// ?if_not_running=true so the server skips the restart when the app is already
+// running, making the operation idempotent. `apps restart` always cycles the
+// pool regardless of current state.
 func newAppsStartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start <slug>",
-		Short: "Start a stopped app (alias for `restart`)",
+		Short: "Start a stopped app (no-op if already running)",
 		Args:  cobra.ExactArgs(1),
-		RunE:  callRestartAs("started"),
+		RunE:  runAppsStart,
 	}
 }
 
-// callRestartAs hits POST /api/apps/{slug}/restart but reports the action
-// using a different past-tense verb (e.g. "started" instead of "restarted")
-// so `apps start` reads naturally without duplicating the HTTP plumbing.
+func runAppsStart(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart?if_not_running=true", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "start app", resp, body)
+	}
+	// The server returns {"status":"running","note":"already running"} when the
+	// app was already up. Surface the note field so the caller can distinguish
+	// a fresh start from a no-op.
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err == nil {
+		if note, _ := result["note"].(string); note != "" {
+			return renderAction(cmd, "running",
+				map[string]any{"slug": slug, "note": note},
+				fmt.Sprintf("%s: %s", slug, note))
+		}
+	}
+	return renderAction(cmd, "running",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: started", slug))
+}
+
+// callRestartAs hits POST /api/apps/{slug}/restart and reports the action using
+// the given past-tense verb. Unlike runAppsStart it does NOT send
+// ?if_not_running=true, so restart always cycles the pool.
 func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -493,8 +546,9 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 		if resp.StatusCode >= 400 {
 			return httpError(cfg.Token, "start app", resp, out)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", slug, pastTense)
-		return nil
+		return renderAction(cmd, "running",
+			map[string]any{"slug": slug},
+			fmt.Sprintf("%s: %s", slug, pastTense))
 	}
 }
 
@@ -519,8 +573,9 @@ func rollbackOrRestart(action, method string) func(*cobra.Command, []string) err
 		if resp.StatusCode >= 400 {
 			return httpError(cfg.Token, action, resp, out)
 		}
-		fmt.Printf("%s: %s\n", slug, action+"ed")
-		return nil
+		return renderAction(cmd, "running",
+			map[string]any{"slug": slug},
+			fmt.Sprintf("%s: %s", slug, action+"ed"))
 	}
 }
 
@@ -641,18 +696,24 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		}
 	}
 
+	// A replica or tier change restarts the app and drops active sessions.
+	// --yes bypasses the interactive prompt. On a non-TTY without --yes,
+	// refuse before any config or network access so the error is the first
+	// thing the caller sees, not a config-not-found or auth failure.
+	if (replicasChanged || tierChanged) && !f.yes && !isStdinTTY() {
+		return confirmationRequiredError(
+			"changing the replica pool restarts the app and drops active sessions",
+			"--yes")
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	slug := args[0]
 
-	// A replica change restarts the app and drops active sessions, so an
-	// interactive caller must confirm first (mirrors the dashboard's guard).
-	// The prompt is tty-gated: a non-interactive caller (CI, cron, piped
-	// script) proceeds without prompting so automation that scales via the CLI
-	// keeps working. --yes skips the prompt explicitly.
-	if (replicasChanged || tierChanged) && !f.yes && isStdinTTY() {
+	// On a TTY without --yes, prompt interactively before proceeding.
+	if (replicasChanged || tierChanged) && !f.yes {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Changing the replica pool restarts %q and drops active sessions. Continue? [y/N]: ", slug)
 		var confirm string
@@ -730,19 +791,20 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		return httpError(cfg.Token, "update app", resp, out)
 	}
 
+	var lines []string
 	if hibernateChanged {
 		minutes, _ := payload["hibernate_timeout_minutes"].(*int)
 		switch {
 		case minutes == nil:
-			fmt.Printf("%s: hibernate-timeout reset to global default\n", slug)
+			lines = append(lines, fmt.Sprintf("%s: hibernate-timeout reset to global default", slug))
 		case *minutes == 0:
-			fmt.Printf("%s: hibernation disabled\n", slug)
+			lines = append(lines, fmt.Sprintf("%s: hibernation disabled", slug))
 		default:
-			fmt.Printf("%s: hibernate-timeout set to %d minutes\n", slug, *minutes)
+			lines = append(lines, fmt.Sprintf("%s: hibernate-timeout set to %d minutes", slug, *minutes))
 		}
 	}
 	if replicasChanged {
-		fmt.Printf("%s: replicas set to %d\n", slug, f.replicas)
+		lines = append(lines, fmt.Sprintf("%s: replicas set to %d", slug, f.replicas))
 	}
 	if tierChanged {
 		parts := make([]string, 0, len(f.tiers))
@@ -751,13 +813,13 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			parts = append(parts, fmt.Sprintf("%s=%d", name, placement[name]))
 			total += placement[name]
 		}
-		fmt.Printf("%s: placement set to %s (%d replicas)\n", slug, strings.Join(parts, ", "), total)
+		lines = append(lines, fmt.Sprintf("%s: placement set to %s (%d replicas)", slug, strings.Join(parts, ", "), total))
 	}
 	if capChanged {
 		if f.maxSessionsPerReplica == 0 {
-			fmt.Printf("%s: max-sessions-per-replica reset to runtime default\n", slug)
+			lines = append(lines, fmt.Sprintf("%s: max-sessions-per-replica reset to runtime default", slug))
 		} else {
-			fmt.Printf("%s: max-sessions-per-replica set to %d\n", slug, f.maxSessionsPerReplica)
+			lines = append(lines, fmt.Sprintf("%s: max-sessions-per-replica set to %d", slug, f.maxSessionsPerReplica))
 		}
 	}
 	if minWarmReplicasChanged {
@@ -766,24 +828,27 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	if anyAutoscaleChanged {
 		if autoscaleChanged {
 			if f.autoscale {
-				fmt.Printf("%s: autoscale enabled\n", slug)
+				lines = append(lines, fmt.Sprintf("%s: autoscale enabled", slug))
 			} else {
-				fmt.Printf("%s: autoscale disabled\n", slug)
+				lines = append(lines, fmt.Sprintf("%s: autoscale disabled", slug))
 			}
 		}
 		if autoscaleMinChanged {
-			fmt.Printf("%s: autoscale-min set to %d\n", slug, f.autoscaleMin)
+			lines = append(lines, fmt.Sprintf("%s: autoscale-min set to %d", slug, f.autoscaleMin))
 		}
 		if autoscaleMaxChanged {
-			fmt.Printf("%s: autoscale-max set to %d\n", slug, f.autoscaleMax)
+			lines = append(lines, fmt.Sprintf("%s: autoscale-max set to %d", slug, f.autoscaleMax))
 		}
 		if autoscaleTargetChanged {
 			if f.autoscaleTarget == 0 {
-				fmt.Printf("%s: autoscale-target reset to runtime default\n", slug)
+				lines = append(lines, fmt.Sprintf("%s: autoscale-target reset to runtime default", slug))
 			} else {
-				fmt.Printf("%s: autoscale-target set to %.0f%%\n", slug, f.autoscaleTarget*100)
+				lines = append(lines, fmt.Sprintf("%s: autoscale-target set to %.0f%%", slug, f.autoscaleTarget*100))
 			}
 		}
+	}
+	if err := renderAction(cmd, "updated", map[string]any{"slug": slug}, strings.Join(lines, "\n")); err != nil {
+		return err
 	}
 
 	if f.wait {
@@ -824,8 +889,8 @@ func newAppsAccessCmd() *cobra.Command {
 
 func newAppsAccessSetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "set <slug> <public|private|shared>",
-		Short: "Set access level for an app",
+		Use:   "set <slug> <level>",
+		Short: "Set access level for an app (level: public, private, or shared)",
 		Args:  cobra.ExactArgs(2),
 		RunE:  runAppsAccessSet,
 	}
@@ -856,8 +921,9 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "set access", resp, out)
 	}
-	fmt.Printf("%s: access set to %s\n", slug, accessLevel)
-	return nil
+	return renderAction(cmd, "updated",
+		map[string]any{"slug": slug, "access": accessLevel},
+		fmt.Sprintf("%s: access set to %s", slug, accessLevel))
 }
 
 type appsAccessGrantFlags struct {
@@ -909,12 +975,15 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "grant access", resp, out)
 	}
+	fields := map[string]any{"slug": slug, "username": username}
+	var prose string
 	if cmd.Flags().Changed("role") {
-		fmt.Printf("%s: granted %s access to %s\n", slug, f.role, username)
+		fields["role"] = f.role
+		prose = fmt.Sprintf("%s: granted %s access to %s", slug, f.role, username)
 	} else {
-		fmt.Printf("%s: granted access to %s\n", slug, username)
+		prose = fmt.Sprintf("%s: granted access to %s", slug, username)
 	}
-	return nil
+	return renderAction(cmd, "granted", fields, prose)
 }
 
 func newAppsAccessRevokeCmd() *cobra.Command {
@@ -951,16 +1020,13 @@ func runAppsAccessRevoke(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "revoke access", resp, out)
 	}
-	fmt.Printf("%s: revoked access for %s\n", slug, username)
-	return nil
-}
-
-type appsAccessListFlags struct {
-	jsonOutput bool
+	return renderAction(cmd, "revoked",
+		map[string]any{"slug": slug, "username": username},
+		fmt.Sprintf("%s: revoked access for %s", slug, username))
 }
 
 func newAppsAccessListCmd() *cobra.Command {
-	f := &appsAccessListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "list <slug>",
 		Short: "List members granted access to an app",
@@ -969,11 +1035,11 @@ func newAppsAccessListCmd() *cobra.Command {
 			return runAppsAccessList(cmd, args, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsAccessList(cmd *cobra.Command, args []string, f *appsAccessListFlags) error {
+func runAppsAccessList(cmd *cobra.Command, args []string, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -993,26 +1059,21 @@ func runAppsAccessList(cmd *cobra.Command, args []string, f *appsAccessListFlags
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list members", resp, out)
 	}
-	if f.jsonOutput {
-		fmt.Println(string(out))
-		return nil
-	}
-	var members []struct {
-		UserID   int64  `json:"user_id"`
-		Username string `json:"username"`
-		Role     string `json:"role"`
-	}
+	var members []map[string]any
 	if err := json.Unmarshal(out, &members); err != nil {
 		return fmt.Errorf("parse response: %w", err)
 	}
-	if len(members) == 0 {
-		fmt.Printf("%s: no members\n", slug)
-		return nil
-	}
-	for _, m := range members {
-		fmt.Printf("%-20s %s\n", m.Username, m.Role)
-	}
-	return nil
+	return renderList(cmd, f, members, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintf(w, "%s: no members\n", slug)
+			return
+		}
+		for _, m := range items {
+			username := fmt.Sprintf("%v", m["username"])
+			role := fmt.Sprintf("%v", m["role"])
+			fmt.Fprintf(w, "%-20s %s\n", username, role)
+		}
+	})
 }
 
 // ── apps access group-grant / group-revoke / group-list ─────────────────────
@@ -1061,10 +1122,11 @@ func runAppsAccessGroupGrant(cmd *cobra.Command, args []string, f *appsAccessGro
 		return httpError(cfg.Token, "grant group access", resp, out)
 	}
 	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
-		fmt.Printf("warning: %s\n", warn)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
-	fmt.Printf("%s: granted %s access to group %s\n", slug, f.role, group)
-	return nil
+	return renderAction(cmd, "granted",
+		map[string]any{"slug": slug, "group": group, "role": f.role},
+		fmt.Sprintf("%s: granted %s access to group %s", slug, f.role, group))
 }
 
 func newAppsAccessGroupRevokeCmd() *cobra.Command {
@@ -1096,16 +1158,13 @@ func runAppsAccessGroupRevoke(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "revoke group access", resp, out)
 	}
-	fmt.Printf("%s: revoked access for group %s\n", slug, group)
-	return nil
-}
-
-type appsAccessGroupListFlags struct {
-	jsonOutput bool
+	return renderAction(cmd, "revoked",
+		map[string]any{"slug": slug, "group": group},
+		fmt.Sprintf("%s: revoked access for group %s", slug, group))
 }
 
 func newAppsAccessGroupListCmd() *cobra.Command {
-	f := &appsAccessGroupListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "group-list <slug>",
 		Short: "List IdP group access rules for an app",
@@ -1114,11 +1173,11 @@ func newAppsAccessGroupListCmd() *cobra.Command {
 			return runAppsAccessGroupList(cmd, args, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *appsAccessGroupListFlags) error {
+func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -1138,25 +1197,21 @@ func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *appsAccessGrou
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list group access", resp, out)
 	}
-	if f.jsonOutput {
-		fmt.Println(string(out))
-		return nil
-	}
-	var rules []struct {
-		Group string `json:"group"`
-		Role  string `json:"role"`
-	}
+	var rules []map[string]any
 	if err := json.Unmarshal(out, &rules); err != nil {
 		return fmt.Errorf("parse response: %w", err)
 	}
-	if len(rules) == 0 {
-		fmt.Printf("%s: no group rules\n", slug)
-		return nil
-	}
-	for _, r := range rules {
-		fmt.Printf("%-20s %s\n", r.Group, r.Role)
-	}
-	return nil
+	return renderList(cmd, f, rules, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintf(w, "%s: no group rules\n", slug)
+			return
+		}
+		for _, r := range items {
+			group := fmt.Sprintf("%v", r["group"])
+			role := fmt.Sprintf("%v", r["role"])
+			fmt.Fprintf(w, "%-20s %s\n", group, role)
+		}
+	})
 }
 
 // ── tokens create ───────────────────────────────────────────────────────────
@@ -1194,7 +1249,15 @@ func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) er
 	case "text", "json":
 		// valid
 	default:
-		return fmt.Errorf("--format must be %q or %q, got %q", "text", "json", f.format)
+		return validationErr(fmt.Sprintf("--format must be %q or %q, got %q", "text", "json", f.format), "")
+	}
+	// --format text/json is a legacy selector that maps onto the global output
+	// format. Treat --format json like --json (legacy alias) and --format text
+	// like --output table (explicit table request). Conflicts follow the same
+	// rule as --json vs --output table: error on mismatch.
+	format, err := resolveLegacyTextJSON(f.format)
+	if err != nil {
+		return err
 	}
 
 	cfg, err := loadConfig()
@@ -1224,7 +1287,7 @@ func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) er
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
-	if f.format == "json" {
+	if format == formatJSON {
 		out, err := json.Marshal(result)
 		if err != nil {
 			return err
@@ -1263,12 +1326,13 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 
 	if !f.yes {
 		// Without --yes the destructive `apps delete` flow REQUIRES a
-		// confirmation. When stdin isn't a tty (CI, cron, `< /dev/null`,
-		// piped scripts) the previous code blocked forever on the read or
-		// surfaced a confusing "read confirmation: EOF". Refuse fast with
-		// a message that points at --yes so automation has a clear path.
+		// confirmation. When stdin is not a TTY (CI, cron, `< /dev/null`,
+		// piped scripts) refuse with a structured error that names --yes so
+		// automation has a clear, actionable path.
 		if !isStdinTTY() {
-			return fmt.Errorf("apps delete requires interactive confirmation; pass --yes to skip the prompt for non-interactive use")
+			return confirmationRequiredError(
+				"apps delete requires interactive confirmation",
+				"--yes")
 		}
 		// Prompt goes to stderr so a `shinyhub apps delete foo | tee log`
 		// pipeline keeps stdout for the success line only.
@@ -1298,11 +1362,21 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// The app does not exist; the desired outcome (absent) is already in
+		// place. Write a notice to stderr so a typo'd slug is visible to the
+		// caller, then exit 0 with status "absent".
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: app %q did not exist\n", slug)
+		return renderAction(cmd, "absent",
+			map[string]any{"slug": slug},
+			fmt.Sprintf("%s: already absent", slug))
+	}
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "delete app", resp, out)
 	}
-	fmt.Printf("%s: deleted\n", slug)
-	return nil
+	return renderAction(cmd, "deleted",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: deleted", slug))
 }
 
 // ── apps stop ───────────────────────────────────────────────────────────────
@@ -1336,18 +1410,15 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "stop app", resp, out)
 	}
-	fmt.Printf("%s: stopped\n", slug)
-	return nil
+	return renderAction(cmd, "stopped",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: stopped", slug))
 }
 
 // ── apps deployments ────────────────────────────────────────────────────────
 
-type appsDeploymentsFlags struct {
-	jsonOutput bool
-}
-
 func newAppsDeploymentsCmd() *cobra.Command {
-	f := &appsDeploymentsFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "deployments <slug>",
 		Short: "List deployment history for an app",
@@ -1356,11 +1427,11 @@ func newAppsDeploymentsCmd() *cobra.Command {
 			return runAppsDeployments(cmd, args, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runAppsDeployments(cmd *cobra.Command, args []string, f *appsDeploymentsFlags) error {
+func runAppsDeployments(cmd *cobra.Command, args []string, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -1380,36 +1451,28 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *appsDeploymentsFla
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "list deployments", resp, out)
 	}
-
-	if f.jsonOutput {
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
-	}
-
-	var deployments []struct {
-		ID        int64  `json:"id"`
-		Version   string `json:"version"`
-		Status    string `json:"status"`
-		CreatedAt string `json:"created_at"`
-	}
+	var deployments []map[string]any
 	if err := json.Unmarshal(out, &deployments); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
-	if len(deployments) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No deployments.")
-		return nil
-	}
-	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-6s %-20s %-12s %s\n", "ID", "VERSION", "STATUS", "CREATED")
-	for _, d := range deployments {
-		created := d.CreatedAt
-		if len(created) > 19 {
-			created = created[:19]
+	return renderList(cmd, f, deployments, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintln(w, "No deployments.")
+			return
 		}
-		row := fmt.Sprintf("%-6d %-20s %-12s %s", d.ID, d.Version, d.Status, created)
-		fmt.Fprintln(w, strings.TrimRight(row, " "))
-	}
-	return nil
+		fmt.Fprintf(w, "%-6s %-20s %-12s %s\n", "ID", "VERSION", "STATUS", "CREATED")
+		for _, d := range items {
+			id := fmt.Sprintf("%v", d["id"])
+			version := fmt.Sprintf("%v", d["version"])
+			status := fmt.Sprintf("%v", d["status"])
+			created := fmt.Sprintf("%v", d["created_at"])
+			if len(created) > 19 {
+				created = created[:19]
+			}
+			row := fmt.Sprintf("%-6s %-20s %-12s %s", id, version, status, created)
+			fmt.Fprintln(w, strings.TrimRight(row, " "))
+		}
+	})
 }
 
 // ── tokens list ─────────────────────────────────────────────────────────────
@@ -1444,67 +1507,59 @@ func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
 	return tokens, nil
 }
 
-type tokensListFlags struct {
-	jsonOutput bool
-}
-
 func newTokensListCmd() *cobra.Command {
-	f := &tokensListFlags{}
+	f := &listFlags{}
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List your API tokens",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTokensList(cmd, args, f)
+			return runTokensList(cmd, f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(cmd, f)
 	return cmd
 }
 
-func runTokensList(cmd *cobra.Command, args []string, f *tokensListFlags) error {
+func runTokensList(cmd *cobra.Command, f *listFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-
-	if f.jsonOutput {
-		req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "list tokens", resp, out)
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
+	req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
 	}
-
-	tokens, err := fetchTokens(cfg)
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
-	if len(tokens) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No tokens.")
-		return nil
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "list tokens", resp, out)
 	}
-	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-6s %-24s %s\n", "ID", "NAME", "CREATED")
-	for _, t := range tokens {
-		created := t.CreatedAt
-		if len(created) > 19 {
-			created = created[:19]
+	var tokens []map[string]any
+	if err := json.Unmarshal(out, &tokens); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return renderList(cmd, f, tokens, nil, func(w io.Writer, items []map[string]any) {
+		if len(items) == 0 {
+			fmt.Fprintln(w, "No tokens.")
+			return
 		}
-		row := fmt.Sprintf("%-6d %-24s %s", t.ID, t.Name, created)
-		fmt.Fprintln(w, strings.TrimRight(row, " "))
-	}
-	return nil
+		fmt.Fprintf(w, "%-6s %-24s %s\n", "ID", "NAME", "CREATED")
+		for _, t := range items {
+			id := fmt.Sprintf("%v", t["id"])
+			name := fmt.Sprintf("%v", t["name"])
+			created := fmt.Sprintf("%v", t["created_at"])
+			if len(created) > 19 {
+				created = created[:19]
+			}
+			row := fmt.Sprintf("%-6s %-24s %s", id, name, created)
+			fmt.Fprintln(w, strings.TrimRight(row, " "))
+		}
+	})
 }
 
 // ── tokens revoke ───────────────────────────────────────────────────────────
@@ -1581,6 +1636,7 @@ func runTokensRevoke(cmd *cobra.Command, args []string, f *tokensRevokeFlags) er
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "revoke token", resp, out)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "token %s: revoked\n", tokenID)
-	return nil
+	return renderAction(cmd, "revoked",
+		map[string]any{"token_id": tokenID},
+		fmt.Sprintf("token %s: revoked", tokenID))
 }

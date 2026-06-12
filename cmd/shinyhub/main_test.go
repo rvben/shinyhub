@@ -7,41 +7,42 @@ import (
 )
 
 func TestRootCmd_HasServeSubcommand(t *testing.T) {
-	for _, sub := range rootCmd.Commands() {
+	for _, sub := range buildRoot().Commands() {
 		if sub.Name() == "serve" {
 			return
 		}
 	}
-	t.Fatalf("rootCmd does not have a `serve` subcommand; has: %v", rootCmd.Commands())
+	t.Fatalf("rootCmd does not have a `serve` subcommand; has: %v", buildRoot().Commands())
 }
 
 func TestRootCmd_HasDeploySubcommand(t *testing.T) {
-	for _, sub := range rootCmd.Commands() {
+	for _, sub := range buildRoot().Commands() {
 		if sub.Name() == "deploy" {
 			return
 		}
 	}
-	t.Fatalf("rootCmd does not have a `deploy` subcommand (CLI tree not grafted); has: %v", rootCmd.Commands())
+	t.Fatalf("rootCmd does not have a `deploy` subcommand (CLI tree not grafted); has: %v", buildRoot().Commands())
 }
 
 func TestRootCmd_UseIsShinyhub(t *testing.T) {
-	if rootCmd.Use != "shinyhub" {
-		t.Fatalf("rootCmd.Use = %q, want \"shinyhub\"", rootCmd.Use)
+	if buildRoot().Use != "shinyhub" {
+		t.Fatalf("rootCmd.Use = %q, want \"shinyhub\"", buildRoot().Use)
 	}
 }
 
 func TestRootCmd_VersionMatchesLdflags(t *testing.T) {
 	// main's `version` var is "dev" in tests (no ldflags). Confirm it's wired
 	// into the cobra Version field so `shinyhub --version` reports something.
-	if rootCmd.Version == "" {
+	if buildRoot().Version == "" {
 		t.Fatal("rootCmd.Version is empty; should be set to the ldflags-injected version")
 	}
 }
 
 func TestRootCmd_HelpMentionsShinyhub(t *testing.T) {
-	out := rootCmd.Short + " " + rootCmd.Long
+	root := buildRoot()
+	out := root.Short + " " + root.Long
 	if !strings.Contains(strings.ToLower(out), "shinyhub") {
-		t.Fatalf("rootCmd help does not mention shinyhub: Short=%q Long=%q", rootCmd.Short, rootCmd.Long)
+		t.Fatalf("rootCmd help does not mention shinyhub: Short=%q Long=%q", root.Short, root.Long)
 	}
 }
 

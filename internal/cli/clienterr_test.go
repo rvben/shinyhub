@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,5 +146,51 @@ func TestAppsList_ExpiredSessionSurfacesLoginHint(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "session expired") || !strings.Contains(msg, "shinyhub login") {
 		t.Errorf("expected session-expired login hint, got %q", msg)
+	}
+}
+
+// TestHTTPError_ReturnsTypedStatusError verifies httpError returns a
+// *httpStatusError carrying the status code, so the root classifier can map
+// status to kind without string parsing.
+func TestHTTPError_ReturnsTypedStatusError(t *testing.T) {
+	resp := &http.Response{StatusCode: 404, Status: "404 Not Found"}
+	err := httpError("shk_sometoken", "show app", resp, []byte(`{"error":"no such app"}`))
+	var hse *httpStatusError
+	if !errors.As(err, &hse) {
+		t.Fatalf("httpError did not return *httpStatusError: %T %v", err, err)
+	}
+	if hse.Status != 404 {
+		t.Errorf("Status = %d, want 404", hse.Status)
+	}
+	if got, want := err.Error(), "show app (404 Not Found): no such app"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestHTTPError_SessionExpiredKeepsTypedStatus verifies the JWT-expiry special
+// case still carries the 401 status for classification.
+func TestHTTPError_SessionExpiredKeepsTypedStatus(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"
+	resp := &http.Response{StatusCode: 401, Status: "401 Unauthorized"}
+	err := httpError(jwt, "list apps", resp, nil)
+	var hse *httpStatusError
+	if !errors.As(err, &hse) {
+		t.Fatalf("session-expired error is not *httpStatusError: %T", err)
+	}
+	if hse.Status != 401 {
+		t.Errorf("Status = %d, want 401", hse.Status)
+	}
+	if got := err.Error(); got != "session expired - run `shinyhub login` to sign in again" {
+		t.Errorf("Error() = %q", got)
+	}
+}
+
+// TestLoginFailedError_IsTyped verifies the login 401 path returns a typed
+// status error so login failures classify as auth, not internal.
+func TestLoginFailedError_IsTyped(t *testing.T) {
+	err := loginFailedError(&http.Response{StatusCode: 401, Status: "401 Unauthorized"})
+	var hse *httpStatusError
+	if !errors.As(err, &hse) || hse.Status != 401 {
+		t.Fatalf("login failure not typed: %T %v", err, err)
 	}
 }

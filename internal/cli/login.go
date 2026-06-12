@@ -85,6 +85,11 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 			}
 			f.password = p
 		}
+	} else if f.username == "" || f.password == "" {
+		// Non-TTY with missing credentials: fail fast with a structured
+		// validation error that names the flags needed for non-interactive
+		// login, rather than forwarding empty values to the server.
+		return loginMissingCredsError()
 	}
 
 	body, _ := json.Marshal(map[string]string{"username": f.username, "password": f.password})
@@ -94,7 +99,7 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("login failed: %s", resp.Status)
+		return loginFailedError(resp)
 	}
 	var result struct {
 		Token string `json:"token"`
@@ -175,13 +180,12 @@ func verifyToken(host, token string) error {
 		return fmt.Errorf("connect to server: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, out)
-	}
 	if resp.StatusCode >= 400 {
 		out, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %s: %s", resp.Status, out)
+		return &httpStatusError{
+			Status: resp.StatusCode,
+			msg:    fmt.Sprintf("server returned %s: %s", resp.Status, out),
+		}
 	}
 	return nil
 }

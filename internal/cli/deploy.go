@@ -171,20 +171,26 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			f.visibility, strings.Join(db.ValidAppVisibilities, ", "))
 	}
 
-	fmt.Printf("Bundling %s...\n", abs)
+	format, err := resolveFormat(false, false)
+	if err != nil {
+		return err
+	}
+	errW := cmd.ErrOrStderr()
+
+	fmt.Fprintf(errW, "Bundling %s...\n", abs)
 	bundleBuf, summary, err := zipDir(abs)
 	if err != nil {
 		return fmt.Errorf("bundle: %w", err)
 	}
 	if summary != "" {
-		fmt.Fprintln(os.Stderr, summary)
+		fmt.Fprintln(errW, summary)
 	}
 
 	if err := ensureApp(cfg, slug, f.visibility); err != nil {
 		return err
 	}
 
-	fmt.Printf("Deploying %s to %s...\n", slug, cfg.Host)
+	fmt.Fprintf(errW, "Deploying %s to %s...\n", slug, cfg.Host)
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, _ := writer.CreateFormFile("bundle", "bundle.zip")
@@ -210,46 +216,64 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		return httpError(cfg.Token, "deploy", resp, out)
 	}
 
-	// Extract deployment number from the response so we can print a clean summary.
+	// Extract fields from the response for the result envelope and human summary.
 	var appResp map[string]any
 	deployCount := 0
+	currentVersion := ""
 	if err := json.Unmarshal(out, &appResp); err == nil {
 		if v, ok := appResp["deploy_count"].(float64); ok {
 			deployCount = int(v)
 		}
+		if v, ok := appResp["current_version"].(string); ok {
+			currentVersion = v
+		}
 	}
-	if deployCount > 0 {
-		fmt.Printf("Deployed %s (deployment #%d)\nURL: %s/app/%s/\n", slug, deployCount, cfg.Host, slug)
+
+	stdOut := cmd.OutOrStdout()
+	if format == formatJSON {
+		// In JSON mode, all prose goes to stderr; one result object on stdout.
+		if deployCount > 0 {
+			fmt.Fprintf(errW, "Deployed %s (deployment #%d)\nURL: %s/app/%s/\n", slug, deployCount, cfg.Host, slug)
+		} else {
+			fmt.Fprintf(errW, "Deployed %s\nURL: %s/app/%s/\n", slug, cfg.Host, slug)
+		}
+		for _, line := range formatManifestSummary(appResp["manifest"]) {
+			fmt.Fprintln(errW, line)
+		}
 	} else {
-		fmt.Printf("Deployed %s\nURL: %s/app/%s/\n", slug, cfg.Host, slug)
-	}
-	for _, line := range formatManifestSummary(appResp["manifest"]) {
-		fmt.Println(line)
+		if deployCount > 0 {
+			fmt.Fprintf(stdOut, "Deployed %s (deployment #%d)\nURL: %s/app/%s/\n", slug, deployCount, cfg.Host, slug)
+		} else {
+			fmt.Fprintf(stdOut, "Deployed %s\nURL: %s/app/%s/\n", slug, cfg.Host, slug)
+		}
+		for _, line := range formatManifestSummary(appResp["manifest"]) {
+			fmt.Fprintln(stdOut, line)
+		}
 	}
 	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" {
-		fmt.Fprintln(os.Stderr, warn)
+		fmt.Fprintln(errW, warn)
 	}
 
 	refs := firstFireRefsFromDeployResponse(out)
 	for _, ref := range refs {
-		fmt.Printf("%s: first-fire triggered (run #%d)\n", ref.Schedule, ref.RunID)
+		fmt.Fprintf(errW, "%s: first-fire triggered (run #%d)\n", ref.Schedule, ref.RunID)
 	}
 	if f.waitForWarm && len(refs) > 0 {
 		timeout := time.Duration(f.waitTimeout) * time.Second
 		var firstFireErr error
 		for _, ref := range refs {
 			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
-			status, werr := waitForFirstFireLoop(poll, timeout, healthPollInterval, 15*time.Second, time.Now, time.Sleep, os.Stdout, ref.Schedule)
+			status, werr := waitForFirstFireLoop(poll, timeout, healthPollInterval, 15*time.Second, time.Now, time.Sleep, errW, ref.Schedule)
 			switch {
 			case werr != nil:
 				// A timeout or transient poll error is not a hard failure: the run
 				// may still be warming and the next deploy self-heals. This matches
 				// fleet apply, which also treats an unfinished wait as non-fatal.
-				fmt.Fprintf(os.Stderr, "%s: first-fire not confirmed: %v (warming may still be in progress)\n", ref.Schedule, werr)
+				fmt.Fprintf(errW, "%s: first-fire not confirmed: %v (warming may still be in progress)\n", ref.Schedule, werr)
 			case status == "skipped_overlap":
-				fmt.Printf("%s: first-fire skipped (another run is warming the cache); warming in progress\n", ref.Schedule)
+				fmt.Fprintf(errW, "%s: first-fire skipped (another run is warming the cache); warming in progress\n", ref.Schedule)
 			case firstFireStatusOK(status):
-				fmt.Printf("%s: first-fire %s\n", ref.Schedule, status)
+				fmt.Fprintf(errW, "%s: first-fire %s\n", ref.Schedule, status)
 			default:
 				// Dump the failed run's own log so the operator sees why the warm-up
 				// failed.
@@ -263,7 +287,22 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 
 	if f.wait {
-		if err := waitForHealthy(cfg, slug, time.Duration(f.waitTimeout)*time.Second); err != nil {
+		if err := waitForHealthyWithOutput(cfg, slug, time.Duration(f.waitTimeout)*time.Second, errW); err != nil {
+			return err
+		}
+	}
+
+	if format == formatJSON {
+		// deploy_count and version are always present so consumers can rely on
+		// these keys existing. deploy_count is 0 when the server omits it (older
+		// servers); version is "" when the server does not report one.
+		result := map[string]any{
+			"status":       "deployed",
+			"slug":         slug,
+			"deploy_count": deployCount,
+			"version":      currentVersion,
+		}
+		if err := json.NewEncoder(stdOut).Encode(result); err != nil {
 			return err
 		}
 	}
@@ -291,33 +330,33 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 // are treated as transient and keep the loop going.
 func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
 	deadline := time.Now().Add(timeout)
-	fmt.Printf("Waiting for %s to be healthy", slug)
+	fmt.Fprintf(errOut, "Waiting for %s to be healthy", slug)
 	var lastErr error
 	var lastPollOK bool
 	for time.Now().Before(deadline) {
 		ready, status, err := pollAppStatus(cfg, slug)
 		if err == nil && ready {
-			fmt.Println(" ready.")
+			fmt.Fprintln(errOut, " ready.")
 			return nil
 		}
 		lastPollOK = err == nil
 		if err != nil {
 			lastErr = err
-			var he *httpStatusError
+			var he *deployHTTPError
 			if errors.As(err, &he) && he.fatal() {
-				fmt.Println()
+				fmt.Fprintln(errOut)
 				return fmt.Errorf("checking %s: %w", slug, err)
 			}
 		}
 		if isTerminalStatus(status) {
-			fmt.Println()
+			fmt.Fprintln(errOut)
 			printLogTail(cfg, slug, errOut)
 			return fmt.Errorf("%s %s during startup - check logs above or run: shinyhub apps logs %s", slug, status, slug)
 		}
-		fmt.Print(".")
+		fmt.Fprint(errOut, ".")
 		time.Sleep(healthPollInterval)
 	}
-	fmt.Println()
+	fmt.Fprintln(errOut)
 	printLogTail(cfg, slug, errOut)
 	// If the most recent poll could not reach the app, surface that error: we
 	// have no fresh evidence the app is merely still booting, and a persistent
@@ -364,7 +403,7 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", resp.Status)
 		return
 	}
-	lines := parseSSELines(resp.Body, tailLines)
+	lines := parsePlainLines(resp.Body, tailLines)
 	if len(lines) == 0 {
 		return
 	}
@@ -375,15 +414,16 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 	fmt.Fprintf(w, "--- run `shinyhub apps logs %s` for full logs ---\n", slug)
 }
 
-// parseSSELines reads Server-Sent Events from r and returns the last n
-// non-empty data lines. Comment lines (starting with ':') are ignored.
-func parseSSELines(r io.Reader, n int) []string {
+// parsePlainLines reads a plain-text response body (one log line per line,
+// as returned by GET /api/apps/{slug}/logs?follow=false) and returns the last
+// n non-empty lines.
+func parsePlainLines(r io.Reader, n int) []string {
 	var all []string
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			all = append(all, strings.TrimPrefix(line, "data: "))
+		if line != "" {
+			all = append(all, line)
 		}
 	}
 	if len(all) <= n {
@@ -392,24 +432,24 @@ func parseSSELines(r io.Reader, n int) []string {
 	return all[len(all)-n:]
 }
 
-// httpStatusError carries the response status code and body so callers can
+// deployHTTPError carries the response status code and body so callers can
 // distinguish fatal (4xx) from transient (5xx) HTTP failures while still
 // surfacing the server's error envelope to the user.
-type httpStatusError struct {
+type deployHTTPError struct {
 	statusCode int
 	body       string
 }
 
-func (e *httpStatusError) Error() string {
+func (e *deployHTTPError) Error() string {
 	if e.body != "" {
 		return fmt.Sprintf("HTTP %d: %s", e.statusCode, strings.TrimSpace(e.body))
 	}
 	return fmt.Sprintf("HTTP %d", e.statusCode)
 }
 
-// fatal returns true for 4xx codes — auth, not-found, forbidden — which won't
+// fatal returns true for 4xx codes - auth, not-found, forbidden - which won't
 // resolve themselves on retry. 5xx is treated as transient.
-func (e *httpStatusError) fatal() bool {
+func (e *deployHTTPError) fatal() bool {
 	return e.statusCode >= 400 && e.statusCode < 500
 }
 
@@ -419,7 +459,7 @@ func (e *httpStatusError) fatal() bool {
 // `defer` inside the loop would keep bodies open for the lifetime of the
 // command on long --wait-timeout values.
 //
-// A non-2xx response is returned as an *httpStatusError so the caller can
+// A non-2xx response is returned as a *deployHTTPError so the caller can
 // distinguish "permanent" failures (401/403/404) from transient ones (5xx).
 func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
@@ -434,7 +474,7 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return false, "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+		return false, "", &deployHTTPError{statusCode: resp.StatusCode, body: string(body)}
 	}
 	var result struct {
 		App struct {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -110,12 +111,13 @@ func TestRunLogin_PromptsForPasswordWhenStdinIsTTY(t *testing.T) {
 }
 
 // TestRunLogin_NoPromptWhenStdinIsPipe guards the script-friendly path. When
-// stdin is not a tty (e.g. the user pipes credentials from a secrets manager),
-// the login command must not block on a prompt — it should pass the empty
-// flags through unchanged so the server's existing 401 surfaces with the same
-// behaviour as before.
+// stdin is not a tty and credentials are missing, the login command must fail
+// fast with a validation error that names --username/--password/--token rather
+// than blocking on a prompt or forwarding empty values to the server.
 func TestRunLogin_NoPromptWhenStdinIsPipe(t *testing.T) {
+	var serverCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverCalled = true
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 	}))
@@ -131,16 +133,26 @@ func TestRunLogin_NoPromptWhenStdinIsPipe(t *testing.T) {
 		return "", nil
 	}
 
+	// Only username provided; password is missing - must fail fast without a
+	// network call.
 	f := &loginFlags{host: srv.URL, username: "alice"}
 
 	cmd := &cobra.Command{}
 	cmd.SetOut(io.Discard)
 	err := runLogin(cmd, f)
 	if err == nil {
-		t.Fatal("expected 401 error from server, got nil")
+		t.Fatal("expected validation error for missing credentials, got nil")
 	}
-	if !strings.Contains(err.Error(), "401") {
-		t.Errorf("error should surface server status, got: %v", err)
+	kind, _ := classify(err)
+	if kind != KindValidation {
+		t.Errorf("error kind = %q, want %q", kind, KindValidation)
+	}
+	if serverCalled {
+		t.Error("server must not be called when credentials are missing on non-TTY")
+	}
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "--username") {
+		t.Errorf("hint must name --username, got: %v", err)
 	}
 }
 

@@ -173,3 +173,16 @@ func TestManifestCmd_RegisteredWithRoot(t *testing.T) {
 		t.Error("expected 'manifest' command to be registered with root")
 	}
 }
+
+// FORMAT-2: manifest validate is a document command; -o ndjson must be
+// rejected with a KindValidation error before any filesystem access.
+func TestManifestValidate_NdjsonRejected(t *testing.T) {
+	dir := t.TempDir()
+	_, err := execCLI(t, "manifest", "validate", dir, "-o", "ndjson")
+	if err == nil {
+		t.Fatal("want error for -o ndjson on manifest validate, got nil")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Errorf("exit code = %d, want 1 (validation)", code)
+	}
+}

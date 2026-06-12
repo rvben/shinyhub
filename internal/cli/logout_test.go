@@ -122,12 +122,12 @@ func TestLogout_WarnsWhenEnvCredsRemain(t *testing.T) {
 		t.Fatalf("runLogout: %v", err)
 	}
 
-	out := stdout.String()
-	if !strings.Contains(out, "SHINYHUB_TOKEN") {
-		t.Fatalf("expected logout output to warn about SHINYHUB_TOKEN env var; got:\n%s", out)
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "SHINYHUB_TOKEN") {
+		t.Fatalf("expected logout stderr to warn about SHINYHUB_TOKEN env var; got:\n%s", errOut)
 	}
-	if !strings.Contains(out, "unset SHINYHUB_HOST SHINYHUB_TOKEN") {
-		t.Fatalf("expected logout output to suggest `unset SHINYHUB_HOST SHINYHUB_TOKEN` (both vars are set); got:\n%s", out)
+	if !strings.Contains(errOut, "unset SHINYHUB_HOST SHINYHUB_TOKEN") {
+		t.Fatalf("expected logout stderr to suggest `unset SHINYHUB_HOST SHINYHUB_TOKEN` (both vars are set); got:\n%s", errOut)
 	}
 }
 
@@ -152,20 +152,21 @@ func TestLogout_WarnsWhenOnlyTokenEnvSet(t *testing.T) {
 		t.Fatalf("save config: %v", err)
 	}
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd := newLogoutCmd()
 	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 
 	if err := runLogout(cmd, nil); err != nil {
 		t.Fatalf("runLogout: %v", err)
 	}
 
-	out := stdout.String()
-	if !strings.Contains(out, "unset SHINYHUB_TOKEN") {
-		t.Fatalf("expected logout output to suggest `unset SHINYHUB_TOKEN`; got:\n%s", out)
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "unset SHINYHUB_TOKEN") {
+		t.Fatalf("expected logout stderr to suggest `unset SHINYHUB_TOKEN`; got:\n%s", errOut)
 	}
-	if strings.Contains(out, "SHINYHUB_HOST") {
-		t.Fatalf("expected warning to mention only SHINYHUB_TOKEN (HOST not set); got:\n%s", out)
+	if strings.Contains(errOut, "SHINYHUB_HOST") {
+		t.Fatalf("expected warning to mention only SHINYHUB_TOKEN (HOST not set); got:\n%s", errOut)
 	}
 }
 
@@ -189,17 +190,18 @@ func TestLogout_NoEnvWarningWhenEnvUnset(t *testing.T) {
 		t.Fatalf("save config: %v", err)
 	}
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd := newLogoutCmd()
 	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 
 	if err := runLogout(cmd, nil); err != nil {
 		t.Fatalf("runLogout: %v", err)
 	}
 
-	out := stdout.String()
-	if strings.Contains(out, "SHINYHUB_TOKEN") || strings.Contains(out, "SHINYHUB_HOST") {
-		t.Fatalf("expected no env-var warning when env is unset; got:\n%s", out)
+	combined := stdout.String() + stderr.String()
+	if strings.Contains(combined, "SHINYHUB_TOKEN") || strings.Contains(combined, "SHINYHUB_HOST") {
+		t.Fatalf("expected no env-var warning when env is unset; got:\n%s", combined)
 	}
 }
 

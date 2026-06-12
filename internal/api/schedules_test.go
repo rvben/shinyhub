@@ -695,10 +695,12 @@ func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) 
 	}
 }
 
-// TestSchedules_Create_DuplicateName_Returns409 verifies that posting a second
-// schedule with the same name for the same app returns 409 Conflict with a
-// JSON body that identifies the conflict (not a generic 500).
-func TestSchedules_Create_DuplicateName_Returns409(t *testing.T) {
+// TestSchedules_Create_DuplicateName_DifferentConfig_Returns409 verifies that
+// posting a second schedule with the same name but different configuration
+// returns 409 Conflict with a JSON body that identifies the conflict (not a
+// generic 500). Identical-config duplicates are idempotent (200 no-op); only
+// configuration conflicts produce 409.
+func TestSchedules_Create_DuplicateName_DifferentConfig_Returns409(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
 	hash, _ := auth.HashPassword("pass")
@@ -721,13 +723,22 @@ func TestSchedules_Create_DuplicateName_Returns409(t *testing.T) {
 		t.Fatalf("first POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Second POST with the same name — must return 409, not 500.
-	req = authedRequest(t, "POST", "/api/apps/my-app/schedules", validScheduleBody(t), token)
+	// Second POST with same name but different cron expression — must return 409.
+	differentBody, _ := json.Marshal(map[string]any{
+		"name":            "daily-job",
+		"cron_expr":       "0 6 * * *", // different time from validScheduleBody ("0 2 * * *")
+		"command":         []string{"Rscript", "daily.R"},
+		"enabled":         true,
+		"timeout_seconds": 300,
+		"overlap_policy":  "skip",
+		"missed_policy":   "skip",
+	})
+	req = authedRequest(t, "POST", "/api/apps/my-app/schedules", differentBody, token)
 	rec = httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("duplicate POST: expected 409, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("different config duplicate: expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	var body map[string]any
@@ -1024,9 +1035,10 @@ func TestSchedules_GrantSharedData_SelfMountReturns400(t *testing.T) {
 	}
 }
 
-// ERR-3: granting the same mount twice is a conflict, not a 500 leaking the raw
-// SQLite UNIQUE-constraint text.
-func TestSchedules_GrantSharedData_DuplicateReturns409(t *testing.T) {
+// ERR-3: granting the same mount twice is idempotent (200 no-op), not a 409.
+// The outcome (already mounted) is already in place; the source_slug is returned
+// so the caller can confirm which mount the no-op refers to.
+func TestSchedules_GrantSharedData_DuplicateReturns200NoOp(t *testing.T) {
 	srv, _, token := grantSharedDataFixture(t)
 
 	body, _ := json.Marshal(map[string]any{"source_slug": "other"})
@@ -1041,8 +1053,15 @@ func TestSchedules_GrantSharedData_DuplicateReturns409(t *testing.T) {
 	req = authedRequest(t, "POST", "/api/apps/mine/shared-data", body2, token)
 	rec = httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("duplicate grant: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("duplicate grant: expected 200 no-op, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode duplicate response: %v", err)
+	}
+	if resp["source_slug"] != "other" {
+		t.Errorf("source_slug = %v, want other", resp["source_slug"])
 	}
 }
 
@@ -1070,15 +1089,16 @@ func TestSchedules_GrantSharedData_CycleReturns400(t *testing.T) {
 	}
 }
 
-// ERR-4: revoking a mount that was never granted is a 404, not a 500.
-func TestSchedules_RevokeSharedData_NotMountedReturns404(t *testing.T) {
+// ERR-4: revoking a mount that was never granted is a 204 no-op. The outcome
+// (not mounted) is already in place; repeating the revoke is safe.
+func TestSchedules_RevokeSharedData_NotMountedReturns204(t *testing.T) {
 	srv, _, token := grantSharedDataFixture(t)
 
 	req := authedRequest(t, "DELETE", "/api/apps/mine/shared-data/other", nil, token)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("revoke non-mounted: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke non-mounted: expected 204 no-op, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

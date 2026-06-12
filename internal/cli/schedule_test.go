@@ -486,6 +486,60 @@ func TestScheduleRun_DisabledScheduleFailureNoProceededNote(t *testing.T) {
 	}
 }
 
+// EXIT-4: runFinalExitError must set Kind=KindJobFailed so the error envelope
+// carries kind=job_failed, the process exit mirrors the job's own code, and the
+// envelope omits exit_code (passthrough contract). The test drives the full
+// --follow code path with a server that returns exit_code=7 and status=failed,
+// then pipes the returned error through reportTo to assert the envelope shape.
+func TestScheduleRun_FollowJobFailedEnvelopeOmitsExitCode(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":true}]`)
+		},
+		"POST /api/apps/demo/schedules/7/run": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"run_id":11}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/11/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: error output\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/11": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"failed","exit_code":7}`)
+		},
+	})
+
+	_, _, runErr := execCLISplit(t, "schedule", "run", "demo", "job", "--follow")
+	if runErr == nil {
+		t.Fatal("expected non-nil error for a failed run")
+	}
+	if exitCode(runErr) != 7 {
+		t.Errorf("exit code = %d, want 7 (job's own exit code)", exitCode(runErr))
+	}
+
+	// Verify the error classifies as KindJobFailed so Report() emits the right
+	// envelope. Drive reportTo directly: it is the same code path main() calls.
+	var stderrBuf bytes.Buffer
+	code := reportTo(&stderrBuf, false, formatJSON, runErr)
+	if code != 7 {
+		t.Errorf("reportTo exit code = %d, want 7", code)
+	}
+	line := strings.TrimRight(stderrBuf.String(), "\n")
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(line), &env); jerr != nil {
+		t.Fatalf("reportTo output is not JSON: %v\nraw: %q", jerr, line)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj == nil {
+		t.Fatalf("envelope missing error object: %v", env)
+	}
+	if errObj["kind"] != "job_failed" {
+		t.Errorf("envelope kind = %q, want job_failed", errObj["kind"])
+	}
+	if _, has := errObj["exit_code"]; has {
+		t.Errorf("job_failed envelope must omit exit_code (passthrough), got %v", errObj["exit_code"])
+	}
+}
+
 // SCH-1: `schedule update` changes a schedule in place (preserving run history)
 // by PATCHing only the fields the operator actually supplied. A lone --cron must
 // not clobber the command, timeout, or any other stored field.
@@ -681,7 +735,8 @@ func TestScheduleAdd_RunOnRegister_ReportsFirstFire(t *testing.T) {
 	if gotBody["run_on_register"] != true {
 		t.Errorf("run_on_register in body = %v, want true", gotBody["run_on_register"])
 	}
-	if !strings.Contains(out.String(), "run #42") {
+	// In piped mode the output is a JSON envelope; check for the run id value.
+	if !strings.Contains(out.String(), "42") {
 		t.Errorf("output missing first-fire run id; got: %s", out.String())
 	}
 }
@@ -707,8 +762,54 @@ func TestScheduleAdd_NoFirstFire_NoTriggerLine(t *testing.T) {
 	if strings.Contains(out.String(), "first-fire") {
 		t.Errorf("unexpected first-fire line when server returned no run id; got: %s", out.String())
 	}
-	if !strings.Contains(out.String(), "created schedule") {
-		t.Errorf("missing normal created output; got: %s", out.String())
+	// In piped mode the output is a JSON envelope with status "created".
+	if !strings.Contains(out.String(), `"created"`) {
+		t.Errorf("missing created status in output; got: %s", out.String())
+	}
+}
+
+// FORMAT-5: schedule add --run-on-register --follow must stream NDJSON log
+// objects on stdout when piped, and route the creation notice to stderr.
+// This verifies that the streaming format (resolved once for the follow path)
+// is not corrupted by the creation envelope logic.
+func TestScheduleAdd_RunOnRegister_Follow_NdjsonStream(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":7,"name":"warm","first_fire_run_id":42}`)
+		},
+		"GET /api/apps/demo/schedules/7/runs/42/logs": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: warming up\n\ndata: done\n\n")
+		},
+		"GET /api/apps/demo/schedules/7/runs/42": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
+		},
+	})
+
+	stdout, stderr, err := execCLISplit(t, "schedule", "add", "demo",
+		"--name", "warm", "--cron", "0 5 * * *", "--cmd", "true",
+		"--run-on-register", "--follow")
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	// The creation notice must appear on stderr, not stdout.
+	if !strings.Contains(stderr, "created") && !strings.Contains(stderr, "following") {
+		t.Errorf("creation notice missing from stderr; stderr=%q stdout=%q", stderr, stdout)
+	}
+
+	// Stdout must be NDJSON log objects, not an action envelope.
+	// Each log line is wrapped as {"line":"..."} in NDJSON mode.
+	if strings.Contains(stdout, `"status"`) {
+		t.Errorf("stdout must not contain action envelope in follow mode; stdout=%q", stdout)
+	}
+	// The log content must appear on stdout wrapped in NDJSON.
+	if !strings.Contains(stdout, `"line"`) {
+		t.Errorf("stdout missing NDJSON log objects; stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "warming up") {
+		t.Errorf("stdout missing log content 'warming up'; stdout=%q", stdout)
 	}
 }
 

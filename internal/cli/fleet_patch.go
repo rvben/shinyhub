@@ -29,8 +29,11 @@ func sendFleetMutation(cfg *cliConfig, req *http.Request, slug string, ifDigest,
 		return &conflictError{slug: slug, msg: serverErrorMessage(body, resp.Status)}
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s failed: HTTP %d: %s",
-			req.Method, slug, resp.StatusCode, serverErrorMessage(body, resp.Status))
+		return &httpStatusError{
+			Status: resp.StatusCode,
+			msg: fmt.Sprintf("%s %s failed: HTTP %d: %s",
+				req.Method, slug, resp.StatusCode, serverErrorMessage(body, resp.Status)),
+		}
 	}
 	return nil
 }

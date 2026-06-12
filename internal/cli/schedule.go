@@ -71,27 +71,6 @@ func lookupSchedule(cfg *cliConfig, slug, name string) (scheduleDTO, error) {
 	return scheduleDTO{}, fmt.Errorf("schedule %q not found for app %q", name, slug)
 }
 
-// listSchedulesRaw returns the raw JSON response body for an app's schedules.
-func listSchedulesRaw(cfg *cliConfig, slug string) ([]byte, error) {
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, httpError(cfg.Token, "get schedules", resp, body)
-	}
-	return body, nil
-}
-
 // listSchedules fetches all schedules for the given app slug.
 func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)
@@ -119,54 +98,66 @@ func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 }
 
 func newScheduleLsCmd() *cobra.Command {
-	var flags struct {
-		jsonOutput bool
-	}
+	f := &listFlags{}
 	lsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List scheduled jobs for an app",
 		Args:  cobra.ExactArgs(1),
 	}
-	lsCmd.Flags().BoolVar(&flags.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(lsCmd, f)
 	lsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
 
-		if flags.jsonOutput {
-			raw, err := listSchedulesRaw(cfg, args[0])
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), string(raw))
-			return nil
-		}
-
 		schedules, err := listSchedules(cfg, args[0])
 		if err != nil {
 			return err
 		}
-		if len(schedules) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "No schedules.")
-			return nil
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
-			"ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND")
-		for _, s := range schedules {
-			cmdStr := strings.Join(s.Command, " ")
-			enabled := "true"
-			if !s.Enabled {
-				enabled = "false"
+
+		// Convert to []map[string]any for the shared list helper.
+		items := make([]map[string]any, len(schedules))
+		for i, s := range schedules {
+			items[i] = map[string]any{
+				"id":                 s.ID,
+				"name":               s.Name,
+				"cron_expr":          s.CronExpr,
+				"command":            s.Command,
+				"enabled":            s.Enabled,
+				"timeout_seconds":    s.TimeoutSeconds,
+				"overlap_policy":     s.OverlapPolicy,
+				"missed_policy":      s.MissedPolicy,
+				"effective_timezone": s.EffectiveTimezone,
+				"timezone_inherited": s.TimezoneInherited,
 			}
-			tzDisplay := s.EffectiveTimezone
-			if s.TimezoneInherited {
-				tzDisplay += " (inherited)"
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%-6d  %-24s  %-20s  %-8s  %-28s  %s\n",
-				s.ID, s.Name, s.CronExpr, enabled, tzDisplay, cmdStr)
 		}
-		return nil
+
+		return renderList(cmd, f, items, nil, func(w io.Writer, rendered []map[string]any) {
+			if len(rendered) == 0 {
+				fmt.Fprintln(w, "No schedules.")
+				return
+			}
+			fmt.Fprintf(w, "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
+				"ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND")
+			for _, item := range rendered {
+				id := fmt.Sprintf("%v", item["id"])
+				name := fmt.Sprintf("%v", item["name"])
+				cron := fmt.Sprintf("%v", item["cron_expr"])
+				enabled := "true"
+				if b, ok := item["enabled"].(bool); ok && !b {
+					enabled = "false"
+				}
+				tzDisplay := fmt.Sprintf("%v", item["effective_timezone"])
+				if inherited, ok := item["timezone_inherited"].(bool); ok && inherited {
+					tzDisplay += " (inherited)"
+				}
+				cmdParts, _ := item["command"].([]string)
+				cmdStr := strings.Join(cmdParts, " ")
+				fmt.Fprintf(w, "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
+					id, name, cron, enabled, tzDisplay, cmdStr)
+			}
+		})
 	}
 	return lsCmd
 }
@@ -209,6 +200,15 @@ func newScheduleAddCmd() *cobra.Command {
 
 	addCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
+
+		// Validate the output format at command start. When --follow is set the
+		// log stream is the primary data (streaming), so NDJSON is accepted and
+		// -o json is rejected. When not following, this is a document command.
+		// We resolve early only to catch invalid -o values before any network
+		// call; the resolved format is re-derived at emit time (see below).
+		if _, err := resolveFormat(false, flags.follow); err != nil {
+			return err
+		}
 
 		cfg, err := loadConfig()
 		if err != nil {
@@ -269,23 +269,56 @@ func newScheduleAddCmd() *cobra.Command {
 			return httpError(cfg.Token, "create schedule", resp, out)
 		}
 
+		// A 200 (as opposed to 201) means the schedule already existed with the
+		// exact same configuration; the repeat is a no-op.
+		if resp.StatusCode == http.StatusOK {
+			var existing scheduleDTO
+			if json.Unmarshal(out, &existing) == nil {
+				return renderAction(cmd, "unchanged",
+					map[string]any{"slug": slug, "name": existing.Name, "id": existing.ID},
+					fmt.Sprintf("schedule %q already exists with identical config (id %d)", existing.Name, existing.ID))
+			}
+			return renderAction(cmd, "unchanged",
+				map[string]any{"slug": slug, "name": flags.name},
+				fmt.Sprintf("schedule %q already exists with identical config", flags.name))
+		}
+
 		var created scheduleDTO
 		if err := json.Unmarshal(out, &created); err == nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "created schedule %q (id %d)\n", created.Name, created.ID)
 			if created.DSTAdvisory != nil && *created.DSTAdvisory != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+*created.DSTAdvisory)
 			}
+			fields := map[string]any{"slug": slug, "name": created.Name, "id": created.ID}
+			prose := fmt.Sprintf("created schedule %q (id %d)", created.Name, created.ID)
 			if created.FirstFireRunID != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "first-fire triggered (run #%d)\n", *created.FirstFireRunID)
-				if flags.follow {
-					if err := streamRunLogs(cfg, slug, created.ID, *created.FirstFireRunID, true, cmd); err != nil {
-						return err
-					}
-					return runFinalExitError(cfg, slug, created.ID, *created.FirstFireRunID)
+				fields["first_fire_run_id"] = *created.FirstFireRunID
+				prose += fmt.Sprintf("\nfirst-fire triggered (run #%d)", *created.FirstFireRunID)
+			}
+			if flags.follow && created.FirstFireRunID != nil {
+				// In follow mode the run's log stream is the primary data on
+				// stdout; its format was resolved as streaming at command start.
+				// Route the creation acknowledgment to stderr so it does not
+				// interleave with the NDJSON log objects.
+				fmt.Fprintf(cmd.ErrOrStderr(), "created schedule %q (id %d), following run #%d\n",
+					created.Name, created.ID, *created.FirstFireRunID)
+				if err := streamRunLogs(cfg, slug, created.ID, *created.FirstFireRunID, true, cmd); err != nil {
+					return err
 				}
+				return runFinalExitError(cfg, slug, created.ID, *created.FirstFireRunID)
+			}
+			// Non-follow path: the creation envelope is a single document.
+			// Re-resolve as non-streaming so -o json is honoured and NDJSON
+			// resolvedFormat set for the follow path is replaced with the
+			// correct document format.
+			if err := renderAction(cmd, "created", fields, prose); err != nil {
+				return err
 			}
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q created\n", slug, flags.name)
+			if err := renderAction(cmd, "created",
+				map[string]any{"slug": slug, "name": flags.name},
+				fmt.Sprintf("%s: schedule %q created", slug, flags.name)); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -415,8 +448,9 @@ Timezone is tri-state:
 			return httpError(cfg.Token, "update schedule", resp, out)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: updated schedule %q\n", slug, name)
-		return nil
+		return renderAction(cmd, "updated",
+			map[string]any{"slug": slug, "name": name},
+			fmt.Sprintf("%s: updated schedule %q", slug, name))
 	}
 	return updateCmd
 }
@@ -457,8 +491,9 @@ func newScheduleRmCmd() *cobra.Command {
 				return httpError(cfg.Token, "remove schedule", resp, out)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: removed schedule %q\n", slug, name)
-			return nil
+			return renderAction(cmd, "removed",
+				map[string]any{"slug": slug, "name": name},
+				fmt.Sprintf("%s: removed schedule %q", slug, name))
 		},
 	}
 }
@@ -519,8 +554,9 @@ func patchScheduleEnabled(enabled bool) func(*cobra.Command, []string) error {
 		if !enabled {
 			state = "disabled"
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q %s\n", slug, name, state)
-		return nil
+		return renderAction(cmd, state,
+			map[string]any{"slug": slug, "name": name},
+			fmt.Sprintf("%s: schedule %q %s", slug, name, state))
 	}
 }
 
@@ -536,6 +572,14 @@ func newScheduleRunCmd() *cobra.Command {
 
 	runCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
+
+		// Resolve format once at command start: streaming=true when following
+		// (the log stream is the data), non-streaming when not following
+		// (a single action envelope is emitted). This ensures -o ndjson is
+		// rejected on the non-follow path and accepted only on the follow path.
+		if _, err := resolveFormat(false, follow); err != nil {
+			return err
+		}
 
 		cfg, err := loadConfig()
 		if err != nil {
@@ -573,10 +617,10 @@ func newScheduleRunCmd() *cobra.Command {
 				"note: schedule %q is disabled; manual trigger proceeded anyway\n", name)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: schedule %q started\n", slug, name)
-
 		if !follow {
-			return nil
+			return renderAction(cmd, "started",
+				map[string]any{"slug": slug, "name": name},
+				fmt.Sprintf("%s: schedule %q started", slug, name))
 		}
 
 		// Follow the exact run that was just admitted, using the run_id from
@@ -615,6 +659,10 @@ func newScheduleLogsCmd() *cobra.Command {
 
 	logsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
+
+		if _, err := resolveFormat(false, true); err != nil {
+			return err
+		}
 
 		cfg, err := loadConfig()
 		if err != nil {
@@ -697,6 +745,7 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 		return httpError(cfg.Token, "stream schedule logs", resp, out)
 	}
 
+	sw := newStreamWriter(cmd.OutOrStdout(), currentFormat(), 0)
 	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -710,7 +759,7 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 			}
 			line = strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), line)
+		sw.WriteLine(line)
 	}
 	return scanner.Err()
 }
@@ -760,5 +809,5 @@ func runFinalExitError(cfg *cliConfig, slug string, schedID, runID int64) error 
 	if code == 0 {
 		code = 1
 	}
-	return &ExitCodeError{Code: code, Err: fmt.Errorf("run %s", run.Status)}
+	return &ExitCodeError{Code: code, Kind: KindJobFailed, Err: fmt.Errorf("run %s", run.Status)}
 }

@@ -66,7 +66,7 @@ func runLogout(cmd *cobra.Command, args []string) error {
 		if os.Getenv("SHINYHUB_HOST") != "" {
 			vars = "SHINYHUB_HOST and SHINYHUB_TOKEN"
 		}
-		fmt.Fprintf(out,
+		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Note: %s still set in your environment; subsequent commands will continue to authenticate. Run `unset %s` to fully sign out.\n",
 			vars, strings.ReplaceAll(vars, " and ", " "))
 	}
@@ -88,7 +88,10 @@ func revokeServerSession(cfg *cliConfig) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %s", resp.Status)
+		return &httpStatusError{
+			Status: resp.StatusCode,
+			msg:    fmt.Sprintf("server returned %s", resp.Status),
+		}
 	}
 	return nil
 }

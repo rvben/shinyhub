@@ -51,22 +51,21 @@ func newDataPushCmd() *cobra.Command {
 		if err := runDataPush(cfg.Host, cfg.Token, slug, localFile, dest, flags.restart); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: uploaded %s\n", slug, dest)
-		return nil
+		return renderAction(cmd, "uploaded",
+			map[string]any{"slug": slug, "path": dest},
+			fmt.Sprintf("%s: uploaded %s", slug, dest))
 	}
 	return pushCmd
 }
 
 func newDataLsCmd() *cobra.Command {
-	var flags struct {
-		jsonOutput bool
-	}
+	f := &listFlags{}
 	lsCmd := &cobra.Command{
 		Use:   "ls <slug>",
 		Short: "List files in an app's persistent data dir",
 		Args:  cobra.ExactArgs(1),
 	}
-	lsCmd.Flags().BoolVar(&flags.jsonOutput, "json", false, "Output as JSON")
+	addListFlags(lsCmd, f)
 	lsCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 
@@ -75,21 +74,56 @@ func newDataLsCmd() *cobra.Command {
 			return err
 		}
 
-		if flags.jsonOutput {
-			raw, err := runDataLsRaw(cfg.Host, cfg.Token, slug)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), string(raw))
-			return nil
+		req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/data", nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
 		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
 
-		out, err := runDataLs(cfg.Host, cfg.Token, slug)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return err
 		}
-		fmt.Fprint(cmd.OutOrStdout(), out)
-		return nil
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return httpError(cfg.Token, "list data", resp, body)
+		}
+
+		// The server wraps file entries under {"files": [...]} and includes
+		// quota metadata as sibling keys passed through as envelope extras.
+		var result struct {
+			Files     []map[string]any `json:"files"`
+			QuotaMB   int64            `json:"quota_mb"`
+			UsedBytes int64            `json:"used_bytes"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+
+		extra := map[string]any{
+			"quota_mb":   result.QuotaMB,
+			"used_bytes": result.UsedBytes,
+		}
+
+		return renderList(cmd, f, result.Files, extra, func(w io.Writer, items []map[string]any) {
+			fmt.Fprintf(w, "%-48s %6s  %s\n", "PATH", "SIZE", "MODIFIED")
+			for _, fi := range items {
+				path := fmt.Sprintf("%v", fi["path"])
+				sizeVal, _ := fi["size"].(float64)
+				modVal, _ := fi["modified_at"].(float64)
+				modTime := time.Unix(int64(modVal), 0).UTC().Format(time.RFC3339)
+				fmt.Fprintf(w, "%-48s %6s  %s\n", path, humanBytes(int64(sizeVal)), modTime)
+			}
+			used := humanBytes(result.UsedBytes)
+			if result.QuotaMB > 0 {
+				quota := humanBytes(result.QuotaMB * 1024 * 1024)
+				fmt.Fprintf(w, "Used: %s / %s\n", used, quota)
+			} else {
+				fmt.Fprintf(w, "Used: %s (no quota set)\n", used)
+			}
+		})
 	}
 	return lsCmd
 }
@@ -112,8 +146,9 @@ func newDataRmCmd() *cobra.Command {
 		if err := runDataRm(cfg.Host, cfg.Token, slug, dest); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s: removed %s\n", slug, dest)
-		return nil
+		return renderAction(cmd, "removed",
+			map[string]any{"slug": slug, "path": dest},
+			fmt.Sprintf("%s: removed %s", slug, dest))
 	}
 	return rmCmd
 }
@@ -192,78 +227,6 @@ func runDataPush(host, token, slug, localFile, dest string, restart bool) error 
 	}
 
 	return nil
-}
-
-// runDataLsRaw returns the raw JSON body from the data list endpoint.
-func runDataLsRaw(host, token, slug string) ([]byte, error) {
-	req, err := http.NewRequest("GET", host+"/api/apps/"+slug+"/data", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(token))
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, httpError(token, "list data", resp, body)
-	}
-	return body, nil
-}
-
-// runDataLs lists files in an app's data dir and returns a formatted string.
-func runDataLs(host, token, slug string) (string, error) {
-	req, err := http.NewRequest("GET", host+"/api/apps/"+slug+"/data", nil)
-	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(token))
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		out, _ := io.ReadAll(resp.Body)
-		return "", httpError(token, "list data", resp, out)
-	}
-
-	var result struct {
-		Files []struct {
-			Path       string `json:"path"`
-			Size       int64  `json:"size"`
-			SHA256     string `json:"sha256"`
-			ModifiedAt int64  `json:"modified_at"`
-		} `json:"files"`
-		QuotaMB   int64 `json:"quota_mb"`
-		UsedBytes int64 `json:"used_bytes"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%-48s %6s  %s\n", "PATH", "SIZE", "MODIFIED")
-	for _, fi := range result.Files {
-		modTime := time.Unix(fi.ModifiedAt, 0).UTC().Format(time.RFC3339)
-		fmt.Fprintf(&sb, "%-48s %6s  %s\n", fi.Path, humanBytes(fi.Size), modTime)
-	}
-
-	used := humanBytes(result.UsedBytes)
-	if result.QuotaMB > 0 {
-		quota := humanBytes(result.QuotaMB * 1024 * 1024)
-		fmt.Fprintf(&sb, "Used: %s / %s\n", used, quota)
-	} else {
-		fmt.Fprintf(&sb, "Used: %s (no quota set)\n", used)
-	}
-
-	return sb.String(), nil
 }
 
 // runDataRm deletes a file from an app's data dir.

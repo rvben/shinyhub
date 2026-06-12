@@ -142,6 +142,28 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrScheduleNameExists) {
+			// A schedule with this name exists. Check whether the config is
+			// identical: if so, return 200 no-op; otherwise, 409 Conflict.
+			existing, lookupErr := s.store.GetScheduleByName(app.ID, req.Name)
+			if lookupErr != nil {
+				writeError(w, http.StatusConflict, db.ErrScheduleNameExists.Error())
+				return
+			}
+			existingCmdJSON, _ := json.Marshal(req.Command) // re-serialize for comparison
+			tzMatch := (storedTZ == nil && existing.Timezone == nil) ||
+				(storedTZ != nil && existing.Timezone != nil && *storedTZ == *existing.Timezone)
+			if existing.CronExpr == req.CronExpr &&
+				existing.CommandJSON == string(existingCmdJSON) &&
+				existing.Enabled == enabled &&
+				existing.TimeoutSeconds == req.TimeoutSeconds &&
+				existing.OverlapPolicy == req.OverlapPolicy &&
+				existing.MissedPolicy == req.MissedPolicy &&
+				tzMatch {
+				// Identical config: idempotent no-op.
+				dto := toScheduleDTO(existing, nil, s.cfg.Scheduler.Location)
+				writeJSON(w, http.StatusOK, dto)
+				return
+			}
 			writeError(w, http.StatusConflict, db.ErrScheduleNameExists.Error())
 			return
 		}
@@ -696,7 +718,9 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, db.ErrSelfMount), errors.Is(err, db.ErrSharedDataCycle):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, db.ErrDuplicateMount):
-			writeError(w, http.StatusConflict, err.Error())
+			// The mount already exists; the outcome is in place. Return 200 with
+			// the existing mount descriptor so the caller can act idempotently.
+			writeJSON(w, http.StatusOK, sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID})
 		default:
 			writeError(w, http.StatusInternalServerError, err.Error())
 		}
@@ -724,7 +748,9 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := s.store.RevokeSharedData(app.ID, src.ID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "data not mounted from this source")
+			// The mount does not exist; the outcome (not mounted) is in place.
+			// Return 204 so callers can safely re-run revoke idempotently.
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())

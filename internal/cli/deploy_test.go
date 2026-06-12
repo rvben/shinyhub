@@ -404,7 +404,7 @@ func TestPollAppStatus_RunningAndStarting(t *testing.T) {
 // behaviour where any non-2xx response (token expired, app gone, server 500)
 // silently decoded into a zero-value status and degraded to ready=false.
 // waitForHealthy then polled until --wait-timeout for an outcome that was
-// already decided. pollAppStatus must surface *httpStatusError so the caller
+// already decided. pollAppStatus must surface *deployHTTPError so the caller
 // can distinguish fatal (4xx) vs transient (5xx).
 func TestPollAppStatus_NonOKStatusReturnsHTTPError(t *testing.T) {
 	cases := []struct {
@@ -433,18 +433,18 @@ func TestPollAppStatus_NonOKStatusReturnsHTTPError(t *testing.T) {
 			if ready {
 				t.Errorf("ready = true, want false on HTTP %d", tc.statusCode)
 			}
-			var he *httpStatusError
+			var he *deployHTTPError
 			if !errors.As(err, &he) {
-				t.Fatalf("pollAppStatus: error %v is not *httpStatusError; waitForHealthy can't classify it", err)
+				t.Fatalf("pollAppStatus: error %v is not *deployHTTPError; waitForHealthy can't classify it", err)
 			}
 			if he.statusCode != tc.statusCode {
-				t.Errorf("httpStatusError.statusCode = %d, want %d", he.statusCode, tc.statusCode)
+				t.Errorf("deployHTTPError.statusCode = %d, want %d", he.statusCode, tc.statusCode)
 			}
 			if he.fatal() != tc.fatal {
-				t.Errorf("httpStatusError.fatal() = %v, want %v for HTTP %d", he.fatal(), tc.fatal, tc.statusCode)
+				t.Errorf("deployHTTPError.fatal() = %v, want %v for HTTP %d", he.fatal(), tc.fatal, tc.statusCode)
 			}
 			if tc.body != "" && !strings.Contains(he.Error(), strings.TrimSpace(tc.body)) {
-				t.Errorf("httpStatusError.Error() = %q, want it to surface server body %q", he.Error(), tc.body)
+				t.Errorf("deployHTTPError.Error() = %q, want it to surface server body %q", he.Error(), tc.body)
 			}
 		})
 	}
@@ -497,9 +497,9 @@ func TestEnsureApp_FallsBackToRawBodyWhenNotJSON(t *testing.T) {
 	}
 }
 
-// TestParseSSELines_LastN verifies that parseSSELines reads SSE data: lines
-// from an io.Reader and returns the last n lines.
-func TestParseSSELines_LastN(t *testing.T) {
+// TestParsePlainLines_LastN verifies that parsePlainLines reads plain-text lines
+// (as returned by GET /api/apps/{slug}/logs?follow=false) and returns the last n.
+func TestParsePlainLines_LastN(t *testing.T) {
 	lines := []string{
 		"line one",
 		"line two",
@@ -509,15 +509,13 @@ func TestParseSSELines_LastN(t *testing.T) {
 	}
 	var buf strings.Builder
 	for _, l := range lines {
-		buf.WriteString("data: " + l + "\n\n")
+		buf.WriteString(l + "\n")
 	}
-	// Also include a heartbeat comment to verify it is ignored.
-	buf.WriteString(": heartbeat\n\n")
 
-	got := parseSSELines(strings.NewReader(buf.String()), 3)
+	got := parsePlainLines(strings.NewReader(buf.String()), 3)
 	want := []string{"line three", "line four", "line five"}
 	if len(got) != len(want) {
-		t.Fatalf("parseSSELines returned %d lines, want %d: %v", len(got), len(want), got)
+		t.Fatalf("parsePlainLines returned %d lines, want %d: %v", len(got), len(want), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -526,39 +524,64 @@ func TestParseSSELines_LastN(t *testing.T) {
 	}
 }
 
-// TestParseSSELines_FewerThanN verifies that parseSSELines returns all lines
-// when the stream contains fewer than n lines.
-func TestParseSSELines_FewerThanN(t *testing.T) {
-	var buf strings.Builder
-	buf.WriteString("data: only line\n\n")
-
-	got := parseSSELines(strings.NewReader(buf.String()), 20)
+// TestParsePlainLines_FewerThanN verifies that parsePlainLines returns all lines
+// when the body contains fewer than n lines.
+func TestParsePlainLines_FewerThanN(t *testing.T) {
+	got := parsePlainLines(strings.NewReader("only line\n"), 20)
 	if len(got) != 1 || got[0] != "only line" {
-		t.Errorf("parseSSELines returned %v, want [\"only line\"]", got)
+		t.Errorf("parsePlainLines returned %v, want [\"only line\"]", got)
 	}
 }
 
-// TestParseSSELines_Empty verifies that parseSSELines returns nil on empty input.
-func TestParseSSELines_Empty(t *testing.T) {
-	got := parseSSELines(strings.NewReader(""), 20)
+// TestParsePlainLines_Empty verifies that parsePlainLines returns nil on empty input.
+func TestParsePlainLines_Empty(t *testing.T) {
+	got := parsePlainLines(strings.NewReader(""), 20)
 	if len(got) != 0 {
-		t.Errorf("parseSSELines on empty input returned %v, want empty", got)
+		t.Errorf("parsePlainLines on empty input returned %v, want empty", got)
+	}
+}
+
+// TestPrintLogTail_PlainTextFixture verifies that printLogTail correctly renders
+// the plain-text response from GET /api/apps/{slug}/logs?follow=false.
+// The server returns one log line per line (no SSE framing).
+func TestPrintLogTail_PlainTextFixture(t *testing.T) {
+	plainBody := "Error in library(shiny): no package called 'shiny'\nExecution halted\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(plainBody))
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	printLogTail(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", &buf)
+
+	out := buf.String()
+	if !strings.Contains(out, "Error in library(shiny)") {
+		t.Errorf("log tail should contain first log line, got %q", out)
+	}
+	if !strings.Contains(out, "Execution halted") {
+		t.Errorf("log tail should contain second log line, got %q", out)
+	}
+	if !strings.Contains(out, "shinyhub apps logs demo") {
+		t.Errorf("log tail should contain hint, got %q", out)
 	}
 }
 
 // TestWaitForHealthy_TimeoutPrintsLogTail verifies that when waitForHealthy
 // times out, it fetches the app logs and prints the tail to stderr.
+// The logs endpoint with ?follow=false returns plain text (one line per line).
 func TestWaitForHealthy_TimeoutPrintsLogTail(t *testing.T) {
-	sseBody := "data: Error in library(shiny) : there is no package called 'shiny'\n\n" +
-		"data: Execution halted\n\n"
+	plainBody := "Error in library(shiny) : there is no package called 'shiny'\n" +
+		"Execution halted\n"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/apps/demo" && r.URL.RawQuery == "":
 			_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
 		case r.Method == "GET" && r.URL.Path == "/api/apps/demo/logs":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte(sseBody))
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(plainBody))
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -589,17 +612,18 @@ func TestWaitForHealthy_TimeoutPrintsLogTail(t *testing.T) {
 
 // TestWaitForHealthy_CrashLoopPrintsLogTail verifies that when the app enters
 // a crashed state during the wait window, the log tail is printed.
+// The logs endpoint with ?follow=false returns plain text (one line per line).
 func TestWaitForHealthy_CrashLoopPrintsLogTail(t *testing.T) {
-	sseBody := "data: Traceback (most recent call last):\n\n" +
-		"data: ImportError: No module named 'shiny'\n\n"
+	plainBody := "Traceback (most recent call last):\n" +
+		"ImportError: No module named 'shiny'\n"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/apps/crash-app" && r.URL.RawQuery == "":
 			_, _ = w.Write([]byte(`{"app":{"status":"crashed"}}`))
 		case r.Method == "GET" && r.URL.Path == "/api/apps/crash-app/logs":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte(sseBody))
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(plainBody))
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -650,8 +674,9 @@ func TestWaitForHealthy_StoppedIsNotTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForHealthyWithOutput: unexpected error for stopped→running transition: %v", err)
 	}
-	if stderrBuf.Len() > 0 {
-		t.Errorf("stderr should be empty on success, got %q", stderrBuf.String())
+	// Progress is written to errOut (stderr); " ready." terminates the line.
+	if !strings.Contains(stderrBuf.String(), "ready") {
+		t.Errorf("expected 'ready' in progress output, got %q", stderrBuf.String())
 	}
 }
 
@@ -700,8 +725,10 @@ func TestWaitForHealthy_SuccessEmitsNoLogTail(t *testing.T) {
 	if logRequested {
 		t.Error("log endpoint should not be called on success")
 	}
-	if stderrBuf.Len() > 0 {
-		t.Errorf("stderr should be empty on success, got %q", stderrBuf.String())
+	// Progress ("Waiting for ... ready.") is written to errOut; only the log tail
+	// must be absent. The progress line itself is expected.
+	if strings.Contains(stderrBuf.String(), "some log line") {
+		t.Errorf("log tail should not appear on success, got %q", stderrBuf.String())
 	}
 }
 

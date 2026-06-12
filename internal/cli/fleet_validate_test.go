@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,4 +119,21 @@ func TestFleetValidate_Registered(t *testing.T) {
 		}
 	}
 	t.Error("expected 'validate' subcommand under fleet")
+}
+
+// FORMAT-1: fleet validate is a document command; -o ndjson must be rejected
+// with a KindValidation error before any file I/O or network call.
+func TestFleetValidate_NdjsonRejected(t *testing.T) {
+	dir := t.TempDir()
+	_, err := execCLI(t, "fleet", "validate", "-f", filepath.Join(dir, "shinyhub-fleet.toml"), "-o", "ndjson")
+	if err == nil {
+		t.Fatal("want error for -o ndjson on fleet validate, got nil")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Errorf("exit code = %d, want 1 (validation)", code)
+	}
+	var ece *ExitCodeError
+	if errors.As(err, &ece) && ece.Kind != KindValidation {
+		t.Errorf("want KindValidation, got kind=%q", ece.Kind)
+	}
 }

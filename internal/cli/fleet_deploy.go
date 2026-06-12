@@ -87,7 +87,10 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	rb, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", false, nil, fmt.Errorf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb))
+		return "", false, nil, &httpStatusError{
+			Status: resp.StatusCode,
+			msg:    fmt.Sprintf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb)),
+		}
 	}
 
 	firstFires = firstFireRefsFromDeployResponse(rb)
@@ -171,7 +174,7 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		}
 		if err != nil {
 			lastErr = err
-			var he *httpStatusError
+			var he *deployHTTPError
 			if errors.As(err, &he) && he.fatal() {
 				return fmt.Errorf("checking %s: %w", slug, err)
 			}

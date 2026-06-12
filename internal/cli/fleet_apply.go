@@ -16,7 +16,6 @@ type fleetApplyFlags struct {
 	yes                      bool
 	allowUnsafeDegradedPrune bool
 	noColor                  bool
-	quiet                    bool
 	jsonOutput               bool
 	retries                  int
 	healthTimeout            int
@@ -56,7 +55,6 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.allowUnsafeDegradedPrune, "allow-unsafe-degraded-prune", false,
 		"Allow prune against a server without precondition support (accepts a documented race)")
 	cmd.Flags().BoolVar(&f.noColor, "no-color", false, "Disable ANSI color (glyphs/words remain)")
-	cmd.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Collapse to the summary + result line")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploy-bearing actions")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
@@ -66,6 +64,13 @@ func newFleetApplyCmd() *cobra.Command {
 }
 
 func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
+	// fleet apply is a document command; NDJSON is not a valid output mode.
+	// -o json behaves like --json (both select the machine-readable envelope).
+	if format, err := resolveFormat(f.jsonOutput, false); err != nil {
+		return err
+	} else if format == formatJSON {
+		f.jsonOutput = true
+	}
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -79,7 +84,6 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		synthetic := &fleetPlanFlags{
 			file:       f.file,
 			noColor:    f.noColor,
-			quiet:      f.quiet,
 			jsonOutput: f.jsonOutput,
 		}
 		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff)
@@ -112,8 +116,9 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 				invocation = "shinyhub fleet apply --prune --yes -f " + shellQuote(f.file)
 			}
 			if !isStdinTTY() {
-				fmt.Fprintf(errOut, "--prune needs interactive confirmation; re-run non-interactively with: %s\n", invocation)
-				return &ExitCodeError{Code: 1, Err: fmt.Errorf("--prune in non-interactive shell requires --yes"), Reported: true}
+				return confirmationRequiredError(
+					fmt.Sprintf("--prune will permanently delete %d fleet-owned app(s); pass --yes to proceed non-interactively: %s", len(candidates), invocation),
+					"--yes")
 			}
 			fmt.Fprintf(errOut,
 				"This will PERMANENTLY delete %d fleet-owned app(s) and their persistent\n"+
@@ -161,5 +166,5 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		}
 		return applyExitErr(code, reason)
 	}
-	return renderApplyReport(out, pf.manifest.FleetID, results, f.quiet)
+	return renderApplyReport(out, pf.manifest.FleetID, results, quietFlag)
 }
