@@ -43,6 +43,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.8](https://github.com/rvben/shinyhub/compare/v0.8.7...v0.8.8) - 2026-06-13
+
+### Added
+
+- **config**: let backup and restore load config without auth.secret ([3acafd3](https://github.com/rvben/shinyhub/commit/3acafd3e925050065d682817d272ae7f0fef8e9d))
+- **auth**: warn when a forward-auth user header arrives from an untrusted peer ([3297071](https://github.com/rvben/shinyhub/commit/3297071720de4d51dc17d3ea8605df712c43d9fb))
+- **cli**: add SHINYHUB_CREDENTIALS env var for the client credentials path ([76421c5](https://github.com/rvben/shinyhub/commit/76421c5ceb836a5398a31e45f843972970e46c37))
+- **cli**: TTY-aware apps logs default and apps get alias ([e59eec8](https://github.com/rvben/shinyhub/commit/e59eec8f042565a471c051446471fd21e524ecd9))
+
 ## [0.8.7](https://github.com/rvben/shinyhub/compare/v0.8.6...v0.8.7) - 2026-06-13
 
 ### Added
