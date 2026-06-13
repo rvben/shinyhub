@@ -42,6 +42,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.7](https://github.com/rvben/shinyhub/compare/v0.8.6...v0.8.7) - 2026-06-13
+
+### Added
+
+- **cli**: surface the app log tail inline on a deploy failure ([3481c0a](https://github.com/rvben/shinyhub/commit/3481c0afc782b13cd6753f70b300a1f6738e4488))
+- **cli**: add --wait to apps restart and rollback ([da65355](https://github.com/rvben/shinyhub/commit/da653556286852cecf4a6bda56967bb1ddd6209c))
+- **cli**: add schedule runs command for run history ([0e50924](https://github.com/rvben/shinyhub/commit/0e509246bf9b9bf5d29bd29d7dcc8150e6f9000b))
+- **cli**: add apps metrics command ([cd740f7](https://github.com/rvben/shinyhub/commit/cd740f768c6619787fd7732f8b3ca2f942144158))
+- **cli**: add users command group for admin user management ([690f695](https://github.com/rvben/shinyhub/commit/690f695fe5901e33aaae541d5f34a279b8668309))
+
+### Fixed
+
+- **fleet**: apply declared [app.config] on create, not just source ([8b0105a](https://github.com/rvben/shinyhub/commit/8b0105a95ce9f719e2eccad984de923f90e9da16))
+- **api**: explain rollback after a failed deploy instead of a bare 409 ([ae16668](https://github.com/rvben/shinyhub/commit/ae1666823c406f128f6a6047a5e43fb0fccdd697))
+- **schedule**: record the runtime error in a failed run's log ([394391e](https://github.com/rvben/shinyhub/commit/394391eb02d6ba492e0ae6afb0dd137d37f2aade))
+- **cli**: tag replica 0 in apps logs NDJSON output ([7596a63](https://github.com/rvben/shinyhub/commit/7596a634d139459112ee22ab82de6bd418ace741))
+- **ui**: declare neverDeployed per card so the apps grid renders ([9bfcd15](https://github.com/rvben/shinyhub/commit/9bfcd159c548ba1ea092f39c07fbaa74d0703fb5))
+
 ## [0.8.6](https://github.com/rvben/shinyhub/compare/v0.8.5...v0.8.6) - 2026-06-13
 
 ### Added
