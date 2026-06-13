@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -646,5 +648,117 @@ func TestForwardAuth_RequireGroupsHeaderNoGroupsHeaderConfigured(t *testing.T) {
 	}
 	if len(store.reconcileCalls) != 0 {
 		t.Fatalf("no group reconcile should run when groups_header is unconfigured, got %d", len(store.reconcileCalls))
+	}
+}
+
+// captureSlog replaces the default slog logger with one that writes to buf for
+// the duration of the test, then restores the original on cleanup.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return &buf
+}
+
+// TestForwardAuth_UntrustedPeerWithUserHeader_LogsWarnOnce verifies that when
+// forward auth is enabled, the request carries the configured user header, and
+// the peer is NOT in trusted_proxies, a WARN log is emitted exactly once for
+// that peer IP (subsequent requests from the same IP produce no further logs).
+func TestForwardAuth_UntrustedPeerWithUserHeader_LogsWarnOnce(t *testing.T) {
+	buf := captureSlog(t)
+
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{Enabled: true, UserHeader: "X-Forwarded-User", DefaultRole: "developer"}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	sendRequest := func(addr string) {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = addr
+		r.Header.Set("X-Forwarded-User", "mallory")
+		mw.ServeHTTP(httptest.NewRecorder(), r)
+	}
+
+	// First request from the untrusted peer: must trigger a WARN.
+	sendRequest("203.0.113.5:1234")
+	if !strings.Contains(buf.String(), "forward_auth") {
+		t.Fatalf("expected WARN log for untrusted peer with user header, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "203.0.113.5") {
+		t.Fatalf("expected peer IP in WARN log, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "trusted_proxies") {
+		t.Fatalf("expected trusted_proxies hint in WARN log, got: %s", buf.String())
+	}
+
+	// Request authenticates nothing: inner handler runs but no user is attached.
+	if !h.called {
+		t.Fatal("middleware must fall through to inner handler for untrusted peer")
+	}
+	if h.user != nil {
+		t.Fatalf("untrusted peer must not authenticate user, got %+v", h.user)
+	}
+
+	// Second request from the same peer: must NOT produce a second log entry.
+	buf.Reset()
+	sendRequest("203.0.113.5:5678") // same IP, different port
+	if strings.Contains(buf.String(), "forward_auth") {
+		t.Fatalf("WARN must not repeat for same untrusted peer IP, got: %s", buf.String())
+	}
+
+	// A different untrusted peer gets its own first-time WARN.
+	buf.Reset()
+	sendRequest("198.51.100.7:9999")
+	if !strings.Contains(buf.String(), "198.51.100.7") {
+		t.Fatalf("expected WARN for new untrusted peer, got: %s", buf.String())
+	}
+}
+
+// TestForwardAuth_TrustedPeerWithUserHeader_NoWarn verifies that a request from
+// a trusted peer never triggers the misconfiguration warning, even when the
+// user header is present.
+func TestForwardAuth_TrustedPeerWithUserHeader_NoWarn(t *testing.T) {
+	buf := captureSlog(t)
+
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{Enabled: true, UserHeader: "X-Forwarded-User", DefaultRole: "developer"}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555" // trusted
+	r.Header.Set("X-Forwarded-User", "alice")
+	mw.ServeHTTP(httptest.NewRecorder(), r)
+
+	if strings.Contains(buf.String(), "forward_auth") {
+		t.Fatalf("trusted peer must not trigger warn log, got: %s", buf.String())
+	}
+}
+
+// TestForwardAuth_UntrustedPeerNoUserHeader_NoWarn verifies that an untrusted
+// peer without the user header does not trigger the misconfiguration warning
+// (the header absence means there is nothing to warn about).
+func TestForwardAuth_UntrustedPeerNoUserHeader_NoWarn(t *testing.T) {
+	buf := captureSlog(t)
+
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{Enabled: true, UserHeader: "X-Forwarded-User", DefaultRole: "developer"}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "203.0.113.9:1234" // untrusted, but no user header
+	mw.ServeHTTP(httptest.NewRecorder(), r)
+
+	if strings.Contains(buf.String(), "forward_auth") {
+		t.Fatalf("untrusted peer without user header must not trigger warn log, got: %s", buf.String())
 	}
 }
