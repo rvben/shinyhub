@@ -25,6 +25,7 @@ func newAppsCmd() *cobra.Command {
 	cmd.AddCommand(
 		newAppsListCmd(),
 		newAppsShowCmd(),
+		newAppsMetricsCmd(),
 		newAppsLogsCmd(),
 		newAppsRollbackCmd(),
 		newAppsRestartCmd(),

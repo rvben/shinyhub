@@ -113,6 +113,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "global_autoscale_enabled", Type: "boolean"},
 	}},
 	"apps logs": {Mutating: ro, Streaming: true},
+	"apps metrics": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"},
+		{Name: "sessions_cap", Type: "integer"},
+		{Name: "metrics_available", Type: "boolean"},
+		{Name: "cpu_percent", Type: "number", Desc: "Aggregate CPU% across replicas"},
+		{Name: "rss_bytes", Type: "integer", Desc: "Aggregate resident memory across replicas"},
+		{Name: "replicas", Type: "array", Desc: "Per-replica index, status, pid, cpu_percent, rss_bytes, sessions"},
+	}},
 	"apps deployments": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "id", Type: "integer"},
 		{Name: "version", Type: "string"},
