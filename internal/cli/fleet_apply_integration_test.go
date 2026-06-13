@@ -276,6 +276,38 @@ func TestFleetApply_Acceptance_CreateThenIdempotent(t *testing.T) {
 	}
 }
 
+// TestFleetApply_Acceptance_CreateAppliesDeclaredConfig guards that a create
+// applies the manifest's [app.config], not just the source bundle. Otherwise a
+// freshly applied app runs with server-default config and the very next plan
+// reports spurious "update(config)" drift — non-idempotent, and the app is
+// silently misconfigured until a second apply.
+func TestFleetApply_Acceptance_CreateAppliesDeclaredConfig(t *testing.T) {
+	fake := newFleetFake(true)
+	_ = fake.httptest(t)
+	// replicas=2 differs from the server default, so a create that ignores
+	// [app.config] leaves drift the next apply would have to fix.
+	man := "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./src\"\nvisibility=\"private\"\n\n  [app.config]\n  replicas = 2\n"
+
+	out, err := applyManifest(t, fake, man)
+	if err != nil {
+		t.Fatalf("first apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "1 created") {
+		t.Fatalf("want 1 created:\n%s", out)
+	}
+	if got := fake.apps["ops"].Replicas; got != 2 {
+		t.Fatalf("create must apply declared config: replicas = %d, want 2", got)
+	}
+
+	out2, err2 := applyManifest(t, fake, man)
+	if err2 != nil {
+		t.Fatalf("second apply: %v\n%s", err2, out2)
+	}
+	if !strings.Contains(out2, "1 unchanged") {
+		t.Fatalf("second apply must be idempotent after a config-bearing create:\n%s", out2)
+	}
+}
+
 func TestFleetApply_Acceptance_PruneRemovesAfterConfirm(t *testing.T) {
 	fake := newFleetFake(true)
 	_ = fake.httptest(t)

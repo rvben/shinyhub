@@ -383,7 +383,9 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 		return httpError(cfg.Token, "stream logs", resp, out)
 	}
 
-	sw := newStreamWriter(cmd.OutOrStdout(), format, f.replica)
+	// `apps logs` always streams a specific replica (default 0), so the stream
+	// is replica-scoped: pass the index by pointer so even replica 0 is tagged.
+	sw := newStreamWriter(cmd.OutOrStdout(), format, &f.replica)
 	if f.noFollow {
 		// Plain-text response: scan lines and route through the stream writer
 		// so NDJSON mode wraps each line correctly.

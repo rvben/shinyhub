@@ -2,7 +2,9 @@ package jobs_test
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -327,6 +329,46 @@ func TestManager_Run_HappyPath(t *testing.T) {
 	}
 	if fc.ExitCode != 0 {
 		t.Errorf("expected exit code 0, got %d", fc.ExitCode)
+	}
+}
+
+// TestManager_Run_SpawnError_CapturesErrorInLog guards that when the runtime
+// returns an error (e.g. the command binary is not on PATH, so the process
+// never starts), the error text is written to the run log. Otherwise
+// `schedule logs --run N` shows an empty file and the failure is undiagnosable.
+func TestManager_Run_SpawnError_CapturesErrorInLog(t *testing.T) {
+	rt := &fakeRuntime{err: fmt.Errorf(`start one-shot: exec: "python": executable file not found in $PATH`)}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	runID, err := m.Run(1, "manual", nil)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	if len(st.finishCalls) == 0 || st.finishCalls[0].Status != "failed" {
+		t.Fatalf("expected a failed run, got finishCalls=%+v", st.finishCalls)
+	}
+	var logPath string
+	for _, lp := range st.logPaths {
+		if lp.RunID == runID {
+			logPath = lp.Path
+		}
+	}
+	if logPath == "" {
+		t.Fatalf("no run-log path recorded for run %d", runID)
+	}
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read run log %s: %v", logPath, err)
+	}
+	if !strings.Contains(string(b), "executable file not found") {
+		t.Errorf("failed run log must surface the runtime error; got %q", string(b))
 	}
 }
 

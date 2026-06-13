@@ -745,7 +745,8 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 		return httpError(cfg.Token, "stream schedule logs", resp, out)
 	}
 
-	sw := newStreamWriter(cmd.OutOrStdout(), currentFormat(), 0)
+	// Schedule run logs are not replica-scoped, so omit the "replica" key.
+	sw := newStreamWriter(cmd.OutOrStdout(), currentFormat(), nil)
 	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {

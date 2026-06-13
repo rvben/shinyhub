@@ -1300,6 +1300,19 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(deployments) < 2 {
+			// The succeeded-only history has no earlier bundle to roll back to.
+			// If the most recent deploy ATTEMPT failed it was never promoted (a
+			// failed deploy triggers restorePreviousPool), so the app is already
+			// running the last succeeded deployment. Say so explicitly instead of
+			// a bare "no previous deployment", which misleads an operator who sees
+			// the failed attempt at the top of `apps deployments`.
+			if all, aerr := s.store.ListDeploymentsBySlug(slug); aerr == nil &&
+				len(all) > 0 && all[0].Status == db.DeploymentFailed && len(deployments) == 1 {
+				writeError(w, http.StatusConflict, fmt.Sprintf(
+					"the most recent deployment failed and was not promoted; %s is already running the last succeeded deployment (#%d). Use --to <id> to redeploy a specific version.",
+					slug, deployments[0].ID))
+				return
+			}
 			writeError(w, http.StatusConflict, "no previous deployment to roll back to")
 			return
 		}
