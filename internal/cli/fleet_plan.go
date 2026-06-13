@@ -14,6 +14,7 @@ import (
 type fleetPlanFlags struct {
 	file             string
 	detailedExitcode bool
+	failOnChanges    bool
 	jsonOutput       bool
 	noColor          bool
 	waitForServer    time.Duration
@@ -29,17 +30,19 @@ func newFleetPlanCmd() *cobra.Command {
 			"Exit codes:\n" +
 			"  0  report printed (default), or no changes (--detailed-exitcode)\n" +
 			"  1  usage / manifest validation error\n" +
-			"  2  --detailed-exitcode only: changes are pending\n" +
+			"  2  --detailed-exitcode / --fail-on-changes only: changes are pending\n" +
 			"  3  transport / auth error\n" +
 			"  6  server not ready (reachable host, but shinyhub is not up yet)\n\n" +
+			"--fail-on-changes is an alias for --detailed-exitcode for CI gates.\n\n" +
 			"Example:\n" +
-			"  shinyhub fleet plan -f shinyhub-fleet.toml --detailed-exitcode",
+			"  shinyhub fleet plan -f shinyhub-fleet.toml --fail-on-changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runFleetPlan(cmd, f)
 		},
 	}
 	cmd.Flags().StringVarP(&f.file, "file", "f", defaultFleetManifest, "Path to the fleet manifest")
 	cmd.Flags().BoolVar(&f.detailedExitcode, "detailed-exitcode", false, "Exit 2 when changes are pending, 0 when none")
+	cmd.Flags().BoolVar(&f.failOnChanges, "fail-on-changes", false, "Alias for --detailed-exitcode: exit 2 when changes are pending (CI gate)")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit machine-readable JSON")
 	cmd.Flags().BoolVar(&f.noColor, "no-color", false, "Disable ANSI color (glyphs/words remain)")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
@@ -47,6 +50,10 @@ func newFleetPlanCmd() *cobra.Command {
 }
 
 func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
+	// --fail-on-changes is a CI-friendly alias for --detailed-exitcode.
+	if f.failOnChanges {
+		f.detailedExitcode = true
+	}
 	// fleet plan is a document command; NDJSON is not a valid output mode.
 	// -o json behaves like --json (both select the machine-readable envelope).
 	if format, err := resolveFormat(f.jsonOutput, false); err != nil {
