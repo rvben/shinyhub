@@ -1479,7 +1479,8 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(deployments) == 0 {
-		writeError(w, http.StatusConflict, "app has never been deployed")
+		writeError(w, http.StatusConflict,
+			"app has no successful deployment - see: shinyhub apps deployments "+slug)
 		return
 	}
 	current := deployments[0]

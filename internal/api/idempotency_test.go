@@ -92,7 +92,7 @@ func TestRestartApp_WithIfNotRunning_AlreadyDeployed_Returns200NoOp(t *testing.T
 // that when the DB status is "running" but no live replica exists in the manager
 // (the hibernation window: process stopped before DB updated), the no-op branch
 // is skipped and the handler falls through to start the app. The test app has no
-// prior deployment, so the handler returns 409 "app has never been deployed" -
+// prior deployment, so the handler returns 409 "app has no successful deployment" -
 // the important thing is it did NOT return the no-op 200 with "already running".
 func TestRestartApp_WithIfNotRunning_StaleRunningStatus_FallsThroughToStart(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
