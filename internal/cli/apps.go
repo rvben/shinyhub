@@ -118,9 +118,10 @@ type appsShowFlags struct {
 func newAppsShowCmd() *cobra.Command {
 	f := &appsShowFlags{}
 	cmd := &cobra.Command{
-		Use:   "show <slug>",
-		Short: "Show detailed information about an app",
-		Args:  cobra.ExactArgs(1),
+		Use:     "show <slug>",
+		Aliases: []string{"get"},
+		Short:   "Show detailed information about an app",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsShow(cmd, args, f)
 		},
@@ -304,8 +305,13 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 
 // ── apps logs ───────────────────────────────────────────────────────────────
 
+// isStdoutTTY is an indirection seam so tests can stub TTY detection for
+// stdout without faking a real terminal. Production code uses isTTY(os.Stdout).
+var isStdoutTTY = func() bool { return isTTY(os.Stdout) }
+
 type appsLogsFlags struct {
 	tail     int
+	follow   bool
 	noFollow bool
 	replica  int
 }
@@ -317,10 +323,17 @@ func newAppsLogsCmd() *cobra.Command {
 		Short: "Stream or fetch logs for an app",
 		Long: "Stream or fetch logs for an app.\n" +
 			"\n" +
-			"By default this opens a Server-Sent Events stream that emits the last 200\n" +
-			"lines then follows new output until interrupted. Pass --no-follow to get a\n" +
-			"one-shot plain-text response (kubectl/docker-style) that prints the tail and\n" +
-			"exits - suitable for CI and grep pipelines.",
+			"Default behavior is TTY-aware: when stdout is an interactive terminal the\n" +
+			"command opens a Server-Sent Events stream that emits the last --tail lines\n" +
+			"then follows new output until interrupted. When stdout is not a terminal\n" +
+			"(piped, redirected, or CI) the command performs a one-shot fetch and exits,\n" +
+			"making it safe to use in scripts and grep pipelines without --no-follow.\n" +
+			"\n" +
+			"Explicit override flags:\n" +
+			"  -f / --follow    Always stream (even when piped)\n" +
+			"  --no-follow      Always one-shot (even when on a terminal)\n" +
+			"\n" +
+			"Passing both --follow and --no-follow at the same time is an error.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsLogs(cmd, args, f)
@@ -328,6 +341,8 @@ func newAppsLogsCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&f.tail, "tail", 200,
 		"Number of initial lines to emit (1..10000)")
+	cmd.Flags().BoolVarP(&f.follow, "follow", "f", false,
+		"Force streaming even when stdout is not a terminal")
 	cmd.Flags().BoolVar(&f.noFollow, "no-follow", false,
 		"Print the tail and exit instead of streaming new output")
 	cmd.Flags().IntVar(&f.replica, "replica", 0,
@@ -338,6 +353,19 @@ func newAppsLogsCmd() *cobra.Command {
 func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	if f.tail <= 0 || f.tail > 10000 {
 		return fmt.Errorf("--tail must be between 1 and 10000")
+	}
+	if f.follow && f.noFollow {
+		return validationErr("--follow and --no-follow are mutually exclusive", "pass at most one")
+	}
+
+	// Resolve whether to stream (SSE) or fetch one-shot (plain text).
+	// Explicit flags take priority; otherwise fall back to TTY detection.
+	stream := isStdoutTTY()
+	if f.follow {
+		stream = true
+	}
+	if f.noFollow {
+		stream = false
 	}
 
 	format, err := resolveFormat(false, true)
@@ -352,7 +380,7 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 
 	url := fmt.Sprintf("%s/api/apps/%s/logs?tail=%d&replica=%d",
 		cfg.Host, args[0], f.tail, f.replica)
-	if f.noFollow {
+	if !stream {
 		url += "&follow=false"
 	}
 
@@ -362,12 +390,11 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 
-	// One-shot fetch (--no-follow) uses the bounded-timeout client so a
-	// stalled server doesn't pin the CLI forever. The streaming path uses
-	// the default client (no timeout) since SSE connections are long-lived
-	// by design.
+	// One-shot fetch uses the bounded-timeout client so a stalled server
+	// doesn't pin the CLI forever. The streaming path uses the default client
+	// (no timeout) since SSE connections are long-lived by design.
 	client := http.DefaultClient
-	if f.noFollow {
+	if !stream {
 		req.Header.Set("Accept", "text/plain")
 		client = httpClient
 	} else {
@@ -387,7 +414,7 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	// `apps logs` always streams a specific replica (default 0), so the stream
 	// is replica-scoped: pass the index by pointer so even replica 0 is tagged.
 	sw := newStreamWriter(cmd.OutOrStdout(), format, &f.replica)
-	if f.noFollow {
+	if !stream {
 		// Plain-text response: scan lines and route through the stream writer
 		// so NDJSON mode wraps each line correctly.
 		scanner := bufio.NewScanner(resp.Body)
