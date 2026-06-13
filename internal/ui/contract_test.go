@@ -707,6 +707,22 @@ func assertNotContains(t *testing.T, path, needle, contract string) {
 	}
 }
 
+// TestAppsGridUsesAppCardActions guards the apps-grid render against the
+// ReferenceError regression where renderGridVerbatim referenced an undeclared
+// `neverDeployed`. That threw on the first card, aborting the entire grid
+// render; and because it threw during initialize(), it also left downstream
+// dashboard wiring (modals, Refresh) unbound. The per-card show/hide decision
+// now lives in the unit-tested appCardActions helper; app.js must import and
+// use it, and must not reference a bare `neverDeployed` (no longer in scope).
+func TestAppsGridUsesAppCardActions(t *testing.T) {
+	assertContains(t, "views/app-card-actions.js", "export function appCardActions",
+		"the appCardActions helper module must exist and be exported")
+	assertContains(t, "app.js", "appCardActions(",
+		"renderGridVerbatim must compute card-action visibility via the unit-tested appCardActions helper")
+	assertNotContains(t, "app.js", "neverDeployed",
+		"app.js must not reference a bare `neverDeployed`; that undeclared variable threw ReferenceError and broke the whole grid. Use appCardActions(app, canManage) instead")
+}
+
 // TestGrantByUsernameUsesServerResolution guards the access-grant security fix:
 // the Access tab must grant by POSTing { username } to /members (the server
 // resolves it under manage-app authorization) and must NOT pre-resolve via
