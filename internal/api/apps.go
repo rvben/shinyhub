@@ -1089,7 +1089,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		s.restorePreviousPool(slug, &preManifestApp, prevActive)
 		s.recordDeploy("failure")
-		writeError(w, http.StatusInternalServerError, "deploy failed")
+		writeError(w, http.StatusInternalServerError, deployFailureMessage(err))
 		return
 	}
 	// The pool is now serving the new bundle; from here onwards the on-disk
