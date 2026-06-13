@@ -1471,6 +1471,11 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *listFlags) error {
 			}
 			row := fmt.Sprintf("%-6s %-20s %-12s %s", id, version, status, created)
 			fmt.Fprintln(w, strings.TrimRight(row, " "))
+			// Surface why a failed deploy failed, indented under its row, so the
+			// cause is visible without re-querying or passing --fields.
+			if reason, ok := d["failure_reason"].(string); ok && reason != "" {
+				fmt.Fprintf(w, "       └ %s\n", reason)
+			}
 		}
 	})
 }

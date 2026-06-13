@@ -1056,8 +1056,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		AppVersion:            version,
 	}, app))
 	if err != nil {
+		reason := deployFailureMessage(err)
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
-		_ = s.store.FailDeployment(pendingDep.ID)
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
 		// Revert manifest [app] settings so the restored old pool runs under
 		// the settings it was deployed with, not the failed bundle's.
 		if manifestApplied {
@@ -1089,7 +1090,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		s.restorePreviousPool(slug, &preManifestApp, prevActive)
 		s.recordDeploy("failure")
-		writeError(w, http.StatusInternalServerError, deployFailureMessage(err))
+		writeError(w, http.StatusInternalServerError, reason)
 		return
 	}
 	// The pool is now serving the new bundle; from here onwards the on-disk

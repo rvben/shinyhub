@@ -110,6 +110,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "id", Type: "integer"},
 		{Name: "version", Type: "string"},
 		{Name: "status", Type: "string"},
+		{Name: "failure_reason", Type: "string", Desc: "Why a failed deploy failed; empty for pending/succeeded"},
 		{Name: "created_at", Type: "string"},
 		{Name: "bundle_dir", Type: "string"},
 		{Name: "content_digest", Type: "string"},

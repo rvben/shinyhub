@@ -1019,11 +1019,20 @@ func (s *Store) PromoteDeployment(id int64) error {
 }
 
 // FailDeployment marks an aborted pending deployment as failed so it is never
-// adopted as the live bundle. It is a no-op on a row that is not pending.
+// adopted as the live bundle. It is a no-op on a row that is not pending. The
+// failure reason is left empty; prefer FailDeploymentWithReason so the cause is
+// recoverable later.
 func (s *Store) FailDeployment(id int64) error {
+	return s.FailDeploymentWithReason(id, "")
+}
+
+// FailDeploymentWithReason marks an aborted pending deployment as failed and
+// records why, so a developer can diagnose the failure after the fact via the
+// deployments history. It is a no-op on a row that is not pending.
+func (s *Store) FailDeploymentWithReason(id int64, reason string) error {
 	_, err := s.db.Exec(
-		`UPDATE deployments SET status = ? WHERE id = ? AND status = ?`,
-		DeploymentFailed, id, DeploymentPending)
+		`UPDATE deployments SET status = ?, failure_reason = ? WHERE id = ? AND status = ?`,
+		DeploymentFailed, reason, id, DeploymentPending)
 	if err != nil {
 		return fmt.Errorf("fail deployment %d: %w", id, err)
 	}
@@ -1074,7 +1083,7 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 // ordered newest first. It is a slug-based counterpart to ListDeployments.
 func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) {
 	rows, err := s.db.Query(`
-		SELECT d.id, d.version, d.status, d.created_at
+		SELECT d.id, d.version, d.status, d.failure_reason, d.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE a.slug = ?
@@ -1086,7 +1095,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 	result := make([]DeploymentSummary, 0)
 	for rows.Next() {
 		var d DeploymentSummary
-		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, d)
@@ -1096,10 +1105,14 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 
 // DeploymentSummary is a public view of a deployment row, safe for API responses.
 type DeploymentSummary struct {
-	ID        int64     `json:"id"`
-	Version   string    `json:"version"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID      int64  `json:"id"`
+	Version string `json:"version"`
+	Status  string `json:"status"`
+	// FailureReason explains why a failed deployment failed; empty for pending
+	// and succeeded rows. Always present so the field is a stable, addressable
+	// part of the deployments contract (machine consumers and CLI --fields).
+	FailureReason string    `json:"failure_reason"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // ListDeployments returns an app's deployments newest-first, excluding
