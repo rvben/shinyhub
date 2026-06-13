@@ -24,6 +24,7 @@ func newScheduleCmd() *cobra.Command {
 		newScheduleEnableCmd(),
 		newScheduleDisableCmd(),
 		newScheduleRunCmd(),
+		newScheduleRunsCmd(),
 		newScheduleLogsCmd(),
 	)
 	return cmd

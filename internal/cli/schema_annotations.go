@@ -113,6 +113,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "global_autoscale_enabled", Type: "boolean"},
 	}},
 	"apps logs": {Mutating: ro, Streaming: true},
+	"apps metrics": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"},
+		{Name: "sessions_cap", Type: "integer"},
+		{Name: "metrics_available", Type: "boolean"},
+		{Name: "cpu_percent", Type: "number", Desc: "Aggregate CPU% across replicas"},
+		{Name: "rss_bytes", Type: "integer", Desc: "Aggregate resident memory across replicas"},
+		{Name: "replicas", Type: "array", Desc: "Per-replica index, status, pid, cpu_percent, rss_bytes, sessions"},
+	}},
 	"apps deployments": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "id", Type: "integer"},
 		{Name: "version", Type: "string"},
@@ -323,6 +331,20 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 	}},
+	"schedule runs": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "id", Type: "integer"},
+		{Name: "schedule_id", Type: "integer"},
+		{Name: "status", Type: "string", Desc: "succeeded | failed | timed_out | cancelled | running"},
+		{Name: "trigger", Type: "string", Desc: "cron | manual | register"},
+		{Name: "exit_code", Type: "integer"},
+		{Name: "started_at", Type: "string"},
+		{Name: "finished_at", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+	}},
 	"schedule add": {
 		Mutating:            mut,
 		ExitCodePassthrough: true,
@@ -390,6 +412,47 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "status", Type: "string", Desc: "unmounted"},
 		{Name: "slug", Type: "string"},
 		{Name: "source_slug", Type: "string"},
+	}},
+
+	// ── users (admin) ─────────────────────────────────────────────────────────
+	"users": {Mutating: ro},
+
+	"users list": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string", Desc: "viewer | developer | operator | admin"},
+		{Name: "created_at", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+	}},
+	"users create": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "created"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string"},
+	}, ArgEnums: map[string][]string{
+		"--role": {"viewer", "developer", "operator", "admin"},
+	}},
+	"users set-role": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "role_updated"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string"},
+	}, ArgEnums: map[string][]string{
+		"--role": {"viewer", "developer", "operator", "admin"},
+	}},
+	"users reset-password": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "password_reset"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+	}},
+	"users delete": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "deleted"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
 	}},
 
 	// ── fleet ─────────────────────────────────────────────────────────────────

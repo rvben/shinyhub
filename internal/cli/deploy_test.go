@@ -680,6 +680,42 @@ func TestWaitForHealthy_StoppedIsNotTerminal(t *testing.T) {
 	}
 }
 
+// TestDeploy_FailurePrintsLogTail verifies that a startup/deploy failure (HTTP
+// 500 "deploy failed: ...") surfaces the app's last log lines inline, so the
+// developer sees the cause without a second `apps logs` command.
+func TestDeploy_FailurePrintsLogTail(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	writeFile(t, dir, "requirements.txt", "shiny\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"deploy failed: the app did not pass its health check - it likely crashed on startup. Check the app logs for the cause."}`))
+		case strings.HasSuffix(r.URL.Path, "/logs"):
+			_, _ = w.Write([]byte("ModuleNotFoundError: No module named 'pandas'\n"))
+		default:
+			// The pre-deploy GET /api/apps/{slug} existence check.
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	writeTestCLIConfig(t, srv.URL)
+
+	out, err := execCLI(t, "deploy", dir, "--slug", "demo")
+	if err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	if !strings.Contains(out, "--- last log lines ---") {
+		t.Errorf("a deploy failure should print the log-tail header inline:\n%s", out)
+	}
+	if !strings.Contains(out, "ModuleNotFoundError") {
+		t.Errorf("a deploy failure should surface the app's crash logs inline:\n%s", out)
+	}
+}
+
 // TestPrintLogTail_WarnsOnLogsEndpointFailure verifies that printLogTail
 // writes a warning line when the logs endpoint returns a non-2xx status,
 // so the user sees actionable output instead of silence.
