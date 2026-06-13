@@ -14,8 +14,29 @@ type schemaDoc struct {
 	Version     string          `json:"version"`
 	Description string          `json:"description,omitempty"`
 	GlobalArgs  []schemaArg     `json:"global_args,omitempty"`
+	EnvVars     []schemaEnvVar  `json:"env_vars,omitempty"`
 	Commands    []schemaCommand `json:"commands"`
 	Errors      []schemaError   `json:"errors"`
+}
+
+// schemaEnvVar documents an environment variable that changes CLI behavior.
+// SHINYHUB_HOST/SHINYHUB_TOKEN are the entire non-interactive (CI) auth story,
+// so making them discoverable here removes the biggest CI onboarding cliff.
+type schemaEnvVar struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Scope       string `json:"scope,omitempty"` // "client" or "server"
+}
+
+// clientEnvVars are the environment variables that affect the shinyhub CLI (and
+// the one server-side var clients need to know about).
+func clientEnvVars() []schemaEnvVar {
+	return []schemaEnvVar{
+		{Name: "SHINYHUB_HOST", Scope: "client", Description: "Server URL; overrides the saved host. Set together with SHINYHUB_TOKEN for non-interactive (CI) auth - no `shinyhub login` needed."},
+		{Name: "SHINYHUB_TOKEN", Scope: "client", Description: "API key or pre-shared deploy token; overrides the saved token. Skips interactive login."},
+		{Name: "SHINYHUB_CONFIG", Scope: "client", Description: "Path to the credentials file (default ~/.config/shinyhub/config.json)."},
+		{Name: "SHINYHUB_DEPLOY_TOKEN", Scope: "server", Description: "Configured on the server to enable pre-shared deploy-token auth; clients pass its value as SHINYHUB_TOKEN."},
+	}
 }
 
 type schemaCommand struct {
@@ -65,6 +86,7 @@ func generateSchema(root *cobra.Command) schemaDoc {
 		Name:        "shinyhub",
 		Version:     version,
 		Description: root.Short,
+		EnvVars:     clientEnvVars(),
 	}
 	root.InitDefaultHelpFlag()
 	root.PersistentFlags().VisitAll(func(f *pflag.Flag) {
