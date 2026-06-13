@@ -392,6 +392,47 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "source_slug", Type: "string"},
 	}},
 
+	// ── users (admin) ─────────────────────────────────────────────────────────
+	"users": {Mutating: ro},
+
+	"users list": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string", Desc: "viewer | developer | operator | admin"},
+		{Name: "created_at", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+	}},
+	"users create": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "created"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string"},
+	}, ArgEnums: map[string][]string{
+		"--role": {"viewer", "developer", "operator", "admin"},
+	}},
+	"users set-role": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "role_updated"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string"},
+	}, ArgEnums: map[string][]string{
+		"--role": {"viewer", "developer", "operator", "admin"},
+	}},
+	"users reset-password": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "password_reset"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+	}},
+	"users delete": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "deleted"},
+		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+	}},
+
 	// ── fleet ─────────────────────────────────────────────────────────────────
 	"fleet": {Mutating: ro},
 
