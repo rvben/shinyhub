@@ -1,6 +1,10 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+	"os/exec"
+	"sync"
+)
 
 // serverInfoResponse is the JSON shape returned by GET /api/server-info.
 type serverInfoResponse struct {
@@ -10,6 +14,11 @@ type serverInfoResponse struct {
 	// requirements before issuing a mutating call.
 	Version      string             `json:"version"`
 	Capabilities serverCapabilities `json:"capabilities"`
+	// Runtimes reports which app runtimes the host can actually start, keyed by
+	// language ("python", "r"). A developer (or the CLI) reads this to learn
+	// that, e.g., an R deploy will fail because R is not installed - instead of
+	// hitting an opaque deploy error.
+	Runtimes map[string]bool `json:"runtimes"`
 }
 
 // serverCapabilities enumerates the optional protocol features this server
@@ -31,7 +40,32 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			FleetPreconditions: true,
 			ContentDigest:      true,
 		},
+		Runtimes: detectRuntimes(),
 	})
+}
+
+var (
+	runtimesOnce  sync.Once
+	runtimesCache map[string]bool
+)
+
+// detectRuntimes reports which app runtimes are available on the host PATH.
+// Python apps run via uv (or python3) and R apps via Rscript, so each language
+// is "available" when its launcher resolves. The result is cached after the
+// first call: PATH does not change for the life of the process.
+func detectRuntimes() map[string]bool {
+	runtimesOnce.Do(func() {
+		runtimesCache = map[string]bool{
+			"python": onPath("uv") || onPath("python3"),
+			"r":      onPath("Rscript"),
+		}
+	})
+	return runtimesCache
+}
+
+func onPath(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 // SetVersion records the binary version string advertised by GET

@@ -186,6 +186,16 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		fmt.Fprintln(errW, summary)
 	}
 
+	// Best-effort pre-flight: an R bundle on a server with no R runtime will
+	// fail server-side. Warn early so the developer knows it is a host setup
+	// issue, not their bundle. Silent when the server is older or unreachable.
+	if looksLikeRApp(abs) {
+		if available, known := serverRuntimeAvailable(cfg, "r"); known && !available {
+			fmt.Fprintln(errW, "Warning: this looks like an R app, but the server reports no R runtime (Rscript). "+
+				"The deploy will likely fail - ask your administrator to install R or use a container runtime.")
+		}
+	}
+
 	if err := ensureApp(cfg, slug, f.visibility); err != nil {
 		return err
 	}
