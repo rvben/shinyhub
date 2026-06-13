@@ -9,7 +9,8 @@ import (
 
 func TestStreamWriter_NDJSONWrapsLines(t *testing.T) {
 	var out bytes.Buffer
-	w := newStreamWriter(&out, formatNDJSON, 2)
+	r := 2
+	w := newStreamWriter(&out, formatNDJSON, &r)
 	w.WriteLine("app started")
 	w.WriteLine(`has "quotes" and {braces}`)
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
@@ -32,25 +33,46 @@ func TestStreamWriter_NDJSONWrapsLines(t *testing.T) {
 
 func TestStreamWriter_TablePassthrough(t *testing.T) {
 	var out bytes.Buffer
-	w := newStreamWriter(&out, formatTable, 0)
+	w := newStreamWriter(&out, formatTable, nil)
 	w.WriteLine("raw line")
 	if out.String() != "raw line\n" {
 		t.Errorf("table mode must pass lines through: %q", out.String())
 	}
 }
 
-func TestStreamWriter_NDJSONReplicaZeroOmitted(t *testing.T) {
+// Replica 0 is a real replica index for `apps logs` (the default, first
+// replica), so NDJSON lines must carry "replica":0 — the same schema every
+// other replica index gets. Omitting it for index 0 left replica-0 lines
+// untagged while replicas 1+ were tagged, breaking cross-replica aggregation.
+func TestStreamWriter_NDJSONReplicaZeroTagged(t *testing.T) {
 	var out bytes.Buffer
-	w := newStreamWriter(&out, formatNDJSON, 0)
-	w.WriteLine("no replica")
+	r := 0
+	w := newStreamWriter(&out, formatNDJSON, &r)
+	w.WriteLine("replica zero line")
 	var obj map[string]any
-	if err := json.Unmarshal(out.Bytes(), &obj); err != nil {
-		// strip trailing newline
-		if err2 := json.Unmarshal(bytes.TrimRight(out.Bytes(), "\n"), &obj); err2 != nil {
-			t.Fatalf("not NDJSON: %q: %v", out.String(), err)
-		}
+	if err := json.Unmarshal(bytes.TrimRight(out.Bytes(), "\n"), &obj); err != nil {
+		t.Fatalf("not NDJSON: %q: %v", out.String(), err)
+	}
+	v, has := obj["replica"]
+	if !has {
+		t.Fatalf("replica key must be present for replica index 0: %q", out.String())
+	}
+	if v != float64(0) {
+		t.Errorf("replica = %v, want 0", v)
+	}
+}
+
+// A nil replica means "not replica-scoped" (e.g. schedule run logs, which have
+// no replica concept). Those lines must omit the "replica" key entirely.
+func TestStreamWriter_NDJSONNilReplicaOmitted(t *testing.T) {
+	var out bytes.Buffer
+	w := newStreamWriter(&out, formatNDJSON, nil)
+	w.WriteLine("no replica scope")
+	var obj map[string]any
+	if err := json.Unmarshal(bytes.TrimRight(out.Bytes(), "\n"), &obj); err != nil {
+		t.Fatalf("not NDJSON: %q: %v", out.String(), err)
 	}
 	if _, has := obj["replica"]; has {
-		t.Error("replica key should be omitted when replica is 0")
+		t.Error("replica key must be omitted when the stream is not replica-scoped")
 	}
 }
