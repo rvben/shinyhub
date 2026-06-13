@@ -45,50 +45,91 @@ no external services to operate.
 
 ## Quick start
 
-### Docker (recommended)
+The simplest way to run ShinyHub end to end is with
+[`uv`](https://docs.astral.sh/uv/): it installs and runs the server in one
+command, and it is also the runtime ShinyHub uses to launch Python apps, so once
+`uv` is on the host you have everything you need. For an isolated or production
+deployment use [Docker](#docker); for a standalone server binary see
+[Binary](#binary).
+
+### uv (recommended)
+
+```bash
+uv tool install shinyhub
+
+SHINYHUB_AUTH_SECRET="$(openssl rand -hex 32)" \
+  SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
+  shinyhub serve
+```
+
+`SHINYHUB_AUTH_SECRET` (a random 32+ character string) is the only required
+setting; no YAML file is needed for a basic run. **Generate it once and reuse the
+same value on every restart**: it signs sessions and derives the key that
+encrypts app secrets, so changing it makes existing encrypted data unreadable.
+Beyond a quick trial, load it from a file or secrets manager (or set `auth.secret`
+in `shinyhub.yaml`). The database, bundles, and per-app data land under `./data/`
+by default. Open `http://localhost:8080` and log in as `admin`.
+
+Then deploy an app (an `app.py` + `requirements.txt`, or an R `app.R`) from
+another terminal:
+
+```bash
+shinyhub login --host http://localhost:8080 --username admin
+shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
+```
+
+> `uvx shinyhub <cmd>` runs any subcommand one-shot, without installing first.
+> `pip install shinyhub` installs the server too, but native Python apps launch
+> via `uv run`, so you still need `uv` on the host to deploy them.
+
+### Docker
+
+The published image runs the ShinyHub control plane, proxy, and dashboard, but it
+is distroless and does **not** bundle a Python or R runtime, so it cannot run
+apps on its own. To run apps under Docker, use the
+[`deploy/docker-compose`](deploy/docker-compose) stack, which wires up the Docker
+app runtime (each app in its own container) together with the host networking and
+path-parity data root that runtime requires. To run apps without containers, run
+the server on a host that has `uv` (the [uv path](#uv-recommended) above).
+
+To start just the control plane (dashboard + API, not app execution) with a
+persistent `/data` volume:
 
 ```bash
 mkdir -p ./data
-cp shinyhub.yaml.example ./shinyhub.yaml
-# Edit shinyhub.yaml: set auth.secret to the output of `openssl rand -hex 32`.
+secret="$(openssl rand -hex 32)"   # generate once; reuse the SAME value on restart
 
 docker run -d \
   --name shinyhub \
   -p 8080:8080 \
-  -v "$PWD/shinyhub.yaml:/etc/shinyhub/shinyhub.yaml:ro" \
   -v "$PWD/data:/data" \
+  -e SHINYHUB_AUTH_SECRET="$secret" \
   -e SHINYHUB_ADMIN_USER=admin \
   -e SHINYHUB_ADMIN_PASSWORD=change-me \
   ghcr.io/rvben/shinyhub:latest
 ```
 
-The mount target `/data` matches the example YAML's `./data/...` paths
-(database, bundles, and app data dir all land there). Open
-`http://localhost:8080` and log in with the admin credentials you set.
-
-### PyPI
-
-ShinyHub is published to PyPI, so `uv` or `pip` can install the CLI and server:
-
-```bash
-uv tool install shinyhub        # isolated tool venv
-uvx shinyhub deploy ./my-app --slug demo   # one-shot, without installing
-pip install shinyhub            # or via pip
-```
+The default `./data/...` paths resolve inside the mounted `/data` volume. Open
+`http://localhost:8080` and log in with the admin credentials you set. To deploy
+apps from here, switch to the [`deploy/docker-compose`](deploy/docker-compose)
+stack; for storage and SSO settings, mount a `shinyhub.yaml`
+(see [Configuration](#configuration)).
 
 ### Binary
+
+For a host without Python, install the standalone server binary:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rvben/shinyhub/main/scripts/install.sh | sh
 # Or download from https://github.com/rvben/shinyhub/releases
 
-cp shinyhub.yaml.example shinyhub.yaml
-# Set auth.secret to a 32-byte random value.
-
-SHINYHUB_CONFIG=./shinyhub.yaml \
+SHINYHUB_AUTH_SECRET="$(openssl rand -hex 32)" \
   SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
   shinyhub serve
 ```
+
+> The binary is the server only. Python apps are launched with `uv`, so install
+> `uv` on the host too (or run apps under the Docker runtime).
 
 ### From source
 
