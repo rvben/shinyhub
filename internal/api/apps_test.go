@@ -883,6 +883,41 @@ func TestRollbackApp_NoPreviousDeployment(t *testing.T) {
 	}
 }
 
+// TestRollbackApp_DefaultAfterFailedDeploy guards that when the most recent
+// deploy ATTEMPT failed (and was therefore never promoted — the app is still
+// running the last succeeded deployment), a default `rollback` does not return
+// the misleading bare "no previous deployment to roll back to". The operator
+// sees the failed attempt at the top of `apps deployments` and reaches for
+// rollback; the response must explain the app is already on the last good
+// deployment and point at `--to <id>`.
+func TestRollbackApp_DefaultAfterFailedDeploy(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("myapp")
+	// v1 succeeded (the last good, still live); v2 failed (never promoted).
+	store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v1", BundleDir: "/tmp/v1"})
+	store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v2", BundleDir: "/tmp/v2", Status: db.DeploymentFailed})
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "POST", "/api/apps/myapp/rollback", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "no previous deployment to roll back to") {
+		t.Errorf("message must not be the misleading generic one after a failed deploy: %s", body)
+	}
+	if !strings.Contains(body, "last succeeded deployment") {
+		t.Errorf("message should explain the app is already on the last succeeded deployment: %s", body)
+	}
+}
+
 // TestRollbackApp_MissingBundleRefusesBeforeStop guards against a regression
 // where the rollback handler called manager.Stop and proxy.Deregister before
 // validating that the target deployment's bundle directory still existed on
