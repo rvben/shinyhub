@@ -97,6 +97,27 @@ func TestWriteFleetApplyJSON_HasResultAndSummary(t *testing.T) {
 	}
 }
 
+// TestWriteFleetApplyJSON_IncludesAppURL verifies each applied app carries its
+// served URL, so CI can post a link to the app from a PR without a follow-up
+// `apps list`.
+func TestWriteFleetApplyJSON_IncludesAppURL(t *testing.T) {
+	var out bytes.Buffer
+	m := &fleet.Manifest{FleetID: "eu"}
+	diff := []fleet.AppDiff{{Slug: "reports", Action: fleet.ActionCreate}}
+	res := []applyResult{{slug: "reports", action: fleet.ActionCreate, status: statusCreated, attempts: 1, duration: time.Second}}
+	if err := writeFleetApplyJSON(&out, m, "https://h", diff, res, 0, "OK - all converged"); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	a0 := env["apps"].([]any)[0].(map[string]any)
+	if got := a0["app_url"]; got != "https://h/app/reports/" {
+		t.Errorf("app_url = %v, want https://h/app/reports/", got)
+	}
+}
+
 type errStub string
 
 func (e errStub) Error() string { return string(e) }
