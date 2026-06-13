@@ -81,6 +81,15 @@ defaults:
   # Set to "public" when ShinyHub sits behind an auth proxy (Caddy, oauth2-proxy,
   # Cloudflare Access, etc.) and the perimeter already enforces access.
   # Existing apps are not affected. The CLI flag `--visibility` overrides per deploy.
+  #
+  # SECURITY CAVEAT: "public" means NO ShinyHub-level authorization. It is only
+  # safe when the auth proxy is the ONLY path into ShinyHub. If the ShinyHub app
+  # port is also reachable directly (LAN, VPN, Tailscale, or any other interface),
+  # apps are accessible with no authentication at all from that path.
+  # In that case, prefer "private" instead: users who arrive through the auth proxy
+  # still receive a forward-auth identity and are logged in; direct access with a
+  # deploy token still works; no app is exposed without any auth. Alternatively,
+  # firewall the app port so only the proxy host can connect.
   app_visibility: private               # SHINYHUB_DEFAULTS_APP_VISIBILITY
 
 lifecycle:

@@ -150,6 +150,14 @@ The server resolves its config file in this order: the `--config` flag
 `restore`), then the `SHINYHUB_CONFIG` environment variable, then
 `./shinyhub.yaml`.
 
+> **`SHINYHUB_CONFIG` has two distinct roles.** On the SERVER it selects the
+> `shinyhub.yaml` config file. On CLIENT commands (`deploy`, `env`, `apps`, ...)
+> it selects the credentials file (`~/.config/shinyhub/config.json` by default,
+> written by `shinyhub login`). The `--config` flag on client commands likewise
+> points to the credentials file, not the server YAML. For CI pipelines the
+> simpler approach is to skip the credentials file entirely and supply
+> `SHINYHUB_HOST` and `SHINYHUB_TOKEN` directly.
+
 The one required setting is `auth.secret`: a random 32+ character string
 (`openssl rand -hex 32`). The server refuses to start with the placeholder
 value.
@@ -169,6 +177,7 @@ value.
 | [Branding](docs/branding.md) | White-label title, logo, theme, landing page, and footer links. |
 | [Reverse-proxy auth - Caddy](docs/reverse-proxy/caddy.md) | Authenticate users via Caddy `forward_auth` and forward the identity to ShinyHub. |
 | [Reverse-proxy auth - nginx](docs/reverse-proxy/nginx.md) | Authenticate users via nginx `auth_request` and forward the identity to ShinyHub. |
+| [CLI/CI behind an auth proxy](docs/reverse-proxy/deploying-behind-a-proxy.md) | Deploy and manage apps from the CLI or CI when ShinyHub is behind an auth proxy that blocks non-browser clients. |
 | [OIDC bridge for LDAP/SAML](docs/reverse-proxy/oidc-bridge.md) | Wrap an LDAP or SAML source with an OIDC bridge (Authelia, Authentik, Keycloak) and use ShinyHub's built-in OIDC login. |
 
 ## Architecture

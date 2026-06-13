@@ -63,7 +63,14 @@ example Authelia at `authelia:9091/api/verify`, or oauth2-proxy at
 ## ShinyHub configuration
 
 Add `auth.forward_auth` to your `shinyhub.yaml` and add Caddy's address to
-`server.trusted_proxies`:
+`server.trusted_proxies`.
+
+> **Cross-host requirement.** If Caddy and ShinyHub run on DIFFERENT hosts, you
+> MUST add the Caddy host's IP or CIDR to `server.trusted_proxies`. The loopback
+> default (`127.0.0.0/8`, `::1/128`) only covers the case where both processes
+> run on the same machine. Without the correct entry, ShinyHub silently ignores
+> the forwarded identity headers and users land on the login page with no
+> indication of what went wrong.
 
 ```yaml
 server:
