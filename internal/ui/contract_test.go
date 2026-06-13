@@ -64,6 +64,18 @@ func TestDataTabUnwrapsResponse(t *testing.T) {
 		"GET /api/apps/:slug/data returns {files, quota_mb, used_bytes}; see internal/api/data.go handleDataList")
 }
 
+// TestAppCardBadgeReadsDeploymentStatus guards the failed-vs-never-deployed
+// badge. The app summary exposes last_deployment_status (internal/db/queries.go
+// deploymentSummarySQL); appCardBadge reads it so a failed-only deploy renders
+// "Failed" instead of the benign "Awaiting deploy", and app.js must route the
+// card badge through it.
+func TestAppCardBadgeReadsDeploymentStatus(t *testing.T) {
+	assertContains(t, "app.js", "appCardBadge",
+		"app.js must use appCardBadge so a failed deploy renders Failed, not Awaiting deploy")
+	assertContains(t, "views/app-card-badge.js", "last_deployment_status",
+		"appCardBadge must read app.last_deployment_status; see internal/db/queries.go deploymentSummarySQL")
+}
+
 // TestAuditUnwrapsEnvelope guards the audit-log consumer.
 // GET /api/audit returns {events, total, has_more} (internal/api/audit.go
 // handleListAuditEvents). The UI's loadAuditEvents must read body.has_more

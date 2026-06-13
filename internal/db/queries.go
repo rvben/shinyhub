@@ -402,6 +402,11 @@ type App struct {
 	// deployment, or "" if it has never had one. Joined via
 	// deploymentSummarySQL; pending/failed deployments are never reflected.
 	ContentDigest string `json:"content_digest,omitempty"`
+	// LastDeploymentStatus is the status of the app's most-recent deployment row
+	// ("succeeded"/"failed"/"pending"), or "" if it has never been deployed. It
+	// lets a consumer tell a failed-only deploy from a never-deployed app, which
+	// deploy_count (incremented on success only) cannot.
+	LastDeploymentStatus string `json:"last_deployment_status,omitempty"`
 	// ReplicaPlacement is the per-app replica placement as a JSON object
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
@@ -453,7 +458,9 @@ const deploymentSummarySQL = `
 		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
 		(SELECT content_digest FROM deployments
 		   WHERE app_id = apps.id AND status = 'succeeded'
-		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest`
+		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest,
+		(SELECT status FROM deployments WHERE app_id = apps.id
+		   ORDER BY created_at DESC, id DESC LIMIT 1) AS last_deployment_status`
 
 // appColumns is the plain apps.* column list shared by every App SELECT, in the
 // exact order scanApp expects. It is kept as a single constant so the column
@@ -2445,7 +2452,7 @@ type scanner interface {
 
 func scanApp(s scanner) (*App, error) {
 	var a App
-	var projectSlug, currentVersion, contentDigest sql.NullString
+	var projectSlug, currentVersion, contentDigest, lastDeploymentStatus sql.NullString
 	// last_deployed_at is the result of MAX(deployments.created_at). SQLite
 	// aggregates lose the original column type, so the driver returns the
 	// value as a string. We parse it manually below.
@@ -2459,7 +2466,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
-		&lastDeployedAtRaw, &currentVersion, &contentDigest,
+		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2481,6 +2488,9 @@ func scanApp(s scanner) (*App, error) {
 	}
 	if contentDigest.Valid {
 		a.ContentDigest = contentDigest.String
+	}
+	if lastDeploymentStatus.Valid {
+		a.LastDeploymentStatus = lastDeploymentStatus.String
 	}
 	return &a, nil
 }

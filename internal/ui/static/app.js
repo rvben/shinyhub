@@ -7,6 +7,7 @@ import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-healt
 import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
+import { appCardBadge } from '/static/views/app-card-badge.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
@@ -330,16 +331,10 @@ document.addEventListener('DOMContentLoaded', () => {
       name.textContent = app.name;
       header.appendChild(name);
 
-      const neverDeployed = (app.deploy_count || 0) === 0;
-
+      const badgeInfo = appCardBadge(app, formatStatus);
       const badge = document.createElement('span');
-      if (neverDeployed) {
-        badge.className = 'badge badge-new';
-        badge.textContent = 'Awaiting deploy';
-      } else {
-        badge.className = `badge badge-${app.status}`;
-        badge.textContent = formatStatus(app.status);
-      }
+      badge.className = badgeInfo.cls;
+      badge.textContent = badgeInfo.text;
       header.appendChild(badge);
 
       const fleetBadge = makeFleetBadge(document, app);
