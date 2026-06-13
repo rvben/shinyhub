@@ -331,6 +331,20 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 	}},
+	"schedule runs": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "id", Type: "integer"},
+		{Name: "schedule_id", Type: "integer"},
+		{Name: "status", Type: "string", Desc: "succeeded | failed | timed_out | cancelled | running"},
+		{Name: "trigger", Type: "string", Desc: "cron | manual | register"},
+		{Name: "exit_code", Type: "integer"},
+		{Name: "started_at", Type: "string"},
+		{Name: "finished_at", Type: "string"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+	}},
 	"schedule add": {
 		Mutating:            mut,
 		ExitCodePassthrough: true,
