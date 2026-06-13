@@ -182,11 +182,12 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		restarted, restartErr = s.maybeRestartForChange(r, app, slug)
 	}
 	resp := map[string]any{
-		"key":       key,
-		"secret":    body.Secret,
-		"set":       true,
-		"changed":   changed,
-		"restarted": restarted,
+		"key":              key,
+		"secret":           body.Secret,
+		"set":              true,
+		"changed":          changed,
+		"restarted":        restarted,
+		"restart_required": changed && !restarted && app.Status == "running",
 	}
 	if restartErr != nil {
 		resp["restart_error"] = restartErr.Error()
@@ -230,7 +231,12 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.ClientIP(r),
 	})
 
-	s.maybeRestartForChange(r, app, slug)
+	restarted, _ := s.maybeRestartForChange(r, app, slug)
+	// The 204 carries no body, so advertise a needed restart via a header: a
+	// running app keeps the removed variable in its environment until cycled.
+	if !restarted && app.Status == "running" {
+		w.Header().Set("X-Shinyhub-Restart-Required", "true")
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
