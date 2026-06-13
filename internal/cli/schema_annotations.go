@@ -54,6 +54,13 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	// ── auth ─────────────────────────────────────────────────────────────────
 	"login":  {Mutating: mut},
 	"logout": {Mutating: mut},
+	"whoami": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "ok"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string"},
+		{Name: "host", Type: "string", Desc: "Server URL the credentials target"},
+		{Name: "can_create_apps", Type: "boolean"},
+	}},
 
 	// ── deploy ───────────────────────────────────────────────────────────────
 	"deploy": {

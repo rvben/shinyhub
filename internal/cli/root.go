@@ -55,6 +55,7 @@ func AddCommandsTo(root *cobra.Command) {
 	root.AddCommand(
 		newLoginCmd(),
 		newLogoutCmd(),
+		newWhoamiCmd(),
 		newDeployCmd(),
 		newAppsCmd(),
 		newTokensCmd(),
