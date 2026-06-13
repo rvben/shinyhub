@@ -231,6 +231,14 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
+		// A startup/deploy failure (HTTP 5xx "deploy failed: ...") is diagnosed
+		// fastest from the app's own logs - the health-check message even tells
+		// the developer to "check the app logs". Surface the last lines inline so
+		// they don't have to run a second `apps logs` command. Other failures
+		// (auth, validation) carry no app logs, so gate on the deploy-failure body.
+		if resp.StatusCode >= 500 && bytes.Contains(out, []byte("deploy failed")) {
+			printLogTail(cfg, slug, cmd.ErrOrStderr())
+		}
 		return httpError(cfg.Token, "deploy", resp, out)
 	}
 
