@@ -8,6 +8,7 @@ import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { appCardBadge } from '/static/views/app-card-badge.js';
+import { appCardActions } from '/static/views/app-card-actions.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
@@ -369,7 +370,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const actions = document.createElement('div');
       actions.className = 'app-actions';
 
-      if (!neverDeployed) {
+      const canManage = canManageApp(state.user, app);
+      const cardActions = appCardActions(app, canManage);
+
+      if (cardActions.showOpen) {
         const openLink = document.createElement('a');
         openLink.href = `/app/${app.slug}/`;
         openLink.target = '_blank';
@@ -379,16 +383,16 @@ document.addEventListener('DOMContentLoaded', () => {
         actions.appendChild(openLink);
       }
 
-      if (canManageApp(state.user, app)) {
+      if (canManage) {
         const deployButton = document.createElement('button');
         deployButton.type = 'button';
         deployButton.textContent = 'Deploy';
-        if (neverDeployed) deployButton.className = 'btn-primary';
+        if (cardActions.deployIsPrimary) deployButton.className = 'btn-primary';
         deployButton.setAttribute('aria-label', `Deploy new bundle to ${app.name}`);
         deployButton.addEventListener('click', () => openDeployModal(app));
         actions.appendChild(deployButton);
 
-        if (!neverDeployed) {
+        if (cardActions.showRestart) {
           const kebab = document.createElement('div');
           kebab.className = 'kebab-menu';
           kebab.innerHTML = `
