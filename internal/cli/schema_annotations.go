@@ -270,9 +270,12 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"data": {Mutating: ro},
 
 	"data push": {Mutating: mut, OutputFields: []fieldSpec{
-		{Name: "status", Type: "string", Desc: "uploaded"},
+		{Name: "status", Type: "string", Desc: "uploaded, or planned with --dry-run"},
 		{Name: "slug", Type: "string"},
-		{Name: "path", Type: "string"},
+		{Name: "path", Type: "string", Desc: "Effective destination inside the data dir"},
+		{Name: "local", Type: "string", Desc: "Local source file"},
+		{Name: "bytes", Type: "integer", Desc: "File size in bytes"},
+		{Name: "dry_run", Type: "boolean", Desc: "Present and true when --dry-run skipped the upload"},
 	}},
 	"data ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "path", Type: "string"},
