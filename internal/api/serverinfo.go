@@ -49,18 +49,26 @@ var (
 	runtimesCache map[string]bool
 )
 
-// detectRuntimes reports which app runtimes are available on the host PATH.
-// Python apps run via uv (or python3) and R apps via Rscript, so each language
-// is "available" when its launcher resolves. The result is cached after the
-// first call: PATH does not change for the life of the process.
+// detectRuntimes reports which app runtimes are available on the host PATH,
+// cached after the first call (PATH does not change for the life of the
+// process).
 func detectRuntimes() map[string]bool {
 	runtimesOnce.Do(func() {
-		runtimesCache = map[string]bool{
-			"python": onPath("uv") || onPath("python3"),
-			"r":      onPath("Rscript"),
-		}
+		runtimesCache = computeRuntimes(onPath)
 	})
 	return runtimesCache
+}
+
+// computeRuntimes maps launcher availability to runtime languages. Python apps
+// launch via uv (`uv run`) and sync deps via uv, so Python is available iff uv
+// resolves - python3 alone cannot run a ShinyHub Python app and reporting it as
+// available would make /api/server-info lie for the exact preflight it serves.
+// R apps launch via Rscript.
+func computeRuntimes(hasExe func(string) bool) map[string]bool {
+	return map[string]bool{
+		"python": hasExe("uv"),
+		"r":      hasExe("Rscript"),
+	}
 }
 
 func onPath(name string) bool {
