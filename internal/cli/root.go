@@ -40,14 +40,14 @@ func silenceUsageOnError(cmd *cobra.Command) {
 }
 
 // configPathOverride is set by the --config persistent flag. Empty means
-// "use the default path (or SHINYHUB_CONFIG)".
+// "use the default path (or SHINYHUB_CREDENTIALS / SHINYHUB_CONFIG)".
 var configPathOverride string
 
 // AddCommandsTo registers every CLI subcommand onto the supplied root command
 // and attaches global persistent flags shared by all subcommands.
 func AddCommandsTo(root *cobra.Command) {
 	root.PersistentFlags().StringVar(&configPathOverride, "config", "",
-		"Path to credentials file (overrides $SHINYHUB_CONFIG and the default)")
+		"Path to client credentials file (overrides $SHINYHUB_CREDENTIALS, $SHINYHUB_CONFIG, and the default)")
 	root.PersistentFlags().StringVarP(&outputFlagValue, "output", "o", "",
 		"Output format: table, json, or ndjson (default: table on a terminal, json/ndjson when piped)")
 	root.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false,
@@ -82,13 +82,18 @@ type cliConfig struct {
 	Token string `json:"token"`
 }
 
-// configPath returns the effective credentials path, honouring (in order):
+// configPath returns the effective client credentials path, honouring (in order):
 //  1. the --config persistent flag,
-//  2. the SHINYHUB_CONFIG environment variable,
-//  3. ~/.config/shinyhub/config.json (default).
+//  2. SHINYHUB_CREDENTIALS (preferred; unambiguously refers to the CLIENT credentials
+//     file, distinct from the server-side `serve --config` flag),
+//  3. SHINYHUB_CONFIG (legacy alias, still fully supported for back-compat),
+//  4. ~/.config/shinyhub/config.json (default).
 func configPath() string {
 	if configPathOverride != "" {
 		return configPathOverride
+	}
+	if v := os.Getenv("SHINYHUB_CREDENTIALS"); v != "" {
+		return v
 	}
 	if v := os.Getenv("SHINYHUB_CONFIG"); v != "" {
 		return v

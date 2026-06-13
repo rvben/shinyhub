@@ -721,7 +721,47 @@ type rawDockerImages struct {
 	R      string `yaml:"r"`
 }
 
+// Load parses and validates the full server configuration from path (or
+// environment variables when path is empty or the file does not exist).
+// auth.secret is required and must not be the placeholder value or shorter
+// than 32 characters. Use LoadForMaintenance for commands that do not perform
+// cryptography (backup, restore).
 func Load(path string) (*Config, error) {
+	cfg, err := loadRaw(path)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Auth.Secret == "" {
+		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
+	}
+	if cfg.Auth.Secret == "change-me-to-a-random-string" {
+		return nil, fmt.Errorf("auth.secret is the placeholder value from shinyhub.yaml.example; generate a strong value with: openssl rand -hex 32")
+	}
+	if len(cfg.Auth.Secret) < 32 {
+		return nil, fmt.Errorf("auth.secret must be at least 32 characters (got %d); generate one with: openssl rand -hex 32", len(cfg.Auth.Secret))
+	}
+	return cfg, nil
+}
+
+// LoadForMaintenance loads the config the same way Load does but skips the
+// auth.secret validation. Backup and restore operate only on files and the
+// SQLite database; they perform no cryptography and therefore do not need a
+// valid secret. Callers must not use cfg.Auth.Secret for any purpose.
+func LoadForMaintenance(path string) (*Config, error) {
+	cfg, err := loadRaw(path)
+	if err != nil {
+		return nil, err
+	}
+	// auth.secret is intentionally not validated here. The field may be empty,
+	// the placeholder, or too short; none of those conditions affect backup or
+	// restore correctness.
+	return cfg, nil
+}
+
+// loadRaw is the shared implementation of Load and LoadForMaintenance. It
+// parses, normalizes, and validates all config fields except auth.secret, which
+// the two public entry points handle differently.
+func loadRaw(path string) (*Config, error) {
 	raw := &rawConfig{
 		Database: DatabaseConfig{Driver: "sqlite", DSN: "./data/shinyhub.db"},
 		Server:   ServerConfig{Host: "0.0.0.0", Port: 8080},
@@ -1018,15 +1058,6 @@ func Load(path string) (*Config, error) {
 				cfg.Scheduler.DefaultTimezone, err)
 		}
 		cfg.Scheduler.Location = loc
-	}
-	if cfg.Auth.Secret == "" {
-		return nil, fmt.Errorf("auth.secret must be set (SHINYHUB_AUTH_SECRET)")
-	}
-	if cfg.Auth.Secret == "change-me-to-a-random-string" {
-		return nil, fmt.Errorf("auth.secret is the placeholder value from shinyhub.yaml.example; generate a strong value with: openssl rand -hex 32")
-	}
-	if len(cfg.Auth.Secret) < 32 {
-		return nil, fmt.Errorf("auth.secret must be at least 32 characters (got %d); generate one with: openssl rand -hex 32", len(cfg.Auth.Secret))
 	}
 	if err := validateBranding(&cfg.Branding); err != nil {
 		return nil, err

@@ -229,6 +229,46 @@ func TestAuthHeader_OpaqueDeployTokenAcceptedByServerAuth(t *testing.T) {
 	}
 }
 
+// TestConfigPath_HonorsShinyhubCredentials verifies that SHINYHUB_CREDENTIALS
+// takes precedence over SHINYHUB_CONFIG (the legacy alias).
+func TestConfigPath_HonorsShinyhubCredentials(t *testing.T) {
+	t.Setenv("HOME", "/home/user")
+	t.Setenv("SHINYHUB_CREDENTIALS", "/etc/ci/credentials.json")
+	t.Setenv("SHINYHUB_CONFIG", "/etc/ci/legacy.json")
+	configPathOverride = ""
+
+	if got, want := configPath(), "/etc/ci/credentials.json"; got != want {
+		t.Fatalf("SHINYHUB_CREDENTIALS should take precedence: configPath() = %q, want %q", got, want)
+	}
+}
+
+// TestConfigPath_CredentialsFallsBackToConfig verifies that SHINYHUB_CONFIG
+// still works when SHINYHUB_CREDENTIALS is unset.
+func TestConfigPath_CredentialsFallsBackToConfig(t *testing.T) {
+	t.Setenv("HOME", "/home/user")
+	t.Setenv("SHINYHUB_CREDENTIALS", "")
+	t.Setenv("SHINYHUB_CONFIG", "/etc/ci/legacy.json")
+	configPathOverride = ""
+
+	if got, want := configPath(), "/etc/ci/legacy.json"; got != want {
+		t.Fatalf("SHINYHUB_CONFIG fallback: configPath() = %q, want %q", got, want)
+	}
+}
+
+// TestConfigPath_FlagOverridesCredentials verifies --config beats
+// SHINYHUB_CREDENTIALS (and SHINYHUB_CONFIG).
+func TestConfigPath_FlagOverridesCredentials(t *testing.T) {
+	t.Setenv("HOME", "/home/user")
+	t.Setenv("SHINYHUB_CREDENTIALS", "/etc/ci/credentials.json")
+	t.Setenv("SHINYHUB_CONFIG", "/etc/ci/legacy.json")
+	configPathOverride = "/explicit/flag.json"
+	t.Cleanup(func() { configPathOverride = "" })
+
+	if got, want := configPath(), "/explicit/flag.json"; got != want {
+		t.Fatalf("flag must beat env vars: configPath() = %q, want %q", got, want)
+	}
+}
+
 // AddCommandsTo must register the --config persistent flag so every subcommand
 // inherits it. Without that, only `login` could be retargeted at a different
 // credentials file.

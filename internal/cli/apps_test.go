@@ -508,6 +508,113 @@ func TestAppsLogs_Piped_EmitsNDJSON(t *testing.T) {
 	}
 }
 
+// TestAppsLogs_NonInteractive_DefaultsToOneShot verifies that when stdout is
+// not a terminal (the default in tests), apps logs sends ?follow=false without
+// requiring an explicit --no-follow flag. This is the CI-safe default.
+func TestAppsLogs_NonInteractive_DefaultsToOneShot(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "line1\nline2\n")
+
+	// Stub stdout as non-TTY (the test default, but be explicit).
+	orig := isStdoutTTY
+	t.Cleanup(func() { isStdoutTTY = orig })
+	isStdoutTTY = func() bool { return false }
+
+	_, err := execCLI(t, "apps", "logs", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[0].Query, "follow=false") {
+		t.Errorf("non-interactive default should send follow=false; query = %q", (*reqs)[0].Query)
+	}
+}
+
+// TestAppsLogs_Interactive_DefaultsToStream verifies that when stdout is a
+// terminal, apps logs streams (SSE, no follow=false) by default.
+func TestAppsLogs_Interactive_DefaultsToStream(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "") // SSE server returns empty body immediately
+
+	orig := isStdoutTTY
+	t.Cleanup(func() { isStdoutTTY = orig })
+	isStdoutTTY = func() bool { return true }
+
+	_, err := execCLI(t, "apps", "logs", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	// Interactive default must NOT append follow=false.
+	if strings.Contains((*reqs)[0].Query, "follow=false") {
+		t.Errorf("interactive default should stream (no follow=false); query = %q", (*reqs)[0].Query)
+	}
+}
+
+// TestAppsLogs_FollowFlag_ForcesStream verifies that -f / --follow always
+// uses SSE regardless of TTY state.
+func TestAppsLogs_FollowFlag_ForcesStream(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+
+	orig := isStdoutTTY
+	t.Cleanup(func() { isStdoutTTY = orig })
+	isStdoutTTY = func() bool { return false } // piped, would default to one-shot
+
+	_, err := execCLI(t, "apps", "logs", "demo", "--follow", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if strings.Contains((*reqs)[0].Query, "follow=false") {
+		t.Errorf("--follow must stream; query must not contain follow=false, got %q", (*reqs)[0].Query)
+	}
+}
+
+// TestAppsLogs_ShortFollowFlag verifies that -f is an accepted alias for --follow.
+func TestAppsLogs_ShortFollowFlag(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+
+	orig := isStdoutTTY
+	t.Cleanup(func() { isStdoutTTY = orig })
+	isStdoutTTY = func() bool { return false }
+
+	_, err := execCLI(t, "apps", "logs", "demo", "-f", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error with -f: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if strings.Contains((*reqs)[0].Query, "follow=false") {
+		t.Errorf("-f must stream; query must not contain follow=false, got %q", (*reqs)[0].Query)
+	}
+}
+
+// TestAppsLogs_BothFollowFlags_RejectsError verifies that passing both
+// --follow and --no-follow returns a validation error before any HTTP request.
+func TestAppsLogs_BothFollowFlags_RejectsError(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+
+	_, err := execCLI(t, "apps", "logs", "demo", "--follow", "--no-follow")
+	if err == nil {
+		t.Fatal("expected error when both --follow and --no-follow are set, got nil")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should say 'mutually exclusive', got: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected no HTTP requests on validation error, got %d", len(*reqs))
+	}
+}
+
 // TestAppsStop sends a POST /api/apps/{slug}/stop and expects a clean message.
 func TestAppsStop(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)

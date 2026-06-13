@@ -16,7 +16,7 @@ func TestSchemaIncludesEnvVars(t *testing.T) {
 	for _, e := range doc.EnvVars {
 		names[e.Name] = e.Description
 	}
-	for _, want := range []string{"SHINYHUB_HOST", "SHINYHUB_TOKEN", "SHINYHUB_CONFIG"} {
+	for _, want := range []string{"SHINYHUB_HOST", "SHINYHUB_TOKEN", "SHINYHUB_CREDENTIALS", "SHINYHUB_CONFIG"} {
 		if _, ok := names[want]; !ok {
 			t.Errorf("schema env_vars missing %q", want)
 		}

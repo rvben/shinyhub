@@ -411,6 +411,64 @@ func TestLoad_RejectsShortSecret(t *testing.T) {
 	}
 }
 
+// TestLoadForMaintenance_SucceedsWithEmptySecret verifies that backup/restore
+// can load config without a valid auth.secret: the field is empty (not set in
+// YAML and SHINYHUB_AUTH_SECRET is unset).
+func TestLoadForMaintenance_SucceedsWithEmptySecret(t *testing.T) {
+	os.Unsetenv("SHINYHUB_AUTH_SECRET")
+	cfg, err := config.LoadForMaintenance("")
+	if err != nil {
+		t.Fatalf("LoadForMaintenance with empty secret: %v", err)
+	}
+	if cfg.Storage.AppsDir == "" {
+		t.Error("expected a non-empty default AppsDir")
+	}
+}
+
+// TestLoadForMaintenance_SucceedsWithPlaceholderSecret verifies that
+// LoadForMaintenance ignores the placeholder value that Load rejects.
+func TestLoadForMaintenance_SucceedsWithPlaceholderSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	content := "auth:\n  secret: change-me-to-a-random-string\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("SHINYHUB_AUTH_SECRET")
+	_, err := config.LoadForMaintenance(path)
+	if err != nil {
+		t.Fatalf("LoadForMaintenance must not reject placeholder secret, got: %v", err)
+	}
+}
+
+// TestLoadForMaintenance_SucceedsWithShortSecret verifies that a secret shorter
+// than 32 characters does not block LoadForMaintenance.
+func TestLoadForMaintenance_SucceedsWithShortSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte("auth:\n  secret: short\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("SHINYHUB_AUTH_SECRET")
+	_, err := config.LoadForMaintenance(path)
+	if err != nil {
+		t.Fatalf("LoadForMaintenance must not reject short secret, got: %v", err)
+	}
+}
+
+// TestLoad_StillRejectsEmptySecret ensures Load (used by serve) still enforces
+// the auth.secret requirement after the loadRaw refactor.
+func TestLoad_StillRejectsEmptySecret(t *testing.T) {
+	os.Unsetenv("SHINYHUB_AUTH_SECRET")
+	_, err := config.Load("")
+	if err == nil {
+		t.Fatal("Load must reject empty secret")
+	}
+	if !strings.Contains(err.Error(), "auth.secret") {
+		t.Fatalf("expected auth.secret in error, got: %v", err)
+	}
+}
+
 func TestStorage_AppQuotaMB_DefaultsToDisabled(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	cfg, err := config.Load("")

@@ -2,10 +2,12 @@ package auth
 
 import (
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/textproto"
 	"strings"
+	"sync"
 )
 
 // ErrUserNotFound is returned by ForwardAuthUserStore.GetForwardAuthUser when no
@@ -52,6 +54,11 @@ type ForwardAuthUserStore interface {
 // request that omits the groups header is refused with 403 so that a proxy
 // misconfiguration fails loudly instead of silently demoting users.
 func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, trustedProxies []*net.IPNet) func(http.Handler) http.Handler {
+	// warnedPeers tracks untrusted peer IPs that have already triggered the
+	// misconfiguration warning so we log at most once per distinct IP per
+	// server lifetime.
+	var warnedPeers sync.Map
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !cfg.Enabled {
@@ -59,6 +66,22 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				return
 			}
 			if !peerInTrustedProxies(r.RemoteAddr, trustedProxies) {
+				// If the request carries the user header that would authenticate a
+				// user, the operator most likely forgot to add this peer to
+				// server.trusted_proxies. Log a WARN once per distinct peer IP so
+				// the misconfiguration surfaces without flooding the log.
+				if strings.TrimSpace(r.Header.Get(cfg.UserHeader)) != "" {
+					host, _, err := net.SplitHostPort(r.RemoteAddr)
+					if err != nil {
+						host = r.RemoteAddr
+					}
+					if _, alreadyWarned := warnedPeers.LoadOrStore(host, struct{}{}); !alreadyWarned {
+						slog.Warn("forward_auth: user header present from untrusted peer; add peer to server.trusted_proxies to enable forward auth",
+							"peer", host,
+							"user_header", cfg.UserHeader,
+						)
+					}
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
