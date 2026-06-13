@@ -1766,7 +1766,8 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -1845,6 +1846,9 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
+	// Advertise the app's visibility so the CLI can warn that a grant on a
+	// private app has no effect until it is shared (the 204 carries no body).
+	w.Header().Set("X-Shinyhub-App-Access", app.Access)
 	w.WriteHeader(http.StatusNoContent)
 }
 
