@@ -88,12 +88,24 @@ func runAppsList(cmd *cobra.Command, f *listFlags) error {
 			fmt.Fprintln(w, "No apps.")
 			return
 		}
-		fmt.Fprintf(w, "%-20s %-10s %-12s\n", "SLUG", "STATUS", "DEPLOYS")
-		for _, a := range items {
-			row := fmt.Sprintf("%-20s %-10s %-12v", a["slug"], a["status"], a["deploy_count"])
-			fmt.Fprintln(w, strings.TrimRight(row, " "))
-		}
+		writeAppsTable(w, items)
 	})
+}
+
+// writeAppsTable renders the apps list as a column-aligned table, sizing the
+// SLUG and STATUS columns to their widest value so a long slug no longer pushes
+// later columns out of alignment.
+func writeAppsTable(w io.Writer, items []map[string]any) {
+	slugW, statusW := len("SLUG"), len("STATUS")
+	for _, a := range items {
+		slugW = max(slugW, len(fmt.Sprintf("%v", a["slug"])))
+		statusW = max(statusW, len(fmt.Sprintf("%v", a["status"])))
+	}
+	fmt.Fprintf(w, "%-*s  %-*s  %s\n", slugW, "SLUG", statusW, "STATUS", "DEPLOYS")
+	for _, a := range items {
+		row := fmt.Sprintf("%-*s  %-*s  %v", slugW, a["slug"], statusW, a["status"], a["deploy_count"])
+		fmt.Fprintln(w, strings.TrimRight(row, " "))
+	}
 }
 
 // ── apps show ───────────────────────────────────────────────────────────────
