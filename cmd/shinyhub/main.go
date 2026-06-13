@@ -65,9 +65,17 @@ import (
 var version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:           "shinyhub",
-	Short:         "ShinyHub — self-hosted platform for deploying and managing Shiny apps",
-	Version:       version,
+	Use:     "shinyhub",
+	Short:   "ShinyHub — self-hosted platform for deploying and managing Shiny apps",
+	Version: version,
+	Long: "ShinyHub is a self-hosted platform for deploying and managing Shiny apps.\n\n" +
+		"Environment variables:\n" +
+		"  SHINYHUB_HOST           Server URL; overrides the saved host.\n" +
+		"  SHINYHUB_TOKEN          API key or deploy token; overrides the saved token.\n" +
+		"                          Set HOST and TOKEN together to skip `shinyhub login` (CI).\n" +
+		"  SHINYHUB_CONFIG         Credentials file path (default ~/.config/shinyhub/config.json).\n" +
+		"  SHINYHUB_DEPLOY_TOKEN   (server) Pre-shared deploy token; clients pass it as SHINYHUB_TOKEN.\n\n" +
+		"Run `shinyhub schema` for a full machine-readable contract.",
 	SilenceErrors: true,
 }
 

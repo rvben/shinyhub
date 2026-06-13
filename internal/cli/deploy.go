@@ -69,9 +69,17 @@ func newDeployCmd() *cobra.Command {
 		Long: `Deploy a Shiny app bundle to ShinyHub.
 
 Bundle: the given directory is zipped and uploaded. Pass '.' to deploy the
-current directory, or a path like './app'. Data and cache directories are
-excluded automatically; add a .shinyhubignore (or .gitignore) to exclude more.
-Validate the bundle's optional manifest first with 'shinyhub manifest validate'.
+current directory, or a path like './app'. The bundle must contain an entry
+point at its root: Python apps need app.py plus requirements.txt (or
+pyproject.toml); R apps need app.R (plus renv.lock for pinned deps). An
+[app] command in shinyhub.toml overrides this detection. Data and cache
+directories are excluded automatically; add a .shinyhubignore (or .gitignore)
+to exclude more. Validate the optional manifest first with
+'shinyhub manifest validate'.
+
+Server: the target server comes from 'shinyhub login' (saved credentials);
+deploy has no --host flag. To target a different server, log in again or set
+SHINYHUB_HOST and SHINYHUB_TOKEN.
 
 Manifest: if the bundle contains a shinyhub.toml at its root, ShinyHub applies
 it on deploy - [app] scaling/hibernate overrides, [[hook]] post-deploy commands,
@@ -186,6 +194,16 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		fmt.Fprintln(errW, summary)
 	}
 
+	// Best-effort pre-flight: an R bundle on a server with no R runtime will
+	// fail server-side. Warn early so the developer knows it is a host setup
+	// issue, not their bundle. Silent when the server is older or unreachable.
+	if looksLikeRApp(abs) {
+		if available, known := serverRuntimeAvailable(cfg, "r"); known && !available {
+			fmt.Fprintln(errW, "Warning: this looks like an R app, but the server reports no R runtime (Rscript). "+
+				"The deploy will likely fail - ask your administrator to install R or use a container runtime.")
+		}
+	}
+
 	if err := ensureApp(cfg, slug, f.visibility); err != nil {
 		return err
 	}
@@ -249,6 +267,18 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		for _, line := range formatManifestSummary(appResp["manifest"]) {
 			fmt.Fprintln(stdOut, line)
 		}
+	}
+	// Surface visibility so the printed URL returning 401 for a brand-new private
+	// app is not a confusing surprise. Prose target matches the URL above.
+	noteW := stdOut
+	if format == formatJSON {
+		noteW = errW
+	}
+	switch access, _ := appResp["access"].(string); access {
+	case "private":
+		fmt.Fprintf(noteW, "Access: private (only you can open it) - share with: shinyhub apps access set %s public\n", slug)
+	case "shared", "public":
+		fmt.Fprintf(noteW, "Access: %s\n", access)
 	}
 	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" {
 		fmt.Fprintln(errW, warn)

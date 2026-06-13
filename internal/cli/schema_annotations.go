@@ -54,6 +54,13 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	// ── auth ─────────────────────────────────────────────────────────────────
 	"login":  {Mutating: mut},
 	"logout": {Mutating: mut},
+	"whoami": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "ok"},
+		{Name: "username", Type: "string"},
+		{Name: "role", Type: "string"},
+		{Name: "host", Type: "string", Desc: "Server URL the credentials target"},
+		{Name: "can_create_apps", Type: "boolean"},
+	}},
 
 	// ── deploy ───────────────────────────────────────────────────────────────
 	"deploy": {
@@ -110,6 +117,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "id", Type: "integer"},
 		{Name: "version", Type: "string"},
 		{Name: "status", Type: "string"},
+		{Name: "failure_reason", Type: "string", Desc: "Why a failed deploy failed; empty for pending/succeeded"},
 		{Name: "created_at", Type: "string"},
 		{Name: "bundle_dir", Type: "string"},
 		{Name: "content_digest", Type: "string"},
@@ -269,9 +277,12 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"data": {Mutating: ro},
 
 	"data push": {Mutating: mut, OutputFields: []fieldSpec{
-		{Name: "status", Type: "string", Desc: "uploaded"},
+		{Name: "status", Type: "string", Desc: "uploaded, or planned with --dry-run"},
 		{Name: "slug", Type: "string"},
-		{Name: "path", Type: "string"},
+		{Name: "path", Type: "string", Desc: "Effective destination inside the data dir"},
+		{Name: "local", Type: "string", Desc: "Local source file"},
+		{Name: "bytes", Type: "integer", Desc: "File size in bytes"},
+		{Name: "dry_run", Type: "boolean", Desc: "Present and true when --dry-run skipped the upload"},
 	}},
 	"data ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "path", Type: "string"},

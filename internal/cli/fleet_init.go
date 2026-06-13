@@ -81,7 +81,27 @@ func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
 		}
 		b.WriteByte('\n')
 	}
+	if len(sorted) == 0 {
+		b.WriteString(commentedAppTemplate())
+	}
 	return b.String()
+}
+
+// commentedAppTemplate is the example [[app]] block emitted when no apps exist,
+// so the manifest format and the available fields are discoverable without
+// external docs. Every line is commented; uncomment and edit to use.
+func commentedAppTemplate() string {
+	return "# Example app block - uncomment and edit, one [[app]] per app:\n" +
+		"#\n" +
+		"# [[app]]\n" +
+		"# slug       = \"my-dashboard\"        # URL path /app/<slug>/ ([a-z0-9-])\n" +
+		"# source     = \"./apps/my-dashboard\" # bundle dir with app.py or app.R at its root\n" +
+		"# visibility = \"private\"             # private | shared | public\n" +
+		"#\n" +
+		"#   [app.config]                     # optional per-app overrides\n" +
+		"#   replicas                  = 1\n" +
+		"#   max_sessions_per_replica  = 10\n" +
+		"#   hibernate_timeout_minutes = 30\n"
 }
 
 // commentSafe collapses any control character in server-controlled text to a

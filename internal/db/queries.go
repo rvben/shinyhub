@@ -402,6 +402,11 @@ type App struct {
 	// deployment, or "" if it has never had one. Joined via
 	// deploymentSummarySQL; pending/failed deployments are never reflected.
 	ContentDigest string `json:"content_digest,omitempty"`
+	// LastDeploymentStatus is the status of the app's most-recent deployment row
+	// ("succeeded"/"failed"/"pending"), or "" if it has never been deployed. It
+	// lets a consumer tell a failed-only deploy from a never-deployed app, which
+	// deploy_count (incremented on success only) cannot.
+	LastDeploymentStatus string `json:"last_deployment_status,omitempty"`
 	// ReplicaPlacement is the per-app replica placement as a JSON object
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
@@ -453,7 +458,9 @@ const deploymentSummarySQL = `
 		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
 		(SELECT content_digest FROM deployments
 		   WHERE app_id = apps.id AND status = 'succeeded'
-		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest`
+		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest,
+		(SELECT status FROM deployments WHERE app_id = apps.id
+		   ORDER BY created_at DESC, id DESC LIMIT 1) AS last_deployment_status`
 
 // appColumns is the plain apps.* column list shared by every App SELECT, in the
 // exact order scanApp expects. It is kept as a single constant so the column
@@ -1019,11 +1026,20 @@ func (s *Store) PromoteDeployment(id int64) error {
 }
 
 // FailDeployment marks an aborted pending deployment as failed so it is never
-// adopted as the live bundle. It is a no-op on a row that is not pending.
+// adopted as the live bundle. It is a no-op on a row that is not pending. The
+// failure reason is left empty; prefer FailDeploymentWithReason so the cause is
+// recoverable later.
 func (s *Store) FailDeployment(id int64) error {
+	return s.FailDeploymentWithReason(id, "")
+}
+
+// FailDeploymentWithReason marks an aborted pending deployment as failed and
+// records why, so a developer can diagnose the failure after the fact via the
+// deployments history. It is a no-op on a row that is not pending.
+func (s *Store) FailDeploymentWithReason(id int64, reason string) error {
 	_, err := s.db.Exec(
-		`UPDATE deployments SET status = ? WHERE id = ? AND status = ?`,
-		DeploymentFailed, id, DeploymentPending)
+		`UPDATE deployments SET status = ?, failure_reason = ? WHERE id = ? AND status = ?`,
+		DeploymentFailed, reason, id, DeploymentPending)
 	if err != nil {
 		return fmt.Errorf("fail deployment %d: %w", id, err)
 	}
@@ -1074,7 +1090,7 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 // ordered newest first. It is a slug-based counterpart to ListDeployments.
 func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) {
 	rows, err := s.db.Query(`
-		SELECT d.id, d.version, d.status, d.created_at
+		SELECT d.id, d.version, d.status, d.failure_reason, d.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE a.slug = ?
@@ -1086,7 +1102,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 	result := make([]DeploymentSummary, 0)
 	for rows.Next() {
 		var d DeploymentSummary
-		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, d)
@@ -1096,10 +1112,14 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 
 // DeploymentSummary is a public view of a deployment row, safe for API responses.
 type DeploymentSummary struct {
-	ID        int64     `json:"id"`
-	Version   string    `json:"version"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID      int64  `json:"id"`
+	Version string `json:"version"`
+	Status  string `json:"status"`
+	// FailureReason explains why a failed deployment failed; empty for pending
+	// and succeeded rows. Always present so the field is a stable, addressable
+	// part of the deployments contract (machine consumers and CLI --fields).
+	FailureReason string    `json:"failure_reason"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // ListDeployments returns an app's deployments newest-first, excluding
@@ -2432,7 +2452,7 @@ type scanner interface {
 
 func scanApp(s scanner) (*App, error) {
 	var a App
-	var projectSlug, currentVersion, contentDigest sql.NullString
+	var projectSlug, currentVersion, contentDigest, lastDeploymentStatus sql.NullString
 	// last_deployed_at is the result of MAX(deployments.created_at). SQLite
 	// aggregates lose the original column type, so the driver returns the
 	// value as a string. We parse it manually below.
@@ -2446,7 +2466,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
-		&lastDeployedAtRaw, &currentVersion, &contentDigest,
+		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2468,6 +2488,9 @@ func scanApp(s scanner) (*App, error) {
 	}
 	if contentDigest.Valid {
 		a.ContentDigest = contentDigest.String
+	}
+	if lastDeploymentStatus.Valid {
+		a.LastDeploymentStatus = lastDeploymentStatus.String
 	}
 	return &a, nil
 }

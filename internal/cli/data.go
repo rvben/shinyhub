@@ -25,6 +25,7 @@ func newDataPushCmd() *cobra.Command {
 	var flags struct {
 		dest    string
 		restart bool
+		dryRun  bool
 	}
 
 	pushCmd := &cobra.Command{
@@ -34,6 +35,7 @@ func newDataPushCmd() *cobra.Command {
 	}
 	pushCmd.Flags().StringVar(&flags.dest, "dest", "", "Destination path inside the data dir (default: basename of local-file)")
 	pushCmd.Flags().BoolVar(&flags.restart, "restart", false, "Restart the app after upload")
+	pushCmd.Flags().BoolVar(&flags.dryRun, "dry-run", false, "Resolve and print the destination and size without uploading")
 	pushCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
 		localFile := args[1]
@@ -48,14 +50,42 @@ func newDataPushCmd() *cobra.Command {
 			dest = filepath.Base(localFile)
 		}
 
+		// Resolve size up front so both the dry-run preview and the success line
+		// can name the effective destination and byte count - the local filename
+		// silently becoming the remote name is an easy footgun.
+		info, err := os.Stat(localFile)
+		if err != nil {
+			return fmt.Errorf("open file: %w", err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("%s is a directory; data push uploads a single file (zip it or push files individually)", localFile)
+		}
+		size := info.Size()
+
+		if flags.dryRun {
+			return renderAction(cmd, "planned",
+				map[string]any{"slug": slug, "path": dest, "local": localFile, "bytes": size, "dry_run": true},
+				dataPushSummary(localFile, dest, size, true))
+		}
+
 		if err := runDataPush(cfg.Host, cfg.Token, slug, localFile, dest, flags.restart); err != nil {
 			return err
 		}
 		return renderAction(cmd, "uploaded",
-			map[string]any{"slug": slug, "path": dest},
-			fmt.Sprintf("%s: uploaded %s", slug, dest))
+			map[string]any{"slug": slug, "path": dest, "local": localFile, "bytes": size},
+			dataPushSummary(localFile, dest, size, false))
 	}
 	return pushCmd
+}
+
+// dataPushSummary builds the human-facing line for a data push, naming the
+// source, the effective destination, and the size so a destination mismatch is
+// impossible to miss. dryRun phrases it as a preview that uploads nothing.
+func dataPushSummary(local, dest string, size int64, dryRun bool) string {
+	if dryRun {
+		return fmt.Sprintf("Would upload %s -> %s (%s) [dry-run, nothing uploaded]", local, dest, humanBytes(size))
+	}
+	return fmt.Sprintf("Uploaded %s -> %s (%s)", local, dest, humanBytes(size))
 }
 
 func newDataLsCmd() *cobra.Command {

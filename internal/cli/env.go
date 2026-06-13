@@ -111,6 +111,7 @@ func newEnvCmd() *cobra.Command {
 		// endpoint directly. Re-PUTing the env var would trigger changed=false
 		// (the value is now identical to what we just stored) and skip the
 		// restart inside maybeRestartForChange.
+		data := map[string]any{"slug": slug, "key": key}
 		if setFlags.restart {
 			restartReq, err := http.NewRequest("POST",
 				cfg.Host+"/api/apps/"+slug+"/restart", nil)
@@ -128,10 +129,14 @@ func newEnvCmd() *cobra.Command {
 				return fmt.Errorf("env var saved, but restart failed: %w",
 					httpError(cfg.Token, "restart", restartResp, restartBody))
 			}
+		} else if rr, _ := result["restart_required"].(bool); rr {
+			// The running app keeps serving the old value until it is cycled.
+			// Make the stale-config trap visible instead of silently leaving it.
+			data["restart_required"] = true
+			printRestartNudge(cmd, slug)
 		}
 
-		return renderAction(cmd, "set",
-			map[string]any{"slug": slug, "key": key},
+		return renderAction(cmd, "set", data,
 			fmt.Sprintf("%s: set %s", slug, key))
 	}
 
@@ -237,11 +242,26 @@ func newEnvCmd() *cobra.Command {
 			return httpError(cfg.Token, "remove env", resp, out)
 		}
 
-		return renderAction(cmd, "removed",
-			map[string]any{"slug": slug, "key": key},
+		data := map[string]any{"slug": slug, "key": key}
+		if !rmFlags.restart && resp.Header.Get("X-Shinyhub-Restart-Required") == "true" {
+			// The running app keeps the removed variable in its environment until
+			// it is cycled; surface that instead of leaving it silent.
+			data["restart_required"] = true
+			printRestartNudge(cmd, slug)
+		}
+
+		return renderAction(cmd, "removed", data,
 			fmt.Sprintf("%s: removed %s", slug, key))
 	}
 
 	envCmd.AddCommand(envSetCmd, envLsCmd, envRmCmd, newEnvApplyCmd())
 	return envCmd
+}
+
+// printRestartNudge tells the user a running app must be restarted for an env
+// change to take effect, written to stderr so it never pollutes JSON output.
+func printRestartNudge(cmd *cobra.Command, slug string) {
+	fmt.Fprintf(cmd.ErrOrStderr(),
+		"Note: restart %s for this to take effect - shinyhub apps restart %s (or re-run with --restart)\n",
+		slug, slug)
 }

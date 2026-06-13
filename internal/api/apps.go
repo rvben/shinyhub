@@ -1056,8 +1056,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		AppVersion:            version,
 	}, app))
 	if err != nil {
+		reason := deployFailureMessage(err)
 		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
-		_ = s.store.FailDeployment(pendingDep.ID)
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
 		// Revert manifest [app] settings so the restored old pool runs under
 		// the settings it was deployed with, not the failed bundle's.
 		if manifestApplied {
@@ -1089,7 +1090,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		s.restorePreviousPool(slug, &preManifestApp, prevActive)
 		s.recordDeploy("failure")
-		writeError(w, http.StatusInternalServerError, "deploy failed")
+		writeError(w, http.StatusInternalServerError, reason)
 		return
 	}
 	// The pool is now serving the new bundle; from here onwards the on-disk
@@ -1478,7 +1479,8 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(deployments) == 0 {
-		writeError(w, http.StatusConflict, "app has never been deployed")
+		writeError(w, http.StatusConflict,
+			"app has no successful deployment - see: shinyhub apps deployments "+slug)
 		return
 	}
 	current := deployments[0]
@@ -1764,7 +1766,8 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -1843,6 +1846,9 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
+	// Advertise the app's visibility so the CLI can warn that a grant on a
+	// private app has no effect until it is shared (the 204 carries no body).
+	w.Header().Set("X-Shinyhub-App-Access", app.Access)
 	w.WriteHeader(http.StatusNoContent)
 }
 

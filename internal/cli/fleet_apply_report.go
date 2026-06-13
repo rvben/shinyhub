@@ -174,6 +174,7 @@ type jsonResult struct {
 
 type applyJSONApp struct {
 	Slug          string             `json:"slug"`
+	AppURL        string             `json:"app_url"`
 	Action        string             `json:"action"`
 	Owned         bool               `json:"owned"`
 	Digest        jsonDigest         `json:"digest"`
@@ -209,7 +210,7 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 			drift = append(drift, jsonDriftItem{Key: c.Key, Server: c.Server, Desired: c.Desired})
 		}
 		aj := applyJSONApp{
-			Slug: d.Slug, Action: string(d.Action), Owned: d.Owned,
+			Slug: d.Slug, AppURL: host + "/app/" + d.Slug + "/", Action: string(d.Action), Owned: d.Owned,
 			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:   drift,
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,

@@ -31,6 +31,32 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 }
 
+// GET /api/server-info reports which app runtimes are available on the host so
+// a developer (or the CLI) can tell that, e.g., an R deploy will fail because R
+// is not installed - rather than seeing an opaque "deploy failed".
+func TestServerInfoReportsRuntimes(t *testing.T) {
+	srv, _ := newTestServer(t)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/server-info", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d", rr.Code)
+	}
+	var got struct {
+		Runtimes map[string]bool `json:"runtimes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Runtimes == nil {
+		t.Fatal("runtimes not reported")
+	}
+	for _, key := range []string{"python", "r"} {
+		if _, ok := got.Runtimes[key]; !ok {
+			t.Errorf("runtimes missing %q key", key)
+		}
+	}
+}
+
 // GET /api/server-info reports the binary version so a CLI can detect a
 // half-provisioned host (front proxy up, shinyhub not) and check version
 // requirements before issuing any mutating call.

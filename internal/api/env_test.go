@@ -196,6 +196,60 @@ func putEnv(t *testing.T, f *testEnvFixture, key, value string, secret bool) *ht
 	return rec
 }
 
+// TestUpsertAppEnv_RestartRequiredWhenRunningAndChanged verifies the response
+// flags that a running app must be restarted to pick up a changed value - so a
+// silent stale-config trap becomes a visible signal for the CLI and UI.
+func TestUpsertAppEnv_RestartRequiredWhenRunningAndChanged(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "demo", Status: "running"}); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+
+	rec := putEnv(t, f, "AWS_REGION", "eu-west-1", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rr, _ := resp["restart_required"].(bool); !rr {
+		t.Errorf("restart_required = %v, want true (running app, value changed)", resp["restart_required"])
+	}
+
+	// Re-writing the identical value changes nothing: no restart required.
+	rec = putEnv(t, f, "AWS_REGION", "eu-west-1", false)
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rr, _ := resp["restart_required"].(bool); rr {
+		t.Errorf("restart_required = true on unchanged write, want false")
+	}
+}
+
+// TestUpsertAppEnv_NoRestartRequiredWhenStopped verifies a stopped app does not
+// nag about a restart: its next start picks up the new value.
+func TestUpsertAppEnv_NoRestartRequiredWhenStopped(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "demo", Status: "stopped"}); err != nil {
+		t.Fatalf("set stopped: %v", err)
+	}
+	rec := putEnv(t, f, "AWS_REGION", "eu-west-1", false)
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rr, _ := resp["restart_required"].(bool); rr {
+		t.Errorf("restart_required = true for stopped app, want false")
+	}
+}
+
 func TestUpsertAppEnv_CreatesNonSecret(t *testing.T) {
 	f, err := setupEnvApp(t)
 	if err != nil {
@@ -496,6 +550,32 @@ func TestDeleteAppEnv_Success(t *testing.T) {
 		if v.Key == "AWS_REGION" {
 			t.Error("AWS_REGION still present after DELETE")
 		}
+	}
+}
+
+// TestDeleteAppEnv_RestartRequiredHeaderWhenRunning verifies a delete on a
+// running app advertises that a restart is needed (via response header, since
+// the 204 carries no body) so the CLI can nudge the user.
+func TestDeleteAppEnv_RestartRequiredHeaderWhenRunning(t *testing.T) {
+	f, err := setupEnvApp(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.UpsertAppEnvVar(f.app.ID, "AWS_REGION", []byte("eu-west-1"), false); err != nil {
+		t.Fatalf("seed var: %v", err)
+	}
+	if err := f.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "demo", Status: "running"}); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+
+	req := authedRequest(t, "DELETE", "/api/apps/demo/env/AWS_REGION", nil, f.ownerToken)
+	rec := httptest.NewRecorder()
+	f.srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Shinyhub-Restart-Required"); got != "true" {
+		t.Errorf("X-Shinyhub-Restart-Required = %q, want \"true\"", got)
 	}
 }
 

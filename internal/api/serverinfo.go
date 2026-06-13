@@ -1,6 +1,10 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+	"os/exec"
+	"sync"
+)
 
 // serverInfoResponse is the JSON shape returned by GET /api/server-info.
 type serverInfoResponse struct {
@@ -10,6 +14,11 @@ type serverInfoResponse struct {
 	// requirements before issuing a mutating call.
 	Version      string             `json:"version"`
 	Capabilities serverCapabilities `json:"capabilities"`
+	// Runtimes reports which app runtimes the host can actually start, keyed by
+	// language ("python", "r"). A developer (or the CLI) reads this to learn
+	// that, e.g., an R deploy will fail because R is not installed - instead of
+	// hitting an opaque deploy error.
+	Runtimes map[string]bool `json:"runtimes"`
 }
 
 // serverCapabilities enumerates the optional protocol features this server
@@ -31,7 +40,40 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			FleetPreconditions: true,
 			ContentDigest:      true,
 		},
+		Runtimes: detectRuntimes(),
 	})
+}
+
+var (
+	runtimesOnce  sync.Once
+	runtimesCache map[string]bool
+)
+
+// detectRuntimes reports which app runtimes are available on the host PATH,
+// cached after the first call (PATH does not change for the life of the
+// process).
+func detectRuntimes() map[string]bool {
+	runtimesOnce.Do(func() {
+		runtimesCache = computeRuntimes(onPath)
+	})
+	return runtimesCache
+}
+
+// computeRuntimes maps launcher availability to runtime languages. Python apps
+// launch via uv (`uv run`) and sync deps via uv, so Python is available iff uv
+// resolves - python3 alone cannot run a ShinyHub Python app and reporting it as
+// available would make /api/server-info lie for the exact preflight it serves.
+// R apps launch via Rscript.
+func computeRuntimes(hasExe func(string) bool) map[string]bool {
+	return map[string]bool{
+		"python": hasExe("uv"),
+		"r":      hasExe("Rscript"),
+	}
+}
+
+func onPath(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 // SetVersion records the binary version string advertised by GET

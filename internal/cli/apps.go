@@ -88,12 +88,24 @@ func runAppsList(cmd *cobra.Command, f *listFlags) error {
 			fmt.Fprintln(w, "No apps.")
 			return
 		}
-		fmt.Fprintf(w, "%-20s %-10s %-12s\n", "SLUG", "STATUS", "DEPLOYS")
-		for _, a := range items {
-			row := fmt.Sprintf("%-20s %-10s %-12v", a["slug"], a["status"], a["deploy_count"])
-			fmt.Fprintln(w, strings.TrimRight(row, " "))
-		}
+		writeAppsTable(w, items)
 	})
+}
+
+// writeAppsTable renders the apps list as a column-aligned table, sizing the
+// SLUG and STATUS columns to their widest value so a long slug no longer pushes
+// later columns out of alignment.
+func writeAppsTable(w io.Writer, items []map[string]any) {
+	slugW, statusW := len("SLUG"), len("STATUS")
+	for _, a := range items {
+		slugW = max(slugW, len(fmt.Sprintf("%v", a["slug"])))
+		statusW = max(statusW, len(fmt.Sprintf("%v", a["status"])))
+	}
+	fmt.Fprintf(w, "%-*s  %-*s  %s\n", slugW, "SLUG", statusW, "STATUS", "DEPLOYS")
+	for _, a := range items {
+		row := fmt.Sprintf("%-*s  %-*s  %v", slugW, a["slug"], statusW, a["status"], a["deploy_count"])
+		fmt.Fprintln(w, strings.TrimRight(row, " "))
+	}
 }
 
 // ── apps show ───────────────────────────────────────────────────────────────
@@ -601,7 +613,10 @@ func newAppsSetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <slug>",
 		Short: "Update app settings",
-		Args:  cobra.ExactArgs(1),
+		Long: "Update app settings: scaling, hibernation, and autoscale.\n\n" +
+			"Visibility and membership are not set here - use `shinyhub apps access set\n" +
+			"<slug> <private|shared|public>` and `shinyhub apps access grant`.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsSet(cmd, args, f)
 		},
@@ -935,7 +950,11 @@ func newAppsAccessGrantCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "grant <slug> <username>",
 		Short: "Grant a user access to an app",
-		Args:  cobra.ExactArgs(2),
+		Long: "Grant a user access to an app.\n\n" +
+			"Member grants only take effect when the app's visibility is `shared`.\n" +
+			"On a `private` app a grant is recorded but the user still cannot reach it;\n" +
+			"set visibility first with `shinyhub apps access set <slug> shared`.",
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsAccessGrant(cmd, args, f)
 		},
@@ -982,6 +1001,14 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 		prose = fmt.Sprintf("%s: granted %s access to %s", slug, f.role, username)
 	} else {
 		prose = fmt.Sprintf("%s: granted access to %s", slug, username)
+	}
+	// A grant has no effect while the app is private: tell the user so they don't
+	// believe sharing is complete when the grantee still cannot reach the app.
+	if resp.Header.Get("X-Shinyhub-App-Access") == "private" {
+		fields["app_access"] = "private"
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Note: %s is private, so %s still cannot reach it. Make it shared: shinyhub apps access set %s shared\n",
+			slug, username, slug)
 	}
 	return renderAction(cmd, "granted", fields, prose)
 }
@@ -1471,6 +1498,11 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *listFlags) error {
 			}
 			row := fmt.Sprintf("%-6s %-20s %-12s %s", id, version, status, created)
 			fmt.Fprintln(w, strings.TrimRight(row, " "))
+			// Surface why a failed deploy failed, indented under its row, so the
+			// cause is visible without re-querying or passing --fields.
+			if reason, ok := d["failure_reason"].(string); ok && reason != "" {
+				fmt.Fprintf(w, "       └ %s\n", reason)
+			}
 		}
 	})
 }

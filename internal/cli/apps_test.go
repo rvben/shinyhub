@@ -716,13 +716,13 @@ func TestAppsStart(t *testing.T) {
 // TestAppsStart_ServerError ensures a non-2xx response propagates as an error.
 func TestAppsStart_ServerError(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
-	setResp(409, `{"error":"app has never been deployed"}`)
+	setResp(409, `{"error":"app has no successful deployment - see: shinyhub apps deployments fresh"}`)
 
 	_, err := execCLI(t, "apps", "start", "fresh")
 	if err == nil {
 		t.Fatal("expected error for 409, got nil")
 	}
-	if !strings.Contains(err.Error(), "never been deployed") {
+	if !strings.Contains(err.Error(), "no successful deployment") {
 		t.Errorf("error should surface the server message, got: %v", err)
 	}
 }
