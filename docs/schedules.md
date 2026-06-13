@@ -19,12 +19,20 @@ Via the CLI:
 shinyhub schedule add fetch \
     --name daily-fetch \
     --cron "0 6 * * *" \
-    --cmd "python helpers/fetch.py" \
+    --cmd "uv run --with-requirements requirements.txt python helpers/fetch.py" \
     --timezone "Europe/Amsterdam" \
     --timeout 600 \
     --overlap skip \
     --missed run_once
 ```
+
+> **Running Python on the native runtime:** the command runs inside the bundle
+> dir using the app's runtime. On the native runtime a Python app's interpreter
+> and dependencies are managed by `uv`, so run scripts through
+> `uv run --with-requirements requirements.txt python <script>` (the same way
+> the app itself is launched). A bare `python <script>` can fail with
+> `executable file not found` because `python` is not on `PATH`. The Docker
+> runtime runs the command inside the app image, where `python` is present.
 
 Fields:
 
@@ -32,7 +40,7 @@ Fields:
 |---|---|
 | `cron` | 5-field standard cron expression. The `timezone` field controls which timezone the expression fires in. Do not embed `TZ=` or `CRON_TZ=` prefixes directly in the expression. |
 | `timezone` | Optional IANA timezone for this schedule (e.g. `Europe/Amsterdam`, `America/New_York`). When absent or empty the schedule inherits the server default (`scheduler.timezone` config, default UTC). See "Timezone resolution" below. |
-| `cmd` | Command to run inside the bundle dir. Shell-quoted; use `--cmd-json` for exact control. |
+| `cmd` | Command to run inside the bundle dir. Shell-quoted; use `--cmd-json` for exact control. For a Python app on the native runtime, prefix with `uv run` (see the note above). |
 | `timeout` | Seconds before SIGTERM; SIGKILL after a 10-second grace. |
 | `overlap` | `skip` (default) drops new ticks while one is in flight; `queue` holds at most one extra; `concurrent` allows overlap. |
 | `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup. |
@@ -84,7 +92,7 @@ In a `shinyhub.toml` manifest:
 name = "daily-fetch"
 cron = "0 6 * * *"
 timezone = "Europe/Amsterdam"
-cmd = "python helpers/fetch.py"
+cmd = "uv run --with-requirements requirements.txt python helpers/fetch.py"
 timeout_seconds = 600
 overlap = "skip"
 missed = "run_once"
@@ -108,7 +116,7 @@ time the first user arrives.
 
 ```bash
 shinyhub schedule add fetch --name daily-fetch \
-    --cron "0 6 * * *" --cmd "python helpers/fetch.py" \
+    --cron "0 6 * * *" --cmd "uv run --with-requirements requirements.txt python helpers/fetch.py" \
     --run-on-register
 ```
 
@@ -118,7 +126,7 @@ Or in a `shinyhub.toml` manifest:
 [[schedule]]
 name = "daily-fetch"
 cron = "0 6 * * *"
-cmd = "python helpers/fetch.py"
+cmd = "uv run --with-requirements requirements.txt python helpers/fetch.py"
 run_on_register = true
 ```
 
@@ -157,7 +165,7 @@ RO by convention).
 
 - `app.py` — minimal Shiny app that just shows the latest fetch time
 - `helpers/fetch.py` — runs an Athena query and writes to `data/latest.parquet` atomically
-- Schedule `daily-fetch` with `cron: "0 6 * * *"`, `cmd: "python helpers/fetch.py"`
+- Schedule `daily-fetch` with `cron: "0 6 * * *"`, `cmd: "uv run --with-requirements requirements.txt python helpers/fetch.py"`
 
 `report` (the consumer):
 
