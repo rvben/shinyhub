@@ -87,7 +87,15 @@ and [[schedule]] cron jobs. The manifest is optional.
 
 Slug and URL: the app is served at <host>/app/<slug>/. The slug defaults to the
 directory name (sanitized); override it with --slug. Slug rule: lowercase
-letters, digits, and single hyphens; it must not start or end with a hyphen.`,
+letters, digits, and single hyphens; it must not start or end with a hyphen.
+
+Deploying behind an auth proxy: when ShinyHub sits behind an auth proxy
+(Authelia, oauth2-proxy, Cloudflare Access, etc.) the CLI cannot complete the
+browser redirect that the proxy requires, so interactive 'shinyhub login' does
+not work from a CI runner. Instead, deploy directly to the app port using
+SHINYHUB_HOST set to the internal address and SHINYHUB_TOKEN set to a
+pre-shared deploy token (the SHINYHUB_DEPLOY_TOKEN value configured on the
+server). See docs/reverse-proxy/deploying-behind-a-proxy.md for the full setup.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDeploy(cmd, args, f)
