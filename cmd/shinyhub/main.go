@@ -99,7 +99,7 @@ var backupCmd = &cobra.Command{
 	Long: "Creates a .tar.gz containing a transactionally consistent SQLite\n" +
 		"snapshot plus the apps and app-data dirs. Safe to run on a live server.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load(serverConfigPath())
+		cfg, err := config.LoadForMaintenance(serverConfigPath())
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
@@ -120,7 +120,7 @@ var restoreCmd = &cobra.Command{
 		"'.pre-restore-<timestamp>' suffix (never deleted) so you can roll back.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load(serverConfigPath())
+		cfg, err := config.LoadForMaintenance(serverConfigPath())
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
