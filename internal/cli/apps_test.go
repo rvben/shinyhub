@@ -1269,6 +1269,66 @@ func TestAppsSet_Wait_RedeployInFlightBlocksReady(t *testing.T) {
 	}
 }
 
+// TestAppsRestart_WaitPolls verifies that `apps restart --wait` blocks on the
+// health poll until the app reports running, rather than returning the moment
+// the restart request is accepted.
+func TestAppsRestart_WaitPolls(t *testing.T) {
+	var getCount int32
+	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/restart":
+			_, _ = w.Write([]byte(`{"status":"running","slug":"demo"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			if atomic.AddInt32(&getCount, 1) < 2 {
+				_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+			}
+		default:
+			w.WriteHeader(404)
+		}
+	})
+	orig := healthPollInterval
+	t.Cleanup(func() { healthPollInterval = orig })
+	healthPollInterval = time.Millisecond
+
+	if _, err := execCLI(t, "apps", "restart", "demo", "--wait"); err != nil {
+		t.Fatalf("restart --wait error: %v", err)
+	}
+	if got := atomic.LoadInt32(&getCount); got < 2 {
+		t.Fatalf("expected --wait to poll until running (>=2 GETs), got %d", got)
+	}
+}
+
+// TestAppsRollback_WaitPolls verifies the same for `apps rollback --wait`.
+func TestAppsRollback_WaitPolls(t *testing.T) {
+	var getCount int32
+	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/rollback":
+			_, _ = w.Write([]byte(`{"status":"rolled_back","slug":"demo"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			if atomic.AddInt32(&getCount, 1) < 2 {
+				_, _ = w.Write([]byte(`{"app":{"status":"starting"}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+			}
+		default:
+			w.WriteHeader(404)
+		}
+	})
+	orig := healthPollInterval
+	t.Cleanup(func() { healthPollInterval = orig })
+	healthPollInterval = time.Millisecond
+
+	if _, err := execCLI(t, "apps", "rollback", "demo", "--wait"); err != nil {
+		t.Fatalf("rollback --wait error: %v", err)
+	}
+	if got := atomic.LoadInt32(&getCount); got < 2 {
+		t.Fatalf("expected --wait to poll until running (>=2 GETs), got %d", got)
+	}
+}
+
 func TestAppsShow_RendersRejectsByReason(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":1,"deploy_count":1,"hibernate_timeout_minutes":null,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"effective_max_sessions_per_replica":1,"replicas_status":[],"rejects_by_reason":{"window_seconds":600,"counts":{"pool-saturated":4103,"app-not-ready":12}}}`)

@@ -416,6 +416,8 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 
 type rollbackFlags struct {
 	deploymentID int64
+	wait         bool
+	waitTimeout  time.Duration
 }
 
 func newAppsRollbackCmd() *cobra.Command {
@@ -430,6 +432,10 @@ func newAppsRollbackCmd() *cobra.Command {
 	}
 	cmd.Flags().Int64Var(&f.deploymentID, "to", 0,
 		"Deployment ID to roll back to (default: previous deployment)")
+	cmd.Flags().BoolVar(&f.wait, "wait", false,
+		"After rolling back, wait until the app is healthy again")
+	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", 300*time.Second,
+		"How long to wait for the app to become healthy when --wait is set")
 	return cmd
 }
 
@@ -474,18 +480,68 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 	} else {
 		prose = fmt.Sprintf("%s: rolled back to previous deployment", slug)
 	}
-	return renderAction(cmd, "rolled_back", fields, prose)
+	if err := renderAction(cmd, "rolled_back", fields, prose); err != nil {
+		return err
+	}
+	if f.wait {
+		return waitForHealthyWithOutput(cfg, slug, f.waitTimeout, cmd.ErrOrStderr())
+	}
+	return nil
 }
 
 // ── apps restart / start ────────────────────────────────────────────────────
 
+type restartFlags struct {
+	wait        bool
+	waitTimeout time.Duration
+}
+
 func newAppsRestartCmd() *cobra.Command {
-	return &cobra.Command{
+	f := &restartFlags{}
+	cmd := &cobra.Command{
 		Use:   "restart <slug>",
 		Short: "Restart a running app",
 		Args:  cobra.ExactArgs(1),
-		RunE:  rollbackOrRestart("restart", "POST"),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAppsRestart(cmd, args, f)
+		},
 	}
+	cmd.Flags().BoolVar(&f.wait, "wait", false,
+		"After restarting, wait until the app is healthy again")
+	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", 300*time.Second,
+		"How long to wait for the app to become healthy when --wait is set")
+	return cmd
+}
+
+func runAppsRestart(cmd *cobra.Command, args []string, f *restartFlags) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "restart", resp, out)
+	}
+	if err := renderAction(cmd, "running",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: restarted", slug)); err != nil {
+		return err
+	}
+	if f.wait {
+		return waitForHealthyWithOutput(cfg, slug, f.waitTimeout, cmd.ErrOrStderr())
+	}
+	return nil
 }
 
 // newAppsStartCmd starts a stopped app without cycling a running one. It sends
@@ -564,33 +620,6 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 		return renderAction(cmd, "running",
 			map[string]any{"slug": slug},
 			fmt.Sprintf("%s: %s", slug, pastTense))
-	}
-}
-
-func rollbackOrRestart(action, method string) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig()
-		if err != nil {
-			return err
-		}
-		slug := args[0]
-		req, err := http.NewRequest(method, cfg.Host+"/api/apps/"+slug+"/"+action, nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, action, resp, out)
-		}
-		return renderAction(cmd, "running",
-			map[string]any{"slug": slug},
-			fmt.Sprintf("%s: %s", slug, action+"ed"))
 	}
 }
 
