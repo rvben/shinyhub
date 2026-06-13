@@ -144,6 +144,14 @@ func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	return d
 }
 
+// DeclaredConfig returns the manifest's declared numeric config for an app as
+// drift items against an unset server, suitable for applying to a freshly
+// created app (which starts at server defaults). Visibility is excluded because
+// the deploy that creates the app already sets it.
+func DeclaredConfig(app AppEntry) []ConfigDriftItem {
+	return configDrift(app, ObservedApp{})
+}
+
 // appendIntDrift adds a drift item when a declared (non-nil desired) int
 // differs from the server value. A nil desired means "not declared" => no
 // drift. A nil server value with a declared desired is drift (server unknown

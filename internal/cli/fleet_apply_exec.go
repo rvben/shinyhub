@@ -287,6 +287,28 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 			res.note = "deployed; ownership marker not stamped, next plan shows adopt: " + err.Error()
 			return done(statusCreated)
 		}
+		// Apply the manifest's declared [app.config] to the freshly created app.
+		// The deploy set the source bundle and visibility; the numeric config
+		// (hibernate_timeout, replicas, max_sessions) is applied here so the new
+		// app fully matches the manifest and the next plan is a clean no-op rather
+		// than spurious "update(config)" drift. Gated on the marker we just
+		// stamped (and the promoted digest when known) so a concurrent writer
+		// cannot be clobbered. Best-effort: on failure the next plan reapplies it.
+		if cfgDrift := fleet.DeclaredConfig(entry); len(cfgDrift) > 0 {
+			var ifDc, ifMc *string
+			if opt.preconditions {
+				m := marker
+				ifMc = &m
+				if promoted != "" {
+					p := promoted
+					ifDc = &p
+				}
+			}
+			if err := applyConfigDrift(cfg, d.Slug, cfgDrift, ifDc, ifMc, opt.runID); err != nil {
+				res.note = "created; declared config not fully applied, next plan shows update(config): " + err.Error()
+				return done(statusCreated)
+			}
+		}
 		return done(statusCreated)
 
 	case fleet.ActionUpdateSource:
