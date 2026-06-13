@@ -604,6 +604,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	var logWriter io.Writer = logFile
 	info, runErr := rt.RunOnce(runCtx, params, logWriter)
 
+	// A non-nil runErr means the runtime could not run the command (e.g. the
+	// binary is not on PATH, so the process never started and emitted no output
+	// of its own). Persist the error to the run log so `schedule logs --run N`
+	// surfaces the cause instead of an empty file.
+	if runErr != nil {
+		fmt.Fprintf(logFile, "shinyhub: run failed: %v\n", runErr)
+	}
+
 	// Determine final status.
 	status := "succeeded"
 	code := info.Code
