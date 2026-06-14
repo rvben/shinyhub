@@ -46,6 +46,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.11](https://github.com/rvben/shinyhub/compare/v0.8.10...v0.8.11) - 2026-06-14
+
+### Added
+
+- **ui**: human-friendly deployment versions (vN) instead of epoch timestamps ([e80eae9](https://github.com/rvben/shinyhub/commit/e80eae99e3ac34bda73fbf5771f79c647288dcc6))
+
 ## [0.8.10](https://github.com/rvben/shinyhub/compare/v0.8.9...v0.8.10) - 2026-06-14
 
 ### Added
