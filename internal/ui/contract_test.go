@@ -1615,6 +1615,20 @@ func TestSidebarLayoutCSS(t *testing.T) {
 	}
 }
 
+// TestDetailTabsScrollAffordanceOnMobile pins the mobile tab-strip polish: it
+// scroll-snaps and shows an edge fade (driven by data-overflow from app-detail.js)
+// so clipped tabs are discoverable, and the active tab is scrolled into view.
+func TestDetailTabsScrollAffordanceOnMobile(t *testing.T) {
+	assertContains(t, "style.css", "scroll-snap-type: x proximity",
+		"the mobile tab strip must scroll-snap for crisp stops")
+	assertContains(t, "style.css", `.settings-tabs[data-overflow="mid"]`,
+		"the tab strip must fade clipped edges via a data-overflow mask")
+	assertContains(t, "views/app-detail.js", "data-overflow",
+		"app-detail.js must maintain the data-overflow hint on the tab strip")
+	assertContains(t, "views/app-detail.js", "scrollIntoView({ inline: 'center', block: 'nearest' })",
+		"the active tab must scroll into view on a scrollable strip")
+}
+
 // TestDetailTabsAreFolderTabs guards the elevated folder-tab styling: tabs must
 // not render as plain underlined links (the global a{} underline is killed), the
 // active tab lifts into a surface card, and a glowing cyan cap marks it.

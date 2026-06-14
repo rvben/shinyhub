@@ -40,6 +40,32 @@ export function mountAppDetail(ctx) {
     TAB_ROUTES.map(t => [t, document.getElementById(`detail-tab-${t}`)]),
   );
 
+  // Maintain a data-overflow hint on the tab strip so CSS can fade only the
+  // edge(s) with clipped tabs when it scrolls (mobile). Wired once; the strip is
+  // static markup, so the listeners outlive individual renders.
+  const tabsNav = document.querySelector('.settings-tabs');
+  function updateTabOverflow() {
+    if (!tabsNav) return;
+    const slack = tabsNav.scrollWidth - tabsNav.clientWidth;
+    if (slack <= 1) { tabsNav.removeAttribute('data-overflow'); return; }
+    const atStart = tabsNav.scrollLeft <= 1;
+    const atEnd = tabsNav.scrollLeft >= slack - 1;
+    tabsNav.setAttribute('data-overflow', atStart ? 'start' : atEnd ? 'end' : 'mid');
+  }
+  // Center the active tab and recompute the edge fade. Run on the next frame and
+  // again after web fonts load (on a fresh/deep-link load the tabs widen when
+  // the font swaps in, which is what makes the strip overflow in the first place).
+  function syncTabStrip(activeEl) {
+    if (activeEl) {
+      try { activeEl.scrollIntoView({ inline: 'center', block: 'nearest' }); } catch { /* older browsers */ }
+    }
+    updateTabOverflow();
+  }
+  if (tabsNav) {
+    tabsNav.addEventListener('scroll', updateTabOverflow, { passive: true });
+    window.addEventListener('resize', updateTabOverflow, { passive: true });
+  }
+
   let tabCleanup = null;
 
   return async function mount(params) {
@@ -86,7 +112,11 @@ export function mountAppDetail(ctx) {
     // On narrow screens the tab bar scrolls horizontally; bring the active tab
     // into view so the user can see which section they're on. block:'nearest'
     // avoids any vertical page jump (no-op on desktop where it's already shown).
-    try { tabEls[tab].scrollIntoView({ inline: 'center', block: 'nearest' }); } catch { /* older browsers */ }
+    const activeTabEl = tabEls[tab];
+    requestAnimationFrame(() => syncTabStrip(activeTabEl));
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => syncTabStrip(activeTabEl)).catch(() => {});
+    }
 
     document.getElementById('app-detail-heading').textContent = app.name;
     document.getElementById('app-detail-slug').textContent = '/' + app.slug;
