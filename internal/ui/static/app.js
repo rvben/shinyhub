@@ -8,6 +8,8 @@ import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { appCardBadge } from '/static/views/app-card-badge.js';
+import { renderSidebarApps, highlightSidebarApp } from '/static/views/sidebar-nav.js';
+import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
@@ -110,8 +112,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const b = window.__SHINYHUB_BRANDING__;
     if (!b || typeof b !== 'object') return;
     if (b.logo) {
-      const brand = document.querySelector('nav .brand');
-      if (brand) {
+      // Brand appears in the sidebar and the mobile top bar — replace every node.
+      for (const brand of document.querySelectorAll('.brand')) {
         brand.innerHTML = '';
         const img = document.createElement('img');
         img.src = b.logo;
@@ -180,11 +182,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const auditPrev   = document.getElementById('audit-prev');
   const auditNext   = document.getElementById('audit-next');
   const auditRange  = document.getElementById('audit-range');
-  const tabBar      = document.getElementById('tab-bar');
-  const tabApps     = document.getElementById('tab-apps');
   const tabAudit    = document.getElementById('tab-audit');
   const tabUsers    = document.getElementById('tab-users');
   const tabWorkers  = document.getElementById('tab-workers');
+  let   sidebarDrawer = null; // mobile off-canvas drawer controller (wired below)
   const workersView    = document.getElementById('workers-view');
   const workersError   = document.getElementById('workers-error');
   const workersEmpty   = document.getElementById('workers-empty');
@@ -501,17 +502,6 @@ document.addEventListener('DOMContentLoaded', () => {
     renderGridVerbatim(apps, appGrid, emptyState);
   }
 
-  function showView(name) {
-    appsView.hidden  = name !== 'apps';
-    usersView.hidden = name !== 'users';
-    auditView.hidden = name !== 'audit';
-    tabApps.classList.toggle('tab-active',  name === 'apps');
-    tabUsers.classList.toggle('tab-active', name === 'users');
-    tabAudit.classList.toggle('tab-active', name === 'audit');
-    if (name === 'audit') loadAuditEvents(0);
-    if (name === 'users') loadUsers();
-  }
-
   function showLoggedOut() {
     closeLogs();
     metrics.setTargets([]);
@@ -528,10 +518,15 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(usersView, true);
     setHidden(auditView, true);
     setHidden(appDetailView, true);
-    tabBar.hidden = true;
+    document.body.dataset.auth = 'out';
+    // Fully close the drawer (clears .app-content inert + releases the focus
+    // trap), not just the class — otherwise logging out from an open mobile
+    // drawer leaves the login form inert and unfocusable.
+    if (sidebarDrawer) sidebarDrawer.close();
     setError(loginError, '');
     setError(appError, '');
     renderApps();
+    syncSidebar();
   }
 
   function showLoggedIn(payload) {
@@ -540,7 +535,7 @@ document.addEventListener('DOMContentLoaded', () => {
     sessionUser.textContent = payload.user.username;
     setHidden(logoutButton, false);
     setHidden(loginView, true);
-    tabBar.hidden = false;
+    document.body.dataset.auth = 'in';
     tabAudit.hidden = payload.user.role !== 'admin';
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
@@ -548,6 +543,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load the admin fleet-health banner now that state.user is set; loadApps
     // can fire before this during boot, when the admin gate would skip it.
     loadFleetHealth();
+    // Populate the sidebar app list regardless of which view the router mounts
+    // (fire-and-forget; renders when it resolves, self-guards on state.user).
+    loadAppsIndex();
     // The router (started by the caller) will mount the view that matches
     // the current URL — do not pre-show apps-view here, it leaks through
     // on direct loads of /users, /audit-log, /apps/<slug>.
@@ -668,8 +666,40 @@ document.addEventListener('DOMContentLoaded', () => {
     state.apps = (await response.json()) || [];
     clearGridLoading();
     renderApps();
+    syncSidebar();
     metrics.setTargets(state.apps.map(a => a.slug));
     loadFleetHealth();
+  }
+
+  // syncSidebar renders the project->app quick-switch list from the FULL app
+  // index (state.apps), never the grid-filtered set, so dashboard search/sort
+  // never hides apps from the sidebar.
+  function syncSidebar() {
+    const el = document.getElementById('sidebar-apps');
+    if (el) renderSidebarApps(el, state.apps, location.pathname, (a) => appCardBadge(a, formatStatus), document);
+  }
+
+  // loadAppsIndex populates the sidebar app list independently of which view is
+  // mounted. showLoggedIn calls it fire-and-forget so the sidebar is filled even
+  // on a direct deep link (/users, /apps/<slug>) where the grid never mounts. It
+  // deliberately omits loadApps's metrics.setTargets/loadFleetHealth side effects
+  // so it never disturbs the active view's metric polling.
+  async function loadAppsIndex() {
+    // Snapshot the session identity: showLoggedIn assigns a fresh state.user
+    // object per login, so a reference change means logout (or a different user)
+    // happened during an in-flight request. Bail in that case so a stale
+    // response never overwrites the new session's apps or fires a late 401.
+    const sessionUser = state.user;
+    let response;
+    try { response = await api('/api/apps'); }
+    catch { return; }
+    if (state.user !== sessionUser) return;
+    if (response.status === 401) { await handleUnauthorized(); return; }
+    if (!response.ok) return;
+    const apps = (await response.json()) || [];
+    if (state.user !== sessionUser) return;
+    state.apps = apps;
+    syncSidebar();
   }
 
   async function loadWorkers() {
@@ -3215,6 +3245,46 @@ document.addEventListener('DOMContentLoaded', () => {
     flashToast(`Logout failed (${resp.status})`, 'error');
   });
 
+  // Desktop sidebar collapse (icon rail), persisted per browser.
+  {
+    const collapseBtn = document.getElementById('sidebar-collapse');
+    const COLLAPSE_KEY = 'shinyhub.sidebarCollapsed';
+    const applyCollapsed = (on) => {
+      document.body.classList.toggle('sidebar-collapsed', on);
+      if (collapseBtn) collapseBtn.setAttribute('aria-expanded', on ? 'false' : 'true');
+    };
+    try { applyCollapsed(localStorage.getItem(COLLAPSE_KEY) === '1'); } catch {}
+    if (collapseBtn) {
+      collapseBtn.addEventListener('click', () => {
+        const on = !document.body.classList.contains('sidebar-collapsed');
+        applyCollapsed(on);
+        try { localStorage.setItem(COLLAPSE_KEY, on ? '1' : '0'); } catch {}
+      });
+    }
+  }
+
+  // Mobile drawer: hamburger toggles, backdrop click + Escape close, and the
+  // post-mount onNavigated() hook (in updateActiveNav) closes it after an
+  // allowed navigation. createFocusTrap is reused for focus containment.
+  sidebarDrawer = createSidebarDrawer({
+    body: document.body,
+    toggle: document.getElementById('sidebar-toggle'),
+    backdrop: document.getElementById('sidebar-backdrop'),
+    sidebar: document.getElementById('sidebar'),
+    content: document.querySelector('.app-content'),
+    createFocusTrap,
+    doc: document,
+  });
+  {
+    const toggleBtn = document.getElementById('sidebar-toggle');
+    const backdrop = document.getElementById('sidebar-backdrop');
+    if (toggleBtn) toggleBtn.addEventListener('click', () => sidebarDrawer.toggle());
+    if (backdrop) backdrop.addEventListener('click', () => sidebarDrawer.close());
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && sidebarDrawer.isOpen()) sidebarDrawer.close();
+    });
+  }
+
   async function fetchMetrics(slug) {
     let resp;
     try {
@@ -3385,7 +3455,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function updateActiveNav(pathname) {
-    for (const el of document.querySelectorAll('[data-nav]')) {
+    // Scoped to the primary section nav so active state never leaks onto other
+    // [data-nav] links (app cards, overview links, detail folder tabs).
+    for (const el of document.querySelectorAll('#primary-nav [data-nav]')) {
       const url = new URL(el.href);
       const active = url.pathname === pathname
         || (pathname === '/' && url.pathname === '/')
@@ -3393,6 +3465,11 @@ document.addEventListener('DOMContentLoaded', () => {
       el.classList.toggle('tab-active', active);
       if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     }
+    // Sidebar app rows own their active state separately (slug-prefix, nested
+    // tabs). Runs on every mount (post-allowed-navigation), and also closes the
+    // mobile drawer there so a guard-vetoed navigation keeps it open.
+    highlightSidebarApp(document.getElementById('sidebar-apps'), pathname);
+    if (sidebarDrawer) sidebarDrawer.onNavigated();
   }
 
   const ctx = {
@@ -3405,6 +3482,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderGridVerbatim,
     applyGridFilters: renderApps,
     updateActiveNav,
+    syncSidebar,
     setSettingsSlug: (slug) => { settingsSlug = slug; },
     populateGeneralTab,
     populateAutoscaleTab,

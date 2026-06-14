@@ -36,6 +36,8 @@ export async function mountAppsGrid(ctx) {
   }
   // Grid polls every app so status/metrics line stays live.
   ctx.metrics.setTargets(apps.map(a => a.slug));
+  // Keep the sidebar quick-switch list in sync with the freshly loaded index.
+  if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
 
   return viewObject();
 

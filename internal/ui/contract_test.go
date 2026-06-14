@@ -1125,8 +1125,10 @@ func TestModalFocusManagementWiring(t *testing.T) {
 func TestKeyboardFocusAndLabels(t *testing.T) {
 	assertContains(t, "style.css", "button:focus-visible",
 		"style.css must give buttons a visible keyboard focus ring via :focus-visible")
-	assertContains(t, "style.css", ".tab:focus-visible",
-		"style.css must give the nav/settings tabs a visible keyboard focus ring")
+	assertContains(t, "style.css", ".nav-item:focus-visible",
+		"style.css must give the sidebar section nav a visible keyboard focus ring")
+	assertContains(t, "style.css", ".settings-tab:focus-visible",
+		"style.css must give the detail folder tabs a visible keyboard focus ring")
 	b, err := fs.ReadFile(ui.Static(), "style.css")
 	if err != nil {
 		t.Fatalf("read style.css: %v", err)
@@ -1496,6 +1498,120 @@ func TestDetailTabsSeparatedFromContent(t *testing.T) {
 	end := strings.Index(css[i:], "}")
 	if end < 0 || !strings.Contains(css[i:i+end], "margin-bottom:") {
 		t.Fatal("style.css: .settings-tabs must carry a margin-bottom so the tab bar is separated from the panel content")
+	}
+}
+
+// TestSidebarShellStructure pins the global-sidebar shell: the section nav lives
+// in #primary-nav inside #sidebar, plus an app list, footer, and a mobile top bar
+// that drives the drawer. The old #tab-bar top nav is removed.
+func TestSidebarShellStructure(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	html := string(b)
+	for _, id := range []string{`id="app-shell"`, `id="sidebar"`, `id="primary-nav"`,
+		`id="sidebar-apps"`, `id="mobile-topbar"`, `id="sidebar-toggle"`,
+		`id="sidebar-collapse"`, `id="sidebar-backdrop"`} {
+		if !strings.Contains(html, id) {
+			t.Fatalf("index.html missing %s", id)
+		}
+	}
+	if strings.Contains(html, `id="tab-bar"`) {
+		t.Fatal("index.html: the old #tab-bar top nav must be removed (replaced by the sidebar)")
+	}
+	// Section anchors keep their ids and live inside #primary-nav (so app.js
+	// gating + active-state code is unchanged).
+	start := strings.Index(html, `id="primary-nav"`)
+	end := strings.Index(html[start:], "</nav>")
+	if start < 0 || end < 0 {
+		t.Fatal("index.html: #primary-nav block not found")
+	}
+	nav := html[start : start+end]
+	for _, id := range []string{`id="tab-apps"`, `id="tab-users"`, `id="tab-workers"`, `id="tab-audit"`} {
+		if !strings.Contains(nav, id) {
+			t.Fatalf("#primary-nav must contain %s", id)
+		}
+	}
+	if !strings.Contains(html, `data-auth="out"`) {
+		t.Fatal(`index.html: <body> must default to data-auth="out" so chrome is hidden before auth resolves`)
+	}
+	if !strings.Contains(html, `aria-controls="sidebar"`) {
+		t.Fatal(`index.html: #sidebar-toggle must have aria-controls="sidebar"`)
+	}
+}
+
+// TestSidebarAuthGating pins data-auth driving the chrome, and that the old
+// tabBar toggle is gone.
+func TestSidebarAuthGating(t *testing.T) {
+	assertContains(t, "app.js", "document.body.dataset.auth = 'in'", "showLoggedIn must mark the body authenticated")
+	assertContains(t, "app.js", "document.body.dataset.auth = 'out'", "showLoggedOut must mark the body logged-out")
+	assertContains(t, "style.css", `[data-auth="out"] #sidebar`, "CSS must hide the sidebar before auth")
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	if strings.Contains(string(b), "tabBar") {
+		t.Fatal("app.js: tabBar references must be removed (replaced by data-auth gating)")
+	}
+}
+
+// TestSidebarAppListWiring pins the app-list data flow: a fire-and-forget
+// loadAppsIndex on login, syncSidebar fed from the FULL state.apps (never the
+// grid-filtered renderApps), and grouping by project_slug.
+func TestSidebarAppListWiring(t *testing.T) {
+	assertContains(t, "app.js", "function loadAppsIndex", "app.js must define loadAppsIndex")
+	assertContains(t, "app.js", "function syncSidebar", "app.js must define syncSidebar")
+	assertContains(t, "app.js", "renderSidebarApps(el, state.apps,", "syncSidebar must feed renderSidebarApps from the full state.apps index")
+	assertContains(t, "views/sidebar-nav.js", "project_slug", "grouping must read project_slug")
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(b)
+	if strings.Contains(js, "await loadAppsIndex()") {
+		t.Fatal("app.js: loadAppsIndex must be fire-and-forget (not awaited) so showLoggedIn stays synchronous")
+	}
+	if !strings.Contains(js, "loadAppsIndex();") {
+		t.Fatal("app.js: showLoggedIn must call loadAppsIndex()")
+	}
+}
+
+// TestSidebarActiveScoping pins section-active scoped to #primary-nav and the
+// separate sidebar app highlighter, so aria-current never leaks onto app cards,
+// overview links, or the detail folder tabs.
+func TestSidebarActiveScoping(t *testing.T) {
+	assertContains(t, "app.js", "querySelectorAll('#primary-nav [data-nav]')", "updateActiveNav must be scoped to #primary-nav")
+	assertContains(t, "app.js", "highlightSidebarApp(", "the sidebar app active state must be applied via highlightSidebarApp")
+	assertContains(t, "views/sidebar-nav.js", "startsWith(href + '/')", "sidebar active must use a segment-boundary slug-prefix match")
+}
+
+// TestBrandingUpdatesAllNodes pins logo replacement hitting every .brand node
+// (sidebar + mobile top bar), not just the first.
+func TestBrandingUpdatesAllNodes(t *testing.T) {
+	assertContains(t, "app.js", "querySelectorAll('.brand')", "branding must replace every .brand node (sidebar + mobile)")
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	if strings.Contains(string(b), "querySelector('nav .brand')") {
+		t.Fatal("app.js: branding selector must not require 'nav .brand' after the sidebar move")
+	}
+}
+
+// TestSidebarDrawerWiring pins the mobile drawer: closed only via the post-mount
+// onNavigated hook (so a guard-vetoed nav keeps it open), focus trap reused.
+func TestSidebarDrawerWiring(t *testing.T) {
+	assertContains(t, "app.js", "createSidebarDrawer(", "app.js must wire the drawer controller")
+	assertContains(t, "app.js", "sidebarDrawer.onNavigated()", "the drawer must close from the post-mount onNavigated hook")
+	assertContains(t, "views/sidebar-drawer.js", "function onNavigated", "the drawer controller must expose onNavigated")
+	assertContains(t, "views/sidebar-drawer.js", "createFocusTrap", "the drawer must reuse createFocusTrap for focus containment")
+}
+
+// TestSidebarLayoutCSS pins the shell layout primitives.
+func TestSidebarLayoutCSS(t *testing.T) {
+	for _, needle := range []string{"#app-shell", "--sidebar-w", "body.sidebar-collapsed", "body.sidebar-open", "@media (max-width: 860px)"} {
+		assertContains(t, "style.css", needle, "style.css must define sidebar layout primitive "+needle)
 	}
 }
 
