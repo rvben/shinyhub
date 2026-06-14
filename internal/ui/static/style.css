@@ -1104,7 +1104,7 @@ main {
   padding: 1.9rem 0;
   border-top: 1px solid var(--line);
 }
-.settings-block:first-child { border-top: none; padding-top: 0.35rem; }
+.settings-block:first-child { border-top: none; padding-top: 0; }
 .settings-block:last-child { padding-bottom: 0.5rem; }
 .settings-block-title,
 fieldset.settings-block > legend {
@@ -1163,7 +1163,7 @@ fieldset.settings-block { min-width: 0; }
 /* Small muted metadata (e.g. data-dir quota usage). */
 .settings-meta { color: var(--text-muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 
-.access-level label {
+.access-radios label {
   display: flex;
   align-items: center;
   gap: 0.7rem;
@@ -1176,9 +1176,9 @@ fieldset.settings-block { min-width: 0; }
   clear: both;
 }
 
-.access-level label:hover { background: var(--surface-2); }
+.access-radios label:hover { background: var(--surface-2); }
 
-.access-level input[type="radio"] {
+.access-radios input[type="radio"] {
   appearance: none;
   -webkit-appearance: none;
   width: 15px;
@@ -1192,12 +1192,12 @@ fieldset.settings-block { min-width: 0; }
   transition: all var(--ease);
 }
 
-.access-level input[type="radio"]:checked {
+.access-radios input[type="radio"]:checked {
   border-color: var(--cyan-bright);
   box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
 }
 
-.access-level input[type="radio"]:checked::after {
+.access-radios input[type="radio"]:checked::after {
   content: '';
   position: absolute;
   top: 50%; left: 50%;
@@ -1816,8 +1816,11 @@ fieldset.settings-block { min-width: 0; }
   box-shadow: 0 0 0 3px rgba(56,189,248,0.25);
 }
 
+/* Plain checkbox toggle rows lay out as an inline flex (checkbox + label). The
+   :not(.scaling-row) guard leaves settings-row controls on their own grid so a
+   checkbox-bearing row (e.g. Enable autoscale) still aligns with sibling fields. */
 .modal-card form label:has(> input[type="checkbox"]),
-.settings-tab-panel label:has(> input[type="checkbox"]) {
+.settings-tab-panel label:not(.scaling-row):has(> input[type="checkbox"]) {
   display: flex;
   align-items: center;
   cursor: pointer;
@@ -2280,35 +2283,72 @@ fieldset.settings-block { min-width: 0; }
 }
 
 /* ── Settings modal tabs ── */
+/* Elevated folder tabs: inactive tabs are flat muted text; the active tab lifts
+   into a surface card with a glowing cyan top cap, its bottom edge merging into
+   the baseline so it reads as connected to the content area below. */
 .settings-tabs {
   display: flex;
-  gap: 0;
+  gap: 0.3rem;
+  align-items: flex-end;
   border-bottom: 1px solid var(--line);
   padding: 0 1.4rem;
+  /* Separate the tab bar from the panel below. The panel is display:contents,
+     so its content butts against this border without a margin here. */
+  margin-bottom: 1.75rem;
 }
 
 .settings-tab {
+  position: relative;
+  text-decoration: none;
   background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  padding: 0.6rem 1rem;
+  /* All four borders are reserved (transparent) so toggling the active state
+     adds no width and never shifts the row. */
+  border: 1px solid transparent;
+  border-radius: 9px 9px 0 0;
+  padding: 0.55rem 1.05rem;
+  /* Pull the bottom edge over the nav's baseline so the active card can break
+     the line beneath it. */
   margin-bottom: -1px;
   cursor: pointer;
   color: var(--text-muted);
   font-family: var(--font);
-  font-size: 0.83rem;
+  font-size: 0.84rem;
   font-weight: 600;
   letter-spacing: -0.01em;
-  transition: color var(--ease), border-color var(--ease);
+  transition: color var(--ease), background var(--ease), border-color var(--ease);
 }
 
-.settings-tab:hover {
+/* Inactive hover: a soft rounded lift hinting at the folder shape. */
+.settings-tab:not(.active):hover {
   color: var(--text-soft);
+  background: var(--surface-2);
 }
 
+.settings-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px rgba(56, 189, 248, 0.55);
+}
+
+/* Active = a lifted surface card; the surface-coloured bottom border covers the
+   baseline so the folder opens into the content area. */
 .settings-tab.active {
-  color: var(--cyan-bright);
-  border-bottom-color: var(--cyan-bright);
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--line);
+  border-bottom-color: var(--surface);
+}
+
+/* Glowing cyan cap along the top edge of the active card. */
+.settings-tab.active::after {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  right: -1px;
+  height: 3px;
+  background: var(--cyan-bright);
+  border-radius: 9px 9px 0 0;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.55);
 }
 
 .settings-tab-panel {
@@ -2742,10 +2782,13 @@ fieldset.settings-block { min-width: 0; }
 }
 .scaling-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 16rem;
   align-items: center;
   gap: 1.5rem;
 }
+/* All controls share the left edge of the fixed input column so number, text,
+   and checkbox fields line up vertically regardless of their own width. */
+.scaling-row > input { justify-self: start; }
 .scaling-row > span {
   display: flex;
   flex-direction: column;
@@ -2769,7 +2812,7 @@ fieldset.settings-block { min-width: 0; }
 }
 .scaling-row input[type="number"] {
   width: 6rem;
-  padding: 0.35rem 0.5rem;
+  padding: 0.4rem 0.6rem;
   font-family: var(--mono);
   background: var(--bg-deep);
   color: var(--text);
@@ -2783,8 +2826,7 @@ fieldset.settings-block { min-width: 0; }
 /* Text inputs in a settings row (General: display name, project slug) share the
    number-input chrome but are wider since they hold free text. */
 .scaling-row input[type="text"] {
-  width: 16rem;
-  max-width: 100%;
+  width: 100%;
   padding: 0.4rem 0.6rem;
   font-family: var(--mono);
   background: var(--bg-deep);
@@ -2982,6 +3024,28 @@ fieldset.settings-block { min-width: 0; }
   margin-bottom: 8px;
   gap: 16px;
 }
+.logs-empty {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 2rem 1.75rem;
+  max-width: 44rem;
+}
+.logs-empty h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.logs-empty p {
+  margin: 0 0 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.logs-empty p:last-child { margin-bottom: 0; }
+.logs-empty a { color: var(--cyan-bright); text-decoration: none; }
+.logs-empty a:hover { text-decoration: underline; }
 
 /* ── App detail: Deployments tab ─────────────────────────────────────────── */
 

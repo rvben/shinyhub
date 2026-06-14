@@ -167,6 +167,19 @@ export function mountAppDetail(ctx) {
 }
 
 function renderLogs(panel, app) {
+  // An app awaiting its first deploy has no log file, so opening the stream
+  // just errors into "(log stream disconnected)". Show an empty state instead.
+  if ((app.deploy_count || 0) === 0) {
+    panel.innerHTML = `
+      <div class="logs-empty">
+        <h3>No logs yet</h3>
+        <p>This app is awaiting its first deploy. Output appears here once it's
+           deployed and running.</p>
+        <p><a href="/apps/${app.slug}/overview" data-nav>Deploy from the Overview tab →</a></p>
+      </div>
+    `;
+    return () => {};
+  }
   panel.innerHTML = `
     <div class="logs-toolbar">
       <label><input id="logs-follow" type="checkbox" checked> Follow</label>

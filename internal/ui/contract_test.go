@@ -1478,3 +1478,129 @@ func TestReservedUserRowIsReadOnly(t *testing.T) {
 	assertContains(t, "views/user-row.js", "__deploy__",
 		"user-row.js must treat __deploy__ as a reserved (read-only) account")
 }
+
+// TestDetailTabsSeparatedFromContent guards a margin below the app-detail tab
+// bar. The tab panel is display:contents, so without this margin the active
+// panel's content butts directly against the tab bar (zero gap).
+func TestDetailTabsSeparatedFromContent(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	// The base rule (not the mobile overflow-x override) starts with display:flex.
+	i := strings.Index(css, ".settings-tabs {\n  display: flex;")
+	if i < 0 {
+		t.Fatal("style.css: could not locate the base .settings-tabs rule")
+	}
+	end := strings.Index(css[i:], "}")
+	if end < 0 || !strings.Contains(css[i:i+end], "margin-bottom:") {
+		t.Fatal("style.css: .settings-tabs must carry a margin-bottom so the tab bar is separated from the panel content")
+	}
+}
+
+// TestDetailTabsAreFolderTabs guards the elevated folder-tab styling: tabs must
+// not render as plain underlined links (the global a{} underline is killed), the
+// active tab lifts into a surface card, and a glowing cyan cap marks it.
+func TestDetailTabsAreFolderTabs(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	// Anchor on the base rule (starts with position:relative), not the earlier
+	// mobile .settings-tab { flex: 0 0 auto } override.
+	i := strings.Index(css, ".settings-tab {\n  position: relative;")
+	if i < 0 {
+		t.Fatal("style.css: missing base .settings-tab rule")
+	}
+	end := strings.Index(css[i:], "}")
+	if end < 0 || !strings.Contains(css[i:i+end], "text-decoration: none") {
+		t.Fatal("style.css: .settings-tab must set text-decoration:none so tabs aren't plain underlined links")
+	}
+	a := strings.Index(css, ".settings-tab.active {")
+	if a < 0 {
+		t.Fatal("style.css: missing .settings-tab.active rule")
+	}
+	aEnd := strings.Index(css[a:], "}")
+	if aEnd < 0 || !strings.Contains(css[a:a+aEnd], "background: var(--surface)") {
+		t.Fatal("style.css: the active tab must lift into a surface card (background: var(--surface))")
+	}
+	assertContains(t, "style.css", ".settings-tab.active::after",
+		"the active folder tab must carry a cyan top-cap accent (::after)")
+}
+
+// TestLogsTabEmptyStateForNeverDeployed guards that the Logs tab does not open
+// an SSE stream for an app awaiting its first deploy. Such an app has no log
+// file, so the stream errors immediately and printed "(log stream disconnected)";
+// instead the tab must render a "No logs yet" empty state.
+func TestLogsTabEmptyStateForNeverDeployed(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "(app.deploy_count || 0) === 0",
+		"renderLogs must short-circuit on a never-deployed app instead of opening EventSource")
+	assertContains(t, "views/app-detail.js", "No logs yet",
+		"the never-deployed Logs tab must show a 'No logs yet' empty state")
+	assertContains(t, "style.css", "\n.logs-empty {",
+		"style.css must style the Logs empty state")
+	// The empty-state branch must precede the EventSource construction so the
+	// stream is never opened for a never-deployed app.
+	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
+	if err != nil {
+		t.Fatalf("read app-detail.js: %v", err)
+	}
+	js := string(b)
+	guard := strings.Index(js, "(app.deploy_count || 0) === 0")
+	es := strings.Index(js, "new EventSource(`/api/apps/${app.slug}/logs`")
+	if guard < 0 || es < 0 || guard > es {
+		t.Fatal("app-detail.js: the never-deployed guard must come before the log EventSource is opened")
+	}
+}
+
+// TestConfigDefaultPlaceholders guards that settings fields which are empty by
+// design (no limit) or only active in another mode communicate their default
+// via a placeholder, rather than rendering as a blank box that reads as missing.
+func TestConfigDefaultPlaceholders(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	html := string(b)
+	cases := []struct{ id, placeholder, why string }{
+		{"resources-memory", `placeholder="No limit"`, "an empty memory limit means no limit"},
+		{"resources-cpu", `placeholder="No limit"`, "an empty CPU quota means no limit"},
+		{"hibernate-custom-minutes", `placeholder="30"`, "the disabled custom-timeout input must hint its default"},
+		{"autoscale-target", `placeholder="0.80"`, "the disabled custom-target input must hint the server-wide default"},
+	}
+	for _, c := range cases {
+		i := strings.Index(html, `id="`+c.id+`"`)
+		if i < 0 {
+			t.Fatalf("index.html: missing input #%s", c.id)
+		}
+		// The input tag spans from the opening of the element back to '<input'.
+		start := strings.LastIndex(html[:i], "<input")
+		end := strings.Index(html[i:], ">")
+		if start < 0 || end < 0 || !strings.Contains(html[start:i+end], c.placeholder) {
+			t.Fatalf("index.html: #%s must carry %s (%s)", c.id, c.placeholder, c.why)
+		}
+	}
+}
+
+// TestScalingRowInputsAlign guards the settings-row alignment contract: every
+// control sits in a fixed-width input column so number, text, and checkbox
+// fields share one left edge. The checkbox-toggle flex rule must exclude
+// .scaling-row, otherwise a checkbox-bearing row (Enable autoscale) collapses to
+// flex and its control no longer aligns with sibling number inputs.
+func TestScalingRowInputsAlign(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	i := strings.Index(css, ".scaling-row {")
+	if i < 0 || !strings.Contains(css[i:i+200], "grid-template-columns: minmax(0, 1fr) 16rem") {
+		t.Fatal("style.css: .scaling-row must use a fixed input column (minmax(0,1fr) 16rem) so all controls align")
+	}
+	assertContains(t, "style.css", ".scaling-row > input { justify-self: start; }",
+		"scaling-row controls must left-align at the input column so narrow (number) and wide (text) inputs share an edge")
+	assertContains(t, "style.css", `.settings-tab-panel label:not(.scaling-row):has(> input[type="checkbox"])`,
+		"the checkbox-toggle flex rule must exclude .scaling-row so a checkbox settings-row keeps its grid alignment")
+}

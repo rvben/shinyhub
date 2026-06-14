@@ -242,14 +242,14 @@
                   <span class="scaling-option-title">Memory limit</span>
                   <span class="scaling-option-help">Hard cap per replica, in MB. Empty or <code>0</code> means no limit.</span>
                 </span>
-                <input id="resources-memory" type="number" min="0" max="1048576" step="1" inputmode="numeric" autocomplete="off" aria-label="Memory limit in MB">
+                <input id="resources-memory" type="number" min="0" max="1048576" step="1" inputmode="numeric" autocomplete="off" placeholder="No limit" aria-label="Memory limit in MB">
               </label>
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">CPU quota</span>
                   <span class="scaling-option-help">Share of one core per replica, 0 to 100 percent. <code>100</code> = a full core. Empty or <code>0</code> means no limit.</span>
                 </span>
-                <input id="resources-cpu" type="number" min="0" max="100" step="1" inputmode="numeric" autocomplete="off" aria-label="CPU quota percent (0 to 100)">
+                <input id="resources-cpu" type="number" min="0" max="100" step="1" inputmode="numeric" autocomplete="off" placeholder="No limit" aria-label="CPU quota percent (0 to 100)">
               </label>
               <div class="env-form-actions">
                 <button id="resources-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
@@ -286,7 +286,7 @@
                     <span class="hibernate-option-help">Hibernate after this many minutes of inactivity.</span>
                     <span class="hibernate-custom-row">
                       <input id="hibernate-custom-minutes" type="number" min="1" max="525600" step="1"
-                             inputmode="numeric" autocomplete="off" disabled aria-label="Custom hibernate timeout in minutes">
+                             inputmode="numeric" autocomplete="off" disabled placeholder="30" aria-label="Custom hibernate timeout in minutes">
                       <span class="hibernate-custom-unit">minutes</span>
                     </span>
                   </span>
@@ -382,7 +382,7 @@
                     <span class="hibernate-option-help">Override the server-wide target. Range 0.01 to 1.00; lower scales out sooner.</span>
                     <span class="hibernate-custom-row">
                       <input id="autoscale-target" type="number" min="0.01" max="1.00" step="0.01"
-                             inputmode="decimal" autocomplete="off" disabled aria-label="Custom target session load">
+                             inputmode="decimal" autocomplete="off" disabled placeholder="0.80" aria-label="Custom target session load">
                     </span>
                   </span>
                 </label>
