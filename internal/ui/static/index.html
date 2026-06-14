@@ -205,107 +205,119 @@
         <section id="detail-traces-panel"        class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-deployments-panel"   class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-configuration-panel" class="settings-tab-panel" role="tabpanel" hidden>
-          <section id="settings-general-panel">
-            <fieldset class="access-level general-options">
-              <legend>General</legend>
+          <section class="settings-block">
+            <h3 class="settings-block-title">General</h3>
+            <p class="settings-block-desc">Name the app and group it with related ones. The URL slug (<code>/app/&lt;slug&gt;/</code>) is part of the app's address and can't be changed after creation.</p>
+            <div class="settings-block-body">
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Display name</span>
-                  <span class="scaling-option-help">Shown across the dashboard. The URL slug (<code>/app/&lt;slug&gt;/</code>) is the app's permanent identity and cannot be changed here.</span>
+                  <span class="scaling-option-help">Shown across the dashboard.</span>
                 </span>
                 <input id="general-name" type="text" maxlength="128" autocomplete="off" aria-label="App display name">
               </label>
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Project</span>
-                  <span class="scaling-option-help">Optional grouping label. Apps that share a project slug are grouped together on the dashboard.</span>
+                  <span class="scaling-option-help">Optional grouping label; apps that share it are grouped on the dashboard.</span>
                 </span>
                 <input id="general-project" type="text" maxlength="63" autocomplete="off" spellcheck="false" placeholder="(none)" aria-label="Project slug">
               </label>
-            </fieldset>
-            <div class="env-form-actions">
-              <button id="general-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-              <span id="general-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-              <span id="general-status" class="hibernate-status" hidden></span>
+              <div class="env-form-actions">
+                <button id="general-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+                <span id="general-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="general-status" class="hibernate-status" hidden></span>
+              </div>
+              <p id="general-error" class="error" hidden></p>
             </div>
-            <p id="general-error" class="error" hidden></p>
+          </section>
 
-            <fieldset class="access-level resources-options">
-              <legend>Resources</legend>
-              <p id="resources-runtime-note" class="settings-help" hidden>This instance runs the <strong>native</strong> runtime, where per-app memory and CPU limits are not enforced. Switch the server to the Docker runtime (<code>runtime.mode: docker</code>) to apply them.</p>
+          <section class="settings-block">
+            <h3 class="settings-block-title">Resources</h3>
+            <p class="settings-block-desc">Per-replica caps on memory and CPU. Enforced under the Docker runtime.</p>
+            <p id="resources-runtime-note" class="settings-inline-note" hidden>This instance runs the <strong>native</strong> runtime, where per-app limits are not enforced. Switch the server to the Docker runtime (<code>runtime.mode: docker</code>) to apply them.</p>
+            <div class="settings-block-body">
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Memory limit</span>
-                  <span class="scaling-option-help">Hard cap per replica, in MB. Empty or <code>0</code> means no limit. Enforced under the Docker runtime; advisory under the native runtime.</span>
+                  <span class="scaling-option-help">Hard cap per replica, in MB. Empty or <code>0</code> means no limit.</span>
                 </span>
                 <input id="resources-memory" type="number" min="0" max="1048576" step="1" inputmode="numeric" autocomplete="off" aria-label="Memory limit in MB">
               </label>
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">CPU quota</span>
-                  <span class="scaling-option-help">Share of one CPU core per replica, 0 to 100 percent. <code>100</code> = a full core. Empty or <code>0</code> means no limit. Enforced under the Docker runtime.</span>
+                  <span class="scaling-option-help">Share of one core per replica, 0 to 100 percent. <code>100</code> = a full core. Empty or <code>0</code> means no limit.</span>
                 </span>
                 <input id="resources-cpu" type="number" min="0" max="100" step="1" inputmode="numeric" autocomplete="off" aria-label="CPU quota percent (0 to 100)">
               </label>
-            </fieldset>
-            <div class="env-form-actions">
-              <button id="resources-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-              <span id="resources-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-              <span id="resources-status" class="hibernate-status" hidden></span>
+              <div class="env-form-actions">
+                <button id="resources-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+                <span id="resources-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="resources-status" class="hibernate-status" hidden></span>
+              </div>
+              <p id="resources-error" class="error" hidden></p>
             </div>
-            <p id="resources-error" class="error" hidden></p>
+          </section>
 
-            <fieldset class="access-level hibernate-options">
-              <legend>Hibernation</legend>
-              <label>
-                <input type="radio" name="hibernate-mode" value="default">
-                <span>
-                  <span class="hibernate-option-title">Use global default</span>
-                  <span class="hibernate-option-help">Apps idle for the server-wide threshold are stopped.</span>
-                </span>
-              </label>
-              <label>
-                <input type="radio" name="hibernate-mode" value="never">
-                <span>
-                  <span class="hibernate-option-title">Never hibernate</span>
-                  <span class="hibernate-option-help">Keep this app running continuously. Useful for apps with large in-memory state.</span>
-                </span>
-              </label>
-              <label>
-                <input type="radio" name="hibernate-mode" value="custom">
-                <span>
-                  <span class="hibernate-option-title">Custom timeout</span>
-                  <span class="hibernate-option-help">Hibernate after this many minutes of inactivity.</span>
-                  <span class="hibernate-custom-row">
-                    <input id="hibernate-custom-minutes" type="number" min="1" max="525600" step="1"
-                           inputmode="numeric" autocomplete="off" disabled aria-label="Custom hibernate timeout in minutes">
-                    <span class="hibernate-custom-unit">minutes</span>
+          <fieldset class="settings-block access-level hibernate-options">
+            <legend class="settings-block-title">Hibernation</legend>
+            <p class="settings-block-desc">Stop the app after a period of inactivity to free resources; it restarts automatically on the next request.</p>
+            <div class="settings-block-body">
+              <div class="access-radios">
+                <label>
+                  <input type="radio" name="hibernate-mode" value="default">
+                  <span>
+                    <span class="hibernate-option-title">Use global default</span>
+                    <span class="hibernate-option-help">Apps idle for the server-wide threshold are stopped.</span>
                   </span>
+                </label>
+                <label>
+                  <input type="radio" name="hibernate-mode" value="never">
+                  <span>
+                    <span class="hibernate-option-title">Never hibernate</span>
+                    <span class="hibernate-option-help">Keep this app running continuously. Useful for apps with large in-memory state.</span>
+                  </span>
+                </label>
+                <label>
+                  <input type="radio" name="hibernate-mode" value="custom">
+                  <span>
+                    <span class="hibernate-option-title">Custom timeout</span>
+                    <span class="hibernate-option-help">Hibernate after this many minutes of inactivity.</span>
+                    <span class="hibernate-custom-row">
+                      <input id="hibernate-custom-minutes" type="number" min="1" max="525600" step="1"
+                             inputmode="numeric" autocomplete="off" disabled aria-label="Custom hibernate timeout in minutes">
+                      <span class="hibernate-custom-unit">minutes</span>
+                    </span>
+                  </span>
+                </label>
+              </div>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Keep warm</span>
+                  <span class="scaling-option-help">Replicas kept running when the app idles. 0 stops all (full hibernation).</span>
+                  <span id="min-warm-warning" class="scaling-option-help scaling-option-warn" hidden>Configured replicas is below the keep-warm floor; the floor self-clamps to the replica count.</span>
                 </span>
+                <input id="min-warm-replicas" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Minimum warm replicas when idle">
               </label>
-            </fieldset>
-            <label class="scaling-row access-level" style="margin-top:1rem">
-              <span>
-                <span class="scaling-option-title">Keep warm</span>
-                <span class="scaling-option-help">Replicas kept running when the app idles. 0 stops all (full hibernation).</span>
-                <span id="min-warm-warning" class="scaling-option-help" style="color:var(--color-warning,#b45309)" hidden>Configured replicas is below the keep-warm floor; the floor self-clamps to the replica count.</span>
-              </span>
-              <input id="min-warm-replicas" type="number" min="0" max="1000" step="1"
-                     inputmode="numeric" autocomplete="off" aria-label="Minimum warm replicas when idle">
-            </label>
-            <div class="env-form-actions">
-              <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-              <span id="hibernate-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-              <span id="hibernate-status" class="hibernate-status" hidden></span>
+              <div class="env-form-actions">
+                <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+                <span id="hibernate-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="hibernate-status" class="hibernate-status" hidden></span>
+              </div>
+              <p id="hibernate-error" class="error" hidden></p>
             </div>
-            <p id="hibernate-error" class="error" hidden></p>
+          </fieldset>
 
-            <fieldset class="access-level scaling-options">
-              <legend>Scaling</legend>
+          <section class="settings-block">
+            <h3 class="settings-block-title">Scaling</h3>
+            <p class="settings-block-desc">How many processes serve this app, and how many sessions each one admits.</p>
+            <div class="settings-block-body">
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Replicas</span>
-                  <span class="scaling-option-help">Number of identical processes serving this app's traffic. More replicas help CPU-bound apps; each replica has its own memory.</span>
+                  <span class="scaling-option-help">Identical processes serving this app's traffic. More replicas help CPU-bound apps; each has its own memory.</span>
                 </span>
                 <input id="scaling-replicas" type="number" min="1" max="32" step="1"
                        inputmode="numeric" autocomplete="off" aria-label="Number of replica processes">
@@ -319,27 +331,30 @@
                        inputmode="numeric" autocomplete="off" aria-label="Maximum new sessions per replica">
               </label>
               <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
-            </fieldset>
-            <div class="env-form-actions">
-              <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-              <span id="scaling-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-              <span id="scaling-status" class="hibernate-status" hidden></span>
+              <div class="env-form-actions">
+                <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+                <span id="scaling-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="scaling-status" class="hibernate-status" hidden></span>
+              </div>
+              <p id="scaling-error" class="error" hidden></p>
             </div>
-            <p id="scaling-error" class="error" hidden></p>
+          </section>
 
-            <fieldset class="access-level autoscale-options" id="autoscale-options">
-              <legend>Autoscale</legend>
+          <fieldset class="settings-block access-level autoscale-options" id="autoscale-options">
+            <legend class="settings-block-title">Autoscale</legend>
+            <p class="settings-block-desc">Let the controller grow and shrink the replica pool automatically based on observed session load.</p>
+            <div class="settings-block-body">
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Enable autoscale</span>
-                  <span class="scaling-option-help">Let the controller resize the replica pool based on observed session load. The bounds below cap how far it can move.</span>
+                  <span class="scaling-option-help">The bounds below cap how far the pool can move.</span>
                 </span>
                 <input id="autoscale-enabled" type="checkbox" autocomplete="off" aria-label="Enable autoscale">
               </label>
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Min replicas</span>
-                  <span class="scaling-option-help">Lower bound the controller will not scale below. Must be at least 1 when autoscale is enabled.</span>
+                  <span class="scaling-option-help">Lower bound the controller will not scale below. At least 1 when enabled.</span>
                 </span>
                 <input id="autoscale-min" type="number" min="0" max="1000" step="1"
                        inputmode="numeric" autocomplete="off" aria-label="Minimum replicas">
@@ -347,49 +362,54 @@
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Max replicas</span>
-                  <span class="scaling-option-help">Upper bound the controller will not scale above. Must be at least min when enabled.</span>
+                  <span class="scaling-option-help">Upper bound the controller will not scale above. At least min when enabled.</span>
                 </span>
                 <input id="autoscale-max" type="number" min="0" max="1000" step="1"
                        inputmode="numeric" autocomplete="off" aria-label="Maximum replicas">
               </label>
-              <label>
-                <input type="radio" name="autoscale-target-mode" value="default">
-                <span>
-                  <span class="hibernate-option-title">Use runtime default target</span>
-                  <span class="hibernate-option-help">Scale toward the server-wide target session load.</span>
-                </span>
-              </label>
-              <label>
-                <input type="radio" name="autoscale-target-mode" value="custom">
-                <span>
-                  <span class="hibernate-option-title">Custom target</span>
-                  <span class="hibernate-option-help">Override the server-wide target. Range 0.01 to 1.00; lower scales out sooner.</span>
-                  <span class="hibernate-custom-row">
-                    <input id="autoscale-target" type="number" min="0.01" max="1.00" step="0.01"
-                           inputmode="decimal" autocomplete="off" disabled aria-label="Custom target session load">
+              <div class="access-radios">
+                <label>
+                  <input type="radio" name="autoscale-target-mode" value="default">
+                  <span>
+                    <span class="hibernate-option-title">Use runtime default target</span>
+                    <span class="hibernate-option-help">Scale toward the server-wide target session load.</span>
                   </span>
-                </span>
-              </label>
+                </label>
+                <label>
+                  <input type="radio" name="autoscale-target-mode" value="custom">
+                  <span>
+                    <span class="hibernate-option-title">Custom target</span>
+                    <span class="hibernate-option-help">Override the server-wide target. Range 0.01 to 1.00; lower scales out sooner.</span>
+                    <span class="hibernate-custom-row">
+                      <input id="autoscale-target" type="number" min="0.01" max="1.00" step="0.01"
+                             inputmode="decimal" autocomplete="off" disabled aria-label="Custom target session load">
+                    </span>
+                  </span>
+                </label>
+              </div>
               <p id="autoscale-ceiling" class="scaling-ceiling" aria-live="polite"></p>
-            </fieldset>
-            <div class="env-form-actions">
-              <button id="autoscale-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-              <span id="autoscale-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-              <span id="autoscale-status" class="hibernate-status" hidden></span>
+              <div class="env-form-actions">
+                <button id="autoscale-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+                <span id="autoscale-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="autoscale-status" class="hibernate-status" hidden></span>
+              </div>
+              <p id="autoscale-error" class="error" hidden></p>
             </div>
-            <p id="autoscale-error" class="error" hidden></p>
-          </section>
+          </fieldset>
 
-          <section id="settings-env-panel">
-            <div class="env-header">
-              <h4>Environment variables</h4>
-              <button id="env-add-btn" type="button" class="env-add-btn">+ Add variable</button>
+          <section class="settings-block">
+            <h3 class="settings-block-title">Environment variables</h3>
+            <p class="settings-block-desc">Key/value pairs passed to the app process when it starts. Secrets are encrypted at rest and write-only.</p>
+            <div class="settings-block-body">
+              <div class="env-header">
+                <p class="env-empty" id="env-empty" hidden>No environment variables set for this app.</p>
+                <button id="env-add-btn" type="button" class="env-add-btn">+ Add variable</button>
+              </div>
+              <table id="env-list" class="env-list" hidden>
+                <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
             </div>
-            <p class="env-empty" id="env-empty" hidden>No environment variables set for this app.</p>
-            <table id="env-list" class="env-list" hidden>
-              <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
-              <tbody></tbody>
-            </table>
 
             <form id="env-form" class="env-form" hidden>
               <h5 id="env-form-heading">Add variable</h5>
@@ -413,89 +433,114 @@
             </form>
           </section>
 
-          <section id="settings-schedules-panel">
-            <h4 class="settings-section-title">Schedules</h4>
-            <p class="settings-help">Cron-style jobs that run as short-lived processes against this app's bundle. Runs do not wake a hibernated app.</p>
-            <div id="schedules-list" class="schedules-table"></div>
-            <button type="button" class="btn-primary" id="schedules-add-btn">+ Add schedule</button>
+          <section class="settings-block">
+            <h3 class="settings-block-title">Schedules</h3>
+            <p class="settings-block-desc">Cron-style jobs that run as short-lived processes against this app's bundle. Runs do not wake a hibernated app.</p>
+            <div class="settings-block-body">
+              <div id="schedules-list" class="schedules-table"></div>
+              <div><button type="button" class="btn-primary" id="schedules-add-btn">+ Add schedule</button></div>
+            </div>
           </section>
 
-          <section id="danger-zone" class="danger-zone" hidden>
-            <h4>Danger zone</h4>
-            <p class="danger-zone-lead">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
-            <div class="danger-zone-row">
-              <label for="delete-confirm" class="danger-zone-label">
-                Type <code id="delete-confirm-slug"></code> to confirm:
-              </label>
-              <div class="danger-zone-controls">
-                <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" aria-describedby="delete-error">
-                <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
+          <section id="danger-zone" class="settings-block danger-zone" hidden>
+            <h3 class="settings-block-title">Danger zone</h3>
+            <p class="settings-block-desc">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
+            <div class="settings-block-body">
+              <div class="danger-zone-row">
+                <label for="delete-confirm" class="danger-zone-label">
+                  Type <code id="delete-confirm-slug"></code> to confirm:
+                </label>
+                <div class="danger-zone-controls">
+                  <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" aria-describedby="delete-error">
+                  <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
+                </div>
               </div>
+              <p id="delete-error" class="error" hidden></p>
             </div>
-            <p id="delete-error" class="error" hidden></p>
           </section>
         </section>
         <section id="detail-data-panel"          class="settings-tab-panel" role="tabpanel" hidden>
-          <section id="settings-data-panel">
-            <div class="env-header">
-              <h4>Data files</h4>
-            </div>
-            <p class="env-empty" id="data-empty" hidden>No files in this app's data dir.</p>
-            <table id="data-list-table" class="env-list" hidden>
-              <thead><tr><th>Path</th><th>Size</th><th>Modified</th><th></th></tr></thead>
-              <tbody id="data-list"></tbody>
-            </table>
-            <div id="data-quota" class="env-empty"></div>
+          <section class="settings-block">
+            <h3 class="settings-block-title">Data files</h3>
+            <p class="settings-block-desc">Files in this app's persistent data directory, available to the running app and kept across deploys.</p>
+            <div class="settings-block-body">
+              <div class="env-header">
+                <p class="env-empty" id="data-empty" hidden>No files in this app's data dir.</p>
+                <span id="data-quota" class="settings-meta"></span>
+              </div>
+              <table id="data-list-table" class="env-list" hidden>
+                <thead><tr><th>Path</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+                <tbody id="data-list"></tbody>
+              </table>
 
-            <form id="data-upload-form" class="env-form" hidden>
-              <h5>Upload file</h5>
-              <div class="env-form-row">
-                <label for="data-file-input">File</label>
-                <input id="data-file-input" type="file" required>
-              </div>
-              <div class="env-form-row">
-                <label for="data-dest-input">Destination path</label>
-                <input id="data-dest-input" type="text" autocomplete="off" spellcheck="false" placeholder="optional subpath (defaults to filename)">
-              </div>
-              <div class="env-form-row env-form-checks">
-                <label><input type="checkbox" id="data-restart-input"> Restart app after upload</label>
-              </div>
-              <progress id="data-progress" max="100" value="0" aria-label="Upload progress" hidden></progress>
-              <p id="data-error" class="error" hidden></p>
-              <div class="env-form-actions">
-                <button id="data-upload-btn" type="submit" class="env-btn-primary">Upload</button>
-              </div>
-            </form>
+              <form id="data-upload-form" class="env-form" hidden>
+                <h5>Upload file</h5>
+                <div class="env-form-row">
+                  <label for="data-file-input">File</label>
+                  <input id="data-file-input" type="file" required>
+                </div>
+                <div class="env-form-row">
+                  <label for="data-dest-input">Destination path</label>
+                  <input id="data-dest-input" type="text" autocomplete="off" spellcheck="false" placeholder="optional subpath (defaults to filename)">
+                </div>
+                <div class="env-form-row env-form-checks">
+                  <label><input type="checkbox" id="data-restart-input"> Restart app after upload</label>
+                </div>
+                <progress id="data-progress" max="100" value="0" aria-label="Upload progress" hidden></progress>
+                <p id="data-error" class="error" hidden></p>
+                <div class="env-form-actions">
+                  <button id="data-upload-btn" type="submit" class="env-btn-primary">Upload</button>
+                </div>
+              </form>
+            </div>
           </section>
 
-          <section id="settings-shared-data-panel">
-            <h4 class="settings-section-title">Shared data</h4>
-            <p class="settings-help">Mount another app's persistent data dir read-only. It appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app. Read-only is enforced by the Docker runtime; under the native runtime it is a convention only (writes through the symlink are not blocked).</p>
-            <div id="shared-data-list" class="shared-data-table"></div>
-            <button type="button" class="btn-primary" id="shared-data-add-btn">+ Mount data from another app</button>
+          <section class="settings-block">
+            <h3 class="settings-block-title">Shared data</h3>
+            <p class="settings-block-desc">Mount another app's persistent data dir read-only. It appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app. Read-only is enforced under the Docker runtime; under native it is a convention only.</p>
+            <div class="settings-block-body">
+              <div id="shared-data-list" class="shared-data-table"></div>
+              <div><button type="button" class="btn-primary" id="shared-data-add-btn">+ Mount data from another app</button></div>
+            </div>
           </section>
         </section>
         <section id="detail-access-panel"        class="settings-tab-panel" role="tabpanel" hidden>
-          <section id="settings-access-panel">
-            <fieldset class="access-level">
-              <legend>Visibility</legend>
-              <label><input type="radio" name="access-level" value="private"> Private</label>
-              <label><input type="radio" name="access-level" value="shared"> Shared</label>
-              <label><input type="radio" name="access-level" value="public"> Public</label>
-            </fieldset>
-            <div class="env-form-actions">
-              <button id="visibility-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-              <span id="visibility-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-              <span id="visibility-status" class="hibernate-status" hidden></span>
+          <fieldset class="settings-block access-level">
+            <legend class="settings-block-title">Visibility</legend>
+            <p class="settings-block-desc">Who can open this app. Private is owner-only; Shared adds members and groups below; Public is open to anyone who can reach the server.</p>
+            <div class="settings-block-body">
+              <div class="access-radios">
+                <label><input type="radio" name="access-level" value="private"> Private</label>
+                <label><input type="radio" name="access-level" value="shared"> Shared</label>
+                <label><input type="radio" name="access-level" value="public"> Public</label>
+              </div>
+              <div class="env-form-actions">
+                <button id="visibility-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+                <span id="visibility-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="visibility-status" class="hibernate-status" hidden></span>
+              </div>
+              <p id="visibility-error" class="error" hidden></p>
             </div>
-            <p id="visibility-error" class="error" hidden></p>
-            <section class="members-section">
-              <h4>Members</h4>
+          </fieldset>
+
+          <section class="settings-block">
+            <h3 class="settings-block-title">Members</h3>
+            <p class="settings-block-desc">People granted direct access to this app, beyond its visibility setting.</p>
+            <div class="settings-block-body">
               <ul id="members-list"></ul>
-            </section>
-            <section class="group-access-section">
-              <h4>Group access</h4>
-              <p class="hint">Grant an IdP group viewer or manager access to this app. Group access is additive and does not restrict a public or shared app.</p>
+              <div class="grant-row">
+                <label for="grant-username" class="sr-only">Username to grant access</label>
+                <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
+                <button id="grant-btn" type="button" class="btn-primary">Grant</button>
+              </div>
+              <p id="grant-error" class="error" hidden></p>
+            </div>
+          </section>
+
+          <section class="settings-block">
+            <h3 class="settings-block-title">Group access</h3>
+            <p class="settings-block-desc">Grant an IdP group viewer or manager access. Group access is additive and does not restrict a public or shared app.</p>
+            <div class="settings-block-body">
               <ul id="group-access-list"></ul>
               <div class="grant-row">
                 <label for="group-access-name" class="sr-only">Group name</label>
@@ -507,16 +552,7 @@
                 <button id="group-access-add-btn" type="button" class="btn-primary">Add</button>
               </div>
               <p id="group-access-error" class="error" hidden></p>
-            </section>
-            <section class="grant-section">
-              <h4>Grant access</h4>
-              <div class="grant-row">
-                <label for="grant-username" class="sr-only">Username to grant access</label>
-                <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
-                <button id="grant-btn" type="button" class="btn-primary">Grant</button>
-              </div>
-              <p id="grant-error" class="error" hidden></p>
-            </section>
+            </div>
           </section>
         </section>
       </div>

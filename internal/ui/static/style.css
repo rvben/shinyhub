@@ -1093,51 +1093,75 @@ main {
 /* Visibility radios */
 .access-level { border: none; padding: 0; margin: 0; }
 
-/* ── Section headers (settings / access panels) ──────────────────────────────
-   The config page stacks many sections; a tiny muted eyebrow read as an
-   afterthought. These give each section a substantial, on-brand label with a
-   glowing accent bar so the page has a clear visual rhythm. See the shared
-   .section-header-mark ::before rule below for the bar. */
-.access-level legend,
-.members-section h4,
-.group-access-section h4,
-.grant-section h4,
-.settings-section-title,
-.env-header h4,
-.danger-zone h4 {
-  position: relative;
-  margin: 0 0 0.95rem;
-  padding-left: 0.85rem;
+/* ── Settings blocks ────────────────────────────────────────────────────────
+   Each config / access section is a stacked block: a plain heading + a short
+   description, then its controls, separated from the next block by a hairline
+   rule with generous space. Replaces the uppercase-eyebrow + side-stripe
+   pattern (both generic tells). The detail tab panel lays these out directly. */
+.settings-block {
+  border: 0;
+  margin: 0;
+  padding: 1.9rem 0;
+  border-top: 1px solid var(--line);
+}
+.settings-block:first-child { border-top: none; padding-top: 0.35rem; }
+.settings-block:last-child { padding-bottom: 0.5rem; }
+.settings-block-title,
+fieldset.settings-block > legend {
+  display: block;
+  float: none;
+  width: 100%;
+  margin: 0 0 0.3rem;
+  padding: 0;
+  font-family: var(--font);
+  font-weight: 600;
+  font-size: 1.05rem;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text);
+}
+.settings-block-desc {
+  margin: 0 0 1.4rem;
+  max-width: 64ch;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+.settings-block-desc code {
   font-family: var(--mono);
-  font-weight: 700;
-  font-size: 0.78rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+  font-size: 0.85em;
   color: var(--text-soft);
 }
-.access-level legend::before,
-.members-section h4::before,
-.group-access-section h4::before,
-.grant-section h4::before,
-.settings-section-title::before,
-.env-header h4::before,
-.danger-zone h4::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 0.95em;
-  border-radius: 2px;
-  background: linear-gradient(180deg, var(--cyan-bright), var(--electric));
-  box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+.settings-block-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
+  min-width: 0;
+  max-width: 44rem;
 }
-/* Legend is a special form element; keep its block layout. */
-.access-level legend {
-  float: left;
-  width: 100%;
+/* Fieldsets used as settings blocks (radio groups) must not impose the UA
+   min-content width or default chrome. */
+fieldset.settings-block { min-width: 0; }
+/* Radio options inside a settings block, grouped with their own rhythm. */
+.access-radios { display: flex; flex-direction: column; gap: 0.4rem; }
+/* A scoped note inside a block (e.g. the native-runtime caveat under Resources):
+   reads as advisory, not an error. */
+.settings-inline-note {
+  margin: -0.5rem 0 1.1rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: var(--radius);
+  background: rgba(56,189,248,0.06);
+  border: 1px solid var(--line-2);
+  color: var(--text-soft);
+  font-size: 0.83rem;
+  line-height: 1.5;
 }
+.settings-inline-note code { font-family: var(--mono); font-size: 0.85em; color: var(--cyan-bright); }
+/* Inline warning under a field (e.g. keep-warm floor clamp). */
+.scaling-option-warn { color: var(--color-warning, #fbbf24); }
+/* Small muted metadata (e.g. data-dir quota usage). */
+.settings-meta { color: var(--text-muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 
 .access-level label {
   display: flex;
@@ -1379,24 +1403,16 @@ main {
 }
 
 /* ── Danger zone (Access modal) ── */
-.danger-zone {
-  margin-top: 1.25rem;
-  padding: 0.95rem 1rem 1rem;
+/* Danger zone is a settings block rendered as a red-tinted card for emphasis
+   (overrides the plain hairline-rule block style). */
+.danger-zone.settings-block {
+  margin-top: 0.75rem;
+  padding: 1.4rem 1.5rem 1.5rem;
   border: 1px solid rgba(248,113,113,0.35);
   border-radius: var(--radius-lg);
-  background: rgba(248,113,113,0.04);
+  background: rgba(248,113,113,0.05);
 }
-
-/* Danger zone reuses the shared section-header typography but in red, with a
-   red accent bar instead of the cyan one. */
-.danger-zone h4 {
-  margin-bottom: 0.5rem;
-  color: var(--red);
-}
-.danger-zone h4::before {
-  background: linear-gradient(180deg, #f87171, #ef4444);
-  box-shadow: 0 0 8px rgba(248, 113, 113, 0.5);
-}
+.danger-zone .settings-block-title { color: var(--red); }
 
 .danger-zone-lead {
   margin: 0 0 0.8rem;
@@ -1544,13 +1560,6 @@ main {
 
 #history-list li:first-child { border-top: none; }
 
-.deployment-active {
-  border-left: 3px solid var(--cyan-bright);
-  padding-left: 0.75rem;
-  margin-left: -0.95rem;
-  box-shadow: inset 3px 0 12px -3px rgba(56,189,248,0.35);
-}
-
 .deployment-meta { flex: 1; }
 
 .deployment-version {
@@ -1653,8 +1662,6 @@ main {
 
   /* Settings rows stack: the label/help sits above a full-width control instead
      of being crushed next to a fixed-width input. */
-  .scaling-row { flex-direction: column; align-items: stretch; gap: 0.45rem; }
-  .scaling-row input[type="text"] { width: 100%; }
 }
 
 /* === New-app modal === */
@@ -2735,9 +2742,9 @@ main {
 }
 .scaling-row {
   display: grid;
-  grid-template-columns: 1fr 7rem;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.75rem;
+  gap: 1.5rem;
 }
 .scaling-row > span {
   display: flex;
@@ -2776,9 +2783,9 @@ main {
 /* Text inputs in a settings row (General: display name, project slug) share the
    number-input chrome but are wider since they hold free text. */
 .scaling-row input[type="text"] {
-  width: 18rem;
+  width: 16rem;
   max-width: 100%;
-  padding: 0.35rem 0.5rem;
+  padding: 0.4rem 0.6rem;
   font-family: var(--mono);
   background: var(--bg-deep);
   color: var(--text);
@@ -2789,15 +2796,28 @@ main {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.scaling-ceiling {
-  margin: 0.75rem 0 0;
-  padding: 0.5rem 0.65rem;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  background: var(--bg-deep);
-  border-left: 2px solid var(--accent, #4ade80);
-  border-radius: 3px;
+/* Stack settings rows on narrow screens: label/help over a full-width control.
+   Placed after the base .scaling-row rules so it actually wins (an earlier copy
+   in the shared 640px block was overridden by source order). */
+@media (max-width: 640px) {
+  .scaling-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+  .scaling-row input[type="text"],
+  .scaling-row input[type="number"] { width: 100%; }
 }
+.scaling-ceiling {
+  margin: 0.4rem 0 0;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  background: var(--bg-deep);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+}
+.scaling-ceiling strong { color: var(--cyan-bright); }
 .scaling-ceiling:empty {
   display: none;
 }
