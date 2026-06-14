@@ -255,6 +255,10 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	asStatus := buildAutoscaleStatus(asEvent, asFound, s.cfg.Runtime.Autoscale.Cooldown)
 	envelope["autoscale_status"] = asStatus
 	envelope["global_autoscale_enabled"] = s.cfg.Runtime.Autoscale.Enabled
+	// runtime_mode lets the UI render per-app resource limits honestly: they are
+	// only enforceable under the docker runtime, so the Configuration tab shows
+	// the Resources controls read-only with an explanation under native.
+	envelope["runtime_mode"] = s.cfg.Runtime.Mode
 	writeJSON(w, http.StatusOK, envelope)
 }
 

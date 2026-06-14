@@ -11,6 +11,7 @@ import {
   renderAutoscaleSummary,
   renderRejectsByReason,
 } from '/static/views/autoscale.js';
+import { deploymentListModels, relativeTime } from '/static/views/deployment-row.js';
 
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
@@ -58,9 +59,15 @@ export function mountAppDetail(ctx) {
     const body = await resp.json();
     const app = body.app || body;
     if (typeof body.can_manage === 'boolean') app.can_manage = body.can_manage;
+    // runtime_mode gates the Resources controls (limits are docker-only).
+    if (typeof body.runtime_mode === 'string') app.runtime_mode = body.runtime_mode;
     const replicasStatus = Array.isArray(body.replicas_status) ? body.replicas_status : [];
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
+
+    // Record the app so the static header kebab (wired once in app.js) acts on
+    // the right app.
+    if (ctx.setDetailApp) ctx.setDetailApp(app);
 
     if (!canManage && MANAGER_ONLY_TABS.has(tab)) {
       ctx.navigate(`/apps/${slug}`, { replace: true });
@@ -76,6 +83,10 @@ export function mountAppDetail(ctx) {
       if (t === tab) tabEls[t].setAttribute('aria-current', 'page');
       else tabEls[t].removeAttribute('aria-current');
     }
+    // On narrow screens the tab bar scrolls horizontally; bring the active tab
+    // into view so the user can see which section they're on. block:'nearest'
+    // avoids any vertical page jump (no-op on desktop where it's already shown).
+    try { tabEls[tab].scrollIntoView({ inline: 'center', block: 'nearest' }); } catch { /* older browsers */ }
 
     document.getElementById('app-detail-heading').textContent = app.name;
     document.getElementById('app-detail-slug').textContent = '/' + app.slug;
@@ -94,6 +105,12 @@ export function mountAppDetail(ctx) {
     const openLink = document.getElementById('app-detail-open');
     openLink.href = `/app/${app.slug}/`;
     openLink.hidden = app.status !== 'running';
+
+    // The header kebab's only action is Restart, a manager action. Hide the
+    // whole kebab for non-managers (mirrors the dashboard card, which only shows
+    // Restart when canManage) so a viewer can't trigger a forbidden POST.
+    const headerKebab = document.querySelector('.app-detail-actions .kebab-menu');
+    if (headerKebab) headerKebab.hidden = !canManage;
 
     const fleetSlot = document.getElementById('app-detail-fleet-badge');
     if (fleetSlot) {
@@ -153,7 +170,7 @@ function renderLogs(panel, app) {
   panel.innerHTML = `
     <div class="logs-toolbar">
       <label><input id="logs-follow" type="checkbox" checked> Follow</label>
-      <button id="logs-copy" type="button">Copy all</button>
+      <button id="logs-copy" type="button" class="btn-row">Copy all</button>
     </div>
     <pre id="detail-logs-body" class="detail-logs-body" aria-live="polite"></pre>
   `;
@@ -180,15 +197,29 @@ function renderLogs(panel, app) {
   return () => { es.close(); };
 }
 
+function makeStatusBadge(cls, text) {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = text;
+  return span;
+}
+
 async function renderDeployments(panel, app, ctx) {
   panel.innerHTML = `
-    <ul id="detail-deployments-list" class="deployments-list"></ul>
+    <ul id="detail-deployments-list" class="deployments-list" hidden>
+      <li class="deployments-head" aria-hidden="true">
+        <span>Deployment</span>
+        <span>Deployed</span>
+        <span></span>
+      </li>
+    </ul>
     <p id="detail-deployments-empty" class="env-empty" hidden>No deployments yet.</p>
     <div id="detail-deployments-error" class="deployments-error" hidden>
       <p class="error"></p>
       <button type="button" class="btn-row" id="detail-deployments-retry">Retry</button>
     </div>`;
   const list = document.getElementById('detail-deployments-list');
+  const head = list.querySelector('.deployments-head');
   const empty = document.getElementById('detail-deployments-empty');
   const errWrap = document.getElementById('detail-deployments-error');
 
@@ -236,7 +267,8 @@ async function renderDeployments(panel, app, ctx) {
 
   async function load() {
     list.hidden = false;
-    list.textContent = '';
+    // Keep the header row; drop only previously-rendered deployment rows.
+    list.querySelectorAll('.deployment-row').forEach(r => r.remove());
     empty.hidden = true;
     errWrap.hidden = true;
 
@@ -275,15 +307,54 @@ async function renderDeployments(panel, app, ctx) {
 
     if (!rows || rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
 
-    for (const d of rows) {
+    const models = deploymentListModels(rows);
+    for (const m of models) {
       const li = document.createElement('li');
-      li.className = 'deployment-row';
-      li.innerHTML = `
-        <span class="deployment-version">v${d.version}</span>
-        <span class="deployment-when">${new Date(d.created_at).toLocaleString()}</span>
-        <span class="deployment-user">${d.deployed_by ?? '—'}</span>
-        <button type="button" class="rollback-btn" data-id="${d.id}">Roll back</button>
-      `;
+      li.className = 'deployment-row' + (m.isCurrent ? ' deployment-row-current' : '');
+      const verCell = document.createElement('span');
+      verCell.className = 'deployment-version';
+      const num = document.createElement('strong');
+      num.className = 'deployment-number';
+      num.textContent = m.deployNumber;
+      verCell.appendChild(num);
+      // Status badge: Current (live), Failed, or Deploying. A plain succeeded
+      // (non-live) row gets no badge — it's just a rollback target.
+      if (m.isCurrent) {
+        verCell.appendChild(makeStatusBadge('deployment-current-badge', 'Current'));
+      } else if (m.status === 'failed') {
+        const b = makeStatusBadge('deployment-failed-badge', 'Failed');
+        if (m.failureReason) b.title = m.failureReason;
+        verCell.appendChild(b);
+      } else if (m.status !== 'succeeded') {
+        verCell.appendChild(makeStatusBadge('deployment-pending-badge', 'Deploying'));
+      }
+      const verId = document.createElement('span');
+      verId.className = 'deployment-version-id';
+      verId.textContent = `v${m.version}`;
+      verCell.appendChild(verId);
+
+      const whenCell = document.createElement('span');
+      whenCell.className = 'deployment-when';
+      whenCell.textContent = m.relWhen || '—';
+      if (m.absWhen) whenCell.title = m.absWhen;
+
+      const actionCell = document.createElement('span');
+      actionCell.className = 'deployment-action';
+      if (m.canRollback) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'rollback-btn';
+        btn.dataset.id = m.id;
+        btn.textContent = 'Roll back';
+        actionCell.appendChild(btn);
+      } else if (m.isCurrent) {
+        const span = document.createElement('span');
+        span.className = 'deployment-live-note';
+        span.textContent = 'Live';
+        actionCell.appendChild(span);
+      }
+
+      li.append(verCell, whenCell, actionCell);
       list.appendChild(li);
     }
   }
@@ -320,8 +391,8 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     <section class="overview-card">
       <h3>Current deployment</h3>
       <dl class="overview-dl">
-        <dt>Version</dt><dd>${app.current_version ?? '—'}</dd>
-        <dt>Deployed</dt><dd>${app.last_deployed_at ? new Date(app.last_deployed_at).toLocaleString() : '—'}</dd>
+        <dt>Version</dt><dd class="overview-version">${app.current_version ? 'v' + app.current_version : '—'}</dd>
+        <dt>Deployed</dt><dd${app.last_deployed_at ? ` title="${new Date(app.last_deployed_at).toLocaleString()}"` : ''}>${app.last_deployed_at ? relativeTime(new Date(app.last_deployed_at)) : '—'}</dd>
         <dt>Deploys</dt><dd>${app.deploy_count}</dd>
       </dl>
       <div class="overview-links">
@@ -427,7 +498,10 @@ function renderConfiguration(panel, app, ctx) {
 
 function renderData(panel, app, ctx) {
   ctx.setSettingsSlug(app.slug);
-  ctx.refreshDataTab(app.slug);
+  // Pass the fetched app (which carries can_manage from the GET envelope) so the
+  // upload form's write-permission check works on a direct deep-link, where the
+  // cached apps LIST (state.apps) is not yet populated.
+  ctx.refreshDataTab(app.slug, app);
   ctx.loadSharedData(app.slug);
 }
 
@@ -446,7 +520,7 @@ function renderAccess(panel, app, ctx) {
 function renderTraces(panel, app, ctx) {
   panel.innerHTML = `
     <div class="traces-toolbar">
-      <button id="traces-refresh" type="button">Refresh</button>
+      <button id="traces-refresh" type="button" class="btn-row">Refresh</button>
       <span id="traces-status" class="hibernate-status"></span>
     </div>
     <p id="traces-empty" class="env-empty" hidden></p>

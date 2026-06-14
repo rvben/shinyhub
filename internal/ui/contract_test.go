@@ -139,11 +139,20 @@ func TestDeployHashHandlerWaitsForApps(t *testing.T) {
 // rapid sequence of clicks cannot leave the UI desynced from the server.
 // We assert the two pieces of the fix are present: a generation counter and
 // a disabled-state writer that freezes the radio group during PATCH.
-func TestAccessVisibilityToggleSerialized(t *testing.T) {
-	assertContains(t, "app.js", "accessGen",
-		"the access-visibility handler must use a generation counter to discard stale responses")
-	assertContains(t, "app.js", "setAccessRadiosDisabled(true)",
-		"the access-visibility handler must disable the radio group while a PATCH is in flight")
+// TestAccessVisibilityUsesExplicitSave pins the explicit-save model for the
+// Access visibility control. It was previously an auto-apply-on-change radio
+// (generation-serialized); it is now consistent with every other settings tab:
+// an edit marks the section dirty and a Save button PATCHes /access. The Save
+// button and handler MUST exist and be wired.
+func TestAccessVisibilityUsesExplicitSave(t *testing.T) {
+	assertContains(t, "index.html", `id="visibility-save-btn"`,
+		"the Visibility section must have an explicit Save button")
+	assertContains(t, "app.js", "async function saveVisibility",
+		"visibility must be persisted by an explicit saveVisibility handler")
+	assertContains(t, "app.js", "getElementById('visibility-save-btn').addEventListener('click', saveVisibility)",
+		"the Visibility Save button must be wired to saveVisibility")
+	assertContains(t, "app.js", "registerSettingsSection('visibility'",
+		"the Visibility section must register with the dirty-state tracker")
 }
 
 // TestSPASlugifyTruncatesBeforeTrim guards parity with the CLI's
@@ -398,8 +407,8 @@ func TestDeploymentRowFitsLongVersionIDs(t *testing.T) {
 	if strings.Contains(css, "grid-template-columns: 5rem 1fr auto auto") {
 		t.Fatal("style.css: .deployment-row must not pin the version column to a fixed 5rem; epoch-millis version IDs overflow it and overlap the timestamp, so size the column to its content instead")
 	}
-	assertContains(t, "style.css", "grid-template-columns: minmax(9rem, max-content) 1fr auto auto",
-		"the Deployments-tab version column must grow to fit epoch-millis version IDs without overlapping the timestamp")
+	assertContains(t, "style.css", "grid-template-columns: minmax(11rem, max-content) 1fr auto",
+		"the Deployments-tab version column must grow to fit the deploy number, status badge, and epoch-millis version ID without overlapping the timestamp")
 }
 
 // TestNewUserSnippetIsRunnable guards the new-user handoff. The snippet is
@@ -1298,4 +1307,174 @@ func TestMinWarmReplicasUIContract(t *testing.T) {
 		"populateGeneralTab must read app.min_warm_replicas to seed the keep-warm input from PATCH /api/apps/:slug")
 	assertContains(t, "app.js", "min_warm_replicas",
 		"saveHibernateSettings must include min_warm_replicas in its PATCH body so the keep-warm floor is persisted")
+}
+
+// TestKebabMenusAreWired guards both "⋯" menus. The dashboard CARD kebab and the
+// app-detail HEADER kebab share one wireKebab helper. The detail-header kebab
+// previously had NO handler at all (its menu never opened), so "Restart" was
+// unreachable from the detail page; this pins that it is wired.
+func TestKebabMenusAreWired(t *testing.T) {
+	assertContains(t, "app.js", "function wireKebab",
+		"a shared wireKebab helper must toggle kebab menus (open/close, outside-click, Escape)")
+	assertContains(t, "app.js", "wireKebab(kebabBtn, kebabList, card)",
+		"the dashboard card kebab must be wired via wireKebab")
+	assertContains(t, "app.js", "getElementById('app-detail-kebab')",
+		"the app-detail header kebab must be wired (it previously had no handler)")
+	assertContains(t, "app.js", "getElementById('app-detail-restart')",
+		"the app-detail header Restart item must be wired to restart the current app")
+	// The header kebab's only action (Restart) is manager-only; it must be hidden
+	// for viewers so they can't trigger a forbidden POST (mirrors the card).
+	assertContains(t, "views/app-detail.js", "headerKebab.hidden = !canManage",
+		"the app-detail header kebab must be hidden for non-managers")
+}
+
+// TestCardKebabNotClippedByOverflow guards the card-kebab clip fix: .app-card
+// used overflow:hidden (to contain its glow), which sliced the absolutely-
+// positioned .kebab-list at the card's bottom edge. The card must stay
+// overflow:visible and lift above neighbours while its menu is open.
+func TestCardKebabNotClippedByOverflow(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	cardStart := strings.Index(css, ".app-card {")
+	if cardStart < 0 {
+		t.Fatal("style.css: .app-card rule not found")
+	}
+	cardRule := css[cardStart : cardStart+400]
+	if strings.Contains(cardRule, "overflow: hidden") {
+		t.Fatal("style.css: .app-card must not use overflow:hidden — it clips the kebab dropdown at the card's bottom edge")
+	}
+	assertContains(t, "style.css", ".app-card.kebab-open",
+		"an open card kebab must raise the card above its grid neighbours so the menu isn't painted under the next card")
+}
+
+// TestDataUploadWorksOnDeepLink guards the deep-link fix for the Data tab. The
+// upload form's write-permission check must use the fetched single-app object
+// (which carries can_manage), not the cached apps LIST (state.apps), which is
+// empty on a fresh deep-link — leaving the whole upload form hidden for admins.
+func TestDataUploadWorksOnDeepLink(t *testing.T) {
+	assertContains(t, "app.js", "async function refreshDataTab(slug, app)",
+		"refreshDataTab must accept the app object so canManageApp works on a deep-link")
+	assertContains(t, "views/app-detail.js", "ctx.refreshDataTab(app.slug, app)",
+		"renderData must pass the fetched app (with can_manage) to refreshDataTab")
+}
+
+// TestDeploymentsMarkCurrent guards that the Deployments tab marks the LIVE
+// deployment — the newest *succeeded* one, not the newest row (a failed/pending
+// latest attempt does not change the running bundle) — and suppresses its Roll
+// back button. deploymentListModels is unit-tested separately; this pins wiring.
+func TestDeploymentsMarkCurrent(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "deploymentListModels(rows)",
+		"the Deployments tab must derive the live deployment from status, not current_version")
+	assertContains(t, "views/deployment-row.js", "rows.findIndex(d => (d.status || 'succeeded') === 'succeeded')",
+		"the live deployment must be the newest succeeded one, so a failed latest attempt isn't mislabelled Current")
+	assertContains(t, "views/app-detail.js", "deployment-row-current",
+		"the current deployment row must be visually distinguished")
+	assertContains(t, "views/app-detail.js", "m.canRollback",
+		"Roll back must be suppressed on the current (live) and on failed/pending deployments")
+}
+
+// TestConfigurationSurfacesGeneralAndResources guards the IA reorg: display-name
+// rename + project (General) and memory/CPU limits (Resources) are surfaced in
+// the Configuration tab (all PATCH-backed but previously CLI-only), and the
+// Danger Zone (Delete) was moved from Access into Configuration.
+func TestConfigurationSurfacesGeneralAndResources(t *testing.T) {
+	assertContains(t, "index.html", `id="general-name"`,
+		"Configuration must expose a display-name (rename) input")
+	assertContains(t, "index.html", `id="resources-memory"`,
+		"Configuration must expose a memory-limit input")
+	assertContains(t, "index.html", `id="resources-cpu"`,
+		"Configuration must expose a CPU-quota input")
+	assertContains(t, "app.js", "async function saveGeneralInfo",
+		"a saveGeneralInfo handler must PATCH name/project_slug")
+	assertContains(t, "app.js", "async function saveResources",
+		"a saveResources handler must PATCH memory_limit_mb/cpu_quota_percent")
+	// Danger Zone now lives in the Configuration panel, not Access.
+	b, err := fs.ReadFile(ui.Static(), "index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	html := string(b)
+	cfgStart := strings.Index(html, `id="detail-configuration-panel"`)
+	accStart := strings.Index(html, `id="detail-access-panel"`)
+	dzStart := strings.Index(html, `id="danger-zone"`)
+	if cfgStart < 0 || accStart < 0 || dzStart < 0 {
+		t.Fatal("index.html: expected configuration panel, access panel, and danger zone")
+	}
+	if !(dzStart > cfgStart && dzStart < accStart) {
+		t.Fatal("index.html: #danger-zone (Delete app) must live inside the Configuration panel, not Access")
+	}
+}
+
+// TestResourcesGatedByRuntimeMode guards that per-app resource limits adapt to
+// the runtime: they are only enforceable under docker, so the server exposes
+// runtime_mode and the client renders Resources read-only (with a note) under
+// native instead of letting a Save 400.
+func TestResourcesGatedByRuntimeMode(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "body.runtime_mode",
+		"the detail view must read runtime_mode from the GET envelope")
+	assertContains(t, "app.js", "app.runtime_mode === 'docker'",
+		"the Resources section must gate editing on the docker runtime")
+	assertContains(t, "index.html", `id="resources-runtime-note"`,
+		"a note must explain that limits need the docker runtime")
+}
+
+// TestSettingsExplicitSaveDirtyTracking guards the explicit-save model: every
+// settings section registers with the dirty tracker (Save disabled until dirty,
+// "Unsaved changes" hint) and a nav/unload guard warns before losing edits.
+func TestSettingsExplicitSaveDirtyTracking(t *testing.T) {
+	assertContains(t, "app.js", "function registerSettingsSection",
+		"settings sections must register with a dirty-state tracker")
+	assertContains(t, "app.js", "function confirmDiscardIfDirty",
+		"a guard must confirm before discarding unsaved settings edits")
+	assertContains(t, "app.js", "router.setNavGuard(confirmDiscardIfDirty)",
+		"the router must consult the unsaved-changes guard before navigating")
+	assertContains(t, "app.js", "addEventListener('beforeunload'",
+		"a beforeunload guard must warn on full-page unload with unsaved edits")
+	assertContains(t, "router.js", "function setNavGuard",
+		"the router must expose setNavGuard for the unsaved-changes guard")
+	assertContains(t, "app.js", "if (el.disabled) return null",
+		"the dirty snapshot must skip disabled mode-specific fields so toggling custom-mode and back isn't spuriously dirty")
+	assertContains(t, "app.js", "clearSettingsDirty();",
+		"delete must clear the dirty state so the unsaved-changes guard doesn't strand the user on a deleted app")
+}
+
+// TestPrimaryButtonsStyledGlobally guards that the button design classes have
+// GLOBAL base rules, not only the context-scoped .app-actions / .modal-actions
+// ones. Without a global rule, a .btn-primary used elsewhere (the app-detail
+// header "Deploy", "+ Add schedule", "+ Mount data from another app") rendered
+// as an unstyled user-agent button; .rollback-btn and the logs/traces toolbar
+// buttons had the same gap.
+func TestPrimaryButtonsStyledGlobally(t *testing.T) {
+	assertContains(t, "style.css", "\n.btn-primary {",
+		"style.css must define a global .btn-primary base so primary buttons are styled outside .app-actions/.modal-actions")
+	assertContains(t, "style.css", "\n.btn-row {",
+		"style.css must define a global .btn-row base for secondary row buttons (logs/traces toolbars, deployments retry)")
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	i := strings.Index(css, ".rollback-btn {")
+	if i < 0 || i+220 > len(css) || !strings.Contains(css[i:i+220], "border:") {
+		t.Fatal("style.css: .rollback-btn must carry real chrome (border/background), not just padding/font — it was rendering unstyled")
+	}
+	// The logs/traces toolbar buttons must carry a style class so they aren't
+	// unstyled user-agent buttons.
+	assertContains(t, "views/app-detail.js", `id="logs-copy" type="button" class="btn-row"`,
+		"the Logs 'Copy all' button must be a styled .btn-row")
+	assertContains(t, "views/app-detail.js", `id="traces-refresh" type="button" class="btn-row"`,
+		"the Traces 'Refresh' button must be a styled .btn-row")
+}
+
+// TestReservedUserRowIsReadOnly guards that the synthetic deploy-token identity
+// (__deploy__) is rendered read-only in the Users table (no role change, reset,
+// or delete) — those actions are meaningless for a tokenless env-managed account.
+func TestReservedUserRowIsReadOnly(t *testing.T) {
+	assertContains(t, "app.js", "userRowCaps(u, selfId)",
+		"renderUsers must derive per-row capabilities via userRowCaps")
+	assertContains(t, "views/user-row.js", "__deploy__",
+		"user-row.js must treat __deploy__ as a reserved (read-only) account")
 }

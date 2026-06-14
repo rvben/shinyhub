@@ -16,6 +16,12 @@ export function createRouter() {
   const routes = [];
   let current = null;
   let generation = 0;
+  // navGuard, when set, is consulted before any navigation (link click, back/
+  // forward, or programmatic navigate). It returns true to allow the navigation
+  // and false to cancel it (e.g. unsaved edits the user chose to keep). currentPath
+  // tracks where we are so a cancelled back/forward can be restored.
+  let navGuard = null;
+  let currentPath = null;
   // start() is invoked from two places: the bootstrap path in initialize()
   // and the interactive login submit handler (see app.js). Without this
   // guard, a logout → login cycle would attach a second pair of click /
@@ -48,6 +54,7 @@ export function createRouter() {
   }
 
   async function mount(path, search) {
+    currentPath = path + (search || '');
     const gen = ++generation;
     if (current && typeof current.unmount === 'function') {
       try { current.unmount(); } catch (e) { console.error('unmount', e); }
@@ -80,6 +87,10 @@ export function createRouter() {
   }
 
   function navigate(path, opts = {}) {
+    // A guard may veto navigation (unsaved edits). replace:true navigations are
+    // internal redirects (e.g. viewer bounced off a manager-only tab) and skip
+    // the guard so they always complete.
+    if (!opts.replace && navGuard && !navGuard()) return Promise.resolve();
     const full = path + (opts.search || '');
     if (opts.replace) {
       history.replaceState({}, '', full);
@@ -90,8 +101,16 @@ export function createRouter() {
   }
 
   function onPopState() {
+    // The history entry already changed by the time popstate fires. If the guard
+    // vetoes, push the previous path back so the URL and view stay put.
+    if (navGuard && !navGuard()) {
+      if (currentPath != null) history.pushState({}, '', currentPath);
+      return;
+    }
     mount(location.pathname, location.search);
   }
+
+  function setNavGuard(fn) { navGuard = fn; }
 
   function onClick(e) {
     if (e.defaultPrevented) return;
@@ -116,5 +135,5 @@ export function createRouter() {
     return mount(location.pathname, location.search);
   }
 
-  return { register, navigate, start };
+  return { register, navigate, start, setNavGuard };
 }

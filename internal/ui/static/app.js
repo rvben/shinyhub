@@ -14,6 +14,7 @@ import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
+import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -56,6 +57,42 @@ function relativeTime(date) {
   if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
+}
+
+// wireKebab wires a kebab "⋯" toggle to its dropdown list: click toggles
+// open/closed, Escape and outside-click close it, clicking any menu item closes
+// it, and aria-expanded stays in sync. The optional container gets the
+// `kebab-open` class while open so CSS can lift it above its neighbours (the
+// dropdown is intentionally allowed to overflow its card). This is the single
+// wiring path for BOTH the dashboard card kebab and the app-detail header kebab
+// (the latter previously had no handler at all, so its menu never opened).
+function wireKebab(button, list, container) {
+  if (!button || !list) return;
+  function onDocClick(e) {
+    if (!list.contains(e.target) && !button.contains(e.target)) setOpen(false);
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') { setOpen(false); button.focus(); }
+  }
+  function setOpen(open) {
+    list.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+    if (container) container.classList.toggle('kebab-open', open);
+    if (open) {
+      document.addEventListener('click', onDocClick, true);
+      document.addEventListener('keydown', onKey, true);
+    } else {
+      document.removeEventListener('click', onDocClick, true);
+      document.removeEventListener('keydown', onKey, true);
+    }
+  }
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(list.hidden);
+  });
+  list.addEventListener('click', (e) => {
+    if (e.target.closest('button')) setOpen(false);
+  });
 }
 
 // formatStatus turns the lowercase wire-status (`running`, `stopped`,
@@ -404,12 +441,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const kebabBtn = kebab.querySelector('button');
           kebabBtn.setAttribute('aria-label', `More actions for ${app.name}`);
           const kebabList = kebab.querySelector('.kebab-list');
-          kebabBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const open = !kebabList.hidden;
-            kebabList.hidden = open;
-            kebabBtn.setAttribute('aria-expanded', String(!open));
-          });
+          wireKebab(kebabBtn, kebabList, card);
           kebabList.querySelector('[data-kebab="restart"]').addEventListener('click', () => restart(app.slug));
           actions.appendChild(kebab);
         }
@@ -866,6 +898,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     for (const u of users) {
       const tr = document.createElement('tr');
+      const caps = userRowCaps(u, selfId);
 
       // Username
       const nameCell = document.createElement('td');
@@ -873,10 +906,17 @@ document.addEventListener('DOMContentLoaded', () => {
       const usernameText = document.createElement('span');
       usernameText.textContent = u.username;
       nameCell.appendChild(usernameText);
-      if (u.id === selfId) {
+      if (caps.isSelf) {
         const tag = document.createElement('span');
         tag.className = 'users-self-tag';
         tag.textContent = 'you';
+        nameCell.appendChild(tag);
+      }
+      if (caps.reserved) {
+        const tag = document.createElement('span');
+        tag.className = 'users-reserved-tag';
+        tag.textContent = 'token';
+        tag.title = RESERVED_USER_HINT;
         nameCell.appendChild(tag);
       }
       nameCell.appendChild(makeCopyButton(u.username, `Copy username ${u.username}`));
@@ -902,9 +942,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (u.role === r) opt.selected = true;
         select.appendChild(opt);
       }
-      if (u.id === selfId) {
+      if (!caps.canChangeRole) {
         select.disabled = true;
-        select.title = 'You cannot change your own role';
+        if (caps.roleHint) select.title = caps.roleHint;
       } else {
         select.addEventListener('change', () => updateUserRole(u.id, u.username, select));
       }
@@ -929,7 +969,12 @@ document.addEventListener('DOMContentLoaded', () => {
       resetBtn.className = 'btn-row';
       resetBtn.textContent = 'Reset password';
       resetBtn.setAttribute('aria-label', `Reset password for ${u.username}`);
-      resetBtn.addEventListener('click', () => openResetPasswordModal(u));
+      if (!caps.canResetPassword) {
+        resetBtn.disabled = true;
+        resetBtn.title = RESERVED_USER_HINT;
+      } else {
+        resetBtn.addEventListener('click', () => openResetPasswordModal(u));
+      }
       actions.appendChild(resetBtn);
 
       const delBtn = document.createElement('button');
@@ -937,9 +982,9 @@ document.addEventListener('DOMContentLoaded', () => {
       delBtn.className = 'btn-row btn-row-danger';
       delBtn.textContent = 'Delete';
       delBtn.setAttribute('aria-label', `Delete user ${u.username}`);
-      if (u.id === selfId) {
+      if (!caps.canDelete) {
         delBtn.disabled = true;
-        delBtn.title = 'You cannot delete yourself';
+        if (caps.deleteHint) delBtn.title = caps.deleteHint;
       } else {
         delBtn.addEventListener('click', () => deleteUser(u.id, u.username));
       }
@@ -1154,34 +1199,149 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   let settingsSlug = null;
-  // accessGen increments on every visibility-radio toggle (and on every panel
-  // re-population) so an in-flight PATCH whose response is no longer relevant
-  // can be ignored. See the change handler below for usage.
-  let accessGen = 0;
+
+  // --- Settings dirty-state tracking (explicit-save model) ---
+  // Every settings section registers the inputs it owns. populate*() snapshots a
+  // baseline; when live values diverge the section is "dirty": its Save button
+  // enables and an "Unsaved changes" hint shows. Saving (or a confirmed discard)
+  // re-snapshots to clean. A nav/unload guard warns before losing unsaved edits,
+  // so all settings tabs behave identically.
+  const settingsSections = {};
+  function registerSettingsSection(name, getEls, saveBtnId, dirtyId) {
+    const els = getEls();
+    const rec = {
+      els,
+      btn: document.getElementById(saveBtnId),
+      dirtyEl: dirtyId ? document.getElementById(dirtyId) : null,
+      baseline: null,
+    };
+    settingsSections[name] = rec;
+    const onChange = () => recomputeDirty(name);
+    els.forEach(el => {
+      el.addEventListener('input', onChange);
+      el.addEventListener('change', onChange);
+    });
+  }
+  function sectionSnapshot(rec) {
+    // Disabled inputs don't contribute to the saved payload (e.g. the custom
+    // hibernate-minutes / autoscale-target fields are disabled unless their mode
+    // is selected). Excluding them keeps a section from reading "dirty" after a
+    // toggle to a mode-specific field and back.
+    return JSON.stringify(rec.els.map(el => {
+      if (el.disabled) return null;
+      return (el.type === 'checkbox' || el.type === 'radio') ? el.checked : el.value;
+    }));
+  }
+  function snapshotSettingsSection(name) {
+    const rec = settingsSections[name];
+    if (!rec) return;
+    rec.baseline = sectionSnapshot(rec);
+    recomputeDirty(name);
+  }
+  function isSectionDirty(name) {
+    const rec = settingsSections[name];
+    if (!rec || rec.baseline === null) return false;
+    return rec.baseline !== sectionSnapshot(rec);
+  }
+  function recomputeDirty(name) {
+    const rec = settingsSections[name];
+    if (!rec) return;
+    const dirty = isSectionDirty(name);
+    if (rec.btn && !rec.btn.hidden) rec.btn.disabled = !dirty;
+    if (rec.dirtyEl) setHidden(rec.dirtyEl, !dirty);
+  }
+  function anySettingsDirty() {
+    return Object.keys(settingsSections).some(isSectionDirty);
+  }
+  // clearSettingsDirty re-snapshots every section to its current values, so the
+  // unsaved-changes guard treats them as clean. Used on a confirmed discard and
+  // after a destructive action (delete) where the edits are moot.
+  function clearSettingsDirty() {
+    Object.keys(settingsSections).forEach(snapshotSettingsSection);
+  }
+  // confirmDiscardIfDirty gates navigation: returns true when it is safe to
+  // leave (nothing unsaved, or the user confirmed). On confirm it re-snapshots
+  // so the guard doesn't fire again during teardown.
+  function confirmDiscardIfDirty() {
+    if (!anySettingsDirty()) return true;
+    const ok = window.confirm('You have unsaved changes in this app’s settings. Leave without saving?');
+    if (ok) clearSettingsDirty();
+    return ok;
+  }
 
   function populateAccessPanel(app) {
-    // Set visibility radio to current access level; mark confirmed so change
-    // listeners know the baseline to revert to on failure. Bumping the
-    // generation invalidates any in-flight PATCH from a previously-viewed
-    // app whose response would otherwise still try to mutate this panel.
-    accessGen++;
+    const canManage = canManageApp(state.user, app);
     const radios = document.querySelectorAll('input[name="access-level"]');
     radios.forEach(r => {
       r.checked = r.value === app.access;
-      r.disabled = false;
-      r.dataset.confirmed = String(r.value === app.access);
+      r.disabled = !canManage;
     });
+    document.getElementById('visibility-save-btn').hidden = !canManage;
+    setError(document.getElementById('visibility-error'), '');
+    setHidden(document.getElementById('visibility-status'), true);
+    snapshotSettingsSection('visibility');
 
     // Clear previous state.
     document.getElementById('members-list').innerHTML = '';
     document.getElementById('grant-username').value = '';
     document.getElementById('grant-error').hidden = true;
+  }
 
-    // Danger zone: visible only to managers (owner/admin/operator), wired per-app.
-    resetDangerZone();
-    const dangerZone = document.getElementById('danger-zone');
-    dangerZone.hidden = !canManageApp(state.user, app);
-    document.getElementById('delete-confirm-slug').textContent = app.slug;
+  async function saveVisibility() {
+    if (!settingsSlug) return;
+    const errEl = document.getElementById('visibility-error');
+    const statusEl = document.getElementById('visibility-status');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+    const selected = document.querySelector('input[name="access-level"]:checked');
+    if (!selected) { setError(errEl, 'Pick a visibility.'); return; }
+    // Capture the submitted slug + value BEFORE the await: the user might switch
+    // apps or radios while the PATCH is in flight. Freeze the radio group so the
+    // selection can't drift mid-save.
+    const slug = settingsSlug;
+    const value = selected.value;
+    const btn = document.getElementById('visibility-save-btn');
+    const radios = [...document.querySelectorAll('input[name="access-level"]')];
+    btn.disabled = true;
+    radios.forEach(r => { r.disabled = true; });
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/access`, {
+        method: 'PATCH',
+        body: JSON.stringify({ access: value }),
+      });
+    } catch {
+      if (settingsSlug === slug) {
+        radios.forEach(r => { r.disabled = false; });
+        setError(errEl, 'Failed to save. Check your connection.');
+        recomputeDirty('visibility');
+      }
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    // The save applied to `slug`; reflect it in the cached list regardless of
+    // where the user navigated.
+    const ok = resp.ok;
+    if (ok) {
+      const app = state.apps.find(a => a.slug === slug);
+      if (app) app.access = value;
+    }
+    // Only touch the visibility panel if it still shows the same app (the user
+    // may have navigated to another app's Access tab during the PATCH, which
+    // re-populated and re-set the radios for that app).
+    if (settingsSlug !== slug) return;
+    radios.forEach(r => { r.disabled = false; });
+    if (!ok) {
+      let message = 'Failed to save.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      recomputeDirty('visibility');
+      return;
+    }
+    statusEl.textContent = 'Saved.';
+    setHidden(statusEl, false);
+    snapshotSettingsSection('visibility');
+    flashToast('Access updated', 'success');
   }
 
   // --- General tab ---
@@ -1232,6 +1392,143 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(document.getElementById('scaling-error'), '');
     setHidden(document.getElementById('scaling-status'), true);
     updateScalingCeiling();
+
+    // General info: display name + project slug (rename / regroup).
+    document.getElementById('general-name').value = app.name ?? '';
+    document.getElementById('general-project').value = app.project_slug ?? '';
+    document.getElementById('general-name').disabled = !canEdit;
+    document.getElementById('general-project').disabled = !canEdit;
+    document.getElementById('general-save-btn').hidden = !canEdit;
+    setError(document.getElementById('general-error'), '');
+    setHidden(document.getElementById('general-status'), true);
+
+    // Resources: per-replica memory/CPU caps. null (no limit) renders as empty.
+    // Limits are only enforceable under the docker runtime, so under native we
+    // show them read-only with a note rather than letting a Save 400.
+    const dockerRuntime = app.runtime_mode === 'docker';
+    document.getElementById('resources-memory').value =
+      app.memory_limit_mb != null ? String(app.memory_limit_mb) : '';
+    document.getElementById('resources-cpu').value =
+      app.cpu_quota_percent != null ? String(app.cpu_quota_percent) : '';
+    document.getElementById('resources-memory').disabled = !canEdit || !dockerRuntime;
+    document.getElementById('resources-cpu').disabled = !canEdit || !dockerRuntime;
+    document.getElementById('resources-save-btn').hidden = !canEdit || !dockerRuntime;
+    setHidden(document.getElementById('resources-runtime-note'), dockerRuntime);
+    setError(document.getElementById('resources-error'), '');
+    setHidden(document.getElementById('resources-status'), true);
+
+    // Danger zone (lifecycle) now lives at the bottom of Configuration, not
+    // Access. Visible to managers; the typed-confirm gate stays the same.
+    resetDangerZone();
+    const dangerZone = document.getElementById('danger-zone');
+    dangerZone.hidden = !canEdit;
+    document.getElementById('delete-confirm-slug').textContent = app.slug;
+
+    // Snapshot baselines so the explicit-save dirty tracker starts clean.
+    snapshotSettingsSection('general');
+    snapshotSettingsSection('resources');
+    snapshotSettingsSection('hibernate');
+    snapshotSettingsSection('scaling');
+  }
+
+  async function saveGeneralInfo() {
+    if (!settingsSlug) return;
+    const errEl = document.getElementById('general-error');
+    const statusEl = document.getElementById('general-status');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+    const name = document.getElementById('general-name').value.trim();
+    const project = document.getElementById('general-project').value.trim();
+    if (name.length < 1 || name.length > 128) {
+      setError(errEl, 'Display name must be 1 to 128 characters.');
+      return;
+    }
+    const btn = document.getElementById('general-save-btn');
+    btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name, project_slug: project }),
+      });
+    } catch {
+      setError(errEl, 'Failed to save. Check your connection.');
+      recomputeDirty('general');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to save.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      recomputeDirty('general');
+      return;
+    }
+    statusEl.textContent = 'Saved.';
+    setHidden(statusEl, false);
+    snapshotSettingsSection('general');
+    const heading = document.getElementById('app-detail-heading');
+    if (heading) heading.textContent = name;
+    if (detailApp) detailApp.name = name;
+    await loadApps();
+  }
+
+  async function saveResources() {
+    if (!settingsSlug) return;
+    const errEl = document.getElementById('resources-error');
+    const statusEl = document.getElementById('resources-status');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+    const parseLimit = (raw, label, max) => {
+      const t = raw.trim();
+      if (t === '') return null; // empty == no limit
+      // The API contract is a non-negative integer; reject fractional/exponent
+      // input (e.g. "1.5", "1e2") instead of letting parseInt silently truncate.
+      if (!/^\d+$/.test(t)) {
+        throw new Error(`${label} must be a whole number (leave empty for no limit).`);
+      }
+      const n = Number(t);
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error(`${label} must be 0 or a positive whole number (leave empty for no limit).`);
+      }
+      if (max != null && n > max) {
+        throw new Error(`${label} must be between 0 and ${max} (leave empty for no limit).`);
+      }
+      return n;
+    };
+    let memory, cpu;
+    try {
+      memory = parseLimit(document.getElementById('resources-memory').value, 'Memory limit', null);
+      cpu = parseLimit(document.getElementById('resources-cpu').value, 'CPU quota', 100);
+    } catch (e) {
+      setError(errEl, e.message);
+      return;
+    }
+    const btn = document.getElementById('resources-save-btn');
+    btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ memory_limit_mb: memory, cpu_quota_percent: cpu }),
+      });
+    } catch {
+      setError(errEl, 'Failed to save. Check your connection.');
+      recomputeDirty('resources');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Failed to save.';
+      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      recomputeDirty('resources');
+      return;
+    }
+    statusEl.textContent = 'Saved.';
+    setHidden(statusEl, false);
+    snapshotSettingsSection('resources');
+    await loadApps();
   }
 
   function updateMinWarmWarning(replicas, minWarm) {
@@ -1328,6 +1625,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
+    snapshotSettingsSection('hibernate');
     // Re-evaluate the keep-warm warning using the values just saved.
     const savedReplicas = parseInt(document.getElementById('scaling-replicas').value, 10);
     const savedMinWarm = minWarm;
@@ -1394,6 +1692,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
+    snapshotSettingsSection('scaling');
     await loadApps();
   }
 
@@ -1436,6 +1735,24 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(document.getElementById('autoscale-error'), '');
     setHidden(document.getElementById('autoscale-status'), true);
     updateAutoscaleCeiling();
+    snapshotSettingsSection('autoscale');
+  }
+
+  // onAutoscaleEnabledChange seeds sane bounds the moment autoscale is turned on,
+  // so the operator never lands on the invalid 0/0 defaults. Min becomes the
+  // current replica count (>=1); max becomes at least min.
+  function onAutoscaleEnabledChange() {
+    const enabled = document.getElementById('autoscale-enabled').checked;
+    if (enabled) {
+      const minEl = document.getElementById('autoscale-min');
+      const maxEl = document.getElementById('autoscale-max');
+      const current = Math.max(1, parseInt(document.getElementById('scaling-replicas').value, 10) || 1);
+      if ((parseInt(minEl.value, 10) || 0) < 1) minEl.value = String(current);
+      const minNow = parseInt(minEl.value, 10) || 1;
+      if ((parseInt(maxEl.value, 10) || 0) < minNow) maxEl.value = String(Math.max(minNow, current));
+    }
+    updateAutoscaleCeiling();
+    recomputeDirty('autoscale');
   }
 
   function onAutoscaleTargetModeChange() {
@@ -1508,6 +1825,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
+    snapshotSettingsSection('autoscale');
     await loadApps();
   }
 
@@ -1553,7 +1871,11 @@ document.addEventListener('DOMContentLoaded', () => {
     empty.hidden = vars.length > 0;
     table.hidden = vars.length === 0;
 
-    const app = state.apps.find(a => a.slug === slug);
+    // Resolve via the current detail app (carries can_manage, present on a
+    // deep-link) before the cached list, so "+ Add variable" isn't wrongly
+    // hidden for a manager who landed directly on /apps/:slug/configuration.
+    const app = (detailApp && detailApp.slug === slug ? detailApp : null)
+      || state.apps.find(a => a.slug === slug);
     const canWrite = canManageApp(state.user, app);
     document.getElementById('env-add-btn').hidden = !canWrite;
 
@@ -1666,7 +1988,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return p.split('/').map(encodeURIComponent).join('/');
   }
 
-  async function refreshDataTab(slug) {
+  async function refreshDataTab(slug, app) {
     const tbody = document.getElementById('data-list');
     tbody.innerHTML = '';
     const errEl = document.getElementById('data-error');
@@ -1696,8 +2018,15 @@ document.addEventListener('DOMContentLoaded', () => {
     empty.hidden = files.length > 0;
     table.hidden = files.length === 0;
 
-    const app = state.apps.find(a => a.slug === slug);
-    const canWrite = canManageApp(state.user, app);
+    // Resolve the app for the write-permission check. Prefer an explicitly
+    // passed app, then the current detail app (set on every detail mount and
+    // carrying can_manage — this is what keeps a direct deep-link working after
+    // an upload/delete re-renders via refreshDataTab(slug) with no app arg),
+    // then the cached list as a last resort.
+    const resolvedApp = app
+      || (detailApp && detailApp.slug === slug ? detailApp : null)
+      || state.apps.find(a => a.slug === slug);
+    const canWrite = canManageApp(state.user, resolvedApp);
     document.getElementById('data-upload-form').hidden = !canWrite;
 
     const quotaEl = document.getElementById('data-quota');
@@ -2045,21 +2374,28 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === e.currentTarget) closeResetPasswordModal();
   });
 
-  // General tab: hibernate radio + save button.
+  // --- Settings tabs: explicit-save wiring + dirty tracking ---
+  // General + Resources (display name/project, memory/CPU limits).
+  document.getElementById('general-save-btn').addEventListener('click', saveGeneralInfo);
+  document.getElementById('resources-save-btn').addEventListener('click', saveResources);
+
+  // Hibernation: mode radios + save button.
   document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
     r.addEventListener('change', onHibernateModeChange);
   });
   document.getElementById('hibernate-save-btn').addEventListener('click', saveHibernateSettings);
+
+  // Scaling: save + live admission-ceiling helper.
   document.getElementById('scaling-save-btn').addEventListener('click', saveScalingSettings);
   document.getElementById('scaling-replicas').addEventListener('input', updateScalingCeiling);
   document.getElementById('scaling-cap').addEventListener('input', updateScalingCeiling);
 
-  // Autoscale fieldset: enable toggle, bounds inputs, target-mode radios.
+  // Autoscale: enabling seeds sane bounds; bounds inputs + target-mode radios.
   document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
     r.addEventListener('change', onAutoscaleTargetModeChange);
   });
   document.getElementById('autoscale-save-btn').addEventListener('click', saveAutoscaleSettings);
-  document.getElementById('autoscale-enabled').addEventListener('change', updateAutoscaleCeiling);
+  document.getElementById('autoscale-enabled').addEventListener('change', onAutoscaleEnabledChange);
   document.getElementById('autoscale-min').addEventListener('input', updateAutoscaleCeiling);
   document.getElementById('autoscale-max').addEventListener('input', updateAutoscaleCeiling);
 
@@ -2071,72 +2407,36 @@ document.addEventListener('DOMContentLoaded', () => {
   // Data tab: upload form submit.
   document.getElementById('data-upload-form').addEventListener('submit', uploadDataFile);
 
-  // Visibility radio change → PATCH access level. The handler serializes
-  // overlapping toggles so rapid clicks can't desync the UI from the server:
-  //  - the whole radio group is disabled while a PATCH is in flight, giving
-  //    the user clear feedback that the change is pending;
-  //  - each PATCH is tagged with a generation; if a newer toggle fires
-  //    before the previous response lands the older response is ignored;
-  //  - the "confirmed" baseline is only advanced once the server acks.
-  function accessRadios() {
-    return document.querySelectorAll('input[name="access-level"]');
-  }
-  function setAccessRadiosDisabled(disabled) {
-    accessRadios().forEach(r => { r.disabled = disabled; });
-  }
-  function applyConfirmed(value) {
-    accessRadios().forEach(r => {
-      r.checked = r.value === value;
-      r.dataset.confirmed = String(r.value === value);
-    });
-  }
-  accessRadios().forEach(radio => {
-    radio.addEventListener('change', async () => {
-      if (!settingsSlug) return;
-      const slug = settingsSlug;
-      const newValue = radio.value;
-      // Snapshot the last confirmed value so we can revert on failure
-      // without clobbering a still-in-flight earlier toggle.
-      const previous = [...accessRadios()]
-        .find(r => r.dataset.confirmed === 'true')
-        ?.value ?? newValue;
-      const myGen = ++accessGen;
-      setAccessRadiosDisabled(true);
+  // Visibility: explicit Save. (Previously auto-applied on radio change; now
+  // consistent with every other settings tab.)
+  document.getElementById('visibility-save-btn').addEventListener('click', saveVisibility);
 
-      let resp;
-      try {
-        resp = await api(`/api/apps/${slug}/access`, {
-          method: 'PATCH',
-          body: JSON.stringify({ access: newValue }),
-        });
-      } catch {
-        if (myGen !== accessGen) return; // newer toggle already in flight
-        applyConfirmed(previous);
-        setAccessRadiosDisabled(false);
-        flashToast('Failed to update access', 'error');
-        return;
-      }
-      // Session expired: short-circuit to the login flow rather than
-      // showing a generic "Failed to update access" toast while the rest
-      // of the page still looks signed in. Run this BEFORE the gen check
-      // — a stale 401 still means the session is dead, and a newer
-      // attempt would only get the same 401.
-      if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (myGen !== accessGen) return;   // newer toggle already in flight
-      if (!resp.ok) {
-        applyConfirmed(previous);
-        setAccessRadiosDisabled(false);
-        flashToast('Failed to update access', 'error');
-        return;
-      }
-      // Server accepted our value; advance baseline and unfreeze.
-      applyConfirmed(newValue);
-      const app = state.apps.find(a => a.slug === slug);
-      if (app) app.access = newValue;
-      setAccessRadiosDisabled(false);
-      flashToast('Access updated', 'success');
-    });
-  });
+  // Register every settings section with the dirty tracker so Save stays
+  // disabled until something changes and an "Unsaved changes" hint appears.
+  registerSettingsSection('general',
+    () => [document.getElementById('general-name'), document.getElementById('general-project')],
+    'general-save-btn', 'general-dirty');
+  registerSettingsSection('resources',
+    () => [document.getElementById('resources-memory'), document.getElementById('resources-cpu')],
+    'resources-save-btn', 'resources-dirty');
+  registerSettingsSection('hibernate',
+    () => [...document.querySelectorAll('input[name="hibernate-mode"]'),
+           document.getElementById('hibernate-custom-minutes'),
+           document.getElementById('min-warm-replicas')],
+    'hibernate-save-btn', 'hibernate-dirty');
+  registerSettingsSection('scaling',
+    () => [document.getElementById('scaling-replicas'), document.getElementById('scaling-cap')],
+    'scaling-save-btn', 'scaling-dirty');
+  registerSettingsSection('autoscale',
+    () => [document.getElementById('autoscale-enabled'),
+           document.getElementById('autoscale-min'),
+           document.getElementById('autoscale-max'),
+           ...document.querySelectorAll('input[name="autoscale-target-mode"]'),
+           document.getElementById('autoscale-target')],
+    'autoscale-save-btn', 'autoscale-dirty');
+  registerSettingsSection('visibility',
+    () => [...document.querySelectorAll('input[name="access-level"]')],
+    'visibility-save-btn', 'visibility-dirty');
 
   // Grant button.
   document.getElementById('grant-btn').addEventListener('click', async () => {
@@ -2235,6 +2535,10 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    // The app (and its settings) are gone; any unsaved edits are moot. Clear the
+    // dirty state so the unsaved-changes guard doesn't veto this navigation and
+    // strand the user on a now-deleted app's page.
+    clearSettingsDirty();
     router.navigate('/');
   });
 
@@ -2963,6 +3267,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // and read by onMetrics to refresh the autoscale summary on each 10s poll
   // without requiring a full GET /api/apps/:slug refetch.
   let detailLastEnvelope = {};
+  // detailApp holds the app object for the detail page currently shown, so the
+  // static header kebab can restart the right app.
+  let detailApp = null;
 
   const metrics = createMetricsController({
     intervalMs: 10000,
@@ -3070,6 +3377,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const router = createRouter();
 
+  // Warn before navigating away (SPA route change or full unload) with unsaved
+  // settings edits, so the explicit-save model never silently loses work.
+  router.setNavGuard(confirmDiscardIfDirty);
+  window.addEventListener('beforeunload', (e) => {
+    if (anySettingsDirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
+
   function updateActiveNav(pathname) {
     for (const el of document.querySelectorAll('[data-nav]')) {
       const url = new URL(el.href);
@@ -3105,12 +3419,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // the stored envelope current so onMetrics can refresh the autoscale
     // summary on each 10s poll without a full GET /api/apps/:slug refetch.
     setDetailEnvelope: (env) => { detailLastEnvelope = env; },
+    // setDetailApp records the app currently shown on the detail page so the
+    // static header kebab (wired once below) knows which app to act on.
+    setDetailApp: (app) => { detailApp = app; },
   };
 
   const appDetailMount = mountAppDetail({
     ...ctx,
     openDeployModal,
   });
+
+  // Wire the app-detail header kebab once. The button + menu are static markup
+  // in index.html; before this they had no handler, so the menu never opened
+  // and "Restart" was unreachable from the detail page.
+  {
+    const dBtn = document.getElementById('app-detail-kebab');
+    const dList = document.getElementById('app-detail-kebab-menu');
+    wireKebab(dBtn, dList, dBtn && dBtn.closest('.kebab-menu'));
+    const dRestart = document.getElementById('app-detail-restart');
+    if (dRestart) {
+      dRestart.addEventListener('click', () => { if (detailApp) restart(detailApp.slug); });
+    }
+  }
 
   // Hide every top-level page section before mounting a new view so a
   // sibling view never bleeds through. The previous-view unmount() handles
