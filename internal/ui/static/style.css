@@ -1093,14 +1093,48 @@ main {
 /* Visibility radios */
 .access-level { border: none; padding: 0; margin: 0; }
 
-.access-level legend {
-  font-weight: 700;
-  font-size: 0.66rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  margin-bottom: 0.55rem;
+/* ── Section headers (settings / access panels) ──────────────────────────────
+   The config page stacks many sections; a tiny muted eyebrow read as an
+   afterthought. These give each section a substantial, on-brand label with a
+   glowing accent bar so the page has a clear visual rhythm. See the shared
+   .section-header-mark ::before rule below for the bar. */
+.access-level legend,
+.members-section h4,
+.group-access-section h4,
+.grant-section h4,
+.settings-section-title,
+.env-header h4,
+.danger-zone h4 {
+  position: relative;
+  margin: 0 0 0.95rem;
+  padding-left: 0.85rem;
   font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+.access-level legend::before,
+.members-section h4::before,
+.group-access-section h4::before,
+.grant-section h4::before,
+.settings-section-title::before,
+.env-header h4::before,
+.danger-zone h4::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 0.95em;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--cyan-bright), var(--electric));
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+}
+/* Legend is a special form element; keep its block layout. */
+.access-level legend {
   float: left;
   width: 100%;
 }
@@ -1152,18 +1186,8 @@ main {
 }
 
 /* Members section */
-.members-section h4,
-.group-access-section h4,
-.grant-section h4,
-.settings-section-title {
-  margin: 0 0 0.7rem;
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  font-family: var(--mono);
-}
+/* (Section-header typography for these is defined in the consolidated rule
+   above, alongside legends and the env/danger headers.) */
 
 #members-list {
   list-style: none;
@@ -1363,14 +1387,15 @@ main {
   background: rgba(248,113,113,0.04);
 }
 
+/* Danger zone reuses the shared section-header typography but in red, with a
+   red accent bar instead of the cyan one. */
 .danger-zone h4 {
-  margin: 0 0 0.4rem;
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  margin-bottom: 0.5rem;
   color: var(--red);
-  font-family: var(--mono);
+}
+.danger-zone h4::before {
+  background: linear-gradient(180deg, #f87171, #ef4444);
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.5);
 }
 
 .danger-zone-lead {
@@ -2295,13 +2320,11 @@ main {
   margin-bottom: 0.75rem;
 }
 
+/* env-header h4 sits in a flex row next to the "+ Add variable" button; the
+   shared section-header typography applies, but drop the block margin so it
+   stays vertically centred with the button. */
 .env-header h4 {
-  font-weight: 700;
-  font-size: 0.66rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  font-family: var(--mono);
+  margin: 0;
 }
 
 .env-add-btn {
