@@ -12,6 +12,7 @@ import {
   renderRejectsByReason,
 } from '/static/views/autoscale.js';
 import { deploymentListModels, relativeTime } from '/static/views/deployment-row.js';
+import { statusPillClass } from '/static/views/stat-format.js';
 
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
@@ -122,16 +123,47 @@ export function mountAppDetail(ctx) {
     document.getElementById('app-detail-slug').textContent = '/' + app.slug;
     const deployCountEl = document.getElementById('app-detail-deploy-count');
     deployCountEl.textContent = pluralize(app.deploy_count, 'deploy', 'deploys');
+    // Current version chip + deployed-ago meta.
+    const versionEl = document.getElementById('app-detail-version');
+    if (versionEl) {
+      if (app.current_version) { versionEl.textContent = 'v' + app.current_version; versionEl.hidden = false; }
+      else versionEl.hidden = true;
+    }
+    const deployedEl = document.getElementById('app-detail-deployed');
+    if (deployedEl) {
+      if (app.last_deployed_at) {
+        const d = new Date(app.last_deployed_at);
+        deployedEl.textContent = 'deployed ' + relativeTime(d);
+        deployedEl.title = d.toLocaleString();
+      } else {
+        deployedEl.textContent = '';
+        deployedEl.removeAttribute('title');
+      }
+    }
     const statusEl = document.getElementById('app-detail-status');
     // Mirror the apps-grid behaviour: an app with zero deploys is not
     // "degraded" — there's nothing wrong with it, it just hasn't run yet.
     if ((app.deploy_count || 0) === 0) {
       statusEl.textContent = 'Awaiting deploy';
-      statusEl.className = 'badge badge-new';
+      statusEl.className = 'status-pill status-new';
     } else {
       statusEl.textContent = formatStatus(app.status);
-      statusEl.className = 'badge badge-' + app.status;
+      statusEl.className = statusPillClass(app.status);
     }
+    // Seed the metric tiles until the first metrics poll arrives. Replicas shows
+    // the configured count immediately (CPU/Memory/Sessions fill in on poll).
+    const seedStat = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.textContent = val;
+        el.classList.toggle('is-empty', val === '—');
+        el.removeAttribute('title'); // clear any stale tooltip from a prior app
+      }
+    };
+    seedStat('app-detail-cpu', '—');
+    seedStat('app-detail-ram', '—');
+    seedStat('app-detail-sessions', '—');
+    seedStat('app-detail-replicas', '0 / ' + (app.replicas || 1));
     const openLink = document.getElementById('app-detail-open');
     openLink.href = `/app/${app.slug}/`;
     openLink.hidden = app.status !== 'running';

@@ -200,34 +200,48 @@
         <a href="/" data-nav>← Apps</a>
       </nav>
       <header class="app-detail-header">
-        <div class="app-detail-title-row">
-          <h1 id="app-detail-heading" class="app-detail-title"></h1>
-          <span id="app-detail-status" class="badge"></span>
-          <span id="app-detail-fleet-badge"></span>
-        </div>
-        <div class="app-detail-meta">
-          <span id="app-detail-slug"></span>
-          <span class="meta-sep">·</span>
-          <span id="app-detail-deploy-count"></span>
-        </div>
-        <div id="app-detail-fleet" class="app-detail-fleet" hidden></div>
-        <div class="app-detail-metrics">
-          <span id="app-detail-cpu">CPU —</span>
-          <span class="meta-sep">·</span>
-          <span id="app-detail-ram">RAM —</span>
-          <span class="meta-sep">·</span>
-          <span id="app-detail-uptime">Uptime —</span>
-        </div>
-        <div class="app-detail-actions">
-          <a id="app-detail-open" href="" target="_blank" rel="noopener noreferrer" hidden>Open</a>
-          <button id="app-detail-deploy" type="button" class="btn-primary">Deploy</button>
-          <div class="kebab-menu">
-            <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">⋯</button>
-            <ul id="app-detail-kebab-menu" class="kebab-list" role="menu" hidden>
-              <li><button id="app-detail-restart" type="button" role="menuitem">Restart</button></li>
-            </ul>
+        <div class="app-detail-bar">
+          <div class="app-detail-identity">
+            <h1 id="app-detail-heading" class="app-detail-title"></h1>
+            <span id="app-detail-status" class="status-pill"></span>
+            <span id="app-detail-fleet-badge"></span>
+          </div>
+          <div class="app-detail-actions">
+            <a id="app-detail-open" href="" target="_blank" rel="noopener noreferrer" hidden>Open</a>
+            <button id="app-detail-deploy" type="button" class="btn-primary">Deploy</button>
+            <div class="kebab-menu">
+              <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">⋯</button>
+              <ul id="app-detail-kebab-menu" class="kebab-list" role="menu" hidden>
+                <li><button id="app-detail-restart" type="button" role="menuitem">Restart</button></li>
+              </ul>
+            </div>
           </div>
         </div>
+        <div class="app-detail-meta">
+          <span id="app-detail-slug" class="meta-chip"></span>
+          <span id="app-detail-version" class="meta-chip" hidden></span>
+          <span id="app-detail-deploy-count"></span>
+          <span id="app-detail-deployed"></span>
+        </div>
+        <div id="app-detail-fleet" class="app-detail-fleet" hidden></div>
+        <dl class="app-detail-stats">
+          <div class="stat">
+            <dt class="stat-label">CPU</dt>
+            <dd class="stat-value" id="app-detail-cpu">—</dd>
+          </div>
+          <div class="stat">
+            <dt class="stat-label">Memory</dt>
+            <dd class="stat-value" id="app-detail-ram">—</dd>
+          </div>
+          <div class="stat">
+            <dt class="stat-label">Replicas</dt>
+            <dd class="stat-value" id="app-detail-replicas">—</dd>
+          </div>
+          <div class="stat">
+            <dt class="stat-label">Sessions</dt>
+            <dd class="stat-value" id="app-detail-sessions">—</dd>
+          </div>
+        </dl>
       </header>
       <nav class="settings-tabs" role="tablist" aria-label="App sections">
         <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      aria-controls="detail-overview-panel"      aria-selected="true"  >Overview</a>

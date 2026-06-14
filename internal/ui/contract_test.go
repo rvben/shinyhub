@@ -1153,10 +1153,19 @@ func TestKeyboardFocusAndLabels(t *testing.T) {
 // Workers refresh control, and the degraded-app tooltip surfaced by the polish
 // pass.
 func TestResponsiveAndStatePolish(t *testing.T) {
-	// Responsive: the detail action bar de-absolutes on mobile and the wide
-	// admin tables get a horizontal scroll container.
-	assertContains(t, "style.css", "position: static",
-		"the 640px breakpoint must reflow .app-detail-actions to position: static so the buttons don't overlap the title")
+	// Responsive: the detail header lays identity + actions out in a flex bar
+	// (no absolute positioning to undo) that wraps on mobile, and the wide admin
+	// tables get a horizontal scroll container.
+	b0, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	bar := string(b0)[strings.Index(string(b0), ".app-detail-bar {"):]
+	if i := strings.Index(string(b0), ".app-detail-bar {"); i < 0 || !strings.Contains(bar[:200], "justify-content: space-between") {
+		t.Fatal("style.css: .app-detail-bar must use flex space-between for the identity/actions layout")
+	}
+	assertContains(t, "style.css", ".app-detail-actions { flex-wrap: wrap; }",
+		"the 640px breakpoint must let the detail action cluster wrap below the title")
 	assertContains(t, "style.css", "-webkit-overflow-scrolling: touch",
 		"the 640px breakpoint must give the wide admin tables a horizontal scroll container")
 	// The responsive table rule uses ID selectors, which outrank the UA
@@ -1613,6 +1622,44 @@ func TestSidebarLayoutCSS(t *testing.T) {
 	for _, needle := range []string{"#app-shell", "--sidebar-w", "body.sidebar-collapsed", "body.sidebar-open", "@media (max-width: 860px)"} {
 		assertContains(t, "style.css", needle, "style.css must define sidebar layout primitive "+needle)
 	}
+}
+
+// TestAppDetailHeaderTiles pins the redesigned detail header: real metric tiles
+// (CPU/Memory/Replicas/Sessions) fed by fleet aggregates, a status pill with a
+// running pulse, version/deployed meta, and removal of the dead Uptime metric.
+func TestAppDetailHeaderTiles(t *testing.T) {
+	assertContains(t, "index.html", `class="app-detail-stats"`, "header must use a metric-tile group")
+	for _, id := range []string{`id="app-detail-cpu"`, `id="app-detail-ram"`,
+		`id="app-detail-replicas"`, `id="app-detail-sessions"`,
+		`id="app-detail-version"`, `id="app-detail-deployed"`} {
+		assertContains(t, "index.html", id, "header must expose "+id)
+	}
+	b, err := fs.ReadFile(ui.Static(), "index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	if strings.Contains(string(b), "app-detail-uptime") {
+		t.Fatal("index.html: the dead #app-detail-uptime must be removed (no data source)")
+	}
+	assertContains(t, "index.html", `id="app-detail-status" class="status-pill"`,
+		"the status must render as a status pill")
+	// JS: fleet aggregation + bare tile values + status pill class.
+	assertContains(t, "views/stat-format.js", "export function headerStats", "stat-format must expose headerStats")
+	assertContains(t, "app.js", "headerStats(m, configured)",
+		"onMetrics must feed the tiles from headerStats fleet aggregates")
+	assertContains(t, "views/app-detail.js", "statusPillClass(app.status)",
+		"the status pill class must come from statusPillClass")
+	// The grid metrics line is a separate path and must stay intact.
+	assertContains(t, "app.js", "CPU ${cpu}% · ${ram} RAM",
+		"the grid status/metrics line must be unchanged")
+	// CSS: tiles, the running pulse, and a reduced-motion off-switch.
+	assertContains(t, "style.css", ".app-detail-stats .stat", "metric tiles must be styled")
+	assertContains(t, "style.css", ".app-detail-header .status-pill.is-live::before { animation: none; }",
+		"the running pulse must be disabled under prefers-reduced-motion (scoped to the header pill)")
+	// The header pill styles must be scoped so they don't clobber the pre-existing
+	// schedules .status-pill (status-on/status-off).
+	assertContains(t, "style.css", ".app-detail-header .status-pill::before",
+		"the header status-pill dot must be scoped to .app-detail-header, not global")
 }
 
 // TestDetailTabsScrollAffordanceOnMobile pins the mobile tab-strip polish: it

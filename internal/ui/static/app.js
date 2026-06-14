@@ -10,6 +10,7 @@ import { mountAppDetail } from '/static/views/app-detail.js';
 import { appCardBadge } from '/static/views/app-card-badge.js';
 import { renderSidebarApps, highlightSidebarApp } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
+import { headerStats } from '/static/views/stat-format.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
@@ -3285,29 +3286,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  async function fetchMetrics(slug) {
-    let resp;
-    try {
-      resp = await api(`/api/apps/${slug}/metrics`);
-    } catch {
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) return;
-    const m = await resp.json();
-    const el = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
-    if (!el) return;
-    if (m.status !== 'running') {
-      el.textContent = '';
-      return;
-    }
-    const cpu = m.cpu_percent.toFixed(1);
-    const ram = m.rss_bytes >= 1 << 20
-      ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
-      : (m.rss_bytes / 1024).toFixed(0) + ' KB';
-    el.textContent = `CPU ${cpu}% · ${ram} RAM`;
-  }
-
   async function loadProviders() {
     try {
       const resp = await api('/api/auth/providers');
@@ -3368,18 +3346,26 @@ document.addEventListener('DOMContentLoaded', () => {
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
       if (!detailView.hidden && location.pathname.startsWith(`/apps/${slug}`)) {
-        const cpuEl = document.getElementById('app-detail-cpu');
-        const ramEl = document.getElementById('app-detail-ram');
-        if (m.status !== 'running') {
-          cpuEl.textContent = 'CPU —';
-          ramEl.textContent = 'RAM —';
-        } else {
-          cpuEl.textContent = `CPU ${m.cpu_percent.toFixed(1)}%`;
-          const ramMb = m.rss_bytes >= 1 << 20
-            ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
-            : (m.rss_bytes / 1024).toFixed(0) + ' KB';
-          ramEl.textContent = `RAM ${ramMb}`;
-        }
+        // Header metric tiles show fleet aggregates (per-replica detail lives in
+        // the Overview replicas panel below). Set bare values; the labels are
+        // static markup. CPU/Memory both summed across replicas → note that.
+        const configured = (detailApp && detailApp.replicas) || 1;
+        const stats = headerStats(m, configured);
+        const setStat = (id, val, title) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.textContent = val;
+          el.classList.toggle('is-empty', val === '—');
+          if (title !== undefined) el.title = title;
+        };
+        const naNote = 'Live CPU/RAM not collected for this backend (Fargate/remote tasks: see CloudWatch / the worker host)';
+        const cpuRamNote = (stats.running && !stats.metricsAvailable)
+          ? naNote
+          : (stats.multiReplica ? 'Summed across replicas' : '');
+        setStat('app-detail-cpu', stats.cpu, cpuRamNote);
+        setStat('app-detail-ram', stats.ram, cpuRamNote);
+        setStat('app-detail-sessions', stats.sessions, '');
+        setStat('app-detail-replicas', stats.replicas, '');
         renderReplicasPanel(m);
 
         // Keep the stored envelope in sync with autoscale_status from the poll

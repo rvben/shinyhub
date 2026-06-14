@@ -1774,15 +1774,14 @@ fieldset.settings-block { min-width: 0; }
   /* Search field shrinks instead of pushing the toolbar buttons off-screen. */
   .apps-search { width: auto; min-width: 0; flex: 1 1 8rem; }
 
-  /* Detail header: drop the absolutely-positioned action bar below the title
-     so the buttons don't overlap the app name on narrow screens. */
-  .app-detail-title-row { flex-wrap: wrap; }
+  /* Detail header: the flex bar wraps the action cluster below the title and the
+     stat tiles collapse to two columns on narrow screens. */
   .app-detail-header { padding-bottom: 16px; }
-  .app-detail-actions {
-    position: static;
-    margin-top: 0.75rem;
-    flex-wrap: wrap;
-  }
+  .app-detail-actions { flex-wrap: wrap; }
+  /* 2x2 tiles on mobile. The extra .app-detail-header qualifier outranks the
+     later base .app-detail-stats .stat rule (media queries add no specificity,
+     so source order would otherwise win). */
+  .app-detail-header .app-detail-stats .stat { min-width: calc(50% - 0.375rem); max-width: none; }
 
   /* Wide admin tables scroll within themselves rather than overflowing body.
      :not([hidden]) so these ID-specificity rules don't override the hidden
@@ -3052,33 +3051,136 @@ fieldset.settings-block { min-width: 0; }
 .breadcrumb a:hover { color: var(--cyan-bright); }
 
 .app-detail-header {
-  position: relative;
   border-bottom: 1px solid var(--line);
-  padding-bottom: 20px;
-  margin-bottom: 20px;
+  padding-bottom: 22px;
+  margin-bottom: 22px;
 }
-.app-detail-title-row {
+.app-detail-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.app-detail-identity {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  min-width: 0;
 }
-.app-detail-title { font-size: 1.6rem; margin: 0; }
-.app-detail-meta,
-.app-detail-metrics {
-  margin-top: 6px;
-  color: var(--text-muted);
-  font-size: 0.9rem;
+.app-detail-title {
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--text);
 }
-.meta-sep { margin: 0 0.4em; opacity: 0.5; }
-
 .app-detail-actions {
-  position: absolute;
-  right: 32px;
-  top: 0;
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0;
 }
+
+/* Header status pill: a state-coloured dot + label. The dot is currentColor, so
+   each state modifier colours both at once. Scoped to .app-detail-header so it
+   never touches the pre-existing schedules .status-pill (status-on/off) above. */
+.app-detail-header .status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.26rem 0.7rem 0.26rem 0.62rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.app-detail-header .status-pill::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.app-detail-header .status-pill.status-running,
+.app-detail-header .status-pill.status-healthy { color: var(--green); background: var(--green-bg); border-color: transparent; }
+.app-detail-header .status-pill.status-deploying,
+.app-detail-header .status-pill.status-waking,
+.app-detail-header .status-pill.status-pending { color: var(--yellow); background: var(--yellow-bg); border-color: transparent; }
+.app-detail-header .status-pill.status-degraded,
+.app-detail-header .status-pill.status-failed { color: var(--red); background: var(--red-bg); border-color: transparent; }
+.app-detail-header .status-pill.status-new { color: var(--cyan-bright); background: var(--accent-glow); border-color: transparent; }
+.app-detail-header .status-pill.status-stopped,
+.app-detail-header .status-pill.status-hibernated { color: var(--text-muted); background: var(--gray-bg); }
+/* Live (running) state: a gently breathing dot. */
+.app-detail-header .status-pill.is-live::before { animation: pulse-dot 2.2s ease-in-out infinite; }
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.68); opacity: 0.5; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-detail-header .status-pill.is-live::before { animation: none; }
+}
+
+/* Meta line: slug + version mono chips, deploy count, deployed-ago. */
+.app-detail-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.85rem;
+  margin-top: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.meta-chip {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--text-soft);
+  background: var(--bg-deep);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 0.1rem 0.45rem;
+}
+.meta-chip[hidden] { display: none; }
+#app-detail-deployed:empty { display: none; }
+
+/* Metric tiles: real fleet aggregates (CPU/Memory/Replicas/Sessions). */
+.app-detail-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.15rem 0 0;
+}
+.app-detail-stats .stat {
+  flex: 1 1 0;
+  min-width: 8.5rem;
+  max-width: 13rem;
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.85rem;
+}
+.stat-label {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.stat-value {
+  margin: 0.25rem 0 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.stat-value.is-empty { color: var(--text-muted); }
 
 .kebab-menu { position: relative; }
 /* The "⋯" toggle, styled consistently wherever a kebab appears (dashboard card
