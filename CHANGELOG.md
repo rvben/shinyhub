@@ -44,6 +44,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.9](https://github.com/rvben/shinyhub/compare/v0.8.8...v0.8.9) - 2026-06-14
+
+### Added
+
+- **ui**: global left sidebar navigation with project-grouped app switcher ([1414870](https://github.com/rvben/shinyhub/commit/14148702876d8d3c3421ec6946756b933d21354e))
+- **ui**: folder-tab navigation and settings-page polish on app detail ([455bd9c](https://github.com/rvben/shinyhub/commit/455bd9cfb92a0c555d9d0bd3c86ab271c5a5622c))
+- **ui**: redesign app settings as GitLab-style settings blocks ([df49b75](https://github.com/rvben/shinyhub/commit/df49b75084c97411ca6f6b9ff1d0bd817b0f081e))
+- **ui**: make settings section headers prominent and on-brand ([46b8c91](https://github.com/rvben/shinyhub/commit/46b8c91f4c04481ee10c17c919d8d6e59b8e047b))
+- **ui**: dashboard excellence pass (bug fixes, settings IA, explicit-save, responsive) ([b4094fd](https://github.com/rvben/shinyhub/commit/b4094fda83ddc416aec10090a5f7513947fd599f))
+
 ## [0.8.8](https://github.com/rvben/shinyhub/compare/v0.8.7...v0.8.8) - 2026-06-13
 
 ### Added
