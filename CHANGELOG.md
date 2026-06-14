@@ -45,6 +45,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.10](https://github.com/rvben/shinyhub/compare/v0.8.9...v0.8.10) - 2026-06-14
+
+### Added
+
+- **ui**: dashboard-grade app-detail header with real metric tiles ([ace0063](https://github.com/rvben/shinyhub/commit/ace0063ff2293f2302b2bcc1d37bd53b6fc80365))
+
+### Fixed
+
+- **ui**: make the mobile app-detail tab strip excellent ([a4e38a6](https://github.com/rvben/shinyhub/commit/a4e38a648e5e3ccea9fe296618f981114e80e9f2))
+
 ## [0.8.9](https://github.com/rvben/shinyhub/compare/v0.8.8...v0.8.9) - 2026-06-14
 
 ### Added
