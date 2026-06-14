@@ -88,6 +88,14 @@ export function mountAppDetail(ctx) {
     if (typeof body.can_manage === 'boolean') app.can_manage = body.can_manage;
     // runtime_mode gates the Resources controls (limits are docker-only).
     if (typeof body.runtime_mode === 'string') app.runtime_mode = body.runtime_mode;
+    // release_number/released_at (human-friendly "vN · date") live at the envelope
+    // level — copy onto app so the header and overview read app.* consistently.
+    // Absent until the app has a succeeded deploy (then the version chip hides).
+    app.release_number = (typeof body.release_number === 'number') ? body.release_number : null;
+    app.released_at = body.released_at || null;
+    // The live succeeded bundle's epoch id (for the "bundle …" hover) — distinct
+    // from current_version, which is the newest row regardless of status.
+    app.released_version = body.released_version || null;
     const replicasStatus = Array.isArray(body.replicas_status) ? body.replicas_status : [];
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
@@ -123,16 +131,23 @@ export function mountAppDetail(ctx) {
     document.getElementById('app-detail-slug').textContent = '/' + app.slug;
     const deployCountEl = document.getElementById('app-detail-deploy-count');
     deployCountEl.textContent = pluralize(app.deploy_count, 'deploy', 'deploys');
-    // Current version chip + deployed-ago meta.
+    // Release chip (human-friendly vN) + deployed-ago meta. The epoch version is
+    // kept on the chip's title for support.
     const versionEl = document.getElementById('app-detail-version');
     if (versionEl) {
-      if (app.current_version) { versionEl.textContent = 'v' + app.current_version; versionEl.hidden = false; }
-      else versionEl.hidden = true;
+      if (app.release_number != null) {
+        versionEl.textContent = 'v' + app.release_number;
+        if (app.released_version) versionEl.title = 'bundle ' + app.released_version;
+        versionEl.hidden = false;
+      } else {
+        versionEl.hidden = true;
+      }
     }
     const deployedEl = document.getElementById('app-detail-deployed');
     if (deployedEl) {
-      if (app.last_deployed_at) {
-        const d = new Date(app.last_deployed_at);
+      const deployedAt = app.released_at || app.last_deployed_at;
+      if (deployedAt) {
+        const d = new Date(deployedAt);
         deployedEl.textContent = 'deployed ' + relativeTime(d);
         deployedEl.title = d.toLocaleString();
       } else {
@@ -390,7 +405,8 @@ async function renderDeployments(panel, app, ctx) {
       verCell.className = 'deployment-version';
       const num = document.createElement('strong');
       num.className = 'deployment-number';
-      num.textContent = m.deployNumber;
+      num.textContent = m.releaseLabel; // "v3"; empty for failed/pending (badge carries status)
+      if (m.releaseLabel) num.title = 'bundle ' + m.version; // epoch id on hover (only where there's a label)
       verCell.appendChild(num);
       // Status badge: Current (live), Failed, or Deploying. A plain succeeded
       // (non-live) row gets no badge — it's just a rollback target.
@@ -403,11 +419,6 @@ async function renderDeployments(panel, app, ctx) {
       } else if (m.status !== 'succeeded') {
         verCell.appendChild(makeStatusBadge('deployment-pending-badge', 'Deploying'));
       }
-      const verId = document.createElement('span');
-      verId.className = 'deployment-version-id';
-      verId.textContent = `v${m.version}`;
-      verCell.appendChild(verId);
-
       const whenCell = document.createElement('span');
       whenCell.className = 'deployment-when';
       whenCell.textContent = m.relWhen || '—';
@@ -466,8 +477,8 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     <section class="overview-card">
       <h3>Current deployment</h3>
       <dl class="overview-dl">
-        <dt>Version</dt><dd class="overview-version">${app.current_version ? 'v' + app.current_version : '—'}</dd>
-        <dt>Deployed</dt><dd${app.last_deployed_at ? ` title="${new Date(app.last_deployed_at).toLocaleString()}"` : ''}>${app.last_deployed_at ? relativeTime(new Date(app.last_deployed_at)) : '—'}</dd>
+        <dt>Version</dt><dd class="overview-version"${app.released_version ? ` title="bundle ${app.released_version}"` : ''}>${app.release_number != null ? 'v' + app.release_number : '—'}</dd>
+        <dt>Deployed</dt><dd${(app.released_at || app.last_deployed_at) ? ` title="${new Date(app.released_at || app.last_deployed_at).toLocaleString()}"` : ''}>${(app.released_at || app.last_deployed_at) ? relativeTime(new Date(app.released_at || app.last_deployed_at)) : '—'}</dd>
         <dt>Deploys</dt><dd>${app.deploy_count}</dd>
       </dl>
       <div class="overview-links">

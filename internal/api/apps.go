@@ -259,6 +259,16 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	// only enforceable under the docker runtime, so the Configuration tab shows
 	// the Resources controls read-only with an explanation under native.
 	envelope["runtime_mode"] = s.cfg.Runtime.Mode
+	// release_number/released_at drive the header's "vN · date" display (the
+	// human-friendly version). Omitted entirely until the app has a succeeded
+	// deploy, so the UI hides the version chip rather than showing "v0".
+	if rel, releasedAt, relVersion, ok := s.store.CurrentRelease(app.ID); ok {
+		envelope["release_number"] = rel
+		envelope["released_at"] = releasedAt
+		// The live succeeded bundle's epoch id, for the "bundle …" hover. NOT
+		// current_version, which is the newest row regardless of status.
+		envelope["released_version"] = relVersion
+	}
 	writeJSON(w, http.StatusOK, envelope)
 }
 

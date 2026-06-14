@@ -1089,12 +1089,21 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 // ListDeploymentsBySlug returns deployments for the app identified by slug,
 // ordered newest first. It is a slug-based counterpart to ListDeployments.
 func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) {
+	// release_number is the row's rank among the app's SUCCEEDED deployments by id
+	// (a human-friendly v1, v2, … shown instead of the epoch version); NULL for
+	// failed/pending rows so a failed attempt never consumes a release number.
+	// Ordered by id DESC to match ListDeployments' authoritative live-history order
+	// (the UI marks the first succeeded row Current).
 	rows, err := s.db.Query(`
-		SELECT d.id, d.version, d.status, d.failure_reason, d.created_at
+		SELECT d.id, d.version, d.status, d.failure_reason, d.created_at,
+		       CASE WHEN d.status = 'succeeded' THEN (
+		           SELECT COUNT(*) FROM deployments d2
+		           WHERE d2.app_id = d.app_id AND d2.status = 'succeeded' AND d2.id <= d.id
+		       ) END AS release_number
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE a.slug = ?
-		ORDER BY d.created_at DESC, d.id DESC`, slug)
+		ORDER BY d.id DESC`, slug)
 	if err != nil {
 		return nil, err
 	}
@@ -1102,8 +1111,13 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 	result := make([]DeploymentSummary, 0)
 	for rows.Next() {
 		var d DeploymentSummary
-		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt); err != nil {
+		var release sql.NullInt64
+		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt, &release); err != nil {
 			return nil, err
+		}
+		if release.Valid {
+			n := release.Int64
+			d.ReleaseNumber = &n
 		}
 		result = append(result, d)
 	}
@@ -1118,8 +1132,40 @@ type DeploymentSummary struct {
 	// FailureReason explains why a failed deployment failed; empty for pending
 	// and succeeded rows. Always present so the field is a stable, addressable
 	// part of the deployments contract (machine consumers and CLI --fields).
-	FailureReason string    `json:"failure_reason"`
+	FailureReason string `json:"failure_reason"`
+	// ReleaseNumber is the human-friendly v1/v2/… rank among the app's succeeded
+	// deployments; nil for failed/pending rows (a failed attempt has no release).
+	ReleaseNumber *int64    `json:"release_number"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// CurrentRelease returns the app's current release number (count of succeeded
+// deployments), and the timestamp + epoch version of the live (newest succeeded)
+// deployment; ok = whether any succeeded deployment exists. Powers the detail
+// header "vN · date" and the bundle-id hover.
+//
+// One statement so the count and the live row are a consistent snapshot (a
+// promotion racing between two queries can't pair an old number with a new date).
+// The live row is the newest SUCCEEDED by id - not MAX(created_at) and not the
+// status-agnostic current_version - so a failed/pending latest attempt is ignored
+// and a rollback (a new succeeded row reusing an old version) reports its own date.
+// Reading the row's created_at column (vs an aggregate) avoids the modernc-sqlite
+// string-scan trap.
+func (s *Store) CurrentRelease(appID int64) (number int, releasedAt time.Time, version string, ok bool) {
+	var n int
+	var at time.Time
+	var v string
+	err := s.db.QueryRow(`
+		SELECT (SELECT COUNT(*) FROM deployments WHERE app_id = ? AND status = 'succeeded'),
+		       created_at, version
+		FROM deployments
+		WHERE app_id = ? AND status = 'succeeded'
+		ORDER BY id DESC LIMIT 1`, appID, appID).Scan(&n, &at, &v)
+	if err != nil {
+		// No succeeded deploy (sql.ErrNoRows) or a read error → omit the fields.
+		return 0, time.Time{}, "", false
+	}
+	return n, at, v, true
 }
 
 // ListDeployments returns an app's deployments newest-first, excluding

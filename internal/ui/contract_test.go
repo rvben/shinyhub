@@ -1624,6 +1624,30 @@ func TestSidebarLayoutCSS(t *testing.T) {
 	}
 }
 
+// TestVersionDisplayUsesReleaseNumber pins the human-friendly version display:
+// the header/overview show the server's release_number (vN) and date, the
+// deployments row renders the release label, and the raw epoch is no longer the
+// visible version label (kept only on hover/title).
+func TestVersionDisplayUsesReleaseNumber(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "body.release_number",
+		"the detail view must read release_number from the GET envelope")
+	assertContains(t, "views/app-detail.js", "'v' + app.release_number",
+		"the header/overview version must show the release number, not the epoch")
+	assertContains(t, "views/app-detail.js", "m.releaseLabel",
+		"the deployments row must render the release label (vN)")
+	assertContains(t, "views/deployment-row.js", "release_number",
+		"deployment-row.js must derive the label from release_number")
+	assertContains(t, "views/deployment-row.js", "releaseLabel",
+		"deployment-row.js must expose releaseLabel")
+	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
+	if err != nil {
+		t.Fatalf("read app-detail.js: %v", err)
+	}
+	if strings.Contains(string(b), "`v${m.version}`") {
+		t.Fatal("app-detail.js: the deployments row must not display the epoch `v${m.version}`; show the release label, keep the epoch on the title")
+	}
+}
+
 // TestAppDetailHeaderTiles pins the redesigned detail header: real metric tiles
 // (CPU/Memory/Replicas/Sessions) fed by fleet aggregates, a status pill with a
 // running pulse, version/deployed meta, and removal of the dead Uptime metric.

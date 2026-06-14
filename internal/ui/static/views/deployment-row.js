@@ -18,22 +18,26 @@ export function relativeTime(date, now = Date.now()) {
 }
 
 // deploymentRowModel turns one raw deployment record into the fields the row
-// needs. `deployNumber` is a human-friendly sequence position (newest highest);
-// `isCurrent` (set by deploymentListModels) flags the live bundle so the view
-// can badge it and suppress its Roll back button. Roll back is offered only on a
-// non-current *succeeded* deployment — you can't roll back to a failed or
-// in-flight bundle.
-export function deploymentRowModel(d, { deployNumber, isCurrent = false, now = Date.now() } = {}) {
+// needs. `releaseLabel` is the human-friendly version ("v3") from the server's
+// release_number (rank among succeeded deploys); it is empty for failed/pending
+// rows, which carry a status badge instead and never get a release number. The
+// epoch `version` is kept for the hover/title. `isCurrent` (set by
+// deploymentListModels) flags the live bundle so the view can badge it and
+// suppress its Roll back button. Roll back is offered only on a non-current
+// *succeeded* deployment — you can't roll back to a failed or in-flight bundle.
+export function deploymentRowModel(d, { isCurrent = false, now = Date.now() } = {}) {
   const version = String(d.version);
   const status = d.status || 'succeeded';
+  const releaseNumber = typeof d.release_number === 'number' ? d.release_number : null;
   const created = d.created_at ? new Date(d.created_at) : null;
   const createdValid = created && Number.isFinite(created.getTime());
   return {
     id: d.id,
     version,
     status,
+    releaseNumber,
+    releaseLabel: releaseNumber != null ? `v${releaseNumber}` : '',
     failureReason: d.failure_reason || '',
-    deployNumber: deployNumber != null ? `#${deployNumber}` : '',
     isCurrent,
     canRollback: status === 'succeeded' && !isCurrent,
     relWhen: createdValid ? relativeTime(created, now) : '',
@@ -41,16 +45,15 @@ export function deploymentRowModel(d, { deployNumber, isCurrent = false, now = D
   };
 }
 
-// deploymentListModels maps a newest-first list of raw deployments to row models,
-// assigning descending deploy numbers (newest = total) and marking the LIVE
-// deployment. The live bundle is the newest *succeeded* deployment — a failed or
-// pending newest attempt does NOT change what is running (ShinyHub auto-reverts a
-// failed deploy), so position-based or current_version-based marking would badge
-// the wrong row.
+// deploymentListModels maps a newest-first list of raw deployments to row models
+// and marks the LIVE deployment. The live bundle is the newest *succeeded*
+// deployment — a failed or pending newest attempt does NOT change what is running
+// (ShinyHub auto-reverts a failed deploy), so position- or current_version-based
+// marking would badge the wrong row. Rows arrive newest-first (id DESC), matching
+// the server's release ranking.
 export function deploymentListModels(rows, now = Date.now()) {
-  const total = rows.length;
   const liveIdx = rows.findIndex(d => (d.status || 'succeeded') === 'succeeded');
   return rows.map((d, i) =>
-    deploymentRowModel(d, { deployNumber: total - i, isCurrent: i === liveIdx, now }),
+    deploymentRowModel(d, { isCurrent: i === liveIdx, now }),
   );
 }

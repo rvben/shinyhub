@@ -692,6 +692,69 @@ func TestListDeployments(t *testing.T) {
 	}
 }
 
+// TestDeploymentReleaseNumbers verifies the human-friendly release number flows
+// through the API: the deployments list ranks succeeded rows (null for failed),
+// and the app detail envelope carries the current release_number + released_at.
+func TestDeploymentReleaseNumbers(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("myapp")
+
+	insert := func(version, status string) {
+		if _, err := store.DB().Exec(
+			`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+			app.ID, version, "/tmp/"+version, status); err != nil {
+			t.Fatalf("insert %s: %v", version, err)
+		}
+	}
+	insert("100", "succeeded") // v1
+	insert("150", "failed")    // failed attempt → no release number
+	insert("200", "succeeded") // v2
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	// Deployments list: release_number per row, newest-first by id.
+	req := authedRequest(t, "GET", "/api/apps/myapp/deployments", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deployments: %d %s", rec.Code, rec.Body.String())
+	}
+	var deps []map[string]any
+	json.NewDecoder(rec.Body).Decode(&deps)
+	if len(deps) != 3 {
+		t.Fatalf("got %d deployments, want 3", len(deps))
+	}
+	if deps[0]["release_number"] != float64(2) {
+		t.Errorf("newest (v2) release_number = %v, want 2", deps[0]["release_number"])
+	}
+	if deps[1]["release_number"] != nil {
+		t.Errorf("failed row release_number = %v, want null", deps[1]["release_number"])
+	}
+	if deps[2]["release_number"] != float64(1) {
+		t.Errorf("oldest (v1) release_number = %v, want 1", deps[2]["release_number"])
+	}
+
+	// Detail envelope: current release_number + released_at.
+	req = authedRequest(t, "GET", "/api/apps/myapp", nil, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get app: %d %s", rec.Code, rec.Body.String())
+	}
+	var env map[string]any
+	json.NewDecoder(rec.Body).Decode(&env)
+	if env["release_number"] != float64(2) {
+		t.Errorf("envelope release_number = %v, want 2", env["release_number"])
+	}
+	if _, ok := env["released_at"]; !ok {
+		t.Error("envelope missing released_at")
+	}
+}
+
 func TestRollbackApp_ToSpecificDeployment(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

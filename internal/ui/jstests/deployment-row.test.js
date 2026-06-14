@@ -23,50 +23,56 @@ test('relativeTime renders compact buckets and tolerates bad input', () => {
   assert.equal(relativeTime('not-a-date', NOW), '');
 });
 
-test('a current succeeded deployment blocks its own rollback', () => {
+test('a current succeeded deployment shows its release label and blocks its own rollback', () => {
   const m = deploymentRowModel(
-    { id: 9, version: '300', created_at: NOW - 60000, status: 'succeeded' },
-    { deployNumber: 3, isCurrent: true, now: NOW },
+    { id: 9, version: '300', release_number: 3, created_at: NOW - 60000, status: 'succeeded' },
+    { isCurrent: true, now: NOW },
   );
   assert.equal(m.isCurrent, true);
   assert.equal(m.canRollback, false);
-  assert.equal(m.deployNumber, '#3');
+  assert.equal(m.releaseNumber, 3);
+  assert.equal(m.releaseLabel, 'v3');
+  assert.equal(m.version, '300'); // epoch kept for the hover/title
 });
 
 test('a non-current succeeded deployment offers rollback', () => {
   const m = deploymentRowModel(
-    { id: 8, version: '200', created_at: NOW - 120000, status: 'succeeded' },
-    { deployNumber: 2, isCurrent: false, now: NOW },
+    { id: 8, version: '200', release_number: 2, created_at: NOW - 120000, status: 'succeeded' },
+    { isCurrent: false, now: NOW },
   );
   assert.equal(m.canRollback, true);
+  assert.equal(m.releaseLabel, 'v2');
 });
 
-test('failed and pending deployments never offer rollback and carry their status', () => {
+test('failed and pending deployments have no release label and never offer rollback', () => {
   const failed = deploymentRowModel(
-    { id: 7, version: '150', created_at: NOW, status: 'failed', failure_reason: 'boom' },
-    { deployNumber: 1, isCurrent: false, now: NOW },
+    { id: 7, version: '150', release_number: null, created_at: NOW, status: 'failed', failure_reason: 'boom' },
+    { isCurrent: false, now: NOW },
   );
   assert.equal(failed.status, 'failed');
   assert.equal(failed.failureReason, 'boom');
   assert.equal(failed.canRollback, false);
+  assert.equal(failed.releaseLabel, ''); // no number for a failed attempt
 
   const pending = deploymentRowModel(
     { id: 6, version: '140', created_at: NOW, status: 'pending' },
-    { deployNumber: 1, isCurrent: false, now: NOW },
+    { isCurrent: false, now: NOW },
   );
   assert.equal(pending.canRollback, false);
+  assert.equal(pending.releaseLabel, '');
 });
 
 test('deploymentListModels marks the newest SUCCEEDED row live, not a failed newest', () => {
-  // Newest-first: a failed latest attempt sits above the succeeded live bundle.
+  // Newest-first (id DESC); a failed latest attempt sits above the succeeded live
+  // bundle. release_number comes from the server (succeeded only; null for failed).
   const rows = [
-    { id: 3, version: '300', created_at: NOW - 1000, status: 'failed', failure_reason: 'bad deps' },
-    { id: 2, version: '200', created_at: NOW - 2000, status: 'succeeded' },
-    { id: 1, version: '100', created_at: NOW - 3000, status: 'succeeded' },
+    { id: 3, version: '300', release_number: null, created_at: NOW - 1000, status: 'failed', failure_reason: 'bad deps' },
+    { id: 2, version: '200', release_number: 2, created_at: NOW - 2000, status: 'succeeded' },
+    { id: 1, version: '100', release_number: 1, created_at: NOW - 3000, status: 'succeeded' },
   ];
   const models = deploymentListModels(rows, NOW);
-  assert.deepEqual(models.map(m => m.deployNumber), ['#3', '#2', '#1']);
-  // The failed newest row is NOT current; the newest succeeded one (#2) is.
+  assert.deepEqual(models.map(m => m.releaseLabel), ['', 'v2', 'v1']);
+  // The failed newest row is NOT current; the newest succeeded one (v2) is.
   assert.deepEqual(models.map(m => m.isCurrent), [false, true, false]);
   // Rollback: not on the failed row, not on the live row, yes on the older succeeded.
   assert.deepEqual(models.map(m => m.canRollback), [false, false, true]);
@@ -74,10 +80,11 @@ test('deploymentListModels marks the newest SUCCEEDED row live, not a failed new
 
 test('deploymentListModels marks newest row live when all succeeded', () => {
   const rows = [
-    { id: 2, version: '200', created_at: NOW - 1000, status: 'succeeded' },
-    { id: 1, version: '100', created_at: NOW - 2000, status: 'succeeded' },
+    { id: 2, version: '200', release_number: 2, created_at: NOW - 1000, status: 'succeeded' },
+    { id: 1, version: '100', release_number: 1, created_at: NOW - 2000, status: 'succeeded' },
   ];
   const models = deploymentListModels(rows, NOW);
+  assert.deepEqual(models.map(m => m.releaseLabel), ['v2', 'v1']);
   assert.deepEqual(models.map(m => m.isCurrent), [true, false]);
   assert.deepEqual(models.map(m => m.canRollback), [false, true]);
 });
