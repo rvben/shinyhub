@@ -460,17 +460,24 @@ main {
   border-radius: var(--radius-lg);
   padding: 1.3rem 1.4rem 1.15rem;
   position: relative;
-  overflow: hidden;
+  /* overflow stays visible so the card's kebab dropdown can escape the card
+     bounds instead of being clipped at the bottom edge. The decorative
+     ::before accent is inset from the rounded corners so it does not poke out. */
+  overflow: visible;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   animation: card-in 0.28s ease both;
   transition: transform var(--ease), border-color var(--ease), box-shadow var(--ease);
 }
 
+/* Raise a card (and its open dropdown) above its grid neighbours so the menu
+   is never painted under the next card. */
+.app-card.kebab-open { z-index: 30; }
+
 .app-card::before {
   content: '';
   position: absolute;
-  top: 0; left: 0; right: 0;
+  top: 0; left: 16px; right: 16px;
   height: 1px;
   background: linear-gradient(90deg, transparent 0%, var(--cyan-bright) 50%, transparent 100%);
   opacity: 0.25;
@@ -887,6 +894,20 @@ main {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+/* Reserved/synthetic account marker (e.g. the deploy-token identity __deploy__),
+   whose row is read-only. */
+.users-reserved-tag {
+  margin-left: 0.4rem;
+  padding: 1px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-family: var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: help;
+}
 
 /* ── Pagination ── */
 .pagination {
@@ -1132,7 +1153,9 @@ main {
 
 /* Members section */
 .members-section h4,
-.grant-section h4 {
+.group-access-section h4,
+.grant-section h4,
+.settings-section-title {
   margin: 0 0 0.7rem;
   font-size: 0.66rem;
   font-weight: 700;
@@ -1396,6 +1419,53 @@ main {
   box-shadow: 0 0 0 3px rgba(248,113,113,0.18);
 }
 
+/* Global button chrome for the .btn-primary / .btn-row design classes. Without
+   these, a .btn-primary used outside .app-actions or .modal-actions (the only
+   two contexts that styled it) fell back to the unstyled user-agent button —
+   e.g. the app-detail header "Deploy", "+ Add schedule" and "+ Mount data from
+   another app". Context blocks have higher specificity and still override. */
+.btn-primary {
+  padding: 0.5rem 1.1rem;
+  background: linear-gradient(135deg, var(--brand-primary), var(--electric));
+  color: var(--bg-deep);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 700;
+  font-family: var(--font);
+  transition: all var(--ease);
+  box-shadow: 0 4px 14px rgba(56,189,248,0.25);
+}
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+  filter: none;
+  transform: none;
+}
+.btn-row {
+  padding: 0.35rem 0.75rem;
+  background: rgba(14,20,38,0.55);
+  color: var(--text-soft);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-weight: 600;
+  font-family: var(--font);
+  transition: all var(--ease);
+}
+.btn-row:hover:not(:disabled) {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+}
+.btn-row:disabled { opacity: 0.45; cursor: not-allowed; }
+
 .btn-danger {
   padding: 0.58rem 1.1rem;
   border-radius: var(--radius);
@@ -1542,6 +1612,24 @@ main {
     -webkit-overflow-scrolling: touch;
     white-space: nowrap;
   }
+
+  /* The toolbar wraps the title above the action cluster; the cluster itself
+     must also wrap so Search + sorts + New app + Refresh don't run off-screen. */
+  .toolbar-actions { flex-wrap: wrap; width: 100%; }
+
+  /* The 7-item app-section tab bar scrolls horizontally instead of overflowing
+     the page; each tab keeps its width rather than being squeezed unreadable. */
+  .settings-tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .settings-tab { flex: 0 0 auto; }
+
+  /* Settings rows stack: the label/help sits above a full-width control instead
+     of being crushed next to a fixed-width input. */
+  .scaling-row { flex-direction: column; align-items: stretch; gap: 0.45rem; }
+  .scaling-row input[type="text"] { width: 100%; }
 }
 
 /* === New-app modal === */
@@ -2587,6 +2675,25 @@ main {
   margin-left: 0.6rem;
   align-self: center;
 }
+/* "Unsaved changes" hint shown next to a settings Save button while the section
+   has pending edits (explicit-save model). */
+.settings-dirty {
+  font-size: 0.8rem;
+  color: var(--color-warning, #fbbf24);
+  margin-left: 0.6rem;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.settings-dirty::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.settings-dirty[hidden] { display: none; }
 
 /* Traces — an unsampled span was never exported to the backend, so its id is
    shown muted with no deep link (a link would resolve to "trace not found"). */
@@ -2640,6 +2747,22 @@ main {
   border-radius: var(--radius);
 }
 .scaling-row input[type="number"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* Text inputs in a settings row (General: display name, project slug) share the
+   number-input chrome but are wider since they hold free text. */
+.scaling-row input[type="text"] {
+  width: 18rem;
+  max-width: 100%;
+  padding: 0.35rem 0.5rem;
+  font-family: var(--mono);
+  background: var(--bg-deep);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+}
+.scaling-row input[type="text"]:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -2708,6 +2831,27 @@ main {
 }
 
 .kebab-menu { position: relative; }
+/* The "⋯" toggle, styled consistently wherever a kebab appears (dashboard card
+   and app-detail header). Previously the detail-header toggle had no class-level
+   style and fell back to the unstyled user-agent button. */
+.kebab-menu > button {
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0.34rem 0.62rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  border: 1px solid var(--line-2);
+  background: rgba(14,20,38,0.5);
+  color: var(--text-soft);
+  font-family: var(--font);
+  transition: all var(--ease);
+}
+.kebab-menu > button:hover,
+.kebab-menu > button[aria-expanded="true"] {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+  background: rgba(56,189,248,0.08);
+}
 .kebab-list {
   position: absolute;
   right: 0;
@@ -2739,6 +2883,7 @@ main {
 .overview-card + .overview-card { margin-top: 16px; }
 .overview-dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; margin: 16px 0; }
 .overview-dl dt { color: var(--text-dim); }
+.overview-version { font-family: 'Space Mono', monospace; }
 .overview-links { display: flex; gap: 16px; margin-top: 12px; }
 .overview-links a { color: var(--accent); text-decoration: none; }
 .overview-links a:hover { text-decoration: underline; }
@@ -2798,22 +2943,89 @@ main {
 /* ── App detail: Deployments tab ─────────────────────────────────────────── */
 
 .deployments-list { list-style: none; padding: 0; margin: 0; }
-.deployment-row {
+.deployment-row,
+.deployments-head {
   display: grid;
-  grid-template-columns: minmax(9rem, max-content) 1fr auto auto;
-  gap: 12px;
+  grid-template-columns: minmax(11rem, max-content) 1fr auto;
+  gap: 12px 16px;
   align-items: center;
-  padding: 8px 0;
+  padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
+.deployments-head {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  padding-bottom: 8px;
+}
+.deployment-row:last-child { border-bottom: none; }
+.deployment-row-current {
+  background: linear-gradient(90deg, rgba(56,189,248,0.06), transparent 60%);
+  border-radius: 6px;
+}
 .deployment-version {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  white-space: nowrap;
+}
+.deployment-number {
   font-family: 'Space Mono', monospace;
   color: var(--cyan-bright);
-  white-space: nowrap;
+  font-weight: 700;
+}
+.deployment-version-id {
+  font-family: 'Space Mono', monospace;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+.deployment-current-badge,
+.deployment-failed-badge,
+.deployment-pending-badge {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid;
+}
+.deployment-current-badge {
+  color: var(--cyan-bright);
+  border-color: rgba(56,189,248,0.5);
+}
+.deployment-failed-badge {
+  color: var(--danger, #f87171);
+  border-color: rgba(248,113,113,0.5);
+  cursor: help;
+}
+.deployment-pending-badge {
+  color: var(--text-muted);
+  border-color: var(--line-2);
 }
 .deployment-when { color: var(--text-muted); font-size: 0.9rem; }
 .deployment-user { color: var(--text-soft); font-size: 0.9rem; }
-.rollback-btn { padding: 4px 10px; font-size: 0.85rem; }
+.deployment-action { justify-self: end; }
+.deployment-live-note { color: var(--text-dim); font-size: 0.8rem; font-style: italic; }
+.rollback-btn {
+  padding: 5px 12px;
+  font-size: 0.85rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  border: 1px solid var(--line-2);
+  background: rgba(14,20,38,0.5);
+  color: var(--text-soft);
+  font-family: var(--font);
+  font-weight: 600;
+  transition: all var(--ease);
+}
+.rollback-btn:hover:not(:disabled) {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+  background: rgba(56,189,248,0.08);
+}
+.rollback-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ── Branding: operator footer and logo ── */
 footer.brand-footer { display:flex; gap:1rem; justify-content:center;

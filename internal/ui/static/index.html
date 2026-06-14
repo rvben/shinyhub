@@ -206,6 +206,55 @@
         <section id="detail-deployments-panel"   class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-configuration-panel" class="settings-tab-panel" role="tabpanel" hidden>
           <section id="settings-general-panel">
+            <fieldset class="access-level general-options">
+              <legend>General</legend>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Display name</span>
+                  <span class="scaling-option-help">Shown across the dashboard. The URL slug (<code>/app/&lt;slug&gt;/</code>) is the app's permanent identity and cannot be changed here.</span>
+                </span>
+                <input id="general-name" type="text" maxlength="128" autocomplete="off" aria-label="App display name">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Project</span>
+                  <span class="scaling-option-help">Optional grouping label. Apps that share a project slug are grouped together on the dashboard.</span>
+                </span>
+                <input id="general-project" type="text" maxlength="63" autocomplete="off" spellcheck="false" placeholder="(none)" aria-label="Project slug">
+              </label>
+            </fieldset>
+            <div class="env-form-actions">
+              <button id="general-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+              <span id="general-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+              <span id="general-status" class="hibernate-status" hidden></span>
+            </div>
+            <p id="general-error" class="error" hidden></p>
+
+            <fieldset class="access-level resources-options">
+              <legend>Resources</legend>
+              <p id="resources-runtime-note" class="settings-help" hidden>This instance runs the <strong>native</strong> runtime, where per-app memory and CPU limits are not enforced. Switch the server to the Docker runtime (<code>runtime.mode: docker</code>) to apply them.</p>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Memory limit</span>
+                  <span class="scaling-option-help">Hard cap per replica, in MB. Empty or <code>0</code> means no limit. Enforced under the Docker runtime; advisory under the native runtime.</span>
+                </span>
+                <input id="resources-memory" type="number" min="0" max="1048576" step="1" inputmode="numeric" autocomplete="off" aria-label="Memory limit in MB">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">CPU quota</span>
+                  <span class="scaling-option-help">Share of one CPU core per replica, 0 to 100 percent. <code>100</code> = a full core. Empty or <code>0</code> means no limit. Enforced under the Docker runtime.</span>
+                </span>
+                <input id="resources-cpu" type="number" min="0" max="100" step="1" inputmode="numeric" autocomplete="off" aria-label="CPU quota percent (0 to 100)">
+              </label>
+            </fieldset>
+            <div class="env-form-actions">
+              <button id="resources-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+              <span id="resources-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+              <span id="resources-status" class="hibernate-status" hidden></span>
+            </div>
+            <p id="resources-error" class="error" hidden></p>
+
             <fieldset class="access-level hibernate-options">
               <legend>Hibernation</legend>
               <label>
@@ -245,7 +294,8 @@
                      inputmode="numeric" autocomplete="off" aria-label="Minimum warm replicas when idle">
             </label>
             <div class="env-form-actions">
-              <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden>Save</button>
+              <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+              <span id="hibernate-dirty" class="settings-dirty" hidden>Unsaved changes</span>
               <span id="hibernate-status" class="hibernate-status" hidden></span>
             </div>
             <p id="hibernate-error" class="error" hidden></p>
@@ -271,7 +321,8 @@
               <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
             </fieldset>
             <div class="env-form-actions">
-              <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden>Save</button>
+              <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+              <span id="scaling-dirty" class="settings-dirty" hidden>Unsaved changes</span>
               <span id="scaling-status" class="hibernate-status" hidden></span>
             </div>
             <p id="scaling-error" class="error" hidden></p>
@@ -322,7 +373,8 @@
               <p id="autoscale-ceiling" class="scaling-ceiling" aria-live="polite"></p>
             </fieldset>
             <div class="env-form-actions">
-              <button id="autoscale-save-btn" type="button" class="env-btn-primary" hidden>Save</button>
+              <button id="autoscale-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+              <span id="autoscale-dirty" class="settings-dirty" hidden>Unsaved changes</span>
               <span id="autoscale-status" class="hibernate-status" hidden></span>
             </div>
             <p id="autoscale-error" class="error" hidden></p>
@@ -362,9 +414,25 @@
           </section>
 
           <section id="settings-schedules-panel">
+            <h4 class="settings-section-title">Schedules</h4>
             <p class="settings-help">Cron-style jobs that run as short-lived processes against this app's bundle. Runs do not wake a hibernated app.</p>
             <div id="schedules-list" class="schedules-table"></div>
             <button type="button" class="btn-primary" id="schedules-add-btn">+ Add schedule</button>
+          </section>
+
+          <section id="danger-zone" class="danger-zone" hidden>
+            <h4>Danger zone</h4>
+            <p class="danger-zone-lead">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
+            <div class="danger-zone-row">
+              <label for="delete-confirm" class="danger-zone-label">
+                Type <code id="delete-confirm-slug"></code> to confirm:
+              </label>
+              <div class="danger-zone-controls">
+                <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" aria-describedby="delete-error">
+                <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
+              </div>
+            </div>
+            <p id="delete-error" class="error" hidden></p>
           </section>
         </section>
         <section id="detail-data-panel"          class="settings-tab-panel" role="tabpanel" hidden>
@@ -401,6 +469,7 @@
           </section>
 
           <section id="settings-shared-data-panel">
+            <h4 class="settings-section-title">Shared data</h4>
             <p class="settings-help">Mount another app's persistent data dir read-only. It appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app. Read-only is enforced by the Docker runtime; under the native runtime it is a convention only (writes through the symlink are not blocked).</p>
             <div id="shared-data-list" class="shared-data-table"></div>
             <button type="button" class="btn-primary" id="shared-data-add-btn">+ Mount data from another app</button>
@@ -414,6 +483,12 @@
               <label><input type="radio" name="access-level" value="shared"> Shared</label>
               <label><input type="radio" name="access-level" value="public"> Public</label>
             </fieldset>
+            <div class="env-form-actions">
+              <button id="visibility-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+              <span id="visibility-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+              <span id="visibility-status" class="hibernate-status" hidden></span>
+            </div>
+            <p id="visibility-error" class="error" hidden></p>
             <section class="members-section">
               <h4>Members</h4>
               <ul id="members-list"></ul>
@@ -441,20 +516,6 @@
                 <button id="grant-btn" type="button" class="btn-primary">Grant</button>
               </div>
               <p id="grant-error" class="error" hidden></p>
-            </section>
-            <section id="danger-zone" class="danger-zone" hidden>
-              <h4>Danger zone</h4>
-              <p class="danger-zone-lead">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
-              <div class="danger-zone-row">
-                <label for="delete-confirm" class="danger-zone-label">
-                  Type <code id="delete-confirm-slug"></code> to confirm:
-                </label>
-                <div class="danger-zone-controls">
-                  <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" aria-describedby="delete-error">
-                  <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
-                </div>
-              </div>
-              <p id="delete-error" class="error" hidden></p>
             </section>
           </section>
         </section>
