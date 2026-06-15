@@ -1805,3 +1805,39 @@ func TestScalingRowInputsAlign(t *testing.T) {
 	assertContains(t, "style.css", `.settings-tab-panel label:not(.scaling-row):has(> input[type="checkbox"])`,
 		"the checkbox-toggle flex rule must exclude .scaling-row so a checkbox settings-row keeps its grid alignment")
 }
+
+// TestProfileIdentityWiring pins the sidebar identity card + profile modal to
+// the static SPA. app.js is an un-importable IIFE, so the wiring is asserted by
+// source string-search; the pure model (initials/hue/fallbacks) is unit-tested
+// in internal/ui/jstests/user-identity.test.js. The PATCH /api/auth/me response
+// is the {user, can_create_apps} session envelope (see internal/api/auth.go
+// handlePatchMe + newSessionUser); the consumer must read body.user and gate
+// the password fields on user.can_set_password, or the class of silent-undefined
+// regression (Save shows nothing, password fields always render) recurs.
+func TestProfileIdentityWiring(t *testing.T) {
+	// Markup: the clickable identity card, the profile modal, its display-name
+	// input, and the logout button now living inside that modal.
+	assertContains(t, "index.html", `id="identity-card"`,
+		"the sidebar footer must keep the clickable identity card that opens the profile modal")
+	assertContains(t, "index.html", `id="profile-modal"`,
+		"the profile modal must exist for self-service display-name + password editing")
+	assertContains(t, "index.html", `id="profile-display-name"`,
+		"the profile modal must keep the display-name input")
+	assertContains(t, "index.html", `id="logout-button"`,
+		"the logout button moved into the profile modal; app.js still binds #logout-button")
+
+	// Consumer: the self-service endpoint, its response shape, and the shared
+	// identity model.
+	assertContains(t, "app.js", "/api/auth/me",
+		"the profile save handler must PATCH /api/auth/me (self-service display name + password)")
+	assertContains(t, "app.js", "can_set_password",
+		"the profile modal must gate the password fields on user.can_set_password from the /api/auth/me response; see internal/api/auth.go newSessionUser")
+	assertContains(t, "app.js", "identityModel",
+		"app.js must render the identity card via the unit-tested identityModel helper")
+	assertContains(t, "views/user-identity.js", "display_name",
+		"the identity model must read user.display_name; see internal/api/auth.go sessionUserResponse")
+	// The admin Users table surfaces the friendly name as a subtitle, reading
+	// userResponse.display_name (see internal/api/users.go toUserResponse).
+	assertContains(t, "app.js", "u.display_name",
+		"the Users table must render u.display_name as the username subtitle; see internal/api/users.go toUserResponse")
+}

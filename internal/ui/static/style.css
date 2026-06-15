@@ -280,7 +280,80 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   padding-top: 0.7rem;
   border-top: 1px solid var(--line);
 }
-.sidebar-footer-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+/* Identity card: clickable profile entry. Scoped under .sidebar-footer so it
+   overrides the generic ".sidebar-footer button" border/padding below. */
+.sidebar-footer .identity-card {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.42rem 0.45rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--ease), border-color var(--ease), box-shadow var(--ease);
+}
+.sidebar-footer .identity-card:hover {
+  background: rgba(56,189,248,0.06);
+  border-color: var(--line-2);
+  box-shadow: none;
+}
+.sidebar-footer .identity-card:hover .identity-cog {
+  color: var(--cyan-bright);
+  transform: rotate(35deg);
+}
+.identity-avatar {
+  --avatar-hue: 205;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #fff;
+  text-transform: uppercase;
+  user-select: none;
+  background: linear-gradient(145deg, hsl(var(--avatar-hue) 65% 56%), hsl(var(--avatar-hue) 74% 40%));
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14), 0 2px 6px rgba(0,0,0,0.35);
+}
+.identity-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.04rem;
+}
+.identity-name {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.identity-role {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.identity-role:empty { display: none; }
+.identity-cog {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-dim);
+  transition: color var(--ease), transform var(--ease);
+}
 .server-host {
   color: var(--text-muted);
   font-size: 0.72rem;
@@ -296,14 +369,6 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   text-overflow: ellipsis;
 }
 .server-host:empty { display: none; }
-.session-user {
-  color: var(--text-muted);
-  font-size: 0.78rem;
-  font-family: var(--mono);
-  letter-spacing: -0.01em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .sidebar-footer button {
   background: transparent;
   border: 1px solid var(--line-2);
@@ -327,11 +392,12 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 /* Collapsed icon rail: labels/text hidden, icons centered. */
 body.sidebar-collapsed .nav-label,
 body.sidebar-collapsed .sidebar-apps,
-body.sidebar-collapsed .session-user,
-body.sidebar-collapsed #server-host,
-body.sidebar-collapsed #logout-button { display: none; }
+body.sidebar-collapsed .identity-meta,
+body.sidebar-collapsed .identity-cog,
+body.sidebar-collapsed #server-host { display: none; }
 body.sidebar-collapsed .nav-item,
 body.sidebar-collapsed .sidebar-collapse { justify-content: center; }
+body.sidebar-collapsed .identity-card { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; }
 body.sidebar-collapsed .sidebar-collapse .nav-ico { transform: rotate(180deg); }
 body.sidebar-collapsed .sidebar-brand { justify-content: center; padding: 0.3rem 0 1rem; }
 body.sidebar-collapsed .sidebar-brand .brand { font-size: 0; gap: 0; }
@@ -394,10 +460,11 @@ main {
   /* The collapsed icon-rail mode does not apply inside the mobile drawer. */
   body.sidebar-collapsed .nav-label,
   body.sidebar-collapsed .sidebar-apps,
-  body.sidebar-collapsed .session-user,
-  body.sidebar-collapsed #server-host,
-  body.sidebar-collapsed #logout-button { display: revert; }
+  body.sidebar-collapsed .identity-meta,
+  body.sidebar-collapsed .identity-cog,
+  body.sidebar-collapsed #server-host { display: revert; }
   body.sidebar-collapsed .nav-item { justify-content: flex-start; }
+  body.sidebar-collapsed .identity-card { justify-content: flex-start; gap: 0.6rem; padding-left: 0.45rem; padding-right: 0.45rem; }
   body.sidebar-collapsed .sidebar-brand .brand { font-size: 1rem; gap: 0.55rem; }
   body.sidebar-open #sidebar-backdrop {
     display: block;
@@ -970,6 +1037,15 @@ main {
   font-family: var(--mono);
   font-weight: 600;
   color: var(--text);
+}
+/* Friendly display name shown under the username in the admin Users table. */
+.users-display-name {
+  display: block;
+  margin-top: 0.18rem;
+  font-family: var(--font);
+  font-weight: 400;
+  font-size: 0.74rem;
+  color: var(--text-muted);
 }
 
 #users-table td.users-created {
@@ -3406,3 +3482,84 @@ footer.brand-footer { display:flex; gap:1rem; justify-content:center;
   padding:1rem; font-size:.8rem; opacity:.7; }
 footer.brand-footer a { color:inherit; }
 .brand-logo { height:1.6rem; width:auto; display:block; }
+
+/* ── Profile modal ── */
+.profile-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+.identity-avatar-lg {
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  font-size: 1.02rem;
+}
+.profile-identity-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+.profile-username {
+  color: var(--text);
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.profile-role {
+  color: var(--cyan);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+.profile-role:empty { display: none; }
+.profile-login {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.profile-login:empty { display: none; }
+.profile-hint {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  margin-top: 0.4rem;
+}
+.profile-password {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.6rem 1rem 1rem;
+  margin-top: 1rem;
+}
+.profile-password[hidden] { display: none; }
+.profile-password legend {
+  padding: 0 0.45rem;
+  color: var(--text-soft);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.profile-success {
+  color: var(--green);
+  font-size: 0.8rem;
+}
+.profile-actions { justify-content: space-between; }
+.modal-actions .profile-logout {
+  color: var(--red);
+  border-color: rgba(248,113,113,0.4);
+}
+.modal-actions .profile-logout:hover:not(:disabled) {
+  background: var(--red-bg);
+  border-color: var(--red);
+  color: var(--red);
+  box-shadow: none;
+}
