@@ -21,6 +21,11 @@ type ContextUser struct {
 	ID       int64
 	Username string
 	Role     string
+	// DisplayName is the user's friendly name. Populated for forward-auth
+	// requests (from the resolved DB user) so the middleware can skip a write
+	// when the IdP name header is unchanged; empty on JWT/API-key paths, which
+	// do not need it.
+	DisplayName string
 }
 
 // TokenInfo describes the JWT the current request was authenticated with.

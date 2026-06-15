@@ -362,7 +362,11 @@ type ForwardAuthConfig struct {
 	UserHeader string `yaml:"user_header"`
 	// EmailHeader is accepted but not yet consumed by the middleware (reserved;
 	// the users table has no email column). Setting it has no effect today.
-	EmailHeader  string   `yaml:"email_header"`
+	EmailHeader string `yaml:"email_header"`
+	// NameHeader is the proxy header carrying the user's friendly name (e.g.
+	// Authelia's Remote-Name). When set, the middleware captures it as the
+	// forward-auth user's display name. Empty (default) disables name capture.
+	NameHeader   string   `yaml:"name_header"`
 	GroupsHeader string   `yaml:"groups_header"`
 	AdminGroups  []string `yaml:"admin_groups"`
 	DefaultRole  string   `yaml:"default_role"`
@@ -1488,6 +1492,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_EMAIL_HEADER"); v != "" {
 		cfg.Auth.ForwardAuth.EmailHeader = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_NAME_HEADER"); v != "" {
+		cfg.Auth.ForwardAuth.NameHeader = v
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_GROUPS_HEADER"); v != "" {
 		cfg.Auth.ForwardAuth.GroupsHeader = v

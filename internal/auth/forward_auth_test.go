@@ -22,6 +22,15 @@ type fakeUserStore struct {
 	// state for GetUserGroups / ReconcileUserFromGroups
 	storedGroups   []string            // returned by GetUserGroups
 	reconcileCalls []reconcileCallArgs // recorded calls to ReconcileUserFromGroups
+
+	// state for SetDisplayNameFromIdP
+	setNameCalls []setNameArgs // recorded calls to SetDisplayNameFromIdP
+	setNameErr   error         // if set, SetDisplayNameFromIdP returns this error
+}
+
+type setNameArgs struct {
+	userID int64
+	name   string
 }
 
 type reconcileCallArgs struct {
@@ -68,6 +77,19 @@ func (f *fakeUserStore) ReconcileUserFromGroups(userID int64, groups []string, m
 		defRole:  defaultRole,
 	})
 	return f.reconcileErr
+}
+
+func (f *fakeUserStore) SetDisplayNameFromIdP(userID int64, name string) error {
+	f.setNameCalls = append(f.setNameCalls, setNameArgs{userID: userID, name: name})
+	if f.setNameErr != nil {
+		return f.setNameErr
+	}
+	for _, u := range f.users {
+		if u.ID == userID {
+			u.DisplayName = name
+		}
+	}
+	return nil
 }
 
 func mustCIDR(t *testing.T, s string) *net.IPNet {
@@ -760,5 +782,89 @@ func TestForwardAuth_UntrustedPeerNoUserHeader_NoWarn(t *testing.T) {
 
 	if strings.Contains(buf.String(), "forward_auth") {
 		t.Fatalf("untrusted peer without user header must not trigger warn log, got: %s", buf.String())
+	}
+}
+
+// TestForwardAuth_NameHeader_CapturesDisplayName verifies that when a name
+// header is configured and present, the middleware captures it as the user's
+// display name and attaches it to the request context.
+func TestForwardAuth_NameHeader_CapturesDisplayName(t *testing.T) {
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{
+		Enabled: true, UserHeader: "Remote-User", NameHeader: "Remote-Name", DefaultRole: "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("Remote-User", "alice")
+	r.Header.Set("Remote-Name", "Alice Liddell")
+	mw.ServeHTTP(httptest.NewRecorder(), r)
+
+	if len(store.setNameCalls) != 1 || store.setNameCalls[0].name != "Alice Liddell" {
+		t.Fatalf("expected one SetDisplayNameFromIdP call with \"Alice Liddell\", got %+v", store.setNameCalls)
+	}
+	if h.user == nil || h.user.DisplayName != "Alice Liddell" {
+		t.Fatalf("expected display name on context, got %+v", h.user)
+	}
+}
+
+// TestForwardAuth_NameHeader_UnchangedSkipsWrite verifies the equality guard:
+// when the header matches the stored display name, no write is issued (this
+// middleware runs on every request, so the unchanged case must stay read-only).
+func TestForwardAuth_NameHeader_UnchangedSkipsWrite(t *testing.T) {
+	store := newFakeStore()
+	store.users["bob"] = &ContextUser{ID: 7, Username: "bob", Role: "developer", DisplayName: "Bob Builder"}
+	cfg := ForwardAuthConfig{
+		Enabled: true, UserHeader: "Remote-User", NameHeader: "Remote-Name", DefaultRole: "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("Remote-User", "bob")
+	r.Header.Set("Remote-Name", "Bob Builder") // identical to stored
+	mw.ServeHTTP(httptest.NewRecorder(), r)
+
+	if len(store.setNameCalls) != 0 {
+		t.Fatalf("unchanged name must not write, got calls %+v", store.setNameCalls)
+	}
+}
+
+// TestForwardAuth_NameHeader_OffWhenUnconfiguredOrEmpty verifies no capture
+// happens when the name header is not configured, and none happens when the
+// header is configured but the request omits a value.
+func TestForwardAuth_NameHeader_OffWhenUnconfiguredOrEmpty(t *testing.T) {
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	// Name header NOT configured: a Remote-Name header is ignored.
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{Enabled: true, UserHeader: "Remote-User", DefaultRole: "developer"}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(&reachedHandler{})
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("Remote-User", "carol")
+	r.Header.Set("Remote-Name", "Carol Danvers")
+	mw.ServeHTTP(httptest.NewRecorder(), r)
+	if len(store.setNameCalls) != 0 {
+		t.Fatalf("unconfigured name header must not write, got %+v", store.setNameCalls)
+	}
+
+	// Configured but the request omits the value: no write.
+	store2 := newFakeStore()
+	cfg2 := ForwardAuthConfig{Enabled: true, UserHeader: "Remote-User", NameHeader: "Remote-Name", DefaultRole: "developer"}
+	mw2 := ForwardAuthMiddleware(store2, cfg2, trusted)(&reachedHandler{})
+	r2 := httptest.NewRequest("GET", "/", nil)
+	r2.RemoteAddr = "127.0.0.1:5555"
+	r2.Header.Set("Remote-User", "dave")
+	mw2.ServeHTTP(httptest.NewRecorder(), r2)
+	if len(store2.setNameCalls) != 0 {
+		t.Fatalf("missing name value must not write, got %+v", store2.setNameCalls)
 	}
 }
