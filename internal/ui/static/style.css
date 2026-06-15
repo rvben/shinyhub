@@ -354,21 +354,6 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   color: var(--text-dim);
   transition: color var(--ease), transform var(--ease);
 }
-.server-host {
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-family: var(--mono);
-  letter-spacing: 0;
-  padding: 0.18rem 0.5rem;
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius);
-  white-space: nowrap;
-  align-self: flex-start;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.server-host:empty { display: none; }
 .sidebar-footer button {
   background: transparent;
   border: 1px solid var(--line-2);
@@ -393,8 +378,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 body.sidebar-collapsed .nav-label,
 body.sidebar-collapsed .sidebar-apps,
 body.sidebar-collapsed .identity-meta,
-body.sidebar-collapsed .identity-cog,
-body.sidebar-collapsed #server-host { display: none; }
+body.sidebar-collapsed .identity-cog { display: none; }
 body.sidebar-collapsed .nav-item,
 body.sidebar-collapsed .sidebar-collapse { justify-content: center; }
 body.sidebar-collapsed .identity-card { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; }
@@ -461,8 +445,7 @@ main {
   body.sidebar-collapsed .nav-label,
   body.sidebar-collapsed .sidebar-apps,
   body.sidebar-collapsed .identity-meta,
-  body.sidebar-collapsed .identity-cog,
-  body.sidebar-collapsed #server-host { display: revert; }
+  body.sidebar-collapsed .identity-cog { display: revert; }
   body.sidebar-collapsed .nav-item { justify-content: flex-start; }
   body.sidebar-collapsed .identity-card { justify-content: flex-start; gap: 0.6rem; padding-left: 0.45rem; padding-right: 0.45rem; }
   body.sidebar-collapsed .sidebar-brand .brand { font-size: 1rem; gap: 0.55rem; }
