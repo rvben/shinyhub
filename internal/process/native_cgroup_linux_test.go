@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -165,5 +166,61 @@ time.sleep(60)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("app cgroup dir still present after teardown: %v", err)
+	}
+}
+
+// TestEnsureDelegatedBase_Integration verifies the delicate self-move that only
+// a real systemd-service context exercises: the process moves itself out of its
+// service cgroup so that cgroup can delegate the memory controller to per-app
+// children. Run it as a transient service with Delegate=memory, e.g.:
+//
+//	sudo systemd-run -p Delegate=memory -p Environment=WWC_DELEGATE_IT=1 \
+//	    --wait --pipe ./process.test \
+//	    -test.run TestEnsureDelegatedBase_Integration -test.v
+//
+// It asserts ensureDelegatedBase moves this process into base/_supervisor,
+// enables +memory on the base, is idempotent, and that a per-app child cgroup
+// under the base exposes memory.current. Gated: needs WWC_DELEGATE_IT=1 and a
+// memory-delegated cgroup (systemd Delegate=memory or equivalent).
+func TestEnsureDelegatedBase_Integration(t *testing.T) {
+	if os.Getenv("WWC_DELEGATE_IT") == "" {
+		t.Skip("set WWC_DELEGATE_IT=1 and run under systemd Delegate=memory")
+	}
+	base, err := ensureDelegatedBase()
+	if err != nil {
+		t.Fatalf("ensureDelegatedBase: %v", err)
+	}
+	// This process must now live in base/_supervisor.
+	rel, err := cgroupV2RelPath(os.Getpid())
+	if err != nil {
+		t.Fatalf("cgroupV2RelPath(self): %v", err)
+	}
+	if !strings.HasSuffix(rel, "/_supervisor") {
+		t.Fatalf("self cgroup = %q, want it moved into .../_supervisor", rel)
+	}
+	// The base must delegate the memory controller to its children.
+	if !cgroupHasField(filepath.Join(base, "cgroup.subtree_control"), "memory") {
+		t.Fatalf("base %s does not have +memory in subtree_control", base)
+	}
+	// Idempotent: a second call returns the same base without error.
+	base2, err := ensureDelegatedBase()
+	if err != nil || base2 != base {
+		t.Fatalf("ensureDelegatedBase not idempotent: base2=%q err=%v", base2, err)
+	}
+	// A per-app child under the prepared base exposes memory.current.
+	dir, err := setupAppCgroup(base, "app-selfmove-it-0", os.Getpid())
+	if err != nil {
+		t.Fatalf("setupAppCgroup: %v", err)
+	}
+	if _, err := appCgroupCurrentMemory(dir); err != nil {
+		t.Fatalf("appCgroupCurrentMemory: %v", err)
+	}
+	// setupAppCgroup moved this process into the app cgroup; move it back to
+	// _supervisor so the now-empty app cgroup can be torn down.
+	if err := writeCgroupProc(filepath.Join(base, "_supervisor"), os.Getpid()); err != nil {
+		t.Fatalf("move self back to _supervisor: %v", err)
+	}
+	if err := teardownAppCgroup(dir); err != nil {
+		t.Fatalf("teardownAppCgroup: %v", err)
 	}
 }
