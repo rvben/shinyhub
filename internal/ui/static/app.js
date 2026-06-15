@@ -163,8 +163,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const refreshButton = document.getElementById('refresh-button');
   const fleetHealthEl = document.getElementById('fleet-health');
   const logoutButton = document.getElementById('logout-button');
-  const serverHost  = document.getElementById('server-host');
-  if (serverHost) serverHost.textContent = window.location.host;
   // Sidebar identity card + profile modal (self-service display name + password).
   const identityCard    = document.getElementById('identity-card');
   const identityAvatar  = document.getElementById('identity-avatar');
