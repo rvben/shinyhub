@@ -260,7 +260,7 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 		// Enable warm-wake (freeze + cgroup reclaim) when configured. When
 		// disabled, Suspend reports not-supported and the watcher hibernates via
 		// Stop exactly as before.
-		dockerRT.SetSnapshot(cfg.Runtime.Docker.Snapshot.Enabled, cfg.Runtime.Docker.Snapshot.ReclaimMinFraction)
+		dockerRT.SetSnapshot(cfg.Runtime.Snapshot.Enabled, cfg.Runtime.Snapshot.ReclaimMinFraction)
 		return dockerRT, nil
 	case "native":
 		return process.NewNativeRuntime(), nil
@@ -972,7 +972,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		IdentityHeadersGlobal:        cfg.Auth.IdentityHeadersEnabled(),
 		Clustered:                    isClustered(cfg),
 		InstanceID:                   cfg.Server.InstanceID,
-		MaxSuspended:                 cfg.Runtime.Docker.Snapshot.MaxSuspended,
+		MaxSuspended:                 cfg.Runtime.Snapshot.MaxSuspended,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 	watcher.SetResume(resumeFn)
