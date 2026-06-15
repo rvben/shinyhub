@@ -257,6 +257,10 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 		if err != nil {
 			return nil, fmt.Errorf("docker runtime: %w", err)
 		}
+		// Enable warm-wake (freeze + cgroup reclaim) when configured. When
+		// disabled, Suspend reports not-supported and the watcher hibernates via
+		// Stop exactly as before.
+		dockerRT.SetSnapshot(cfg.Runtime.Docker.Snapshot.Enabled, cfg.Runtime.Docker.Snapshot.ReclaimMinFraction)
 		return dockerRT, nil
 	case "native":
 		return process.NewNativeRuntime(), nil
