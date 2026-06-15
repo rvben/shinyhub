@@ -653,6 +653,125 @@ func (m *Manager) Stop(slug string) error {
 	return nil
 }
 
+// Suspend freezes every running replica of slug via the tier runtime's
+// Snapshotter capability, releasing host RAM. It returns freed=true ONLY when
+// every replica's warmed memory was released; in that case each frozen replica's
+// in-memory status becomes StatusSuspended (the entry is kept - the process/
+// container is paused, not gone). If the runtime is not a Snapshotter, or any
+// replica could not be freed, Suspend restores any replicas it had frozen (so
+// the whole pool is back to a normal running state the caller can Stop) and
+// returns freed=false, so the caller falls back to Stop (which always frees RAM).
+func (m *Manager) Suspend(slug string) (bool, error) {
+	type target struct {
+		index  int
+		handle RunHandle
+		tier   string
+	}
+	m.mu.Lock()
+	pool := m.entries[slug]
+	targets := make([]target, 0, len(pool))
+	for i, e := range pool {
+		if e != nil && e.info.Status == StatusRunning {
+			targets = append(targets, target{i, e.handle, e.tier})
+		}
+	}
+	m.mu.Unlock()
+	if len(targets) == 0 {
+		return false, fmt.Errorf("app %s not running", slug)
+	}
+
+	frozen := make([]target, 0, len(targets))
+	var firstErr error
+	allFreed := true
+	for _, t := range targets {
+		sn, ok := m.runtimeFor(t.tier).(Snapshotter)
+		if !ok {
+			allFreed = false
+			firstErr = ErrRuntimeNotSnapshotter
+			break
+		}
+		freed, err := sn.Suspend(context.Background(), t.handle)
+		switch {
+		case err != nil:
+			allFreed = false
+			if firstErr == nil {
+				firstErr = err
+			}
+		case !freed:
+			allFreed = false
+		default:
+			frozen = append(frozen, t)
+		}
+	}
+
+	if allFreed {
+		m.mu.Lock()
+		pool := m.entries[slug]
+		for _, t := range frozen {
+			if t.index < len(pool) && pool[t.index] != nil {
+				pool[t.index].info.Status = StatusSuspended
+			}
+		}
+		m.mu.Unlock()
+		return true, nil
+	}
+
+	// Partial/failed: restore any replicas we froze (Resume is idempotent) so the
+	// whole pool is back to a normal running state and the caller's Stop path
+	// works without hitting a frozen cgroup.
+	for _, t := range frozen {
+		if sn, ok := m.runtimeFor(t.tier).(Snapshotter); ok {
+			if _, rerr := sn.Resume(context.Background(), t.handle); rerr != nil {
+				slog.Warn("manager: restore after partial suspend failed", "slug", slug, "idx", t.index, "err", rerr)
+			}
+		}
+	}
+	return false, firstErr
+}
+
+// Resume restores a single suspended replica via the tier runtime's Snapshotter
+// capability and returns its (possibly updated) route endpoint. The in-memory
+// entry returns to StatusRunning with the resumed endpoint's URL/WorkerID/handle.
+// Returns a wrapped ErrRuntimeNotSnapshotter, ErrReplicaNotSuspended, or
+// ErrReplicaNotFound sentinel when the slot cannot be resumed, so the caller
+// cold-boots it instead.
+func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
+	m.mu.Lock()
+	pool := m.entries[slug]
+	if index >= len(pool) || pool[index] == nil {
+		m.mu.Unlock()
+		return ReplicaEndpoint{}, fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
+	}
+	e := pool[index]
+	if e.info.Status != StatusSuspended {
+		m.mu.Unlock()
+		return ReplicaEndpoint{}, fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotSuspended)
+	}
+	handle, tier := e.handle, e.tier
+	m.mu.Unlock()
+
+	sn, ok := m.runtimeFor(tier).(Snapshotter)
+	if !ok {
+		return ReplicaEndpoint{}, fmt.Errorf("app %s replica %d: %w", slug, index, ErrRuntimeNotSnapshotter)
+	}
+	ep, err := sn.Resume(context.Background(), handle)
+	if err != nil {
+		// The driver has torn down the stale resource per contract; the entry is
+		// left for the caller's cold-boot (Start) to replace.
+		return ReplicaEndpoint{}, fmt.Errorf("resume replica %d: %w", index, err)
+	}
+
+	m.mu.Lock()
+	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil {
+		pool[index].info.Status = StatusRunning
+		pool[index].info.EndpointURL = ep.URL
+		pool[index].info.WorkerID = ep.WorkerID
+		pool[index].handle = ep.Handle
+	}
+	m.mu.Unlock()
+	return ep, nil
+}
+
 // StopAll gracefully stops every tracked app across all slugs, concurrently.
 // Used on server shutdown when server.shutdown_apps is "stop" so the host is
 // left clean instead of with orphaned subprocesses/containers. Errors are
