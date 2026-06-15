@@ -230,6 +230,18 @@ func (c *dockerClient) startContainer(id string) error {
 	return c.postEmpty(fmt.Sprintf("/containers/%s/start", id))
 }
 
+// pauseContainer freezes a running container's processes via the cgroup freezer
+// (POST /containers/{id}/pause). The container keeps its memory and PID; thaw it
+// with unpauseContainer.
+func (c *dockerClient) pauseContainer(id string) error {
+	return c.postEmpty(fmt.Sprintf("/containers/%s/pause", id))
+}
+
+// unpauseContainer thaws a paused container (POST /containers/{id}/unpause).
+func (c *dockerClient) unpauseContainer(id string) error {
+	return c.postEmpty(fmt.Sprintf("/containers/%s/unpause", id))
+}
+
 // removeContainer forcibly removes a container.
 func (c *dockerClient) removeContainer(id string) error {
 	url := fmt.Sprintf("%s/containers/%s?force=true", c.base, id)
