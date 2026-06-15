@@ -134,6 +134,13 @@ var ErrReplicaNotSuspended = errors.New("replica not suspended")
 // Snapshotter is an optional capability for runtimes that can freeze a running
 // replica's warmed memory and restore it, skipping a cold restart on wake. A
 // runtime that does not implement it uses the existing stop/cold-start path.
+//
+// A runtime that implements Snapshotter must also ensure its Stop/Signal path can
+// terminate a SUSPENDED replica - a frozen resource (e.g. a paused cgroup) does
+// not deliver SIGTERM until it is thawed, so the runtime must unfreeze before
+// killing (or kill the frozen resource directly). Until a real Snapshotter
+// runtime is registered, suspended state never arises in production: Manager.
+// Suspend returns ErrRuntimeNotSnapshotter and the watcher falls back to Stop.
 type Snapshotter interface {
 	// Suspend freezes the replica identified by handle and tries to release its
 	// warmed memory from host RAM. It returns freed=true ONLY when the warmed

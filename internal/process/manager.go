@@ -702,13 +702,21 @@ func (m *Manager) Suspend(slug string) (bool, error) {
 		default:
 			frozen = append(frozen, t)
 		}
+		if !allFreed {
+			// Abort early: we are falling back to Stop for the whole pool, so
+			// freezing the remaining replicas would only be undone below.
+			break
+		}
 	}
 
 	if allFreed {
 		m.mu.Lock()
 		pool := m.entries[slug]
 		for _, t := range frozen {
-			if t.index < len(pool) && pool[t.index] != nil {
+			// Re-check identity under the lock: a concurrent stop/replace may have
+			// niled or replaced this slot while Suspend ran unlocked. Only flip the
+			// status of the entry we actually froze, never a fresh replacement.
+			if t.index < len(pool) && pool[t.index] != nil && pool[t.index].handle == t.handle {
 				pool[t.index].info.Status = StatusSuspended
 			}
 		}
@@ -762,7 +770,10 @@ func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
 	}
 
 	m.mu.Lock()
-	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil {
+	// Re-check identity under the lock: only update the entry we resumed, never a
+	// fresh replacement created by a concurrent stop/start while Resume ran
+	// unlocked (matches the Start/StopReplica handle-equality idiom).
+	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
 		pool[index].info.Status = StatusRunning
 		pool[index].info.EndpointURL = ep.URL
 		pool[index].info.WorkerID = ep.WorkerID
