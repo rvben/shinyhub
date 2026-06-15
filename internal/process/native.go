@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,22 +69,95 @@ func applySharedMounts(p StartParams) error {
 	return nil
 }
 
-// compile-time check that NativeRuntime implements Runtime.
-var _ Runtime = (*NativeRuntime)(nil)
+// compile-time checks that NativeRuntime implements Runtime and Snapshotter.
+var (
+	_ Runtime     = (*NativeRuntime)(nil)
+	_ Snapshotter = (*NativeRuntime)(nil)
+)
 
 // NativeRuntime runs app processes as direct OS child processes.
 type NativeRuntime struct {
 	mu    sync.Mutex
 	cmds  map[int]*exec.Cmd
 	procs map[int]*gops.Process // cached gopsutil handles for CPU delta computation
+
+	// Warm-wake (Snapshotter) state. snapshotEnabled is the configured intent;
+	// snapshotReady is set once ensureDelegatedBase has prepared the cgroup
+	// subtree (lazily, on the first snapshot-enabled Start). cgroupBase is the
+	// delegated base dir under which per-app cgroups are created; appCgroups maps
+	// a running PID to its app cgroup dir so Suspend/Resume/teardown can find it.
+	// All four are guarded by mu (snapshotEnabled/reclaimMinFraction are set once
+	// at startup before any Start, so reads of them need no lock).
+	snapshotEnabled    bool
+	reclaimMinFraction float64
+	snapshotOnce       sync.Once
+	snapshotReady      bool
+	cgroupBase         string
+	appCgroups         map[int]string
 }
 
 // NewNativeRuntime returns a ready-to-use NativeRuntime.
 func NewNativeRuntime() *NativeRuntime {
 	return &NativeRuntime{
-		cmds:  make(map[int]*exec.Cmd),
-		procs: make(map[int]*gops.Process),
+		cmds:       make(map[int]*exec.Cmd),
+		procs:      make(map[int]*gops.Process),
+		appCgroups: make(map[int]string),
 	}
+}
+
+// SetSnapshot enables warm-wake (SIGSTOP freeze + per-app cgroup reclaim) and
+// sets the reclaim-success threshold. Called once at startup from buildRuntime,
+// before any Start. The delegated cgroup base is prepared lazily on the first
+// snapshot-enabled Start (see ensureSnapshotBase); if that preparation fails the
+// runtime degrades gracefully and hibernates via Stop as before.
+func (r *NativeRuntime) SetSnapshot(enabled bool, reclaimMinFraction float64) {
+	r.snapshotEnabled = enabled
+	r.reclaimMinFraction = reclaimMinFraction
+}
+
+// ensureSnapshotBase prepares the delegated cgroup base exactly once, on the
+// first snapshot-enabled Start. It runs BEFORE the child is forked so the child
+// is born in base/_supervisor (where shinyhub now lives) rather than base, which
+// must stay empty of processes to delegate the memory controller. Any failure
+// leaves snapshotReady false and warm-wake stays off for the process lifetime.
+func (r *NativeRuntime) ensureSnapshotBase() {
+	if !r.snapshotEnabled {
+		return
+	}
+	r.snapshotOnce.Do(func() {
+		base, err := ensureDelegatedBase()
+		if err != nil {
+			slog.Warn("native: warm-wake unavailable; apps hibernate via stop", "err", err)
+			return
+		}
+		r.mu.Lock()
+		r.cgroupBase = base
+		r.snapshotReady = true
+		r.mu.Unlock()
+		slog.Info("native: warm-wake enabled", "cgroup_base", base)
+	})
+}
+
+// placeInAppCgroup moves a just-started replica process into its own per-app
+// cgroup so its memory can be reclaimed in isolation on Suspend. A failure is
+// non-fatal: the replica simply hibernates via Stop instead of warm-freeze.
+func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
+	r.mu.Lock()
+	ready := r.snapshotReady
+	base := r.cgroupBase
+	r.mu.Unlock()
+	if !ready {
+		return
+	}
+	dir, err := setupAppCgroup(base, fmt.Sprintf("app-%s-%d", p.Slug, p.Index), pid)
+	if err != nil {
+		slog.Warn("native: per-app cgroup setup failed; replica hibernates via stop",
+			"slug", p.Slug, "idx", p.Index, "err", err)
+		return
+	}
+	r.mu.Lock()
+	r.appCgroups[pid] = dir
+	r.mu.Unlock()
 }
 
 // HostPreparesDeps reports true: native runtime executes app processes on the
@@ -106,6 +180,9 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	if err := applySharedMounts(p); err != nil {
 		return ReplicaEndpoint{}, err
 	}
+	// Prepare the delegated cgroup base before forking (once) so the child is
+	// born in base/_supervisor and can be moved into its own app cgroup below.
+	r.ensureSnapshotBase()
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
 	cmd.Env = nativeChildEnv(p)
@@ -122,6 +199,9 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	r.mu.Lock()
 	r.cmds[pid] = cmd
 	r.mu.Unlock()
+	// Move the replica into its own cgroup for isolated warm-wake reclaim. No-op
+	// when warm-wake is off or unavailable; failures degrade to stop-hibernate.
+	r.placeInAppCgroup(p, pid)
 	// MemoryLimitMB and CPUQuotaPercent are enforced by DockerRuntime only;
 	// the native runtime inherits OS scheduling with no additional limits.
 	return ReplicaEndpoint{
@@ -153,7 +233,9 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 		// Adopted process: this runtime instance never started it, so we have
 		// no *exec.Cmd to wait on. Poll the kernel for liveness; signal 0 is a
 		// permission/existence probe that returns ESRCH once the PID is gone.
-		return waitForPIDExit(ctx, handle.PID)
+		err := waitForPIDExit(ctx, handle.PID)
+		r.teardownAppCgroupFor(handle.PID)
+		return err
 	}
 
 	err := cmd.Wait()
@@ -161,7 +243,27 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 	r.mu.Lock()
 	delete(r.procs, handle.PID)
 	r.mu.Unlock()
+	// The process has exited, so its cgroup is now empty and can be removed.
+	r.teardownAppCgroupFor(handle.PID)
 	return err
+}
+
+// teardownAppCgroupFor removes a replica's per-app cgroup once its process has
+// exited and forgets the mapping. A no-op for a pid that was never tracked
+// (warm-wake off, setup failed, or an adopted process from a prior instance).
+func (r *NativeRuntime) teardownAppCgroupFor(pid int) {
+	r.mu.Lock()
+	dir, ok := r.appCgroups[pid]
+	if ok {
+		delete(r.appCgroups, pid)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	if err := teardownAppCgroup(dir); err != nil {
+		slog.Warn("native: app cgroup teardown failed", "pid", pid, "dir", dir, "err", err)
+	}
 }
 
 // adoptedPollInterval is how often we re-check a PID we don't own. Two seconds
@@ -263,4 +365,83 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 		}
 		return ExitInfo{}, fmt.Errorf("wait one-shot: %w", err)
 	}
+}
+
+// Suspend freezes a replica's process group (SIGSTOP) and reclaims its resident
+// memory to swap via its per-app cgroup's memory.reclaim, returning freed=true
+// only when the reclaimed fraction meets the configured threshold. On any
+// non-(true,nil) result it sends SIGCONT so the process is left normally
+// stoppable. When warm-wake is disabled or its cgroup base never came up it
+// reports ErrRuntimeNotSnapshotter so the watcher hibernates via Stop; a replica
+// that was started without a per-app cgroup reports (false, nil) for the same
+// fallback without flagging the whole runtime as non-snapshotting.
+func (r *NativeRuntime) Suspend(_ context.Context, handle RunHandle) (bool, error) {
+	if !r.snapshotEnabled {
+		return false, ErrRuntimeNotSnapshotter
+	}
+	r.mu.Lock()
+	ready := r.snapshotReady
+	dir, tracked := r.appCgroups[handle.PID]
+	r.mu.Unlock()
+	if !ready {
+		return false, ErrRuntimeNotSnapshotter
+	}
+	if !tracked {
+		// This replica has no per-app cgroup (setup failed, or it predates
+		// delegation): it cannot be warm-frozen, so cold-stop it.
+		return false, nil
+	}
+
+	pid := handle.PID
+	// Freeze the whole process group so its memory is stable across the reclaim.
+	if err := syscall.Kill(-pid, syscall.SIGSTOP); err != nil {
+		if err == syscall.ESRCH {
+			return false, fmt.Errorf("suspend: process group %d is gone", pid)
+		}
+		return false, fmt.Errorf("sigstop pgid %d: %w", pid, err)
+	}
+	cont := func(reason string) {
+		if cerr := syscall.Kill(-pid, syscall.SIGCONT); cerr != nil && cerr != syscall.ESRCH {
+			slog.Warn("native: sigcont after "+reason, "pid", pid, "err", cerr)
+		}
+	}
+	preMem, err := appCgroupCurrentMemory(dir)
+	if err != nil {
+		cont("failed pre-measure")
+		return false, fmt.Errorf("measure memory before reclaim: %w", err)
+	}
+	if err := reclaimAppCgroup(dir, preMem); err != nil {
+		cont("failed reclaim")
+		return false, fmt.Errorf("reclaim: %w", err)
+	}
+	postMem, err := appCgroupCurrentMemory(dir)
+	if err != nil {
+		cont("failed post-measure")
+		return false, fmt.Errorf("measure memory after reclaim: %w", err)
+	}
+	if !reclaimFreed(preMem, postMem, r.reclaimMinFraction) {
+		// Not enough RAM freed (e.g. no swap): thaw and let the caller Stop, which
+		// frees all the RAM. Never leave a frozen-but-resident idle app.
+		cont("insufficient reclaim")
+		return false, nil
+	}
+	// Success: leave the process group frozen with its memory reclaimed.
+	return true, nil
+}
+
+// Resume thaws a previously suspended replica (SIGCONT). It is idempotent:
+// SIGCONT on an already-running process group is a no-op. The PID and port are
+// preserved, so the route URL is unchanged and the returned endpoint carries an
+// empty URL for the Manager to preserve the known route. A vanished process
+// group (ESRCH) is a genuine error so the caller cold-boots; its now-empty cgroup
+// is reclaimed by the replica's Wait.
+func (r *NativeRuntime) Resume(_ context.Context, handle RunHandle) (ReplicaEndpoint, error) {
+	pid := handle.PID
+	if err := syscall.Kill(-pid, syscall.SIGCONT); err != nil {
+		if err == syscall.ESRCH {
+			return ReplicaEndpoint{}, fmt.Errorf("resume: process group %d is gone", pid)
+		}
+		return ReplicaEndpoint{}, fmt.Errorf("sigcont pgid %d: %w", pid, err)
+	}
+	return ReplicaEndpoint{Provider: "native", WorkerID: strconv.Itoa(pid), Handle: handle}, nil
 }
