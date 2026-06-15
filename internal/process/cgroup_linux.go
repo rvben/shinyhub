@@ -54,10 +54,22 @@ func reclaimPIDMemory(pid int, targetBytes uint64) error {
 	// never happens. We treat EAGAIN as success: the kernel reclaimed what it
 	// could and the caller measures the actual RSS drop against the threshold.
 	data := []byte(strconv.FormatUint(targetBytes, 10))
-	if _, err := syscall.Write(int(f.Fd()), data); err != nil && err != syscall.EAGAIN {
-		return fmt.Errorf("write %s: %w", reclaimFile, err)
+	fd := int(f.Fd())
+	for {
+		// The returned byte count is kernel-specific for memory.reclaim and is
+		// intentionally ignored. EAGAIN means the kernel reclaimed some but not
+		// the full requested amount - acceptable, the caller measures the real
+		// drop. Retry on EINTR.
+		if _, werr := syscall.Write(fd, data); werr != nil {
+			if werr == syscall.EINTR {
+				continue
+			}
+			if werr != syscall.EAGAIN {
+				return fmt.Errorf("write %s: %w", reclaimFile, werr)
+			}
+		}
+		return nil
 	}
-	return nil
 }
 
 // cgroupV2RelPath returns the cgroup-v2 path of pid relative to the v2 mount,

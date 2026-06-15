@@ -301,10 +301,6 @@ func (r *DockerRuntime) Suspend(_ context.Context, handle RunHandle) (bool, erro
 	if st.Pid == 0 {
 		return false, fmt.Errorf("container %s has no pid to reclaim", id)
 	}
-	preMem, err := cgroupCurrentMemory(st.Pid)
-	if err != nil {
-		return false, fmt.Errorf("measure memory before reclaim: %w", err)
-	}
 	if err := r.client.pauseContainer(id); err != nil {
 		return false, fmt.Errorf("pause: %w", err)
 	}
@@ -312,6 +308,13 @@ func (r *DockerRuntime) Suspend(_ context.Context, handle RunHandle) (bool, erro
 		if uerr := r.client.unpauseContainer(id); uerr != nil {
 			slog.Warn("docker: unpause after "+reason, "container", id, "err", uerr)
 		}
+	}
+	// Measure the baseline AFTER the freeze: a frozen container's memory cannot
+	// change between the baseline and the reclaim, so the threshold is stable.
+	preMem, err := cgroupCurrentMemory(st.Pid)
+	if err != nil {
+		unpause("failed pre-measure")
+		return false, fmt.Errorf("measure memory before reclaim: %w", err)
 	}
 	if err := reclaimPIDMemory(st.Pid, preMem); err != nil {
 		unpause("failed reclaim")
