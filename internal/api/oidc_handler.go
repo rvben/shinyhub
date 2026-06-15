@@ -135,6 +135,11 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		})
 	}
+	// Refresh the IdP-governed display name from the OIDC name claim. No-op for
+	// accounts with a local password (self-managed) or when the claim is absent.
+	if err := s.store.SetDisplayNameFromIdP(user.ID, oidcUser.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "oidc display name from idp: %v\n", err)
+	}
 
 	// Authoritative role reconciliation from IdP groups. Only when the provider
 	// actually sent the groups claim - an absent claim must not demote the user.

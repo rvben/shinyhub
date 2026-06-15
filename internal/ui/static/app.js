@@ -18,6 +18,7 @@ import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
+import { identityModel } from '/static/views/user-identity.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -162,9 +163,29 @@ document.addEventListener('DOMContentLoaded', () => {
   const refreshButton = document.getElementById('refresh-button');
   const fleetHealthEl = document.getElementById('fleet-health');
   const logoutButton = document.getElementById('logout-button');
-  const sessionUser = document.getElementById('session-user');
   const serverHost  = document.getElementById('server-host');
   if (serverHost) serverHost.textContent = window.location.host;
+  // Sidebar identity card + profile modal (self-service display name + password).
+  const identityCard    = document.getElementById('identity-card');
+  const identityAvatar  = document.getElementById('identity-avatar');
+  const identityName    = document.getElementById('identity-name');
+  const identityRole    = document.getElementById('identity-role');
+  const profileModal    = document.getElementById('profile-modal');
+  const profileClose    = document.getElementById('profile-close');
+  const profileForm     = document.getElementById('profile-form');
+  const profileAvatar   = document.getElementById('profile-avatar');
+  const profileUsername = document.getElementById('profile-username');
+  const profileRole     = document.getElementById('profile-role');
+  const profileLogin    = document.getElementById('profile-login');
+  const profileNameField   = document.getElementById('profile-name-field');
+  const profileDisplayName = document.getElementById('profile-display-name');
+  const profileSubmit      = document.getElementById('profile-submit');
+  const profilePwSection   = document.getElementById('profile-password-section');
+  const profilePwManaged   = document.getElementById('profile-password-managed');
+  const profileCurrentPw   = document.getElementById('profile-current-password');
+  const profileNewPw       = document.getElementById('profile-new-password');
+  const profileError    = document.getElementById('profile-error');
+  const profileSuccess  = document.getElementById('profile-success');
   const appGrid = document.getElementById('app-grid');
   const emptyState = document.getElementById('empty-state');
   const emptyStateHeading = document.getElementById('empty-state-heading');
@@ -512,7 +533,8 @@ document.addEventListener('DOMContentLoaded', () => {
     state.auditHasMore = false;
     state.canCreateApps = false;
     newAppButton.hidden = true;
-    sessionUser.textContent = '';
+    closeProfileModal();
+    renderIdentity(null);
     setHidden(logoutButton, true);
     setHidden(loginView, false);
     setHidden(appsView, true);
@@ -533,7 +555,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function showLoggedIn(payload) {
     state.user = payload.user;
     state.canCreateApps = !!payload.can_create_apps;
-    sessionUser.textContent = payload.user.username;
+    renderIdentity(payload.user);
     setHidden(logoutButton, false);
     setHidden(loginView, true);
     document.body.dataset.auth = 'in';
@@ -550,6 +572,111 @@ document.addEventListener('DOMContentLoaded', () => {
     // The router (started by the caller) will mount the view that matches
     // the current URL — do not pre-show apps-view here, it leaks through
     // on direct loads of /users, /audit-log, /apps/<slug>.
+  }
+
+  // ── Sidebar identity card + profile modal ──────────────────────────────────
+
+  // renderIdentity paints the sidebar identity card from a session user. null
+  // clears it (logged-out / boot). Guarded against a missing card so a partial
+  // DOM never throws out of the IIFE and takes the whole dashboard down with it.
+  function renderIdentity(user) {
+    if (!identityCard) return;
+    const m = identityModel(user);
+    identityAvatar.textContent = m.initials;
+    identityAvatar.style.setProperty('--avatar-hue', m.hue);
+    identityName.textContent = m.name;
+    identityRole.textContent = m.roleLabel;
+    identityCard.setAttribute('aria-label', user ? `Open your profile, ${m.name}` : 'Open your profile');
+  }
+
+  function openProfileModal() {
+    if (!profileModal || !state.user) return;
+    const u = state.user;
+    const m = identityModel(u);
+    profileAvatar.textContent = m.initials;
+    profileAvatar.style.setProperty('--avatar-hue', m.hue);
+    profileUsername.textContent = m.name;
+    profileRole.textContent = m.roleLabel;
+    // When a display name is set, show the underlying @username (normal case, so
+    // it never reads like a second role); otherwise the primary line already is
+    // the username, so leave this blank.
+    profileLogin.textContent = m.secondary ? `@${m.secondary}` : '';
+
+    // SSO accounts are governed by the identity provider: name + password are
+    // read-only here (refreshed from the IdP on each login). Local accounts get
+    // the full editor. can_set_password is the local-account signal.
+    const isLocalAccount = !!u.can_set_password;
+    setHidden(profileNameField, !isLocalAccount);
+    setHidden(profilePwSection, !isLocalAccount);
+    setHidden(profilePwManaged, isLocalAccount);
+    setHidden(profileSubmit, !isLocalAccount);
+    profileDisplayName.value = u.display_name || '';
+    profileCurrentPw.value = '';
+    profileNewPw.value = '';
+    setError(profileError, '');
+    setHidden(profileSuccess, true);
+    profileModal.hidden = false;
+    modalTrap(profileModal).activate();
+    (isLocalAccount ? profileDisplayName : (profileClose || logoutButton)).focus();
+  }
+
+  function closeProfileModal() {
+    if (!profileModal || profileModal.hidden) return;
+    profileModal.hidden = true;
+    modalTrap(profileModal).release();
+    setError(profileError, '');
+    setHidden(profileSuccess, true);
+  }
+
+  async function submitProfile(event) {
+    event.preventDefault();
+    if (!state.user) return;
+    const canSetPw = !!state.user.can_set_password;
+    // SSO accounts have nothing to save (name + password are IdP-managed); the
+    // Save button is hidden, but guard against an Enter-key submit anyway.
+    if (!canSetPw) { closeProfileModal(); return; }
+    setError(profileError, '');
+    setHidden(profileSuccess, true);
+
+    const body = { display_name: profileDisplayName.value.trim() };
+    const wantsPwChange = canSetPw &&
+      (profileNewPw.value.length > 0 || profileCurrentPw.value.length > 0);
+    if (wantsPwChange) {
+      if (profileNewPw.value.length < 8) {
+        setError(profileError, 'New password must be at least 8 characters');
+        return;
+      }
+      body.current_password = profileCurrentPw.value;
+      body.new_password = profileNewPw.value;
+    }
+
+    let resp;
+    try {
+      resp = await api('/api/auth/me', { method: 'PATCH', body: JSON.stringify(body) });
+    } catch {
+      setError(profileError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Failed to save profile';
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+      setError(profileError, msg);
+      return;
+    }
+    let data = null;
+    try { data = await resp.json(); } catch {}
+    if (data && data.user) {
+      state.user = data.user;
+      renderIdentity(data.user);
+    }
+    profileCurrentPw.value = '';
+    profileNewPw.value = '';
+    profileSuccess.textContent = wantsPwChange ? 'Profile and password updated' : 'Profile updated';
+    setHidden(profileSuccess, false);
+    // If the admin Users table is on screen, refresh it so this user's display
+    // name updates there too.
+    if (usersView && !usersView.hidden) loadUsers();
   }
 
   async function handleUnauthorized() {
@@ -951,6 +1078,13 @@ document.addEventListener('DOMContentLoaded', () => {
         nameCell.appendChild(tag);
       }
       nameCell.appendChild(makeCopyButton(u.username, `Copy username ${u.username}`));
+      // Friendly display name (when set) as a subtitle under the username.
+      if (u.display_name) {
+        const dn = document.createElement('span');
+        dn.className = 'users-display-name';
+        dn.textContent = u.display_name;
+        nameCell.appendChild(dn);
+      }
       tr.appendChild(nameCell);
 
       // Role (editable select; disabled for self)
@@ -2316,6 +2450,14 @@ document.addEventListener('DOMContentLoaded', () => {
   newUserForm.addEventListener('submit', submitNewUser);
   newUserUsername.addEventListener('input', renderNewUserSnippet);
 
+  // Profile modal: open from the sidebar identity card; close/submit wiring.
+  if (identityCard) identityCard.addEventListener('click', openProfileModal);
+  if (profileClose) profileClose.addEventListener('click', closeProfileModal);
+  if (profileForm)  profileForm.addEventListener('submit', submitProfile);
+  if (profileModal) profileModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeProfileModal();
+  });
+
   if (newUserSnippetCopy) {
     const copyLabel  = newUserSnippetCopy.querySelector('.copy-label');
     const copyStatus = document.getElementById('new-user-snippet-status');
@@ -2383,6 +2525,8 @@ document.addEventListener('DOMContentLoaded', () => {
         closeNewAppModal();
       } else if (!newUserModal.hidden) {
         closeNewUserModal();
+      } else if (profileModal && !profileModal.hidden) {
+        closeProfileModal();
       } else if (!resetPwModal.hidden) {
         closeResetPasswordModal();
       } else if (scheduleModal && !scheduleModal.hidden) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -44,7 +45,17 @@ type User struct {
 	Username     string
 	PasswordHash string
 	Role         string
+	DisplayName  string
 	CreatedAt    time.Time
+}
+
+// HasLocalPassword reports whether the hash is a usable bcrypt password (i.e.
+// the account can log in with a username/password and may change it from the
+// profile page). OAuth/OIDC accounts carry an empty hash and forward-auth /
+// system accounts carry the "!disabled" sentinel; neither starts with the
+// bcrypt "$2" prefix, so both correctly report false.
+func HasLocalPassword(hash string) bool {
+	return strings.HasPrefix(hash, "$2")
 }
 
 type CreateUserParams struct {
@@ -66,11 +77,11 @@ func (s *Store) CreateUser(p CreateUserParams) error {
 
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?`,
+		`SELECT id, username, password_hash, role, display_name, created_at FROM users WHERE username = ?`,
 		username,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -81,11 +92,11 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, created_at FROM users WHERE id = ?`,
+		`SELECT id, username, password_hash, role, display_name, created_at FROM users WHERE id = ?`,
 		id,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -97,7 +108,7 @@ func (s *Store) GetUserByID(id int64) (*User, error) {
 // ListUsers returns all users ordered by username.
 func (s *Store) ListUsers() ([]*User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, password_hash, role, created_at FROM users ORDER BY username`)
+		`SELECT id, username, password_hash, role, display_name, created_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +116,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 	var users []*User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, &u)
@@ -161,6 +172,48 @@ func (s *Store) UpdateUserPassword(id int64, hash string) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateUserDisplayName sets the friendly display name for the user identified
+// by ID (self-service profile edit). The caller is responsible for trimming and
+// length-validating name; an empty string is allowed and re-opens the field to
+// SSO backfill on the next login. Returns ErrNotFound if no such user exists.
+func (s *Store) UpdateUserDisplayName(id int64, name string) error {
+	result, err := s.db.Exec(`UPDATE users SET display_name = ? WHERE id = ?`, name, id)
+	if err != nil {
+		return fmt.Errorf("update user display name: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update user display name rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetDisplayNameFromIdP refreshes a user's display name from an external
+// identity provider on login. It applies ONLY to IdP-governed accounts - those
+// without a local bcrypt password - so a local account's self-set name is never
+// overwritten, even if that local user has also linked an SSO provider. SSO
+// accounts are refreshed on every login so a name changed upstream propagates.
+// A blank name is a no-op, so a login that omits the name claim never blanks a
+// good name. The "$2%" guard is the SQL mirror of HasLocalPassword (bcrypt
+// hashes start with "$2"); keep the two in sync. Not finding a matching row is
+// not an error.
+func (s *Store) SetDisplayNameFromIdP(id int64, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if _, err := s.db.Exec(
+		`UPDATE users SET display_name = ? WHERE id = ? AND password_hash NOT LIKE '$2%'`,
+		name, id,
+	); err != nil {
+		return fmt.Errorf("set display name from idp: %w", err)
 	}
 	return nil
 }
@@ -296,11 +349,11 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 
 func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.created_at
 		FROM users u JOIN api_keys k ON k.user_id = u.id
 		WHERE k.key_hash = ?`, hash)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1479,12 +1532,12 @@ func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
 
 func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.created_at
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`, provider, providerID)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1531,7 +1584,7 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	scanUser := func(row *sql.Row) (*User, error) {
 		var u User
-		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.CreatedAt); err != nil {
+		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrNotFound
 			}
@@ -1540,12 +1593,12 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return &u, nil
 	}
 	const linkedQuery = `
-		SELECT u.id, u.username, u.password_hash, u.role, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.created_at
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`
 	const userByIDQuery = `
-		SELECT id, username, password_hash, role, created_at
+		SELECT id, username, password_hash, role, display_name, created_at
 		FROM users WHERE id = ?`
 
 	if u, gerr := scanUser(tx.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {

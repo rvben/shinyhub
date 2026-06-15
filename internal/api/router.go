@@ -669,6 +669,7 @@ func (s *Server) buildRouter() chi.Router {
 		// just discard its own session cookie.
 		r.Post("/api/auth/logout", s.handleLogout)
 		r.Get("/api/auth/me", s.handleMe)
+		r.Patch("/api/auth/me", s.handlePatchMe) // self-service profile: display name + own password
 		r.Get("/api/apps", s.handleListApps)
 		r.Post("/api/apps", s.handleCreateApp)
 		r.Get("/api/apps/{slug}", s.handleGetApp)

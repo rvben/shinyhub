@@ -55,11 +55,15 @@
       <div id="sidebar-apps" class="sidebar-apps"></div>
 
       <div class="sidebar-footer">
+        <button id="identity-card" type="button" class="identity-card" aria-haspopup="dialog" aria-label="Open your profile">
+          <span id="identity-avatar" class="identity-avatar" aria-hidden="true">?</span>
+          <span class="identity-meta">
+            <span id="identity-name" class="identity-name">&nbsp;</span>
+            <span id="identity-role" class="identity-role"></span>
+          </span>
+          <svg class="identity-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 4.4v1.8M12 17.8v1.8M4.4 12h1.8M17.8 12h1.8M6.7 6.7l1.3 1.3M16 16l1.3 1.3M17.3 6.7l-1.3 1.3M8 16l-1.3 1.3"/></svg>
+        </button>
         <span id="server-host" class="server-host" aria-label="Server"></span>
-        <div class="sidebar-footer-row">
-          <span id="session-user" class="session-user"></span>
-          <button id="logout-button" type="button" hidden>Logout</button>
-        </div>
         <button id="sidebar-collapse" type="button" class="sidebar-collapse" aria-label="Collapse sidebar" aria-expanded="true">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="14 7 9 12 14 17"/></svg>
           <span class="nav-label">Collapse</span>
@@ -756,6 +760,54 @@
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+    <!-- Profile modal: self-service display name + own password, plus logout -->
+    <div id="profile-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="profile-heading">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="profile-heading" class="modal-title">Your profile</h2>
+          <button id="profile-close" type="button" aria-label="Close profile"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+        </div>
+        <div class="modal-body">
+          <div class="profile-identity">
+            <span id="profile-avatar" class="identity-avatar identity-avatar-lg" aria-hidden="true">?</span>
+            <div class="profile-identity-meta">
+              <span id="profile-username" class="profile-username"></span>
+              <span id="profile-role" class="profile-role"></span>
+              <span id="profile-login" class="profile-login"></span>
+            </div>
+          </div>
+
+          <form id="profile-form">
+            <div id="profile-name-field">
+              <label for="profile-display-name">Display name</label>
+              <input id="profile-display-name" type="text" maxlength="80"
+                     autocomplete="name" spellcheck="false" placeholder="Your name">
+              <p class="profile-hint">Shown across the dashboard. Leave blank to use your username.</p>
+            </div>
+
+            <fieldset id="profile-password-section" class="profile-password">
+              <legend>Change password</legend>
+              <label for="profile-current-password">Current password</label>
+              <input id="profile-current-password" type="password"
+                     autocomplete="current-password" placeholder="Your current password">
+              <label for="profile-new-password">New password</label>
+              <input id="profile-new-password" type="password" minlength="8"
+                     autocomplete="new-password" placeholder="At least 8 characters">
+            </fieldset>
+            <p id="profile-password-managed" class="profile-hint" hidden>Your name and password are managed by your identity provider.</p>
+
+            <p id="profile-error" class="error" hidden></p>
+            <p id="profile-success" class="profile-success" role="status" aria-live="polite" hidden></p>
+
+            <div class="modal-actions profile-actions">
+              <button id="logout-button" type="button" class="profile-logout">Log out</button>
+              <button id="profile-submit" type="submit" class="btn-primary">Save changes</button>
+            </div>
+          </form>
         </div>
       </div>
     </div>
