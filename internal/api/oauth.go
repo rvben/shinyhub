@@ -100,6 +100,11 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		})
 	}
+	// Refresh the IdP-governed display name from GitHub. No-op for accounts with
+	// a local password (self-managed) or when GitHub sends no name. Non-fatal.
+	if err := s.store.SetDisplayNameFromIdP(user.ID, ghUser.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "github display name from idp: %v\n", err)
+	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
 	if err != nil {
@@ -206,6 +211,11 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 			UserID: &user.ID, Action: "create_user", ResourceType: "user",
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		})
+	}
+	// Refresh the IdP-governed display name from Google. No-op for accounts with
+	// a local password (self-managed) or when Google sends no name. Non-fatal.
+	if err := s.store.SetDisplayNameFromIdP(user.ID, gUser.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "google display name from idp: %v\n", err)
 	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)

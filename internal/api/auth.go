@@ -118,9 +118,27 @@ type loginResponse struct {
 }
 
 type sessionUserResponse struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name"`
+	// CanSetPassword is true for local accounts (a real bcrypt password is on
+	// file) and false for SSO/forward-auth accounts. The profile UI uses it to
+	// show the change-password fields only when they would actually work.
+	CanSetPassword bool `json:"can_set_password"`
+}
+
+// newSessionUser builds the public session view from a full DB user record so
+// the display name and password-management capability travel with every
+// authenticated response.
+func newSessionUser(u *db.User) *sessionUserResponse {
+	return &sessionUserResponse{
+		ID:             u.ID,
+		Username:       u.Username,
+		Role:           u.Role,
+		DisplayName:    u.DisplayName,
+		CanSetPassword: db.HasLocalPassword(u.PasswordHash),
+	}
 }
 
 type sessionResponse struct {
@@ -187,7 +205,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	writeJSON(w, http.StatusOK, loginResponse{
 		Token: token,
-		User:  &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
+		User:  newSessionUser(user),
 	})
 }
 
@@ -234,7 +252,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	auth.SetSessionCookie(w, r, token, s.cfg.TrustedProxyNets)
 	ctxUser := &auth.ContextUser{ID: user.ID, Username: user.Username, Role: user.Role}
 	writeJSON(w, http.StatusOK, sessionResponse{
-		User:          &sessionUserResponse{ID: user.ID, Username: user.Username, Role: user.Role},
+		User:          newSessionUser(user),
 		CanCreateApps: canCreateApps(ctxUser),
 	})
 }
@@ -283,8 +301,131 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
 		}
 	}
+	// Prefer the full DB record so display name + password capability ride
+	// along. Fall back to the JWT claims if the read fails (e.g. the row was
+	// removed mid-session) so /api/auth/me stays available for logout/redirect.
+	su := &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role}
+	if dbUser, err := s.store.GetUserByID(u.ID); err == nil {
+		su = newSessionUser(dbUser)
+	}
 	writeJSON(w, http.StatusOK, sessionResponse{
-		User:          &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role},
+		User:          su,
+		CanCreateApps: canCreateApps(u),
+	})
+}
+
+type patchMeRequest struct {
+	// DisplayName is a pointer so the handler can tell "set to empty" (clear the
+	// name, re-opening it to SSO backfill) apart from "field omitted".
+	DisplayName     *string `json:"display_name"`
+	CurrentPassword string  `json:"current_password"`
+	NewPassword     string  `json:"new_password"`
+}
+
+// handlePatchMe lets the authenticated user edit their own profile: the
+// friendly display name and, for local accounts, their password (verifying the
+// current one first). SSO and system accounts cannot set a password here. It
+// returns the refreshed session view so the dashboard can update the sidebar
+// without a reload.
+func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// System accounts (e.g. __deploy__) are owned by env/config, not the UI.
+	if db.IsSystemUser(u.Username) {
+		writeError(w, http.StatusForbidden, "system users cannot edit their profile")
+		return
+	}
+
+	var req patchMeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+
+	current, err := s.store.GetUserByID(u.ID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	changedDisplayName := false
+	if req.DisplayName != nil {
+		// SSO accounts get their name from the identity provider (refreshed on
+		// every login); only local accounts edit it here, mirroring the password
+		// rule so a self-managed account and an IdP-managed one are unambiguous.
+		if !db.HasLocalPassword(current.PasswordHash) {
+			writeError(w, http.StatusForbidden, "display name is managed by your identity provider")
+			return
+		}
+		name := strings.TrimSpace(*req.DisplayName)
+		if len([]rune(name)) > 80 {
+			writeError(w, http.StatusBadRequest, "display name must be at most 80 characters")
+			return
+		}
+		if name != current.DisplayName {
+			if err := s.store.UpdateUserDisplayName(u.ID, name); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal server error")
+				return
+			}
+			changedDisplayName = true
+		}
+	}
+
+	if req.NewPassword != "" {
+		if !db.HasLocalPassword(current.PasswordHash) {
+			writeError(w, http.StatusForbidden, "password is managed by your identity provider")
+			return
+		}
+		if len(req.NewPassword) < 8 {
+			writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+			return
+		}
+		if err := auth.VerifyPassword(current.PasswordHash, req.CurrentPassword); err != nil {
+			writeError(w, http.StatusUnauthorized, "current password is incorrect")
+			return
+		}
+		hash, err := auth.HashPassword(req.NewPassword)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if err := s.store.UpdateUserPassword(u.ID, hash); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "change_own_password",
+			ResourceType: "user",
+			ResourceID:   u.Username,
+			IPAddress:    s.ClientIP(r),
+		})
+	}
+
+	if changedDisplayName {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "update_profile",
+			ResourceType: "user",
+			ResourceID:   u.Username,
+			IPAddress:    s.ClientIP(r),
+		})
+	}
+
+	fresh, err := s.store.GetUserByID(u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionResponse{
+		User:          newSessionUser(fresh),
 		CanCreateApps: canCreateApps(u),
 	})
 }
