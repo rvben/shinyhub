@@ -64,10 +64,11 @@ type SharedMountResolver func(slug string) ([]SharedMount, error)
 type Status string
 
 const (
-	StatusRunning Status = "running"
-	StatusStopped Status = "stopped"
-	StatusCrashed Status = "crashed"
-	StatusUnknown Status = "unknown"
+	StatusRunning   Status = "running"
+	StatusStopped   Status = "stopped"
+	StatusCrashed   Status = "crashed"
+	StatusUnknown   Status = "unknown"
+	StatusSuspended Status = "suspended"
 )
 
 // DefaultTier is the tier name a replica runs under when StartParams.Tier is

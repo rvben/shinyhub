@@ -1946,6 +1946,10 @@ const (
 	// ReplicaStatusLost marks a replica whose worker stopped heartbeating. It is
 	// excluded from routing and is not auto-restarted.
 	ReplicaStatusLost = "lost"
+	// ReplicaStatusSuspended marks a replica that is hibernated but resumable: its
+	// warmed memory was snapshotted/frozen and host RAM freed, so wake can Resume
+	// it instead of cold-booting. Distinct from "stopped", which must cold-boot.
+	ReplicaStatusSuspended = "suspended"
 )
 
 // ReplicaDesiredWarm marks a replica deliberately stopped by warm-shrink:
