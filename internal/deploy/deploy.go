@@ -32,9 +32,9 @@ func init() {
 // (or replace) host-side dependency installation. Production code always
 // goes through process.Sync / process.SyncR.
 var (
-	pythonSyncFn       = process.Sync
-	rSyncFn            = process.SyncR
-	requirementsLockFn = process.EnsureRequirementsLock
+	pythonSyncFn    = process.Sync
+	rSyncFn         = process.SyncR
+	ensureProjectFn = process.EnsureProject
 )
 
 // autoInstrumentPackages is the overlay layered into a Python app's
@@ -322,17 +322,17 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 			switch appType {
 			case "python":
 				if hostDeps {
+					// Convert a requirements.txt-only app into a uv project on first
+					// prep so it locks via the native uv.lock - one reproducibility
+					// mechanism for every Python app. Best-effort: a failed
+					// conversion cleans itself up and the app falls back to
+					// requirements mode, never blocking the boot.
+					if cerr := ensureProjectFn(p.BundleDir); cerr != nil {
+						slog.Warn("deploy: project conversion failed; using requirements.txt",
+							"slug", p.Slug, "err", cerr)
+					}
 					if err = pythonSyncFn(p.BundleDir); err != nil {
 						return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
-					}
-					// Freeze a loose requirements.txt into a lock on first prep so
-					// later cold starts reuse this resolution instead of drifting
-					// onto a newer, possibly-broken one. Best-effort: a compile
-					// failure leaves the app on live resolution (prior behavior)
-					// and never blocks the boot.
-					if lerr := requirementsLockFn(p.BundleDir); lerr != nil {
-						slog.Warn("deploy: requirements lock failed; using live resolution",
-							"slug", p.Slug, "err", lerr)
 					}
 				}
 				// Only inferred-command Python boots resolve auto-instrumentation:
@@ -590,11 +590,11 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 			if workers <= 0 {
 				workers = 1
 			}
-			// Prefer the compiled lock only when this host prepares the deps; a
-			// container/worker replica runs from a bundle that may not carry the
-			// lock, so it must keep using requirements.txt.
-			useLock := p.hostPreparesDeps(tier)
-			cmd = buildCommandFn(p.BundleDir, port, workers, bindHost, instrument, useLock)
+			// hostDeps gates project mode for a SYNTHESIZED project: a
+			// container/worker replica gets the bundle but not this host's synced
+			// .venv, so it falls back to requirements.txt. An author-shipped
+			// pyproject is project mode regardless.
+			cmd = buildCommandFn(p.BundleDir, port, workers, bindHost, instrument, p.hostPreparesDeps(tier))
 		case "r":
 			cmd = BuildRCommand(p.BundleDir, port, bindHost)
 		default:
@@ -700,43 +700,36 @@ func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 	return []string{"Rscript", "--vanilla", "-e", expr}
 }
 
-// requirementsFileFor returns the dependency file `uv run --with-requirements`
-// should use for a non-pyproject app, or "" if neither file exists. When useLock
-// is set and a compiled lock is present, it wins; otherwise the loose
-// requirements.txt is used (the prior behavior, and the only safe choice when
-// the deps are prepared off-host).
-func requirementsFileFor(bundleDir string, useLock bool) string {
-	if useLock {
-		if _, err := os.Stat(filepath.Join(bundleDir, process.RequirementsLockName)); err == nil {
-			return process.RequirementsLockName
-		}
+// useProjectMode reports whether to launch in uv project mode. An author-shipped
+// pyproject.toml is project mode everywhere (it ships with the bundle). A
+// pyproject SYNTHESIZED from requirements by this host is project mode only where
+// this host prepared the deps and synced the .venv - a container/worker replica
+// gets the bundle but not the .venv, so it falls back to requirements.txt.
+func useProjectMode(bundleDir string, hostDeps bool) bool {
+	if _, err := os.Stat(filepath.Join(bundleDir, "pyproject.toml")); err != nil {
+		return false
 	}
-	if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
-		return "requirements.txt"
+	if process.IsSynthesizedProject(bundleDir) {
+		return hostDeps
 	}
-	return ""
+	return true
 }
 
 // buildCommand constructs the uv launch command for a bundle directory.
-// If a pyproject.toml is present, uv sync has already prepared the environment
-// and we use plain `uv run`. If only requirements.txt is present, we pass
-// --with-requirements so uv installs deps into an ephemeral environment.
-// When autoInstrument is set, the OTEL overlay is layered in via --with and
-// the entrypoint is wrapped with opentelemetry-instrument; the app's own
-// environment is never modified. bindHost has the same meaning as in
-// BuildRCommand.
-// useLock prefers a compiled requirements.lock over requirements.txt when one is
-// present and this host prepares the dependencies (so the lock is guaranteed to
-// be alongside the bundle the command runs against). It freezes the resolution
-// to what was locked at deploy, instead of re-resolving loose pins on every cold
-// start.
-func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument, useLock bool) []string {
+// In project mode (a pyproject.toml, author-shipped or synthesized by
+// EnsureProject) uv sync has prepared a locked .venv and we use plain `uv run`.
+// Otherwise we pass --with-requirements so uv installs deps into an ephemeral
+// environment. When autoInstrument is set, the OTEL overlay is layered in via
+// --with and the entrypoint is wrapped with opentelemetry-instrument; the app's
+// own environment is never modified. bindHost has the same meaning as in
+// BuildRCommand. hostDeps gates project mode for a synthesized project (see
+// useProjectMode).
+func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument, hostDeps bool) []string {
 	base := []string{"uv", "run", "--no-project"}
-	if _, err := os.Stat(filepath.Join(bundleDir, "pyproject.toml")); err == nil {
-		// Project mode: environment was synced by process.Sync.
+	if useProjectMode(bundleDir, hostDeps) {
 		base = []string{"uv", "run"}
-	} else if reqFile := requirementsFileFor(bundleDir, useLock); reqFile != "" {
-		base = append(base, "--with-requirements", reqFile)
+	} else if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
+		base = append(base, "--with-requirements", "requirements.txt")
 	}
 	if autoInstrument {
 		for _, pkg := range autoInstrumentPackages {

@@ -47,44 +47,66 @@ func Sync(dir string) error {
 	return nil
 }
 
-// RequirementsLockName is the compiled, fully-pinned lock written next to a
-// requirements.txt app. Cold starts launch from this frozen resolution instead
-// of re-resolving loose pins (which drifts as upstream publishes new versions).
-const RequirementsLockName = "requirements.lock"
+// SynthesizedProjectMarker is a sentinel EnsureProject drops next to a
+// pyproject.toml it generated from a requirements.txt. It distinguishes a
+// synthesized project (valid only where this host prepared the deps and synced
+// the .venv) from one the author shipped (valid everywhere).
+const SynthesizedProjectMarker = ".shinyhub-synthesized-project"
 
-// uvPipCompileCmd builds `uv pip compile requirements.txt -o requirements.lock`
-// with a scrubbed env (the resolver runs index/build code).
-func uvPipCompileCmd(dir string) *exec.Cmd {
-	cmd := exec.Command("uv", "pip", "compile", "requirements.txt", "-o", RequirementsLockName)
+func uvInitCmd(dir string) *exec.Cmd {
+	// --bare yields a non-package project (no [build-system]), so `uv sync`
+	// installs only the dependencies, never the app directory itself. --name is
+	// explicit because the version dir is an all-digits timestamp, which uv
+	// would otherwise use as the project name.
+	cmd := exec.Command("uv", "init", "--bare", "--name", "shinyhub-app")
 	cmd.Dir = dir
 	cmd.Env = SanitizedEnv()
 	return cmd
 }
 
-// EnsureRequirementsLock freezes a requirements.txt-only app into a lock the
-// first time it is prepared, so every later cold start installs the same
-// resolution rather than re-resolving loose pins. It is a no-op when:
-//   - a pyproject.toml is present (uv.lock already provides reproducibility),
-//   - there is no requirements.txt to lock, or
-//   - a lock already exists (reuse it; a redeploy lands in a fresh version dir
-//     with no lock, so it re-locks from the new requirements).
+func uvAddRequirementsCmd(dir string) *exec.Cmd {
+	// uv parses the requirements file (including its grammar) and writes the
+	// resolved deps into pyproject.toml plus a native uv.lock.
+	cmd := exec.Command("uv", "add", "--requirements", "requirements.txt")
+	cmd.Dir = dir
+	cmd.Env = SanitizedEnv()
+	return cmd
+}
+
+// EnsureProject converts a requirements.txt-only Python app into a uv project so
+// it gains a native uv.lock (fully pinned, hashed, requires-python-aware) and
+// launches in project mode. Reproducibility then comes from one mechanism -
+// uv.lock - for both author-provided and requirements-based apps.
 //
-// Compiling in dir targets the same interpreter `uv run` selects from the same
-// dir, keeping the lock consistent with the launch.
-func EnsureRequirementsLock(dir string) error {
+// It is a no-op when a pyproject.toml is already present (the author's, or a
+// prior conversion) or when there is no requirements.txt to convert. On a failed
+// `uv add` it removes the half-built project so the app falls back cleanly to
+// requirements mode rather than launching against an incomplete environment.
+func EnsureProject(dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err == nil {
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(dir, "requirements.txt")); err != nil {
 		return nil
 	}
-	if _, err := os.Stat(filepath.Join(dir, RequirementsLockName)); err == nil {
-		return nil
+	if out, err := uvInitCmd(dir).CombinedOutput(); err != nil {
+		return fmt.Errorf("uv init: %w\n%s", err, out)
 	}
-	if out, err := uvPipCompileCmd(dir).CombinedOutput(); err != nil {
-		return fmt.Errorf("uv pip compile: %w\n%s", err, out)
+	if out, err := uvAddRequirementsCmd(dir).CombinedOutput(); err != nil {
+		_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
+		_ = os.Remove(filepath.Join(dir, "uv.lock"))
+		_ = os.RemoveAll(filepath.Join(dir, ".venv"))
+		return fmt.Errorf("uv add requirements: %w\n%s", err, out)
 	}
+	_ = os.WriteFile(filepath.Join(dir, SynthesizedProjectMarker), []byte("1\n"), 0o644)
 	return nil
+}
+
+// IsSynthesizedProject reports whether the pyproject.toml in dir was generated
+// by EnsureProject (rather than shipped by the app author).
+func IsSynthesizedProject(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, SynthesizedProjectMarker))
+	return err == nil
 }
 
 // EnsurePython runs `uv python install <version>` if version is non-empty.
