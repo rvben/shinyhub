@@ -263,7 +263,14 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 		dockerRT.SetSnapshot(cfg.Runtime.Snapshot.Enabled, cfg.Runtime.Snapshot.ReclaimMinFraction)
 		return dockerRT, nil
 	case "native":
-		return process.NewNativeRuntime(), nil
+		nativeRT := process.NewNativeRuntime()
+		// Enable warm-wake (SIGSTOP freeze + per-app cgroup reclaim) when
+		// configured. If the delegated cgroup subtree cannot be prepared at
+		// runtime (no systemd Delegate=memory, no cgroup v2, or no swap), the
+		// runtime degrades gracefully: Suspend reports not-supported and the
+		// watcher hibernates via Stop exactly as before.
+		nativeRT.SetSnapshot(cfg.Runtime.Snapshot.Enabled, cfg.Runtime.Snapshot.ReclaimMinFraction)
+		return nativeRT, nil
 	case "fargate":
 		return buildFargateRuntime(ctx, cfg, tier, bundleTokenKey)
 	case "remote_docker":
