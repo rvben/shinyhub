@@ -64,10 +64,11 @@ type SharedMountResolver func(slug string) ([]SharedMount, error)
 type Status string
 
 const (
-	StatusRunning Status = "running"
-	StatusStopped Status = "stopped"
-	StatusCrashed Status = "crashed"
-	StatusUnknown Status = "unknown"
+	StatusRunning   Status = "running"
+	StatusStopped   Status = "stopped"
+	StatusCrashed   Status = "crashed"
+	StatusUnknown   Status = "unknown"
+	StatusSuspended Status = "suspended"
 )
 
 // DefaultTier is the tier name a replica runs under when StartParams.Tier is
@@ -521,6 +522,17 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	m.mu.Unlock()
 
 	rt := m.runtimeFor(tier)
+	// A container may be frozen - either intentionally suspended, or left paused
+	// by a suspend whose unpause failed. SIGTERM (and `docker kill`) do not reach
+	// a frozen resource until it is thawed. Resume is idempotent (a no-op on a
+	// running, non-paused container), so unconditionally thaw before signalling:
+	// this avoids both a hung stop and a leaked paused container, regardless of
+	// the entry's recorded status.
+	if sn, ok := rt.(Snapshotter); ok {
+		if _, err := sn.Resume(context.Background(), handle); err != nil {
+			slog.Warn("manager: unfreeze before stop failed", "slug", slug, "idx", index, "err", err)
+		}
+	}
 	if err := rt.Signal(handle, syscall.SIGTERM); err != nil {
 		// The signal was not delivered, so this replica is still running. Undo
 		// the intentional-stop mark set above so that if it later exits on its
@@ -650,6 +662,142 @@ func (m *Manager) Stop(slug string) error {
 		return errors.Join(combined...)
 	}
 	return nil
+}
+
+// Suspend freezes every running replica of slug via the tier runtime's
+// Snapshotter capability, releasing host RAM. It returns freed=true ONLY when
+// every replica's warmed memory was released; in that case each frozen replica's
+// in-memory status becomes StatusSuspended (the entry is kept - the process/
+// container is paused, not gone). If the runtime is not a Snapshotter, or any
+// replica could not be freed, Suspend restores any replicas it had frozen (so
+// the whole pool is back to a normal running state the caller can Stop) and
+// returns freed=false, so the caller falls back to Stop (which always frees RAM).
+func (m *Manager) Suspend(slug string) (bool, error) {
+	type target struct {
+		index  int
+		handle RunHandle
+		tier   string
+	}
+	m.mu.Lock()
+	pool := m.entries[slug]
+	targets := make([]target, 0, len(pool))
+	for i, e := range pool {
+		if e != nil && e.info.Status == StatusRunning {
+			targets = append(targets, target{i, e.handle, e.tier})
+		}
+	}
+	m.mu.Unlock()
+	if len(targets) == 0 {
+		return false, fmt.Errorf("app %s not running", slug)
+	}
+
+	frozen := make([]target, 0, len(targets))
+	var firstErr error
+	allFreed := true
+	for _, t := range targets {
+		sn, ok := m.runtimeFor(t.tier).(Snapshotter)
+		if !ok {
+			allFreed = false
+			firstErr = ErrRuntimeNotSnapshotter
+			break
+		}
+		freed, err := sn.Suspend(context.Background(), t.handle)
+		switch {
+		case err != nil:
+			allFreed = false
+			if firstErr == nil {
+				firstErr = err
+			}
+		case !freed:
+			allFreed = false
+		default:
+			frozen = append(frozen, t)
+		}
+		if !allFreed {
+			// Abort early: we are falling back to Stop for the whole pool, so
+			// freezing the remaining replicas would only be undone below.
+			break
+		}
+	}
+
+	if allFreed {
+		m.mu.Lock()
+		pool := m.entries[slug]
+		for _, t := range frozen {
+			// Re-check identity under the lock: a concurrent stop/replace may have
+			// niled or replaced this slot while Suspend ran unlocked. Only flip the
+			// status of the entry we actually froze, never a fresh replacement.
+			if t.index < len(pool) && pool[t.index] != nil && pool[t.index].handle == t.handle {
+				pool[t.index].info.Status = StatusSuspended
+			}
+		}
+		m.mu.Unlock()
+		return true, nil
+	}
+
+	// Partial/failed: restore any replicas we froze (Resume is idempotent) so the
+	// whole pool is back to a normal running state and the caller's Stop path
+	// works without hitting a frozen cgroup.
+	for _, t := range frozen {
+		if sn, ok := m.runtimeFor(t.tier).(Snapshotter); ok {
+			if _, rerr := sn.Resume(context.Background(), t.handle); rerr != nil {
+				slog.Warn("manager: restore after partial suspend failed", "slug", slug, "idx", t.index, "err", rerr)
+			}
+		}
+	}
+	return false, firstErr
+}
+
+// Resume restores a single suspended replica via the tier runtime's Snapshotter
+// capability and returns its (possibly updated) route endpoint. The in-memory
+// entry returns to StatusRunning with the resumed endpoint's URL/WorkerID/handle.
+// Returns a wrapped ErrRuntimeNotSnapshotter, ErrReplicaNotSuspended, or
+// ErrReplicaNotFound sentinel when the slot cannot be resumed, so the caller
+// cold-boots it instead.
+func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
+	m.mu.Lock()
+	pool := m.entries[slug]
+	if index >= len(pool) || pool[index] == nil {
+		m.mu.Unlock()
+		return ReplicaEndpoint{}, fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
+	}
+	e := pool[index]
+	if e.info.Status != StatusSuspended {
+		m.mu.Unlock()
+		return ReplicaEndpoint{}, fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotSuspended)
+	}
+	handle, tier := e.handle, e.tier
+	m.mu.Unlock()
+
+	sn, ok := m.runtimeFor(tier).(Snapshotter)
+	if !ok {
+		return ReplicaEndpoint{}, fmt.Errorf("app %s replica %d: %w", slug, index, ErrRuntimeNotSnapshotter)
+	}
+	ep, err := sn.Resume(context.Background(), handle)
+	if err != nil {
+		// The driver has torn down the stale resource per contract; the entry is
+		// left for the caller's cold-boot (Start) to replace.
+		return ReplicaEndpoint{}, fmt.Errorf("resume replica %d: %w", index, err)
+	}
+
+	m.mu.Lock()
+	// Re-check identity under the lock: only update the entry we resumed, never a
+	// fresh replacement created by a concurrent stop/start while Resume ran
+	// unlocked (matches the Start/StopReplica handle-equality idiom).
+	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
+		if ep.URL == "" {
+			// In-place resume (e.g. docker unpause) preserves the route; keep the
+			// known endpoint URL rather than clobbering it with an empty one. A
+			// driver that restores under a new identity returns a non-empty URL.
+			ep.URL = pool[index].info.EndpointURL
+		}
+		pool[index].info.Status = StatusRunning
+		pool[index].info.EndpointURL = ep.URL
+		pool[index].info.WorkerID = ep.WorkerID
+		pool[index].handle = ep.Handle
+	}
+	m.mu.Unlock()
+	return ep, nil
 }
 
 // StopAll gracefully stops every tracked app across all slugs, concurrently.

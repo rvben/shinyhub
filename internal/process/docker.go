@@ -61,6 +61,12 @@ type DockerRuntime struct {
 	// runtime starts. "bridge" (default, isolated namespace + 127.0.0.1 host
 	// port mapping) or "host" (shares the host network stack).
 	networkMode string
+
+	// snapshotEnabled turns on warm-wake (freeze + cgroup reclaim). When false,
+	// Suspend reports ErrRuntimeNotSnapshotter and the watcher hibernates via
+	// Stop. reclaimMinFraction is the reclaim-success threshold (see reclaimFreed).
+	snapshotEnabled    bool
+	reclaimMinFraction float64
 }
 
 // Compile-time interface check.
@@ -268,6 +274,83 @@ func (r *DockerRuntime) RemoveHandle(handle RunHandle) error {
 		return nil
 	}
 	return r.client.removeContainer(handle.ContainerID)
+}
+
+// SetSnapshot enables warm-wake (freeze + cgroup reclaim) and sets the
+// reclaim-success threshold. Called once at startup from buildRuntime.
+func (r *DockerRuntime) SetSnapshot(enabled bool, reclaimMinFraction float64) {
+	r.snapshotEnabled = enabled
+	r.reclaimMinFraction = reclaimMinFraction
+}
+
+// Suspend freezes the container (docker pause) and reclaims its resident memory
+// to swap via cgroup v2 memory.reclaim, returning freed=true only when the
+// reclaimed fraction meets the configured threshold. On any non-(true,nil)
+// result it unpauses so the caller's Stop path operates on a normal container.
+// When snapshot is disabled it reports ErrRuntimeNotSnapshotter so the watcher
+// hibernates via Stop.
+func (r *DockerRuntime) Suspend(_ context.Context, handle RunHandle) (bool, error) {
+	if !r.snapshotEnabled {
+		return false, ErrRuntimeNotSnapshotter
+	}
+	id := handle.ContainerID
+	st, err := r.client.inspectContainer(id)
+	if err != nil {
+		return false, fmt.Errorf("inspect for suspend: %w", err)
+	}
+	if st.Pid == 0 {
+		return false, fmt.Errorf("container %s has no pid to reclaim", id)
+	}
+	if err := r.client.pauseContainer(id); err != nil {
+		return false, fmt.Errorf("pause: %w", err)
+	}
+	unpause := func(reason string) {
+		if uerr := r.client.unpauseContainer(id); uerr != nil {
+			slog.Warn("docker: unpause after "+reason, "container", id, "err", uerr)
+		}
+	}
+	// Measure the baseline AFTER the freeze: a frozen container's memory cannot
+	// change between the baseline and the reclaim, so the threshold is stable.
+	preMem, err := cgroupCurrentMemory(st.Pid)
+	if err != nil {
+		unpause("failed pre-measure")
+		return false, fmt.Errorf("measure memory before reclaim: %w", err)
+	}
+	if err := reclaimPIDMemory(st.Pid, preMem); err != nil {
+		unpause("failed reclaim")
+		return false, fmt.Errorf("reclaim: %w", err)
+	}
+	postMem, err := cgroupCurrentMemory(st.Pid)
+	if err != nil {
+		unpause("failed post-measure")
+		return false, fmt.Errorf("measure memory after reclaim: %w", err)
+	}
+	if !reclaimFreed(preMem, postMem, r.reclaimMinFraction) {
+		// Not enough RAM freed (e.g. no swap): thaw and let the caller Stop,
+		// which frees all the RAM. Never leave a paused-but-resident idle app.
+		unpause("insufficient reclaim")
+		return false, nil
+	}
+	return true, nil
+}
+
+// Resume thaws a paused container. It is idempotent: a running, non-paused
+// container returns immediately. pause/unpause leaves the route URL unchanged, so
+// the returned endpoint carries an empty URL and the Manager preserves the known
+// route.
+func (r *DockerRuntime) Resume(_ context.Context, handle RunHandle) (ReplicaEndpoint, error) {
+	id := handle.ContainerID
+	st, err := r.client.inspectContainer(id)
+	if err != nil {
+		return ReplicaEndpoint{}, fmt.Errorf("inspect for resume: %w", err)
+	}
+	if st.Running && !st.Paused {
+		return ReplicaEndpoint{Provider: providerDocker, WorkerID: id, Handle: handle}, nil
+	}
+	if err := r.client.unpauseContainer(id); err != nil {
+		return ReplicaEndpoint{}, fmt.Errorf("unpause: %w", err)
+	}
+	return ReplicaEndpoint{Provider: providerDocker, WorkerID: id, Handle: handle}, nil
 }
 
 func (r *DockerRuntime) Signal(handle RunHandle, sig syscall.Signal) error {

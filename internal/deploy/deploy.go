@@ -679,6 +679,56 @@ func RunReplica(p Params, index int) (*Result, error) {
 	return &r, nil
 }
 
+// resumeProbeTimeout bounds the abbreviated readiness probe after a resume. A
+// resumed process may briefly fault its working set back from swap/zram; a short
+// check avoids routing into a fault storm without paying the full cold-boot
+// health timeout.
+const resumeProbeTimeout = 15 * time.Second
+
+// ResumeReplica restores a single suspended replica via the Manager's Snapshotter
+// path, runs an abbreviated readiness probe, and registers the route. It mirrors
+// RunReplica's post-start steps (health check + proxy register) but skips the
+// cold boot and dependency prep. It returns a wrapped sentinel
+// (ErrRuntimeNotSnapshotter / ErrReplicaNotSuspended / ErrReplicaNotFound) when
+// the slot cannot be resumed, so the caller falls back to RunReplica.
+func ResumeReplica(p Params, index int) (*Result, error) {
+	ep, err := p.Manager.Resume(p.Slug, index)
+	if err != nil {
+		return nil, err
+	}
+	// Prefer the tier the replica actually runs on (from the live entry) over the
+	// placement-derived tier, so the route transport matches the resumed worker.
+	tier := p.tierForIndex(index)
+	port := 0
+	if info, ok := p.Manager.GetReplica(p.Slug, index); ok {
+		if info.Tier != "" {
+			tier = info.Tier
+		}
+		port = info.Port
+	}
+	transport := p.Manager.TransportForWorker(tier, ep.WorkerID)
+
+	hc := p.HealthCheck
+	if hc == nil {
+		hc = waitHealthy
+	}
+	if err := hc(ep.URL, resumeProbeTimeout, transport); err != nil {
+		return nil, fmt.Errorf("resume readiness: %w", err)
+	}
+	if err := p.Proxy.RegisterReplica(p.Slug, index, ep.URL, transport, p.DeploymentID); err != nil {
+		return nil, fmt.Errorf("register: %w", err)
+	}
+	return &Result{
+		Index:       index,
+		PID:         ep.Handle.PID,
+		Port:        port,
+		EndpointURL: ep.URL,
+		Tier:        tier,
+		Provider:    ep.Provider,
+		WorkerID:    ep.WorkerID,
+	}, nil
+}
+
 // DetectAppType returns "python" if app.py exists, "r" if app.R exists, or ""
 // if neither is found.
 func DetectAppType(bundleDir string) string {

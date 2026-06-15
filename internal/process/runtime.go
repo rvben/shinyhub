@@ -122,6 +122,45 @@ type ReplicaInventory interface {
 	Inventory(ctx context.Context) ([]InventoryItem, error)
 }
 
+// ErrRuntimeNotSnapshotter is returned (wrapped) by Manager.Suspend/Resume when
+// the replica's tier runtime does not implement Snapshotter. Callers fall back
+// to Stop (hibernate) or a cold RunReplica (wake).
+var ErrRuntimeNotSnapshotter = errors.New("runtime does not support snapshot")
+
+// ErrReplicaNotSuspended is returned (wrapped) by Manager.Resume when the target
+// slot is not in a suspended state, so there is nothing to resume.
+var ErrReplicaNotSuspended = errors.New("replica not suspended")
+
+// Snapshotter is an optional capability for runtimes that can freeze a running
+// replica's warmed memory and restore it, skipping a cold restart on wake. A
+// runtime that does not implement it uses the existing stop/cold-start path.
+//
+// A runtime that implements Snapshotter must also ensure its Stop/Signal path can
+// terminate a SUSPENDED replica - a frozen resource (e.g. a paused cgroup) does
+// not deliver SIGTERM until it is thawed, so the runtime must unfreeze before
+// killing (or kill the frozen resource directly). Until a real Snapshotter
+// runtime is registered, suspended state never arises in production: Manager.
+// Suspend returns ErrRuntimeNotSnapshotter and the watcher falls back to Stop.
+type Snapshotter interface {
+	// Suspend freezes the replica identified by handle and tries to release its
+	// warmed memory from host RAM. It returns freed=true ONLY when the warmed
+	// memory was actually released (driver-defined threshold). On any result
+	// other than (true, nil) - freed=false OR err != nil, including an error
+	// after a partial freeze - the driver MUST first restore the replica to a
+	// normally stoppable state so the caller's Stop path works without
+	// special-casing a frozen cgroup. The handle stays valid for a later Resume
+	// only on (true, nil).
+	Suspend(ctx context.Context, handle RunHandle) (freed bool, err error)
+
+	// Resume restores a previously suspended replica and returns its route
+	// endpoint (the same URL when the driver preserves the process/port in
+	// place). Resume MUST be idempotent: if the replica is already serving,
+	// return the current endpoint and nil error. On a genuine error the driver
+	// MUST tear down the stale frozen/suspended resource before returning, so the
+	// caller's cold-boot fallback cannot collide with or leak it.
+	Resume(ctx context.Context, handle RunHandle) (ReplicaEndpoint, error)
+}
+
 // PartialInventoryError reports that a tier's aggregated inventory is
 // incomplete: at least one worker was queried successfully, but Workers could
 // not be reached. The returned items hold what the reachable workers reported.

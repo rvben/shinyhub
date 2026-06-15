@@ -1946,6 +1946,10 @@ const (
 	// ReplicaStatusLost marks a replica whose worker stopped heartbeating. It is
 	// excluded from routing and is not auto-restarted.
 	ReplicaStatusLost = "lost"
+	// ReplicaStatusSuspended marks a replica that is hibernated but resumable: its
+	// warmed memory was snapshotted/frozen and host RAM freed, so wake can Resume
+	// it instead of cold-booting. Distinct from "stopped", which must cold-boot.
+	ReplicaStatusSuspended = "suspended"
 )
 
 // ReplicaDesiredWarm marks a replica deliberately stopped by warm-shrink:
@@ -2109,6 +2113,43 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
 		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// SuspendedReplica identifies one suspended replica with the app slug needed to
+// stop it. Used by the warm-wake GC to evict the oldest suspended replicas when
+// the configured cap is exceeded.
+type SuspendedReplica struct {
+	Slug      string
+	AppID     int64
+	Index     int
+	UpdatedAt time.Time
+}
+
+// ListSuspendedReplicas returns every replica whose status is 'suspended',
+// joined to the parent app for its slug, ordered oldest-first by updated_at so
+// the GC evicts the longest-suspended replicas first.
+func (s *Store) ListSuspendedReplicas() ([]SuspendedReplica, error) {
+	rows, err := s.db.Query(`
+		SELECT a.slug, r.app_id, r.idx, r.updated_at
+		FROM replicas r
+		JOIN apps a ON a.id = r.app_id
+		WHERE r.status = 'suspended'
+		ORDER BY r.updated_at ASC, a.slug, r.idx`)
+	if err != nil {
+		return nil, fmt.Errorf("list suspended replicas: %w", err)
+	}
+	defer rows.Close()
+	var out []SuspendedReplica
+	for rows.Next() {
+		var sr SuspendedReplica
+		var updatedAt int64
+		if err := rows.Scan(&sr.Slug, &sr.AppID, &sr.Index, &updatedAt); err != nil {
+			return nil, err
+		}
+		sr.UpdatedAt = time.Unix(updatedAt, 0)
+		out = append(out, sr)
 	}
 	return out, rows.Err()
 }

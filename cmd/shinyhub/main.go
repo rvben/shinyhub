@@ -257,6 +257,10 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 		if err != nil {
 			return nil, fmt.Errorf("docker runtime: %w", err)
 		}
+		// Enable warm-wake (freeze + cgroup reclaim) when configured. When
+		// disabled, Suspend reports not-supported and the watcher hibernates via
+		// Stop exactly as before.
+		dockerRT.SetSnapshot(cfg.Runtime.Docker.Snapshot.Enabled, cfg.Runtime.Docker.Snapshot.ReclaimMinFraction)
 		return dockerRT, nil
 	case "native":
 		return process.NewNativeRuntime(), nil
@@ -935,6 +939,31 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return deploy.RunReplica(p, index)
 	}
 
+	// resumeFn restores a suspended replica via the Snapshotter path, mirroring
+	// deployFn's Params shape (placement/tier so the route transport resolves).
+	resumeFn := func(slug, bundleDir string, index int) (*deploy.Result, error) {
+		app, err := store.GetApp(slug)
+		if err != nil {
+			return nil, fmt.Errorf("get app for resume: %w", err)
+		}
+		p := deploy.Params{
+			Slug:        slug,
+			AppID:       app.ID,
+			BundleDir:   bundleDir,
+			Manager:     mgr,
+			Proxy:       prx,
+			Replicas:    app.Replicas,
+			Placement:   app.PlacementMap(),
+			TierOrder:   cfg.Runtime.TierOrder(),
+			DefaultTier: cfg.Runtime.DefaultTierName(),
+		}
+		if deps, derr := store.ListDeployments(app.ID); derr == nil && len(deps) > 0 {
+			p.DeploymentID = deps[0].ID
+			p.AppVersion = deps[0].Version
+		}
+		return deploy.ResumeReplica(p, index)
+	}
+
 	lcCfg := lifecycle.Config{
 		WatchInterval:                cfg.Lifecycle.WatchInterval,
 		RestartMaxAttempts:           cfg.Lifecycle.RestartMaxAttempts,
@@ -943,8 +972,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		IdentityHeadersGlobal:        cfg.Auth.IdentityHeadersEnabled(),
 		Clustered:                    isClustered(cfg),
 		InstanceID:                   cfg.Server.InstanceID,
+		MaxSuspended:                 cfg.Runtime.Docker.Snapshot.MaxSuspended,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
+	watcher.SetResume(resumeFn)
 
 	// Wire pre-warming ops: when an app has min_warm_replicas > 0 the watcher
 	// calls WarmShrink instead of fully hibernating. The drain grace matches

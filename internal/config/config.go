@@ -602,6 +602,23 @@ type DockerRuntimeConfig struct {
 	// via 127.0.0.1 binding. "host" disables network isolation; the container
 	// shares the host network stack. Allowed: "bridge" (default), "host".
 	NetworkMode string
+	// Snapshot controls warm-wake (freeze + cgroup reclaim) for docker apps.
+	Snapshot SnapshotConfig
+}
+
+// SnapshotConfig controls warm-wake for the docker runtime: on hibernate a
+// replica is frozen (docker pause) and its RAM reclaimed to swap/zram instead of
+// being stopped, so wake resumes it warm. Disabled by default; when off, apps
+// hibernate via Stop exactly as before.
+type SnapshotConfig struct {
+	Enabled bool
+	// MaxSuspended caps concurrently suspended replicas (GC evicts the oldest
+	// beyond it). Defaults to 16; a value <= 0 falls back to the default.
+	MaxSuspended int
+	// ReclaimMinFraction is the minimum fraction of a replica's pre-suspend RSS
+	// that must be reclaimed for the freeze to count as "freed"; below it the
+	// replica falls back to Stop. Must be in (0, 1]; defaults to 0.8.
+	ReclaimMinFraction float64
 }
 
 // DockerImages holds the base image names for each app type.
@@ -713,11 +730,18 @@ type rawTierConfig struct {
 }
 
 type rawDockerRuntimeConfig struct {
-	Socket            string          `yaml:"socket"`
-	Images            rawDockerImages `yaml:"images"`
-	DefaultMemoryMB   int             `yaml:"default_memory_mb"`
-	DefaultCPUPercent int             `yaml:"default_cpu_percent"`
-	NetworkMode       string          `yaml:"network_mode"`
+	Socket            string            `yaml:"socket"`
+	Images            rawDockerImages   `yaml:"images"`
+	DefaultMemoryMB   int               `yaml:"default_memory_mb"`
+	DefaultCPUPercent int               `yaml:"default_cpu_percent"`
+	NetworkMode       string            `yaml:"network_mode"`
+	Snapshot          rawSnapshotConfig `yaml:"snapshot"`
+}
+
+type rawSnapshotConfig struct {
+	Enabled            bool    `yaml:"enabled"`
+	MaxSuspended       int     `yaml:"max_suspended"`
+	ReclaimMinFraction float64 `yaml:"reclaim_min_fraction"`
 }
 
 type rawDockerImages struct {
@@ -986,6 +1010,12 @@ func loadRaw(path string) (*Config, error) {
 		// allowed
 	default:
 		return nil, fmt.Errorf("runtime.docker.network_mode: %q is not supported; must be one of bridge, host", cfg.Runtime.Docker.NetworkMode)
+	}
+	if f := cfg.Runtime.Docker.Snapshot.ReclaimMinFraction; f <= 0 || f > 1 {
+		return nil, fmt.Errorf("runtime.docker.snapshot.reclaim_min_fraction: %v must be in (0, 1]", f)
+	}
+	if cfg.Runtime.Docker.Snapshot.MaxSuspended <= 0 {
+		cfg.Runtime.Docker.Snapshot.MaxSuspended = 16
 	}
 	// Tiers: copy from raw, or synthesize a single default tier from Mode.
 	if len(raw.Runtime.Tiers) == 0 {
@@ -1358,10 +1388,18 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 				R:      DefaultRImage,
 			},
 			NetworkMode: DefaultNetworkMode,
+			Snapshot:    SnapshotConfig{MaxSuspended: 16, ReclaimMinFraction: 0.8},
 		},
 	}
 	if r.Mode != "" {
 		rc.Mode = r.Mode
+	}
+	rc.Docker.Snapshot.Enabled = r.Docker.Snapshot.Enabled
+	if r.Docker.Snapshot.MaxSuspended > 0 {
+		rc.Docker.Snapshot.MaxSuspended = r.Docker.Snapshot.MaxSuspended
+	}
+	if r.Docker.Snapshot.ReclaimMinFraction != 0 {
+		rc.Docker.Snapshot.ReclaimMinFraction = r.Docker.Snapshot.ReclaimMinFraction
 	}
 	if r.Docker.Socket != "" {
 		rc.Docker.Socket = r.Docker.Socket
@@ -1646,6 +1684,27 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT: %q is not an integer: %w", v, err)
 		}
 		cfg.Runtime.Docker.DefaultCPUPercent = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_ENABLED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_ENABLED: %w", err)
+		}
+		cfg.Runtime.Docker.Snapshot.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_MAX_SUSPENDED"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_MAX_SUSPENDED: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Docker.Snapshot.MaxSuspended = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_RECLAIM_MIN_FRACTION"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_RECLAIM_MIN_FRACTION: %q is not a number: %w", v, err)
+		}
+		cfg.Runtime.Docker.Snapshot.ReclaimMinFraction = f
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON"); v != "" {
 		cfg.Runtime.Docker.Images.Python = v

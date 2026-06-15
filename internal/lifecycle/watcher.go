@@ -41,6 +41,10 @@ type Config struct {
 	// active's local idle predicate (BeginHibernate) and the fleet predicate
 	// (AppFleetLoad) each cover a disjoint set of sessions.
 	InstanceID string
+	// MaxSuspended caps how many replicas may stay suspended (warm-wake) at once.
+	// When the count exceeds it, the watcher evicts the oldest-suspended replicas
+	// (stop them; they cold-boot on next wake). 0 disables the cap.
+	MaxSuspended int
 }
 
 // replicaKey uniquely identifies a single replica within a slug.
@@ -54,6 +58,13 @@ type replicaKey struct {
 type manager interface {
 	All() []*process.ProcessInfo
 	Stop(slug string) error
+	// StopReplica stops a single replica (unfreezing it first if suspended). Used
+	// by the warm-wake GC to evict the oldest suspended replicas.
+	StopReplica(slug string, index int) error
+	// Suspend freezes a slug's replicas, freeing host RAM, when the runtime
+	// supports it. freed=true means the warmed memory was released and the
+	// replicas are resumable; freed=false means the caller must Stop instead.
+	Suspend(slug string) (bool, error)
 }
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
@@ -118,6 +129,9 @@ type appStore interface {
 	// replica parked with desired_state='warm'. The watcher expand check
 	// iterates this set each tick.
 	ListWarmShrunkApps() ([]*db.App, error)
+	// ListSuspendedReplicas returns all suspended replicas oldest-first, joined to
+	// the app slug. The warm-wake GC evicts the oldest over the configured cap.
+	ListSuspendedReplicas() ([]db.SuspendedReplica, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -183,6 +197,11 @@ type Watcher struct {
 	// configured floor (safe degradation for unconfigured setups).
 	warmShrink func(slug string, floor int) (bool, error)
 	warmExpand func(slug string) (bool, error)
+
+	// resume restores a suspended replica via deploy.ResumeReplica. nil disables
+	// the warm-wake path: every wake cold-boots (safe default for unconfigured
+	// setups). Set once at startup via SetResume before Start.
+	resume func(slug, bundleDir string, index int) (*deploy.Result, error)
 }
 
 // wakeDrainTimeout bounds how long Start waits for outstanding wake
@@ -305,6 +324,90 @@ func (w *Watcher) SetWarmOps(shrink func(slug string, floor int) (bool, error), 
 	w.warmExpand = expand
 }
 
+// SetResume wires the warm-wake executor (deploy.ResumeReplica). nil leaves the
+// warm-wake path disabled: every wake cold-boots. Call once at startup before Start.
+func (w *Watcher) SetResume(fn func(slug, bundleDir string, index int) (*deploy.Result, error)) {
+	w.resume = fn
+}
+
+// hibernatePool removes a slug's replicas from host resources on hibernate,
+// preferring a memory-preserving Suspend when the runtime supports it and the
+// warmed RAM was actually freed. On freed=true the replica rows are marked
+// suspended (resumable on wake). Otherwise it falls back to Stop + stopped,
+// which always frees RAM (the never-worse-than-cold-stop invariant).
+func (w *Watcher) hibernatePool(app *db.App) {
+	freed, err := w.mgr.Suspend(app.Slug)
+	if freed && err == nil {
+		for i := 0; i < app.Replicas; i++ {
+			if uerr := w.store.UpsertReplica(db.UpsertReplicaParams{
+				AppID: app.ID, Index: i, Status: db.ReplicaStatusSuspended, DesiredState: "stopped",
+			}); uerr != nil {
+				slog.Warn("watcher: persist suspended replica failed", "slug", app.Slug, "index", i, "err", uerr)
+			}
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, process.ErrRuntimeNotSnapshotter) {
+		slog.Warn("watcher: suspend failed; falling back to stop", "slug", app.Slug, "err", err)
+	}
+	if serr := w.mgr.Stop(app.Slug); serr != nil {
+		slog.Warn("watcher: stop on hibernate failed", "slug", app.Slug, "err", serr)
+	}
+	for i := 0; i < app.Replicas; i++ {
+		if uerr := w.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped",
+		}); uerr != nil {
+			slog.Warn("watcher: persist hibernated replica failed", "slug", app.Slug, "index", i, "err", uerr)
+		}
+	}
+}
+
+// wakeReplica brings one replica back up. For a replica persisted as suspended it
+// tries the warm Resume path first; on any resume error (or when resume is
+// unconfigured / the replica was not suspended) it falls back to the existing
+// cold RunReplica boot. The fallback guarantees wake is never worse than today.
+func (w *Watcher) wakeReplica(slug, bundleDir string, index int, suspended bool) (*deploy.Result, error) {
+	if suspended && w.resume != nil {
+		res, err := w.resume(slug, bundleDir, index)
+		if err == nil {
+			return res, nil
+		}
+		slog.Warn("watcher: resume failed; cold-booting", "slug", slug, "idx", index, "err", err)
+	}
+	return w.deploy(slug, bundleDir, index)
+}
+
+// enforceSuspendedCap evicts the oldest suspended replicas when their count
+// exceeds Config.MaxSuspended, bounding the swap/disk footprint of warm-wake.
+// Evicted replicas are stopped (StopReplica unfreezes and removes them) and
+// marked stopped, so they cold-boot on their next wake. 0 disables the cap.
+func (w *Watcher) enforceSuspendedCap() {
+	if w.cfg.MaxSuspended <= 0 {
+		return
+	}
+	susp, err := w.store.ListSuspendedReplicas()
+	if err != nil {
+		slog.Warn("watcher: list suspended replicas failed", "err", err)
+		return
+	}
+	excess := len(susp) - w.cfg.MaxSuspended
+	if excess <= 0 {
+		return
+	}
+	for i := 0; i < excess; i++ {
+		r := susp[i] // oldest-first
+		if err := w.mgr.StopReplica(r.Slug, r.Index); err != nil {
+			slog.Warn("watcher: evict suspended replica failed", "slug", r.Slug, "index", r.Index, "err", err)
+			continue
+		}
+		if err := w.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: r.AppID, Index: r.Index, Status: "stopped", DesiredState: "stopped",
+		}); err != nil {
+			slog.Warn("watcher: persist evicted replica failed", "slug", r.Slug, "index", r.Index, "err", err)
+		}
+	}
+}
+
 // traceOp starts an internal span named op for slug and returns a derived
 // context plus an end func that records the operation's error (if any) and ends
 // the span. A no-op when tracing is disabled. Background operations are
@@ -359,6 +462,7 @@ func (w *Watcher) runOnce() {
 	w.reconcileReplicas(handled)
 	w.reconcileStatuses()
 	w.handleWarmExpand()
+	w.enforceSuspendedCap()
 	// Reap stale replica_sessions rows only in clustered mode. Single-node
 	// deployments never write replica_sessions rows, so this DELETE is both
 	// unnecessary and a behavioral change we must avoid.
@@ -630,14 +734,7 @@ func (w *Watcher) handleIdle(slug string, runningCount int) {
 	_, endSpan := w.traceOp(context.Background(), "lifecycle.hibernate", slug)
 	defer func() { endSpan(nil) }()
 
-	if err := w.mgr.Stop(slug); err != nil { // stops all replicas in the pool
-		slog.Warn("watcher: stop on hibernate failed", "slug", slug, "err", err)
-	}
-	for i := 0; i < app.Replicas; i++ {
-		if err := w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped"}); err != nil {
-			slog.Warn("watcher: persist hibernated replica failed", "slug", slug, "index", i, "err", err)
-		}
-	}
+	w.hibernatePool(app)
 	if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"}); err != nil {
 		slog.Warn("watcher: persist hibernated status failed", "slug", slug, "err", err)
 	}
@@ -757,14 +854,7 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration, runnin
 	_, endSpan := w.traceOp(context.Background(), "lifecycle.hibernate", slug)
 	defer func() { endSpan(nil) }()
 
-	if err := w.mgr.Stop(slug); err != nil {
-		slog.Warn("watcher: stop on hibernate failed", "slug", slug, "err", err)
-	}
-	for i := 0; i < app.Replicas; i++ {
-		if err := w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: "stopped"}); err != nil {
-			slog.Warn("watcher: persist hibernated replica failed", "slug", slug, "index", i, "err", err)
-		}
-	}
+	w.hibernatePool(app)
 	// Do NOT call UpdateAppStatus(hibernated) here: the DB CAS (D) already set
 	// the status. Calling it again would be redundant and would unconditionally
 	// overwrite any concurrent status change (e.g. an immediate wake).
@@ -1009,13 +1099,26 @@ func (w *Watcher) driveWakingApp(slug string) {
 		w.prx.SetPoolIdentityHeaders(slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
 
 		deploymentID := deployments[0].ID
+		// Replicas persisted as suspended take the warm Resume path; the rest
+		// (and any resume failure) cold-boot. Reading the rows once here keeps the
+		// per-replica goroutines lock-free.
+		suspendedByIdx := make(map[int]bool)
+		if reps, lerr := w.store.ListReplicas(app.ID); lerr == nil {
+			for _, r := range reps {
+				if r.Status == db.ReplicaStatusSuspended {
+					suspendedByIdx[r.Index] = true
+				}
+			}
+		} else {
+			slog.Warn("watcher: list replicas for wake failed", "slug", slug, "err", lerr)
+		}
 		var wg sync.WaitGroup
 		var started atomic.Int32
 		for i := 0; i < app.Replicas; i++ {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				res, err := w.deploy(slug, deployments[0].BundleDir, idx)
+				res, err := w.wakeReplica(slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
 				if err != nil {
 					slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
 					return
