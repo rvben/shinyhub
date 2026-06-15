@@ -153,10 +153,39 @@ body::before {
   min-height: 100vh;
 }
 body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-collapsed) minmax(0, 1fr); }
-/* Pre-auth: no sidebar chrome, single full-width column for the login view. */
-[data-auth="out"] #app-shell { grid-template-columns: minmax(0, 1fr); }
+/* Pre-auth and boot: no sidebar chrome, single full-width column. The login
+   view and dashboard chrome only belong to the resolved out/in states, so they
+   stay hidden until the session check decides which to show. */
+[data-auth="out"] #app-shell,
+[data-auth="loading"] #app-shell { grid-template-columns: minmax(0, 1fr); }
 [data-auth="out"] #sidebar,
-[data-auth="out"] #mobile-topbar { display: none; }
+[data-auth="out"] #mobile-topbar,
+[data-auth="loading"] #sidebar,
+[data-auth="loading"] #mobile-topbar { display: none; }
+/* The login form must paint only in the resolved logged-out state, never during
+   boot (data-auth="loading") or for an already-authenticated, server-stamped
+   shell (data-auth="in"). This is what kills the login-flash-before-dashboard. */
+[data-auth="loading"] #login-view,
+[data-auth="in"] #login-view { display: none; }
+
+/* Boot splash: a quiet branded hold while the session check is in flight. Shown
+   only for data-auth="loading"; an authenticated shell is stamped "in" by the
+   server and skips straight to the dashboard chrome. */
+#boot-splash { display: none; }
+[data-auth="loading"] #boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: boot-splash-pulse 1.5s ease-in-out infinite;
+}
+[data-auth="loading"] #boot-splash .brand { font-size: 1.5rem; }
+@keyframes boot-splash-pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  [data-auth="loading"] #boot-splash { animation: none; opacity: 0.85; }
+}
 
 #sidebar {
   position: sticky;
