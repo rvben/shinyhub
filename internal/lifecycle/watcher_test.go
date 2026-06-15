@@ -26,6 +26,9 @@ type fakeManager struct {
 	suspendFreed bool
 	suspendErr   error
 	suspendCalls int
+
+	// stoppedReplicas records every StopReplica(slug, index) call (GC eviction).
+	stoppedReplicas []replicaKey
 }
 
 func (f *fakeManager) All() []*process.ProcessInfo {
@@ -50,6 +53,13 @@ func (f *fakeManager) Suspend(_ string) (bool, error) {
 	freed, err := f.suspendFreed, f.suspendErr
 	f.mu.Unlock()
 	return freed, err
+}
+
+func (f *fakeManager) StopReplica(slug string, index int) error {
+	f.mu.Lock()
+	f.stoppedReplicas = append(f.stoppedReplicas, replicaKey{slug, index})
+	f.mu.Unlock()
+	return nil
 }
 
 type fakeProxy struct {
@@ -110,16 +120,17 @@ func (f *fakeProxy) SetPoolAppID(_ string, _ int64)          {}
 func (f *fakeProxy) SetPoolIdentityHeaders(_ string, _ bool) {}
 
 type fakeStore struct {
-	mu               sync.Mutex
-	apps             map[string]*db.App
-	deployments      []*db.Deployment
-	statusUpdates    []db.UpdateAppStatusParams
-	appStatus        map[string]string
-	upsertedReplicas []db.UpsertReplicaParams
-	replicas         map[int64][]*db.Replica
-	upsertErr        error // when set, UpsertReplica records the call then returns this
-	updateStatusErr  error // when set, UpdateAppStatus records the call then returns this
-	reapCount        int   // incremented by each ReapStaleReplicaSessions call
+	mu                sync.Mutex
+	apps              map[string]*db.App
+	deployments       []*db.Deployment
+	statusUpdates     []db.UpdateAppStatusParams
+	appStatus         map[string]string
+	upsertedReplicas  []db.UpsertReplicaParams
+	replicas          map[int64][]*db.Replica
+	suspendedReplicas []db.SuspendedReplica // returned by ListSuspendedReplicas
+	upsertErr         error                 // when set, UpsertReplica records the call then returns this
+	updateStatusErr   error                 // when set, UpdateAppStatus records the call then returns this
+	reapCount         int                   // incremented by each ReapStaleReplicaSessions call
 
 	// hibernateAppCalls tracks every HibernateApp call (slug).
 	hibernateAppCalls []string
@@ -288,6 +299,11 @@ func (f *fakeStore) ListReplicas(appID int64) ([]*db.Replica, error) {
 	defer f.mu.Unlock()
 	f.listReplicasCalls++
 	return f.replicas[appID], nil
+}
+func (f *fakeStore) ListSuspendedReplicas() ([]db.SuspendedReplica, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.suspendedReplicas, nil
 }
 
 func (f *fakeStore) ReapStaleReplicaSessions(_ int64) error {
@@ -1617,6 +1633,9 @@ func (m *orderCheckingManager) Stop(slug string) error {
 	return m.inner.Stop(slug)
 }
 func (m *orderCheckingManager) Suspend(slug string) (bool, error) { return m.inner.Suspend(slug) }
+func (m *orderCheckingManager) StopReplica(slug string, index int) error {
+	return m.inner.StopReplica(slug, index)
+}
 
 // --- warm-shrink replaces hibernation tests ---
 

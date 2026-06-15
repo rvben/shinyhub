@@ -972,6 +972,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		IdentityHeadersGlobal:        cfg.Auth.IdentityHeadersEnabled(),
 		Clustered:                    isClustered(cfg),
 		InstanceID:                   cfg.Server.InstanceID,
+		MaxSuspended:                 cfg.Runtime.Docker.Snapshot.MaxSuspended,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 	watcher.SetResume(resumeFn)

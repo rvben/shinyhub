@@ -41,6 +41,10 @@ type Config struct {
 	// active's local idle predicate (BeginHibernate) and the fleet predicate
 	// (AppFleetLoad) each cover a disjoint set of sessions.
 	InstanceID string
+	// MaxSuspended caps how many replicas may stay suspended (warm-wake) at once.
+	// When the count exceeds it, the watcher evicts the oldest-suspended replicas
+	// (stop them; they cold-boot on next wake). 0 disables the cap.
+	MaxSuspended int
 }
 
 // replicaKey uniquely identifies a single replica within a slug.
@@ -54,6 +58,9 @@ type replicaKey struct {
 type manager interface {
 	All() []*process.ProcessInfo
 	Stop(slug string) error
+	// StopReplica stops a single replica (unfreezing it first if suspended). Used
+	// by the warm-wake GC to evict the oldest suspended replicas.
+	StopReplica(slug string, index int) error
 	// Suspend freezes a slug's replicas, freeing host RAM, when the runtime
 	// supports it. freed=true means the warmed memory was released and the
 	// replicas are resumable; freed=false means the caller must Stop instead.
@@ -122,6 +129,9 @@ type appStore interface {
 	// replica parked with desired_state='warm'. The watcher expand check
 	// iterates this set each tick.
 	ListWarmShrunkApps() ([]*db.App, error)
+	// ListSuspendedReplicas returns all suspended replicas oldest-first, joined to
+	// the app slug. The warm-wake GC evicts the oldest over the configured cap.
+	ListSuspendedReplicas() ([]db.SuspendedReplica, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -367,6 +377,37 @@ func (w *Watcher) wakeReplica(slug, bundleDir string, index int, suspended bool)
 	return w.deploy(slug, bundleDir, index)
 }
 
+// enforceSuspendedCap evicts the oldest suspended replicas when their count
+// exceeds Config.MaxSuspended, bounding the swap/disk footprint of warm-wake.
+// Evicted replicas are stopped (StopReplica unfreezes and removes them) and
+// marked stopped, so they cold-boot on their next wake. 0 disables the cap.
+func (w *Watcher) enforceSuspendedCap() {
+	if w.cfg.MaxSuspended <= 0 {
+		return
+	}
+	susp, err := w.store.ListSuspendedReplicas()
+	if err != nil {
+		slog.Warn("watcher: list suspended replicas failed", "err", err)
+		return
+	}
+	excess := len(susp) - w.cfg.MaxSuspended
+	if excess <= 0 {
+		return
+	}
+	for i := 0; i < excess; i++ {
+		r := susp[i] // oldest-first
+		if err := w.mgr.StopReplica(r.Slug, r.Index); err != nil {
+			slog.Warn("watcher: evict suspended replica failed", "slug", r.Slug, "index", r.Index, "err", err)
+			continue
+		}
+		if err := w.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: r.AppID, Index: r.Index, Status: "stopped", DesiredState: "stopped",
+		}); err != nil {
+			slog.Warn("watcher: persist evicted replica failed", "slug", r.Slug, "index", r.Index, "err", err)
+		}
+	}
+}
+
 // traceOp starts an internal span named op for slug and returns a derived
 // context plus an end func that records the operation's error (if any) and ends
 // the span. A no-op when tracing is disabled. Background operations are
@@ -421,6 +462,7 @@ func (w *Watcher) runOnce() {
 	w.reconcileReplicas(handled)
 	w.reconcileStatuses()
 	w.handleWarmExpand()
+	w.enforceSuspendedCap()
 	// Reap stale replica_sessions rows only in clustered mode. Single-node
 	// deployments never write replica_sessions rows, so this DELETE is both
 	// unnecessary and a behavioral change we must avoid.
