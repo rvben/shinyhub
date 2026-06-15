@@ -19,6 +19,13 @@ type fakeManager struct {
 	entries []*process.ProcessInfo
 	stopped []string
 	stopErr error // when set, Stop records the slug then returns this error
+
+	// suspendFreed/suspendErr script Suspend; suspendCalls records invocations.
+	// Default zero value (false, nil) makes Suspend report "not freed", so the
+	// watcher falls back to Stop - preserving existing tests' behaviour.
+	suspendFreed bool
+	suspendErr   error
+	suspendCalls int
 }
 
 func (f *fakeManager) All() []*process.ProcessInfo {
@@ -35,6 +42,14 @@ func (f *fakeManager) Stop(slug string) error {
 	err := f.stopErr
 	f.mu.Unlock()
 	return err
+}
+
+func (f *fakeManager) Suspend(_ string) (bool, error) {
+	f.mu.Lock()
+	f.suspendCalls++
+	freed, err := f.suspendFreed, f.suspendErr
+	f.mu.Unlock()
+	return freed, err
 }
 
 type fakeProxy struct {
@@ -1601,6 +1616,7 @@ func (m *orderCheckingManager) Stop(slug string) error {
 	}
 	return m.inner.Stop(slug)
 }
+func (m *orderCheckingManager) Suspend(slug string) (bool, error) { return m.inner.Suspend(slug) }
 
 // --- warm-shrink replaces hibernation tests ---
 
