@@ -517,11 +517,22 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	e := pool[index]
 	done := e.done
 	handle := e.handle
+	wasSuspended := e.info.Status == StatusSuspended
 	e.stopped = true
 	tier := e.tier
 	m.mu.Unlock()
 
 	rt := m.runtimeFor(tier)
+	// A suspended replica is frozen; SIGTERM (and `docker kill`) do not reach a
+	// frozen resource until it is thawed. Unfreeze it first (Resume is idempotent)
+	// so the normal signal-and-wait stop path works and no frozen resource leaks.
+	if wasSuspended {
+		if sn, ok := rt.(Snapshotter); ok {
+			if _, err := sn.Resume(context.Background(), handle); err != nil {
+				slog.Warn("manager: unfreeze before stop failed", "slug", slug, "idx", index, "err", err)
+			}
+		}
+	}
 	if err := rt.Signal(handle, syscall.SIGTERM); err != nil {
 		// The signal was not delivered, so this replica is still running. Undo
 		// the intentional-stop mark set above so that if it later exits on its
