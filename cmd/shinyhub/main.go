@@ -1266,6 +1266,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			Enabled:             true,
 			UserHeader:          cfg.Auth.ForwardAuth.UserHeader,
 			EmailHeader:         cfg.Auth.ForwardAuth.EmailHeader,
+			NameHeader:          cfg.Auth.ForwardAuth.NameHeader,
 			GroupsHeader:        cfg.Auth.ForwardAuth.GroupsHeader,
 			DefaultRole:         cfg.Auth.ForwardAuth.DefaultRole,
 			GroupRoleMappings:   api.AuthMappings(cfg.Auth.GroupRoleMappings),

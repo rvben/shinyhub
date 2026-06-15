@@ -21,7 +21,11 @@ type ForwardAuthConfig struct {
 	Enabled    bool
 	UserHeader string
 	// EmailHeader is accepted but not yet consumed by the middleware (reserved).
-	EmailHeader       string
+	EmailHeader string
+	// NameHeader is the proxy header carrying the user's friendly name (e.g.
+	// Authelia's Remote-Name). When set and present, the middleware captures it
+	// as the forward-auth user's display name. Empty disables name capture.
+	NameHeader        string
 	GroupsHeader      string
 	GroupRoleMappings []GroupRoleMapping
 	DefaultRole       string
@@ -38,6 +42,10 @@ type ForwardAuthUserStore interface {
 	CreateForwardAuthUser(username, role string) (*ContextUser, error)
 	GetUserGroups(userID int64) ([]string, error)
 	ReconcileUserFromGroups(userID int64, groups []string, mappings []GroupRoleMapping, defaultRole string) error
+	// SetDisplayNameFromIdP refreshes the user's display name from the proxy's
+	// name header. The store skips local-password accounts, so forward-auth
+	// (IdP-governed) users are updated and a missing name is a no-op.
+	SetDisplayNameFromIdP(userID int64, name string) error
 }
 
 // ForwardAuthMiddleware trusts a username header from a reverse proxy whose direct
@@ -125,6 +133,21 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 					}
 					if fresh, err := store.GetForwardAuthUser(user.Username); err == nil && fresh != nil {
 						user = fresh
+					}
+				}
+			}
+
+			// Capture the friendly name from the proxy. The proxy is authoritative
+			// (the user is governed by the upstream IdP), so refresh whenever it
+			// differs from the stored value; the equality guard keeps this off the
+			// write path for the common unchanged case, since this middleware runs
+			// on every request.
+			if cfg.NameHeader != "" {
+				if name := strings.TrimSpace(r.Header.Get(cfg.NameHeader)); name != "" && name != user.DisplayName {
+					if err := store.SetDisplayNameFromIdP(user.ID, name); err != nil {
+						slog.Warn("forward_auth: failed to update display name", "user", user.Username, "err", err)
+					} else {
+						user.DisplayName = name
 					}
 				}
 			}
