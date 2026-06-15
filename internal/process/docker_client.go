@@ -70,6 +70,7 @@ type containerPortBinding struct {
 
 type containerState struct {
 	Running  bool
+	Paused   bool
 	Pid      int
 	ExitCode int
 }
@@ -267,6 +268,7 @@ func (c *dockerClient) inspectContainer(id string) (containerState, error) {
 	var resp struct {
 		State struct {
 			Running  bool `json:"Running"`
+			Paused   bool `json:"Paused"`
 			Pid      int  `json:"Pid"`
 			ExitCode int  `json:"ExitCode"`
 		} `json:"State"`
@@ -274,7 +276,7 @@ func (c *dockerClient) inspectContainer(id string) (containerState, error) {
 	if err := c.get(fmt.Sprintf("/containers/%s/json", id), &resp); err != nil {
 		return containerState{}, fmt.Errorf("inspect container: %w", err)
 	}
-	return containerState{Running: resp.State.Running, Pid: resp.State.Pid, ExitCode: resp.State.ExitCode}, nil
+	return containerState{Running: resp.State.Running, Paused: resp.State.Paused, Pid: resp.State.Pid, ExitCode: resp.State.ExitCode}, nil
 }
 
 // waitContainer blocks until the container exits and returns its exit code.

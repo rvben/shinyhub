@@ -785,6 +785,12 @@ func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
 	// fresh replacement created by a concurrent stop/start while Resume ran
 	// unlocked (matches the Start/StopReplica handle-equality idiom).
 	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
+		if ep.URL == "" {
+			// In-place resume (e.g. docker unpause) preserves the route; keep the
+			// known endpoint URL rather than clobbering it with an empty one. A
+			// driver that restores under a new identity returns a non-empty URL.
+			ep.URL = pool[index].info.EndpointURL
+		}
 		pool[index].info.Status = StatusRunning
 		pool[index].info.EndpointURL = ep.URL
 		pool[index].info.WorkerID = ep.WorkerID

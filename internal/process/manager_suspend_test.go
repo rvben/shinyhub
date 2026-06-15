@@ -92,6 +92,29 @@ func TestManager_Resume_RestoresEndpointAndStatus(t *testing.T) {
 	}
 }
 
+func TestManager_Resume_PreservesURLWhenDriverReturnsEmpty(t *testing.T) {
+	m := NewManager(t.TempDir(), NewNativeRuntime())
+	// Driver returns an empty URL (in-place resume, e.g. docker unpause); the
+	// Manager must preserve the entry's known route URL.
+	rt := &fakeSnapshotRuntime{suspendFreed: true, resumeEP: ReplicaEndpoint{Handle: RunHandle{PID: 4242}}}
+	seedRunningEntry(m, "app", "snap", 0, rt) // EndpointURL "http://127.0.0.1:1000"
+	if _, err := m.Suspend("app"); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	ep, err := m.Resume("app", 0)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if ep.URL != "http://127.0.0.1:1000" {
+		t.Fatalf("ep.URL = %q, want preserved http://127.0.0.1:1000", ep.URL)
+	}
+	info, _ := m.GetReplica("app", 0)
+	if info.EndpointURL != "http://127.0.0.1:1000" {
+		t.Fatalf("entry URL = %q, want preserved", info.EndpointURL)
+	}
+}
+
 func TestManager_Resume_NotSuspendedReturnsSentinel(t *testing.T) {
 	m := NewManager(t.TempDir(), NewNativeRuntime())
 	rt := &fakeSnapshotRuntime{}
