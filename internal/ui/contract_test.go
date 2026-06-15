@@ -1542,8 +1542,8 @@ func TestSidebarShellStructure(t *testing.T) {
 			t.Fatalf("#primary-nav must contain %s", id)
 		}
 	}
-	if !strings.Contains(html, `data-auth="out"`) {
-		t.Fatal(`index.html: <body> must default to data-auth="out" so chrome is hidden before auth resolves`)
+	if !strings.Contains(html, `data-auth="loading"`) {
+		t.Fatal(`index.html: <body> must default to data-auth="loading" so neither the chrome nor the login form paints before the session check resolves (see TestBootSplashAvoidsLoginFlash)`)
 	}
 	if !strings.Contains(html, `aria-controls="sidebar"`) {
 		t.Fatal(`index.html: #sidebar-toggle must have aria-controls="sidebar"`)
@@ -1840,4 +1840,25 @@ func TestProfileIdentityWiring(t *testing.T) {
 	// userResponse.display_name (see internal/api/users.go toUserResponse).
 	assertContains(t, "app.js", "u.display_name",
 		"the Users table must render u.display_name as the username subtitle; see internal/api/users.go toUserResponse")
+}
+
+// TestBootSplashAvoidsLoginFlash pins the boot-state contract that prevents the
+// login form from painting before the dashboard. The shell must default to
+// data-auth="loading" (not "out") with a #boot-splash hold; the server stamps
+// "in" for authenticated requests (StampAuthenticated, tested separately), and
+// the CSS must hide the login view during boot and for an already-authenticated
+// shell. Regressing the default back to "out" reintroduces the login flash.
+func TestBootSplashAvoidsLoginFlash(t *testing.T) {
+	assertContains(t, "index.html", `data-auth="loading"`,
+		"the shell must boot in data-auth=\"loading\" so the login form never paints before the session check resolves")
+	assertNotContains(t, "index.html", `<body data-auth="out">`,
+		"the shell must not default to data-auth=\"out\"; that paints the login form first (the flash)")
+	assertContains(t, "index.html", `id="boot-splash"`,
+		"the shell must include the #boot-splash hold shown during data-auth=\"loading\"")
+	assertContains(t, "style.css", `[data-auth="loading"] #login-view`,
+		"the login view must be hidden during boot so it never flashes")
+	assertContains(t, "style.css", `[data-auth="in"] #login-view`,
+		"the login view must stay hidden for a server-stamped authenticated shell")
+	assertContains(t, "style.css", `[data-auth="loading"] #boot-splash`,
+		"the boot splash must be shown only during the loading state")
 }

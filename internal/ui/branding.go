@@ -101,3 +101,14 @@ func RenderIndex(raw []byte, p Public) ([]byte, error) {
 	out = headRe.ReplaceAllLiteral(out, append(head.Bytes(), []byte("</head>")...))
 	return out, nil
 }
+
+// StampAuthenticated marks the SPA shell as already-authenticated so the
+// dashboard chrome paints immediately, skipping the boot splash and never
+// flashing the login form. Callers invoke this only when the request that
+// fetched the shell is itself authenticated (e.g. behind forward auth). It
+// swaps the default data-auth="loading" for data-auth="in"; if the marker is
+// absent (already stamped, or the shell changed), it returns the input
+// unchanged.
+func StampAuthenticated(shell []byte) []byte {
+	return bytes.Replace(shell, []byte(`data-auth="loading"`), []byte(`data-auth="in"`), 1)
+}

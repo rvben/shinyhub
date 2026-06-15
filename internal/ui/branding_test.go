@@ -100,3 +100,20 @@ func TestBrandingAssetHandler(t *testing.T) {
 		}
 	}
 }
+
+func TestStampAuthenticated(t *testing.T) {
+	// Flips the boot marker to the logged-in state, exactly once.
+	out := string(ui.StampAuthenticated([]byte(`<body data-auth="loading"><div data-auth="loading"></div>`)))
+	if !strings.Contains(out, `<body data-auth="in">`) {
+		t.Errorf("body marker not flipped to in: %s", out)
+	}
+	if strings.Count(out, `data-auth="loading"`) != 1 {
+		t.Errorf("only the first marker (the body) should flip, got: %s", out)
+	}
+
+	// Absent marker is a no-op (already stamped, or an unexpected shell).
+	none := []byte(`<body data-auth="out">`)
+	if got := string(ui.StampAuthenticated(none)); got != string(none) {
+		t.Errorf("no marker must be a no-op, got %q", got)
+	}
+}

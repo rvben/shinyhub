@@ -11,8 +11,18 @@
   <script src="/static/zip-writer.js" defer></script>
   <script type="module" src="/static/app.js" defer></script>
 </head>
-<body data-auth="out">
+<body data-auth="loading">
   <div class="bg-stars" aria-hidden="true"></div>
+
+  <!-- Boot splash: shown only while the session check is in flight (data-auth=
+       "loading"), so the login form never paints first. Authenticated requests
+       are served with data-auth="in" stamped by the server, skipping this. -->
+  <div id="boot-splash" aria-hidden="true">
+    <span class="brand">
+      <span class="sparkle sparkle-brand" aria-hidden="true"></span>
+      Shiny<span class="brand-hub">Hub</span>
+    </span>
+  </div>
 
   <header id="mobile-topbar">
     <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">

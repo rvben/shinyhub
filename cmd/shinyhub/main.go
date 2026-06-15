@@ -1448,7 +1448,13 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	// dev live-reload still works).
 	pub := ui.PublicBranding(cfg.Branding, resolved)
 	serveShell := func(w http.ResponseWriter, r *http.Request) {
-		if !brandingActive {
+		// An authenticated request (the request that fetches the shell is itself
+		// behind forward auth or a session) gets the shell pre-marked "in" so the
+		// dashboard chrome paints immediately, with no boot splash and no flash of
+		// the login form. This needs a per-request render, so it leaves the cached
+		// ServeFileFS fast path only when there is a reason to.
+		authed := auth.UserFromContext(r.Context()) != nil
+		if !brandingActive && !authed {
 			http.ServeFileFS(w, r, ui.Static(), "index.html")
 			return
 		}
@@ -1457,10 +1463,16 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		out, err := ui.RenderIndex(raw, pub)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+		out := raw
+		if brandingActive {
+			out, err = ui.RenderIndex(raw, pub)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+		}
+		if authed {
+			out = ui.StampAuthenticated(out)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(out)
