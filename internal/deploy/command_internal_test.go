@@ -14,7 +14,7 @@ func TestBuildCommand_AutoInstrumentWrapsRequirementsMode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", true)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", true, true)
 	want := []string{
 		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
 		"--with", "opentelemetry-distro",
@@ -35,7 +35,7 @@ func TestBuildCommand_AutoInstrumentWrapsProjectMode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", true)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", true, true)
 	want := []string{
 		"uv", "run",
 		"--with", "opentelemetry-distro",
@@ -57,7 +57,48 @@ func TestBuildCommand_NoInstrumentUnchanged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", false)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, true)
+	want := []string{
+		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
+		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("buildCommand =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// With useLock set and a compiled lock present, the launch installs from the
+// frozen lock instead of re-resolving requirements.txt on every cold start.
+func TestBuildCommand_PrefersLockWhenHostPrepares(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, process.RequirementsLockName), []byte("shiny==1.4.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, true)
+	want := []string{
+		"uv", "run", "--no-project", "--with-requirements", process.RequirementsLockName,
+		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("buildCommand =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// When the host does NOT prepare deps (container/worker), the lock may not ship
+// with the bundle, so the command must stay on requirements.txt even if a lock
+// happens to exist in the host's version dir.
+func TestBuildCommand_IgnoresLockWhenOffHostPrepared(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, process.RequirementsLockName), []byte("shiny==1.4.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, false)
 	want := []string{
 		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",

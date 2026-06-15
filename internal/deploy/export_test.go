@@ -20,7 +20,7 @@ func SetSyncHooksForTest(py, r func(string) error) (restore func()) {
 // SetBuildCommandForTest swaps the package's python launch-command builder so
 // tests can observe the auto-instrument decision and substitute runnable
 // commands. Returns a restore func — pair with defer. Test use only.
-func SetBuildCommandForTest(f func(bundleDir string, port, workers int, bindHost string, autoInstrument bool) []string) (restore func()) {
+func SetBuildCommandForTest(f func(bundleDir string, port, workers int, bindHost string, autoInstrument, useLock bool) []string) (restore func()) {
 	orig := buildCommandFn
 	buildCommandFn = f
 	return func() { buildCommandFn = orig }

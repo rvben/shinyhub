@@ -1154,7 +1154,7 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 
 			var mu sync.Mutex
 			var autos []bool
-			restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto bool) []string {
+			restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto, _ bool) []string {
 				mu.Lock()
 				autos = append(autos, auto)
 				mu.Unlock()
@@ -1188,7 +1188,7 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 // must never be applied to user-supplied commands.
 func TestRun_AutoInstrumentSkipsCustomCommand(t *testing.T) {
 	bundle := t.TempDir()
-	restoreCmd := deploy.SetBuildCommandForTest(func(string, int, int, string, bool) []string {
+	restoreCmd := deploy.SetBuildCommandForTest(func(string, int, int, string, bool, bool) []string {
 		t.Error("buildCommand must not be called for a custom Command")
 		return nil
 	})
@@ -1396,7 +1396,7 @@ func TestRun_InstrumentedFailureFallsBackUninstrumented(t *testing.T) {
 
 	var mu sync.Mutex
 	var autos []bool
-	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto bool) []string {
+	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto, _ bool) []string {
 		mu.Lock()
 		autos = append(autos, auto)
 		mu.Unlock()

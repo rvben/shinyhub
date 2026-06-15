@@ -32,8 +32,9 @@ func init() {
 // (or replace) host-side dependency installation. Production code always
 // goes through process.Sync / process.SyncR.
 var (
-	pythonSyncFn = process.Sync
-	rSyncFn      = process.SyncR
+	pythonSyncFn       = process.Sync
+	rSyncFn            = process.SyncR
+	requirementsLockFn = process.EnsureRequirementsLock
 )
 
 // autoInstrumentPackages is the overlay layered into a Python app's
@@ -324,6 +325,15 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 					if err = pythonSyncFn(p.BundleDir); err != nil {
 						return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
 					}
+					// Freeze a loose requirements.txt into a lock on first prep so
+					// later cold starts reuse this resolution instead of drifting
+					// onto a newer, possibly-broken one. Best-effort: a compile
+					// failure leaves the app on live resolution (prior behavior)
+					// and never blocks the boot.
+					if lerr := requirementsLockFn(p.BundleDir); lerr != nil {
+						slog.Warn("deploy: requirements lock failed; using live resolution",
+							"slug", p.Slug, "err", lerr)
+					}
 				}
 				// Only inferred-command Python boots resolve auto-instrumentation:
 				// opentelemetry-instrument is Python-only, and user-supplied
@@ -580,7 +590,11 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 			if workers <= 0 {
 				workers = 1
 			}
-			cmd = buildCommandFn(p.BundleDir, port, workers, bindHost, instrument)
+			// Prefer the compiled lock only when this host prepares the deps; a
+			// container/worker replica runs from a bundle that may not carry the
+			// lock, so it must keep using requirements.txt.
+			useLock := p.hostPreparesDeps(tier)
+			cmd = buildCommandFn(p.BundleDir, port, workers, bindHost, instrument, useLock)
 		case "r":
 			cmd = BuildRCommand(p.BundleDir, port, bindHost)
 		default:
@@ -686,6 +700,23 @@ func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 	return []string{"Rscript", "--vanilla", "-e", expr}
 }
 
+// requirementsFileFor returns the dependency file `uv run --with-requirements`
+// should use for a non-pyproject app, or "" if neither file exists. When useLock
+// is set and a compiled lock is present, it wins; otherwise the loose
+// requirements.txt is used (the prior behavior, and the only safe choice when
+// the deps are prepared off-host).
+func requirementsFileFor(bundleDir string, useLock bool) string {
+	if useLock {
+		if _, err := os.Stat(filepath.Join(bundleDir, process.RequirementsLockName)); err == nil {
+			return process.RequirementsLockName
+		}
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
+		return "requirements.txt"
+	}
+	return ""
+}
+
 // buildCommand constructs the uv launch command for a bundle directory.
 // If a pyproject.toml is present, uv sync has already prepared the environment
 // and we use plain `uv run`. If only requirements.txt is present, we pass
@@ -694,13 +725,18 @@ func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 // the entrypoint is wrapped with opentelemetry-instrument; the app's own
 // environment is never modified. bindHost has the same meaning as in
 // BuildRCommand.
-func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument bool) []string {
+// useLock prefers a compiled requirements.lock over requirements.txt when one is
+// present and this host prepares the dependencies (so the lock is guaranteed to
+// be alongside the bundle the command runs against). It freezes the resolution
+// to what was locked at deploy, instead of re-resolving loose pins on every cold
+// start.
+func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument, useLock bool) []string {
 	base := []string{"uv", "run", "--no-project"}
 	if _, err := os.Stat(filepath.Join(bundleDir, "pyproject.toml")); err == nil {
 		// Project mode: environment was synced by process.Sync.
 		base = []string{"uv", "run"}
-	} else if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
-		base = append(base, "--with-requirements", "requirements.txt")
+	} else if reqFile := requirementsFileFor(bundleDir, useLock); reqFile != "" {
+		base = append(base, "--with-requirements", reqFile)
 	}
 	if autoInstrument {
 		for _, pkg := range autoInstrumentPackages {
