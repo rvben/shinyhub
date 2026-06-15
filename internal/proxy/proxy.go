@@ -237,15 +237,6 @@ type Proxy struct {
 	wakeTrigger func(slug string)
 	slugExists  func(slug string) (bool, error)
 
-	// forwardErrorWake enables the clustered forward-error recovery path.
-	// When true, a reverse-proxy upstream error triggers the wake trigger
-	// and serves the loading page (HTTP 200) instead of 502, so a client
-	// reconnects after a replica that was hibernated or stopped mid-request.
-	// Kept false on single-node deployments: the loading page has a bounded
-	// retry cap (~60 s), so the reconnect never loops indefinitely.
-	// Set once at startup via SetForwardErrorWake; read lock-free via atomic.
-	forwardErrorWake atomic.Bool
-
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
 	// replica index, so a client cannot forge or replay it to pin itself to a
@@ -505,15 +496,6 @@ func (p *Proxy) getWakeTrigger() func(string) {
 	return fn
 }
 
-// SetForwardErrorWake enables the clustered forward-error recovery path.
-// When true, a reverse-proxy upstream error calls the wake trigger and serves
-// the loading page (HTTP 200) so a client reconnects after a replica that was
-// stopped or hibernated mid-request. Must be set only in clustered mode: on
-// single-node, the standard 502 is preserved byte-for-byte.
-func (p *Proxy) SetForwardErrorWake(enable bool) {
-	p.forwardErrorWake.Store(enable)
-}
-
 // SetSlugExists registers a synchronous predicate that the proxy uses to
 // distinguish a known-but-not-running slug (serve loading page) from a
 // completely unknown slug (return 404). The predicate returns
@@ -720,30 +702,29 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	slugCopy := slug
 	targetPath := strings.TrimRight(target.Path, "/")
 	// Capture pre-response upstream failures (connection refused, timeout)
-	// onto the statusRecorder so the trace span surfaces span.Error. Mirrors
-	// httputil's default handler (log + 502) and adds the capture.
+	// onto the statusRecorder so the trace span surfaces span.Error.
 	//
-	// In clustered mode (forwardErrorWake=true), an upstream error triggers the
-	// wake trigger and serves the loading page (HTTP 200) so the client retries
-	// automatically. A replica that was hibernated or stopped between the pool
-	// registration and the forwarded request causes this path; the loading page
-	// retries for up to ~60 s (bounded by loadingPageMaxRetries on the client).
-	// Single-node keeps the standard 502 byte-for-byte.
+	// A pre-response upstream error means the backend is unreachable: the
+	// replica was hibernated, stopped, or died between its pool registration
+	// and this forwarded request. Trigger a wake and serve the loading page
+	// (HTTP 200) so the client retries while the replica is (re)started, instead
+	// of a dead-end 502. The loading page self-limits to ~60 s of retries
+	// (loadingPageMaxRetries on the client), so a genuinely broken backend ends
+	// in the bounded "try again" page rather than looping. This recovery is
+	// unconditional: it applies to single-node and clustered deployments alike
+	// (the wake trigger is wired on every instance), since the dead-replica race
+	// happens in both.
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
 		}
-		if p.forwardErrorWake.Load() {
-			if t := p.getWakeTrigger(); t != nil {
-				go t(slugCopy)
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(loadingPage)) //nolint:errcheck
-			return
+		if t := p.getWakeTrigger(); t != nil {
+			go t(slugCopy)
 		}
-		w.WriteHeader(http.StatusBadGateway)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(loadingPage)) //nolint:errcheck
 	}
 	// ErrorHandler does not fire for failures after the response header was
 	// sent: ReverseProxy reports those only on the body copy. Wrap the

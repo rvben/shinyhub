@@ -10,21 +10,27 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 )
 
-// TestForwardErrorWake_ClusteredServesLoadingPage verifies that when
-// forwardErrorWake is enabled (clustered mode) and a registered upstream is
-// unreachable, the proxy serves the loading page (HTTP 200) and invokes the
-// wake trigger rather than returning 502.
-func TestForwardErrorWake_ClusteredServesLoadingPage(t *testing.T) {
-	// Backend that always refuses connections: start then close immediately.
+// TestProxy_UpstreamErrorWakesAndServesLoadingPage verifies that a pre-response
+// upstream error (the registered replica is unreachable: hibernated, stopped, or
+// died between pool registration and this request) makes the proxy trigger a
+// wake and serve the loading page (HTTP 200) so the client retries while the
+// replica is (re)started, instead of a dead-end 502.
+//
+// This recovery is unconditional. It was previously gated to clustered mode,
+// which left single-node deployments returning a *permanent* 502: the wake was
+// never triggered, so the dead replica was never restarted and every subsequent
+// request 502'd until manual intervention.
+func TestProxy_UpstreamErrorWakesAndServesLoadingPage(t *testing.T) {
+	// A backend that refuses connections: start then close immediately so the
+	// reverse proxy's dial fails (a pre-response upstream error).
 	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	closedURL := closed.URL
 	closed.Close()
 
-	p := proxy.New()
-	p.SetForwardErrorWake(true)
+	p := proxy.New() // no clustered wiring: this is the single-node default
 
-	done := make(chan struct{})
-	p.SetWakeTrigger(func(slug string) { close(done) })
+	woke := make(chan string, 1)
+	p.SetWakeTrigger(func(slug string) { woke <- slug })
 
 	if err := p.Register("errapp", closedURL); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -35,38 +41,17 @@ func TestForwardErrorWake_ClusteredServesLoadingPage(t *testing.T) {
 	p.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Errorf("clustered forward-error: expected 200 (loading page), got %d", rec.Code)
+		t.Errorf("upstream error: expected 200 (loading page), got %d", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "Starting app") {
-		t.Errorf("clustered forward-error: expected loading page body, got %q", rec.Body.String())
+		t.Errorf("upstream error: expected loading page body, got %q", rec.Body.String())
 	}
 	select {
-	case <-done:
+	case slug := <-woke:
+		if slug != "errapp" {
+			t.Errorf("wake trigger slug = %q, want errapp", slug)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("clustered forward-error: wake trigger must be called on upstream error")
-	}
-}
-
-// TestForwardErrorWake_SingleNodeReturns502 verifies that when forwardErrorWake
-// is false (single-node default), a forward error to an unreachable upstream
-// returns 502 (byte-for-byte unchanged behaviour).
-func TestForwardErrorWake_SingleNodeReturns502(t *testing.T) {
-	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	closedURL := closed.URL
-	closed.Close()
-
-	p := proxy.New()
-	// forwardErrorWake NOT set: single-node default.
-
-	if err := p.Register("singleapp", closedURL); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	req := httptest.NewRequest("GET", "/app/singleapp/", nil)
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("single-node forward-error: expected 502, got %d", rec.Code)
+		t.Fatal("upstream error: wake trigger must fire so the dead replica is (re)started")
 	}
 }

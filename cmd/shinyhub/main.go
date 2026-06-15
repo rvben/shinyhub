@@ -962,14 +962,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// ownership. A standby issues the BeginWake CAS (hibernated->waking) on a
 	// proxy miss so the DB reflects the pending wake immediately; the active's
 	// runOnce reconciler drives it to running. The active drives inline.
+	// The proxy's ErrorHandler also calls this trigger on a pre-response
+	// upstream error so a dead/hibernated replica is woken rather than 502'd,
+	// in single-node and clustered deployments alike.
 	prx.SetWakeTrigger(watcher.WakeTrigger)
-
-	// In clustered mode, a forward error to a stopped/hibernated upstream
-	// should reconnect the client via the loading page rather than 502, since
-	// another replica or a just-woken replacement may become available.
-	if isClustered(cfg) {
-		prx.SetForwardErrorWake(true)
-	}
 
 	// Record hibernate/wake transitions and crash-restart counts when metrics
 	// are enabled. Nil-safe inside the watcher when metrics are disabled.
