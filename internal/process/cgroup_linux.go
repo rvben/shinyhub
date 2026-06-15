@@ -16,6 +16,11 @@ import (
 // cgroupV2Mount is the unified cgroup v2 mount point.
 const cgroupV2Mount = "/sys/fs/cgroup"
 
+// supervisorName is the leaf cgroup under the delegated base into which shinyhub
+// moves its own process, so the base can delegate the memory controller to the
+// per-app children (cgroup v2's no-internal-process rule).
+const supervisorName = "_supervisor"
+
 // cgroupCurrentMemory reads memory.current (bytes charged to the cgroup) for the
 // cgroup that pid belongs to. Used to measure resident memory before/after a
 // reclaim. It reads the cgroup file directly (not the docker stats API) so it is
@@ -115,7 +120,16 @@ func ensureDelegatedBase() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base := filepath.Join(cgroupV2Mount, rel)
+	selfDir := filepath.Join(cgroupV2Mount, rel)
+	// Resolve the base. On a first call shinyhub is still in its service cgroup,
+	// so base == selfDir. On any later call shinyhub has already been moved into
+	// base/_supervisor, so the real base is the parent - detect that (we only
+	// ever create a child literally named "_supervisor") so re-invocation is
+	// idempotent and never nests a second _supervisor under the first.
+	base := selfDir
+	if filepath.Base(selfDir) == supervisorName {
+		base = filepath.Dir(selfDir)
+	}
 
 	// Already prepared: +memory in subtree_control implies base holds no procs
 	// (it could not have been enabled otherwise) and shinyhub already lives in
@@ -128,7 +142,7 @@ func ensureDelegatedBase() (string, error) {
 	if !cgroupHasField(filepath.Join(base, "cgroup.controllers"), "memory") {
 		return "", fmt.Errorf("cgroup %s: memory controller not delegated (need systemd Delegate=memory)", rel)
 	}
-	sup := filepath.Join(base, "_supervisor")
+	sup := filepath.Join(base, supervisorName)
 	if err := os.Mkdir(sup, 0o755); err != nil && !os.IsExist(err) {
 		return "", fmt.Errorf("mkdir %s: %w", sup, err)
 	}
