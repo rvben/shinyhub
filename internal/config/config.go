@@ -414,6 +414,9 @@ type RuntimeConfig struct {
 	// Fargate holds the AWS ECS/Fargate runtime settings. They are required when
 	// any tier declares runtime "fargate"; otherwise the zero value is unused.
 	Fargate FargateRuntimeConfig
+	// Snapshot controls warm-wake (freeze + cgroup reclaim), shared by the
+	// native and docker runtimes.
+	Snapshot SnapshotConfig
 }
 
 // FargateRuntimeConfig holds the AWS ECS/Fargate runtime settings shared by every
@@ -602,13 +605,12 @@ type DockerRuntimeConfig struct {
 	// via 127.0.0.1 binding. "host" disables network isolation; the container
 	// shares the host network stack. Allowed: "bridge" (default), "host".
 	NetworkMode string
-	// Snapshot controls warm-wake (freeze + cgroup reclaim) for docker apps.
-	Snapshot SnapshotConfig
 }
 
-// SnapshotConfig controls warm-wake for the docker runtime: on hibernate a
-// replica is frozen (docker pause) and its RAM reclaimed to swap/zram instead of
-// being stopped, so wake resumes it warm. Disabled by default; when off, apps
+// SnapshotConfig controls warm-wake, shared by the native and docker runtimes:
+// on hibernate a replica is frozen (SIGSTOP for native, docker pause for docker)
+// and its RAM reclaimed to swap via cgroup v2 memory.reclaim instead of being
+// stopped, so wake resumes it warm. Disabled by default; when off, apps
 // hibernate via Stop exactly as before.
 type SnapshotConfig struct {
 	Enabled bool
@@ -689,6 +691,7 @@ type rawRuntimeConfig struct {
 	Tiers                        []rawTierConfig         `yaml:"tiers"`
 	Autoscale                    rawAutoscaleConfig      `yaml:"autoscale"`
 	Fargate                      rawFargateRuntimeConfig `yaml:"fargate"`
+	Snapshot                     rawSnapshotConfig       `yaml:"snapshot"`
 }
 
 type rawFargateRuntimeConfig struct {
@@ -730,12 +733,11 @@ type rawTierConfig struct {
 }
 
 type rawDockerRuntimeConfig struct {
-	Socket            string            `yaml:"socket"`
-	Images            rawDockerImages   `yaml:"images"`
-	DefaultMemoryMB   int               `yaml:"default_memory_mb"`
-	DefaultCPUPercent int               `yaml:"default_cpu_percent"`
-	NetworkMode       string            `yaml:"network_mode"`
-	Snapshot          rawSnapshotConfig `yaml:"snapshot"`
+	Socket            string          `yaml:"socket"`
+	Images            rawDockerImages `yaml:"images"`
+	DefaultMemoryMB   int             `yaml:"default_memory_mb"`
+	DefaultCPUPercent int             `yaml:"default_cpu_percent"`
+	NetworkMode       string          `yaml:"network_mode"`
 }
 
 type rawSnapshotConfig struct {
@@ -1011,11 +1013,11 @@ func loadRaw(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("runtime.docker.network_mode: %q is not supported; must be one of bridge, host", cfg.Runtime.Docker.NetworkMode)
 	}
-	if f := cfg.Runtime.Docker.Snapshot.ReclaimMinFraction; f <= 0 || f > 1 {
-		return nil, fmt.Errorf("runtime.docker.snapshot.reclaim_min_fraction: %v must be in (0, 1]", f)
+	if f := cfg.Runtime.Snapshot.ReclaimMinFraction; f <= 0 || f > 1 {
+		return nil, fmt.Errorf("runtime.snapshot.reclaim_min_fraction: %v must be in (0, 1]", f)
 	}
-	if cfg.Runtime.Docker.Snapshot.MaxSuspended <= 0 {
-		cfg.Runtime.Docker.Snapshot.MaxSuspended = 16
+	if cfg.Runtime.Snapshot.MaxSuspended <= 0 {
+		cfg.Runtime.Snapshot.MaxSuspended = 16
 	}
 	// Tiers: copy from raw, or synthesize a single default tier from Mode.
 	if len(raw.Runtime.Tiers) == 0 {
@@ -1388,18 +1390,18 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 				R:      DefaultRImage,
 			},
 			NetworkMode: DefaultNetworkMode,
-			Snapshot:    SnapshotConfig{MaxSuspended: 16, ReclaimMinFraction: 0.8},
 		},
+		Snapshot: SnapshotConfig{MaxSuspended: 16, ReclaimMinFraction: 0.8},
 	}
 	if r.Mode != "" {
 		rc.Mode = r.Mode
 	}
-	rc.Docker.Snapshot.Enabled = r.Docker.Snapshot.Enabled
-	if r.Docker.Snapshot.MaxSuspended > 0 {
-		rc.Docker.Snapshot.MaxSuspended = r.Docker.Snapshot.MaxSuspended
+	rc.Snapshot.Enabled = r.Snapshot.Enabled
+	if r.Snapshot.MaxSuspended > 0 {
+		rc.Snapshot.MaxSuspended = r.Snapshot.MaxSuspended
 	}
-	if r.Docker.Snapshot.ReclaimMinFraction != 0 {
-		rc.Docker.Snapshot.ReclaimMinFraction = r.Docker.Snapshot.ReclaimMinFraction
+	if r.Snapshot.ReclaimMinFraction != 0 {
+		rc.Snapshot.ReclaimMinFraction = r.Snapshot.ReclaimMinFraction
 	}
 	if r.Docker.Socket != "" {
 		rc.Docker.Socket = r.Docker.Socket
@@ -1685,26 +1687,26 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Runtime.Docker.DefaultCPUPercent = n
 	}
-	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_ENABLED"); v != "" {
+	if v := os.Getenv("SHINYHUB_RUNTIME_SNAPSHOT_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)
 		if err != nil {
-			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_ENABLED: %w", err)
+			return fmt.Errorf("SHINYHUB_RUNTIME_SNAPSHOT_ENABLED: %w", err)
 		}
-		cfg.Runtime.Docker.Snapshot.Enabled = b
+		cfg.Runtime.Snapshot.Enabled = b
 	}
-	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_MAX_SUSPENDED"); v != "" {
+	if v := os.Getenv("SHINYHUB_RUNTIME_SNAPSHOT_MAX_SUSPENDED"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_MAX_SUSPENDED: %q is not an integer: %w", v, err)
+			return fmt.Errorf("SHINYHUB_RUNTIME_SNAPSHOT_MAX_SUSPENDED: %q is not an integer: %w", v, err)
 		}
-		cfg.Runtime.Docker.Snapshot.MaxSuspended = n
+		cfg.Runtime.Snapshot.MaxSuspended = n
 	}
-	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_RECLAIM_MIN_FRACTION"); v != "" {
+	if v := os.Getenv("SHINYHUB_RUNTIME_SNAPSHOT_RECLAIM_MIN_FRACTION"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
-			return fmt.Errorf("SHINYHUB_RUNTIME_DOCKER_SNAPSHOT_RECLAIM_MIN_FRACTION: %q is not a number: %w", v, err)
+			return fmt.Errorf("SHINYHUB_RUNTIME_SNAPSHOT_RECLAIM_MIN_FRACTION: %q is not a number: %w", v, err)
 		}
-		cfg.Runtime.Docker.Snapshot.ReclaimMinFraction = f
+		cfg.Runtime.Snapshot.ReclaimMinFraction = f
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON"); v != "" {
 		cfg.Runtime.Docker.Images.Python = v
