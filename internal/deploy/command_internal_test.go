@@ -67,19 +67,29 @@ func TestBuildCommand_NoInstrumentUnchanged(t *testing.T) {
 	}
 }
 
-// With useLock set and a compiled lock present, the launch installs from the
-// frozen lock instead of re-resolving requirements.txt on every cold start.
-func TestBuildCommand_PrefersLockWhenHostPrepares(t *testing.T) {
+// synthProject writes a pyproject.toml plus the synthesized marker (the state
+// EnsureProject leaves) alongside a requirements.txt in dir.
+func synthProject(t *testing.T, dir string) {
+	t.Helper()
+	for name, body := range map[string]string{
+		"requirements.txt":               "shiny\n",
+		"pyproject.toml":                 "[project]\nname='shinyhub-app'\n",
+		process.SynthesizedProjectMarker: "1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A synthesized project launches in project mode where this host prepared the
+// deps (the .venv is present), not via --with-requirements.
+func TestBuildCommand_SynthesizedProjectRunsInProjectModeOnHost(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, process.RequirementsLockName), []byte("shiny==1.4.0\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	synthProject(t, dir)
 	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, true)
 	want := []string{
-		"uv", "run", "--no-project", "--with-requirements", process.RequirementsLockName,
+		"uv", "run",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -87,20 +97,31 @@ func TestBuildCommand_PrefersLockWhenHostPrepares(t *testing.T) {
 	}
 }
 
-// When the host does NOT prepare deps (container/worker), the lock may not ship
-// with the bundle, so the command must stay on requirements.txt even if a lock
-// happens to exist in the host's version dir.
-func TestBuildCommand_IgnoresLockWhenOffHostPrepared(t *testing.T) {
+// Off-host (container/worker), a synthesized project's .venv is not present, so
+// it must fall back to requirements.txt even though a pyproject is in the dir.
+func TestBuildCommand_SynthesizedProjectFallsBackOffHost(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
-		t.Fatal(err)
+	synthProject(t, dir)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, false)
+	want := []string{
+		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
+		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
-	if err := os.WriteFile(filepath.Join(dir, process.RequirementsLockName), []byte("shiny==1.4.0\n"), 0o644); err != nil {
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("buildCommand =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// An author-shipped pyproject (no synthesized marker) ships with the bundle, so
+// it is project mode everywhere, including off-host.
+func TestBuildCommand_AuthorProjectIsProjectModeOffHost(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, false)
 	want := []string{
-		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
+		"uv", "run",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
