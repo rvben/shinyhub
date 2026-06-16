@@ -47,6 +47,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.12](https://github.com/rvben/shinyhub/compare/v0.8.11...v0.8.12) - 2026-06-16
+
+### Added
+
+- **runtime**: enable native warm-wake in buildRuntime ([c3e67a7](https://github.com/rvben/shinyhub/commit/c3e67a74f292128b0a7e69218729a5f469df0494))
+- **process**: native warm-wake via per-app cgroup reclaim ([f8dfd5d](https://github.com/rvben/shinyhub/commit/f8dfd5dcc9960f1f8d5c7f29230d41ac6b06acd2))
+- **lifecycle**: evict oldest suspended replicas over max_suspended ([6176c9b](https://github.com/rvben/shinyhub/commit/6176c9b44dff2da1033a9efc33715a1ac9a54c78))
+- **server**: enable docker warm-wake from snapshot config ([1717396](https://github.com/rvben/shinyhub/commit/1717396c0eb7e63ce25acfdce29ba57146a04b9c))
+- **process**: implement DockerRuntime Snapshotter (freeze + reclaim) ([c44a2e0](https://github.com/rvben/shinyhub/commit/c44a2e0c64e0c0c23fc592d6c394f1f6956da439))
+- **process**: add cgroup v2 memory.reclaim helpers (linux) ([7caebc6](https://github.com/rvben/shinyhub/commit/7caebc6b2153edb24c0b98e793846bdf18286a05))
+- **process**: add dockerClient pause/unpause ([4a604b4](https://github.com/rvben/shinyhub/commit/4a604b48bca1006e8f67ff8e94ce7e882c1e7407))
+- **config**: add runtime.docker.snapshot config (warm-wake) ([ef736a0](https://github.com/rvben/shinyhub/commit/ef736a05c24a1c1584100451b381d1a98310490b))
+- **process**: add reclaim-success threshold helper for warm-wake ([48efa27](https://github.com/rvben/shinyhub/commit/48efa27a008626af0375857d3446d01179551ded))
+- **server**: wire resume executor into the lifecycle watcher ([7cb42b0](https://github.com/rvben/shinyhub/commit/7cb42b014e2a5cbe6240351aee7c1fbfdde8ac64))
+- **lifecycle**: suspend on hibernate and resume on wake with fallbacks ([655e94d](https://github.com/rvben/shinyhub/commit/655e94d84fcb1d574d02c717d14d872d06f37bd4))
+- **deploy**: add ResumeReplica with abbreviated readiness probe ([dfdefb8](https://github.com/rvben/shinyhub/commit/dfdefb8d21b63d05373c8a264e5f7747b9146370))
+- **process**: add Manager.Suspend/Resume snapshot fan-out ([e2f81b7](https://github.com/rvben/shinyhub/commit/e2f81b7c0d87a1c6a507fba5c9fc2d1417b0633d))
+- **process**: add Snapshotter capability and suspended status ([13f0f2e](https://github.com/rvben/shinyhub/commit/13f0f2e0d1f71c5d9aa377c8f5dc460ce2e39bcb))
+- **deploy**: freeze requirements.txt apps at deploy to stop cold-start drift ([a878844](https://github.com/rvben/shinyhub/commit/a8788445efa14e335e84b724bf533c9b9193685a))
+- **auth**: capture forward-auth display name from proxy name header ([6505558](https://github.com/rvben/shinyhub/commit/650555830a2de4056127dbf45207518a15836444))
+- **ui**: sidebar identity card and editable profile modal ([ec3f1d7](https://github.com/rvben/shinyhub/commit/ec3f1d743001dcc3adeb71eacdc07ba751195485))
+- **api**: self-service profile endpoint and IdP-managed names ([cfea65a](https://github.com/rvben/shinyhub/commit/cfea65a4842ebe75d636da87dfb89312f9fa1242))
+- **db**: add user display_name column and store methods ([ce072ec](https://github.com/rvben/shinyhub/commit/ce072ec9e0889b1188fd9d6f0dba9167d2258589))
+
+### Fixed
+
+- **process**: make ensureDelegatedBase idempotent across calls ([0138795](https://github.com/rvben/shinyhub/commit/013879514cccd7c16081371cdfec189ea1854ec2))
+- **deploy**: launch project-mode apps with uv run --frozen --no-sync ([15e7403](https://github.com/rvben/shinyhub/commit/15e740379e80028825835ce5e3c2f20d4dace234))
+- **proxy**: recover from a dead/hibernated replica instead of 502 (single-node) ([d28d12c](https://github.com/rvben/shinyhub/commit/d28d12c6d27a57dafec90b531c440de1ce5d3eed))
+- **process**: stable suspend baseline, unconditional unfreeze on stop, EINTR retry ([a177125](https://github.com/rvben/shinyhub/commit/a177125547f132eeeb3ed70336d13660c8d95fdd))
+- **process**: unfreeze a suspended replica before stopping it ([4eece02](https://github.com/rvben/shinyhub/commit/4eece02873416b41ad1172dcc4b610d66ed2edcc))
+- **process**: guard suspend/resume status writes with handle re-check ([6457551](https://github.com/rvben/shinyhub/commit/645755139824683137dbca578e773b5a860daecf))
+- **ui**: replace the login-form flash on load with a boot splash ([afddd9b](https://github.com/rvben/shinyhub/commit/afddd9b3ae33b52ab0d9ae6d0f79753b66121f82))
+
 ## [0.8.11](https://github.com/rvben/shinyhub/compare/v0.8.10...v0.8.11) - 2026-06-14
 
 ### Added
