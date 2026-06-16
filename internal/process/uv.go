@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // CheckUV verifies that the uv binary is available in PATH.
@@ -73,6 +74,47 @@ func uvAddRequirementsCmd(dir string) *exec.Cmd {
 	return cmd
 }
 
+// uvAddCmd builds a `uv add <pkgs...>` command with a scrubbed env.
+func uvAddCmd(dir string, pkgs ...string) *exec.Cmd {
+	cmd := exec.Command("uv", append([]string{"add"}, pkgs...)...)
+	cmd.Dir = dir
+	cmd.Env = SanitizedEnv()
+	return cmd
+}
+
+// requirementDistName extracts the lowercased distribution name from one
+// requirements.txt line, stripping version specifiers, extras, environment
+// markers, comments, and options. Returns "" for blank/comment/option lines.
+func requirementDistName(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
+		return ""
+	}
+	name := line
+	for _, sep := range []string{" ", "\t", ";", "@", "[", "(", "=", ">", "<", "~", "!", ","} {
+		if i := strings.Index(name, sep); i >= 0 {
+			name = name[:i]
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// requirementsImplyPydantic reports whether the requirements declare a direct
+// dependency on `shiny`. shiny's UI imports `shinychat`, which imports `pydantic`
+// unconditionally at module load while declaring it OPTIONAL (shinychat 0.5.0:
+// `Requires-Dist: pydantic; extra == 'providers'`). A correct resolver therefore
+// omits pydantic, and every shiny app then crashes on `import shiny.ui` with
+// ModuleNotFoundError. EnsureProject adds pydantic for shiny apps so they run.
+// Remove this once shinychat stops importing an optional dependency.
+func requirementsImplyPydantic(requirements string) bool {
+	for _, line := range strings.Split(requirements, "\n") {
+		if requirementDistName(line) == "shiny" {
+			return true
+		}
+	}
+	return false
+}
+
 // EnsureProject converts a requirements.txt-only Python app into a uv project so
 // it gains a native uv.lock (fully pinned, hashed, requires-python-aware) and
 // launches in project mode. Reproducibility then comes from one mechanism -
@@ -97,6 +139,17 @@ func EnsureProject(dir string) error {
 		_ = os.Remove(filepath.Join(dir, "uv.lock"))
 		_ = os.RemoveAll(filepath.Join(dir, ".venv"))
 		return fmt.Errorf("uv add requirements: %w\n%s", err, out)
+	}
+	// shiny's UI imports shinychat, which imports pydantic unconditionally while
+	// declaring it optional (shinychat 0.5.0). Add pydantic for shiny apps so they
+	// do not crash on `import shiny.ui`. See requirementsImplyPydantic.
+	if reqs, rerr := os.ReadFile(filepath.Join(dir, "requirements.txt")); rerr == nil && requirementsImplyPydantic(string(reqs)) {
+		if out, err := uvAddCmd(dir, "pydantic").CombinedOutput(); err != nil {
+			_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
+			_ = os.Remove(filepath.Join(dir, "uv.lock"))
+			_ = os.RemoveAll(filepath.Join(dir, ".venv"))
+			return fmt.Errorf("uv add pydantic (shiny chat dependency): %w\n%s", err, out)
+		}
 	}
 	_ = os.WriteFile(filepath.Join(dir, SynthesizedProjectMarker), []byte("1\n"), 0o644)
 	return nil
