@@ -7,7 +7,7 @@ import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-healt
 import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
-import { appCardBadge } from '/static/views/app-card-badge.js';
+import { appCardBadge, updateCardStatusBadge } from '/static/views/app-card-badge.js';
 import { renderSidebarApps, highlightSidebarApp } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
@@ -394,6 +394,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const badge = document.createElement('span');
       badge.className = badgeInfo.cls;
       badge.textContent = badgeInfo.text;
+      // Tag the status badge so the 10s metrics poll can refresh it in place
+      // (see onMetrics → updateCardStatusBadge); without this the badge would
+      // freeze at its render-time status and miss wake/hibernate transitions.
+      badge.dataset.slug = app.slug;
       header.appendChild(badge);
 
       const fleetBadge = makeFleetBadge(document, app);
@@ -3464,6 +3468,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const metrics = createMetricsController({
     intervalMs: 10000,
     onMetrics: (slug, m) => {
+      // Grid card status badge: keep it live so a card opened while an app was
+      // hibernating reflects wake/sleep transitions (m.status is the live
+      // app-level status from /metrics). Update the stored model too so a later
+      // re-render (search/sort/filter) carries the fresh status.
+      const badgeEl = appGrid.querySelector(`.app-header .badge[data-slug="${slug}"]`);
+      const gridApp = state.apps && state.apps.find(a => a.slug === slug);
+      if (badgeEl && gridApp) updateCardStatusBadge(badgeEl, gridApp, m.status, formatStatus);
       // Grid card.
       const gridEl = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
       if (gridEl) {
