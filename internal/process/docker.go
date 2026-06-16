@@ -276,6 +276,16 @@ func (r *DockerRuntime) RemoveHandle(handle RunHandle) error {
 	return r.client.removeContainer(handle.ContainerID)
 }
 
+// RemoveContainer force-removes a container by ID. force=true handles a paused
+// container, so recovery can reap an orphaned frozen warm container. Satisfies
+// the lifecycle.ContainerLister capability. An empty ID is a no-op.
+func (r *DockerRuntime) RemoveContainer(id string) error {
+	if id == "" {
+		return nil
+	}
+	return r.client.removeContainer(id)
+}
+
 // SetSnapshot enables warm-wake (freeze + cgroup reclaim) and sets the
 // reclaim-success threshold. Called once at startup from buildRuntime.
 func (r *DockerRuntime) SetSnapshot(enabled bool, reclaimMinFraction float64) {

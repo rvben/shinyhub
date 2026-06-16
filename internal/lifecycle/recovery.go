@@ -108,6 +108,10 @@ func activeBundleDir(store *db.Store, appID int64) string {
 type ContainerLister interface {
 	ListByLabel(labelFilter string) ([]process.ContainerInfo, error)
 	InspectPID(containerID string) (int, error)
+	// RemoveContainer force-removes a container by ID (force handles a paused
+	// container). Recovery uses it to reap an orphaned frozen warm container that
+	// survived a restart and cannot be re-adopted.
+	RemoveContainer(containerID string) error
 }
 
 // RecoverProcesses re-adopts running app processes after a server restart.
@@ -485,10 +489,20 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
 		// 'suspended' warm row is a paused container that survived the restart and
-		// cannot be re-adopted warm; downgrade the row to stopped/warm so expansion
-		// cold-boots a fresh container. (Reaping the orphaned paused container is a
-		// docker-only follow-up; the docker runtime's warm-wake is opt-in.)
+		// cannot be re-adopted warm. Reap it (force-remove handles the paused state)
+		// so it does not leak, then downgrade the row to stopped/warm so a later
+		// expansion cold-boots a fresh container.
 		if r.Status == "suspended" {
+			for _, c := range containers {
+				if c.Labels[process.LabelSlug] == app.Slug && c.Labels[process.LabelReplicaIndex] == strconv.Itoa(r.Index) {
+					if rerr := lister.RemoveContainer(c.ID); rerr != nil {
+						slog.Warn("recovery: reap frozen warm container", "slug", app.Slug, "idx", r.Index, "container", c.ID, "err", rerr)
+					} else {
+						slog.Info("recovery: reaped frozen warm container", "slug", app.Slug, "idx", r.Index, "container", c.ID)
+					}
+					break
+				}
+			}
 			if err := store.UpsertReplica(db.UpsertReplicaParams{
 				AppID:        app.ID,
 				Index:        r.Index,

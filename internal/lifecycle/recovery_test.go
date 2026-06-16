@@ -41,6 +41,7 @@ func liveListener(t *testing.T) int {
 type fakeDockerRuntime struct {
 	containers []process.ContainerInfo
 	pids       map[string]int // containerID → host PID
+	removed    []string       // container IDs passed to RemoveContainer
 }
 
 func (f *fakeDockerRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
@@ -67,6 +68,11 @@ func (f *fakeDockerRuntime) InspectPID(id string) (int, error) {
 		return pid, nil
 	}
 	return 0, fmt.Errorf("container %s not found", id)
+}
+
+func (f *fakeDockerRuntime) RemoveContainer(id string) error {
+	f.removed = append(f.removed, id)
+	return nil
 }
 
 // mustCreateApp creates a test app and returns it.
@@ -272,6 +278,52 @@ func TestRecoverDockerProcesses(t *testing.T) {
 	}
 	if info.PID != pid {
 		t.Errorf("expected pid %d, got %d", pid, info.PID)
+	}
+}
+
+// TestRecoverProcesses_ReapsFrozenWarmContainer: a suspended/warm container that
+// survived a restart is force-removed (it cannot be re-adopted warm) and its row
+// downgraded to stopped/warm so a later expansion cold-boots a fresh container.
+func TestRecoverProcesses_ReapsFrozenWarmContainer(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+
+	app := mustCreateApp(t, store, "docker-app")
+	port := 20500
+	pid := 99001
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "suspended",
+		DesiredState: db.ReplicaDesiredWarm,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='docker-app'`)
+
+	rt := &fakeDockerRuntime{
+		containers: []process.ContainerInfo{
+			{ID: "cont-abc", Labels: map[string]string{
+				process.LabelSlug:         "docker-app",
+				process.LabelReplicaIndex: "0",
+			}},
+		},
+		pids: map[string]int{"cont-abc": 99001},
+	}
+	mgr := process.NewManager(t.TempDir(), rt)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
+
+	if len(rt.removed) != 1 || rt.removed[0] != "cont-abc" {
+		t.Fatalf("removed = %v, want [cont-abc] (paused container reaped)", rt.removed)
+	}
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil || len(reps) != 1 {
+		t.Fatalf("ListReplicas = %v, %v", reps, err)
+	}
+	if reps[0].Status != "stopped" || reps[0].DesiredState != db.ReplicaDesiredWarm {
+		t.Fatalf("row = %s/%s, want stopped/%s", reps[0].Status, reps[0].DesiredState, db.ReplicaDesiredWarm)
+	}
+	if _, ok := mgr.GetReplica("docker-app", 0); ok {
+		t.Error("frozen warm container must not be adopted as running")
 	}
 }
 
