@@ -76,6 +76,36 @@ func TestAppCardBadgeReadsDeploymentStatus(t *testing.T) {
 		"appCardBadge must read app.last_deployment_status; see internal/db/queries.go deploymentSummarySQL")
 }
 
+// TestGridStatusBadgeRefreshesFromMetricsPoll guards the live status badge.
+// The badge is computed once at render time; without this wiring it freezes at
+// its render-time status, so a card opened while an app is hibernating never
+// reflects a wake/sleep transition. The 10s /metrics poll carries a live
+// `status`, and onMetrics must push it onto the tagged badge via
+// updateCardStatusBadge (which re-derives through appCardBadge so pre-deploy
+// "Awaiting deploy"/"Failed" states are not clobbered by a poll's "stopped").
+func TestGridStatusBadgeRefreshesFromMetricsPoll(t *testing.T) {
+	assertContains(t, "app.js", "updateCardStatusBadge",
+		"app.js must import and call updateCardStatusBadge so the grid status badge tracks the live /metrics status")
+	assertContains(t, "app.js", "badge.dataset.slug = app.slug",
+		"renderGridVerbatim must tag the status badge with data-slug so onMetrics can locate it")
+	assertContains(t, "app.js", ".app-header .badge[data-slug=",
+		"onMetrics must locate the status badge by its data-slug to refresh it in place")
+	assertContains(t, "views/app-card-badge.js", "export function updateCardStatusBadge",
+		"app-card-badge.js must export updateCardStatusBadge for the live badge refresh")
+}
+
+// TestAppCardTitleHasNoLinkUnderline guards issue-1's fix: the whole card body
+// is an <a>, so underlining the title on hover made it read like a text link.
+// The card already signals it is clickable (lift + cyan border + accent dot);
+// the title shifts to the brand cyan instead. Pin that the underline rule is
+// gone so it cannot creep back.
+func TestAppCardTitleHasNoLinkUnderline(t *testing.T) {
+	assertNotContains(t, "style.css", ".app-card-body-link:hover strong { text-decoration: underline; }",
+		"the card title must not be underlined on hover (it reads as a text link); use the cyan accent shift instead")
+	assertContains(t, "style.css", ".app-card-body-link:hover strong { color: var(--cyan-bright); }",
+		"the card title hover affordance must be the brand cyan accent shift, not a link underline")
+}
+
 // TestAuditUnwrapsEnvelope guards the audit-log consumer.
 // GET /api/audit returns {events, total, has_more} (internal/api/audit.go
 // handleListAuditEvents). The UI's loadAuditEvents must read body.has_more
