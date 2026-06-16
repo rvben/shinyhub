@@ -48,6 +48,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.13](https://github.com/rvben/shinyhub/compare/v0.8.12...v0.8.13) - 2026-06-16
+
+### Added
+
+- **lifecycle**: reap orphaned frozen warm containers on recovery ([01899c1](https://github.com/rvben/shinyhub/commit/01899c16355d643af5a70fd67d4973b4e53232b6))
+- **lifecycle**: thaw warm-pool replicas on scale-up instead of cold-boot ([dd0888e](https://github.com/rvben/shinyhub/commit/dd0888e8af6ba8a23545ac17d910c1de71d0318d))
+
+### Fixed
+
+- **ui**: keep app-card status badge live and drop title link underline ([5d2bc33](https://github.com/rvben/shinyhub/commit/5d2bc334793636aafd2157a2b54c0369811d7a83))
+
 ## [0.8.12](https://github.com/rvben/shinyhub/compare/v0.8.11...v0.8.12) - 2026-06-16
 
 ### Added
