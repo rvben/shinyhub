@@ -748,6 +748,54 @@ func (m *Manager) Suspend(slug string) (bool, error) {
 	return false, firstErr
 }
 
+// SuspendReplica freezes a single running replica via the tier runtime's
+// Snapshotter, releasing its host RAM, and flips the in-memory entry to
+// StatusSuspended on success. It is the per-replica analogue of Suspend, mirroring
+// Resume's index-addressed shape, used by the warm pool to freeze drained replicas
+// while the floor keeps serving.
+//
+// Returns freed=true ONLY when the warmed memory was actually released. On any
+// other result the driver has already restored the replica to a normally stoppable
+// state (per the Snapshotter contract), so the entry is left StatusRunning and the
+// caller falls back to StopReplica: (false, ErrRuntimeNotSnapshotter) when the tier
+// runtime cannot snapshot, (false, nil) when too little was reclaimed, (false, err)
+// on a driver error.
+func (m *Manager) SuspendReplica(slug string, index int) (bool, error) {
+	m.mu.Lock()
+	pool := m.entries[slug]
+	if index >= len(pool) || pool[index] == nil {
+		m.mu.Unlock()
+		return false, fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
+	}
+	e := pool[index]
+	if e.info.Status != StatusRunning {
+		m.mu.Unlock()
+		return false, fmt.Errorf("app %s replica %d: not running", slug, index)
+	}
+	handle, tier := e.handle, e.tier
+	m.mu.Unlock()
+
+	sn, ok := m.runtimeFor(tier).(Snapshotter)
+	if !ok {
+		return false, fmt.Errorf("app %s replica %d: %w", slug, index, ErrRuntimeNotSnapshotter)
+	}
+	freed, err := sn.Suspend(context.Background(), handle)
+	if err != nil || !freed {
+		// The driver restored the replica per contract; leave it StatusRunning so
+		// the caller's StopReplica path operates on a normal, stoppable replica.
+		return false, err
+	}
+
+	m.mu.Lock()
+	// Re-check identity under the lock: a concurrent stop/replace may have niled or
+	// replaced this slot while Suspend ran unlocked. Only flip the entry we froze.
+	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
+		pool[index].info.Status = StatusSuspended
+	}
+	m.mu.Unlock()
+	return true, nil
+}
+
 // Resume restores a single suspended replica via the tier runtime's Snapshotter
 // capability and returns its (possibly updated) route endpoint. The in-memory
 // entry returns to StatusRunning with the resumed endpoint's URL/WorkerID/handle.

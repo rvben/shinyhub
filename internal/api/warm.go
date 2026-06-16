@@ -88,26 +88,42 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 			s.waitForDrain(slug, idx, grace, s.clusteredFleetWait(app.ID, idx))
 		}
 
+		// Park the victim. Prefer a warm-wake freeze (SIGSTOP + reclaim to swap) so a
+		// later expansion thaws it in ~ms instead of cold-booting; fall back to a
+		// full Stop when the runtime cannot snapshot or too little RAM was reclaimed.
+		// Either way the slot is recorded desired_state='warm'.
+		victimStatus := "stopped"
 		if s.manager != nil {
-			if stopErr := s.manager.StopReplica(slug, idx); stopErr != nil {
-				if !errors.Is(stopErr, process.ErrReplicaNotFound) {
-					// A genuine stop failure: the replica may still be running.
-					// Undrain it so it resumes serving, and in clustered mode revert
-					// the desired_state row so remote syncers restore full routing.
-					// Rows already written as stopped/warm in earlier loop iterations
-					// survive; a re-run skips them and retries the remaining victims.
-					if s.proxy != nil {
-						s.proxy.UndrainReplica(slug, idx)
-					}
-					if s.clustered {
-						if rerr := s.store.SetReplicaDesiredState(app.ID, idx, "running"); rerr != nil {
-							slog.Warn("warm shrink: revert desired_state running", "slug", slug, "index", idx, "err", rerr)
-						}
-					}
-					return false, fmt.Errorf("warm shrink %s: stop replica %d: %w", slug, idx, stopErr)
+			frozen, suspErr := s.manager.SuspendReplica(slug, idx)
+			switch {
+			case frozen:
+				victimStatus = "suspended"
+			default:
+				if suspErr != nil && !errors.Is(suspErr, process.ErrRuntimeNotSnapshotter) {
+					// A real suspend error (not "runtime can't snapshot"): log and stop,
+					// which always frees the replica's RAM.
+					slog.Warn("warm shrink: suspend failed; stopping instead", "slug", slug, "index", idx, "err", suspErr)
 				}
-				// ErrReplicaNotFound is benign: the process was already gone.
-				slog.Warn("warm shrink: stop replica not found", "slug", slug, "index", idx, "err", stopErr)
+				if stopErr := s.manager.StopReplica(slug, idx); stopErr != nil {
+					if !errors.Is(stopErr, process.ErrReplicaNotFound) {
+						// A genuine stop failure: the replica may still be running.
+						// Undrain it so it resumes serving, and in clustered mode revert
+						// the desired_state row so remote syncers restore full routing.
+						// Rows already written as stopped/warm in earlier loop iterations
+						// survive; a re-run skips them and retries the remaining victims.
+						if s.proxy != nil {
+							s.proxy.UndrainReplica(slug, idx)
+						}
+						if s.clustered {
+							if rerr := s.store.SetReplicaDesiredState(app.ID, idx, "running"); rerr != nil {
+								slog.Warn("warm shrink: revert desired_state running", "slug", slug, "index", idx, "err", rerr)
+							}
+						}
+						return false, fmt.Errorf("warm shrink %s: stop replica %d: %w", slug, idx, stopErr)
+					}
+					// ErrReplicaNotFound is benign: the process was already gone.
+					slog.Warn("warm shrink: stop replica not found", "slug", slug, "index", idx, "err", stopErr)
+				}
 			}
 		}
 
@@ -124,15 +140,17 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 			}
 		}
 
-		// Persist the stopped/warm state. Preserve the row's existing metadata
-		// (provider, tier, version, deployment ID) so the row remains a faithful
-		// record of what was running and warm-expansion can boot the same binary.
+		// Persist the parked state (stopped or suspended) with desired_state='warm'.
+		// Preserve the row's existing metadata (PID, port, provider, tier, version,
+		// deployment ID) so the row stays a faithful record of what was running:
+		// expansion thaws a 'suspended' row by PID/port and cold-boots a 'stopped'
+		// one, and recovery uses the PID to clean up a frozen process after a crash.
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:        app.ID,
 			Index:        idx,
 			PID:          v.rep.PID,
 			Port:         v.rep.Port,
-			Status:       "stopped",
+			Status:       victimStatus,
 			Provider:     v.rep.Provider,
 			Tier:         v.rep.Tier,
 			EndpointURL:  v.rep.EndpointURL,
@@ -179,7 +197,20 @@ func (s *Server) bootWarmVictims(
 	slug := app.Slug
 	for _, v := range victims {
 		idx := v.index
-		r, bootErr := s.deployReplica(p, idx)
+		var r *deploy.Result
+		var bootErr error
+		if v.rep.Status == "suspended" {
+			// Thaw the frozen replica (SIGCONT + abbreviated probe + re-register),
+			// ~ms vs a multi-second cold boot. On any resume failure fall back to a
+			// cold boot - the same "try resume, fall back to cold" the wake path uses.
+			r, bootErr = s.resumeReplica(p, idx)
+			if bootErr != nil {
+				slog.Warn(callerName+": thaw failed; cold-booting", "slug", slug, "index", idx, "err", bootErr)
+				r, bootErr = s.deployReplica(p, idx)
+			}
+		} else {
+			r, bootErr = s.deployReplica(p, idx)
+		}
 		if bootErr != nil {
 			// Hand the failed victim to the watchdog: crashed/running causes
 			// reconcileReplicas to restart it on the next tick.
@@ -256,11 +287,12 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		return false, fmt.Errorf("warm expand %s: list replicas: %w", slug, err)
 	}
 
-	// Collect warm victims: stopped rows that were parked by WarmShrink.
-	// Manual stops (desired_state='stopped') are deliberately excluded.
+	// Collect warm victims parked by WarmShrink: stopped (cold) or suspended
+	// (frozen) rows. Manual stops (desired_state='stopped') are deliberately
+	// excluded. restoreWarmVictims thaws the suspended ones and cold-boots the rest.
 	var victims []warmVictim
 	for _, r := range reps {
-		if r.DesiredState == db.ReplicaDesiredWarm && r.Status == "stopped" {
+		if r.DesiredState == db.ReplicaDesiredWarm && (r.Status == "stopped" || r.Status == "suspended") {
 			victims = append(victims, warmVictim{index: r.Index, rep: r})
 		}
 	}

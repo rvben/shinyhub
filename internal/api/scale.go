@@ -63,17 +63,18 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		return false, fmt.Errorf("scale up %s: %w", slug, err)
 	}
 
-	// Defragment before adding: if warm rows exist (desired_state='warm',
-	// status='stopped'), boot them all first and return immediately. This keeps
-	// the pool contiguous - no stopped row sits below a running one - and avoids
-	// adding a new index N when capacity is already parked at lower indices.
+	// Defragment before adding: if warm rows exist (desired_state='warm', status
+	// 'stopped' or 'suspended'), restore them all first and return immediately -
+	// thawing the frozen ones and cold-booting the rest. This keeps the pool
+	// contiguous - no parked row sits below a running one - and avoids adding a new
+	// index N when capacity is already parked at lower indices.
 	reps, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		return false, fmt.Errorf("scale up %s: list replicas: %w", slug, err)
 	}
 	var warmVictims []warmVictim
 	for _, r := range reps {
-		if r.DesiredState == db.ReplicaDesiredWarm && r.Status == "stopped" {
+		if r.DesiredState == db.ReplicaDesiredWarm && (r.Status == "stopped" || r.Status == "suspended") {
 			warmVictims = append(warmVictims, warmVictim{index: r.Index, rep: r})
 		}
 	}

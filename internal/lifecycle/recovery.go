@@ -336,7 +336,13 @@ func workerDeclaredGone(store *db.Store, workerID string) bool {
 // when the PID is missing, dead, or fails the stale-process identity check.
 func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir string) bool {
 	if r.DesiredState == db.ReplicaDesiredWarm {
-		// Warm-parked by the idle shrink: deliberately stopped; expansion boots it, not recovery.
+		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
+		// 'suspended' warm row is a frozen (SIGSTOP'd) process that survived this
+		// restart; the new control plane cannot re-adopt it warm, so reap the frozen
+		// process to avoid leaking it and downgrade the row so expansion cold-boots.
+		if r.Status == "suspended" {
+			cleanupFrozenWarmReplica(store, app, r, bundleDir)
+		}
 		return false
 	}
 	if r.PID == nil {
@@ -382,6 +388,73 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	return true
 }
 
+// cleanupFrozenWarmReplica tears down a native warm replica left SIGSTOP-frozen by
+// a prior control plane and downgrades its row to stopped/warm so a later
+// expansion cold-boots the slot. The frozen process cannot be re-adopted warm
+// (the in-memory Manager state was lost on restart), so leaving it would leak a
+// frozen process holding swap. Identity is checked by cwd only (NOT the port
+// probe validateNativeProcess uses: a frozen process accepts no connections), so
+// a reused PID is never killed; the row is downgraded regardless of kill outcome.
+// With no resolvable bundle dir to match against, the process is left alone (the
+// row still downgrades) rather than risk killing an unverified PID.
+func cleanupFrozenWarmReplica(store *db.Store, app *db.App, r *db.Replica, bundleDir string) {
+	if r.PID != nil && bundleDir != "" {
+		if alive := syscall.Kill(*r.PID, 0); alive == nil {
+			if frozenReplicaIdentityOK(*r.PID, bundleDir) {
+				// Confirmed our frozen replica: SIGKILL the whole group (a stopped
+				// process is reaped immediately even without a prior SIGCONT). ESRCH
+				// means it raced away already.
+				if kerr := syscall.Kill(-*r.PID, syscall.SIGKILL); kerr != nil && kerr != syscall.ESRCH {
+					slog.Warn("recovery: kill frozen warm replica", "slug", app.Slug, "idx", r.Index, "pid", *r.PID, "err", kerr)
+				} else {
+					slog.Info("recovery: reaped frozen warm replica", "slug", app.Slug, "idx", r.Index, "pid", *r.PID)
+				}
+			} else {
+				slog.Warn("recovery: frozen warm replica PID failed cwd identity check; not killing",
+					"slug", app.Slug, "idx", r.Index, "pid", *r.PID)
+			}
+		}
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:        app.ID,
+		Index:        r.Index,
+		Status:       "stopped",
+		Provider:     r.Provider,
+		Tier:         r.Tier,
+		AppVersion:   r.AppVersion,
+		DesiredState: db.ReplicaDesiredWarm,
+		DeploymentID: r.DeploymentID,
+	}); err != nil {
+		slog.Warn("recovery: downgrade frozen warm replica row", "slug", app.Slug, "idx", r.Index, "err", err)
+	}
+}
+
+// frozenReplicaIdentityOK reports whether the process at pid is our frozen
+// replica, by comparing its working directory to bundleDir. It deliberately omits
+// the TCP port probe validateNativeProcess performs: a SIGSTOP-frozen process
+// accepts no connections, so a port probe would always reject it. cwd comes from
+// /proc and is readable while the process is stopped. Symlinks are resolved on
+// both sides (e.g. macOS /tmp -> /private/tmp) before comparing.
+func frozenReplicaIdentityOK(pid int, bundleDir string) bool {
+	p, err := gops.NewProcess(int32(pid))
+	if err != nil {
+		return false
+	}
+	cwd, err := p.Cwd()
+	if err != nil {
+		return false
+	}
+	want, _ := filepath.Abs(bundleDir)
+	got, _ := filepath.Abs(cwd)
+	if rw, err := filepath.EvalSymlinks(want); err == nil {
+		want = rw
+	}
+	if rg, err := filepath.EvalSymlinks(got); err == nil {
+		got = rg
+	}
+	return want == got
+}
+
 // markReplicaCrashed persists a replica's "crashed" status so the watcher
 // restarts it on the next tick. The write is best-effort during recovery, but a
 // failure is logged rather than dropped: a silent miss would leave the replica
@@ -410,7 +483,25 @@ func derefInt64(p *int64) int64 {
 // watcher relaunches it.
 func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, lister ContainerLister, containers []process.ContainerInfo) bool {
 	if r.DesiredState == db.ReplicaDesiredWarm {
-		// Warm-parked by the idle shrink: deliberately stopped; expansion boots it, not recovery.
+		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
+		// 'suspended' warm row is a paused container that survived the restart and
+		// cannot be re-adopted warm; downgrade the row to stopped/warm so expansion
+		// cold-boots a fresh container. (Reaping the orphaned paused container is a
+		// docker-only follow-up; the docker runtime's warm-wake is opt-in.)
+		if r.Status == "suspended" {
+			if err := store.UpsertReplica(db.UpsertReplicaParams{
+				AppID:        app.ID,
+				Index:        r.Index,
+				Status:       "stopped",
+				Provider:     r.Provider,
+				Tier:         r.Tier,
+				AppVersion:   r.AppVersion,
+				DesiredState: db.ReplicaDesiredWarm,
+				DeploymentID: r.DeploymentID,
+			}); err != nil {
+				slog.Warn("recovery: downgrade suspended warm container row", "slug", app.Slug, "idx", r.Index, "err", err)
+			}
+		}
 		return false
 	}
 	if r.Index >= app.Replicas {
