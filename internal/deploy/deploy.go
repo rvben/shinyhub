@@ -767,7 +767,17 @@ func useProjectMode(bundleDir string, hostDeps bool) bool {
 
 // buildCommand constructs the uv launch command for a bundle directory.
 // In project mode (a pyproject.toml, author-shipped or synthesized by
-// EnsureProject) uv sync has prepared a locked .venv and we use plain `uv run`.
+// EnsureProject) the dependency environment is already prepared by the uv sync
+// in resolveBootParams - which runs BEFORE the per-replica health-check window -
+// so the launch uses `uv run --frozen --no-sync`. Those flags make the launch a
+// pure exec against the locked .venv: --no-sync skips the implicit environment
+// sync and --frozen skips any lockfile resolution. A plain `uv run` would
+// re-check the lock and sync on start; on a cold first boot that uncached work
+// (resolve, download, wheel builds) can stall past the health timeout and fail
+// the boot, even though prep already did all of it. Keeping the launch
+// dependency-work-free moves that cost entirely into prep (untimed) and makes
+// the boot itself deterministic, cold or warm.
+//
 // Otherwise we pass --with-requirements so uv installs deps into an ephemeral
 // environment. When autoInstrument is set, the OTEL overlay is layered in via
 // --with and the entrypoint is wrapped with opentelemetry-instrument; the app's
@@ -777,7 +787,7 @@ func useProjectMode(bundleDir string, hostDeps bool) bool {
 func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument, hostDeps bool) []string {
 	base := []string{"uv", "run", "--no-project"}
 	if useProjectMode(bundleDir, hostDeps) {
-		base = []string{"uv", "run"}
+		base = []string{"uv", "run", "--frozen", "--no-sync"}
 	} else if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
 		base = append(base, "--with-requirements", "requirements.txt")
 	}

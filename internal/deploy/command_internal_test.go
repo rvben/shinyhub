@@ -37,7 +37,7 @@ func TestBuildCommand_AutoInstrumentWrapsProjectMode(t *testing.T) {
 	}
 	got := buildCommand(dir, 41000, 1, "127.0.0.1", true, true)
 	want := []string{
-		"uv", "run",
+		"uv", "run", "--frozen", "--no-sync",
 		"--with", "opentelemetry-distro",
 		"--with", "opentelemetry-exporter-otlp",
 		"--with", "opentelemetry-instrumentation-starlette",
@@ -89,7 +89,7 @@ func TestBuildCommand_SynthesizedProjectRunsInProjectModeOnHost(t *testing.T) {
 	synthProject(t, dir)
 	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, true)
 	want := []string{
-		"uv", "run",
+		"uv", "run", "--frozen", "--no-sync",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -121,11 +121,53 @@ func TestBuildCommand_AuthorProjectIsProjectModeOffHost(t *testing.T) {
 	}
 	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, false)
 	want := []string{
-		"uv", "run",
+		"uv", "run", "--frozen", "--no-sync",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildCommand =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// Project-mode launches must do ZERO dependency work: the uv sync in
+// resolveBootParams (untimed, before the health-check window) prepares the
+// locked .venv, and the launch only execs against it. A plain `uv run` re-checks
+// the lock and syncs on start; on a cold first boot that uncached resolve/build
+// can stall past the health timeout and fail the boot. --frozen (no lock
+// resolution) and --no-sync (no environment sync) pin the launch to pure exec.
+// Regression guard: every project-mode shape carries both flags and never the
+// --with-requirements install path.
+func TestBuildCommand_ProjectModeLaunchDoesNoDependencyWork(t *testing.T) {
+	mkAuthor := func(t *testing.T) string {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	mkSynth := func(t *testing.T) string { dir := t.TempDir(); synthProject(t, dir); return dir }
+
+	cases := []struct {
+		name     string
+		mkDir    func(*testing.T) string
+		hostDeps bool
+	}{
+		{"author pyproject on host", mkAuthor, true},
+		{"author pyproject off host", mkAuthor, false},
+		{"synthesized project on host", mkSynth, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildCommand(tc.mkDir(t), 41000, 1, "127.0.0.1", false, tc.hostDeps)
+			if len(got) < 4 || got[0] != "uv" || got[1] != "run" || got[2] != "--frozen" || got[3] != "--no-sync" {
+				t.Fatalf("project-mode launch must start with `uv run --frozen --no-sync`, got %q", got)
+			}
+			for _, a := range got {
+				if a == "--with-requirements" {
+					t.Errorf("project-mode launch must not install deps at start, got %q", got)
+				}
+			}
+		})
 	}
 }
 
