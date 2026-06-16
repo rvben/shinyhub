@@ -99,6 +99,11 @@ type Server struct {
 	// scale-up primitive to grow a pool by one without cycling the whole pool.
 	// Defaults to deploy.RunReplica; overridable in tests.
 	deployReplica func(deploy.Params, int) (*deploy.Result, error)
+	// resumeReplica thaws a single warm-frozen replica at one index (SIGCONT +
+	// abbreviated readiness probe + proxy re-register), the fast counterpart of
+	// deployReplica used when a warm-parked replica was suspended rather than
+	// stopped. Defaults to deploy.ResumeReplica; overridable in tests.
+	resumeReplica func(deploy.Params, int) (*deploy.Result, error)
 
 	// deployLocksMu guards the deployLocks map. Each slug gets its own
 	// sync.Mutex which serializes deploy/restart/rollback/stop/delete
@@ -182,6 +187,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		oauthLimiter:  newKeyedRateLimiter(20, time.Minute),
 		deployRun:     deploy.Run,
 		deployReplica: deploy.RunReplica,
+		resumeReplica: deploy.ResumeReplica,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(

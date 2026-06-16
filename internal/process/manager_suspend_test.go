@@ -115,6 +115,60 @@ func TestManager_Resume_PreservesURLWhenDriverReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestManager_SuspendReplica_FreedMarksSuspended(t *testing.T) {
+	m := NewManager(t.TempDir(), NewNativeRuntime())
+	rt := &fakeSnapshotRuntime{suspendFreed: true}
+	seedRunningEntry(m, "app", "snap", 1, rt)
+
+	freed, err := m.SuspendReplica("app", 1)
+	if err != nil || !freed {
+		t.Fatalf("SuspendReplica = (%v, %v), want (true, nil)", freed, err)
+	}
+	info, ok := m.GetReplica("app", 1)
+	if !ok || info.Status != StatusSuspended {
+		t.Fatalf("status = %v ok=%v, want suspended", info.Status, ok)
+	}
+	if rt.suspendCalls != 1 {
+		t.Fatalf("suspendCalls = %d, want 1", rt.suspendCalls)
+	}
+}
+
+func TestManager_SuspendReplica_NotFreedLeavesRunning(t *testing.T) {
+	m := NewManager(t.TempDir(), NewNativeRuntime())
+	rt := &fakeSnapshotRuntime{suspendFreed: false}
+	seedRunningEntry(m, "app", "snap", 0, rt)
+
+	freed, err := m.SuspendReplica("app", 0)
+	if freed || err != nil {
+		t.Fatalf("SuspendReplica = (%v, %v), want (false, nil)", freed, err)
+	}
+	info, _ := m.GetReplica("app", 0)
+	if info.Status != StatusRunning {
+		t.Fatalf("status = %v, want running (left stoppable)", info.Status)
+	}
+}
+
+func TestManager_SuspendReplica_NotSnapshotterReturnsSentinel(t *testing.T) {
+	m := NewManager(t.TempDir(), NewNativeRuntime())
+	seedRunningEntry(m, "app", "plain", 0, NewNativeRuntime())
+
+	freed, err := m.SuspendReplica("app", 0)
+	if freed || !errors.Is(err, ErrRuntimeNotSnapshotter) {
+		t.Fatalf("SuspendReplica = (%v, %v), want (false, ErrRuntimeNotSnapshotter)", freed, err)
+	}
+}
+
+func TestManager_SuspendReplica_MissingSlotReturnsNotFound(t *testing.T) {
+	m := NewManager(t.TempDir(), NewNativeRuntime())
+	rt := &fakeSnapshotRuntime{suspendFreed: true}
+	seedRunningEntry(m, "app", "snap", 0, rt)
+
+	freed, err := m.SuspendReplica("app", 5) // index beyond the pool
+	if freed || !errors.Is(err, ErrReplicaNotFound) {
+		t.Fatalf("SuspendReplica(missing) = (%v, %v), want (false, ErrReplicaNotFound)", freed, err)
+	}
+}
+
 func TestManager_Resume_NotSuspendedReturnsSentinel(t *testing.T) {
 	m := NewManager(t.TempDir(), NewNativeRuntime())
 	rt := &fakeSnapshotRuntime{}
