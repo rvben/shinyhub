@@ -72,6 +72,23 @@ func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
 	}, nil
 }
 
+// Purge evicts cached process handles for PIDs not present in alive. The
+// GopsutilSampler caches a *gops.Process per PID so CPU% can be computed as a
+// delta across calls, and it only drops an entry when a Sample for that PID
+// fails. A long-running caller that samples only currently-running PIDs (the
+// metrics-history collector) never re-samples an exited PID, so without periodic
+// pruning the cache grows unbounded as PIDs churn. Callers pass the set of live
+// PIDs each cycle; everything else is dropped.
+func (g *GopsutilSampler) Purge(alive map[int32]struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for pid := range g.procs {
+		if _, ok := alive[pid]; !ok {
+			delete(g.procs, pid)
+		}
+	}
+}
+
 // RuntimeSampler implements Sampler by delegating to Runtime.Stats.
 // Used when DockerRuntime is active so stats are fetched via the Docker API.
 type RuntimeSampler struct {
