@@ -50,6 +50,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.15](https://github.com/rvben/shinyhub/compare/v0.8.14...v0.8.15) - 2026-06-17
+
+### Fixed
+
+- **deploy**: fail health check fast when an app crashes on startup ([4c31761](https://github.com/rvben/shinyhub/commit/4c31761d41342a694674e45271dfd750021e5ca4))
+
 ## [0.8.14](https://github.com/rvben/shinyhub/compare/v0.8.13...v0.8.14) - 2026-06-17
 
 ### Added
