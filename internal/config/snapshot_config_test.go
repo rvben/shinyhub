@@ -8,6 +8,41 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 )
 
+// TestSnapshotConfig_RestoreOnStartup: warm-restore defaults to ON (so warm-wake
+// survives a restart) and can be turned off with an explicit false.
+func TestSnapshotConfig_RestoreOnStartup(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Runtime.Snapshot.RestoreOnStartup {
+		t.Fatalf("RestoreOnStartup default = false, want true (on by default)")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `
+auth:
+  secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+runtime:
+  snapshot:
+    enabled: true
+    restore_on_startup: false
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.Snapshot.RestoreOnStartup {
+		t.Fatalf("explicit restore_on_startup: false was not honored")
+	}
+}
+
 func TestSnapshotConfig_Env(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_RUNTIME_SNAPSHOT_ENABLED", "true")

@@ -178,6 +178,35 @@ func mustDeleteApp(t *testing.T, s *db.Store, slug string) {
 	}
 }
 
+// TestListHibernatedApps verifies the query returns exactly the apps whose
+// status is 'hibernated' (the set the startup warm-restore pass re-boots).
+func TestListHibernatedApps(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "u", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.GetUserByUsername("u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hib := mustCreateApp(t, store, "hib", u.ID)
+	run := mustCreateApp(t, store, "run", u.ID)
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: hib.Slug, Status: "hibernated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: run.Slug, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	apps, err := store.ListHibernatedApps()
+	if err != nil {
+		t.Fatalf("ListHibernatedApps: %v", err)
+	}
+	if len(apps) != 1 || apps[0].Slug != "hib" {
+		t.Fatalf("ListHibernatedApps returned %d apps; want exactly [hib]", len(apps))
+	}
+}
+
 func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 	store := dbtest.New(t)
 

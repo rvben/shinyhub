@@ -647,6 +647,29 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListHibernatedApps returns all apps whose status is 'hibernated'. Used on
+// startup by the warm-restore pass to re-boot and re-freeze apps that were warm
+// before a server restart, so their next access is a warm resume rather than a
+// cold boot (a frozen process does not survive a service restart).
+func (s *Store) ListHibernatedApps() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + appColumns + deploymentSummarySQL + `
+		FROM apps WHERE status = 'hibernated'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // ListWarmShrunkApps returns apps that currently have warm-parked replicas
 // (desired_state='warm') and are still serving (running or degraded). The
 // watcher's expansion check iterates exactly this set each tick.

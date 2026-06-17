@@ -371,6 +371,18 @@ func (f *fakeStore) ListWarmShrunkApps() ([]*db.App, error) {
 	return out, nil
 }
 
+func (f *fakeStore) ListHibernatedApps() ([]*db.App, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*db.App
+	for slug, app := range f.apps {
+		if f.appStatus[slug] == "hibernated" {
+			out = append(out, app)
+		}
+	}
+	return out, nil
+}
+
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
 // call runOnce() directly without starting the background goroutine.
 func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
