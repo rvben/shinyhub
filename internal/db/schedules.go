@@ -467,6 +467,13 @@ func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 // LATEST register run that is 'interrupted' preserves the other policies - an
 // operator 'cancelled' first-fire stays terminal, a 'failed' first-fire heals
 // on the next deploy, and a schedule that ever succeeded is never re-fired.
+//
+// The gate is the run history, not the current manifest's run_on_register flag
+// (which is a deploy-time instruction, never persisted). So if an operator
+// removes run_on_register while a first-fire is interrupted and never
+// succeeded, a restart still completes that one warm. This is intentional:
+// finishing an in-progress warm an operator already requested is harmless and
+// idempotent, and it avoids persisting deploy-time intent into the schedule row.
 func (s *Store) SchedulesNeedingFirstFireRetry() ([]int64, error) {
 	rows, err := s.db.Query(`
 		SELECT sc.id
