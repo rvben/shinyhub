@@ -770,7 +770,7 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 // honest CLI exit code after following a run to completion.
 type scheduleRunResult struct {
 	Status   string `json:"status"`
-	ExitCode int    `json:"exit_code"`
+	ExitCode *int   `json:"exit_code"`
 }
 
 // runFinalExitError fetches the run's final state and returns an ExitCodeError
@@ -807,9 +807,12 @@ func runFinalExitError(cfg *cliConfig, slug string, schedID, runID int64) error 
 	case "succeeded", "skipped_overlap":
 		return nil
 	}
-	code := run.ExitCode
-	if code == 0 {
-		code = 1
+	// Mirror the command's own exit code when the run recorded one; an
+	// interrupted run (null exit_code) or a recorded 0 on a non-success status
+	// falls back to 1 so scripted callers still see a failure.
+	code := 1
+	if run.ExitCode != nil && *run.ExitCode != 0 {
+		code = *run.ExitCode
 	}
 	return &ExitCodeError{Code: code, Kind: KindJobFailed, Err: fmt.Errorf("run %s", run.Status)}
 }

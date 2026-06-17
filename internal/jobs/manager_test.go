@@ -327,8 +327,8 @@ func TestManager_Run_HappyPath(t *testing.T) {
 	if fc.Status != "succeeded" {
 		t.Errorf("expected status 'succeeded', got %q", fc.Status)
 	}
-	if fc.ExitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", fc.ExitCode)
+	if fc.ExitCode == nil || *fc.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %v", fc.ExitCode)
 	}
 }
 
@@ -400,8 +400,8 @@ func TestManager_Run_NonZeroExit_StatusFailed(t *testing.T) {
 	if fc.Status != "failed" {
 		t.Errorf("expected status 'failed', got %q", fc.Status)
 	}
-	if fc.ExitCode != 2 {
-		t.Errorf("expected exit code 2, got %d", fc.ExitCode)
+	if fc.ExitCode == nil || *fc.ExitCode != 2 {
+		t.Errorf("expected exit code 2, got %v", fc.ExitCode)
 	}
 }
 

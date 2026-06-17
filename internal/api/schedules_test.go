@@ -583,8 +583,9 @@ func TestSchedules_RunLogs_FollowStopsWhenRunFinishes(t *testing.T) {
 	// Mark the run finished shortly after the stream attaches.
 	go func() {
 		time.Sleep(200 * time.Millisecond)
+		exit := 1
 		_ = store.FinishScheduleRun(db.FinishScheduleRunParams{
-			RunID: runID, Status: "failed", ExitCode: 1, FinishedAt: time.Now().UTC(),
+			RunID: runID, Status: "failed", ExitCode: &exit, FinishedAt: time.Now().UTC(),
 		})
 	}()
 

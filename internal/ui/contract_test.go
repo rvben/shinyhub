@@ -638,11 +638,13 @@ func TestScheduleRunHistoryReadsSnakeCase(t *testing.T) {
 		assertContains(t, "app.js", needle,
 			"run-history list must read snake_case ScheduleRun fields; see internal/db/schedules.go json tags")
 	}
-	// exit_code is always serialized (int, COALESCE'd to 0), so the UI must
-	// gate the exit-code display on finished_at to avoid showing "exit 0" for
-	// a still-running run.
+	// exit_code is null until a terminal state and stays null for an
+	// interrupted run, so the UI must gate the exit-code display on both
+	// finished_at AND a non-null exit_code to avoid rendering "exit null".
 	assertContains(t, "app.js", "run.finished_at",
-		"run-history must gate the exit-code display on run.finished_at; a running run has exit_code 0 but is not finished")
+		"run-history must gate the exit-code display on run.finished_at; a running run has a null exit_code")
+	assertContains(t, "app.js", "run.exit_code != null",
+		"run-history must gate the exit-code display on a non-null exit_code; an interrupted run is finished but has a null exit_code")
 	// The PascalCase reads must be gone so the regression cannot creep back.
 	b, err := fs.ReadFile(ui.Static(), "app.js")
 	if err != nil {

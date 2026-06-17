@@ -254,7 +254,12 @@ type ScheduleRun struct {
 	TriggeredByUserID *int64     `json:"triggered_by_user_id"`
 	StartedAt         time.Time  `json:"started_at"`
 	FinishedAt        *time.Time `json:"finished_at"`
-	ExitCode          int        `json:"exit_code"`
+	// ExitCode is the scheduled command's process exit code. It is nil (JSON
+	// null) until the run reaches a terminal state, and stays nil for an
+	// interrupted run that never observed a process exit. A non-nil value is
+	// always the real exit status, so a caller can trust exit_code == 0 to mean
+	// "succeeded" without also inspecting Status.
+	ExitCode *int `json:"exit_code"`
 	// LogPath is the server-side filesystem path of the run's log file. It
 	// is an internal detail consumed only by the log-streaming handler and
 	// must never be serialized to API clients.
@@ -271,9 +276,12 @@ type InsertScheduleRunParams struct {
 }
 
 type FinishScheduleRunParams struct {
-	RunID      int64
-	Status     string
-	ExitCode   int
+	RunID  int64
+	Status string
+	// ExitCode is the process exit code to record. nil writes SQL NULL, used
+	// for a run that finished without observing a process exit (interrupted by
+	// a service restart).
+	ExitCode   *int
 	FinishedAt time.Time
 }
 
@@ -296,9 +304,13 @@ func (s *Store) InsertScheduleRun(p InsertScheduleRunParams) (int64, error) {
 }
 
 func (s *Store) FinishScheduleRun(p FinishScheduleRunParams) error {
+	var ec sql.NullInt64
+	if p.ExitCode != nil {
+		ec = sql.NullInt64{Int64: int64(*p.ExitCode), Valid: true}
+	}
 	res, err := s.db.Exec(`
 		UPDATE schedule_runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?`,
-		p.Status, p.ExitCode, p.FinishedAt, p.RunID,
+		p.Status, ec, p.FinishedAt, p.RunID,
 	)
 	if err != nil {
 		return fmt.Errorf("finish schedule run: %w", err)
@@ -327,7 +339,7 @@ func (s *Store) SetScheduleRunLogPath(runID int64, logPath string) error {
 func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*ScheduleRun, error) {
 	rows, err := s.db.Query(`
 		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,
-		       finished_at, COALESCE(exit_code, 0), log_path
+		       finished_at, exit_code, log_path
 		FROM schedule_runs WHERE schedule_id = ?
 		ORDER BY started_at DESC LIMIT ? OFFSET ?`, scheduleID, limit, offset)
 	if err != nil {
@@ -339,8 +351,9 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 		var r ScheduleRun
 		var uid sql.NullInt64
 		var fin sql.NullTime
+		var ex sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-			&r.StartedAt, &fin, &r.ExitCode, &r.LogPath); err != nil {
+			&r.StartedAt, &fin, &ex, &r.LogPath); err != nil {
 			return nil, err
 		}
 		if uid.Valid {
@@ -351,6 +364,10 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 			v := fin.Time
 			r.FinishedAt = &v
 		}
+		if ex.Valid {
+			v := int(ex.Int64)
+			r.ExitCode = &v
+		}
 		out = append(out, &r)
 	}
 	return out, rows.Err()
@@ -359,13 +376,14 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
 	row := s.db.QueryRow(`
 		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,
-		       finished_at, COALESCE(exit_code, 0), log_path
+		       finished_at, exit_code, log_path
 		FROM schedule_runs WHERE id = ?`, runID)
 	var r ScheduleRun
 	var uid sql.NullInt64
 	var fin sql.NullTime
+	var ex sql.NullInt64
 	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-		&r.StartedAt, &fin, &r.ExitCode, &r.LogPath)
+		&r.StartedAt, &fin, &ex, &r.LogPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -379,6 +397,10 @@ func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
 	if fin.Valid {
 		v := fin.Time
 		r.FinishedAt = &v
+	}
+	if ex.Valid {
+		v := int(ex.Int64)
+		r.ExitCode = &v
 	}
 	return &r, nil
 }
@@ -400,14 +422,15 @@ func (s *Store) MarkRunningSchedulesInterrupted() (int64, error) {
 func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	row := s.db.QueryRow(`
 		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,
-		       finished_at, COALESCE(exit_code, 0), log_path
+		       finished_at, exit_code, log_path
 		FROM schedule_runs WHERE schedule_id = ? AND status = 'succeeded'
 		ORDER BY started_at DESC LIMIT 1`, scheduleID)
 	var r ScheduleRun
 	var uid sql.NullInt64
 	var fin sql.NullTime
+	var ex sql.NullInt64
 	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-		&r.StartedAt, &fin, &r.ExitCode, &r.LogPath)
+		&r.StartedAt, &fin, &ex, &r.LogPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -421,6 +444,10 @@ func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	if fin.Valid {
 		v := fin.Time
 		r.FinishedAt = &v
+	}
+	if ex.Valid {
+		v := int(ex.Int64)
+		r.ExitCode = &v
 	}
 	return &r, nil
 }

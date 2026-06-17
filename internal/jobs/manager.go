@@ -364,7 +364,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 			// then finalise as cancelled. We never acquired the slot,
 			// so do not call slot.unlock.
 			<-sem
-			m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
+			m.finishRun(sched, runID, "cancelled", intPtr(0), trigger, userID)
 			return
 		}
 		// Promoted from queued to active. Free the queue slot now —
@@ -439,7 +439,7 @@ func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int6
 	if err := m.store.FinishScheduleRun(db.FinishScheduleRunParams{
 		RunID:      runID,
 		Status:     "skipped_overlap",
-		ExitCode:   0,
+		ExitCode:   intPtr(0),
 		FinishedAt: time.Now().UTC(),
 	}); err != nil {
 		return runID, fmt.Errorf("finish skipped run: %w", err)
@@ -467,7 +467,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	case m.globalSem <- struct{}{}:
 		defer func() { <-m.globalSem }()
 	case <-ctx.Done():
-		m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
+		m.finishRun(sched, runID, "cancelled", intPtr(0), trigger, userID)
 		return
 	}
 
@@ -480,14 +480,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Build log file path and create directory.
 	logDir := filepath.Join(m.appsDir, app.Slug, "schedules", fmt.Sprintf("%d", sched.ID))
 	if err := os.MkdirAll(logDir, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 	logPath := filepath.Join(logDir, fmt.Sprintf("run-%d.log", runID))
 
 	logFile, err := os.Create(logPath)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 	defer logFile.Close()
@@ -504,21 +504,21 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// surfacing a key/rotation problem, and app startup fails closed the same way.
 	envVars, err := m.store.ListAppEnvVars(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 	env, secretEnv, err := appenv.Resolve(envVars, m.secretsKey)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: %v\n", err)
 		slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "err", err)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 
 	// Build shared mounts.
 	mounts, err := m.store.ListSharedDataSources(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 	sharedMounts := make([]process.SharedMount, 0, len(mounts))
@@ -532,14 +532,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Parse command from JSON.
 	var cmd []string
 	if err := json.Unmarshal([]byte(sched.CommandJSON), &cmd); err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 
 	// Build app data dir.
 	appDataPath := filepath.Join(m.appDataDir, app.Slug)
 	if err := os.MkdirAll(appDataPath, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 
@@ -549,12 +549,12 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	deployments, err := m.store.ListDeployments(app.ID)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: list deployments: %v\n", err)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 	if len(deployments) == 0 {
 		fmt.Fprintf(logFile, "shinyhub: app %q has no deployments; cannot run schedule\n", app.Slug)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 	bundleDir := deployments[0].BundleDir
@@ -566,7 +566,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	assignments, err := process.ExpandPlacement(app.PlacementMap(), m.tierOrder, 1, m.defaultTier)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: resolve job tier: %v\n", err)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
 		return
 	}
 	jobTier := m.defaultTier
@@ -626,11 +626,17 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		status = "failed"
 	}
 
-	m.finishRun(sched, runID, status, code, trigger, userID)
+	m.finishRun(sched, runID, status, intPtr(code), trigger, userID)
 }
 
-// finishRun updates the run row and logs an audit event.
-func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exitCode int, trigger string, userID *int64) {
+// intPtr returns a pointer to i, used to pass a concrete exit code where a
+// nil pointer means "no observed exit" (an interrupted run).
+func intPtr(i int) *int { return &i }
+
+// finishRun updates the run row and logs an audit event. A nil exitCode is
+// recorded as SQL NULL, used for a run that finished without observing a
+// process exit (interrupted by a service restart).
+func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exitCode *int, trigger string, userID *int64) {
 	_ = m.store.FinishScheduleRun(db.FinishScheduleRunParams{
 		RunID:      runID,
 		Status:     status,

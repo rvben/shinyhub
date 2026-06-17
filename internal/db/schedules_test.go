@@ -135,7 +135,7 @@ func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 
 	finished := started.Add(2 * time.Second)
 	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
-		RunID: runID, Status: "succeeded", ExitCode: 0, FinishedAt: finished,
+		RunID: runID, Status: "succeeded", ExitCode: ptrInt(0), FinishedAt: finished,
 	}); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
@@ -144,8 +144,54 @@ func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list runs: %v", err)
 	}
-	if len(runs) != 1 || runs[0].Status != "succeeded" || runs[0].ExitCode != 0 {
+	if len(runs) != 1 || runs[0].Status != "succeeded" || runs[0].ExitCode == nil || *runs[0].ExitCode != 0 {
 		t.Fatalf("unexpected run: %+v", runs)
+	}
+}
+
+// TestScheduleRuns_ExitCodeNullableLifecycle asserts exit_code is NULL (nil)
+// for a run that has not reached a terminal state, and is populated only once
+// the run finishes. A still-running run with exit_code defaulted to 0 reads as
+// "succeeded" to any caller that checks the code without also checking status.
+func TestScheduleRuns_ExitCodeNullableLifecycle(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "fetch")
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "x", CronExpr: "* * * * *",
+		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 10,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "register",
+		StartedAt: time.Now().UTC(), LogPath: "x.log",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// While running: exit_code must be nil via both Get and List.
+	got, err := store.GetScheduleRun(runID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ExitCode != nil {
+		t.Fatalf("running run exit_code must be nil, got %d", *got.ExitCode)
+	}
+	runs, _ := store.ListScheduleRuns(schedID, 10, 0)
+	if len(runs) != 1 || runs[0].ExitCode != nil {
+		t.Fatalf("running run exit_code must be nil in list, got %+v", runs)
+	}
+
+	// Finishing with a real non-zero code populates it.
+	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
+		RunID: runID, Status: "failed", ExitCode: ptrInt(2), FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	got, _ = store.GetScheduleRun(runID)
+	if got.ExitCode == nil || *got.ExitCode != 2 {
+		t.Fatalf("finished run exit_code must be 2, got %+v", got.ExitCode)
 	}
 }
 
@@ -171,6 +217,10 @@ func TestScheduleRuns_MarkInterrupted(t *testing.T) {
 	runs, _ := store.ListScheduleRuns(schedID, 10, 0)
 	if runs[0].Status != "interrupted" {
 		t.Fatalf("expected interrupted, got %s", runs[0].Status)
+	}
+	// An interrupted run never observed a process exit, so its exit_code is NULL.
+	if runs[0].ExitCode != nil {
+		t.Fatalf("interrupted run exit_code must be nil, got %d", *runs[0].ExitCode)
 	}
 }
 
@@ -210,7 +260,7 @@ func TestSharedData_RejectsSelfMount(t *testing.T) {
 func TestScheduleRuns_FinishMissing_ReturnsErrNotFound(t *testing.T) {
 	store := newScheduleStore(t)
 	err := store.FinishScheduleRun(db.FinishScheduleRunParams{
-		RunID: 999, Status: "succeeded", ExitCode: 0, FinishedAt: time.Now().UTC(),
+		RunID: 999, Status: "succeeded", ExitCode: ptrInt(0), FinishedAt: time.Now().UTC(),
 	})
 	if !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
