@@ -264,6 +264,76 @@ func TestRun_PoolBootsAllReplicas(t *testing.T) {
 	}
 }
 
+// TestRun_HealthTimeoutFromManifest verifies that [app] startup_timeout_seconds
+// in the bundle manifest lengthens the readiness deadline the health check is
+// given, so a slow-but-correct startup within that window deploys successfully.
+func TestRun_HealthTimeoutFromManifest(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "shinyhub.toml"),
+		[]byte("[app]\nstartup_timeout_seconds = 600\n"), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("tmo-manifest")
+	prx := proxy.New()
+
+	var mu sync.Mutex
+	var gotTimeout time.Duration
+	_, err := deploy.Run(deploy.Params{
+		Slug: "tmo-manifest", BundleDir: bundle, Replicas: 1,
+		Manager: mgr, Proxy: prx,
+		Command: []string{"sleep", "30"},
+		HealthCheck: func(_ string, to time.Duration, _ http.RoundTripper) error {
+			mu.Lock()
+			gotTimeout = to
+			mu.Unlock()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	mu.Lock()
+	got := gotTimeout
+	mu.Unlock()
+	if got != 600*time.Second {
+		t.Fatalf("health timeout = %v, want 600s from manifest startup_timeout_seconds", got)
+	}
+}
+
+// TestRun_HealthTimeoutDefaultsWithoutManifest verifies the readiness deadline
+// falls back to the platform default (120s) when no startup_timeout_seconds is
+// declared, so existing bundles keep today's behaviour.
+func TestRun_HealthTimeoutDefaultsWithoutManifest(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("tmo-default")
+	prx := proxy.New()
+
+	var mu sync.Mutex
+	var gotTimeout time.Duration
+	_, err := deploy.Run(deploy.Params{
+		Slug: "tmo-default", BundleDir: bundle, Replicas: 1,
+		Manager: mgr, Proxy: prx,
+		Command: []string{"sleep", "30"},
+		HealthCheck: func(_ string, to time.Duration, _ http.RoundTripper) error {
+			mu.Lock()
+			gotTimeout = to
+			mu.Unlock()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	mu.Lock()
+	got := gotTimeout
+	mu.Unlock()
+	if got != 120*time.Second {
+		t.Fatalf("health timeout = %v, want the 120s platform default", got)
+	}
+}
+
 func TestRun_PartialHealthStillSucceeds(t *testing.T) {
 	bundle := t.TempDir()
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())

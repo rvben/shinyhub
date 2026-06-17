@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -230,6 +231,7 @@ func TestLoadManifest_ParsesAppSettings(t *testing.T) {
 hibernate_timeout_minutes = 0
 replicas = 2
 max_sessions_per_replica = 10
+startup_timeout_seconds = 600
 `)
 	m, err := LoadManifest(dir)
 	if err != nil {
@@ -243,6 +245,19 @@ max_sessions_per_replica = 10
 	}
 	if m.App.MaxSessionsPerReplica == nil || *m.App.MaxSessionsPerReplica != 10 {
 		t.Errorf("max_sessions_per_replica = %v, want 10", m.App.MaxSessionsPerReplica)
+	}
+	if m.App.StartupTimeoutSeconds == nil || *m.App.StartupTimeoutSeconds != 600 {
+		t.Errorf("startup_timeout_seconds = %v, want 600", m.App.StartupTimeoutSeconds)
+	}
+}
+
+func TestLoadManifest_RejectsOutOfRangeStartupTimeout(t *testing.T) {
+	for _, v := range []int{0, -5, 3601} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\nstartup_timeout_seconds = "+strconv.Itoa(v)+"\n")
+		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "startup_timeout_seconds must be between 1 and 3600") {
+			t.Errorf("startup_timeout_seconds = %d: expected range error, got %v", v, err)
+		}
 	}
 }
 

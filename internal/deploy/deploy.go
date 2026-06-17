@@ -93,6 +93,11 @@ func AllocatePort() int {
 // realistic deploy load and bounds the worst-case latency.
 const maxAllocateProbes = 1000
 
+// defaultHealthTimeout is the readiness deadline the deploy health check allows
+// per boot attempt before declaring the app crashed on startup. A bundle can
+// override it via [app] startup_timeout_seconds in shinyhub.toml.
+const defaultHealthTimeout = 120 * time.Second
+
 // portIsBindable returns true if a TCP listener can be opened on
 // 127.0.0.1:port right now. The probe listener is closed immediately; the
 // caller is responsible for reserving the port via the actual app process
@@ -149,7 +154,7 @@ type Params struct {
 	DefaultTier     string
 	Manager         *process.Manager
 	Proxy           *proxy.Proxy
-	HealthTimeout   time.Duration // 0 means the 120 s default
+	HealthTimeout   time.Duration // 0 means defaultHealthTimeout (or [app] startup_timeout_seconds)
 	MemoryLimitMB   int           // 0 = no limit
 	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
 	// MaxSessionsPerReplica caps the per-replica active connection count the
@@ -291,67 +296,68 @@ func (p Params) hostPreparesDeps(tiers ...string) bool {
 //     silently ignoring a declared command could boot the wrong server).
 //  3. Type detection (app.py / app.R) — falls through when no manifest command.
 func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration, err error) {
-	if len(p.Command) > 0 {
-		baseCmd = p.Command
-	} else {
-		// One manifest load per boot, shared by the command override and the
-		// [tracing] auto override. File absent = nil manifest (inferred
-		// path, fleet defaults). Present but unparseable = fatal: deploys
-		// already reject bad manifests, so an unreadable on-disk manifest is
-		// a pre-validation bundle or a hand-edit, and silently ignoring a
-		// declared command could boot the wrong server.
-		m, merr := LoadManifest(p.BundleDir)
-		if merr != nil {
-			return nil, "", false, nil, 0, fmt.Errorf("read manifest: %w", merr)
-		}
-		if m != nil && len(m.App.Command) > 0 {
-			// Boot-time re-validation covers rollbacks to bundles deployed
-			// before stricter rules. The template is stored UNSUBSTITUTED:
-			// {port} is per-replica and substituted in bootReplicaAttempt.
-			if verr := validateCommandTemplate(m.App.Command); verr != nil {
-				return nil, "", false, nil, 0, fmt.Errorf("manifest [app] command: %w", verr)
-			}
-			baseCmd = m.App.Command
-		} else {
-			appType = DetectAppType(p.BundleDir)
-			// Container runtimes prepare dependencies inside the image/container, so
-			// running uv sync / renv::restore on the host would leak host state into
-			// what is supposed to be an isolated boot path (and fail outright on
-			// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
-			// caller from the tiers this boot touches.
-			switch appType {
-			case "python":
-				if hostDeps {
-					// Convert a requirements.txt-only app into a uv project on first
-					// prep so it locks via the native uv.lock - one reproducibility
-					// mechanism for every Python app. Best-effort: a failed
-					// conversion cleans itself up and the app falls back to
-					// requirements mode, never blocking the boot.
-					if cerr := ensureProjectFn(p.BundleDir); cerr != nil {
-						slog.Warn("deploy: project conversion failed; using requirements.txt",
-							"slug", p.Slug, "err", cerr)
-					}
-					if err = pythonSyncFn(p.BundleDir); err != nil {
-						return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
-					}
-				}
-				// Only inferred-command Python boots resolve auto-instrumentation:
-				// opentelemetry-instrument is Python-only, and user-supplied
-				// commands are never rewritten.
-				autoInstrument = resolveAutoInstrument(p, m)
-			case "r":
-				if hostDeps {
-					if err = rSyncFn(p.BundleDir); err != nil {
-						return nil, "", false, nil, 0, fmt.Errorf("renv restore: %w", err)
-					}
-				}
-			default:
-				return nil, "", false, nil, 0, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", p.BundleDir)
-			}
-		}
-		// baseCmd remains nil for inferred-command boots — bootReplica constructs
-		// the per-replica command using the real port once it is allocated.
+	// One manifest load per boot, shared by the command override, the [tracing]
+	// auto override, and the [app] startup_timeout_seconds. File absent = nil
+	// manifest (inferred path, fleet defaults, platform-default timeout).
+	// Present but unparseable = fatal: deploys already reject bad manifests, so
+	// an unreadable on-disk manifest is a pre-validation bundle or a hand-edit,
+	// and silently ignoring it could boot the wrong server or apply the wrong
+	// readiness deadline.
+	m, merr := LoadManifest(p.BundleDir)
+	if merr != nil {
+		return nil, "", false, nil, 0, fmt.Errorf("read manifest: %w", merr)
 	}
+
+	switch {
+	case len(p.Command) > 0:
+		baseCmd = p.Command
+	case m != nil && len(m.App.Command) > 0:
+		// Boot-time re-validation covers rollbacks to bundles deployed before
+		// stricter rules. The template is stored UNSUBSTITUTED: {port} is
+		// per-replica and substituted in bootReplicaAttempt.
+		if verr := validateCommandTemplate(m.App.Command); verr != nil {
+			return nil, "", false, nil, 0, fmt.Errorf("manifest [app] command: %w", verr)
+		}
+		baseCmd = m.App.Command
+	default:
+		appType = DetectAppType(p.BundleDir)
+		// Container runtimes prepare dependencies inside the image/container, so
+		// running uv sync / renv::restore on the host would leak host state into
+		// what is supposed to be an isolated boot path (and fail outright on
+		// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
+		// caller from the tiers this boot touches.
+		switch appType {
+		case "python":
+			if hostDeps {
+				// Convert a requirements.txt-only app into a uv project on first
+				// prep so it locks via the native uv.lock - one reproducibility
+				// mechanism for every Python app. Best-effort: a failed
+				// conversion cleans itself up and the app falls back to
+				// requirements mode, never blocking the boot.
+				if cerr := ensureProjectFn(p.BundleDir); cerr != nil {
+					slog.Warn("deploy: project conversion failed; using requirements.txt",
+						"slug", p.Slug, "err", cerr)
+				}
+				if err = pythonSyncFn(p.BundleDir); err != nil {
+					return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
+				}
+			}
+			// Only inferred-command Python boots resolve auto-instrumentation:
+			// opentelemetry-instrument is Python-only, and user-supplied
+			// commands are never rewritten.
+			autoInstrument = resolveAutoInstrument(p, m)
+		case "r":
+			if hostDeps {
+				if err = rSyncFn(p.BundleDir); err != nil {
+					return nil, "", false, nil, 0, fmt.Errorf("renv restore: %w", err)
+				}
+			}
+		default:
+			return nil, "", false, nil, 0, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", p.BundleDir)
+		}
+	}
+	// baseCmd remains nil for inferred-command boots — bootReplica constructs
+	// the per-replica command using the real port once it is allocated.
 
 	hc = p.HealthCheck
 	if hc == nil {
@@ -359,7 +365,14 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 	}
 	timeout = p.HealthTimeout
 	if timeout == 0 {
-		timeout = 120 * time.Second
+		// A bundle can lengthen (or shorten) its own readiness deadline via
+		// [app] startup_timeout_seconds for an app that legitimately warms up
+		// slowly at import; otherwise fall back to the platform default.
+		if m != nil && m.App.StartupTimeoutSeconds != nil {
+			timeout = time.Duration(*m.App.StartupTimeoutSeconds) * time.Second
+		} else {
+			timeout = defaultHealthTimeout
+		}
 	}
 	return baseCmd, appType, autoInstrument, hc, timeout, nil
 }

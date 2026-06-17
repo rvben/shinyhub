@@ -74,6 +74,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 			{Name: "deploy_count", Type: "integer", Desc: "Cumulative deployment number; 0 when the server does not report one"},
 			{Name: "version", Type: "string", Desc: "Version string from the deployment; empty when the server does not report one"},
 		},
+		Notes: "shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; it travels with the bundle and also applies on wake, scale, and rollback.",
 	},
 
 	// ── apps (container) ─────────────────────────────────────────────────────
