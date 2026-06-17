@@ -51,6 +51,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.16](https://github.com/rvben/shinyhub/compare/v0.8.15...v0.8.16) - 2026-06-17
+
+### Added
+
+- **deploy**: add per-app startup_timeout_seconds readiness deadline ([f274eaf](https://github.com/rvben/shinyhub/commit/f274eaf1c68a5abe6277fb33b0e32a78d5cd69b2))
+- **fleet**: surface the failing app's log tail on fleet apply ([eedfa74](https://github.com/rvben/shinyhub/commit/eedfa74af68c041e7099350254867b0bbc63bdd7))
+- **fleet**: default manifest to fleet.toml with shinyhub-fleet.toml fallback ([ea1f95c](https://github.com/rvben/shinyhub/commit/ea1f95cd115498dc4278e529cd88abea67ccea5f))
+
+### Fixed
+
+- **schedule**: re-fire a run_on_register first-fire interrupted by a restart ([850d1bc](https://github.com/rvben/shinyhub/commit/850d1bcdade494a5b3c1a37f9a71ad8a99d0f34a))
+- **schedule**: report exit_code null until a run reaches a terminal state ([3efccaa](https://github.com/rvben/shinyhub/commit/3efccaa2e2d55f06938195a3597b6f05b8e6af98))
+
 ## [0.8.15](https://github.com/rvben/shinyhub/compare/v0.8.14...v0.8.15) - 2026-06-17
 
 ### Fixed
