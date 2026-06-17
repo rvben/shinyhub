@@ -1,4 +1,4 @@
-# Fleet manifest (`shinyhub-fleet.toml`)
+# Fleet manifest (`fleet.toml`)
 
 `shinyhub fleet` reconciles a whole set of apps against a single declarative
 manifest, the way `kubectl apply` reconciles a cluster against a directory of
@@ -9,6 +9,12 @@ actually runs and converges it.
 Reconcile is client-orchestrated: the CLI fetches server state, builds the
 plan locally, and drives the existing per-app deploy and patch APIs. There is
 no server-side fleet controller and no new privileged endpoint.
+
+Fleet commands read `fleet.toml` from the working directory when `-f` is
+omitted. The previous name `shinyhub-fleet.toml` is still read as a fallback
+when `fleet.toml` is absent (with a one-line deprecation note on stderr), so
+existing repositories keep working; rename the file to `fleet.toml` at your
+convenience. Pass `-f <path>` to point at any other location.
 
 ```toml
 fleet_id = "prod-eu"
@@ -107,7 +113,7 @@ Scaffold a manifest from the apps already deployed on the server:
 shinyhub fleet init --fleet-id prod-eu --source-root ./apps
 ```
 
-Writes `shinyhub-fleet.toml` containing `fleet_id` and one `[[app]]` block per
+Writes `fleet.toml` containing `fleet_id` and one `[[app]]` block per
 existing app, slug-sorted, with each app's current visibility and config.
 With `--source-root <dir>` each `source` is set to `<dir>/<slug>` and the file
 is immediately plan-able. Without it the `source` line is left commented so
@@ -122,7 +128,7 @@ overwritten unless `--force` is passed.
 Show what `apply` would do, and change nothing:
 
 ```
-shinyhub fleet plan -f shinyhub-fleet.toml
+shinyhub fleet plan
 ```
 
 `plan` recomputes the diff from live server state every time; it never
@@ -135,7 +141,7 @@ envelope; `-q/--quiet` collapses to the summary.
 Converge the fleet:
 
 ```
-shinyhub fleet apply -f shinyhub-fleet.toml --prune --yes
+shinyhub fleet apply --prune --yes
 ```
 
 `apply` recomputes the same diff as `plan` (a prior plan is never replayed),

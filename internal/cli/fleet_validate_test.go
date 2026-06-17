@@ -100,6 +100,52 @@ func TestFleetValidate_MissingManifest(t *testing.T) {
 	}
 }
 
+// With -f omitted and only the legacy shinyhub-fleet.toml present, validate
+// reads it (backward compatibility) and prints a deprecation note on stderr that
+// names the fleet.toml default, so old repositories keep working while the
+// operator is steered to rename.
+func TestFleetValidate_LegacyManifestFallback(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "apps", "ops", "app.py"), "print(1)\n")
+	mustWrite(t, filepath.Join(dir, legacyFleetManifest),
+		"fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./apps/ops\"\n")
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_HOST", "")
+	t.Setenv("SHINYHUB_TOKEN", "")
+	t.Chdir(dir)
+
+	stdout, stderr, err := execCLISplit(t, "fleet", "validate")
+	if err != nil {
+		t.Fatalf("legacy-named manifest should validate when -f omitted, got %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "deprecated") || !strings.Contains(stderr, defaultFleetManifest) {
+		t.Errorf("expected a deprecation note naming %s on stderr, got:\n%s", defaultFleetManifest, stderr)
+	}
+}
+
+// With -f omitted and fleet.toml present, validate uses it and prints no
+// deprecation note (the modern default is the happy path).
+func TestFleetValidate_ModernDefaultNoNote(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "apps", "ops", "app.py"), "print(1)\n")
+	mustWrite(t, filepath.Join(dir, defaultFleetManifest),
+		"fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./apps/ops\"\n")
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_HOST", "")
+	t.Setenv("SHINYHUB_TOKEN", "")
+	t.Chdir(dir)
+
+	stdout, stderr, err := execCLISplit(t, "fleet", "validate")
+	if err != nil {
+		t.Fatalf("fleet.toml should validate when -f omitted, got %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if strings.Contains(stderr, "deprecated") {
+		t.Errorf("no deprecation note expected for fleet.toml, got:\n%s", stderr)
+	}
+}
+
 // validate is registered under the fleet command tree.
 func TestFleetValidate_Registered(t *testing.T) {
 	root := &cobra.Command{Use: "root"}

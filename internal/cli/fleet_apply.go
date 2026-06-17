@@ -42,7 +42,7 @@ func newFleetApplyCmd() *cobra.Command {
 			"  5  conflicts: >=1 app skipped on a precondition 409\n" +
 			"  6  server not ready (reachable host, but shinyhub is not up yet)\n\n" +
 			"Example:\n" +
-			"  shinyhub fleet apply -f shinyhub-fleet.toml --prune --yes",
+			"  shinyhub fleet apply --prune --yes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runFleetApply(cmd, f)
 		},
@@ -74,6 +74,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
+	f.file = resolveFleetManifest(cmd, f.file, errOut)
 	pf, err := fleetPreflight(f.file, errOut, "apply", f.waitForServer)
 	if err != nil {
 		return err

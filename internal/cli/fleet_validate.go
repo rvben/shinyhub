@@ -19,7 +19,7 @@ func newFleetValidateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Validate a fleet manifest locally (no server contact)",
-		Long: "Validate parses shinyhub-fleet.toml and runs every cheap, local check\n" +
+		Long: "Validate parses fleet.toml and runs every cheap, local check\n" +
 			"the same way `fleet plan` does, but WITHOUT contacting the server: no\n" +
 			"host, no token, no network. It is the fleet-level analogue of\n" +
 			"`manifest validate`, intended for a pre-merge CI gate.\n\n" +
@@ -31,7 +31,7 @@ func newFleetValidateCmd() *cobra.Command {
 			"  0  manifest is valid\n" +
 			"  1  manifest is invalid (every problem is listed)\n\n" +
 			"Example:\n" +
-			"  shinyhub fleet validate -f shinyhub-fleet.toml",
+			"  shinyhub fleet validate",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runFleetValidate(cmd, f)
 		},
@@ -48,6 +48,7 @@ func runFleetValidate(cmd *cobra.Command, f *fleetValidateFlags) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
+	f.file = resolveFleetManifest(cmd, f.file, errOut)
 	data, err := os.ReadFile(f.file)
 	if err != nil {
 		if os.IsNotExist(err) {

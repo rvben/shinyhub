@@ -14,16 +14,18 @@ func newFleetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "fleet",
 		Short: "Declaratively reconcile a fleet of apps from a manifest",
-		Long: "fleet manages a set of apps from a single shinyhub-fleet.toml.\n\n" +
+		Long: "fleet manages a set of apps from a single fleet.toml.\n\n" +
 			"  shinyhub fleet init      scaffold a manifest from deployed apps\n" +
 			"  shinyhub fleet validate  check a manifest locally (offline, no server)\n" +
 			"  shinyhub fleet plan      preview the diff (read-only)\n" +
 			"  shinyhub fleet apply     converge: deploy changed, reconcile, prune\n" +
 			"  shinyhub fleet status    read-only fleet overview (no manifest)\n\n" +
+			"Commands read fleet.toml from the working directory by default; pass -f to\n" +
+			"point at another path.\n\n" +
 			"Example:\n" +
 			"  shinyhub fleet init --fleet-id prod-eu --source-root ./apps\n" +
-			"  shinyhub fleet plan -f shinyhub-fleet.toml --detailed-exitcode\n" +
-			"  shinyhub fleet apply -f shinyhub-fleet.toml --prune --yes",
+			"  shinyhub fleet plan --detailed-exitcode\n" +
+			"  shinyhub fleet apply --prune --yes",
 	}
 	cmd.AddCommand(newFleetInitCmd())
 	cmd.AddCommand(newFleetValidateCmd())

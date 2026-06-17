@@ -35,7 +35,7 @@ func newFleetPlanCmd() *cobra.Command {
 			"  6  server not ready (reachable host, but shinyhub is not up yet)\n\n" +
 			"--fail-on-changes is an alias for --detailed-exitcode for CI gates.\n\n" +
 			"Example:\n" +
-			"  shinyhub fleet plan -f shinyhub-fleet.toml --fail-on-changes",
+			"  shinyhub fleet plan --fail-on-changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runFleetPlan(cmd, f)
 		},
@@ -61,6 +61,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 	} else if format == formatJSON {
 		f.jsonOutput = true
 	}
+	f.file = resolveFleetManifest(cmd, f.file, cmd.ErrOrStderr())
 	pf, err := fleetPreflight(f.file, cmd.ErrOrStderr(), "plan", f.waitForServer)
 	if err != nil {
 		return err

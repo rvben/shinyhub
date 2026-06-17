@@ -15,11 +15,6 @@ import (
 // fleetPlanSchemaVersion is the stable --json envelope version.
 const fleetPlanSchemaVersion = 1
 
-// defaultFleetManifest is the manifest path assumed when -f is omitted. The
-// "Next:" suggestion only echoes -f when the active manifest differs from it,
-// so a copy-paste reconciles the same file the operator is looking at.
-const defaultFleetManifest = "shinyhub-fleet.toml"
-
 // planLegend is the one-line glyph key printed under the plan's app list so the
 // column glyphs are self-describing.
 const planLegend = "+ create  ~ update  > adopt  - delete  = unchanged"

@@ -54,7 +54,7 @@ type AppEntry struct {
 	Config     Config `toml:"config"`
 }
 
-// Manifest is a validated shinyhub-fleet.toml.
+// Manifest is a validated fleet.toml.
 type Manifest struct {
 	FleetID string     `toml:"fleet_id"`
 	Apps    []AppEntry `toml:"app"`
