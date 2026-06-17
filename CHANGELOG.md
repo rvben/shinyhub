@@ -53,6 +53,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.18](https://github.com/rvben/shinyhub/compare/v0.8.17...v0.8.18) - 2026-06-17
+
+### Added
+
+- **warm-wake**: restore warm apps on startup so they survive a restart ([4472cc7](https://github.com/rvben/shinyhub/commit/4472cc79a79e9489b9bbb05dd20eb35425a2072b))
+
 ## [0.8.17](https://github.com/rvben/shinyhub/compare/v0.8.16...v0.8.17) - 2026-06-17
 
 ### Fixed
