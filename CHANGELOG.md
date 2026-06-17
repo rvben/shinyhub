@@ -49,6 +49,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.14](https://github.com/rvben/shinyhub/compare/v0.8.13...v0.8.14) - 2026-06-17
+
+### Added
+
+- **metrics**: add in-memory historical app metrics with Overview sparklines ([60682a5](https://github.com/rvben/shinyhub/commit/60682a51841a2e5891151264540dc6fd451ac3a9))
+
+### Fixed
+
+- **deploy**: ensure pydantic for shiny apps (shinychat optional-import workaround) ([4bc5ef4](https://github.com/rvben/shinyhub/commit/4bc5ef49c42d7d955c0a8eebbc97b6aa0431c35b))
+
 ## [0.8.13](https://github.com/rvben/shinyhub/compare/v0.8.12...v0.8.13) - 2026-06-16
 
 ### Added
