@@ -90,6 +90,12 @@ type Manager struct {
 	queues  map[int64]chan struct{}      // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
 	active  map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
 
+	// operatorCancelled records run IDs an operator explicitly cancelled via
+	// Cancel, so finishRun can tell an operator cancel ("cancelled", terminal)
+	// apart from a service-shutdown cancel ("interrupted", re-fired by the
+	// startup reconcile). Entries are cleared in unregisterActive.
+	operatorCancelled map[int64]bool
+
 	// wg tracks every launched run goroutine so Stop can wait for them to
 	// observe cancellation and finalize their DB rows before the process exits.
 	wg sync.WaitGroup
@@ -122,17 +128,18 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 		appDataDir = abs
 	}
 	return &Manager{
-		procMgr:     procMgr,
-		tierOrder:   tierOrder,
-		defaultTier: defaultTier,
-		store:       st,
-		secretsKey:  secretsKey,
-		appsDir:     appsDir,
-		appDataDir:  appDataDir,
-		globalSem:   make(chan struct{}, defaultMaxConcurrentRuns),
-		locks:       make(map[int64]*schedLock),
-		queues:      make(map[int64]chan struct{}),
-		active:      make(map[int64]context.CancelFunc),
+		procMgr:           procMgr,
+		tierOrder:         tierOrder,
+		defaultTier:       defaultTier,
+		store:             st,
+		secretsKey:        secretsKey,
+		appsDir:           appsDir,
+		appDataDir:        appDataDir,
+		globalSem:         make(chan struct{}, defaultMaxConcurrentRuns),
+		locks:             make(map[int64]*schedLock),
+		queues:            make(map[int64]chan struct{}),
+		active:            make(map[int64]context.CancelFunc),
+		operatorCancelled: make(map[int64]bool),
 	}, nil
 }
 
@@ -174,20 +181,44 @@ func (m *Manager) registerActive(runID int64, cancel context.CancelFunc) {
 func (m *Manager) unregisterActive(runID int64) {
 	m.mu.Lock()
 	delete(m.active, runID)
+	delete(m.operatorCancelled, runID)
 	m.mu.Unlock()
 }
 
 // Cancel signals an in-flight run to terminate. Returns nil even when the run
-// has already finished — cancellation is best-effort.
+// has already finished — cancellation is best-effort. The run id is recorded
+// as operator-cancelled so it finalises as "cancelled" (terminal) rather than
+// "interrupted" (re-fired by the startup reconcile) even if a service shutdown
+// cancels it moments later.
 func (m *Manager) Cancel(runID int64) error {
 	m.mu.Lock()
 	cancel, ok := m.active[runID]
+	if ok {
+		m.operatorCancelled[runID] = true
+	}
 	m.mu.Unlock()
 	if !ok {
 		return nil
 	}
 	cancel()
 	return nil
+}
+
+// cancelStatus classifies why an in-flight run's context was cancelled. An
+// operator Cancel recorded the run id, yielding "cancelled" (terminal). A
+// cancel during Stop (service shutdown) with no operator record yields
+// "interrupted", which the startup reconcile re-fires for a run_on_register
+// first-fire. Any other cancellation defaults to "cancelled".
+func (m *Manager) cancelStatus(runID int64) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.operatorCancelled[runID] {
+		return "cancelled"
+	}
+	if m.stopped {
+		return "interrupted"
+	}
+	return "cancelled"
 }
 
 // Stop signals all in-flight runs to cancel and waits for their goroutines
@@ -364,7 +395,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 			// then finalise as cancelled. We never acquired the slot,
 			// so do not call slot.unlock.
 			<-sem
-			m.finishRun(sched, runID, "cancelled", intPtr(0), trigger, userID)
+			m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID)
 			return
 		}
 		// Promoted from queued to active. Free the queue slot now —
@@ -467,7 +498,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	case m.globalSem <- struct{}{}:
 		defer func() { <-m.globalSem }()
 	case <-ctx.Done():
-		m.finishRun(sched, runID, "cancelled", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID)
 		return
 	}
 
@@ -614,19 +645,27 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 
 	// Determine final status.
 	status := "succeeded"
-	code := info.Code
+	exitCode := intPtr(info.Code)
 	switch {
 	case runErr != nil:
 		status = "failed"
 	case info.Signaled && runCtx.Err() == context.DeadlineExceeded:
 		status = "timed_out"
+	case info.Signaled && runCtx.Err() == context.Canceled:
+		// Killed by an explicit cancel: an operator Cancel ("cancelled") or a
+		// service-shutdown Stop ("interrupted"). A killed run never observed a
+		// meaningful exit code, so record NULL.
+		status = m.cancelStatus(runID)
+		exitCode = nil
 	case info.Signaled:
-		status = "cancelled"
+		// Signaled without our context being cancelled - the process died of
+		// its own signal (crash / external kill), which is a failure.
+		status = "failed"
 	case info.Code != 0:
 		status = "failed"
 	}
 
-	m.finishRun(sched, runID, status, intPtr(code), trigger, userID)
+	m.finishRun(sched, runID, status, exitCode, trigger, userID)
 }
 
 // intPtr returns a pointer to i, used to pass a concrete exit code where a

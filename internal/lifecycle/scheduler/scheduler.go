@@ -24,6 +24,7 @@ type Store interface {
 	GetSchedule(id int64) (*db.Schedule, error)
 	MarkRunningSchedulesInterrupted() (int64, error)
 	LastSuccessfulRun(id int64) (*db.ScheduleRun, error)
+	SchedulesNeedingFirstFireRetry() ([]int64, error)
 }
 
 // ErrNotStarted is returned by Reload when the scheduler's cron has not
@@ -95,6 +96,12 @@ func (s *Scheduler) Start(ctx context.Context) error {
 			s.dispatchMissedIfDue(sched)
 		}
 	}
+
+	// 2b. Re-fire run_on_register first-fires interrupted by a prior restart.
+	// A first-fire warms an app's cache on its initial deploy; if a restart
+	// killed it before it succeeded, its next cron tick can be hours away, so
+	// recover it here rather than leaving the app with an empty cache.
+	s.reconcileFirstFires()
 
 	// 3. Start cron loop and stop it when ctx is cancelled.
 	s.cron.Start()
@@ -227,5 +234,28 @@ func (s *Scheduler) dispatchMissedIfDue(sched *db.Schedule) {
 				slog.Warn("missed-run dispatch failed", "schedule", id, "err", err)
 			}
 		}(sched.ID)
+	}
+}
+
+// reconcileFirstFires re-fires any run_on_register first-fire that a prior
+// service restart interrupted before it could succeed. The store gate scopes
+// this to enabled schedules whose latest register-triggered run is
+// 'interrupted' and that have never succeeded, so an operator-cancelled or
+// already-succeeded first-fire is left alone. Each is dispatched with the
+// "register" trigger (not "schedule") so a subsequent restart sees the new
+// first-fire's status. Dispatch is asynchronous: a first-fire can run for
+// minutes and must not block scheduler startup.
+func (s *Scheduler) reconcileFirstFires() {
+	ids, err := s.store.SchedulesNeedingFirstFireRetry()
+	if err != nil {
+		slog.Warn("reconcile first-fires: query failed", "err", err)
+		return
+	}
+	for _, id := range ids {
+		go func(id int64) {
+			if _, err := s.jobs.Run(id, "register", nil); err != nil {
+				slog.Warn("reconcile first-fire dispatch failed", "schedule", id, "err", err)
+			}
+		}(id)
 	}
 }

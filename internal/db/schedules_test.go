@@ -195,6 +195,87 @@ func TestScheduleRuns_ExitCodeNullableLifecycle(t *testing.T) {
 	}
 }
 
+// TestSchedulesNeedingFirstFireRetry covers the startup-reconcile gate: a
+// run_on_register first-fire (trigger='register') that was interrupted by a
+// service restart and has never succeeded must be re-fired, while a schedule
+// that already succeeded, was operator-cancelled, failed, is disabled, or never
+// had a first-fire must not be.
+func TestSchedulesNeedingFirstFireRetry(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "fetch")
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mkSched := func(name string, enabled bool) int64 {
+		id, err := store.CreateSchedule(db.CreateScheduleParams{
+			AppID: appID, Name: name, CronExpr: "0 5 * * *",
+			CommandJSON: `["true"]`, Enabled: enabled, TimeoutSeconds: 60,
+			OverlapPolicy: "skip", MissedPolicy: "skip",
+		})
+		if err != nil {
+			t.Fatalf("create schedule %s: %v", name, err)
+		}
+		return id
+	}
+	// run inserts a finished run with a controlled started_at so "most recent
+	// register run" ordering is deterministic.
+	run := func(schedID int64, trigger, status string, offset time.Duration) {
+		rid, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: schedID, Status: status, Trigger: trigger,
+			StartedAt: base.Add(offset), LogPath: "x",
+		})
+		if err != nil {
+			t.Fatalf("insert run: %v", err)
+		}
+		_ = rid
+	}
+
+	// A: interrupted first-fire, never succeeded -> re-fire.
+	a := mkSched("a-needs-retry", true)
+	run(a, "register", "interrupted", time.Minute)
+
+	// B: interrupted first-fire but a later success exists -> do not re-fire.
+	b := mkSched("b-succeeded", true)
+	run(b, "register", "interrupted", time.Minute)
+	run(b, "register", "succeeded", 2*time.Minute)
+
+	// C: latest register run was operator-cancelled -> terminal, do not re-fire.
+	c := mkSched("c-cancelled", true)
+	run(c, "register", "interrupted", time.Minute)
+	run(c, "register", "cancelled", 2*time.Minute)
+
+	// D: first-fire failed (app error) -> self-heals on next deploy, not restart.
+	d := mkSched("d-failed", true)
+	run(d, "register", "failed", time.Minute)
+
+	// E: disabled schedule -> not registered, do not re-fire.
+	e := mkSched("e-disabled", false)
+	run(e, "register", "interrupted", time.Minute)
+
+	// F: only a cron-triggered interrupted run, never a first-fire -> ignore.
+	f := mkSched("f-no-register", true)
+	run(f, "schedule", "interrupted", time.Minute)
+
+	ids, err := store.SchedulesNeedingFirstFireRetry()
+	if err != nil {
+		t.Fatalf("SchedulesNeedingFirstFireRetry: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if !got[a] {
+		t.Errorf("schedule A (interrupted, never succeeded) must be selected for re-fire")
+	}
+	for name, id := range map[string]int64{"B-succeeded": b, "C-cancelled": c, "D-failed": d, "E-disabled": e, "F-no-register": f} {
+		if got[id] {
+			t.Errorf("schedule %s must NOT be selected for re-fire", name)
+		}
+	}
+	if len(ids) != 1 {
+		t.Errorf("expected exactly schedule A, got %d ids: %v", len(ids), ids)
+	}
+}
+
 func TestScheduleRuns_MarkInterrupted(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "fetch")
