@@ -368,11 +368,18 @@ func (w *Watcher) hibernatePool(app *db.App) {
 // RestoreWarm re-boots and re-freezes apps that were hibernated before a server
 // restart, so their next access is a warm resume instead of a cold boot. A
 // frozen process does not survive a restart, so this re-creates the warm state
-// from scratch: cold-boot each replica into a fresh per-app cgroup, then freeze
-// it via the normal hibernate path. It runs in the background after recovery,
-// one app at a time (so the boots do not all spike the host at once), and is
-// owner-gated and ctx-cancellable. Best-effort: a failed boot leaves that app
-// cold - woken on first access, exactly as before.
+// from scratch and lands each app in the exact state an idle hibernation would:
+// processes frozen + RAM reclaimed, replica rows suspended, and - crucially - no
+// proxy pool, so the next request triggers a normal wake (warm resume) rather
+// than routing to a frozen process.
+//
+// Per app: claim it (BeginWake CAS, hibernated->waking) so a concurrent user
+// wake cannot double-boot it; size the pool and cold-boot each replica into a
+// fresh per-app cgroup; then remove the pool from routing (gated on no in-flight
+// request) and suspend. It runs in the background after recovery, one app at a
+// time (so the boots do not all spike the host at once), and is owner-gated and
+// ctx-cancellable. Best-effort: a failed boot leaves that app cold - woken on
+// first access, exactly as before.
 func (w *Watcher) RestoreWarm(ctx context.Context) {
 	if w.deploy == nil {
 		return
@@ -393,15 +400,47 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		if app.Replicas < 1 {
 			continue
 		}
+
+		// Claim the app so a concurrent user wake (WakeTrigger -> BeginWake) cannot
+		// double-boot it. CAS hibernated->waking; if it fails another path already
+		// owns the wake (or the app is no longer hibernated) - leave it to them.
+		won, werr := w.store.BeginWake(app.Slug)
+		if werr != nil {
+			slog.Warn("warm restore: begin wake failed", "slug", app.Slug, "err", werr)
+			continue
+		}
+		if !won {
+			continue
+		}
+
 		deployments, derr := w.store.ListDeployments(app.ID)
 		if derr != nil || len(deployments) == 0 {
-			continue // never deployed; nothing to restore
+			if derr != nil {
+				slog.Warn("warm restore: list deployments failed", "slug", app.Slug, "err", derr)
+			}
+			w.abortWarmClaim(app.Slug) // never deployed; release claim, leave cold
+			continue
 		}
 		bundleDir := deployments[0].BundleDir
+
+		// Snapshot the activity mark BEFORE the pool exists so the freeze below can
+		// detect any real request that lands on a booted replica during restore.
+		sinceMark := w.prx.LastSeen(app.Slug)
+
+		// Size the proxy pool before booting, exactly as the wake/recovery paths
+		// do: after a restart the in-memory pool is empty for a hibernated app
+		// (recovery only sizes running apps), so RegisterReplica would otherwise
+		// fail with "pool size not set".
+		w.prx.SetPoolSize(app.Slug, app.Replicas)
+		w.prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
+		w.prx.SetPoolAppID(app.Slug, app.ID)
+		w.prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
+
 		booted := true
 		for i := 0; i < app.Replicas; i++ {
 			if ctx.Err() != nil {
-				return
+				booted = false
+				break
 			}
 			if _, derr := w.deploy(app.Slug, bundleDir, i); derr != nil {
 				slog.Warn("warm restore: boot failed; app left cold", "slug", app.Slug, "idx", i, "err", derr)
@@ -410,17 +449,53 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			}
 		}
 		if !booted {
+			// A replica failed mid-boot (or shutdown raced in). Take down any that
+			// came up so the app is genuinely cold (no orphan replica running under
+			// a 'hibernated' app, which the idle watcher would never reap), and
+			// release the claim. Mirrors the watcher's Deregister+Stop teardown.
+			w.prx.Deregister(app.Slug)
+			if serr := w.mgr.Stop(app.Slug); serr != nil {
+				slog.Warn("warm restore: cleanup after partial boot failed", "slug", app.Slug, "err", serr)
+			}
+			w.abortWarmClaim(app.Slug)
+			if ctx.Err() != nil {
+				return
+			}
 			continue
 		}
-		// Re-freeze: the app stays 'hibernated' and its fresh replicas become
-		// suspended (warm-resumable). Reuses the normal hibernate path, so a
-		// runtime without warm-wake degrades to Stop exactly as on idle.
+
+		// Park the booted replicas into the frozen warm state, exactly as an idle
+		// hibernation does: atomically remove the pool from routing (BeginHibernate
+		// aborts if a request raced in during boot), then suspend. Removing the
+		// pool is what makes the next access trigger a wake -> warm resume instead
+		// of routing to a frozen process.
+		if !w.prx.BeginHibernate(app.Slug, sinceMark) {
+			// A real request landed on the app during restore; it is serving now.
+			// Promote it to running and leave it up - the idle watchdog hibernates
+			// it normally later.
+			if _, ferr := w.store.FinishWake(app.Slug); ferr != nil {
+				slog.Warn("warm restore: finish wake failed", "slug", app.Slug, "err", ferr)
+			}
+			slog.Info("warm restore: app served a request during restore; left running", "slug", app.Slug)
+			continue
+		}
 		w.hibernatePool(app)
+		// Restore the hibernated status: AbortWake is the waking->hibernated CAS.
+		w.abortWarmClaim(app.Slug)
 		restored++
 		slog.Info("warm restore: re-froze hibernated app", "slug", app.Slug, "replicas", app.Replicas)
 	}
 	if restored > 0 {
 		slog.Info("warm restore complete", "apps", restored)
+	}
+}
+
+// abortWarmClaim returns a warm-restore claim from "waking" to "hibernated". It
+// is the waking->hibernated CAS (AbortWake), used both to release a claim we
+// could not fulfil and to park a successfully re-frozen app back to hibernated.
+func (w *Watcher) abortWarmClaim(slug string) {
+	if aerr := w.store.AbortWake(slug); aerr != nil {
+		slog.Warn("warm restore: release claim failed", "slug", slug, "err", aerr)
 	}
 }
 
