@@ -977,7 +977,6 @@ func (m *Manager) HandleReplica(slug string, index int) (RunHandle, bool) {
 // goroutine so crashed processes are detected normally.
 func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	tier := info.Tier
 	if tier == "" {
 		tier = m.defaultTier
@@ -991,6 +990,22 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	done := make(chan struct{})
 	pool[info.Index] = &entry{info: &info, handle: handle, tier: tier, done: done}
 	m.entries[slug] = pool
+	m.mu.Unlock()
+
+	// Re-register warm-wake state for an adopted-after-restart replica so it can
+	// be warm-frozen and warm-resumed again rather than cold-booting on its next
+	// hibernate (Start does this via placeInAppCgroup; Adopt must do the
+	// equivalent). Done outside the lock - it touches cgroup files - and
+	// best-effort: ErrRuntimeNotSnapshotter (warm-wake off) is silent, and any
+	// other error means the warm state is gone, so the replica hibernates via
+	// Stop, exactly as before this re-registration existed.
+	if rd, ok := rt.(WarmReadopter); ok {
+		if err := rd.ReadoptWarm(slug, info.Index, handle.PID); err != nil && !errors.Is(err, ErrRuntimeNotSnapshotter) {
+			slog.Warn("manager: warm re-adopt failed; replica will hibernate via stop",
+				"slug", slug, "idx", info.Index, "err", err)
+		}
+	}
+
 	go func() {
 		rt.Wait(context.Background(), handle)
 		m.mu.Lock()
