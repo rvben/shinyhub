@@ -13,6 +13,7 @@ import {
 } from '/static/views/autoscale.js';
 import { deploymentListModels, relativeTime } from '/static/views/deployment-row.js';
 import { statusPillClass } from '/static/views/stat-format.js';
+import { renderTrendsCard } from '/static/views/trends-card.js';
 
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
@@ -486,6 +487,10 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
         <a href="/apps/${app.slug}/deployments" data-nav>Deployment history →</a>
       </div>
     </section>
+    <div id="overview-trends" class="overview-card overview-trends">
+      <h3>Trends</h3>
+      <p class="trends-empty">Collecting...</p>
+    </div>
     <section class="overview-card overview-autoscale">
       <h3>Autoscale</h3>
       <dl id="autoscale-summary" class="overview-dl"></dl>
@@ -527,6 +532,31 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
   if (rejectsSection && rejectsList) {
     renderRejectsByReason(rejectsSection, rejectsList, formatRejectsByReason(envelope && envelope.rejects_by_reason));
   }
+
+  // Load the in-memory metrics history into the Trends card. Best-effort: a
+  // failed fetch or disabled history just leaves the Collecting placeholder.
+  loadTrends(app.slug);
+}
+
+// loadTrends fetches the app's metrics history and renders the Trends card. The
+// response is the columnar { window_seconds, interval_seconds, series } payload
+// from GET /api/apps/:slug/metrics/history.
+function loadTrends(slug) {
+  const container = document.getElementById('overview-trends');
+  if (!container) return;
+  fetch(`/api/apps/${slug}/metrics/history`, { credentials: 'include' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((body) => {
+      if (!body) return;
+      const card = renderTrendsCard(document, body);
+      if (!card) {
+        // History disabled server-side: hide the card entirely.
+        container.hidden = true;
+        return;
+      }
+      container.replaceChildren(card);
+    })
+    .catch(() => {});
 }
 
 function seedReplicasFromStatus(app, replicasStatus) {

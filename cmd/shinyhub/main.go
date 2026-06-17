@@ -39,6 +39,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fargate"
+	"github.com/rvben/shinyhub/internal/history"
 	"github.com/rvben/shinyhub/internal/identity"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/leader"
@@ -886,6 +887,32 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		srv.SetSampler(&hostSampler{})
 	}
 
+	// Start the in-memory metrics-history collector unless disabled
+	// (history_window == 0). It runs on every instance (recording the replicas it
+	// runs locally) with its own sampler instance so its CPU deltas are
+	// independent of the API's on-demand sampler. Cancelled + joined at shutdown
+	// so it stops cleanly on SIGTERM and on a tableflip re-exec.
+	var historyWG sync.WaitGroup
+	var historyCancel context.CancelFunc
+	if cfg.Metrics.HistoryWindow > 0 {
+		histStore := history.NewStore(cfg.Metrics.HistoryWindow, cfg.Metrics.HistoryInterval)
+		srv.SetHistory(histStore)
+		var histSampler process.Sampler = &process.GopsutilSampler{}
+		if defaultTierCfg.Runtime == "docker" {
+			histSampler = &process.RuntimeSampler{Runtime: rt}
+		}
+		collector := history.NewCollector(mgr, prx, histSampler, histStore, cfg.Metrics.HistoryInterval)
+		historyCtx, cancel := context.WithCancel(context.Background())
+		historyCancel = cancel
+		historyWG.Add(1)
+		go func() {
+			defer historyWG.Done()
+			collector.Run(historyCtx)
+		}()
+		slog.Info("metrics history collector started",
+			"window", cfg.Metrics.HistoryWindow, "interval", cfg.Metrics.HistoryInterval)
+	}
+
 	if cfg.OAuth.OIDC.IssuerURL != "" {
 		oidcCtx, oidcCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		p, err := oauth.NewOIDCProvider(oidcCtx,
@@ -1430,6 +1457,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		syncerCancel()
 		syncerWG.Wait()
 		prx.SetOnMissSync(nil)
+	}
+	// Stop the metrics-history collector. It only reads in-memory manager/proxy
+	// state, so ordering relative to the store close is not load-bearing.
+	if historyCancel != nil {
+		historyCancel()
+		historyWG.Wait()
 	}
 	// Drain in-flight scheduled job runs before the store closes.
 	jobsMgr.Stop(shutdownCtx)

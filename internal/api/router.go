@@ -15,6 +15,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/history"
 	"github.com/rvben/shinyhub/internal/httproute"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
@@ -49,6 +50,7 @@ type Server struct {
 	secretsKey    []byte
 	traceBuffer   *tracing.Buffer
 	metrics       *metrics.Registry   // nil when metrics are disabled
+	history       *history.Store      // nil when metrics-history collection is disabled
 	tracer        *servertrace.Tracer // nil when server tracing is disabled
 	router        chi.Router
 
@@ -470,6 +472,12 @@ func (s *Server) colocationPins(consumerTiers []string, sources []*db.SharedData
 // begins handling requests; it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetSampler(sampler process.Sampler) { s.sampler = sampler }
 
+// SetHistory wires the in-memory metrics-history store that serves the Trends
+// endpoint. nil (the default) means history collection is disabled: the endpoint
+// returns an empty series. Must be called before the server begins handling
+// requests.
+func (s *Server) SetHistory(h *history.Store) { s.history = h }
+
 // SetOIDCProvider sets the OIDC provider after the server is constructed.
 // Must be called before the server begins handling requests.
 func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
@@ -689,6 +697,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/apps/{slug}/stop", s.handleStopApp)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
 		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
+		r.Get("/api/apps/{slug}/metrics/history", s.handleMetricsHistory)
 		r.Get("/api/apps/{slug}/traces", s.handleTraces)
 		r.Get("/api/apps/{slug}/members", s.handleGetMembers)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)

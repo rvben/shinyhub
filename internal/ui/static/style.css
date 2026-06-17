@@ -3329,6 +3329,15 @@ fieldset.settings-block { min-width: 0; }
 .overview-links a { color: var(--accent); text-decoration: none; }
 .overview-links a:hover { text-decoration: underline; }
 
+.trends-card h3 { margin: 0 0 4px; }
+.trend-row { display: grid; grid-template-columns: 5.5rem 5rem 1fr; align-items: center; gap: 12px; padding: 7px 0; }
+.trend-row + .trend-row { border-top: 1px solid var(--line); }
+.trend-label { color: var(--text-dim); font-size: 0.9rem; }
+.trend-value { font-family: 'Space Mono', monospace; color: var(--text); font-size: 0.95rem; text-align: right; }
+.trend-row .sparkline { width: 100%; height: 28px; display: block; color: var(--accent); }
+.trend-row .sparkline-instances { color: var(--cyan); }
+.trends-empty { color: var(--text-muted); font-size: 0.9rem; padding: 6px 0; margin: 0; }
+
 .overview-replicas h3 { display: flex; align-items: baseline; gap: 8px; }
 .overview-replicas-cap { color: var(--text-muted); font-size: 0.85rem; font-weight: normal; }
 .replicas-list { list-style: none; padding: 0; margin: 12px 0 0; }

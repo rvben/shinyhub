@@ -179,6 +179,13 @@ type MetricsConfig struct {
 	// Addr is the listen address for the dedicated metrics listener in
 	// "host:port" form. Defaults to "127.0.0.1:9090" when enabled and unset.
 	Addr string
+	// HistoryWindow is the retention window for the in-memory app-metrics history
+	// (CPU/RAM/sessions/instances) shown on the dashboard Trends card. 0 disables
+	// collection. Default 12h; a non-zero value must be within [1m, 48h].
+	HistoryWindow time.Duration
+	// HistoryInterval is the sampling cadence for the history collector.
+	// Default 15s; must be within [1s, 10m].
+	HistoryInterval time.Duration
 }
 
 // BrandingConfig customises the ShinyHub front door. Every field is optional;
@@ -655,8 +662,10 @@ type rawConfig struct {
 }
 
 type rawMetricsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Addr    string `yaml:"addr"`
+	Enabled         bool   `yaml:"enabled"`
+	Addr            string `yaml:"addr"`
+	HistoryWindow   string `yaml:"history_window"`   // parsed as time.Duration; "0s" disables
+	HistoryInterval string `yaml:"history_interval"` // parsed as time.Duration
 }
 
 type rawTracingConfig struct {
@@ -820,6 +829,11 @@ func loadRaw(path string) (*Config, error) {
 		return nil, err
 	}
 
+	histWindow, histInterval, err := parseMetricsHistory(raw.Metrics)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Database:  raw.Database,
 		Server:    raw.Server,
@@ -843,8 +857,10 @@ func loadRaw(path string) (*Config, error) {
 			AutoInstrumentApps: raw.Tracing.AutoInstrumentApps,
 		},
 		Metrics: MetricsConfig{
-			Enabled: raw.Metrics.Enabled,
-			Addr:    raw.Metrics.Addr,
+			Enabled:         raw.Metrics.Enabled,
+			Addr:            raw.Metrics.Addr,
+			HistoryWindow:   histWindow,
+			HistoryInterval: histInterval,
 		},
 		Branding: raw.Branding,
 		Worker:   raw.Worker,
@@ -1083,6 +1099,9 @@ func loadRaw(path string) (*Config, error) {
 	if err := normalizeMetrics(&cfg.Metrics); err != nil {
 		return nil, err
 	}
+	if err := validateMetricsHistory(cfg.Metrics.HistoryWindow, cfg.Metrics.HistoryInterval); err != nil {
+		return nil, err
+	}
 	// Resolve scheduler timezone. Default to UTC when unset; validate when set.
 	if cfg.Scheduler.DefaultTimezone == "" {
 		cfg.Scheduler.DefaultTimezone = "UTC"
@@ -1169,6 +1188,55 @@ func normalizeMetrics(m *MetricsConfig) error {
 	}
 	if _, _, err := net.SplitHostPort(m.Addr); err != nil {
 		return fmt.Errorf("metrics.addr: %q is not a valid host:port address: %w", m.Addr, err)
+	}
+	return nil
+}
+
+// Bounds for the in-memory app-metrics history. The floors keep a misconfigured
+// tiny interval from driving runaway sampling; the ceilings (plus the
+// history.Store's hard per-app point cap) keep memory bounded.
+const (
+	defaultHistoryWindow   = 12 * time.Hour
+	defaultHistoryInterval = 15 * time.Second
+	minHistoryWindow       = 1 * time.Minute
+	maxHistoryWindow       = 48 * time.Hour
+	minHistoryInterval     = 1 * time.Second
+	maxHistoryInterval     = 10 * time.Minute
+)
+
+// parseMetricsHistory parses the raw history duration strings, applying defaults
+// for absent keys (an empty string means the key was absent; "0s" is the
+// explicit disable for the window). Validation is deferred until after env
+// overrides are layered on, so an env-supplied value is the one validated, not
+// the YAML value it replaces.
+func parseMetricsHistory(raw rawMetricsConfig) (window, interval time.Duration, err error) {
+	window = defaultHistoryWindow
+	if raw.HistoryWindow != "" {
+		window, err = time.ParseDuration(raw.HistoryWindow)
+		if err != nil {
+			return 0, 0, fmt.Errorf("metrics.history_window: %q is not a duration: %w", raw.HistoryWindow, err)
+		}
+	}
+	interval = defaultHistoryInterval
+	if raw.HistoryInterval != "" {
+		interval, err = time.ParseDuration(raw.HistoryInterval)
+		if err != nil {
+			return 0, 0, fmt.Errorf("metrics.history_interval: %q is not a duration: %w", raw.HistoryInterval, err)
+		}
+	}
+	return window, interval, nil
+}
+
+// validateMetricsHistory enforces the history window/interval bounds. A window of
+// 0 (collection disabled) is always accepted.
+func validateMetricsHistory(window, interval time.Duration) error {
+	if window != 0 && (window < minHistoryWindow || window > maxHistoryWindow) {
+		return fmt.Errorf("metrics.history_window: %v is out of range [%v, %v] (use 0 to disable)",
+			window, minHistoryWindow, maxHistoryWindow)
+	}
+	if interval < minHistoryInterval || interval > maxHistoryInterval {
+		return fmt.Errorf("metrics.history_interval: %v is out of range [%v, %v]",
+			interval, minHistoryInterval, maxHistoryInterval)
 	}
 	return nil
 }
@@ -1886,6 +1954,20 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_METRICS_ADDR"); v != "" {
 		cfg.Metrics.Addr = v
+	}
+	if v := os.Getenv("SHINYHUB_METRICS_HISTORY_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_METRICS_HISTORY_WINDOW: %q is not a duration: %w", v, err)
+		}
+		cfg.Metrics.HistoryWindow = d
+	}
+	if v := os.Getenv("SHINYHUB_METRICS_HISTORY_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_METRICS_HISTORY_INTERVAL: %q is not a duration: %w", v, err)
+		}
+		cfg.Metrics.HistoryInterval = d
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_OTLP_ENDPOINT"); v != "" {
 		cfg.Tracing.OTLPEndpoint = v
