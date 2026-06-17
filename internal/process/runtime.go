@@ -161,6 +161,21 @@ type Snapshotter interface {
 	Resume(ctx context.Context, handle RunHandle) (ReplicaEndpoint, error)
 }
 
+// WarmReadopter is implemented by a runtime whose warm-wake state is held in
+// this process's memory and is therefore lost when a replica is re-adopted after
+// a server restart - the native runtime, whose per-app cgroup mapping Adopt does
+// not rebuild the way Start does. Manager.Adopt calls ReadoptWarm best-effort so
+// a re-adopted replica can be warm-frozen and warm-resumed again. Runtimes whose
+// warm state survives a restart independently (e.g. Docker's daemon-held paused
+// containers) do not implement it.
+type WarmReadopter interface {
+	// ReadoptWarm re-registers the warm-wake state for an adopted replica. It
+	// returns ErrRuntimeNotSnapshotter when warm-wake is unavailable (the caller
+	// stays silent); any other error means the warm state could not be rebuilt
+	// (the caller logs and the replica hibernates via Stop).
+	ReadoptWarm(slug string, index, pid int) error
+}
+
 // PartialInventoryError reports that a tier's aggregated inventory is
 // incomplete: at least one worker was queried successfully, but Workers could
 // not be reached. The returned items hold what the reachable workers reported.

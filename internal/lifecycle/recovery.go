@@ -342,9 +342,16 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
 		// 'suspended' warm row is a frozen (SIGSTOP'd) process that survived this
-		// restart; the new control plane cannot re-adopt it warm, so reap the frozen
-		// process to avoid leaking it and downgrade the row so expansion cold-boots.
+		// restart. Re-adopt it warm so its next wake SIGCONT-resumes it instead of
+		// cold-booting; only when it cannot be re-adopted (gone, or fails the cwd
+		// identity check) is it reaped and the row downgraded so expansion
+		// cold-boots. Re-adopting returns true so the app is not driven to stopped:
+		// it stays hibernated and wakeable, and the watcher's wake already falls
+		// back to cold-boot if the resume ever fails.
 		if r.Status == "suspended" {
+			if reAdoptFrozenWarmReplica(mgr, app, r, bundleDir) {
+				return true
+			}
 			cleanupFrozenWarmReplica(store, app, r, bundleDir)
 		}
 		return false
@@ -392,11 +399,50 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	return true
 }
 
+// reAdoptFrozenWarmReplica re-adopts a SIGSTOP-frozen warm replica that survived
+// a restart, so its next wake SIGCONT-resumes it warm instead of cold-booting. It
+// registers the replica in the Manager as suspended (which re-registers its
+// per-app cgroup via WarmReadopter) and leaves the DB row suspended/warm so the
+// wake path picks the resume branch. The proxy route is intentionally not
+// registered: a frozen process accepts no connections, and the wake registers the
+// route once it resumes.
+//
+// Identity is verified by cwd (a frozen process cannot be port-probed), so a
+// reused/unrelated PID is never adopted. Returns false - leaving the caller to
+// reap and downgrade - when there is no live, verified process to re-adopt
+// (manager absent, PID/port missing, process gone, or identity mismatch).
+func reAdoptFrozenWarmReplica(mgr *process.Manager, app *db.App, r *db.Replica, bundleDir string) bool {
+	if mgr == nil || r.PID == nil || r.Port == nil || bundleDir == "" {
+		return false
+	}
+	if syscall.Kill(*r.PID, 0) != nil {
+		return false // process is gone
+	}
+	if !frozenReplicaIdentityOK(*r.PID, bundleDir) {
+		return false // unverified PID; caller downgrades without killing
+	}
+	mgr.Adopt(app.Slug, process.ProcessInfo{
+		Slug:        app.Slug,
+		Index:       r.Index,
+		PID:         *r.PID,
+		Port:        *r.Port,
+		Status:      process.StatusSuspended,
+		Tier:        r.Tier,
+		Provider:    r.Provider,
+		EndpointURL: r.EndpointURL,
+		WorkerID:    r.WorkerID,
+	}, process.RunHandle{PID: *r.PID})
+	slog.Info("recovery: re-adopted frozen warm replica (warm-resumable on next wake)",
+		"slug", app.Slug, "idx", r.Index, "pid", *r.PID)
+	return true
+}
+
 // cleanupFrozenWarmReplica tears down a native warm replica left SIGSTOP-frozen by
 // a prior control plane and downgrades its row to stopped/warm so a later
-// expansion cold-boots the slot. The frozen process cannot be re-adopted warm
-// (the in-memory Manager state was lost on restart), so leaving it would leak a
-// frozen process holding swap. Identity is checked by cwd only (NOT the port
+// expansion cold-boots the slot. It is the fallback for a frozen replica that
+// reAdoptFrozenWarmReplica could not re-adopt warm (the process is gone or fails
+// the identity check); leaving such a process would leak a frozen process holding
+// swap. Identity is checked by cwd only (NOT the port
 // probe validateNativeProcess uses: a frozen process accepts no connections), so
 // a reused PID is never killed; the row is downgraded regardless of kill outcome.
 // With no resolvable bundle dir to match against, the process is left alone (the

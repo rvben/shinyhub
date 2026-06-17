@@ -976,21 +976,43 @@ func (m *Manager) HandleReplica(slug string, index int) (RunHandle, bool) {
 // (e.g. recovered after a server restart). It starts the exit-monitoring
 // goroutine so crashed processes are detected normally.
 func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	tier := info.Tier
 	if tier == "" {
 		tier = m.defaultTier
 	}
 	info.Tier = tier
-	rt := m.runtimeFor(tier)
-	pool := m.entries[slug]
-	for len(pool) <= info.Index {
-		pool = append(pool, nil)
-	}
 	done := make(chan struct{})
-	pool[info.Index] = &entry{info: &info, handle: handle, tier: tier, done: done}
-	m.entries[slug] = pool
+
+	// Register the pool slot under the lock, then release it BEFORE the warm
+	// re-adopt (file I/O) and the monitoring goroutine. The locked section is a
+	// scoped func with its own defer so a panic cannot leak the manager lock.
+	var rt Runtime
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		rt = m.runtimeFor(tier)
+		pool := m.entries[slug]
+		for len(pool) <= info.Index {
+			pool = append(pool, nil)
+		}
+		pool[info.Index] = &entry{info: &info, handle: handle, tier: tier, done: done}
+		m.entries[slug] = pool
+	}()
+
+	// Re-register warm-wake state for an adopted-after-restart replica so it can
+	// be warm-frozen and warm-resumed again rather than cold-booting on its next
+	// hibernate (Start does this via placeInAppCgroup; Adopt must do the
+	// equivalent). Done outside the lock - it touches cgroup files - and
+	// best-effort: ErrRuntimeNotSnapshotter (warm-wake off) is silent, and any
+	// other error means the warm state is gone, so the replica hibernates via
+	// Stop, exactly as before this re-registration existed.
+	if rd, ok := rt.(WarmReadopter); ok {
+		if err := rd.ReadoptWarm(slug, info.Index, handle.PID); err != nil && !errors.Is(err, ErrRuntimeNotSnapshotter) {
+			slog.Warn("manager: warm re-adopt failed; replica will hibernate via stop",
+				"slug", slug, "idx", info.Index, "err", err)
+		}
+	}
+
 	go func() {
 		rt.Wait(context.Background(), handle)
 		m.mu.Lock()

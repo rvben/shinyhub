@@ -149,7 +149,7 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 	if !ready {
 		return
 	}
-	dir, err := setupAppCgroup(base, fmt.Sprintf("app-%s-%d", p.Slug, p.Index), pid)
+	dir, err := setupAppCgroup(base, appCgroupName(p.Slug, p.Index), pid)
 	if err != nil {
 		slog.Warn("native: per-app cgroup setup failed; replica hibernates via stop",
 			"slug", p.Slug, "idx", p.Index, "err", err)
@@ -158,6 +158,41 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 	r.mu.Lock()
 	r.appCgroups[pid] = dir
 	r.mu.Unlock()
+}
+
+// ReadoptWarm re-registers the per-app cgroup of a replica adopted from a prior
+// process life (after a server restart), so warm-wake (Suspend/Resume) works for
+// it again. The cgroup survives the restart on disk; only this runtime's
+// in-memory appCgroups mapping is lost, and Adopt - unlike Start - never rebuilds
+// it. ReadoptWarm reconstructs the deterministic app-<slug>-<index> directory
+// under the delegated base, confirms the adopted PID is still a member, and
+// re-registers the mapping. It is the adoption-time analogue of placeInAppCgroup.
+//
+// Best-effort: ErrRuntimeNotSnapshotter when warm-wake is off or its base never
+// came up (the caller stays silent; the replica hibernates via Stop as today);
+// any other error means the cgroup is gone or no longer holds the PID (the
+// caller logs and degrades).
+func (r *NativeRuntime) ReadoptWarm(slug string, index, pid int) error {
+	r.ensureSnapshotBase()
+	r.mu.Lock()
+	ready := r.snapshotReady
+	base := r.cgroupBase
+	r.mu.Unlock()
+	if !ready {
+		return ErrRuntimeNotSnapshotter
+	}
+	dir := appCgroupDir(base, slug, index)
+	ok, err := cgroupContainsPID(dir, pid)
+	if err != nil {
+		return fmt.Errorf("readopt warm %s/%d: %w", slug, index, err)
+	}
+	if !ok {
+		return fmt.Errorf("readopt warm %s/%d: pid %d not in cgroup %s", slug, index, pid, dir)
+	}
+	r.mu.Lock()
+	r.appCgroups[pid] = dir
+	r.mu.Unlock()
+	return nil
 }
 
 // HostPreparesDeps reports true: native runtime executes app processes on the
