@@ -1227,6 +1227,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		loops.Add(1)
 		go func() { defer loops.Done(); watcher.Start(octx) }()
+		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
+		// this restart, so their next access is a warm resume instead of a cold
+		// boot (a frozen process does not survive a service restart, so the warm
+		// state is re-created from scratch). Background - the boots take time - and
+		// owner-gated by this span; only when warm-wake is enabled.
+		if cfg.Runtime.Snapshot.Enabled && cfg.Runtime.Snapshot.RestoreOnStartup {
+			loops.Add(1)
+			go func() { defer loops.Done(); watcher.RestoreWarm(octx) }()
+		}
 		if err := sched.Start(octx); err != nil {
 			slog.Error("start scheduler", "err", err)
 		} else {

@@ -628,6 +628,11 @@ type SnapshotConfig struct {
 	// that must be reclaimed for the freeze to count as "freed"; below it the
 	// replica falls back to Stop. Must be in (0, 1]; defaults to 0.8.
 	ReclaimMinFraction float64
+	// RestoreOnStartup re-boots and re-freezes apps that were hibernated before a
+	// server restart, so their next access is a warm resume instead of a cold
+	// boot (a frozen process does not survive a service restart). Defaults to
+	// true when warm-wake is enabled. No effect when Enabled is false.
+	RestoreOnStartup bool
 }
 
 // DockerImages holds the base image names for each app type.
@@ -753,6 +758,9 @@ type rawSnapshotConfig struct {
 	Enabled            bool    `yaml:"enabled"`
 	MaxSuspended       int     `yaml:"max_suspended"`
 	ReclaimMinFraction float64 `yaml:"reclaim_min_fraction"`
+	// Pointer so an unset value defaults to true while an explicit `false` can
+	// turn the startup warm-restore off.
+	RestoreOnStartup *bool `yaml:"restore_on_startup"`
 }
 
 type rawDockerImages struct {
@@ -1459,7 +1467,7 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 			},
 			NetworkMode: DefaultNetworkMode,
 		},
-		Snapshot: SnapshotConfig{MaxSuspended: 16, ReclaimMinFraction: 0.8},
+		Snapshot: SnapshotConfig{MaxSuspended: 16, ReclaimMinFraction: 0.8, RestoreOnStartup: true},
 	}
 	if r.Mode != "" {
 		rc.Mode = r.Mode
@@ -1470,6 +1478,9 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	}
 	if r.Snapshot.ReclaimMinFraction != 0 {
 		rc.Snapshot.ReclaimMinFraction = r.Snapshot.ReclaimMinFraction
+	}
+	if r.Snapshot.RestoreOnStartup != nil {
+		rc.Snapshot.RestoreOnStartup = *r.Snapshot.RestoreOnStartup
 	}
 	if r.Docker.Socket != "" {
 		rc.Docker.Socket = r.Docker.Socket

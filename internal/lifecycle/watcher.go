@@ -132,6 +132,9 @@ type appStore interface {
 	// ListSuspendedReplicas returns all suspended replicas oldest-first, joined to
 	// the app slug. The warm-wake GC evicts the oldest over the configured cap.
 	ListSuspendedReplicas() ([]db.SuspendedReplica, error)
+	// ListHibernatedApps returns apps whose status is 'hibernated'. The startup
+	// warm-restore pass re-boots and re-freezes exactly this set.
+	ListHibernatedApps() ([]*db.App, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -359,6 +362,65 @@ func (w *Watcher) hibernatePool(app *db.App) {
 		}); uerr != nil {
 			slog.Warn("watcher: persist hibernated replica failed", "slug", app.Slug, "index", i, "err", uerr)
 		}
+	}
+}
+
+// RestoreWarm re-boots and re-freezes apps that were hibernated before a server
+// restart, so their next access is a warm resume instead of a cold boot. A
+// frozen process does not survive a restart, so this re-creates the warm state
+// from scratch: cold-boot each replica into a fresh per-app cgroup, then freeze
+// it via the normal hibernate path. It runs in the background after recovery,
+// one app at a time (so the boots do not all spike the host at once), and is
+// owner-gated and ctx-cancellable. Best-effort: a failed boot leaves that app
+// cold - woken on first access, exactly as before.
+func (w *Watcher) RestoreWarm(ctx context.Context) {
+	if w.deploy == nil {
+		return
+	}
+	apps, err := w.store.ListHibernatedApps()
+	if err != nil {
+		slog.Warn("warm restore: list hibernated apps failed", "err", err)
+		return
+	}
+	restored := 0
+	for _, app := range apps {
+		if ctx.Err() != nil {
+			return
+		}
+		if w.isOwner != nil && !w.isOwner() {
+			return // a standby never drives app processes
+		}
+		if app.Replicas < 1 {
+			continue
+		}
+		deployments, derr := w.store.ListDeployments(app.ID)
+		if derr != nil || len(deployments) == 0 {
+			continue // never deployed; nothing to restore
+		}
+		bundleDir := deployments[0].BundleDir
+		booted := true
+		for i := 0; i < app.Replicas; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, derr := w.deploy(app.Slug, bundleDir, i); derr != nil {
+				slog.Warn("warm restore: boot failed; app left cold", "slug", app.Slug, "idx", i, "err", derr)
+				booted = false
+				break
+			}
+		}
+		if !booted {
+			continue
+		}
+		// Re-freeze: the app stays 'hibernated' and its fresh replicas become
+		// suspended (warm-resumable). Reuses the normal hibernate path, so a
+		// runtime without warm-wake degrades to Stop exactly as on idle.
+		w.hibernatePool(app)
+		restored++
+		slog.Info("warm restore: re-froze hibernated app", "slug", app.Slug, "replicas", app.Replicas)
+	}
+	if restored > 0 {
+		slog.Info("warm restore complete", "apps", restored)
 	}
 }
 
