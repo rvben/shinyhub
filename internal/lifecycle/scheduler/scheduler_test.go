@@ -12,14 +12,19 @@ import (
 
 // fakeJobs records calls to Run.
 type fakeJobs struct {
-	mu    sync.Mutex
-	calls []int64
+	mu       sync.Mutex
+	calls    []int64
+	triggers map[int64]string
 }
 
 func (f *fakeJobs) Run(id int64, trigger string, userID *int64) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, id)
+	if f.triggers == nil {
+		f.triggers = map[int64]string{}
+	}
+	f.triggers[id] = trigger
 	return int64(len(f.calls)), nil
 }
 
@@ -29,14 +34,24 @@ func (f *fakeJobs) callCount() int {
 	return len(f.calls)
 }
 
+func (f *fakeJobs) triggerFor(id int64) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.triggers[id]
+}
+
 // fakeStore implements scheduler.Store.
 type fakeStore struct {
-	enabled     []*db.Schedule
-	interrupted int64
-	lastSucc    map[int64]*db.ScheduleRun
+	enabled        []*db.Schedule
+	interrupted    int64
+	lastSucc       map[int64]*db.ScheduleRun
+	firstFireRetry []int64
 }
 
 func (s *fakeStore) ListEnabledSchedules() ([]*db.Schedule, error) { return s.enabled, nil }
+func (s *fakeStore) SchedulesNeedingFirstFireRetry() ([]int64, error) {
+	return s.firstFireRetry, nil
+}
 func (s *fakeStore) GetSchedule(id int64) (*db.Schedule, error) {
 	for _, sched := range s.enabled {
 		if sched.ID == id {
@@ -74,6 +89,35 @@ func TestScheduler_Start_MarksInterruptedAndLoadsEnabled(t *testing.T) {
 	}
 	if got := s.entryCount(); got != 1 {
 		t.Fatalf("expected 1 cron entry, got %d", got)
+	}
+	// With nothing needing a first-fire retry, Start must not dispatch any run.
+	if got := jobs.callCount(); got != 0 {
+		t.Fatalf("expected no dispatched runs, got %d", got)
+	}
+	s.Stop()
+}
+
+// TestScheduler_Start_RefiresInterruptedFirstFire verifies that a
+// run_on_register first-fire interrupted by a prior restart is re-fired on
+// startup, using the "register" trigger so a later restart can recognise the
+// new first-fire.
+func TestScheduler_Start_RefiresInterruptedFirstFire(t *testing.T) {
+	store := &fakeStore{
+		enabled: []*db.Schedule{
+			{ID: 7, CronExpr: "0 5 * * *", Enabled: true, MissedPolicy: "skip"},
+		},
+		firstFireRetry: []int64{7},
+	}
+	jobs := &fakeJobs{}
+	s := New(jobs, store, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForCallCount(t, jobs, 1, time.Second)
+	if got := jobs.triggerFor(7); got != "register" {
+		t.Fatalf("re-fire trigger = %q, want register", got)
 	}
 	s.Stop()
 }

@@ -83,7 +83,10 @@ SHINYHUB_HOST and SHINYHUB_TOKEN.
 
 Manifest: if the bundle contains a shinyhub.toml at its root, ShinyHub applies
 it on deploy - [app] scaling/hibernate overrides, [[hook]] post-deploy commands,
-and [[schedule]] cron jobs. The manifest is optional.
+and [[schedule]] cron jobs. The manifest is optional. Set [app]
+startup_timeout_seconds (1-3600, default 120) to lengthen the readiness deadline
+for an app that warms up slowly at import; it travels with the bundle and also
+applies on wake, scale, and rollback.
 
 Slug and URL: the app is served at <host>/app/<slug>/. The slug defaults to the
 directory name (sanitized); override it with --slug. Slug rule: lowercase
@@ -427,29 +430,43 @@ func isTerminalStatus(status string) bool {
 	return status == "crashed"
 }
 
-// printLogTail fetches the last 20 lines of the app log via the SSE endpoint
-// and writes them to w, followed by a hint for the full logs command.
-// On fetch error or non-2xx response, a warning line is written to w so the
-// caller always sees actionable output even when the log endpoint is unavailable.
-func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
-	const tailLines = 20
+// logTailLines is the default number of app-log lines surfaced on a deploy
+// failure. Shared by the single-app deploy path and fleet apply so both
+// entrypoints tail the same amount.
+const logTailLines = 20
+
+// fetchLogTail returns the last n non-empty lines of the app's process log via
+// GET /api/apps/{slug}/logs?follow=false. It is best-effort: a non-nil error
+// (request build, transport, or non-2xx) means the tail is unavailable, and the
+// returned slice is nil. Callers that render to a human can surface the error;
+// callers that attach the tail to a structured result ignore it.
+func fetchLogTail(cfg *cliConfig, slug string, n int) ([]string, error) {
 	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/logs?follow=false", nil)
 	if err != nil {
-		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
-		return
+		return nil, err
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", resp.Status)
+		return nil, fmt.Errorf("%s", resp.Status)
+	}
+	return parsePlainLines(resp.Body, n), nil
+}
+
+// printLogTail fetches the last logTailLines lines of the app log and writes
+// them to w, followed by a hint for the full logs command. On fetch error or
+// non-2xx response, a warning line is written to w so the caller always sees
+// actionable output even when the log endpoint is unavailable.
+func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
+	lines, err := fetchLogTail(cfg, slug, logTailLines)
+	if err != nil {
+		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
 		return
 	}
-	lines := parsePlainLines(resp.Body, tailLines)
 	if len(lines) == 0 {
 		return
 	}

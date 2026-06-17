@@ -90,6 +90,12 @@ type Manager struct {
 	queues  map[int64]chan struct{}      // per-schedule capacity-2 semaphore for "queue" policy (1 active + 1 queued)
 	active  map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
 
+	// operatorCancelled records run IDs an operator explicitly cancelled via
+	// Cancel, so finishRun can tell an operator cancel ("cancelled", terminal)
+	// apart from a service-shutdown cancel ("interrupted", re-fired by the
+	// startup reconcile). Entries are cleared in unregisterActive.
+	operatorCancelled map[int64]bool
+
 	// wg tracks every launched run goroutine so Stop can wait for them to
 	// observe cancellation and finalize their DB rows before the process exits.
 	wg sync.WaitGroup
@@ -122,17 +128,18 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 		appDataDir = abs
 	}
 	return &Manager{
-		procMgr:     procMgr,
-		tierOrder:   tierOrder,
-		defaultTier: defaultTier,
-		store:       st,
-		secretsKey:  secretsKey,
-		appsDir:     appsDir,
-		appDataDir:  appDataDir,
-		globalSem:   make(chan struct{}, defaultMaxConcurrentRuns),
-		locks:       make(map[int64]*schedLock),
-		queues:      make(map[int64]chan struct{}),
-		active:      make(map[int64]context.CancelFunc),
+		procMgr:           procMgr,
+		tierOrder:         tierOrder,
+		defaultTier:       defaultTier,
+		store:             st,
+		secretsKey:        secretsKey,
+		appsDir:           appsDir,
+		appDataDir:        appDataDir,
+		globalSem:         make(chan struct{}, defaultMaxConcurrentRuns),
+		locks:             make(map[int64]*schedLock),
+		queues:            make(map[int64]chan struct{}),
+		active:            make(map[int64]context.CancelFunc),
+		operatorCancelled: make(map[int64]bool),
 	}, nil
 }
 
@@ -174,20 +181,44 @@ func (m *Manager) registerActive(runID int64, cancel context.CancelFunc) {
 func (m *Manager) unregisterActive(runID int64) {
 	m.mu.Lock()
 	delete(m.active, runID)
+	delete(m.operatorCancelled, runID)
 	m.mu.Unlock()
 }
 
 // Cancel signals an in-flight run to terminate. Returns nil even when the run
-// has already finished — cancellation is best-effort.
+// has already finished — cancellation is best-effort. The run id is recorded
+// as operator-cancelled so it finalises as "cancelled" (terminal) rather than
+// "interrupted" (re-fired by the startup reconcile) even if a service shutdown
+// cancels it moments later.
 func (m *Manager) Cancel(runID int64) error {
 	m.mu.Lock()
 	cancel, ok := m.active[runID]
+	if ok {
+		m.operatorCancelled[runID] = true
+	}
 	m.mu.Unlock()
 	if !ok {
 		return nil
 	}
 	cancel()
 	return nil
+}
+
+// cancelStatus classifies why an in-flight run's context was cancelled. An
+// operator Cancel recorded the run id, yielding "cancelled" (terminal). A
+// cancel during Stop (service shutdown) with no operator record yields
+// "interrupted", which the startup reconcile re-fires for a run_on_register
+// first-fire. Any other cancellation defaults to "cancelled".
+func (m *Manager) cancelStatus(runID int64) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.operatorCancelled[runID] {
+		return "cancelled"
+	}
+	if m.stopped {
+		return "interrupted"
+	}
+	return "cancelled"
 }
 
 // Stop signals all in-flight runs to cancel and waits for their goroutines
@@ -364,7 +395,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, trigger string, 
 			// then finalise as cancelled. We never acquired the slot,
 			// so do not call slot.unlock.
 			<-sem
-			m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
+			m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID)
 			return
 		}
 		// Promoted from queued to active. Free the queue slot now —
@@ -437,9 +468,10 @@ func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int6
 		return 0, fmt.Errorf("insert skipped run: %w", err)
 	}
 	if err := m.store.FinishScheduleRun(db.FinishScheduleRunParams{
-		RunID:      runID,
-		Status:     "skipped_overlap",
-		ExitCode:   0,
+		RunID:  runID,
+		Status: "skipped_overlap",
+		// No process ran, so no exit code was observed.
+		ExitCode:   nil,
 		FinishedAt: time.Now().UTC(),
 	}); err != nil {
 		return runID, fmt.Errorf("finish skipped run: %w", err)
@@ -467,7 +499,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	case m.globalSem <- struct{}{}:
 		defer func() { <-m.globalSem }()
 	case <-ctx.Done():
-		m.finishRun(sched, runID, "cancelled", 0, trigger, userID)
+		m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID)
 		return
 	}
 
@@ -480,14 +512,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Build log file path and create directory.
 	logDir := filepath.Join(m.appsDir, app.Slug, "schedules", fmt.Sprintf("%d", sched.ID))
 	if err := os.MkdirAll(logDir, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	logPath := filepath.Join(logDir, fmt.Sprintf("run-%d.log", runID))
 
 	logFile, err := os.Create(logPath)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	defer logFile.Close()
@@ -504,21 +536,21 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// surfacing a key/rotation problem, and app startup fails closed the same way.
 	envVars, err := m.store.ListAppEnvVars(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	env, secretEnv, err := appenv.Resolve(envVars, m.secretsKey)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: %v\n", err)
 		slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "err", err)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 
 	// Build shared mounts.
 	mounts, err := m.store.ListSharedDataSources(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	sharedMounts := make([]process.SharedMount, 0, len(mounts))
@@ -532,14 +564,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Parse command from JSON.
 	var cmd []string
 	if err := json.Unmarshal([]byte(sched.CommandJSON), &cmd); err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 
 	// Build app data dir.
 	appDataPath := filepath.Join(m.appDataDir, app.Slug)
 	if err := os.MkdirAll(appDataPath, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 
@@ -549,12 +581,12 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	deployments, err := m.store.ListDeployments(app.ID)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: list deployments: %v\n", err)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	if len(deployments) == 0 {
 		fmt.Fprintf(logFile, "shinyhub: app %q has no deployments; cannot run schedule\n", app.Slug)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	bundleDir := deployments[0].BundleDir
@@ -566,7 +598,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	assignments, err := process.ExpandPlacement(app.PlacementMap(), m.tierOrder, 1, m.defaultTier)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: resolve job tier: %v\n", err)
-		m.finishRun(sched, runID, "failed", 0, trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	jobTier := m.defaultTier
@@ -612,25 +644,46 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		fmt.Fprintf(logFile, "shinyhub: run failed: %v\n", runErr)
 	}
 
-	// Determine final status.
+	// Determine final status. exit_code is recorded only when the process ran
+	// to completion and we observed its own exit code (a clean success, or a
+	// non-zero exit). A run that never launched (runErr), was killed (timeout,
+	// operator cancel, or service shutdown), or died of its own signal records
+	// a NULL exit_code - status carries the reason in those cases.
 	status := "succeeded"
-	code := info.Code
+	var exitCode *int
 	switch {
 	case runErr != nil:
+		// The runtime could not launch the process; no exit was observed.
 		status = "failed"
 	case info.Signaled && runCtx.Err() == context.DeadlineExceeded:
 		status = "timed_out"
+	case info.Signaled && runCtx.Err() == context.Canceled:
+		// Killed by an explicit cancel: an operator Cancel ("cancelled") or a
+		// service-shutdown Stop ("interrupted").
+		status = m.cancelStatus(runID)
 	case info.Signaled:
-		status = "cancelled"
+		// Signaled without our context being cancelled - the process died of
+		// its own signal (crash / external kill), which is a failure.
+		status = "failed"
 	case info.Code != 0:
 		status = "failed"
+		exitCode = intPtr(info.Code)
+	default:
+		// Exited 0 on its own.
+		exitCode = intPtr(info.Code)
 	}
 
-	m.finishRun(sched, runID, status, code, trigger, userID)
+	m.finishRun(sched, runID, status, exitCode, trigger, userID)
 }
 
-// finishRun updates the run row and logs an audit event.
-func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exitCode int, trigger string, userID *int64) {
+// intPtr returns a pointer to i, used to pass a concrete exit code where a
+// nil pointer means "no observed exit" (an interrupted run).
+func intPtr(i int) *int { return &i }
+
+// finishRun updates the run row and logs an audit event. A nil exitCode is
+// recorded as SQL NULL, used for a run that finished without observing a
+// process exit (interrupted by a service restart).
+func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exitCode *int, trigger string, userID *int64) {
 	_ = m.store.FinishScheduleRun(db.FinishScheduleRunParams{
 		RunID:      runID,
 		Status:     status,

@@ -327,8 +327,8 @@ func TestManager_Run_HappyPath(t *testing.T) {
 	if fc.Status != "succeeded" {
 		t.Errorf("expected status 'succeeded', got %q", fc.Status)
 	}
-	if fc.ExitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", fc.ExitCode)
+	if fc.ExitCode == nil || *fc.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %v", fc.ExitCode)
 	}
 }
 
@@ -353,6 +353,10 @@ func TestManager_Run_SpawnError_CapturesErrorInLog(t *testing.T) {
 
 	if len(st.finishCalls) == 0 || st.finishCalls[0].Status != "failed" {
 		t.Fatalf("expected a failed run, got finishCalls=%+v", st.finishCalls)
+	}
+	// The process never launched, so no exit code was observed: exit_code is null.
+	if st.finishCalls[0].ExitCode != nil {
+		t.Errorf("spawn-error run exit_code must be nil, got %v", *st.finishCalls[0].ExitCode)
 	}
 	var logPath string
 	for _, lp := range st.logPaths {
@@ -400,8 +404,58 @@ func TestManager_Run_NonZeroExit_StatusFailed(t *testing.T) {
 	if fc.Status != "failed" {
 		t.Errorf("expected status 'failed', got %q", fc.Status)
 	}
-	if fc.ExitCode != 2 {
-		t.Errorf("expected exit code 2, got %d", fc.ExitCode)
+	if fc.ExitCode == nil || *fc.ExitCode != 2 {
+		t.Errorf("expected exit code 2, got %v", fc.ExitCode)
+	}
+}
+
+// TestManager_Stop_InFlightRunMarkedInterrupted verifies that a run cancelled
+// by service shutdown (Stop) is finalised as "interrupted" with a null exit
+// code - distinct from an operator Cancel, which stays "cancelled". The startup
+// reconcile re-fires an interrupted run_on_register first-fire, so a run killed
+// by a restart must be told apart from one an operator deliberately cancelled.
+func TestManager_Stop_InFlightRunMarkedInterrupted(t *testing.T) {
+	rt := &fakeRuntime{block: make(chan struct{})}
+	st := newFakeStore(makeSchedule("concurrent", 0), makeApp())
+	m := newTestManager(t, rt, st)
+
+	runID, err := m.Run(1, "register", nil)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// Wait until the run is actually executing (RunOnce entered and blocking)
+	// so Stop cancels an in-flight run, the case the restart bug hit.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rt.mu.Lock()
+		entered := len(rt.deadlinesAtEntry) >= 1
+		rt.mu.Unlock()
+		if entered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("RunOnce never entered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Service shutdown cancels the in-flight run and waits for it to finalise.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	m.Stop(ctx)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	run := st.runs[runID]
+	if run == nil {
+		t.Fatal("run not recorded")
+	}
+	if run.Status != "interrupted" {
+		t.Fatalf("shutdown-cancelled run status = %q, want interrupted", run.Status)
+	}
+	if run.ExitCode != nil {
+		t.Fatalf("interrupted run exit_code must be nil, got %d", *run.ExitCode)
 	}
 }
 
@@ -947,6 +1001,10 @@ func TestManager_Run_TimeoutMarksTimedOut(t *testing.T) {
 	fc := st.finishCalls[0]
 	if fc.Status != "timed_out" {
 		t.Errorf("expected status 'timed_out', got %q", fc.Status)
+	}
+	// A timed-out run was killed, not exited on its own: exit_code is null.
+	if fc.ExitCode != nil {
+		t.Errorf("timed_out run exit_code must be nil, got %v", *fc.ExitCode)
 	}
 }
 

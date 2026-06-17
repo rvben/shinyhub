@@ -135,7 +135,7 @@ func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 
 	finished := started.Add(2 * time.Second)
 	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
-		RunID: runID, Status: "succeeded", ExitCode: 0, FinishedAt: finished,
+		RunID: runID, Status: "succeeded", ExitCode: ptrInt(0), FinishedAt: finished,
 	}); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
@@ -144,8 +144,135 @@ func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list runs: %v", err)
 	}
-	if len(runs) != 1 || runs[0].Status != "succeeded" || runs[0].ExitCode != 0 {
+	if len(runs) != 1 || runs[0].Status != "succeeded" || runs[0].ExitCode == nil || *runs[0].ExitCode != 0 {
 		t.Fatalf("unexpected run: %+v", runs)
+	}
+}
+
+// TestScheduleRuns_ExitCodeNullableLifecycle asserts exit_code is NULL (nil)
+// for a run that has not reached a terminal state, and is populated only once
+// the run finishes. A still-running run with exit_code defaulted to 0 reads as
+// "succeeded" to any caller that checks the code without also checking status.
+func TestScheduleRuns_ExitCodeNullableLifecycle(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "fetch")
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "x", CronExpr: "* * * * *",
+		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 10,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "register",
+		StartedAt: time.Now().UTC(), LogPath: "x.log",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// While running: exit_code must be nil via both Get and List.
+	got, err := store.GetScheduleRun(runID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ExitCode != nil {
+		t.Fatalf("running run exit_code must be nil, got %d", *got.ExitCode)
+	}
+	runs, _ := store.ListScheduleRuns(schedID, 10, 0)
+	if len(runs) != 1 || runs[0].ExitCode != nil {
+		t.Fatalf("running run exit_code must be nil in list, got %+v", runs)
+	}
+
+	// Finishing with a real non-zero code populates it.
+	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
+		RunID: runID, Status: "failed", ExitCode: ptrInt(2), FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	got, _ = store.GetScheduleRun(runID)
+	if got.ExitCode == nil || *got.ExitCode != 2 {
+		t.Fatalf("finished run exit_code must be 2, got %+v", got.ExitCode)
+	}
+}
+
+// TestSchedulesNeedingFirstFireRetry covers the startup-reconcile gate: a
+// run_on_register first-fire (trigger='register') that was interrupted by a
+// service restart and has never succeeded must be re-fired, while a schedule
+// that already succeeded, was operator-cancelled, failed, is disabled, or never
+// had a first-fire must not be.
+func TestSchedulesNeedingFirstFireRetry(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "fetch")
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mkSched := func(name string, enabled bool) int64 {
+		id, err := store.CreateSchedule(db.CreateScheduleParams{
+			AppID: appID, Name: name, CronExpr: "0 5 * * *",
+			CommandJSON: `["true"]`, Enabled: enabled, TimeoutSeconds: 60,
+			OverlapPolicy: "skip", MissedPolicy: "skip",
+		})
+		if err != nil {
+			t.Fatalf("create schedule %s: %v", name, err)
+		}
+		return id
+	}
+	// run inserts a finished run with a controlled started_at so "most recent
+	// register run" ordering is deterministic.
+	run := func(schedID int64, trigger, status string, offset time.Duration) {
+		rid, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: schedID, Status: status, Trigger: trigger,
+			StartedAt: base.Add(offset), LogPath: "x",
+		})
+		if err != nil {
+			t.Fatalf("insert run: %v", err)
+		}
+		_ = rid
+	}
+
+	// A: interrupted first-fire, never succeeded -> re-fire.
+	a := mkSched("a-needs-retry", true)
+	run(a, "register", "interrupted", time.Minute)
+
+	// B: interrupted first-fire but a later success exists -> do not re-fire.
+	b := mkSched("b-succeeded", true)
+	run(b, "register", "interrupted", time.Minute)
+	run(b, "register", "succeeded", 2*time.Minute)
+
+	// C: latest register run was operator-cancelled -> terminal, do not re-fire.
+	c := mkSched("c-cancelled", true)
+	run(c, "register", "interrupted", time.Minute)
+	run(c, "register", "cancelled", 2*time.Minute)
+
+	// D: first-fire failed (app error) -> self-heals on next deploy, not restart.
+	d := mkSched("d-failed", true)
+	run(d, "register", "failed", time.Minute)
+
+	// E: disabled schedule -> not registered, do not re-fire.
+	e := mkSched("e-disabled", false)
+	run(e, "register", "interrupted", time.Minute)
+
+	// F: only a cron-triggered interrupted run, never a first-fire -> ignore.
+	f := mkSched("f-no-register", true)
+	run(f, "schedule", "interrupted", time.Minute)
+
+	ids, err := store.SchedulesNeedingFirstFireRetry()
+	if err != nil {
+		t.Fatalf("SchedulesNeedingFirstFireRetry: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if !got[a] {
+		t.Errorf("schedule A (interrupted, never succeeded) must be selected for re-fire")
+	}
+	for name, id := range map[string]int64{"B-succeeded": b, "C-cancelled": c, "D-failed": d, "E-disabled": e, "F-no-register": f} {
+		if got[id] {
+			t.Errorf("schedule %s must NOT be selected for re-fire", name)
+		}
+	}
+	if len(ids) != 1 {
+		t.Errorf("expected exactly schedule A, got %d ids: %v", len(ids), ids)
 	}
 }
 
@@ -171,6 +298,10 @@ func TestScheduleRuns_MarkInterrupted(t *testing.T) {
 	runs, _ := store.ListScheduleRuns(schedID, 10, 0)
 	if runs[0].Status != "interrupted" {
 		t.Fatalf("expected interrupted, got %s", runs[0].Status)
+	}
+	// An interrupted run never observed a process exit, so its exit_code is NULL.
+	if runs[0].ExitCode != nil {
+		t.Fatalf("interrupted run exit_code must be nil, got %d", *runs[0].ExitCode)
 	}
 }
 
@@ -210,7 +341,7 @@ func TestSharedData_RejectsSelfMount(t *testing.T) {
 func TestScheduleRuns_FinishMissing_ReturnsErrNotFound(t *testing.T) {
 	store := newScheduleStore(t)
 	err := store.FinishScheduleRun(db.FinishScheduleRunParams{
-		RunID: 999, Status: "succeeded", ExitCode: 0, FinishedAt: time.Now().UTC(),
+		RunID: 999, Status: "succeeded", ExitCode: ptrInt(0), FinishedAt: time.Now().UTC(),
 	})
 	if !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)

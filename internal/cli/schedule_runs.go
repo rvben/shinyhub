@@ -58,8 +58,10 @@ func newScheduleRunsCmd() *cobra.Command {
 				"ID", "STATUS", "TRIGGER", "EXIT", "STARTED", "DURATION")
 			for _, r := range items {
 				finished, _ := r["finished_at"].(string)
+				// exit_code is null while running and stays null for an
+				// interrupted run, so show "-" unless a real code is present.
 				exit := "-"
-				if finished != "" {
+				if finished != "" && r["exit_code"] != nil {
 					exit = fmt.Sprintf("%v", r["exit_code"])
 				}
 				fmt.Fprintf(w, "%-6v  %-10v  %-9v  %-5s  %-19s  %s\n",

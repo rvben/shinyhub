@@ -70,10 +70,19 @@ type AppSettings struct {
 	// type detection, uv-sync, and tracing auto-instrumentation are skipped.
 	Command []string `toml:"command"`
 
+	// StartupTimeoutSeconds lengthens (or shortens) the readiness deadline the
+	// deploy health check allows before declaring the app crashed. nil =
+	// inherit the platform default. Like Command and [tracing] auto it is read
+	// from the bundle at every boot (deploy, redeploy, wake, scale, rollback),
+	// so a slow-warming app's deadline travels with its bundle. It is never
+	// reconciled into the DB.
+	StartupTimeoutSeconds *int `toml:"startup_timeout_seconds"`
+
 	HibernateResetToDefault bool `toml:"-"`
 }
 
-// Command is not part of IsZero: it is read at boot, not reconciled into the DB.
+// Command and StartupTimeoutSeconds are not part of IsZero: they are read at
+// boot, not reconciled into the DB.
 func (a AppSettings) IsZero() bool {
 	return a.HibernateTimeoutMinutes == nil &&
 		a.Replicas == nil &&
@@ -242,6 +251,9 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.MinWarmReplicas != nil && (*a.MinWarmReplicas < 0 || *a.MinWarmReplicas > 1000) {
 		return fmt.Errorf("min_warm_replicas must be between 0 and 1000, got %d", *a.MinWarmReplicas)
+	}
+	if a.StartupTimeoutSeconds != nil && (*a.StartupTimeoutSeconds < 1 || *a.StartupTimeoutSeconds > 3600) {
+		return fmt.Errorf("startup_timeout_seconds must be between 1 and 3600, got %d", *a.StartupTimeoutSeconds)
 	}
 	if a.Command != nil {
 		if err := validateCommandTemplate(a.Command); err != nil {

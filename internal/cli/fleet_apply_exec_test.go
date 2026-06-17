@@ -401,6 +401,107 @@ func TestConvergeApp_ConflictRecordedNotRetried(t *testing.T) {
 	}
 }
 
+// TestConvergeApp_FailedDeployAttachesLogTail verifies that when a deploy fails
+// its health check (the app crashed on startup), the per-app result and the
+// JSON envelope carry the app's log tail - including the exception line - so
+// the operator does not have to SSH to the host to read app-0.log.
+func TestConvergeApp_FailedDeployAttachesLogTail(t *testing.T) {
+	const crashLine = "ModuleNotFoundError: No module named 'pandas'"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":"deploy failed: the app did not pass its health check - it likely crashed on startup. Check the app logs for the cause."}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo/logs":
+			_, _ = io.WriteString(w, "Traceback (most recent call last):\n  File \"app.py\", line 12, in <module>\n"+crashLine+"\n")
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "crashed"}})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{Slug: "demo", Action: fleet.ActionCreate}
+	entry := fleet.AppEntry{Slug: "demo", Source: "./x", Visibility: "private"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{}, dir,
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+
+	if r.status != statusFailed {
+		t.Fatalf("status = %s (%v), want failed", r.status, r.err)
+	}
+	if !strings.Contains(strings.Join(r.logTail, "\n"), crashLine) {
+		t.Fatalf("result log tail must contain the crash exception; got %q", r.logTail)
+	}
+
+	// The JSON envelope must carry log_tail too, so non-TTY/CI callers get the
+	// cause without a second call.
+	var buf strings.Builder
+	m := &fleet.Manifest{FleetID: "eu"}
+	if err := writeFleetApplyJSON(&buf, m, cfg.Host, []fleet.AppDiff{d}, []applyResult{r}, 4, "PARTIAL"); err != nil {
+		t.Fatalf("writeFleetApplyJSON: %v", err)
+	}
+	if !strings.Contains(buf.String(), crashLine) {
+		t.Fatalf("JSON envelope must include log_tail with the exception; got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"log_tail"`) {
+		t.Fatalf("JSON envelope must use the log_tail key; got %s", buf.String())
+	}
+}
+
+// TestConvergeApp_PostDeployPatchFailureHasNoLogTail verifies the log tail is
+// attached only when the deploy itself failed. When the bundle deploys fine but
+// a follow-up config PATCH fails, the app is running, so its log tail would be
+// misleading and must NOT be fetched or attached.
+func TestConvergeApp_PostDeployPatchFailureHasNoLogTail(t *testing.T) {
+	var logsHit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "sc", "content_digest": "sha256:NEW"}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/sc":
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":"patch boom"}`))
+		case r.URL.Path == "/api/apps/sc/logs":
+			logsHit = true
+			_, _ = io.WriteString(w, "should not be fetched\n")
+		case r.Method == "GET" && r.URL.Path == "/api/apps/sc":
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{
+		Slug: "sc", Action: fleet.ActionUpdateSourceConfig, Owned: true,
+		ServerDigest: "sha256:OLD",
+		ConfigDrift:  []fleet.ConfigDriftItem{{Key: "replicas", Server: "1", Desired: "2"}},
+	}
+	entry := fleet.AppEntry{Slug: "sc", Config: fleet.Config{Replicas: stateInt(2)}}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "sc"}, dir,
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+
+	if r.status != statusFailed {
+		t.Fatalf("status = %s (%v), want failed", r.status, r.err)
+	}
+	if len(r.logTail) != 0 {
+		t.Fatalf("post-deploy patch failure must not attach a log tail, got %v", r.logTail)
+	}
+	if logsHit {
+		t.Errorf("the logs endpoint must not be queried for a post-deploy patch failure")
+	}
+}
+
 func TestConvergeApp_CreateDeploysThenStampsMarker(t *testing.T) {
 	var deployed, stamped bool
 	var stampBody map[string]any
@@ -434,6 +535,9 @@ func TestConvergeApp_CreateDeploysThenStampsMarker(t *testing.T) {
 		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
 	if r.status != statusCreated {
 		t.Fatalf("status = %s (%v), want created", r.status, r.err)
+	}
+	if len(r.logTail) != 0 {
+		t.Fatalf("a successful create must not attach a log tail, got %v", r.logTail)
 	}
 	if !deployed || !stamped {
 		t.Fatalf("deployed=%v stamped=%v, want both", deployed, stamped)
