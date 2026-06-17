@@ -20,13 +20,17 @@ func TestAppCgroupDir(t *testing.T) {
 // PID really lives in the reconstructed cgroup before re-registering it.
 func TestCgroupContainsPID(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("100\n4242\n200\n"), 0o644); err != nil {
+	// Include a whitespace-padded line to exercise the TrimSpace hardening.
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("100\n4242\n  7777  \n200\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	ok, err := cgroupContainsPID(dir, 4242)
 	if err != nil || !ok {
 		t.Fatalf("cgroupContainsPID(present) = (%v, %v), want (true, nil)", ok, err)
+	}
+	if ok, _ := cgroupContainsPID(dir, 7777); !ok {
+		t.Fatalf("cgroupContainsPID must match a whitespace-padded PID line")
 	}
 	ok, err = cgroupContainsPID(dir, 999)
 	if err != nil || ok {

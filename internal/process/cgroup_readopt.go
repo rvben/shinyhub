@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // appCgroupName is the per-app cgroup directory name (relative to the delegated
@@ -35,7 +36,7 @@ func cgroupContainsPID(dir string, pid int) (bool, error) {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		if n, perr := strconv.Atoi(sc.Text()); perr == nil && n == pid {
+		if n, perr := strconv.Atoi(strings.TrimSpace(sc.Text())); perr == nil && n == pid {
 			return true, nil
 		}
 	}
