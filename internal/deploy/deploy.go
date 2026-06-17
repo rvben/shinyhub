@@ -630,11 +630,24 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	// transport. Empty for the local tier (no remote transport).
 	transport := p.Manager.TransportForWorker(tier, info.WorkerID)
 
-	if err := hc(info.EndpointURL, timeout, transport); err != nil {
+	// Run the health check. The default poller also watches process liveness via
+	// the Manager so a crash on startup fails fast (and clearly) instead of
+	// burning the full health timeout polling a dead endpoint. A custom hc
+	// (injected in tests) is used as-is.
+	var healthErr error
+	if p.HealthCheck != nil {
+		healthErr = hc(info.EndpointURL, timeout, transport)
+	} else {
+		healthErr = waitHealthyOrExit(info.EndpointURL, timeout, transport, func() bool {
+			i, ok := p.Manager.GetReplica(p.Slug, idx)
+			return ok && i.Status == process.StatusRunning
+		})
+	}
+	if healthErr != nil {
 		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
 			slog.Warn("deploy: stop replica after failed health check", "slug", p.Slug, "index", idx, "err", serr)
 		}
-		return Result{}, fmt.Errorf("health: %w", err)
+		return Result{}, fmt.Errorf("health: %w", healthErr)
 	}
 
 	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID); err != nil {
@@ -808,6 +821,16 @@ func buildCommand(bundleDir string, port, workers int, bindHost string, autoInst
 // status or the deadline is exceeded. Each HTTP attempt is capped at 5 seconds.
 // When transport is non-nil it is installed on the client (required for mTLS endpoints).
 func waitHealthy(endpointURL string, timeout time.Duration, transport http.RoundTripper) error {
+	return waitHealthyOrExit(endpointURL, timeout, transport, nil)
+}
+
+// waitHealthyOrExit polls the app's root endpoint until it responds with a
+// non-5xx status, the deadline is exceeded, or - when alive is non-nil - the
+// process has exited before becoming healthy. Detecting the exit via alive()
+// lets a crash-on-startup fail fast with a clear error instead of burning the
+// full health timeout polling a dead endpoint (and muddying the failure as a
+// timeout). A nil alive disables the liveness check (the plain HTTP poller).
+func waitHealthyOrExit(endpointURL string, timeout time.Duration, transport http.RoundTripper, alive func() bool) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	if transport != nil {
 		client.Transport = transport
@@ -828,6 +851,9 @@ func waitHealthy(endpointURL string, timeout time.Duration, transport http.Round
 			if resp.StatusCode < 500 {
 				return nil
 			}
+		}
+		if alive != nil && !alive() {
+			return fmt.Errorf("app at %s crashed on startup before becoming healthy", endpointURL)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
