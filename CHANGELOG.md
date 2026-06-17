@@ -54,6 +54,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.19](https://github.com/rvben/shinyhub/compare/v0.8.18...v0.8.19) - 2026-06-17
+
+### Fixed
+
+- **warm-wake**: make warm-restore produce a working warm state across restarts ([a268c39](https://github.com/rvben/shinyhub/commit/a268c39c602967f6de51677a2a8c2f0c51ec3d71))
+
 ## [0.8.18](https://github.com/rvben/shinyhub/compare/v0.8.17...v0.8.18) - 2026-06-17
 
 ### Added
