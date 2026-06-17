@@ -56,3 +56,29 @@ func TestManager_Adopt_WarmReadoptErrorIsNonFatal(t *testing.T) {
 		t.Fatalf("a warm re-adopt error must not abort the adoption")
 	}
 }
+
+// TestManager_Adopt_SuspendedReplicaIsWarmResumable verifies the mechanism Part 2
+// relies on: a replica re-adopted in the suspended state (a frozen process that
+// survived a restart) re-registers its warm-wake state and is warm-resumable via
+// Manager.Resume - so its next wake SIGCONTs it instead of cold-booting.
+func TestManager_Adopt_SuspendedReplicaIsWarmResumable(t *testing.T) {
+	m := NewManager(t.TempDir(), NewNativeRuntime())
+	rt := &fakeSnapshotRuntime{resumeEP: ReplicaEndpoint{Handle: RunHandle{PID: 4242}, URL: "http://127.0.0.1:1000"}}
+	m.RegisterRuntime("snap", rt)
+
+	m.Adopt("demo", ProcessInfo{Slug: "demo", Index: 0, PID: 4242, Tier: "snap", Status: StatusSuspended, EndpointURL: "http://127.0.0.1:1000"}, RunHandle{PID: 4242})
+
+	if rt.readoptCalls != 1 {
+		t.Fatalf("ReadoptWarm calls = %d, want 1", rt.readoptCalls)
+	}
+	if _, err := m.Resume("demo", 0); err != nil {
+		t.Fatalf("Resume of a re-adopted suspended replica: %v", err)
+	}
+	if rt.resumeCalls != 1 {
+		t.Fatalf("runtime Resume calls = %d, want 1", rt.resumeCalls)
+	}
+	info, ok := m.GetReplica("demo", 0)
+	if !ok || info.Status != StatusRunning {
+		t.Fatalf("status after resume = %v ok=%v, want running", info.Status, ok)
+	}
+}
