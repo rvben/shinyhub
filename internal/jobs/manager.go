@@ -468,9 +468,10 @@ func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int6
 		return 0, fmt.Errorf("insert skipped run: %w", err)
 	}
 	if err := m.store.FinishScheduleRun(db.FinishScheduleRunParams{
-		RunID:      runID,
-		Status:     "skipped_overlap",
-		ExitCode:   intPtr(0),
+		RunID:  runID,
+		Status: "skipped_overlap",
+		// No process ran, so no exit code was observed.
+		ExitCode:   nil,
 		FinishedAt: time.Now().UTC(),
 	}); err != nil {
 		return runID, fmt.Errorf("finish skipped run: %w", err)
@@ -511,14 +512,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Build log file path and create directory.
 	logDir := filepath.Join(m.appsDir, app.Slug, "schedules", fmt.Sprintf("%d", sched.ID))
 	if err := os.MkdirAll(logDir, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	logPath := filepath.Join(logDir, fmt.Sprintf("run-%d.log", runID))
 
 	logFile, err := os.Create(logPath)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	defer logFile.Close()
@@ -535,21 +536,21 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// surfacing a key/rotation problem, and app startup fails closed the same way.
 	envVars, err := m.store.ListAppEnvVars(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	env, secretEnv, err := appenv.Resolve(envVars, m.secretsKey)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: %v\n", err)
 		slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "err", err)
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 
 	// Build shared mounts.
 	mounts, err := m.store.ListSharedDataSources(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	sharedMounts := make([]process.SharedMount, 0, len(mounts))
@@ -563,14 +564,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Parse command from JSON.
 	var cmd []string
 	if err := json.Unmarshal([]byte(sched.CommandJSON), &cmd); err != nil {
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 
 	// Build app data dir.
 	appDataPath := filepath.Join(m.appDataDir, app.Slug)
 	if err := os.MkdirAll(appDataPath, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 
@@ -580,12 +581,12 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	deployments, err := m.store.ListDeployments(app.ID)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: list deployments: %v\n", err)
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	if len(deployments) == 0 {
 		fmt.Fprintf(logFile, "shinyhub: app %q has no deployments; cannot run schedule\n", app.Slug)
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	bundleDir := deployments[0].BundleDir
@@ -597,7 +598,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	assignments, err := process.ExpandPlacement(app.PlacementMap(), m.tierOrder, 1, m.defaultTier)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: resolve job tier: %v\n", err)
-		m.finishRun(sched, runID, "failed", intPtr(0), trigger, userID)
+		m.finishRun(sched, runID, "failed", nil, trigger, userID)
 		return
 	}
 	jobTier := m.defaultTier
@@ -643,26 +644,33 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		fmt.Fprintf(logFile, "shinyhub: run failed: %v\n", runErr)
 	}
 
-	// Determine final status.
+	// Determine final status. exit_code is recorded only when the process ran
+	// to completion and we observed its own exit code (a clean success, or a
+	// non-zero exit). A run that never launched (runErr), was killed (timeout,
+	// operator cancel, or service shutdown), or died of its own signal records
+	// a NULL exit_code - status carries the reason in those cases.
 	status := "succeeded"
-	exitCode := intPtr(info.Code)
+	var exitCode *int
 	switch {
 	case runErr != nil:
+		// The runtime could not launch the process; no exit was observed.
 		status = "failed"
 	case info.Signaled && runCtx.Err() == context.DeadlineExceeded:
 		status = "timed_out"
 	case info.Signaled && runCtx.Err() == context.Canceled:
 		// Killed by an explicit cancel: an operator Cancel ("cancelled") or a
-		// service-shutdown Stop ("interrupted"). A killed run never observed a
-		// meaningful exit code, so record NULL.
+		// service-shutdown Stop ("interrupted").
 		status = m.cancelStatus(runID)
-		exitCode = nil
 	case info.Signaled:
 		// Signaled without our context being cancelled - the process died of
 		// its own signal (crash / external kill), which is a failure.
 		status = "failed"
 	case info.Code != 0:
 		status = "failed"
+		exitCode = intPtr(info.Code)
+	default:
+		// Exited 0 on its own.
+		exitCode = intPtr(info.Code)
 	}
 
 	m.finishRun(sched, runID, status, exitCode, trigger, userID)

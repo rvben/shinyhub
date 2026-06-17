@@ -354,6 +354,10 @@ func TestManager_Run_SpawnError_CapturesErrorInLog(t *testing.T) {
 	if len(st.finishCalls) == 0 || st.finishCalls[0].Status != "failed" {
 		t.Fatalf("expected a failed run, got finishCalls=%+v", st.finishCalls)
 	}
+	// The process never launched, so no exit code was observed: exit_code is null.
+	if st.finishCalls[0].ExitCode != nil {
+		t.Errorf("spawn-error run exit_code must be nil, got %v", *st.finishCalls[0].ExitCode)
+	}
 	var logPath string
 	for _, lp := range st.logPaths {
 		if lp.RunID == runID {
@@ -997,6 +1001,10 @@ func TestManager_Run_TimeoutMarksTimedOut(t *testing.T) {
 	fc := st.finishCalls[0]
 	if fc.Status != "timed_out" {
 		t.Errorf("expected status 'timed_out', got %q", fc.Status)
+	}
+	// A timed-out run was killed, not exited on its own: exit_code is null.
+	if fc.ExitCode != nil {
+		t.Errorf("timed_out run exit_code must be nil, got %v", *fc.ExitCode)
 	}
 }
 
