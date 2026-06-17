@@ -135,6 +135,11 @@ type fakeStore struct {
 	// hibernateAppCalls tracks every HibernateApp call (slug).
 	hibernateAppCalls []string
 
+	// forceHibernatedList, when non-nil, is returned verbatim by
+	// ListHibernatedApps regardless of per-app status (drives the
+	// snapshot-vs-claim race in warm-restore tests).
+	forceHibernatedList []*db.App
+
 	// listReplicasCalls counts how many times ListReplicas has been called.
 	listReplicasCalls int
 
@@ -374,6 +379,12 @@ func (f *fakeStore) ListWarmShrunkApps() ([]*db.App, error) {
 func (f *fakeStore) ListHibernatedApps() ([]*db.App, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// forceHibernatedList overrides the status filter so a test can drive a
+	// snapshot-vs-claim race (an app already woken off "hibernated" between the
+	// list and the BeginWake CAS).
+	if f.forceHibernatedList != nil {
+		return f.forceHibernatedList, nil
+	}
 	var out []*db.App
 	for slug, app := range f.apps {
 		if f.appStatus[slug] == "hibernated" {
