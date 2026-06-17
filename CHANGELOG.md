@@ -52,6 +52,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.17](https://github.com/rvben/shinyhub/compare/v0.8.16...v0.8.17) - 2026-06-17
+
+### Fixed
+
+- **warm-wake**: re-adopt frozen replicas warm after a restart instead of reaping them ([b491814](https://github.com/rvben/shinyhub/commit/b491814a76759c8974813a999634efaade58f53b))
+- **warm-wake**: re-register the per-app cgroup when a replica is adopted after a restart ([fe43b01](https://github.com/rvben/shinyhub/commit/fe43b012d334492b525365a046dece0db77ffd24))
+
 ## [0.8.16](https://github.com/rvben/shinyhub/compare/v0.8.15...v0.8.16) - 2026-06-17
 
 ### Added
