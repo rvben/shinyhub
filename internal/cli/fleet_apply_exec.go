@@ -187,6 +187,21 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		}
 		return res
 	}
+	// failDeploy records a failure of the bundle deploy itself (the app most
+	// likely crashed on startup) and attaches its log tail so the operator sees
+	// the cause inline instead of SSHing to read the process log. It is used
+	// only where the deploy step failed; post-deploy config/ownership patch and
+	// first-fire failures use fail (the app is running, so its tail would be
+	// misleading).
+	failDeploy := func(err error, attempts int) applyResult {
+		fail(err, attempts)
+		if res.status == statusFailed {
+			if tail, lerr := fetchLogTail(cfg, d.Slug, logTailLines); lerr == nil {
+				res.logTail = tail
+			}
+		}
+		return res
+	}
 
 	switch d.Action {
 	case fleet.ActionUnchanged:
@@ -226,7 +241,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 			if !committed && !adoptBundleWentLive(cfg, d.Slug, d.ServerDigest) {
 				releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt)
 			}
-			return fail(err, attempts)
+			return failDeploy(err, attempts)
 		}
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
@@ -263,7 +278,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		promoted, attempts, _, firstFires, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
-			return fail(err, attempts)
+			return failDeploy(err, attempts)
 		}
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
@@ -315,7 +330,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		_, attempts, _, firstFires, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
-			return fail(err, attempts)
+			return failDeploy(err, attempts)
 		}
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
@@ -336,7 +351,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		promoted, attempts, _, firstFires, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		if err != nil {
-			return fail(err, attempts)
+			return failDeploy(err, attempts)
 		}
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)

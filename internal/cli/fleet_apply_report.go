@@ -36,6 +36,10 @@ type applyResult struct {
 	err        error
 	note       string
 	firstFires []firstFireOutcome
+	// logTail holds the failing app's last process-log lines, populated only
+	// when a deploy-bearing action fails (e.g. the app crashed on startup), so
+	// the operator sees the cause without a second round-trip to the host.
+	logTail []string
 }
 
 type applyTally struct {
@@ -154,7 +158,14 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 	for _, r := range res {
 		switch r.status {
 		case statusFailed:
-			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub apps logs %s --tail 200\n", r.slug, r.err, r.slug)
+			fmt.Fprintf(out, "  %s: %v\n", r.slug, r.err)
+			if len(r.logTail) > 0 {
+				fmt.Fprintf(out, "    last %d lines of app log:\n", len(r.logTail))
+				for _, l := range r.logTail {
+					fmt.Fprintf(out, "      %s\n", l)
+				}
+			}
+			fmt.Fprintf(out, "    -> shinyhub apps logs %s --tail 200\n", r.slug)
 		case statusConflict:
 			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub fleet plan   (re-review before re-applying)\n", r.slug, r.err)
 		}
@@ -166,10 +177,11 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 // per-app result and summary exit fields.
 
 type jsonResult struct {
-	Status     string `json:"status"`
-	Attempts   int    `json:"attempts"`
-	DurationMS int64  `json:"duration_ms"`
-	Error      string `json:"error,omitempty"`
+	Status     string   `json:"status"`
+	Attempts   int      `json:"attempts"`
+	DurationMS int64    `json:"duration_ms"`
+	Error      string   `json:"error,omitempty"`
+	LogTail    []string `json:"log_tail,omitempty"`
 }
 
 type applyJSONApp struct {
@@ -220,6 +232,7 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 				Status:     string(r.status),
 				Attempts:   r.attempts,
 				DurationMS: r.duration.Milliseconds(),
+				LogTail:    r.logTail,
 			}
 			if r.err != nil {
 				jr.Error = r.err.Error()
