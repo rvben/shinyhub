@@ -27,10 +27,11 @@ export function summariseFleetHealth(h) {
   const num = (v) => Number(v || 0);
   const lostReplicas = num(replicas.lost);
   const degradedApps = num(apps.degraded);
+  const crashedApps = num(apps.crashed);
   const workersDown = workers ? num(workers.down) : 0;
 
   let statusClass, statusLabel;
-  if (lostReplicas > 0 || degradedApps > 0) {
+  if (lostReplicas > 0 || degradedApps > 0 || crashedApps > 0) {
     statusClass = 'lost';
     statusLabel = 'degraded';
   } else if (workersDown > 0) {
@@ -42,6 +43,7 @@ export function summariseFleetHealth(h) {
   }
 
   const parts = [`${num(apps.total)} apps`, `${num(apps.running)} running`];
+  if (crashedApps > 0) parts.push(`${crashedApps} crashed`);
   if (degradedApps > 0) parts.push(`${degradedApps} degraded`);
   if (lostReplicas > 0) parts.push(`${lostReplicas} replicas lost`);
   if (workers) parts.push(`${num(workers.up)}/${num(workers.total)} workers up`);

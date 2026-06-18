@@ -857,8 +857,31 @@ main {
 .badge-deploying { background: var(--yellow-bg); color: var(--yellow); }
 .badge-waking    { background: var(--yellow-bg); color: var(--yellow); }
 .badge-degraded  { background: var(--red-bg);    color: var(--red); }
+.badge-crashed   { background: var(--red-bg);    color: var(--red); }
 .badge-stopped   { background: var(--gray-bg);   color: var(--text-muted); }
 .badge-new       { background: var(--accent-glow); color: var(--cyan-bright); }
+
+/* Crash banner: a crashed app's failure reason + Restart on the detail Overview. */
+.crash-banner {
+  background: var(--red-bg);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.crash-banner-title { color: var(--red); font-weight: 600; margin-bottom: 8px; }
+.crash-banner-reason {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.82em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  margin: 0 0 12px;
+}
+.crash-banner-restart { margin-top: 4px; }
 
 /* Deployment status */
 .badge-active   { background: var(--accent-glow); color: var(--cyan-bright); }
@@ -3202,6 +3225,7 @@ fieldset.settings-block { min-width: 0; }
 .app-detail-header .status-pill.status-waking,
 .app-detail-header .status-pill.status-pending { color: var(--yellow); background: var(--yellow-bg); border-color: transparent; }
 .app-detail-header .status-pill.status-degraded,
+.app-detail-header .status-pill.status-crashed,
 .app-detail-header .status-pill.status-failed { color: var(--red); background: var(--red-bg); border-color: transparent; }
 .app-detail-header .status-pill.status-new { color: var(--cyan-bright); background: var(--accent-glow); border-color: transparent; }
 .app-detail-header .status-pill.status-stopped,

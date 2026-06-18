@@ -65,6 +65,9 @@ type manager interface {
 	// supports it. freed=true means the warmed memory was released and the
 	// replicas are resumable; freed=false means the caller must Stop instead.
 	Suspend(slug string) (bool, error)
+	// LogTail returns the last n lines of a replica's log joined by newlines (or
+	// "" if unreadable), used to capture a crash diagnostic.
+	LogTail(slug string, index, n int) string
 }
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
@@ -97,6 +100,10 @@ type MetricsRecorder interface {
 type appStore interface {
 	GetAppBySlug(slug string) (*db.App, error)
 	UpdateAppStatus(p db.UpdateAppStatusParams) error
+	// MarkAppCrashed transitions an app to "crashed" and records why (reason: a
+	// boot error plus the tail of the app log). Used when an app's replicas
+	// cannot be brought up so the dashboard/proxy can show the reason + Restart.
+	MarkAppCrashed(slug, reason string) error
 	BeginWake(slug string) (bool, error)
 	AbortWake(slug string) error
 	FinishWake(slug string) (bool, error)
@@ -173,8 +180,15 @@ type Watcher struct {
 
 	mu        sync.Mutex
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
-	attempts  map[replicaKey]int       // consecutive crash-restart attempts per replica
+	attempts  map[replicaKey]int       // consecutive failed restart attempts (boot failures) per replica
 	nextRetry map[replicaKey]time.Time // earliest time to retry a crashed replica
+	// crashCount/lastCrash detect a RUNTIME crash loop: a replica that boots fine
+	// (so `attempts` keeps resetting) but keeps exiting shortly after. crashCount
+	// counts crashes within crashLoopWindow of each other; once it exceeds the
+	// restart budget the app is marked crashed. A gap longer than the window
+	// starts a fresh incident, so an occasional crash never accumulates.
+	crashCount map[replicaKey]int
+	lastCrash  map[replicaKey]time.Time
 	// driving tracks slugs currently being driven by driveWakingApp so a
 	// concurrent trigger (e.g. inline from the miss path and from the reconciler)
 	// does not spawn two parallel deploys for the same wake. The guard is
@@ -225,6 +239,8 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		deploy:        deployFn,
 		attempts:      make(map[replicaKey]int),
 		nextRetry:     make(map[replicaKey]time.Time),
+		crashCount:    make(map[replicaKey]int),
+		lastCrash:     make(map[replicaKey]time.Time),
 		driving:       make(map[string]bool),
 		expandingWarm: make(map[string]bool),
 	}
@@ -443,7 +459,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 				break
 			}
 			if _, derr := w.deploy(app.Slug, bundleDir, i); derr != nil {
-				slog.Warn("warm restore: boot failed; app left cold", "slug", app.Slug, "idx", i, "err", derr)
+				slog.Warn("warm restore: boot failed; leaving app cold", "slug", app.Slug, "idx", i, "err", derr)
 				booted = false
 				break
 			}
@@ -451,8 +467,14 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		if !booted {
 			// A replica failed mid-boot (or shutdown raced in). Take down any that
 			// came up so the app is genuinely cold (no orphan replica running under
-			// a 'hibernated' app, which the idle watcher would never reap), and
-			// release the claim. Mirrors the watcher's Deregister+Stop teardown.
+			// a 'hibernated' app, which the idle watcher would never reap), then
+			// release the claim. Warm restore is best-effort pre-warming: a failure
+			// here (a transient infra error, or a genuinely-broken app) just leaves
+			// the app cold to wake on first access - it must NOT be marked crashed,
+			// because a registration/transient error is not the app's fault. A
+			// genuinely-broken app surfaces as crashed via the runtime crash-loop
+			// guard (handleCrashed) once it is actually run. Mirrors the watcher's
+			// Deregister+Stop teardown.
 			w.prx.Deregister(app.Slug)
 			if serr := w.mgr.Stop(app.Slug); serr != nil {
 				slog.Warn("warm restore: cleanup after partial boot failed", "slug", app.Slug, "err", serr)
@@ -497,6 +519,35 @@ func (w *Watcher) abortWarmClaim(slug string) {
 	if aerr := w.store.AbortWake(slug); aerr != nil {
 		slog.Warn("warm restore: release claim failed", "slug", slug, "err", aerr)
 	}
+}
+
+// crashLogTailLines bounds how many trailing app-log lines are captured as a
+// crash reason; crashReasonMaxBytes caps the total so a runaway log line cannot
+// bloat the apps row.
+const (
+	crashLogTailLines   = 20
+	crashReasonMaxBytes = 8000
+)
+
+// crashReason builds a short diagnostic for a crashed app: the boot/restart error
+// (when present) followed by the tail of the replica's log, where a Python/R
+// traceback lands. The end of the text - the actual error - is preserved when the
+// reason is truncated.
+func (w *Watcher) crashReason(slug string, index int, bootErr error) string {
+	tail := w.mgr.LogTail(slug, index, crashLogTailLines)
+	var reason string
+	switch {
+	case bootErr != nil && tail != "":
+		reason = bootErr.Error() + "\n\n" + tail
+	case bootErr != nil:
+		reason = bootErr.Error()
+	default:
+		reason = tail
+	}
+	if len(reason) > crashReasonMaxBytes {
+		reason = "...\n" + reason[len(reason)-crashReasonMaxBytes:]
+	}
+	return reason
 }
 
 // wakeReplica brings one replica back up. For a replica persisted as suspended it
@@ -662,11 +713,50 @@ func (w *Watcher) reconcileReplicas(handled map[replicaKey]bool) {
 	}
 }
 
-// handleCrashed restarts a crashed replica reported by the process manager. It
-// loads the owning app and delegates to the shared restartSlot core.
+// crashLoopWindow bounds how far apart crashes can be and still count toward the
+// crash-loop budget. A replica that stays up longer than this between crashes is
+// treated as recovered, so an occasional crash never accumulates to "crashed".
+const crashLoopWindow = 2 * time.Minute
+
+// handleCrashed restarts a crashed replica reported by the process manager, or -
+// when the replica is in a crash loop - gives up and marks the app crashed.
+//
+// A runtime crash loop (the replica boots fine but keeps exiting shortly after,
+// e.g. on a lazy import that fails) never trips restartSlot's boot-failure budget,
+// because each successful boot resets it. So this counts crashes within
+// crashLoopWindow of each other and, once they exceed the restart budget, stops
+// the flapping app and surfaces it as crashed with the log-tail reason. Pure
+// boot failures (the replica never starts) are handled by restartSlot's budget +
+// reconcileAppStatus instead.
 func (w *Watcher) handleCrashed(slug string, index int) {
 	app, err := w.store.GetAppBySlug(slug)
 	if err != nil {
+		return
+	}
+	k := replicaKey{slug, index}
+	w.mu.Lock()
+	now := time.Now()
+	if last, ok := w.lastCrash[k]; ok && now.Sub(last) > crashLoopWindow {
+		w.crashCount[k] = 0 // stable since the last crash; start a fresh incident
+	}
+	w.lastCrash[k] = now
+	w.crashCount[k]++
+	count := w.crashCount[k]
+	w.mu.Unlock()
+
+	if count > w.cfg.RestartMaxAttempts {
+		reason := w.crashReason(slug, index, nil)
+		if reason == "" {
+			reason = "the app crashed repeatedly"
+		}
+		w.prx.Deregister(slug)
+		if serr := w.mgr.Stop(slug); serr != nil {
+			slog.Warn("watcher: stop crash-looping app failed", "slug", slug, "err", serr)
+		}
+		if cerr := w.store.MarkAppCrashed(slug, reason); cerr != nil {
+			slog.Warn("watcher: mark crashed failed", "slug", slug, "err", cerr)
+		}
+		slog.Warn("watcher: app crash-looped; marked crashed", "slug", slug, "index", index, "crashes", count)
 		return
 	}
 	w.restartSlot(app, index)
@@ -777,6 +867,7 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 		return
 	}
 	running, warm := 0, 0
+	downIdx := -1
 	for _, r := range reps {
 		if r.Index >= app.Replicas {
 			continue
@@ -787,17 +878,73 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 		case r.DesiredState == db.ReplicaDesiredWarm:
 			// Warm victims are deliberately stopped capacity, not failures.
 			warm++
+		default:
+			// A down slot that is neither running nor an intentional warm victim:
+			// remember one for the crash diagnostic below.
+			if downIdx < 0 {
+				downIdx = r.Index
+			}
 		}
+	}
+	// Nothing is healthy, nothing is intentionally warm, and the restart budget
+	// for every slot is spent: the app is down with no recovery in flight. That
+	// is "crashed" (a terminal, operator-actionable state), not merely "degraded"
+	// (partially up, still self-healing). Record the reason so the dashboard and
+	// proxy can show it with a Restart action instead of an endless spinner. The
+	// app leaves the reconcilable set, so the watcher stops here until a restart.
+	if running == 0 && warm == 0 && downIdx >= 0 && w.allReplicasExhausted(app.Slug, app.Replicas) {
+		reason := w.crashReason(app.Slug, downIdx, nil)
+		if reason == "" {
+			reason = "all replicas crashed and the restart budget is exhausted"
+		}
+		if err := w.store.MarkAppCrashed(app.Slug, reason); err != nil {
+			slog.Warn("watcher: mark crashed failed", "slug", app.Slug, "err", err)
+		}
+		return
 	}
 	want := "running"
 	if running < app.Replicas-warm {
 		want = "degraded"
+	} else {
+		// Fully healthy: clear any spent restart budget so a later crash gets a
+		// fresh set of retries. RestartMaxAttempts counts CONSECUTIVE crashes, so a
+		// stretch of health resets the counter. This covers recovery via any path
+		// (manual restart, redeploy, self-heal), not just the in-watchdog restart.
+		w.clearRestartBudget(app.Slug, app.Replicas)
 	}
 	if want != app.Status {
 		if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: want}); err != nil {
 			slog.Warn("watcher: reconcile app status failed", "slug", app.Slug, "want", want, "err", err)
 		}
 	}
+}
+
+// clearRestartBudget forgets the crash-restart attempts and backoff for every
+// slot of an app, giving it a fresh retry budget. Called when the app is fully
+// healthy again.
+func (w *Watcher) clearRestartBudget(slug string, replicas int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for i := 0; i < replicas; i++ {
+		k := replicaKey{slug, i}
+		delete(w.attempts, k)
+		delete(w.nextRetry, k)
+	}
+}
+
+// allReplicasExhausted reports whether every replica slot of an app has spent its
+// crash-restart budget (so the watchdog will not restart any of them). A slot
+// with no recorded attempts is not exhausted, so a transient single-tick dip in
+// the running count never trips it.
+func (w *Watcher) allReplicasExhausted(slug string, replicas int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for i := 0; i < replicas; i++ {
+		if w.attempts[replicaKey{slug, i}] < w.cfg.RestartMaxAttempts {
+			return false
+		}
+	}
+	return true
 }
 
 // handleIdle checks whether a running app has been idle past its configured
@@ -1323,7 +1470,7 @@ func (w *Watcher) driveWakingApp(slug string) {
 		switch {
 		case errors.Is(gerr, db.ErrNotFound):
 			tearDownStarted("deleted")
-		case gerr == nil && (cur.Status == "stopped" || cur.Status == "deleting"):
+		case gerr == nil && (cur.Status == "stopped" || cur.Status == "deleting" || cur.Status == "crashed"):
 			tearDownStarted(cur.Status)
 		}
 	}()

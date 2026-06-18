@@ -518,7 +518,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return tb - ta;
       });
     } else if (sortKey === 'status') {
-      const order = { running: 0, stopped: 1, failed: 2 };
+      const order = { crashed: 0, running: 1, stopped: 2, failed: 3 };
       apps.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
     }
     // 'default' keeps server order.
@@ -3639,6 +3639,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // setDetailApp records the app currently shown on the detail page so the
     // static header kebab (wired once below) knows which app to act on.
     setDetailApp: (app) => { detailApp = app; },
+    // restart triggers POST /api/apps/:slug/restart (the same action as the
+    // header kebab), exposed so the crash banner's Restart button can reuse it.
+    restart: (slug) => restart(slug),
   };
 
   const appDetailMount = mountAppDetail({

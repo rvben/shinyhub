@@ -486,6 +486,13 @@ type App struct {
 	// MinWarmReplicas is the pre-warming floor: replicas kept running
 	// through idle hibernation. 0 = hibernate fully (the default).
 	MinWarmReplicas int `json:"min_warm_replicas"`
+	// LastError is a short diagnostic for why the app is "crashed" (a boot
+	// error plus the tail of the app log, e.g. a Python traceback). Empty when
+	// the app is not crashed; cleared on a successful (re)start.
+	LastError string `json:"last_error,omitempty"`
+	// CrashedAt is the Unix-epoch seconds of the transition into "crashed", or
+	// 0 when the app is not crashed. Cleared alongside LastError on (re)start.
+	CrashedAt int64 `json:"crashed_at,omitempty"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -526,7 +533,8 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       created_at, updated_at,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
-		       last_autoscale_at, identity_headers, min_warm_replicas,`
+		       last_autoscale_at, identity_headers, min_warm_replicas,
+		       last_error, crashed_at,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -896,12 +904,53 @@ type UpdateAppStatusParams struct {
 }
 
 func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
-	res, err := s.db.Exec(
-		`UPDATE apps SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
-		p.Status, p.Slug,
-	)
+	// Any transition OUT of "crashed" (start, restart, wake, hibernate, stop)
+	// clears the recorded crash diagnostic so a stale reason never lingers on a
+	// recovered app. A status write TO "crashed" must NOT clear it: crashed
+	// transitions go through MarkAppCrashed (which records the reason), and a bare
+	// UpdateAppStatus("crashed") - from a current or future caller - must preserve
+	// whatever reason is already there rather than wiping it.
+	var res sql.Result
+	var err error
+	if p.Status == "crashed" {
+		res, err = s.db.Exec(
+			`UPDATE apps SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+			p.Status, p.Slug,
+		)
+	} else {
+		res, err = s.db.Exec(
+			`UPDATE apps SET status = ?, last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+			p.Status, p.Slug,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("update app status: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkAppCrashed transitions an app into the "crashed" status and records why:
+// reason is a short diagnostic (a boot error plus the tail of the app log, e.g.
+// a Python traceback). It is the single entry point into the crashed state,
+// shared by recovery, warm-restore, and the runtime watchdog when an app's
+// replicas cannot be brought up. A "deleting" app is left untouched so an
+// in-flight delete always wins. crashed_at is stamped on the database clock.
+func (s *Store) MarkAppCrashed(slug, reason string) error {
+	epoch, err := s.NowEpoch()
+	if err != nil {
+		return fmt.Errorf("mark app crashed: %w", err)
+	}
+	res, err := s.db.Exec(
+		`UPDATE apps SET status = 'crashed', last_error = ?, crashed_at = ?, updated_at = CURRENT_TIMESTAMP
+		   WHERE slug = ? AND status != 'deleting'`,
+		reason, epoch, slug,
+	)
+	if err != nil {
+		return fmt.Errorf("mark app crashed: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -2629,6 +2678,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
+		&a.LastError, &a.CrashedAt,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {

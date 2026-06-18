@@ -100,3 +100,16 @@ test('degradedTooltip: caps the list and appends a "+N more" tail', () => {
   assert.match(tip, /; \+2 more$/);
   assert.equal(tip.split(';').length, 6); // 5 entries + the "+N more" tail
 });
+
+test('summariseFleetHealth: a crashed app → degraded/red + headline', () => {
+  const s = summariseFleetHealth({
+    apps: { total: 4, running: 3, stopped: 0, degraded: 0, crashed: 1 },
+    replicas: { running: 3, lost: 0, stopped: 0 },
+    workers: { total: 1, up: 1, down: 0, revoked: 0 },
+    tiers: [],
+    degraded_apps: [],
+  });
+  assert.equal(s.statusClass, 'lost');
+  assert.equal(s.statusLabel, 'degraded');
+  assert.match(s.headline, /1 crashed/);
+});

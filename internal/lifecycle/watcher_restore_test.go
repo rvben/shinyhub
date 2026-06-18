@@ -170,15 +170,17 @@ func TestRestoreWarm_SkipsAppWithoutDeployment(t *testing.T) {
 	}
 }
 
-// TestRestoreWarm_BootFailureLeavesAppCold: when a boot fails, the app is left
-// cold (woken on first access) and not frozen.
-func TestRestoreWarm_BootFailureLeavesAppCold(t *testing.T) {
+// TestRestoreWarm_BootFailureLeavesCold: warm restore is best-effort pre-warming,
+// so a boot failure leaves the app cold (hibernated) to wake on first access - it
+// must NOT mark the app crashed, because a transient/infra error is not the app's
+// fault (a genuinely-broken app is surfaced by the runtime crash-loop guard).
+func TestRestoreWarm_BootFailureLeavesCold(t *testing.T) {
 	apps := map[string]*db.App{"warm": {ID: 1, Slug: "warm", Status: "hibernated", Replicas: 1}}
 	st := newFakeStore(apps, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/warm"}})
 	mgr := &fakeManager{suspendFreed: true}
 	prx := newFakeProxy()
 	deployFn := func(slug, bundleDir string, idx int) (*deploy.Result, error) {
-		return nil, errors.New("crashed on startup")
+		return nil, errors.New("health check failed")
 	}
 	w := newTestWatcher(Config{}, mgr, prx, st, deployFn)
 
@@ -186,6 +188,9 @@ func TestRestoreWarm_BootFailureLeavesAppCold(t *testing.T) {
 
 	if mgr.suspendCalls != 0 {
 		t.Fatalf("suspendCalls = %d, want 0 (boot failed, nothing to freeze)", mgr.suspendCalls)
+	}
+	if got := appStatusOf(st, "warm"); got != "hibernated" {
+		t.Fatalf("status of 'warm' = %q, want hibernated (left cold, not crashed)", got)
 	}
 }
 
@@ -222,5 +227,9 @@ func TestRestoreWarm_PartialBootCleansUp(t *testing.T) {
 	prx.mu.Unlock()
 	if len(dereg) != 1 || dereg[0] != "warm" {
 		t.Fatalf("deregistered = %v, want [warm] (proxy pool reset on partial boot)", dereg)
+	}
+	// A partial-boot failure leaves the app cold (hibernated), not crashed.
+	if got := appStatusOf(st, "warm"); got != "hibernated" {
+		t.Fatalf("status of 'warm' = %q, want hibernated after partial-boot cleanup", got)
 	}
 }

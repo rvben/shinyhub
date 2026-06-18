@@ -19,6 +19,7 @@ type fleetHealthEnvelope struct {
 	Apps          struct {
 		Total    int `json:"total"`
 		Degraded int `json:"degraded"`
+		Crashed  int `json:"crashed"`
 	} `json:"apps"`
 	Replicas struct {
 		Running int `json:"running"`
@@ -83,6 +84,9 @@ func TestFleetHealth_AggregatesAcrossBackends(t *testing.T) {
 	store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: admin.ID})
 	dash, _ := store.GetAppBySlug("dash")
 	store.UpsertReplica(db.UpsertReplicaParams{AppID: dash.ID, Index: 0, Status: db.ReplicaStatusLost, Tier: "remote", Provider: "remote_docker"})
+	// broke: crashed - its replicas cannot start.
+	store.CreateApp(db.CreateAppParams{Slug: "broke", Name: "Broke", OwnerID: admin.ID})
+	store.MarkAppCrashed("broke", "ModuleNotFoundError: No module named 'pandas'")
 
 	req := authedRequest(t, "GET", "/api/fleet/health", nil, adminTok)
 	rec := httptest.NewRecorder()
@@ -97,11 +101,14 @@ func TestFleetHealth_AggregatesAcrossBackends(t *testing.T) {
 	if got.ServerVersion != "9.9.9" {
 		t.Errorf("server_version = %q, want 9.9.9", got.ServerVersion)
 	}
-	if got.Apps.Total != 2 {
-		t.Errorf("apps.total = %d, want 2", got.Apps.Total)
+	if got.Apps.Total != 3 {
+		t.Errorf("apps.total = %d, want 3", got.Apps.Total)
 	}
 	if got.Apps.Degraded != 1 {
 		t.Errorf("apps.degraded = %d, want 1", got.Apps.Degraded)
+	}
+	if got.Apps.Crashed != 1 {
+		t.Errorf("apps.crashed = %d, want 1", got.Apps.Crashed)
 	}
 	if got.Replicas.Running != 1 || got.Replicas.Lost != 1 {
 		t.Errorf("replicas = %+v, want running=1 lost=1", got.Replicas)

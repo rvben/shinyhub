@@ -24,6 +24,7 @@ type fleetAppCounts struct {
 	Running  int `json:"running"`
 	Stopped  int `json:"stopped"`
 	Degraded int `json:"degraded"` // running apps with >=1 lost replica
+	Crashed  int `json:"crashed"`  // apps down because their replicas cannot start
 }
 
 type fleetReplicaCounts struct {
@@ -87,6 +88,8 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 			resp.Apps.Running++
 		case "stopped":
 			resp.Apps.Stopped++
+		case "crashed":
+			resp.Apps.Crashed++
 		}
 	}
 

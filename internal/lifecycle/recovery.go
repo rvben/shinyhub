@@ -264,11 +264,16 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		}
 		// Keep the app reconcilable when a slot was queued for lost-replica
 		// healing: the healer only scans running/degraded apps, so driving the app
-		// to stopped here would strand the slot it just queued until a manual
-		// restart. Only an app with no live, no indeterminate, and no healable
-		// replica is genuinely down.
+		// down here would strand the slot it just queued until a manual restart.
+		// Only an app with no live, no indeterminate, and no healable replica is
+		// genuinely down: its processes did not survive the restart. Mark it
+		// "hibernated" (not "stopped") so the warm-restore pass re-boots and
+		// re-freezes it - or, with warm-wake off, so the next request cold-wakes it
+		// - instead of silently dropping a running app to a dead "stopped". A
+		// genuinely-broken app fails its re-boot and is surfaced as "crashed" by the
+		// restore/wake paths.
 		if !anyAlive && !indeterminate && !healable {
-			markRecoveryStopped(store, app.Slug)
+			markRecoveryDown(store, app.Slug)
 		}
 	}
 }
@@ -712,5 +717,18 @@ func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 func markRecoveryStopped(store *db.Store, slug string) {
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
 		slog.Error("process recovery: mark stopped", "slug", slug, "err", err)
+	}
+}
+
+// markRecoveryDown handles an app whose replicas were all confirmed dead after a
+// restart (their processes did not survive). It marks the app "hibernated" so the
+// warm-restore pass re-boots and re-freezes it - pre-warming it exactly like an
+// app that was already hibernated - rather than stranding a previously-running
+// app in a dead "stopped" that never comes back on its own. With warm-wake off
+// (no restore pass) the "hibernated" status still lets the next request cold-wake
+// it. A genuinely-broken app fails to boot and is surfaced as "crashed".
+func markRecoveryDown(store *db.Store, slug string) {
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"}); err != nil {
+		slog.Error("process recovery: mark hibernated", "slug", slug, "err", err)
 	}
 }

@@ -1894,3 +1894,33 @@ func TestBootSplashAvoidsLoginFlash(t *testing.T) {
 	assertContains(t, "style.css", `[data-auth="loading"] #boot-splash`,
 		"the boot splash must be shown only during the loading state")
 }
+
+// TestCrashedAppUX pins the wiring that surfaces a crashed app's reason and a
+// Restart, so an API/JS shape drift (last_error) or a missing import fails the
+// build instead of silently breaking the dashboard.
+func TestCrashedAppUX(t *testing.T) {
+	// The detail Overview imports the crash banner and feeds it a Restart wired
+	// to ctx.restart.
+	assertContains(t, "views/app-detail.js", "crash-banner.js",
+		"app-detail.js must import the crash banner")
+	assertContains(t, "views/app-detail.js", "crashBanner(document",
+		"renderOverview must build the crash banner")
+	assertContains(t, "views/app-detail.js", "ctx.restart(app.slug)",
+		"the crash banner's Restart must call ctx.restart")
+	// The banner reads the crash reason and gates on the crashed status.
+	assertContains(t, "views/crash-banner.js", "last_error",
+		"the crash banner must show app.last_error (the crash reason from GET /api/apps/:slug; see internal/db/queries.go App.LastError)")
+	assertContains(t, "views/crash-banner.js", "'crashed'",
+		"the crash banner must gate on app.status === 'crashed'")
+	// app.js exposes restart on ctx for the banner to reuse.
+	assertContains(t, "app.js", "restart: (slug) => restart(slug)",
+		"ctx must expose restart so the crash banner can reuse the existing restart action")
+	// The crashed badge + banner are styled.
+	assertContains(t, "style.css", ".badge-crashed",
+		"a crashed app needs a styled status badge")
+	assertContains(t, "style.css", ".crash-banner",
+		"the crash banner needs styling")
+	// The fleet-health panel counts crashed apps.
+	assertContains(t, "views/fleet-health.js", "apps.crashed",
+		"the fleet health summary must read apps.crashed; see internal/api/fleet_health.go fleetAppCounts.Crashed")
+}

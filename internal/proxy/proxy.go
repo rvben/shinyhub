@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -235,6 +236,11 @@ type Proxy struct {
 	mu          sync.RWMutex
 	pools       map[string]*backendPool
 	wakeTrigger func(slug string)
+	// appStatusFn reports an app's lifecycle status and (for a crashed app) its
+	// failure reason. When set, a no-backend miss for a "crashed" or "stopped"
+	// app serves a clear status page instead of the endlessly-retrying loading
+	// page. nil => always serve the loading page (the prior behaviour).
+	appStatusFn func(slug string) (status, reason string)
 	slugExists  func(slug string) (bool, error)
 
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
@@ -496,6 +502,85 @@ func (p *Proxy) getWakeTrigger() func(string) {
 	return fn
 }
 
+// renderAppDownPage builds a static (non-reloading) page for an app that will
+// not come up on its own: "crashed" shows the failure reason, "stopped" explains
+// it was stopped. Both link to the app's dashboard page, where an operator sees
+// the full detail and can Restart. The reason is HTML-escaped (it carries an app
+// log tail that may contain markup-like characters).
+func renderAppDownPage(state, slug, reason string) string {
+	esc := html.EscapeString
+	heading, body := "This app is stopped", `<p>It has been stopped and is not currently running.</p>`
+	if state == "crashed" {
+		heading = "This app crashed"
+		if strings.TrimSpace(reason) != "" {
+			body = `<pre class="reason">` + esc(reason) + `</pre>`
+		} else {
+			body = `<p>Its replicas could not be started.</p>`
+		}
+	}
+	return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>` + esc(heading) + `</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; background:#0b1020; color:#e8eeff; margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+  .card { max-width:680px; padding:32px; }
+  h1 { color:#f87171; font-size:1.4rem; margin:0 0 12px; }
+  pre.reason { background:rgba(248,113,113,0.12); border:1px solid #f87171; border-radius:8px; padding:14px; overflow:auto; max-height:320px; white-space:pre-wrap; word-break:break-word; font-size:0.82rem; line-height:1.5; }
+  a.btn { display:inline-block; margin-top:18px; background:#3b82f6; color:#fff; text-decoration:none; padding:10px 18px; border-radius:8px; }
+</style></head>
+<body><div class="card">
+<h1>` + esc(heading) + `</h1>
+` + body + `
+<a class="btn" href="/apps/` + esc(slug) + `">Open in dashboard</a>
+</div></body></html>`
+}
+
+// SetAppStatusLookup registers a callback that reports an app's lifecycle status
+// and (for a crashed app) its failure reason. It lets a no-backend miss for a
+// crashed/stopped app render a clear status page instead of the loading spinner.
+// Called once at startup; leaving it unset preserves the loading-page behaviour.
+func (p *Proxy) SetAppStatusLookup(fn func(slug string) (status, reason string)) {
+	p.mu.Lock()
+	p.appStatusFn = fn
+	p.mu.Unlock()
+}
+
+// getAppStatusLookup returns the current status lookup under the read lock.
+func (p *Proxy) getAppStatusLookup() func(string) (string, string) {
+	p.mu.RLock()
+	fn := p.appStatusFn
+	p.mu.RUnlock()
+	return fn
+}
+
+// serveMissPage responds to a request for a slug with no live backend. A crashed
+// or stopped app gets a clear, static status page so the user sees why it is
+// unavailable; anything else fires the wake trigger and gets the auto-retrying
+// loading page (the normal cold-start path).
+func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(string)) {
+	if fn := p.getAppStatusLookup(); fn != nil {
+		switch status, reason := fn(slug); status {
+		case "crashed":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(renderAppDownPage("crashed", slug, reason))) //nolint:errcheck
+			return
+		case "stopped":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(renderAppDownPage("stopped", slug, ""))) //nolint:errcheck
+			return
+		}
+	}
+	if trigger != nil {
+		go trigger(slug)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(loadingPage)) //nolint:errcheck
+}
+
 // SetSlugExists registers a synchronous predicate that the proxy uses to
 // distinguish a known-but-not-running slug (serve loading page) from a
 // completely unknown slug (return 404). The predicate returns
@@ -719,12 +804,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
 		}
-		if t := p.getWakeTrigger(); t != nil {
-			go t(slugCopy)
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(loadingPage)) //nolint:errcheck
+		p.serveMissPage(w, slugCopy, p.getWakeTrigger())
 	}
 	// ErrorHandler does not fire for failures after the response header was
 	// sent: ReverseProxy reports those only on the body copy. Wrap the
@@ -1201,24 +1281,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			trigger = p.wakeTrigger
 			if pool == nil || !poolHasAny(pool) {
 				p.mu.RUnlock()
-				// Sync populated nothing; serve loading page as usual.
-				if trigger != nil {
-					go trigger(slug)
-				}
-				rec.Header().Set("Content-Type", "text/html; charset=utf-8")
-				rec.WriteHeader(http.StatusOK)
-				rec.Write([]byte(loadingPage)) //nolint:errcheck
+				// Sync populated nothing; serve the miss page - status-aware, so a
+				// crashed/stopped app gets a clear page instead of the spinner.
+				p.serveMissPage(rec, slug, trigger)
 				return
 			}
 			// Pool is now populated; fall through to the routing path below
 			// while still holding p.mu.RLock (matching the normal routing path).
 		} else {
-			if trigger != nil {
-				go trigger(slug)
-			}
-			rec.Header().Set("Content-Type", "text/html; charset=utf-8")
-			rec.WriteHeader(http.StatusOK)
-			rec.Write([]byte(loadingPage)) //nolint:errcheck
+			p.serveMissPage(rec, slug, trigger)
 			return
 		}
 	}
