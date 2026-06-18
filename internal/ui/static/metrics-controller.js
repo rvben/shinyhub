@@ -17,18 +17,24 @@ export function createMetricsController({ intervalMs = 10000, onMetrics, onError
 
   async function tick() {
     const snapshot = targets.slice();
-    for (const slug of snapshot) {
-      try {
-        const resp = await fetch(`/api/apps/${slug}/metrics`, { credentials: 'include' });
-        if (!resp.ok) {
-          if (onError) onError(slug, new Error(`status ${resp.status}`));
-          continue;
-        }
-        const m = await resp.json();
-        onMetrics(slug, m);
-      } catch (e) {
-        if (onError) onError(slug, e);
+    if (snapshot.length === 0) return;
+    // One batch request for every card on screen (GET /api/apps/metrics?slugs=...)
+    // instead of one round-trip per app, so the dashboard fills in together rather
+    // than one card at a time.
+    try {
+      const qs = encodeURIComponent(snapshot.join(','));
+      const resp = await fetch(`/api/apps/metrics?slugs=${qs}`, { credentials: 'include' });
+      if (!resp.ok) {
+        if (onError) for (const slug of snapshot) onError(slug, new Error(`status ${resp.status}`));
+        return;
       }
+      const body = await resp.json();
+      const metrics = (body && body.metrics) || {};
+      for (const slug of snapshot) {
+        if (Object.prototype.hasOwnProperty.call(metrics, slug)) onMetrics(slug, metrics[slug]);
+      }
+    } catch (e) {
+      if (onError) for (const slug of snapshot) onError(slug, e);
     }
   }
 

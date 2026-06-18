@@ -1970,3 +1970,15 @@ func TestAppCardInstancesAndSummedMetrics(t *testing.T) {
 	assertContains(t, "style.css", ".app-instances",
 		"the instance-count chip needs styling")
 }
+
+// TestBatchMetricsPoll pins the metrics poll to the batch endpoint: the dashboard
+// must fetch every card's live data in one request (GET /api/apps/metrics) and
+// read the slug-keyed body.metrics, not loop one round-trip per app.
+func TestBatchMetricsPoll(t *testing.T) {
+	assertContains(t, "metrics-controller.js", "/api/apps/metrics?slugs=",
+		"the metrics poll must use the batch endpoint (one request for all cards); see internal/api/apps.go handleBatchMetrics")
+	assertContains(t, "metrics-controller.js", "body.metrics",
+		"the metrics poll must read the slug-keyed body.metrics from the batch response")
+	assertNotContains(t, "metrics-controller.js", "/api/apps/${slug}/metrics",
+		"the metrics poll must not fetch per-app metrics one at a time (the slow sequential path)")
+}
