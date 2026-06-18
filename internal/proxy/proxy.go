@@ -243,6 +243,12 @@ type Proxy struct {
 	appStatusFn func(slug string) (status, reason string)
 	slugExists  func(slug string) (bool, error)
 
+	// wakeHoldNanos is the maximum time (ns) a request for a not-yet-routable app
+	// is held while its wake completes, so a warm resume is served inline instead
+	// of via the loading page. 0 disables the hold (immediate loading page).
+	// Atomic for a lock-free read on the request path.
+	wakeHoldNanos atomic.Int64
+
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
 	// replica index, so a client cannot forge or replay it to pin itself to a
@@ -328,6 +334,9 @@ type onMissSyncFuncT func(slug string)
 type appReadyFuncT func(slug string) bool
 
 func New() *Proxy {
+	// wakeHoldNanos defaults to 0 (no hold): the request-holding behaviour is
+	// opt-in, wired by main.go for production, so tests and embedders are not
+	// implicitly slowed by it (same pattern as SetWakeTrigger).
 	return &Proxy{
 		pools:    make(map[string]*backendPool),
 		lastSeen: make(map[string]time.Time),
@@ -335,6 +344,81 @@ func New() *Proxy {
 		rejects:  newRejectCounter(),
 		conns:    newConnTracker(),
 	}
+}
+
+const (
+	// wakePollInterval is how often the hold loop re-checks the pool for a freshly
+	// registered replica.
+	wakePollInterval = 50 * time.Millisecond
+	// wakeSyncInterval throttles the clustered on-miss sync inside the hold loop
+	// (the local pool is polled far more often than the cross-instance sync).
+	wakeSyncInterval = 400 * time.Millisecond
+)
+
+// SetWakeHoldTimeout sets how long a request is held during a wake before the
+// loading page is served. 0 disables the hold (the loading page is served
+// immediately, the pre-hold behaviour). Called once at startup.
+func (p *Proxy) SetWakeHoldTimeout(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	p.wakeHoldNanos.Store(int64(d))
+}
+
+// holdForWake fires the wake trigger and waits up to the configured hold window
+// for slug's pool to become routable, so a warm (or fast cold) resume is served
+// inline instead of via the loading page. It returns true when the pool is ready
+// (the caller routes the request) and false when the hold expired, the client
+// disconnected, or the app is down (the caller serves the miss page). A
+// crashed/stopped app is never held. ctx is the request context, so a client
+// that gives up frees the hold immediately rather than polling to the deadline.
+func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(string)) bool {
+	if fn := p.getAppStatusLookup(); fn != nil {
+		if status, _ := fn(slug); status == "crashed" || status == "stopped" {
+			return false // will not come up; let the caller serve the down page now
+		}
+	}
+	hold := time.Duration(p.wakeHoldNanos.Load())
+	if trigger != nil {
+		go trigger(slug)
+	}
+	syncFn := p.onMissSync.Load()
+	if hold <= 0 {
+		// Hold disabled: preserve the original one-shot clustered sync + a single
+		// pool check, then fall back to the loading page immediately.
+		if syncFn != nil {
+			(*syncFn)(slug)
+		}
+		return p.poolRoutable(slug)
+	}
+	deadline := time.Now().Add(hold)
+	nextSync := time.Now()
+	for {
+		now := time.Now()
+		if syncFn != nil && !now.Before(nextSync) {
+			(*syncFn)(slug)
+			nextSync = now.Add(wakeSyncInterval)
+		}
+		if p.poolRoutable(slug) {
+			return true
+		}
+		if !now.Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false // client gave up: stop holding the connection
+		case <-time.After(wakePollInterval):
+		}
+	}
+}
+
+// poolRoutable reports whether slug currently has at least one routable replica.
+func (p *Proxy) poolRoutable(slug string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	return pool != nil && poolHasAny(pool)
 }
 
 // SetAccessLogger registers a callback invoked once per proxied request
@@ -1268,30 +1352,31 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.writeUnknownApp(rec, r, slug)
 			return
 		}
-		// In clustered mode a synchronous targeted sync runs before the wake
-		// trigger: the DB may already have a running replica (registered by the
-		// owner's deploy path) that has not yet propagated to this instance's pool
-		// via the background ticker. After the sync, re-check the pool under the
-		// read lock; if a replica appeared, fall through to normal routing without
-		// a loading-page round-trip.
-		if syncFn := p.onMissSync.Load(); syncFn != nil {
-			(*syncFn)(slug)
-			p.mu.RLock()
-			pool = p.pools[slug]
-			trigger = p.wakeTrigger
-			if pool == nil || !poolHasAny(pool) {
-				p.mu.RUnlock()
-				// Sync populated nothing; serve the miss page - status-aware, so a
-				// crashed/stopped app gets a clear page instead of the spinner.
-				p.serveMissPage(rec, slug, trigger)
-				return
-			}
-			// Pool is now populated; fall through to the routing path below
-			// while still holding p.mu.RLock (matching the normal routing path).
-		} else {
-			p.serveMissPage(rec, slug, trigger)
+		// Hold the request during the wake: trigger the wake and wait up to the
+		// hold window for a replica to register, so a warm resume (and a fast cold
+		// boot) is served INLINE instead of bouncing through the loading page.
+		// holdForWake also drives the clustered on-miss sync each tick - in
+		// clustered mode the owner may register a replica that this instance's
+		// background ticker has not yet pulled in.
+		if !p.holdForWake(r.Context(), slug, trigger) {
+			// The hold expired (a slow cold boot) or the app is down: serve the
+			// miss page - status-aware, so a crashed/stopped app gets a clear page
+			// rather than the spinner. The wake is already in flight (holdForWake
+			// fired it), so do not re-trigger.
+			p.serveMissPage(rec, slug, nil)
 			return
 		}
+		// A replica registered within the hold window. Re-acquire the read lock for
+		// the routing path and re-check (it could have drained in the gap).
+		p.mu.RLock()
+		pool = p.pools[slug]
+		if pool == nil || !poolHasAny(pool) {
+			p.mu.RUnlock()
+			p.serveMissPage(rec, slug, nil)
+			return
+		}
+		// Pool is populated; fall through to the routing path below while still
+		// holding p.mu.RLock (matching the normal routing path).
 	}
 
 	picked, isStickyHit, saturated := p.pickReplicaLocked(pool, slug, r)
