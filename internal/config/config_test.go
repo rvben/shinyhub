@@ -40,6 +40,37 @@ func TestLifecycle_Defaults(t *testing.T) {
 	if cfg.Lifecycle.HibernateTimeout != 30*time.Minute {
 		t.Errorf("HibernateTimeout default: got %v, want 30m", cfg.Lifecycle.HibernateTimeout)
 	}
+	if cfg.Lifecycle.WakeHold != 5*time.Second {
+		t.Errorf("WakeHold default: got %v, want 5s", cfg.Lifecycle.WakeHold)
+	}
+}
+
+func TestLifecycle_WakeHoldFromYAML(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	if err := os.WriteFile(path, []byte("auth:\n  secret: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\nlifecycle:\n  wake_hold: \"2s\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Lifecycle.WakeHold != 2*time.Second {
+		t.Errorf("WakeHold: got %v, want 2s", cfg.Lifecycle.WakeHold)
+	}
+
+	// "0s" disables the hold (distinct from unset, which uses the default).
+	if err := os.WriteFile(path, []byte("auth:\n  secret: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\nlifecycle:\n  wake_hold: \"0s\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Lifecycle.WakeHold != 0 {
+		t.Errorf("WakeHold 0s: got %v, want 0 (disabled)", cfg.Lifecycle.WakeHold)
+	}
 }
 
 func TestServerShutdownApps(t *testing.T) {

@@ -1043,6 +1043,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return app.Status, app.LastError
 	})
 
+	// Hold a request for a not-yet-routable app while its wake completes, so a
+	// warm resume serves inline (no loading-page round-trip). 0 disables it.
+	prx.SetWakeHoldTimeout(cfg.Lifecycle.WakeHold)
+
 	// Record hibernate/wake transitions and crash-restart counts when metrics
 	// are enabled. Nil-safe inside the watcher when metrics are disabled.
 	if metricsReg != nil {

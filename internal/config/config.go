@@ -262,6 +262,10 @@ type LifecycleConfig struct {
 	WatchInterval      time.Duration
 	RestartMaxAttempts int
 	HibernateTimeout   time.Duration
+	// WakeHold is how long the proxy holds a request for a not-yet-routable app
+	// while its wake completes, so a warm resume serves inline instead of via the
+	// loading page. 0 disables the hold (the loading page is served immediately).
+	WakeHold time.Duration
 }
 
 type DatabaseConfig struct {
@@ -692,6 +696,7 @@ type rawLifecycleConfig struct {
 	WatchInterval      string `yaml:"watch_interval"`
 	RestartMaxAttempts int    `yaml:"restart_max_attempts"`
 	HibernateTimeout   string `yaml:"hibernate_timeout"`
+	WakeHold           string `yaml:"wake_hold"`
 }
 
 type rawRuntimeConfig struct {
@@ -1303,6 +1308,7 @@ func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 		WatchInterval:      15 * time.Second,
 		RestartMaxAttempts: 5,
 		HibernateTimeout:   30 * time.Minute,
+		WakeHold:           5 * time.Second,
 	}
 	if r.WatchInterval != "" {
 		d, err := time.ParseDuration(r.WatchInterval)
@@ -1320,6 +1326,13 @@ func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 			return lc, fmt.Errorf("lifecycle.hibernate_timeout: %w", err)
 		}
 		lc.HibernateTimeout = d
+	}
+	if r.WakeHold != "" {
+		d, err := time.ParseDuration(r.WakeHold)
+		if err != nil {
+			return lc, fmt.Errorf("lifecycle.wake_hold: %w", err)
+		}
+		lc.WakeHold = d // may be 0 to disable the hold
 	}
 	return lc, nil
 }
