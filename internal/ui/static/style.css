@@ -988,10 +988,11 @@ main {
 }
 
 .app-metrics:empty {
-  padding: 0;
-  border: none;
-  margin: 0;
-  min-height: 0;
+  /* The CPU/RAM line is empty until an app is running. Keep its reserved height
+     (from the base rule) so the action buttons below do NOT shift down when the
+     line fills in on start; just hide the dashed frame so a stopped card shows a
+     blank gap rather than an empty box. */
+  border-color: transparent;
 }
 
 /* ── Audit table ── */
