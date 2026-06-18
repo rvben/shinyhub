@@ -2249,12 +2249,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	writeJSON(w, http.StatusOK, s.buildAppMetrics(slug, app))
+}
 
+// buildAppMetrics computes the live metrics envelope for one app: per-replica
+// status/CPU/RAM/sessions sampled from the manager, the top-level rollup, the DB
+// lost-status overlay, and the autoscale status. Shared by the single-app
+// (GET /api/apps/{slug}/metrics) and batch (GET /api/apps/metrics) handlers so
+// both report identical shapes.
+func (s *Server) buildAppMetrics(slug string, app *db.App) metricsResponse {
 	resp := metricsResponse{Status: app.Status, Replicas: []replicaMetrics{}}
 
 	if s.manager == nil {
-		writeJSON(w, http.StatusOK, resp)
-		return
+		return resp
 	}
 
 	var sessionCounts []int64
@@ -2354,7 +2361,52 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metricsAS := buildAutoscaleStatus(metricsEvent, metricsFound, s.cfg.Runtime.Autoscale.Cooldown)
 	resp.AutoscaleStatus = &metricsAS
 
-	writeJSON(w, http.StatusOK, resp)
+	return resp
+}
+
+// handleBatchMetrics returns the live metrics for many apps in one response,
+// keyed by slug, so the dashboard populates every card's CPU/RAM/status with a
+// single request instead of one round-trip per app. The slugs to report are
+// taken from the comma-separated ?slugs= query (the cards currently on screen);
+// any the caller may not view are silently skipped. With no ?slugs= it reports
+// all apps visible to the caller.
+func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var slugs []string
+	if raw := strings.TrimSpace(r.URL.Query().Get("slugs")); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				slugs = append(slugs, s)
+			}
+		}
+	} else {
+		apps, err := s.store.ListAppsVisibleToUser(u.ID, 1_000_000, 0)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		for _, a := range apps {
+			slugs = append(slugs, a.Slug)
+		}
+	}
+
+	out := make(map[string]metricsResponse, len(slugs))
+	for _, slug := range slugs {
+		app, err := s.store.GetAppBySlug(slug)
+		if err != nil {
+			continue // unknown slug: skip rather than fail the whole batch
+		}
+		if ok, err := s.canViewApp(u, app); err != nil || !ok {
+			continue // not visible to this caller (or a lookup error): skip silently
+		}
+		out[slug] = s.buildAppMetrics(slug, app)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"metrics": out})
 }
 
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {

@@ -686,6 +686,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.Patch("/api/auth/me", s.handlePatchMe) // self-service profile: display name + own password
 		r.Get("/api/apps", s.handleListApps)
 		r.Post("/api/apps", s.handleCreateApp)
+		// Static "/metrics" is registered before the "{slug}" wildcard so chi
+		// routes the batch endpoint here rather than to handleGetApp(slug=metrics).
+		r.Get("/api/apps/metrics", s.handleBatchMetrics)
 		r.Get("/api/apps/{slug}", s.handleGetApp)
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
