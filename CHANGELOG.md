@@ -56,6 +56,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.21](https://github.com/rvben/shinyhub/compare/v0.8.20...v0.8.21) - 2026-06-18
+
+### Added
+
+- **ui**: show instance count and sum CPU/RAM across replicas on the app card ([650a635](https://github.com/rvben/shinyhub/commit/650a63516ef0dd1cafded730678913774e904500))
+
+### Fixed
+
+- **ui**: stop app card buttons shifting when CPU/RAM appears on start ([bb974fc](https://github.com/rvben/shinyhub/commit/bb974fc9e77139def314eb99e302188b45d3c7d1))
+
 ## [0.8.20](https://github.com/rvben/shinyhub/compare/v0.8.19...v0.8.20) - 2026-06-18
 
 ### Added
