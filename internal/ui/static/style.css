@@ -762,6 +762,15 @@ main {
   letter-spacing: -0.01em;
 }
 
+/* Instance-count chip: shown only for scaled apps (>1 replica), a subtle hint
+   that the card's CPU/RAM total is across this many instances. */
+.app-instances {
+  color: var(--cyan-bright);
+  background: var(--accent-glow);
+  border-radius: 999px;
+  padding: 0 0.45rem;
+}
+
 .app-actions {
   display: flex;
   gap: 0.35rem;

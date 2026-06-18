@@ -11,6 +11,7 @@ import { appCardBadge, updateCardStatusBadge } from '/static/views/app-card-badg
 import { renderSidebarApps, highlightSidebarApp } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
+import { cardMetricsLabel, instanceCountLabel } from '/static/views/card-metrics.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
@@ -428,6 +429,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const n = app.deploy_count || 0;
       deployCount.textContent = `${n} ${n === 1 ? 'deploy' : 'deploys'}`;
       meta.appendChild(deployCount);
+
+      // Instance count: shown only for scaled apps (>1 replica), so the card's
+      // summed CPU/RAM below reads as a total across this many instances.
+      const instances = instanceCountLabel(app);
+      if (instances) {
+        const instancesEl = document.createElement('span');
+        instancesEl.className = 'app-instances';
+        instancesEl.textContent = instances;
+        meta.appendChild(instancesEl);
+      }
 
       const actions = document.createElement('div');
       actions.className = 'app-actions';
@@ -3478,23 +3489,14 @@ document.addEventListener('DOMContentLoaded', () => {
       // Grid card.
       const gridEl = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
       if (gridEl) {
-        if (m.status !== 'running') {
-          gridEl.textContent = '';
-        } else if (!m.metrics_available) {
-          // Top-level metrics_available is false when all running replicas are PID-less
-          // (Fargate / remote_docker). Rendering "0.0% CPU / 0 KB RAM" would mislead
-          // operators; show n/a instead with the standard tooltip from metricsText.
-          const { cpuText, ramText } = metricsText({ metrics_available: false });
-          gridEl.textContent = `CPU ${cpuText} · ${ramText} RAM`;
-          gridEl.title = 'Live CPU/RAM not collected for this backend (Fargate/remote tasks: see CloudWatch / the worker host)';
-        } else {
-          const cpu = m.cpu_percent.toFixed(1);
-          const ram = m.rss_bytes >= 1 << 20
-            ? (m.rss_bytes / (1 << 20)).toFixed(0) + ' MB'
-            : (m.rss_bytes / 1024).toFixed(0) + ' KB';
-          gridEl.textContent = `CPU ${cpu}% · ${ram} RAM`;
-          gridEl.title = '';
-        }
+        // CPU/RAM are summed across replicas (matching the detail header) so a
+        // scaled app shows its true total, not just the first replica's slice.
+        // Empty while not running (the line keeps its reserved height); "n/a"
+        // for PID-less backends (Fargate / remote_docker).
+        gridEl.textContent = cardMetricsLabel(m, (gridApp && gridApp.replicas) || 1);
+        gridEl.title = (m.status === 'running' && m.metrics_available === false)
+          ? 'Live CPU/RAM not collected for this backend (Fargate/remote tasks: see CloudWatch / the worker host)'
+          : '';
       }
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
