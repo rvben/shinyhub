@@ -1705,9 +1705,10 @@ func TestAppDetailHeaderTiles(t *testing.T) {
 		"onMetrics must feed the tiles from headerStats fleet aggregates")
 	assertContains(t, "views/app-detail.js", "statusPillClass(app.status)",
 		"the status pill class must come from statusPillClass")
-	// The grid metrics line is a separate path and must stay intact.
-	assertContains(t, "app.js", "CPU ${cpu}% · ${ram} RAM",
-		"the grid status/metrics line must be unchanged")
+	// The grid metrics line is a separate path; it renders via cardMetricsLabel,
+	// which sums CPU/RAM across replicas (see TestAppCardInstancesAndSummedMetrics).
+	assertContains(t, "views/card-metrics.js", "CPU ${s.cpu} · ${s.ram} RAM",
+		"the grid metrics line renders CPU/RAM via cardMetricsLabel")
 	// CSS: tiles, the running pulse, and a reduced-motion off-switch.
 	assertContains(t, "style.css", ".app-detail-stats .stat", "metric tiles must be styled")
 	assertContains(t, "style.css", ".app-detail-header .status-pill.is-live::before { animation: none; }",
@@ -1951,4 +1952,21 @@ func TestAppCardMetricsReserveSpace(t *testing.T) {
 			t.Errorf(".app-metrics:empty contains %q, which collapses the line to zero height and shifts the card buttons down when CPU/RAM appears on start", collapse)
 		}
 	}
+}
+
+// TestAppCardInstancesAndSummedMetrics pins that the dashboard card reports a
+// scaled app honestly: CPU/RAM summed across replicas (matching the detail
+// header) and an instance-count chip, rather than the first-replica scalar that
+// under-reported a multi-replica app's usage.
+func TestAppCardInstancesAndSummedMetrics(t *testing.T) {
+	assertContains(t, "app.js", "cardMetricsLabel",
+		"the grid card must render CPU/RAM via cardMetricsLabel (summed across replicas), not the first-replica m.cpu_percent scalar")
+	assertContains(t, "app.js", "instanceCountLabel",
+		"the grid card must show the instance count via instanceCountLabel for scaled apps")
+	assertNotContains(t, "app.js", "m.cpu_percent.toFixed",
+		"the grid card must not render the first-replica m.cpu_percent scalar; it under-reports a scaled app's total")
+	assertContains(t, "views/card-metrics.js", "headerStats",
+		"cardMetricsLabel must reuse headerStats so the card's total matches the detail header's per-replica sum")
+	assertContains(t, "style.css", ".app-instances",
+		"the instance-count chip needs styling")
 }
