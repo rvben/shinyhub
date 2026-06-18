@@ -58,6 +58,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.23](https://github.com/rvben/shinyhub/compare/v0.8.22...v0.8.23) - 2026-06-18
+
+### Added
+
+- **api**: batch app metrics into one request so the dashboard loads at once ([86e6323](https://github.com/rvben/shinyhub/commit/86e632388cf82faba2fcd02c636cbf3422d76723))
+
 ## [0.8.22](https://github.com/rvben/shinyhub/compare/v0.8.21...v0.8.22) - 2026-06-18
 
 ### Added
