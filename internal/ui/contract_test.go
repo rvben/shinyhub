@@ -1235,6 +1235,18 @@ func TestStatusLabelContract(t *testing.T) {
 		"app-detail.js must not carry a private formatStatus — use the shared module")
 }
 
+// TestDetailPillMatchesCardStatus guards against the card and detail-header
+// pill disagreeing about the same app. The pill must derive from the shared
+// appStatusView, so a never-deployed crash-looped app reads "Failed" on both
+// surfaces instead of "Failed" on the card but a benign "Awaiting deploy" on
+// the detail page.
+func TestDetailPillMatchesCardStatus(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "appStatusView(app, formatStatus)",
+		"the detail-header pill must derive from the shared appStatusView so it agrees with the card badge")
+	assertNotContains(t, "views/app-detail.js", "status-pill status-new",
+		"the detail pill must not hardcode status-new for every zero-deploy app — appStatusView distinguishes Failed from Awaiting deploy")
+}
+
 // TestResponsiveAndStatePolish pins the responsive breakpoint additions, the
 // loading placeholders, the audit empty-state, the SSE disconnect notice, the
 // Workers refresh control, and the degraded-app tooltip surfaced by the polish
@@ -1758,8 +1770,8 @@ func TestAppDetailHeaderTiles(t *testing.T) {
 	assertContains(t, "views/stat-format.js", "export function headerStats", "stat-format must expose headerStats")
 	assertContains(t, "app.js", "headerStats(m, configured)",
 		"onMetrics must feed the tiles from headerStats fleet aggregates")
-	assertContains(t, "views/app-detail.js", "statusPillClass(app.status)",
-		"the status pill class must come from statusPillClass")
+	assertContains(t, "views/app-detail.js", "statusPillClass(statusView.state)",
+		"the status pill class must come from statusPillClass, fed the shared appStatusView state")
 	// The grid metrics line is a separate path; it renders via cardMetricsLabel,
 	// which sums CPU/RAM across replicas (see TestAppCardInstancesAndSummedMetrics).
 	assertContains(t, "views/card-metrics.js", "CPU ${s.cpu} · ${s.ram} RAM",

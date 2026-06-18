@@ -1,10 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { appCardBadge, updateCardStatusBadge } from '../static/views/app-card-badge.js';
+import { appCardBadge, updateCardStatusBadge, appStatusView } from '../static/views/app-card-badge.js';
 
 // Stub for app.js's formatStatus so the helper stays pure and testable.
 const fmt = (s) => `S:${s}`;
+
+// appStatusView is the shared status decision the card badge AND the detail-
+// header pill both consume, so the same app cannot read "Failed" on its card
+// while reading "Awaiting deploy" on its detail page.
+test('appStatusView reports a never-deployed crash-looped app as failed, not new', () => {
+  const v = appStatusView(
+    { deploy_count: 0, last_deployment_status: 'failed', status: 'stopped' },
+    fmt,
+  );
+  assert.deepEqual(v, { state: 'failed', text: 'Failed' });
+});
+
+test('appStatusView reports a never-deployed app as awaiting its first deploy', () => {
+  const v = appStatusView({ deploy_count: 0, last_deployment_status: '', status: 'stopped' }, fmt);
+  assert.deepEqual(v, { state: 'new', text: 'Awaiting deploy' });
+});
+
+test('appStatusView reports a deployed app by its live status', () => {
+  const v = appStatusView({ deploy_count: 3, status: 'hibernated' }, fmt);
+  assert.deepEqual(v, { state: 'hibernated', text: 'S:hibernated' });
+});
 
 // A status badge as renderGridVerbatim builds it: a span with the badge classes
 // plus the data-slug the metrics poll uses to locate it.

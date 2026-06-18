@@ -1,4 +1,7 @@
-// appCardBadge decides the status badge for an app card.
+// appStatusView is the canonical status decision an app card AND the detail-
+// header pill both consume, so the same app cannot read "Failed" on its card
+// while reading "Awaiting deploy" on its detail page. It returns a state key
+// (used to build `badge-<state>` / `status-<state>` classes) and the label.
 //
 // deploy_count only increments on a *successful* deploy, so it cannot tell a
 // failed-only deploy (an attempt that crash-looped) from an app that was never
@@ -8,15 +11,21 @@
 //
 // formatStatus is injected (app.js owns it) to keep this module DOM-free and
 // unit-testable.
-export function appCardBadge(app, formatStatus) {
+export function appStatusView(app, formatStatus) {
   const neverSucceeded = (app.deploy_count || 0) === 0;
   if (neverSucceeded && app.last_deployment_status === 'failed') {
-    return { cls: 'badge badge-failed', text: 'Failed' };
+    return { state: 'failed', text: 'Failed' };
   }
   if (neverSucceeded) {
-    return { cls: 'badge badge-new', text: 'Awaiting deploy' };
+    return { state: 'new', text: 'Awaiting deploy' };
   }
-  return { cls: `badge badge-${app.status}`, text: formatStatus(app.status) };
+  return { state: app.status, text: formatStatus(app.status) };
+}
+
+// appCardBadge maps the shared status view onto an app-card badge class.
+export function appCardBadge(app, formatStatus) {
+  const { state, text } = appStatusView(app, formatStatus);
+  return { cls: `badge badge-${state}`, text };
 }
 
 // updateCardStatusBadge refreshes a card's status badge in place from a freshly

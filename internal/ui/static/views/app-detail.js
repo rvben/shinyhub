@@ -14,6 +14,7 @@ import {
 import { deploymentListModels, relativeTime } from '/static/views/deployment-row.js';
 import { statusPillClass } from '/static/views/stat-format.js';
 import { formatStatus } from '/static/views/status-label.js';
+import { appStatusView } from '/static/views/app-card-badge.js';
 import { crashBanner } from '/static/views/crash-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
 
@@ -154,15 +155,13 @@ export function mountAppDetail(ctx) {
       }
     }
     const statusEl = document.getElementById('app-detail-status');
-    // Mirror the apps-grid behaviour: an app with zero deploys is not
-    // "degraded" — there's nothing wrong with it, it just hasn't run yet.
-    if ((app.deploy_count || 0) === 0) {
-      statusEl.textContent = 'Awaiting deploy';
-      statusEl.className = 'status-pill status-new';
-    } else {
-      statusEl.textContent = formatStatus(app.status);
-      statusEl.className = statusPillClass(app.status);
-    }
+    // Derive the pill from the same appStatusView the apps-grid card uses, so
+    // the two surfaces always agree: a zero-deploy app reads "Awaiting deploy"
+    // (not "degraded"), and a zero-deploy crash-looped one reads "Failed", not
+    // the benign "Awaiting deploy".
+    const statusView = appStatusView(app, formatStatus);
+    statusEl.textContent = statusView.text;
+    statusEl.className = statusPillClass(statusView.state);
     // Seed the metric tiles until the first metrics poll arrives. Replicas shows
     // the configured count immediately (CPU/Memory/Sessions fill in on poll).
     const seedStat = (id, val) => {
