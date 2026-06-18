@@ -13,6 +13,7 @@ import {
 } from '/static/views/autoscale.js';
 import { deploymentListModels, relativeTime } from '/static/views/deployment-row.js';
 import { statusPillClass } from '/static/views/stat-format.js';
+import { formatStatus } from '/static/views/status-label.js';
 import { crashBanner } from '/static/views/crash-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
 
@@ -21,11 +22,6 @@ const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
 
 function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
-}
-
-function formatStatus(status) {
-  if (!status) return '';
-  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 export function mountAppDetail(ctx) {

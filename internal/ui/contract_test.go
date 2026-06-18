@@ -1180,6 +1180,61 @@ func TestKeyboardFocusAndLabels(t *testing.T) {
 		"the members-list Revoke button must carry a per-user aria-label")
 }
 
+// TestStatusColorContract pins a status color for every wire status the cards,
+// detail-header pill, and sidebar dots can render. A missing rule falls through
+// to an unstyled near-white badge (the hibernated bug) or a gray dot that makes
+// a broken app look idle (the crashed sidebar bug), so the absence of any of
+// these classes must fail the build rather than ship a misleading status.
+func TestStatusColorContract(t *testing.T) {
+	// The dedicated standby color exists and is distinct from the gray/off and
+	// cyan/new tiers so hibernated never reads as broken or as actively live.
+	assertContains(t, "style.css", "--standby:",
+		"hibernated needs its own standby color token, not the unstyled near-white fallback")
+
+	// Card badges: every status the grid can render carries an explicit rule.
+	for _, cls := range []string{
+		".badge-running", ".badge-healthy", ".badge-deploying", ".badge-waking",
+		".badge-degraded", ".badge-crashed", ".badge-hibernated", ".badge-stopped",
+		".badge-suspended", ".badge-unknown", ".badge-new",
+	} {
+		assertContains(t, "style.css", cls+" ",
+			"card status badge "+cls+" must have an explicit color rule, not fall through to the unstyled .badge default")
+	}
+	assertContains(t, "style.css", ".badge-hibernated { background: var(--standby-bg)",
+		"hibernated card badge must use the standby color")
+
+	// Detail-header pill: hibernated reads standby, not lumped with gray stopped.
+	assertContains(t, "style.css", ".status-pill.status-hibernated { color: var(--standby)",
+		"detail-header hibernated pill must use the standby color, distinct from stopped")
+
+	// Sidebar dots: crashed must be red (was missing → showed gray, looking idle).
+	assertContains(t, "style.css", ".sb-dot-crashed",
+		"a crashed app's sidebar dot must be red, not fall through to the gray default")
+	assertContains(t, "style.css", ".sb-dot-hibernated",
+		"hibernated needs its own sidebar standby dot")
+}
+
+// TestStatusLabelContract pins the status→label voice to one shared module.
+// app.js and app-detail.js previously each carried a private formatStatus that
+// could drift; status-label.js is now the single source so cards, the detail
+// pill, the sidebar, and replica badges all speak with one voice.
+func TestStatusLabelContract(t *testing.T) {
+	assertContains(t, "views/status-label.js", "hibernated: 'Sleeping'",
+		"hibernated must read 'Sleeping' — it pairs with the 'Waking' resume and the indigo standby color")
+	assertContains(t, "views/status-label.js", "suspended:  'Paused'",
+		"suspended must read 'Paused' — the operator word for a resumable replica")
+
+	// Both consumers import the shared label, not a private copy that can drift.
+	assertContains(t, "app.js", "import { formatStatus } from '/static/views/status-label.js'",
+		"app.js must import the shared status label, not redefine it")
+	assertContains(t, "views/app-detail.js", "import { formatStatus } from '/static/views/status-label.js'",
+		"app-detail.js must import the shared status label, not redefine it")
+	assertNotContains(t, "app.js", "function formatStatus",
+		"app.js must not carry a private formatStatus — the duplicate is how the label voice drifted")
+	assertNotContains(t, "views/app-detail.js", "function formatStatus",
+		"app-detail.js must not carry a private formatStatus — use the shared module")
+}
+
 // TestResponsiveAndStatePolish pins the responsive breakpoint additions, the
 // loading placeholders, the audit empty-state, the SSE disconnect notice, the
 // Workers refresh control, and the degraded-app tooltip surfaced by the polish

@@ -18,6 +18,7 @@ import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
+import { formatStatus } from '/static/views/status-label.js';
 import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 
@@ -100,13 +101,9 @@ function wireKebab(button, list, container) {
   });
 }
 
-// formatStatus turns the lowercase wire-status (`running`, `stopped`,
-// `degraded`, …) into a sentence-case label for badge text. Badges no
-// longer use `text-transform: uppercase`, so the source casing matters.
-function formatStatus(status) {
-  if (!status) return '';
-  return status.charAt(0).toUpperCase() + status.slice(1);
-}
+// formatStatus (status → display label) is imported from views/status-label.js
+// so the cards, detail pill, sidebar, and replica badges all speak with one
+// voice. Badges no longer use `text-transform: uppercase`, so casing matters.
 
 document.addEventListener('DOMContentLoaded', () => {
   // Branding: server injects window.__SHINYHUB_BRANDING__ (see
