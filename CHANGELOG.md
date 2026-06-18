@@ -59,6 +59,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.24](https://github.com/rvben/shinyhub/compare/v0.8.23...v0.8.24) - 2026-06-18
+
+### Added
+
+- **ui**: rework app status colors and labels ([9379efb](https://github.com/rvben/shinyhub/commit/9379efbd56003c3df25fc5a60240ad57bb62463e))
+
+### Fixed
+
+- **ui**: show a crash-looped never-deployed app as Failed on its detail page ([b904062](https://github.com/rvben/shinyhub/commit/b90406297adcc7f4ede43669b3bc812276549085))
+
 ## [0.8.23](https://github.com/rvben/shinyhub/compare/v0.8.22...v0.8.23) - 2026-06-18
 
 ### Added
