@@ -1924,3 +1924,31 @@ func TestCrashedAppUX(t *testing.T) {
 	assertContains(t, "views/fleet-health.js", "apps.crashed",
 		"the fleet health summary must read apps.crashed; see internal/api/fleet_health.go fleetAppCounts.Crashed")
 }
+
+// TestAppCardMetricsReserveSpace guards against the layout shift where the app
+// card's action buttons jumped down when the CPU/RAM line appeared on start: the
+// metrics line must reserve its height even when empty (not running), so the
+// buttons below never move. Scoped to the .app-metrics:empty rule so it catches
+// a re-collapse (zeroing height/padding) without matching the same declarations
+// elsewhere in the stylesheet.
+func TestAppCardMetricsReserveSpace(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	i := strings.Index(css, ".app-metrics:empty {")
+	if i < 0 {
+		t.Fatal(".app-metrics:empty rule not found")
+	}
+	end := strings.Index(css[i:], "}")
+	if end < 0 {
+		t.Fatal(".app-metrics:empty rule has no closing brace")
+	}
+	rule := css[i : i+end]
+	for _, collapse := range []string{"min-height: 0", "height: 0", "padding: 0"} {
+		if strings.Contains(rule, collapse) {
+			t.Errorf(".app-metrics:empty contains %q, which collapses the line to zero height and shifts the card buttons down when CPU/RAM appears on start", collapse)
+		}
+	}
+}
