@@ -13,6 +13,7 @@ import {
 } from '/static/views/autoscale.js';
 import { deploymentListModels, relativeTime } from '/static/views/deployment-row.js';
 import { statusPillClass } from '/static/views/stat-format.js';
+import { crashBanner } from '/static/views/crash-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
 
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
@@ -506,6 +507,15 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
       <ul id="overview-rejects-by-reason-list" class="rejects-list" aria-live="polite"></ul>
     </section>
   `;
+
+  // A crashed app shows a prominent failure banner (the reason + a Restart) above
+  // the overview cards so the operator immediately sees why it is down and can
+  // recover it, instead of a silent status pill.
+  const crashEl = crashBanner(document, app, {
+    canManage: ctx.canManageApp(ctx.state.user, app),
+    onRestart: () => ctx.restart(app.slug),
+  });
+  if (crashEl) panel.insertBefore(crashEl, panel.firstChild);
 
   // Seed the Replicas list from /api/apps/:slug's replicas_status so the
   // panel shows index + status immediately. Sessions / CPU / RAM stay as

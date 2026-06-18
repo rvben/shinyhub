@@ -1032,6 +1032,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// in single-node and clustered deployments alike.
 	prx.SetWakeTrigger(watcher.WakeTrigger)
 
+	// Let the proxy render a clear status page (instead of the endless loading
+	// spinner) when a request hits an app that is crashed or stopped, surfacing
+	// the crash reason recorded in apps.last_error.
+	prx.SetAppStatusLookup(func(slug string) (string, string) {
+		app, err := store.GetAppBySlug(slug)
+		if err != nil {
+			return "", ""
+		}
+		return app.Status, app.LastError
+	})
+
 	// Record hibernate/wake transitions and crash-restart counts when metrics
 	// are enabled. Nil-safe inside the watcher when metrics are disabled.
 	if metricsReg != nil {

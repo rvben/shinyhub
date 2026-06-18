@@ -118,13 +118,15 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
 
-	// App should now be stopped in the DB.
+	// A running app whose process did not survive the restart is marked
+	// "hibernated" (not "stopped") so the warm-restore pass re-boots it - it
+	// survives the restart instead of being stranded down.
 	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Status != "stopped" {
-		t.Errorf("expected status=stopped after recovery of dead PID, got %s", a.Status)
+	if a.Status != "hibernated" {
+		t.Errorf("expected status=hibernated after recovery of dead PID, got %s", a.Status)
 	}
 }
 
@@ -380,13 +382,14 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 		t.Error("expected orphan-app to not be adopted (no container found)")
 	}
 
-	// "orphan-app" should be marked stopped in the DB.
+	// "orphan-app" (its container vanished) is marked "hibernated" so the
+	// warm-restore pass re-boots it, rather than being stranded "stopped".
 	orphan, err := store.GetApp("orphan-app")
 	if err != nil {
 		t.Fatalf("GetApp: %v", err)
 	}
-	if orphan.Status != "stopped" {
-		t.Errorf("expected orphan-app status=stopped, got %s", orphan.Status)
+	if orphan.Status != "hibernated" {
+		t.Errorf("expected orphan-app status=hibernated, got %s", orphan.Status)
 	}
 }
 

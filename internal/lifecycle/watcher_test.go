@@ -29,6 +29,15 @@ type fakeManager struct {
 
 	// stoppedReplicas records every StopReplica(slug, index) call (GC eviction).
 	stoppedReplicas []replicaKey
+
+	// logTail is returned verbatim by LogTail (the captured crash diagnostic).
+	logTail string
+}
+
+func (f *fakeManager) LogTail(_ string, _, _ int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logTail
 }
 
 func (f *fakeManager) All() []*process.ProcessInfo {
@@ -135,6 +144,10 @@ type fakeStore struct {
 	// hibernateAppCalls tracks every HibernateApp call (slug).
 	hibernateAppCalls []string
 
+	// crashReasons records the reason from the most recent MarkAppCrashed per
+	// slug; cleared by any non-crashed UpdateAppStatus.
+	crashReasons map[string]string
+
 	// forceHibernatedList, when non-nil, is returned verbatim by
 	// ListHibernatedApps regardless of per-app status (drives the
 	// snapshot-vs-claim race in warm-restore tests).
@@ -194,7 +207,30 @@ func (f *fakeStore) UpdateAppStatus(p db.UpdateAppStatusParams) error {
 		f.appStatus = make(map[string]string)
 	}
 	f.appStatus[p.Slug] = p.Status
+	delete(f.crashReasons, p.Slug) // any non-crashed transition clears the reason
 	f.mu.Unlock()
+	return nil
+}
+
+// MarkAppCrashed records the crash reason and sets status to "crashed", mirroring
+// the real store (a "deleting" app is left untouched).
+func (f *fakeStore) MarkAppCrashed(slug, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.appStatus[slug] == "deleting" {
+		return db.ErrNotFound
+	}
+	if app, ok := f.apps[slug]; ok {
+		app.Status = "crashed"
+	}
+	if f.appStatus == nil {
+		f.appStatus = make(map[string]string)
+	}
+	if f.crashReasons == nil {
+		f.crashReasons = make(map[string]string)
+	}
+	f.appStatus[slug] = "crashed"
+	f.crashReasons[slug] = reason
 	return nil
 }
 
@@ -406,6 +442,8 @@ func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
 		deploy:        deployFn,
 		attempts:      make(map[replicaKey]int),
 		nextRetry:     make(map[replicaKey]time.Time),
+		crashCount:    make(map[replicaKey]int),
+		lastCrash:     make(map[replicaKey]time.Time),
 		driving:       make(map[string]bool),
 		expandingWarm: make(map[string]bool),
 	}
@@ -588,8 +626,11 @@ func TestWatchdog_GivesUpAfterMaxAttempts(t *testing.T) {
 	if got := atomic.LoadInt32(&deployCount); got != int32(w.cfg.RestartMaxAttempts) {
 		t.Errorf("expected deploy attempts capped at %d, got %d", w.cfg.RestartMaxAttempts, got)
 	}
-	if st.appStatus["app"] != "degraded" {
-		t.Errorf("expected status=degraded, got %q", st.appStatus["app"])
+	// The single replica is down and its restart budget is spent: the app is fully
+	// down with no recovery in flight, so it is "crashed" (terminal, restartable),
+	// not "degraded" (partially up, still self-healing).
+	if st.appStatus["app"] != "crashed" {
+		t.Errorf("expected status=crashed, got %q", st.appStatus["app"])
 	}
 }
 
@@ -1071,7 +1112,7 @@ func TestWatcher_OneReplicaCrashesOtherStays(t *testing.T) {
 	}
 }
 
-func TestWatcher_AllReplicasDegraded(t *testing.T) {
+func TestWatcher_AllReplicasCrashed(t *testing.T) {
 	mgr := &fakeManager{
 		entries: []*process.ProcessInfo{
 			{Slug: "demo", Index: 0, Status: process.StatusCrashed},
@@ -1099,8 +1140,10 @@ func TestWatcher_AllReplicasDegraded(t *testing.T) {
 	w.nextRetry[replicaKey{"demo", 1}] = time.Now().Add(-time.Second)
 	w.mu.Unlock()
 	w.runOnce()
-	if st.appStatus["demo"] != "degraded" {
-		t.Fatalf("expected degraded after all replicas exhaust retries, got %q", st.appStatus["demo"])
+	// Both replicas are down with their restart budgets spent: the app is fully
+	// down (crashed), not partially up (degraded).
+	if st.appStatus["demo"] != "crashed" {
+		t.Fatalf("expected crashed after all replicas exhaust retries, got %q", st.appStatus["demo"])
 	}
 }
 
@@ -1656,6 +1699,9 @@ func (m *orderCheckingManager) Stop(slug string) error {
 	return m.inner.Stop(slug)
 }
 func (m *orderCheckingManager) Suspend(slug string) (bool, error) { return m.inner.Suspend(slug) }
+func (m *orderCheckingManager) LogTail(slug string, index, n int) string {
+	return m.inner.LogTail(slug, index, n)
+}
 func (m *orderCheckingManager) StopReplica(slug string, index int) error {
 	return m.inner.StopReplica(slug, index)
 }

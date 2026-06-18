@@ -1040,6 +1040,21 @@ func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
 	m.entries[slug] = pool
 }
 
+// LogTail returns the last n lines of a replica's log file joined by newlines,
+// or "" when the log cannot be read. Used to capture a crash diagnostic (e.g. a
+// Python traceback) when an app transitions to "crashed".
+func (m *Manager) LogTail(slug string, index, n int) string {
+	r, ok := m.LogReader(slug, index)
+	if !ok {
+		return ""
+	}
+	lines, err := r.Tail(n)
+	if err != nil {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
 // LogReader returns a LogReader for a specific replica's log file.
 // Returns false if no log file exists yet (replica has never been started).
 func (m *Manager) LogReader(slug string, index int) (*LogReader, bool) {
