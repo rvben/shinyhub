@@ -57,6 +57,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.22](https://github.com/rvben/shinyhub/compare/v0.8.21...v0.8.22) - 2026-06-18
+
+### Added
+
+- **proxy**: serve warm-wake resumes inline instead of via the loading page ([3e1e26d](https://github.com/rvben/shinyhub/commit/3e1e26de7f58a32accca34648d0bdfe29439b491))
+
 ## [0.8.21](https://github.com/rvben/shinyhub/compare/v0.8.20...v0.8.21) - 2026-06-18
 
 ### Added
