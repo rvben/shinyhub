@@ -55,6 +55,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.20](https://github.com/rvben/shinyhub/compare/v0.8.19...v0.8.20) - 2026-06-18
+
+### Added
+
+- **lifecycle**: surface crashed apps with a reason and one-click recovery ([7ace24d](https://github.com/rvben/shinyhub/commit/7ace24df228f9adb28b70c9e5042120d27000038))
+
 ## [0.8.19](https://github.com/rvben/shinyhub/compare/v0.8.18...v0.8.19) - 2026-06-17
 
 ### Fixed
