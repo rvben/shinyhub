@@ -28,7 +28,12 @@ HOST="http://127.0.0.1:${PORT}"
 skip() { echo "SKILL-SMOKE SKIP: $*" >&2; exit 0; }
 fail() { echo "SKILL-SMOKE FAIL: $*" >&2; exit 1; }
 
-command -v uv >/dev/null 2>&1 || skip "uv not installed; the example app needs uv to start (https://docs.astral.sh/uv/). Offline-safe skip."
+if ! command -v uv >/dev/null 2>&1; then
+  # In CI the regression must run for real; a missing uv there is a setup failure,
+  # not an offline skip. Locally (no CI) skip so `make` stays green without uv.
+  [ -n "${CI:-}" ] && fail "uv not installed but CI is set; CI must run the skill smoke for real (https://docs.astral.sh/uv/)"
+  skip "uv not installed; the example app needs uv to start (https://docs.astral.sh/uv/). Offline-safe skip."
+fi
 [ -f "${APP_DIR}/app.py" ] || fail "example app missing at ${APP_DIR}/app.py"
 
 WORKDIR="$(mktemp -d)"
@@ -94,8 +99,11 @@ echo "==> deploy the skill's example app"
   || { "${BIN}" apps logs "${SLUG}" --no-follow --config "${CREDS}" >&2 2>/dev/null || true; fail "deploy"; }
 
 echo "==> assert app is running"
-"${BIN}" apps list --config "${CREDS}" | grep -Eq "^${SLUG}[[:space:]]+running" \
-  || { "${BIN}" apps list --config "${CREDS}" >&2; fail "app not running"; }
+# Force table output: piping makes the CLI emit JSON (non-TTY default), which the
+# table-anchored grep would never match. The table is "SLUG STATUS DEPLOYS", so
+# the status is the column immediately after the slug.
+"${BIN}" apps list -o table --config "${CREDS}" | grep -Eq "^${SLUG}[[:space:]]+running([[:space:]]|\$)" \
+  || { "${BIN}" apps list -o table --config "${CREDS}" >&2; fail "app not running"; }
 
 echo "==> assert private app returns 401 unauthenticated (access control)"
 code="$(curl -s -o /dev/null -w '%{http_code}' "${HOST}/app/${SLUG}/")"

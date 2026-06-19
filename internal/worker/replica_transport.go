@@ -70,6 +70,18 @@ func (b *ReplicaTransportBuilder) TransportForReplica(r *db.Replica) (http.Round
 		return nil, nil
 	}
 
+	// A remote_docker replica needs a worker store and an agent dialer to build
+	// its mTLS transport. A builder constructed without them (e.g. the single-node
+	// startup pool syncer when worker support is not configured) reports an error
+	// here instead of dereferencing a nil dialer/store, so reconcileSlug logs the
+	// error and leaves the replica unrouted rather than crashing the control plane.
+	if b.store == nil {
+		return nil, fmt.Errorf("transport for replica worker %q: no worker store configured", r.WorkerID)
+	}
+	if b.dialer == nil {
+		return nil, fmt.Errorf("transport for replica worker %q: no agent dialer configured", r.WorkerID)
+	}
+
 	b.mu.Lock()
 	if tr, ok := b.cache[r.WorkerID]; ok {
 		b.mu.Unlock()
@@ -80,6 +92,9 @@ func (b *ReplicaTransportBuilder) TransportForReplica(r *db.Replica) (http.Round
 	w, err := b.store.GetWorker(r.WorkerID)
 	if err != nil {
 		return nil, fmt.Errorf("transport for replica worker %q: %w", r.WorkerID, err)
+	}
+	if w == nil {
+		return nil, fmt.Errorf("transport for replica worker %q: worker not found", r.WorkerID)
 	}
 	tr, err := b.dialer.Transport(*w)
 	if err != nil {
