@@ -1,16 +1,20 @@
 package proxy_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/proxy"
-	"log/slog"
+	"github.com/rvben/shinyhub/internal/worker"
 )
 
 // --- test doubles ---
@@ -585,5 +589,84 @@ func TestReconcileSlug_PushesEffectiveIdentityFlag(t *testing.T) {
 				t.Errorf("flag = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestPoolSyncer_RunOnce_NilDialerRemoteDocker is the regression for the
+// control-plane startup panic: single-node startup pool adoption built the
+// transport builder with a nil dialer, and reconciling a routable remote_docker
+// replica dereferenced that nil dialer (SIGSEGV, "control plane did not start").
+// With the nil-guard in TransportForReplica, the syncer logs the transport error
+// and skips the slot, so the control plane survives and the replica is simply
+// left unrouted. This drives the exact production path through the real
+// worker.ReplicaTransportBuilder: RunOnce -> sync -> reconcileSlug ->
+// TransportForReplica.
+func TestPoolSyncer_RunOnce_NilDialerRemoteDocker(t *testing.T) {
+	store := dbtest.New(t)
+
+	// Seed owner -> app -> worker -> a routable remote_docker replica. The worker
+	// MUST exist so GetWorker succeeds and (pre-fix) the nil dialer is actually
+	// dereferenced; a missing worker returns ErrNotFound before the deref and would
+	// not reproduce the panic.
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	owner, err := store.GetUserByUsername("owner")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	const slug = "remote-app"
+	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: "remote", OwnerID: owner.ID, Access: "private"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, err := store.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if err := store.UpsertWorker(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "192.0.2.5:8443", Status: "up"}); err != nil {
+		t.Fatalf("upsert worker: %v", err)
+	}
+	depID := int64(1)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:        app.ID,
+		Index:        0,
+		Status:       db.ReplicaStatusRunning,
+		Provider:     "remote_docker",
+		Tier:         "remote",
+		WorkerID:     "node-a",
+		EndpointURL:  "http://192.0.2.5:8080",
+		DesiredState: "running",
+		DeploymentID: &depID,
+	}); err != nil {
+		t.Fatalf("upsert replica: %v", err)
+	}
+
+	// Build the syncer exactly as single-node startup adoption did: the transport
+	// builder is constructed with a NIL dialer.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	prx := proxy.New()
+	prx.MarkSynced()
+	syncer := proxy.NewPoolSyncer(prx, store, worker.NewReplicaTransportBuilder(nil, store), logger, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Must not panic (pre-fix this is a SIGSEGV inside TransportForReplica).
+	syncer.RunOnce(ctx)
+
+	// The transport error is logged and the slot skipped. Assert the nil-dialer
+	// cause specifically (not just the generic event) so a future seed change that
+	// makes GetWorker fail instead can't silently turn this into a false pass.
+	if !strings.Contains(logBuf.String(), "pool_sync_transport_error") {
+		t.Errorf("expected pool_sync_transport_error to be logged; log was:\n%s", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "no agent dialer configured") {
+		t.Errorf("expected the nil-dialer error cause to be logged; log was:\n%s", logBuf.String())
+	}
+	// ...and no backend target is registered for the slug. SetPoolSize runs before
+	// transport construction, so assert the target URL (not RegisteredSlugs).
+	if got := prx.ReplicaTargetURL(slug, 0); got != "" {
+		t.Errorf("ReplicaTargetURL(%q, 0) = %q, want \"\" (no route registered)", slug, got)
 	}
 }

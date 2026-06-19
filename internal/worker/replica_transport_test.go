@@ -339,3 +339,74 @@ func TestReplicaTransportBuilder_UnknownWorker(t *testing.T) {
 		t.Errorf("TransportForReplica for unknown worker: got transport, want nil")
 	}
 }
+
+// nilWorkerStore is a WorkerGetter that returns (nil, nil) - a contract the real
+// store never produces (GetWorker returns ErrNotFound for a missing worker), but
+// TransportForReplica must not dereference the nil worker if some WorkerGetter
+// ever does.
+type nilWorkerStore struct{}
+
+func (nilWorkerStore) GetWorker(string) (*db.Worker, error) { return nil, nil }
+
+// newTestDialer builds a minimal mTLS dialer for the nil-guard tests, which only
+// need a non-nil AgentDialer (they never complete a handshake).
+func newTestDialer(t *testing.T) AgentDialer {
+	t.Helper()
+	mint := func() (tls.Certificate, error) {
+		return selfSignedCert(t, time.Now().Add(-time.Minute), time.Now().Add(time.Hour)), nil
+	}
+	d, err := NewMTLSDialer(mint, nil)
+	if err != nil {
+		t.Fatalf("NewMTLSDialer: %v", err)
+	}
+	return d
+}
+
+// TestReplicaTransportBuilder_NilDialer verifies that a builder constructed with a
+// nil dialer returns an error (not a panic) for a remote_docker replica, even when
+// the worker row exists. This is the single-node startup-adoption crash path: the
+// startup pool syncer builds the transport builder with a nil dialer when worker
+// support is unconfigured.
+func TestReplicaTransportBuilder_NilDialer(t *testing.T) {
+	store := newStubWorkerStore(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "192.0.2.5:8443", Status: "up"})
+	builder := NewReplicaTransportBuilder(nil, store)
+	row := &db.Replica{Provider: ProviderRemoteDocker, WorkerID: "node-a"}
+
+	tr, err := builder.TransportForReplica(row)
+	if err == nil {
+		t.Fatal("TransportForReplica with nil dialer: want error, got nil")
+	}
+	if tr != nil {
+		t.Errorf("TransportForReplica with nil dialer: got transport %T, want nil", tr)
+	}
+}
+
+// TestReplicaTransportBuilder_NilStore verifies a nil worker store yields an error
+// rather than a nil dereference for a remote_docker replica.
+func TestReplicaTransportBuilder_NilStore(t *testing.T) {
+	builder := NewReplicaTransportBuilder(newTestDialer(t), nil)
+	row := &db.Replica{Provider: ProviderRemoteDocker, WorkerID: "node-a"}
+
+	tr, err := builder.TransportForReplica(row)
+	if err == nil {
+		t.Fatal("TransportForReplica with nil store: want error, got nil")
+	}
+	if tr != nil {
+		t.Errorf("TransportForReplica with nil store: got transport %T, want nil", tr)
+	}
+}
+
+// TestReplicaTransportBuilder_NilWorker verifies that a WorkerGetter returning
+// (nil, nil) yields an error rather than dereferencing the nil worker.
+func TestReplicaTransportBuilder_NilWorker(t *testing.T) {
+	builder := NewReplicaTransportBuilder(newTestDialer(t), nilWorkerStore{})
+	row := &db.Replica{Provider: ProviderRemoteDocker, WorkerID: "node-a"}
+
+	tr, err := builder.TransportForReplica(row)
+	if err == nil {
+		t.Fatal("TransportForReplica with nil worker: want error, got nil")
+	}
+	if tr != nil {
+		t.Errorf("TransportForReplica with nil worker: got transport %T, want nil", tr)
+	}
+}

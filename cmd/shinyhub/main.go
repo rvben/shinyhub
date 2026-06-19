@@ -1389,8 +1389,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// first-sync gate so /readyz is not blocked). RunOnce calls MarkSynced
 	// again, which is idempotent.
 	if !isClustered(cfg) {
+		// Pass the real dialer (nil when worker support is unconfigured) so startup
+		// adoption can build mTLS transports for remote_docker replicas it adopts;
+		// TransportForReplica reports an error for a nil dialer rather than crashing.
 		startupSyncer := proxy.NewPoolSyncer(prx, store,
-			worker.NewReplicaTransportBuilder(nil, store),
+			worker.NewReplicaTransportBuilder(dialer, store),
 			slog.Default(), cfg.Auth.IdentityHeadersEnabled())
 		startupSyncer.RunOnce(context.Background())
 		slog.Info("startup pool adoption complete (single-node)")
