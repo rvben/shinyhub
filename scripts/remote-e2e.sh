@@ -57,8 +57,20 @@ fail() {
   exit 1
 }
 
-command -v docker >/dev/null 2>&1 || fail "docker is required for the remote-worker E2E"
-docker info >/dev/null 2>&1 || fail "docker daemon is not reachable"
+# skip aborts cleanly (exit 0) so `make test-remote-e2e` stays green on a host
+# without Docker. In CI the test must run for real, so a missing Docker daemon is
+# a hard failure there (CI is always set to "true" by GitHub Actions); this
+# guarantees CI never goes green by silently skipping the regression.
+skip() {
+  if [ -n "${CI:-}" ]; then
+    fail "$* (CI is set; the remote-worker E2E must run for real in CI)"
+  fi
+  echo "E2E SKIP: $*" >&2
+  exit 0
+}
+
+command -v docker >/dev/null 2>&1 || skip "docker not installed; the remote tier needs a Docker daemon"
+docker info >/dev/null 2>&1 || skip "docker daemon not reachable"
 
 # Ports for the three listeners: the user/API server, the control plane's
 # worker-facing mTLS API, and the worker's data-plane tunnel.
