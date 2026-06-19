@@ -170,6 +170,7 @@ value.
 | [Persistent data dir](docs/data.md) | Pushing data, the app-visible path, authorization, quota, and concurrency. |
 | [Scheduled jobs and shared data](docs/schedules.md) | Per-app cron schedules and read-only cross-app data mounts. |
 | [Horizontal scaling](docs/scaling.md) | Per-app replicas, load balancing, and session admission. |
+| [App startup performance](docs/app-performance.md) | Why data lags the page shell, and the startup-scope and caching patterns that fix it. |
 | [Fleet reconcile](docs/fleet.md) | Declaring and converging a whole set of apps from one file. |
 | [Deploy manifest](docs/manifest.md) | The `shinyhub.toml` bundle manifest. |
 | [Tracing](docs/tracing.md) | OpenTelemetry propagation, app spans, and control-plane spans. |
