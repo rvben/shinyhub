@@ -17,6 +17,14 @@ func SetSyncHooksForTest(py, r func(string) error) (restore func()) {
 	return func() { pythonSyncFn, rSyncFn = origPy, origR }
 }
 
+// SetEnsureProjectForTest swaps the ensure-project hook. Returns a restore
+// func — pair with defer. Test use only.
+func SetEnsureProjectForTest(fn func(string) error) (restore func()) {
+	orig := ensureProjectFn
+	ensureProjectFn = fn
+	return func() { ensureProjectFn = orig }
+}
+
 // SetBuildCommandForTest swaps the package's python launch-command builder so
 // tests can observe the auto-instrument decision and substitute runnable
 // commands. Returns a restore func — pair with defer. Test use only.

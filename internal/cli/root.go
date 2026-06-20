@@ -67,6 +67,7 @@ func AddCommandsTo(root *cobra.Command) {
 		newFleetCmd(),
 		newManifestCmd(),
 		newSchemaCmd(),
+		newRunCmd(),
 	)
 	// Wrap flag-parse errors as KindValidation so the error envelope carries
 	// kind=validation instead of the internal fallback. This applies to all
