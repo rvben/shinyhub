@@ -75,9 +75,16 @@ func TestDefaultRules_Stable(t *testing.T) {
 	if r.MaxFileBytes != 10*1024*1024 {
 		t.Errorf("MaxFileBytes = %d, want 10MiB", r.MaxFileBytes)
 	}
-	want := []string{".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user"}
+	want := []string{".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user", ".shinyhub-run"}
 	if strings.Join(r.CacheDirs, ",") != strings.Join(want, ",") {
 		t.Errorf("CacheDirs = %v, want %v", r.CacheDirs, want)
+	}
+}
+
+func TestDefaultRules_SkipsShinyhubRunDir(t *testing.T) {
+	r := DefaultRules()
+	if got := r.Inspect(".shinyhub-run/data/cache.bin", 10); got != FilterSkipCacheDir {
+		t.Fatalf("Inspect(.shinyhub-run/...) = %v, want FilterSkipCacheDir", got)
 	}
 }
 

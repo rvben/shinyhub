@@ -68,6 +68,7 @@ func DefaultRules() Rules {
 		MaxFileBytes: 10 * 1024 * 1024,
 		CacheDirs: []string{
 			".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user",
+			".shinyhub-run",
 		},
 		DataExtensions: []string{
 			".parquet",
