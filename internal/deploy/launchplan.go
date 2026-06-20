@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -36,7 +37,6 @@ type LaunchOptions struct {
 	CommandHostDeps       bool // per-tier project-mode flag for buildCommand
 	AutoInstrumentDefault bool
 	HonorManifestTracing  bool // apply manifest [tracing] auto override? server true, run false
-	DataDir               string
 	Reload                bool
 }
 
@@ -85,7 +85,20 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 	case "python":
 		if opts.PrepHostDeps {
 			plan.DepPrep = []DepPrepStep{
-				{Label: "ensure project", Run: ensureProjectFn},
+				{
+					Label: "ensure project",
+					// ensure project is best-effort: a missing pyproject.toml or
+					// uv init failure should not abort the run (uv sync below
+					// will still catch real problems). This matches server
+					// behaviour (deploy.go warns and continues on ensureProjectFn
+					// failure).
+					Run: func(bundleDir string) error {
+						if err := ensureProjectFn(bundleDir); err != nil {
+							slog.Warn("ensure project failed; continuing", "err", err)
+						}
+						return nil
+					},
+				},
 				{Label: "uv sync", Run: pythonSyncFn},
 			}
 		}

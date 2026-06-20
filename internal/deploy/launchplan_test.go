@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -116,6 +117,32 @@ func TestResolveLaunch_PrepHostDeps_GatesDepPrep(t *testing.T) {
 	}
 	if len(without.DepPrep) != 0 {
 		t.Fatalf("PrepHostDeps:false must produce no dep-prep steps, got %v", without.DepPrep)
+	}
+}
+
+// TestResolveLaunch_EnsureProject_IsNonfatal verifies that a failing
+// ensureProjectFn does not cause the dep-prep step to return an error (it
+// should warn and continue). The subsequent uv sync step is allowed to fail,
+// so we stub that out as a no-op here to isolate the behaviour.
+func TestResolveLaunch_EnsureProject_IsNonfatal(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
+
+	restoreEnsure := SetEnsureProjectForTest(func(string) error {
+		return errors.New("simulated ensure-project failure")
+	})
+	defer restoreEnsure()
+	restoreSync := SetSyncHooksForTest(func(string) error { return nil }, func(string) error { return nil })
+	defer restoreSync()
+
+	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9100, PrepHostDeps: true})
+	if err != nil {
+		t.Fatalf("ResolveLaunch must not fail on ensure-project error: %v", err)
+	}
+	// Run each dep-prep step; ensure-project must not propagate its error.
+	for _, step := range plan.DepPrep {
+		if stepErr := step.Run(dir); stepErr != nil {
+			t.Fatalf("dep-prep step %q returned error: %v (ensure-project must be nonfatal)", step.Label, stepErr)
+		}
 	}
 }
 
