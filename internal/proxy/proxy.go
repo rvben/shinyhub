@@ -1469,6 +1469,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Path:     "/app/" + slug + "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
+			// Mirror the session cookie's scheme-aware policy: Secure over HTTPS
+			// (so the routing cookie is never sent in cleartext), off over plain
+			// HTTP (where the browser would otherwise drop it). X-Forwarded-Proto
+			// is trusted only from configured proxies.
+			Secure: proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
 		})
 	}
 	newConns := picked.activeConns.Add(1)

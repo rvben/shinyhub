@@ -1460,7 +1460,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// deadlineExemptions so they are not severed mid-flight.
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(deadlineExemptions(rootHandler)),
+		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, deadlineExemptions(rootHandler)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      120 * time.Second,
