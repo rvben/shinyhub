@@ -60,6 +60,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.25](https://github.com/rvben/shinyhub/compare/v0.8.24...v0.8.25) - 2026-06-20
+
+### Added
+
+- **cli**: add 'shinyhub run' local dev server ([6d00af1](https://github.com/rvben/shinyhub/commit/6d00af12fad3132a2741fd01a9628ecdaada5be9))
+- **cli**: add shinyhub run local dev server command ([886ceb4](https://github.com/rvben/shinyhub/commit/886ceb464ac7134a05889ff7553acda0b643f2b7))
+- **localrun**: file-watch restart fallback for manifest-command apps ([6dcef81](https://github.com/rvben/shinyhub/commit/6dcef8197abfb04c7193722b2be3447733fb4c27))
+- **localrun**: foreground runner with readiness, --check, signal handling ([20d5aaa](https://github.com/rvben/shinyhub/commit/20d5aaaba21996f87c47985e7f887a5290f924aa))
+- **deploy**: resolve inferred python/r launch commands with reload ([ecfe39f](https://github.com/rvben/shinyhub/commit/ecfe39f37be95f062a8a4f0d2c68555eef059f1a))
+- **deploy**: add LaunchPlan seam (override + manifest-command paths) ([5eb1511](https://github.com/rvben/shinyhub/commit/5eb151184421e0dfc4e0ab553ecb2d99a2a6d9a6))
+- **bundle**: exclude .shinyhub-run from deploy bundles ([7b2a358](https://github.com/rvben/shinyhub/commit/7b2a3587a61d916183e3625397c0484fe06e98a3))
+
+### Fixed
+
+- **localrun**: recompute readiness URL from re-resolved plan on restart ([524d343](https://github.com/rvben/shinyhub/commit/524d343c795da86435be3bfd3963153bfcacf4f4))
+- **localrun**: prevent subprocess orphan, reserved-env leak, relative data-dir, and watcher debounce race ([f7327bb](https://github.com/rvben/shinyhub/commit/f7327bbd5795a6863ee617364bad72dd6938b576))
+- **deploy**: make ensure-project dep-prep step nonfatal and remove unused DataDir option ([7514435](https://github.com/rvben/shinyhub/commit/75144359169d4d9667caf10d0bdcc7a56d3b756a))
+- **proxy**: prevent control-plane startup panic adopting remote_docker replicas ([3a6f85f](https://github.com/rvben/shinyhub/commit/3a6f85f4a013841606755a5ba5915f19eeb08cbd))
+
 ## [0.8.24](https://github.com/rvben/shinyhub/compare/v0.8.23...v0.8.24) - 2026-06-18
 
 ### Added
