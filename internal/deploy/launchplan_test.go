@@ -72,6 +72,50 @@ func TestResolveLaunch_NoAppType_Errors(t *testing.T) {
 	}
 }
 
+func TestResolveLaunch_AutoInstrument_BuildsFallback(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
+	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: true, HonorManifestTracing: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(plan.Command, "opentelemetry-instrument") {
+		t.Fatalf("instrumented command must wrap with opentelemetry-instrument: %v", plan.Command)
+	}
+	if plan.FallbackCommand == nil || slices.Contains(plan.FallbackCommand, "opentelemetry-instrument") {
+		t.Fatalf("FallbackCommand must be the uninstrumented variant: %v", plan.FallbackCommand)
+	}
+}
+
+func TestResolveLaunch_RunSuppressesManifestTracing(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{
+		"app.py": "x=1\n", "requirements.txt": "shiny\n",
+		"shinyhub.toml": "[tracing]\nauto = true\n",
+	})
+	// run passes AutoInstrumentDefault:false, HonorManifestTracing:false
+	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9007, BindHost: "127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(plan.Command, "opentelemetry-instrument") {
+		t.Fatalf("run must NOT instrument despite manifest [tracing] auto: %v", plan.Command)
+	}
+	if plan.FallbackCommand != nil {
+		t.Fatalf("no fallback when not instrumented, got %v", plan.FallbackCommand)
+	}
+}
+
+func TestResolveLaunch_PrepHostDeps_GatesDepPrep(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
+	with, _ := ResolveLaunch(dir, LaunchOptions{Port: 9008, PrepHostDeps: true})
+	without, _ := ResolveLaunch(dir, LaunchOptions{Port: 9008, PrepHostDeps: false})
+	if len(with.DepPrep) == 0 {
+		t.Fatal("PrepHostDeps:true must produce dep-prep steps")
+	}
+	if len(without.DepPrep) != 0 {
+		t.Fatalf("PrepHostDeps:false must produce no dep-prep steps, got %v", without.DepPrep)
+	}
+}
+
 func TestResolveLaunch_ManifestCommand_NoPrep(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{
 		"app.py":           "x=1\n",
