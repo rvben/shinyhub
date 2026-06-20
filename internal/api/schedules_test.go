@@ -1217,7 +1217,16 @@ func TestCreateSchedule_RunOnRegister_FiresOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	if dto.FirstFireRunID == nil {
-		t.Fatalf("first_fire_run_id is nil, want a run id")
+		// run_on_register first-fire is best-effort: maybeFirstFire returns nil
+		// (and logs) when its gate sees a prior successful run or when dispatch
+		// errors. Probe the DB so a recurrence pinpoints which: zero runs means
+		// the dispatch never inserted; a non-ErrNotFound gate error means the
+		// gate check itself failed.
+		schedID := scheduleIDBySlugAndName(t, store, app.ID, "warm")
+		runs, runsErr := store.ListScheduleRuns(schedID, 50, 0)
+		_, gateErr := store.LastSuccessfulRun(schedID)
+		t.Fatalf("first_fire_run_id is nil; status=%d body=%s; runs=%d (err=%v); gate(LastSuccessfulRun) err=%v",
+			rr.Code, rr.Body.String(), len(runs), runsErr, gateErr)
 	}
 
 	schedID := scheduleIDBySlugAndName(t, store, app.ID, "warm")
