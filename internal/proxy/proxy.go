@@ -841,9 +841,37 @@ func (p *Proxy) EnableImmediateFlush(ch chan string) {
 	p.mu.Unlock()
 }
 
+// backendResponseHeaderTimeout bounds how long the proxy waits for an app to
+// send its response headers after the request is written. A hung app (stuck in
+// a long computation or deadlocked) that accepts the connection but never
+// responds would otherwise block the forwarding goroutine indefinitely; this
+// releases it, routing through the ErrorHandler (wake + loading page) instead.
+// It bounds only the header wait, so streaming response bodies and WebSocket
+// upgrades (whose 101 headers arrive immediately) are unaffected.
+const backendResponseHeaderTimeout = 120 * time.Second
+
+// newBackendTransport returns the HTTP transport for local (native/docker) and
+// VPC-internal (fargate) app backends. It mirrors http.DefaultTransport's
+// connection settings but adds a ResponseHeaderTimeout backstop and raises
+// MaxIdleConnsPerHost: every app is a single host that may carry many
+// concurrent Shiny sessions, so the net/http default of 2 idle conns per host
+// causes needless connection churn.
+func newBackendTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = backendResponseHeaderTimeout
+	t.MaxIdleConnsPerHost = 64
+	return t
+}
+
+// defaultBackendTransport is the shared transport used for nil-base replica
+// registrations. *http.Transport is safe for concurrent use and pools
+// connections, so a single shared instance is correct and avoids the
+// connection leak a per-replica transport would cause.
+var defaultBackendTransport = newBackendTransport()
+
 // RegisterReplica registers a backend URL at the given index within slug's pool.
-// base is the HTTP transport used for outbound requests; nil uses the default
-// transport. Remote tunnel URLs may carry a path prefix (e.g. /v1/data/<token>)
+// base is the HTTP transport used for outbound requests; nil uses the tuned
+// defaultBackendTransport. Remote tunnel URLs may carry a path prefix (e.g. /v1/data/<token>)
 // that is prepended to every forwarded app-relative path. deploymentID is stamped
 // into the sticky cookie so a stale cookie from a previous deployment causes a
 // re-pick rather than pinning the client to a potentially wrong replica.
@@ -857,7 +885,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		return fmt.Errorf("register %s#%d: url needs scheme and host", slug, index)
 	}
 	if base == nil {
-		base = http.DefaultTransport
+		base = defaultBackendTransport
 	}
 
 	p.mu.Lock()

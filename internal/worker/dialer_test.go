@@ -41,4 +41,15 @@ func TestMTLSDialer_BuildsServerNameAndBaseURL(t *testing.T) {
 	if tr.ForceAttemptHTTP2 {
 		t.Error("ForceAttemptHTTP2 = true, want false (HTTP/1.1 only)")
 	}
+	// An unreachable or hung remote worker must not pin a forwarding goroutine
+	// indefinitely: the transport bounds dials and the response-header wait.
+	if tr.DialContext == nil {
+		t.Error("DialContext is nil; a dial to an unreachable worker would block until the OS TCP timeout")
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want > 0", tr.ResponseHeaderTimeout)
+	}
+	if tr.TLSHandshakeTimeout <= 0 {
+		t.Errorf("TLSHandshakeTimeout = %v, want > 0", tr.TLSHandshakeTimeout)
+	}
 }

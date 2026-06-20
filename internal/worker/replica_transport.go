@@ -48,7 +48,7 @@ func NewReplicaTransportBuilder(dialer AgentDialer, store WorkerGetter) *Replica
 
 // TransportForReplica returns the HTTP transport to use when forwarding requests
 // to the given replica. It returns nil for non-remote_docker providers (the
-// proxy falls back to http.DefaultTransport in that case).
+// proxy falls back to its tuned default backend transport in that case).
 //
 // For remote_docker replicas the transport is built once per worker_id and
 // cached; concurrent callers for the same worker_id are serialized through a

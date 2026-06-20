@@ -1361,10 +1361,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	// ReadTimeout/WriteTimeout bound slow-body and slow-read clients on ordinary
+	// requests so they cannot pin a connection (and its goroutine) indefinitely.
+	// Streaming and long-running routes (the reverse proxy, SSE log tails, large
+	// uploads, lifecycle swaps) clear these per-connection deadlines via
+	// deadlineExemptions so they are not severed mid-flight.
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(rootHandler),
+		Handler:           api.SecurityHeaders(deadlineExemptions(rootHandler)),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
@@ -1721,4 +1728,47 @@ func isScheduleRunLogsPath(sub string) bool {
 		seg[0] == "schedules" && seg[1] != "" &&
 		seg[2] == "runs" && seg[3] != "" &&
 		seg[4] == "logs"
+}
+
+// needsUnboundedDeadline reports whether a request must run without the
+// server's connection-level read/write deadlines. These are the streaming and
+// long-running surfaces that ReadTimeout/WriteTimeout would otherwise sever
+// mid-flight:
+//
+//   - /app/* — the reverse proxy to app processes, which carries Shiny
+//     WebSockets and arbitrarily long streaming responses.
+//   - /internal/fargate-bundle/* — streams a deployment bundle (large body).
+//   - the long-lived /api/ routes enumerated by isLongLivedAPIRoute (SSE log
+//     streams, bundle uploads, lifecycle swaps, per-app data uploads).
+//
+// Every other control-plane route keeps the deadlines so a slow-read or
+// slow-body client cannot pin a connection (and its goroutine) indefinitely.
+func needsUnboundedDeadline(method, path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/app/"):
+		return true
+	case strings.HasPrefix(path, "/internal/fargate-bundle/"):
+		return true
+	case strings.HasPrefix(path, "/api/"):
+		return isLongLivedAPIRoute(method, path)
+	}
+	return false
+}
+
+// deadlineExemptions clears the per-connection read and write deadlines for the
+// streaming and long-running routes identified by needsUnboundedDeadline. The
+// server-level ReadTimeout/WriteTimeout then act as a slow-client backstop on
+// ordinary responses without severing legitimate long-lived connections
+// (WebSocket proxying, SSE log tails, large uploads, dependency-heavy launches).
+func deadlineExemptions(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if needsUnboundedDeadline(r.Method, r.URL.Path) {
+			rc := http.NewResponseController(w)
+			// Best-effort: the underlying writer supports deadlines; ignore
+			// ErrNotSupported so a future wrapper can't break streaming.
+			_ = rc.SetReadDeadline(time.Time{})
+			_ = rc.SetWriteDeadline(time.Time{})
+		}
+		next.ServeHTTP(w, r)
+	})
 }

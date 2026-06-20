@@ -120,3 +120,49 @@ func TestIsLongLivedAPIRoute(t *testing.T) {
 		})
 	}
 }
+
+// TestNeedsUnboundedDeadline documents which surfaces must run without the
+// server's connection-level ReadTimeout/WriteTimeout: the reverse proxy
+// (Shiny WebSockets + streaming app responses), the Fargate bundle stream,
+// and the long-lived /api routes. Everything else keeps the deadlines so a
+// slow-read or slow-body client cannot pin a connection indefinitely.
+func TestNeedsUnboundedDeadline(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		want   bool
+	}{
+		// Reverse proxy: WebSockets + streaming app responses.
+		{"proxy app GET", http.MethodGet, "/app/myapp/", true},
+		{"proxy app websocket", http.MethodGet, "/app/myapp/websocket", true},
+		{"proxy app POST", http.MethodPost, "/app/myapp/submit", true},
+		{"proxy root", http.MethodGet, "/app/", true},
+
+		// Fargate bundle stream — large response body.
+		{"fargate bundle", http.MethodGet, "/internal/fargate-bundle/sha256-abc", true},
+
+		// Delegates to the /api long-lived matrix.
+		{"api logs SSE", http.MethodGet, "/api/apps/myapp/logs", true},
+		{"api deploy upload", http.MethodPost, "/api/apps/myapp/deploy", true},
+		{"api data PUT", http.MethodPut, "/api/apps/myapp/data/f.bin", true},
+		{"api status GET", http.MethodGet, "/api/apps/myapp", false},
+		{"api login", http.MethodPost, "/api/auth/login", false},
+
+		// Bounded control-plane surfaces.
+		{"static asset", http.MethodGet, "/static/app.js", false},
+		{"healthz", http.MethodGet, "/healthz", false},
+		{"dashboard root", http.MethodGet, "/", false},
+		{"other internal route", http.MethodGet, "/internal/other", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := needsUnboundedDeadline(tc.method, tc.path)
+			if got != tc.want {
+				t.Errorf("needsUnboundedDeadline(%q, %q) = %v, want %v",
+					tc.method, tc.path, got, tc.want)
+			}
+		})
+	}
+}
