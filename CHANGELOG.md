@@ -61,6 +61,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.26](https://github.com/rvben/shinyhub/compare/v0.8.25...v0.8.26) - 2026-06-20
+
+### Added
+
+- **db**: bound audit-log and schedule-run growth with retention pruning ([018cd75](https://github.com/rvben/shinyhub/commit/018cd7501a9487163599a9137f79a3203ba3191e))
+- **observability**: add pprof, apps_crashed gauge, audit-error counter ([1c0f304](https://github.com/rvben/shinyhub/commit/1c0f304ad0663608c9ded5f5d921b53a872be0ac))
+- **db**: refuse to start against a database from a newer build ([fc3c207](https://github.com/rvben/shinyhub/commit/fc3c2074b8c88ea5596bf3489f9e8507e62e077b))
+
+### Fixed
+
+- **observability**: only expose pprof on a loopback metrics listener ([96b2360](https://github.com/rvben/shinyhub/commit/96b23605666149f0714f4ad4ca8fac8a3df8e305))
+- **config**: load the maintenance block from YAML, not only env vars ([4583898](https://github.com/rvben/shinyhub/commit/45838983de5ed0b90ed9839013c9c4b3adc5e2d2))
+- startup robustness and small correctness hardening ([1804cf3](https://github.com/rvben/shinyhub/commit/1804cf3f8ffa3d97c6a87c57ac0fab43af396282))
+- **users**: reject deleting a user who still owns apps with a clear 409 ([dd28a71](https://github.com/rvben/shinyhub/commit/dd28a714663f4f133603dd7a9ef57bda3dd7f0f3))
+- **process**: recover exit-monitor panics; configurable stop grace ([b68257f](https://github.com/rvben/shinyhub/commit/b68257fb988c17b5595f1c2ac858095afcbb0a7d))
+- **security**: add Secure to sticky cookie, HSTS, and Permissions-Policy ([98a5a8a](https://github.com/rvben/shinyhub/commit/98a5a8a201da14f8b0a693cbcb1d11b21f3bb6b9))
+- **deploy**: prune old versions synchronously under the deploy lock ([5ad8c1f](https://github.com/rvben/shinyhub/commit/5ad8c1fad88dfc3d61eaeb8ba80a7004c963e972))
+- **api**: cap request body size to prevent memory exhaustion ([5a66116](https://github.com/rvben/shinyhub/commit/5a661160a846e7e225ac242c8370c7861790322b))
+- **server**: bound slow clients and hung backends with connection timeouts ([0dab39b](https://github.com/rvben/shinyhub/commit/0dab39b3f53e14b312a1d0e3f14a9e9744234751))
+
 ## [0.8.25](https://github.com/rvben/shinyhub/compare/v0.8.24...v0.8.25) - 2026-06-20
 
 ### Added
