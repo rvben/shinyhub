@@ -3,22 +3,28 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"os"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 )
 
-// writeJSON writes v as JSON with the given HTTP status code. Encode errors
-// are logged to stderr; they cannot be reported to the client because the
-// header has already been sent.
+// reqLog returns a slog.Logger tagged with the request's correlation ID so
+// handler-side and async errors can be joined to the api_access log line for
+// the same request.
+func reqLog(r *http.Request) *slog.Logger {
+	return slog.With("request_id", RequestIDFromContext(r.Context()))
+}
+
+// writeJSON writes v as JSON with the given HTTP status code. Encode errors are
+// logged (the header has already been sent, so they cannot reach the client).
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		fmt.Fprintf(os.Stderr, "writeJSON encode: %v\n", err)
+		slog.Warn("write_json_encode_failed", "err", err)
 	}
 }
 

@@ -78,6 +78,20 @@ func (s *Store) migrationsSubdir() string {
 type Store struct {
 	db *boundDB
 	d  dialect
+
+	// auditErrHook, if set, is invoked when an audit-event write fails. It lets
+	// the server surface dropped audit events as a metric without coupling the
+	// db package to the metrics registry. Never nil-checked off the hot path:
+	// audit writes are infrequent relative to request volume.
+	auditErrHook func()
+}
+
+// SetAuditErrorHook registers a callback invoked whenever LogAuditEvent fails to
+// persist an event. The server wires this to a metrics counter so a persistent
+// audit-write failure (e.g. disk full) can be alerted on rather than silently
+// dropping the compliance trail.
+func (s *Store) SetAuditErrorHook(hook func()) {
+	s.auditErrHook = hook
 }
 
 // fileDBMaxConns caps the connection pool for file-backed databases. WAL lets

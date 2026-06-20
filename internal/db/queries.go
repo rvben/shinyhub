@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -1805,15 +1805,19 @@ type AuditEvent struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// LogAuditEvent inserts an audit event. Errors are logged to stderr but do
-// not fail the caller — audit recording must never break normal operation.
+// LogAuditEvent inserts an audit event. A write failure is logged and surfaced
+// via the audit-error hook but does not fail the caller — audit recording must
+// never break normal operation.
 func (s *Store) LogAuditEvent(p AuditEventParams) {
 	_, err := s.db.Exec(`
 		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "audit log: %v\n", err)
+		slog.Error("audit_log_write_failed", "action", p.Action, "err", err)
+		if s.auditErrHook != nil {
+			s.auditErrHook()
+		}
 	}
 }
 
