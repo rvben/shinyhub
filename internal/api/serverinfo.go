@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"os/exec"
+	"runtime/debug"
 	"sync"
 )
 
@@ -12,7 +13,11 @@ type serverInfoResponse struct {
 	// to distinguish a healthy shinyhub from a half-provisioned host (a front
 	// proxy answering before the binary is up) and to enforce version
 	// requirements before issuing a mutating call.
-	Version      string             `json:"version"`
+	Version string `json:"version"`
+	// Commit is the git SHA the binary was built from (short form), present only
+	// when built with VCS stamping. More precise than the semver tag for support
+	// and for confirming a hotfix actually reached production.
+	Commit       string             `json:"commit,omitempty"`
 	Capabilities serverCapabilities `json:"capabilities"`
 	// Runtimes reports which app runtimes the host can actually start, keyed by
 	// language ("python", "r"). A developer (or the CLI) reads this to learn
@@ -36,12 +41,40 @@ type serverCapabilities struct {
 func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, serverInfoResponse{
 		Version: s.version,
+		Commit:  buildCommit(),
 		Capabilities: serverCapabilities{
 			FleetPreconditions: true,
 			ContentDigest:      true,
 		},
 		Runtimes: detectRuntimes(),
 	})
+}
+
+var (
+	commitOnce sync.Once
+	commitVal  string
+)
+
+// buildCommit returns the short git SHA the binary was built from, or "" when
+// the binary carries no VCS stamping (e.g. under `go test`). Cached: build info
+// is constant for the life of the process.
+func buildCommit() string {
+	commitOnce.Do(func() {
+		info, ok := debug.ReadBuildInfo()
+		if !ok {
+			return
+		}
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				commitVal = setting.Value
+				if len(commitVal) > 12 {
+					commitVal = commitVal[:12]
+				}
+				return
+			}
+		}
+	})
+	return commitVal
 }
 
 var (

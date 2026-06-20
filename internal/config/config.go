@@ -925,6 +925,13 @@ func loadRaw(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Validate the listen port range. Port 0 is allowed here (OS-assigned), but
+	// the serve command further rejects it because zero-downtime upgrades need a
+	// fixed port; a negative or out-of-range value is always a misconfiguration.
+	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
+		return nil, fmt.Errorf("server.port must be between 0 and 65535, got %d", cfg.Server.Port)
+	}
+
 	// Parse trusted proxy CIDRs. Default to loopback-only when none are configured,
 	// so XFF is trusted only from local reverse proxies by default.
 	if len(cfg.Server.TrustedProxies) == 0 {
@@ -1761,8 +1768,18 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
 	}
+	if v := os.Getenv("SHINYHUB_SERVER_HOST"); v != "" {
+		cfg.Server.Host = v
+	}
+	if v := os.Getenv("SHINYHUB_SERVER_PORT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_PORT: %q is not an integer: %w", v, err)
+		}
+		cfg.Server.Port = n
+	}
 	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
-		cfg.Server.TrustedProxies = strings.Split(v, ",")
+		cfg.Server.TrustedProxies = splitCSV(v)
 	}
 	if v := os.Getenv("SHINYHUB_SHUTDOWN_APPS"); v != "" {
 		cfg.Server.ShutdownApps = v

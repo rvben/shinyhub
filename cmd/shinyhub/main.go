@@ -220,6 +220,20 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 	return srv, ln, nil
 }
 
+// probeWritable confirms dir is writable by creating and removing a temp file.
+// os.MkdirAll succeeds on an existing-but-unwritable directory (e.g. wrong owner
+// left by a prior install), so without this probe the first deploy would fail
+// later with a cryptic permission error instead of a clear startup failure.
+func probeWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".shinyhub-writeprobe-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	return os.Remove(name)
+}
+
 // runMaintenance periodically prunes the audit log and per-schedule run history
 // to keep those tables bounded. It runs on the owner instance only (so HA
 // standbys never prune concurrently) and is a no-op when no retention is
@@ -450,9 +464,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if err := os.MkdirAll(cfg.Storage.AppsDir, 0o750); err != nil {
 		return fmt.Errorf("create apps dir: %w", err)
 	}
+	if err := probeWritable(cfg.Storage.AppsDir); err != nil {
+		return fmt.Errorf("apps dir %s is not writable: %w", cfg.Storage.AppsDir, err)
+	}
 
 	if err := os.MkdirAll(cfg.Storage.AppDataDir, 0o750); err != nil {
 		return fmt.Errorf("create app-data dir: %w", err)
+	}
+	if err := probeWritable(cfg.Storage.AppDataDir); err != nil {
+		return fmt.Errorf("app-data dir %s is not writable: %w", cfg.Storage.AppDataDir, err)
 	}
 
 	// Normalize the configured app-data dir to an absolute path once, here at
