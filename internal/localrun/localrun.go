@@ -112,29 +112,35 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	childEnv = append(childEnv, plan.Env...)
 	childEnv = append(childEnv, "SHINYHUB_APP_DATA="+dataDir)
 
-	// Spawn the app.
-	cmd := exec.CommandContext(ctx, plan.Command[0], plan.Command[1:]...) //nolint:gosec
-	cmd.Dir = bundleDir
-	cmd.Env = childEnv
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start %s: %w", slug, err)
-	}
-
-	// Channel receives the process exit result.
-	exitCh := make(chan error, 1)
-	go func() { exitCh <- cmd.Wait() }()
-
 	readyPath := plan.ReadyPath
 	if readyPath == "" {
 		readyPath = "/"
 	}
 	readyURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, readyPath)
 
-	// Step 6: Poll for readiness concurrently with watching for early exit.
+	// spawnChild starts the app process and returns the cmd + its exit channel.
+	spawnChild := func() (*exec.Cmd, <-chan error, error) {
+		c := exec.CommandContext(ctx, plan.Command[0], plan.Command[1:]...) //nolint:gosec
+		c.Dir = bundleDir
+		c.Env = childEnv
+		c.Stdout = stdout
+		c.Stderr = stderr
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := c.Start(); err != nil {
+			return nil, nil, fmt.Errorf("start %s: %w", slug, err)
+		}
+		ch := make(chan error, 1)
+		go func() { ch <- c.Wait() }()
+		return c, ch, nil
+	}
+
+	// Step 6: First spawn.
+	cmd, exitCh, err := spawnChild()
+	if err != nil {
+		return err
+	}
+
+	// Step 7: Poll for readiness concurrently with watching for early exit.
 	readyCh := make(chan struct{}, 1)
 	go pollReady(ctx, readyURL, plan.Timeout, readyCh)
 
@@ -170,7 +176,51 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		return nil
 	}
 
-	// Long-run: block until context is cancelled or the process exits.
+	// Long-run: manifest-command apps (AppType == "") get a file-watch restart
+	// loop when reload is enabled. Inferred python/r apps self-reload via their
+	// framework flags and do not need the watcher.
+	useWatcher := plan.AppType == "" && !o.NoReload
+	if useWatcher {
+		// changeCh buffers one signal; the loop drains it before re-spawning.
+		changeCh := make(chan struct{}, 1)
+		watchCtx, watchCancel := context.WithCancel(ctx)
+		defer watchCancel()
+
+		excludeDirs := []string{".shinyhub-run", ".venv", ".git", "__pycache__", "node_modules"}
+		go func() {
+			_ = watchAndRestart(watchCtx, bundleDir, excludeDirs, func() {
+				select {
+				case changeCh <- struct{}{}:
+				default: // already queued; debounce
+				}
+			})
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				stopChild(cmd, exitCh, stderr)
+				return nil
+
+			case exitErr := <-exitCh:
+				if exitErr != nil {
+					return fmt.Errorf("app exited: %w", exitErr)
+				}
+				return nil
+
+			case <-changeCh:
+				fmt.Fprintln(stdout, "==> file change detected; restarting")
+				stopChild(cmd, exitCh, stderr)
+				newCmd, newCh, spawnErr := spawnChild()
+				if spawnErr != nil {
+					return spawnErr
+				}
+				cmd, exitCh = newCmd, newCh
+			}
+		}
+	}
+
+	// Long-run without watcher: block until context is cancelled or process exits.
 	select {
 	case <-ctx.Done():
 		stopChild(cmd, exitCh, stderr)
