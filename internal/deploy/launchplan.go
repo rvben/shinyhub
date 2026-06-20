@@ -15,15 +15,14 @@ type DepPrepStep struct {
 // LaunchPlan is the canonical description of how a single app replica launches.
 // It is the one source of truth shared by the server boot path and `shinyhub run`.
 type LaunchPlan struct {
-	AppType         string
-	Manifest        *Manifest
-	Command         []string
-	FallbackCommand []string // inferred Python only: command WITHOUT OTEL wrapping, when auto-instrument applied
-	Env             []string // launch-coupled only ("PORT"); platform/per-app env layered by the consumer
-	BindHost        string
-	ReadyPath       string
-	DepPrep         []DepPrepStep
-	Timeout         time.Duration
+	AppType   string
+	Manifest  *Manifest
+	Command   []string
+	Env       []string // launch-coupled only ("PORT"); platform/per-app env layered by the consumer
+	BindHost  string
+	ReadyPath string
+	DepPrep   []DepPrepStep
+	Timeout   time.Duration
 }
 
 // LaunchOptions are the Manager-free inputs both consumers supply. See the
@@ -37,15 +36,8 @@ type LaunchOptions struct {
 	CommandHostDeps       bool // per-tier project-mode flag for buildCommand
 	AutoInstrumentDefault bool
 	HonorManifestTracing  bool // apply manifest [tracing] auto override? server true, run false
-	// BuildFallbackCommand controls whether plan.FallbackCommand is populated for
-	// auto-instrumented Python boots. The `shinyhub run` consumer sets this true
-	// to pre-build the uninstrumented fallback command in one pass. The server
-	// boot path (bootReplicaAttempt) leaves this false: it calls ResolveLaunch
-	// once per attempt and passes AutoInstrumentDefault:false on the retry,
-	// avoiding an extra buildCommandFn call on the happy path.
-	BuildFallbackCommand bool
-	DataDir              string
-	Reload               bool
+	DataDir               string
+	Reload                bool
 }
 
 // ResolveLaunch resolves how a bundle launches, mirroring resolveBootParams +
@@ -102,9 +94,6 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 			auto = *m.Tracing.Auto
 		}
 		plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
-		if auto && opts.BuildFallbackCommand {
-			plan.FallbackCommand = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, false, opts.CommandHostDeps), opts.Reload)
-		}
 	case "r":
 		if opts.PrepHostDeps {
 			plan.DepPrep = []DepPrepStep{{Label: "renv restore", Run: rSyncFn}}

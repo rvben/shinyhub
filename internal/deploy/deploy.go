@@ -567,16 +567,14 @@ func planPoolWorkers(p Params, asn []process.TierAssignment) map[int]string {
 // log.
 //
 // Each attempt obtains its launch command via bootReplicaAttempt, which calls the
-// shared ResolveLaunch seam. The retry passes AutoInstrumentDefault:false to get the
-// uninstrumented command from ResolveLaunch, matching the same fallback path that
-// plan.FallbackCommand captures for the local `shinyhub run` consumer.
+// shared ResolveLaunch seam. The retry passes AutoInstrumentDefault:false to get
+// the uninstrumented command, re-deriving it cleanly through the seam.
 func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
 	res, err := bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, autoInstrument, hc, timeout)
 	if err != nil && autoInstrument && baseCmd == nil && appType == "python" {
 		// The instrumented launch failed; retry with the uninstrumented fallback.
 		// bootReplicaAttempt calls ResolveLaunch with AutoInstrumentDefault:false,
-		// obtaining the same uninstrumented command that ResolveLaunch exposes as
-		// plan.FallbackCommand for the local-run consumer.
+		// re-deriving the uninstrumented command through the shared seam.
 		slog.Warn("deploy: instrumented launch failed; retrying without auto-instrumentation",
 			"slug", p.Slug, "index", idx, "err", err)
 		res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, false, hc, timeout)

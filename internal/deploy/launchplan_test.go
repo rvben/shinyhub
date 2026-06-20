@@ -74,15 +74,21 @@ func TestResolveLaunch_NoAppType_Errors(t *testing.T) {
 
 func TestResolveLaunch_AutoInstrument_BuildsFallback(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
-	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: true, HonorManifestTracing: true, BuildFallbackCommand: true})
+	// With auto-instrument: Command contains opentelemetry-instrument.
+	instrumented, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: true, HonorManifestTracing: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(plan.Command, "opentelemetry-instrument") {
-		t.Fatalf("instrumented command must wrap with opentelemetry-instrument: %v", plan.Command)
+	if !slices.Contains(instrumented.Command, "opentelemetry-instrument") {
+		t.Fatalf("instrumented command must wrap with opentelemetry-instrument: %v", instrumented.Command)
 	}
-	if plan.FallbackCommand == nil || slices.Contains(plan.FallbackCommand, "opentelemetry-instrument") {
-		t.Fatalf("FallbackCommand must be the uninstrumented variant: %v", plan.FallbackCommand)
+	// Re-resolving with AutoInstrumentDefault:false produces the uninstrumented fallback (the server retry path).
+	fallback, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(fallback.Command, "opentelemetry-instrument") {
+		t.Fatalf("uninstrumented fallback must NOT contain opentelemetry-instrument: %v", fallback.Command)
 	}
 }
 
@@ -98,9 +104,6 @@ func TestResolveLaunch_RunSuppressesManifestTracing(t *testing.T) {
 	}
 	if slices.Contains(plan.Command, "opentelemetry-instrument") {
 		t.Fatalf("run must NOT instrument despite manifest [tracing] auto: %v", plan.Command)
-	}
-	if plan.FallbackCommand != nil {
-		t.Fatalf("no fallback when not instrumented, got %v", plan.FallbackCommand)
 	}
 }
 
