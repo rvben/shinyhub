@@ -265,6 +265,13 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 					return fmt.Errorf("re-resolve launch after change: %w", resolveErr)
 				}
 				plan = newPlan
+				// ReadyPath comes from the re-resolved plan; recompute the probe
+				// URL so a changed readiness path is honored on restart.
+				restartReadyPath := plan.ReadyPath
+				if restartReadyPath == "" {
+					restartReadyPath = "/"
+				}
+				readyURL = fmt.Sprintf("http://127.0.0.1:%d%s", port, restartReadyPath)
 				newCmd, newCh, spawnErr := spawnChild()
 				if spawnErr != nil {
 					return spawnErr
