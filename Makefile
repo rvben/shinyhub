@@ -15,8 +15,10 @@ test-go:
 # test-go, so it is its own target/CI job rather than folded into test-go. The
 # control plane crosses many goroutine boundaries (watcher, proxy poolsync,
 # autoscale, worker agent), so this is the primary guard against data races.
+# A raised per-package -timeout accommodates the slowest packages under the
+# race detector's overhead (the default 10m is exceeded by the api package).
 test-race:
-	go test -race ./... -count=1
+	go test -race ./... -count=1 -timeout 30m
 
 # vuln scans the module (and its dependencies) against the Go vulnerability
 # database. Run via `go run` so no separate install step is needed and it works
@@ -26,10 +28,13 @@ vuln:
 
 # test-js runs the JSDOM tests for UI assets. Requires Node 20+. Installs
 # devDependencies (jsdom) the first time it runs; afterwards it's a no-op.
+# The glob is left unquoted so the shell expands it to the matching files;
+# node --test does not expand glob patterns itself before Node 21, so quoting
+# would break on Node 20.
 test-js:
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required for UI tests)"; exit 1; }
 	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
-	node --test 'internal/ui/jstests/*.test.js'
+	node --test internal/ui/jstests/*.test.js
 
 # test-remote-e2e launches a control plane and a real `shinyhub worker` against
 # the local Docker daemon, deploys an app onto the remote tier with two
