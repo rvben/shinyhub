@@ -1314,7 +1314,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// and traces record the status/latency the client actually sees, including
 	// timeout 503s and recovered-panic 500s. It is a no-op unless metrics or
 	// tracing are enabled.
-	mux.Handle("/api/", srv.Observe(apiTimeoutHandler(srv.Router())))
+	mux.Handle("/api/", bodyLimitHandler(srv.Observe(apiTimeoutHandler(srv.Router()))))
 	// Re-resolve JWT-claimed users against the live DB on every /app/* hit
 	// so role demotions and account deletions take effect immediately.
 	// Without this an admin's still-valid JWT keeps the admin-bypass path
@@ -1734,6 +1734,50 @@ func isScheduleRunLogsPath(sub string) bool {
 		seg[0] == "schedules" && seg[1] != "" &&
 		seg[2] == "runs" && seg[3] != "" &&
 		seg[4] == "logs"
+}
+
+// maxAPIJSONBody caps the request body for ordinary JSON API endpoints so a
+// malicious or buggy client cannot exhaust server memory with an unbounded
+// body. Bulk-upload routes (bundle deploy, per-app data PUT) are exempt; their
+// handlers apply their own, much larger, http.MaxBytesReader limits.
+const maxAPIJSONBody = 4 << 20 // 4 MiB
+
+// bodyLimitHandler wraps r.Body in an http.MaxBytesReader for every /api route
+// except the bulk-upload routes (see isLargeUploadRoute), bounding the memory a
+// single request can consume. It is mounted outermost on the /api handler so it
+// sees the raw ResponseWriter and the real request body before any inner
+// wrapper, and so the bulk-upload handlers can still install their own limits.
+func bodyLimitHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && !isLargeUploadRoute(r.Method, r.URL.Path) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxAPIJSONBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLargeUploadRoute reports whether method+path is a bulk-upload API route that
+// legitimately carries a body larger than maxAPIJSONBody and applies its own
+// size limit downstream: POST /api/apps/{slug}/deploy (bundle zip) and
+// PUT /api/apps/{slug}/data/<rel> (per-app data file).
+func isLargeUploadRoute(method, path string) bool {
+	const prefix = "/api/apps/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	rest := path[len(prefix):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return false
+	}
+	sub := rest[slash+1:]
+	if sub == "deploy" {
+		return method == http.MethodPost
+	}
+	if method == http.MethodPut && strings.HasPrefix(sub, "data/") && len(sub) > len("data/") {
+		return true
+	}
+	return false
 }
 
 // needsUnboundedDeadline reports whether a request must run without the

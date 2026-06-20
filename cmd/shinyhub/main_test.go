@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -164,5 +167,70 @@ func TestNeedsUnboundedDeadline(t *testing.T) {
 					tc.method, tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestIsLargeUploadRoute documents which API routes are exempt from the global
+// JSON body cap because they legitimately stream large bodies and apply their
+// own (much larger) limit downstream: bundle deploy and per-app data upload.
+func TestIsLargeUploadRoute(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		want   bool
+	}{
+		{"deploy POST", http.MethodPost, "/api/apps/myapp/deploy", true},
+		{"data PUT", http.MethodPut, "/api/apps/myapp/data/big.csv", true},
+		{"data PUT nested", http.MethodPut, "/api/apps/myapp/data/a/b/c.bin", true},
+
+		// Small-body mutations stay capped.
+		{"deploy GET", http.MethodGet, "/api/apps/myapp/deploy", false},
+		{"restart POST", http.MethodPost, "/api/apps/myapp/restart", false},
+		{"patch app", http.MethodPatch, "/api/apps/myapp", false},
+		{"data list GET", http.MethodGet, "/api/apps/myapp/data", false},
+		{"data delete", http.MethodDelete, "/api/apps/myapp/data/x", false},
+		{"login", http.MethodPost, "/api/auth/login", false},
+		{"slug literally data", http.MethodPut, "/api/apps/data/replicas", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLargeUploadRoute(tc.method, tc.path); got != tc.want {
+				t.Errorf("isLargeUploadRoute(%q, %q) = %v, want %v", tc.method, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBodyLimitHandler proves the middleware caps ordinary request bodies while
+// letting bulk-upload routes through unbounded for their own downstream limit.
+func TestBodyLimitHandler(t *testing.T) {
+	var readErr error
+	var readN int
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		readN, readErr = len(b), err
+		w.WriteHeader(http.StatusOK)
+	})
+	h := bodyLimitHandler(next)
+
+	oversize := bytes.Repeat([]byte("a"), maxAPIJSONBody+1)
+
+	// Over-cap body on an ordinary route is rejected before it can exhaust memory.
+	req := httptest.NewRequest(http.MethodPatch, "/api/apps/myapp", bytes.NewReader(oversize))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if readErr == nil {
+		t.Errorf("ordinary route: expected a read error for a %d-byte body over the %d cap", len(oversize), maxAPIJSONBody)
+	}
+
+	// The same body on a bulk-upload route passes through for the handler's own limit.
+	readErr, readN = nil, 0
+	req = httptest.NewRequest(http.MethodPost, "/api/apps/myapp/deploy", bytes.NewReader(oversize))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if readErr != nil {
+		t.Errorf("upload route: body must pass through uncapped, got read error: %v", readErr)
+	}
+	if readN != len(oversize) {
+		t.Errorf("upload route: read %d bytes, want %d", readN, len(oversize))
 	}
 }
