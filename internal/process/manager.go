@@ -164,8 +164,18 @@ type Manager struct {
 	platformEnv   PlatformDefaultEnvResolver
 	mountResolver SharedMountResolver
 	appDataRoot   string
+	stopGrace     time.Duration
 
 	autoInstrumentApps bool
+}
+
+// SetStopGrace sets how long StopReplica waits after SIGTERM before escalating
+// to SIGKILL. Must be called before the manager begins stopping processes; it
+// is not safe to call concurrently with StopReplica.
+func (m *Manager) SetStopGrace(d time.Duration) {
+	if d > 0 {
+		m.stopGrace = d
+	}
 }
 
 // SetEnvResolver sets the function used to inject per-app environment variables
@@ -284,8 +294,15 @@ func NewManager(appsDir string, rt Runtime) *Manager {
 		appsDir:     appsDir,
 		runtimes:    map[string]Runtime{DefaultTier: rt},
 		defaultTier: DefaultTier,
+		stopGrace:   defaultStopGrace,
 	}
 }
+
+// defaultStopGrace is the SIGTERM-to-SIGKILL window for a single replica. It is
+// generous enough for a Shiny/R or Python app to flush session state and close
+// its on-disk stores on shutdown; operators with slower cleanup can raise it via
+// SetStopGrace (server.stop_grace).
+const defaultStopGrace = 10 * time.Second
 
 // RegisterRuntime adds or replaces the runtime for the named tier. Safe to
 // call concurrently with RuntimeForTier lookups.
@@ -478,8 +495,21 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	m.entries[p.Slug] = pool
 
 	go func() {
+		// close(done) is deferred so it always fires - even on a panic below -
+		// so a concurrent StopReplica waiting on done never hangs. The recover
+		// keeps a fault in Wait or the bookkeeping from crashing the whole
+		// server. defers run LIFO, so the locked section's Unlock runs first
+		// (releasing the mutex even on panic), then recover, then close.
+		defer close(done)
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("manager: exit-monitor goroutine panicked",
+					"slug", p.Slug, "idx", p.Index, "panic", rec)
+			}
+		}()
 		rt.Wait(context.Background(), handle)
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		// Only the entry's current owner reacts to this exit. After an eviction or
 		// a replacement Start at the same key, a stale Wait sees a nil or different
 		// entry and must touch neither status nor the log file — otherwise it would
@@ -498,15 +528,14 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 				}
 			}
 		}
-		m.mu.Unlock()
-		close(done)
 	}()
 
 	return info, nil
 }
 
 // StopReplica signals a single replica to stop and waits for it to exit.
-// If the process does not exit within 5 seconds, SIGKILL is sent.
+// If the process does not exit within the stop grace (default defaultStopGrace,
+// configurable via SetStopGrace), SIGKILL is sent.
 func (m *Manager) StopReplica(slug string, index int) error {
 	m.mu.Lock()
 	pool := m.entries[slug]
@@ -543,9 +572,15 @@ func (m *Manager) StopReplica(slug string, index int) error {
 		m.mu.Unlock()
 		return fmt.Errorf("sigterm: %w", err)
 	}
+	grace := m.stopGrace
+	if grace <= 0 {
+		grace = defaultStopGrace
+	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(grace):
+		slog.Warn("manager: replica did not exit within grace; sending SIGKILL",
+			"slug", slug, "idx", index, "grace", grace)
 		rt.Signal(handle, syscall.SIGKILL) //nolint:errcheck
 		<-done
 	}
@@ -1014,15 +1049,24 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	}
 
 	go func() {
+		// See the Start monitor: deferred close keeps StopReplica from hanging on
+		// a panic, recover keeps the fault from crashing the server, and the
+		// locked section's Unlock runs first (mutex released even on panic).
+		defer close(done)
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("manager: adopt exit-monitor goroutine panicked",
+					"slug", slug, "idx", info.Index, "panic", rec)
+			}
+		}()
 		rt.Wait(context.Background(), handle)
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		if p := m.entries[slug]; info.Index < len(p) {
 			if e := p[info.Index]; e != nil && e.handle == handle && !e.stopped {
 				e.info.Status = StatusCrashed
 			}
 		}
-		m.mu.Unlock()
-		close(done)
 	}()
 }
 

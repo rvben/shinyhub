@@ -325,6 +325,11 @@ type ServerConfig struct {
 	// upgrade and continuing to serve. Defaults to 60s.
 	UpgradeTimeout time.Duration `yaml:"upgrade_timeout"`
 
+	// StopGrace is the SIGTERM-to-SIGKILL window when stopping a single app
+	// replica (hibernation, stop, restart, shutdown). Raise it for apps that
+	// need longer to flush session state on shutdown. Defaults to 10s.
+	StopGrace time.Duration `yaml:"stop_grace"`
+
 	// PIDFile, when set, receives the ready process's PID on startup and after
 	// each zero-downtime handoff. Required for the systemd path (MAINPID
 	// tracking via PIDFile=). Empty (default) writes no PID file.
@@ -959,6 +964,9 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if cfg.Server.DrainTimeout <= 0 {
 		cfg.Server.DrainTimeout = 60 * time.Second
+	}
+	if cfg.Server.StopGrace <= 0 {
+		cfg.Server.StopGrace = 10 * time.Second
 	}
 	if cfg.Server.UpgradeTimeout <= 0 {
 		cfg.Server.UpgradeTimeout = 60 * time.Second
@@ -1698,6 +1706,16 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_UPGRADE_TIMEOUT must be positive, got %q", v)
 		}
 		cfg.Server.UpgradeTimeout = d
+	}
+	if v := os.Getenv("SHINYHUB_STOP_GRACE"); v != "" {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("parse SHINYHUB_STOP_GRACE %q: %w", v, perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("SHINYHUB_STOP_GRACE must be positive, got %q", v)
+		}
+		cfg.Server.StopGrace = d
 	}
 	if v := os.Getenv("SHINYHUB_APPS_DIR"); v != "" {
 		cfg.Storage.AppsDir = v

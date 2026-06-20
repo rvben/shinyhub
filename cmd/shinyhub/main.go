@@ -633,6 +633,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	mgr.SetDefaultTier(defaultTier)
+	mgr.SetStopGrace(cfg.Server.StopGrace)
 	for _, tierCfg := range cfg.Runtime.Tiers {
 		if tierCfg.Name == defaultTier {
 			continue

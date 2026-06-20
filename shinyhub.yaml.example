@@ -26,6 +26,7 @@ server:
   # binary and hands off the listeners. See docs/zero-downtime-upgrades.md.
   pid_file: ""                        # e.g. /run/shinyhub/shinyhub.pid (required for systemd)  # SHINYHUB_PID_FILE
   upgrade_timeout: 60s                # wait for the successor to become ready before aborting  # SHINYHUB_UPGRADE_TIMEOUT
+  stop_grace: 10s                     # SIGTERM-to-SIGKILL window when stopping an app replica  # SHINYHUB_STOP_GRACE
 
 auth:
   # REQUIRED. 32+ characters. Generate with: openssl rand -hex 32
