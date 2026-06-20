@@ -713,6 +713,15 @@ func (s *Store) CountRunningApps() (int64, error) {
 	return n, err
 }
 
+// CountCrashedApps returns the number of apps currently in the crashed state -
+// apps that exhausted their restart budget and are serving nothing. Used by the
+// fleet metrics gauge so operators can alert on the most actionable condition.
+func (s *Store) CountCrashedApps() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps WHERE status = 'crashed'`).Scan(&n)
+	return n, err
+}
+
 // CountRunningReplicas returns the number of replica rows currently in the
 // running state across all apps. Used by the fleet metrics gauge.
 func (s *Store) CountRunningReplicas() (int64, error) {

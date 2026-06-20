@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -200,6 +201,16 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", reg.Handler())
+	// pprof is mounted only on this listener, which binds loopback by default
+	// (cfg.Metrics.Addr), so live goroutine/heap/CPU profiles are available for
+	// diagnosing a hung server without restarting it and without ever exposing
+	// profiling on the public port. The server sets no WriteTimeout, so the
+	// default 30s CPU profile completes.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -801,7 +812,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 				}
 				return float64(n)
 			},
+			func() float64 {
+				n, err := store.CountCrashedApps()
+				if err != nil {
+					return 0
+				}
+				return float64(n)
+			},
 		)
+		// Surface dropped audit events (e.g. disk full) as a counter so the
+		// silent loss of the compliance trail is alertable.
+		store.SetAuditErrorHook(reg.RecordAuditWriteError)
 		var mln net.Listener
 		metricsSrv, mln, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, reg)
 		if err != nil {
@@ -829,6 +850,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// Tear down the tracer on any early error return below (idempotent with
 		// the ordered shutdown path).
 		defer func() { _ = tracer.Shutdown(context.Background()) }()
+	}
+
+	// Running with neither metrics nor tracing means no external visibility into
+	// request rates, error rates, or a crashed-app fleet - an operational blind
+	// spot. Warn loudly so it is a deliberate choice, not an oversight.
+	if !cfg.Metrics.Enabled && !cfg.Tracing.Enabled {
+		slog.Warn("observability disabled: no Prometheus metrics or OTel tracing are enabled; enable metrics.enabled to get request/error/crashed-app signals")
 	}
 
 	// Emit a structured access log for every proxied app request. Using the

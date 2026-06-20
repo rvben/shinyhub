@@ -36,7 +36,8 @@ type Registry struct {
 	fargateInventoryErrorsTotal prometheus.Counter
 	fargateRunTaskDuration      prometheus.Histogram
 
-	autoscaleScales *prometheus.CounterVec
+	autoscaleScales  *prometheus.CounterVec
+	auditWriteErrors prometheus.Counter
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -136,6 +137,12 @@ func New(version string) *Registry {
 	}, []string{"direction"})
 	reg.MustRegister(autoscaleScales)
 
+	auditWriteErrors := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_audit_write_errors_total",
+		Help: "Total audit events that failed to persist (e.g. disk full). A rising value means the compliance trail is dropping entries.",
+	})
+	reg.MustRegister(auditWriteErrors)
+
 	return &Registry{
 		reg:              reg,
 		httpRequests:     httpRequests,
@@ -151,7 +158,8 @@ func New(version string) *Registry {
 		fargateInventoryErrorsTotal: fargateInventoryErrorsTotal,
 		fargateRunTaskDuration:      fargateRunTaskDuration,
 
-		autoscaleScales: autoscaleScales,
+		autoscaleScales:  autoscaleScales,
+		auditWriteErrors: auditWriteErrors,
 	}
 }
 
@@ -172,10 +180,12 @@ func (r *Registry) RecordReplicaRestart() {
 	r.replicaRestarts.Inc()
 }
 
-// RegisterFleetGauges registers two GaugeFuncs reporting the live count of
-// running apps and running replicas. The callbacks are evaluated lazily at
-// scrape time, so the reported values always reflect current fleet state.
-func (r *Registry) RegisterFleetGauges(appsRunning, replicasRunning func() float64) {
+// RegisterFleetGauges registers GaugeFuncs reporting the live count of running
+// apps, running replicas, and crashed apps. The callbacks are evaluated lazily
+// at scrape time, so the reported values always reflect current fleet state.
+// shinyhub_apps_crashed is the primary alert target: a non-zero value means one
+// or more apps exhausted their restart budget and are serving nothing.
+func (r *Registry) RegisterFleetGauges(appsRunning, replicasRunning, appsCrashed func() float64) {
 	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "shinyhub_apps_running",
 		Help: "Number of apps currently in the running state.",
@@ -184,6 +194,17 @@ func (r *Registry) RegisterFleetGauges(appsRunning, replicasRunning func() float
 		Name: "shinyhub_replicas_running",
 		Help: "Number of app replicas currently running.",
 	}, replicasRunning))
+	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "shinyhub_apps_crashed",
+		Help: "Number of apps currently in the crashed state (exhausted restart budget, serving nothing).",
+	}, appsCrashed))
+}
+
+// RecordAuditWriteError increments the counter of audit events that failed to
+// persist. Wired to db.Store's audit-error hook so a persistent failure (e.g.
+// disk full) silently dropping the compliance trail can be alerted on.
+func (r *Registry) RecordAuditWriteError() {
+	r.auditWriteErrors.Inc()
 }
 
 // Handler returns the Prometheus scrape handler for this registry.

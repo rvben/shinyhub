@@ -62,10 +62,11 @@ func TestRecordReplicaRestart_Increments(t *testing.T) {
 // are running right now" is answerable from Prometheus alone.
 func TestRegisterFleetGauges_ReflectsCallbacks(t *testing.T) {
 	reg := New("test")
-	apps, replicas := 3.0, 7.0
+	apps, replicas, crashed := 3.0, 7.0, 2.0
 	reg.RegisterFleetGauges(
 		func() float64 { return apps },
 		func() float64 { return replicas },
+		func() float64 { return crashed },
 	)
 
 	if v, ok := sampleValue(t, reg, "shinyhub_apps_running", nil); !ok || v != 3 {
@@ -74,10 +75,24 @@ func TestRegisterFleetGauges_ReflectsCallbacks(t *testing.T) {
 	if v, ok := sampleValue(t, reg, "shinyhub_replicas_running", nil); !ok || v != 7 {
 		t.Fatalf("shinyhub_replicas_running = %v (ok=%v), want 7", v, ok)
 	}
+	if v, ok := sampleValue(t, reg, "shinyhub_apps_crashed", nil); !ok || v != 2 {
+		t.Fatalf("shinyhub_apps_crashed = %v (ok=%v), want 2", v, ok)
+	}
 
 	// Gauges are evaluated lazily at scrape time, so a later change is reflected.
 	apps = 5
 	if v, _ := sampleValue(t, reg, "shinyhub_apps_running", nil); v != 5 {
 		t.Fatalf("shinyhub_apps_running after change = %v, want 5", v)
+	}
+}
+
+// TestRecordAuditWriteError surfaces dropped audit events as a counter so a
+// persistent audit-write failure (e.g. disk full) can be alerted on.
+func TestRecordAuditWriteError(t *testing.T) {
+	reg := New("test")
+	reg.RecordAuditWriteError()
+	reg.RecordAuditWriteError()
+	if v, ok := sampleValue(t, reg, "shinyhub_audit_write_errors_total", nil); !ok || v != 2 {
+		t.Fatalf("shinyhub_audit_write_errors_total = %v (ok=%v), want 2", v, ok)
 	}
 }
