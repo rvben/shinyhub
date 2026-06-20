@@ -252,6 +252,16 @@ func (s *Store) DeleteUser(id int64) error {
 			return ErrLastAdmin
 		}
 	}
+	// apps.owner_id has no ON DELETE action (RESTRICT), so deleting a user who
+	// owns apps would fail with an opaque FK error. Detect it up front and return
+	// a typed sentinel the API maps to a clear 409.
+	var ownedApps int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM apps WHERE owner_id = ?`, id).Scan(&ownedApps); err != nil {
+		return fmt.Errorf("delete user: count owned apps: %w", err)
+	}
+	if ownedApps > 0 {
+		return ErrUserOwnsApps
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)

@@ -167,6 +167,26 @@ func TestDeleteUser_NonAdminAllowed(t *testing.T) {
 	}
 }
 
+// TestDeleteUser_OwnsAppsRejected proves a user who still owns apps cannot be
+// deleted: the apps.owner_id foreign key would otherwise reject the DELETE with
+// an opaque error. The pre-check returns a typed sentinel the API maps to 409.
+func TestDeleteUser_OwnsAppsRejected(t *testing.T) {
+	store := dbtest.New(t)
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: "h", Role: "admin"})
+	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: "h", Role: "developer"})
+	dev, _ := store.GetUserByUsername("dev")
+	mustCreateApp(t, store, "owned-app", dev.ID)
+
+	if err := store.DeleteUser(dev.ID); !errors.Is(err, db.ErrUserOwnsApps) {
+		t.Fatalf("DeleteUser on a user owning apps = %v, want ErrUserOwnsApps", err)
+	}
+
+	// The user and app must both survive a rejected delete.
+	if _, err := store.GetUserByUsername("dev"); err != nil {
+		t.Errorf("user should still exist after rejected delete: %v", err)
+	}
+}
+
 // TestDeleteUser_ConcurrentDeletesCannotReachZeroAdmins is the reason the guard
 // is transactional: two admins deleting each other at the same time must not
 // both succeed. The advisory lock serializes the two DeleteUser transactions, so
