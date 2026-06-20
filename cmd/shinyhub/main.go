@@ -194,6 +194,18 @@ type listenFunc func(network, addr string) (net.Listener, error)
 // returned server is already serving in a background goroutine; the caller is
 // responsible for Shutdown. The listener is returned so callers can log the
 // resolved address (useful when addr requests an ephemeral :0 port).
+// addrIsLoopback reports whether a is a TCP address on a loopback IP. Used to
+// gate pprof so the profiling endpoints are never served on a non-loopback (and
+// thus potentially publicly reachable) metrics interface. A non-TCP or
+// wildcard (0.0.0.0 / ::) bind is treated as not loopback.
+func addrIsLoopback(a net.Addr) bool {
+	ta, ok := a.(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	return ta.IP.IsLoopback()
+}
+
 func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry) (*http.Server, net.Listener, error) {
 	ln, err := listen("tcp", addr)
 	if err != nil {
@@ -201,16 +213,21 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", reg.Handler())
-	// pprof is mounted only on this listener, which binds loopback by default
-	// (cfg.Metrics.Addr), so live goroutine/heap/CPU profiles are available for
-	// diagnosing a hung server without restarting it and without ever exposing
-	// profiling on the public port. The server sets no WriteTimeout, so the
-	// default 30s CPU profile completes.
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	// pprof exposes process internals (cmdline, heap/goroutine dumps, CPU/trace
+	// profiling) with no authentication, so mount it ONLY when the metrics
+	// listener is bound to a loopback address. An operator who binds metrics to a
+	// non-loopback interface for remote Prometheus scraping must not also expose
+	// profiling there. The server sets no WriteTimeout, so the default 30s CPU
+	// profile completes.
+	if addrIsLoopback(ln.Addr()) {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	} else {
+		slog.Warn("pprof disabled: metrics listener is not bound to loopback", "addr", ln.Addr().String())
+	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
