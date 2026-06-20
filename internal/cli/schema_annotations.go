@@ -39,6 +39,16 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		ArgEnums: map[string][]string{"--output": {"table", "json", "ndjson"}},
 	},
 
+	// ── local dev runner ─────────────────────────────────────────────────────
+	"run": {Mutating: ro, Streaming: true,
+		ArgTypes: map[string]string{"--data-dir": "path", "--env-file": "path"},
+		OutputFields: []fieldSpec{
+			{Name: "slug", Type: "string"},
+			{Name: "url", Type: "string"},
+			{Name: "port", Type: "integer"},
+			{Name: "status", Type: "string"},
+		}},
+
 	// ── server-side commands ─────────────────────────────────────────────────
 	"serve": {Mutating: mut, Streaming: true},
 	"backup": {Mutating: mut, ArgTypes: map[string]string{"--out": "path"}, OutputFields: []fieldSpec{
