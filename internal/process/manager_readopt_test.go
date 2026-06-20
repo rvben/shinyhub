@@ -1,9 +1,28 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
+
+// blockingWaitRuntime keeps Wait blocked until the test ends. A genuinely
+// suspended replica's process stays alive (frozen), so its Wait does not return
+// mid-test; the embedded fake's dead PID would otherwise make Wait return
+// "exited" and let the adopt exit-monitor mark the replica crashed, racing the
+// status assertions. Counts/behaviour are promoted from the embedded fake.
+type blockingWaitRuntime struct {
+	*fakeSnapshotRuntime
+	block chan struct{}
+}
+
+func (b *blockingWaitRuntime) Wait(ctx context.Context, _ RunHandle) error {
+	select {
+	case <-b.block:
+	case <-ctx.Done():
+	}
+	return nil
+}
 
 // TestManager_Adopt_ReregistersWarmState verifies that adopting a replica after
 // a restart re-registers its warm-wake state via the runtime's WarmReadopter, so
@@ -64,7 +83,9 @@ func TestManager_Adopt_WarmReadoptErrorIsNonFatal(t *testing.T) {
 func TestManager_Adopt_SuspendedReplicaIsWarmResumable(t *testing.T) {
 	m := NewManager(t.TempDir(), NewNativeRuntime())
 	rt := &fakeSnapshotRuntime{resumeEP: ReplicaEndpoint{Handle: RunHandle{PID: 4242}, URL: "http://127.0.0.1:1000"}}
-	m.RegisterRuntime("snap", rt)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	m.RegisterRuntime("snap", &blockingWaitRuntime{fakeSnapshotRuntime: rt, block: block})
 
 	m.Adopt("demo", ProcessInfo{Slug: "demo", Index: 0, PID: 4242, Tier: "snap", Status: StatusSuspended, EndpointURL: "http://127.0.0.1:1000"}, RunHandle{PID: 4242})
 
