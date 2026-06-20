@@ -1890,6 +1890,22 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 	return result, rows.Err()
 }
 
+// PruneAuditEvents deletes audit events older than the retention window and
+// returns the number removed. A non-positive retention is a no-op (returns 0,
+// nil) so the operator can keep the full compliance trail by default. The
+// cutoff is computed on the DB clock, matching how created_at is stamped.
+func (s *Store) PruneAuditEvents(retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	secs := int(retention.Seconds())
+	res, err := s.db.Exec(`DELETE FROM audit_events WHERE created_at < ` + s.d.nowMinusSeconds(secs))
+	if err != nil {
+		return 0, fmt.Errorf("prune audit events: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // LatestAutoscaleEvent returns the most-recent autoscale_scale_up or
 // autoscale_scale_down audit event for the named app slug, or a zero-value
 // AuditEvent and false if no such event exists.

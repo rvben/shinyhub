@@ -109,6 +109,7 @@ type Config struct {
 	Defaults         DefaultsConfig
 	Tracing          TracingConfig
 	Metrics          MetricsConfig
+	Maintenance      MaintenanceConfig
 	Branding         BrandingConfig
 	Worker           WorkerConfig
 	OAuth            OAuthConfig  `yaml:"-"`
@@ -186,6 +187,21 @@ type MetricsConfig struct {
 	// HistoryInterval is the sampling cadence for the history collector.
 	// Default 15s; must be within [1s, 10m].
 	HistoryInterval time.Duration
+}
+
+// MaintenanceConfig controls periodic database housekeeping run on the owner
+// instance only. Retention values default to "keep everything" so no history is
+// ever deleted unless the operator opts in - the safe default for an audit
+// trail and run history.
+type MaintenanceConfig struct {
+	// AuditRetentionDays deletes audit_events older than this many days. 0 (the
+	// default) keeps them forever.
+	AuditRetentionDays int `yaml:"audit_retention_days"`
+	// ScheduleRunRetentionCount keeps this many newest runs per schedule and
+	// deletes older ones. 0 (the default) keeps all runs.
+	ScheduleRunRetentionCount int `yaml:"schedule_run_retention_count"`
+	// Interval is how often the maintenance loop runs. Defaults to 1h.
+	Interval time.Duration `yaml:"interval"`
 }
 
 // BrandingConfig customises the ShinyHub front door. Every field is optional;
@@ -957,6 +973,15 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Storage.AppQuotaMB < 0 {
 		cfg.Storage.AppQuotaMB = 0
 	}
+	if cfg.Maintenance.Interval <= 0 {
+		cfg.Maintenance.Interval = time.Hour
+	}
+	if cfg.Maintenance.AuditRetentionDays < 0 {
+		cfg.Maintenance.AuditRetentionDays = 0
+	}
+	if cfg.Maintenance.ScheduleRunRetentionCount < 0 {
+		cfg.Maintenance.ScheduleRunRetentionCount = 0
+	}
 	if cfg.Storage.AppDataDir == "" {
 		cfg.Storage.AppDataDir = "./data/app-data"
 	}
@@ -1683,6 +1708,20 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_STORAGE_VERSION_RETENTION: %q is not an integer: %w", v, err)
 		}
 		cfg.Storage.VersionRetention = n
+	}
+	if v := os.Getenv("SHINYHUB_AUDIT_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_AUDIT_RETENTION_DAYS: %q is not an integer: %w", v, err)
+		}
+		cfg.Maintenance.AuditRetentionDays = n
+	}
+	if v := os.Getenv("SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT: %q is not an integer: %w", v, err)
+		}
+		cfg.Maintenance.ScheduleRunRetentionCount = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
 		n, err := strconv.Atoi(v)

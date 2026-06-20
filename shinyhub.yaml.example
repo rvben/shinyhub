@@ -245,6 +245,13 @@ metrics:
   enabled: false                       # SHINYHUB_METRICS_ENABLED
   addr: 127.0.0.1:9090                 # host:port for the /metrics scrape listener  # SHINYHUB_METRICS_ADDR
 
+# Optional: periodic database housekeeping (runs on the owner instance only).
+# Retention defaults keep everything; set a value to opt in to pruning.
+maintenance:
+  audit_retention_days: 0              # delete audit_events older than N days; 0 = keep forever  # SHINYHUB_AUDIT_RETENTION_DAYS
+  schedule_run_retention_count: 0      # keep N newest runs per schedule; 0 = keep all  # SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT
+  interval: 1h                         # how often the maintenance loop runs
+
 # Optional: white-label branding. All fields are optional; with no branding
 # block at all, / and /login serve byte-for-byte today's stock catalog/login.
 #

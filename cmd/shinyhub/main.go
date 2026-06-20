@@ -220,6 +220,59 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 	return srv, ln, nil
 }
 
+// runMaintenance periodically prunes the audit log and per-schedule run history
+// to keep those tables bounded. It runs on the owner instance only (so HA
+// standbys never prune concurrently) and is a no-op when no retention is
+// configured. It prunes once promptly on start, then on each interval tick.
+func runMaintenance(ctx context.Context, store *db.Store, cfg config.MaintenanceConfig) {
+	auditRetention := time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour
+	keepRuns := cfg.ScheduleRunRetentionCount
+	if auditRetention <= 0 && keepRuns <= 0 {
+		return
+	}
+
+	prune := func() {
+		if auditRetention > 0 {
+			if n, err := store.PruneAuditEvents(auditRetention); err != nil {
+				slog.Warn("prune_audit_events_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_audit_events", "removed", n, "retention_days", cfg.AuditRetentionDays)
+			}
+		}
+		if keepRuns > 0 {
+			ids, err := store.ListAllScheduleIDs()
+			if err != nil {
+				slog.Warn("prune_schedule_runs_list_failed", "err", err)
+				return
+			}
+			var total int64
+			for _, id := range ids {
+				n, err := store.PruneScheduleRuns(id, keepRuns)
+				if err != nil {
+					slog.Warn("prune_schedule_runs_failed", "schedule_id", id, "err", err)
+					continue
+				}
+				total += n
+			}
+			if total > 0 {
+				slog.Info("pruned_schedule_runs", "removed", total, "keep_per_schedule", keepRuns)
+			}
+		}
+	}
+
+	prune()
+	ticker := time.NewTicker(cfg.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
+}
+
 // isClustered reports whether cfg is using the Postgres backend, which means
 // multiple control-plane instances may share the same database. The check
 // reuses the same scheme-prefix dispatch that db.Open uses to pick a backend,
@@ -1276,6 +1329,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		loops.Add(1)
 		go func() { defer loops.Done(); watcher.Start(octx) }()
+		// Database housekeeping (audit + schedule-run retention) runs on the owner
+		// only, so HA standbys never prune concurrently. A no-op unless retention
+		// is configured.
+		loops.Add(1)
+		go func() { defer loops.Done(); runMaintenance(octx, store, cfg.Maintenance) }()
 		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
 		// this restart, so their next access is a warm resume instead of a cold
 		// boot (a frozen process does not survive a service restart, so the warm

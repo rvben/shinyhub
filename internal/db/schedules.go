@@ -336,6 +336,48 @@ func (s *Store) SetScheduleRunLogPath(runID int64, logPath string) error {
 	return nil
 }
 
+// ListAllScheduleIDs returns the IDs of every schedule across all apps. Used by
+// the maintenance loop to bound each schedule's run history.
+func (s *Store) ListAllScheduleIDs() ([]int64, error) {
+	rows, err := s.db.Query(`SELECT id FROM app_schedules`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// PruneScheduleRuns keeps the newest keep runs for the given schedule and
+// deletes the rest, returning the number removed. A non-positive keep is a
+// no-op so callers can disable bounding. Called after each run completes so a
+// frequently-firing schedule cannot accumulate run history without bound.
+func (s *Store) PruneScheduleRuns(scheduleID int64, keep int) (int64, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`
+		DELETE FROM schedule_runs
+		WHERE schedule_id = ?
+		  AND id NOT IN (
+		    SELECT id FROM schedule_runs
+		    WHERE schedule_id = ?
+		    ORDER BY started_at DESC, id DESC
+		    LIMIT ?
+		  )`, scheduleID, scheduleID, keep)
+	if err != nil {
+		return 0, fmt.Errorf("prune schedule runs: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*ScheduleRun, error) {
 	rows, err := s.db.Query(`
 		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,
