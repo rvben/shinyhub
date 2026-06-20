@@ -1,0 +1,293 @@
+// Package localrun provides the foreground app runner for `shinyhub run`.
+// It resolves the exact launch a hub native runtime would perform and runs the
+// app process locally, with readiness polling, --check mode, and signal handling.
+package localrun
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
+)
+
+// Options configures a local foreground run.
+type Options struct {
+	// BundleDir is the app bundle directory to run (required).
+	BundleDir string
+	// Slug is a human label for log output. Defaults to the basename of BundleDir.
+	Slug string
+	// DataDir is the host path used as SHINYHUB_APP_DATA and symlinked to
+	// <BundleDir>/data. When empty, defaults to <BundleDir>/.shinyhub-run/data.
+	DataDir string
+	// Port is the local TCP port to bind. When 0, a free port is allocated.
+	Port int
+	// Env is additional environment in KEY=VALUE form, layered above the
+	// sanitized host env but below the platform-controlled PORT and SHINYHUB_APP_DATA.
+	Env []string
+	// NoSync skips the explicit dep-prep steps (uv sync / renv restore).
+	NoSync bool
+	// NoReload disables framework hot reload and the file-watch fallback.
+	NoReload bool
+	// Open opens the serving URL in the default browser after readiness.
+	Open bool
+	// Check runs in preflight mode: boot, verify healthy, stop, exit 0/1.
+	Check bool
+}
+
+// Run boots the app bundle and blocks until the context is cancelled (or, in
+// --check mode, until the first healthy poll or crash). It streams all app
+// output to stdout/stderr and returns a non-nil error on any failure.
+func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
+	bundleDir, err := filepath.Abs(o.BundleDir)
+	if err != nil {
+		return fmt.Errorf("resolve bundle dir: %w", err)
+	}
+
+	slug := o.Slug
+	if slug == "" {
+		slug = filepath.Base(bundleDir)
+	}
+
+	// Step 1: Resolve the data dir and set up <bundle>/data symlink.
+	dataDir := o.DataDir
+	if dataDir == "" {
+		dataDir = filepath.Join(bundleDir, ".shinyhub-run", "data")
+	}
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+
+	linkPath := filepath.Join(bundleDir, "data")
+	if err := ensureDataSymlink(linkPath, dataDir); err != nil {
+		return err
+	}
+	// Deferred cleanup: remove the symlink only if it still points at our dataDir.
+	defer removeDataSymlinkIfOwned(linkPath, dataDir, stderr)
+
+	// Step 2: Allocate a free port unless one was provided.
+	port := o.Port
+	if port == 0 {
+		port = deploy.AllocatePort()
+	}
+
+	// Step 3: Resolve the launch plan via the shared seam.
+	launchOpts := deploy.LaunchOptions{
+		Port:                  port,
+		Workers:               1,
+		BindHost:              "127.0.0.1",
+		DataDir:               dataDir,
+		Reload:                !o.NoReload,
+		PrepHostDeps:          !o.NoSync,
+		CommandHostDeps:       !o.NoSync,
+		AutoInstrumentDefault: false,
+		HonorManifestTracing:  false,
+	}
+	plan, err := deploy.ResolveLaunch(bundleDir, launchOpts)
+	if err != nil {
+		return fmt.Errorf("resolve launch: %w", err)
+	}
+
+	// Step 4: Run each dep-prep step, streaming output to the terminal.
+	for _, step := range plan.DepPrep {
+		fmt.Fprintf(stdout, "==> %s\n", step.Label)
+		if err := step.Run(bundleDir); err != nil {
+			return fmt.Errorf("dep prep (%s): %w", step.Label, err)
+		}
+	}
+
+	// Step 5: Assemble the child env. Precedence (lowest to highest):
+	//   SanitizedEnv() base, then o.Env (--env/.env), then plan.Env (PORT),
+	//   then SHINYHUB_APP_DATA. Platform vars win over user-supplied env.
+	childEnv := append(process.SanitizedEnv(), o.Env...)
+	childEnv = append(childEnv, plan.Env...)
+	childEnv = append(childEnv, "SHINYHUB_APP_DATA="+dataDir)
+
+	// Spawn the app.
+	cmd := exec.CommandContext(ctx, plan.Command[0], plan.Command[1:]...) //nolint:gosec
+	cmd.Dir = bundleDir
+	cmd.Env = childEnv
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start %s: %w", slug, err)
+	}
+
+	// Channel receives the process exit result.
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- cmd.Wait() }()
+
+	readyPath := plan.ReadyPath
+	if readyPath == "" {
+		readyPath = "/"
+	}
+	readyURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, readyPath)
+
+	// Step 6: Poll for readiness concurrently with watching for early exit.
+	readyCh := make(chan struct{}, 1)
+	go pollReady(ctx, readyURL, plan.Timeout, readyCh)
+
+	select {
+	case exitErr := <-exitCh:
+		// The process exited before becoming healthy.
+		code := exitCode(exitErr)
+		msg := fmt.Sprintf("app exited during startup (exit %d)", code)
+		fmt.Fprintln(stderr, msg)
+		return errors.New(msg)
+
+	case <-readyCh:
+		// App is healthy.
+		fmt.Fprintf(stdout, "serving on http://127.0.0.1:%d\n", port)
+
+		if o.Check {
+			// --check: signal the child group and wait for it to finish.
+			stopChild(cmd, exitCh, stderr)
+			return nil
+		}
+
+		// Open browser if requested.
+		if o.Open {
+			openBrowser(fmt.Sprintf("http://127.0.0.1:%d", port))
+		}
+
+	case <-time.After(plan.Timeout):
+		stopChild(cmd, exitCh, stderr)
+		return fmt.Errorf("app did not become healthy within %s", plan.Timeout)
+
+	case <-ctx.Done():
+		stopChild(cmd, exitCh, stderr)
+		return nil
+	}
+
+	// Long-run: block until context is cancelled or the process exits.
+	select {
+	case <-ctx.Done():
+		stopChild(cmd, exitCh, stderr)
+		return nil
+	case exitErr := <-exitCh:
+		if exitErr != nil {
+			return fmt.Errorf("app exited: %w", exitErr)
+		}
+		return nil
+	}
+}
+
+// ensureDataSymlink creates the <bundle>/data symlink pointing at dataDir, or
+// accepts it if it already points at the right target (idempotent restart).
+// Any other occupant at the path is rejected to prevent silent corruption.
+func ensureDataSymlink(linkPath, dataDir string) error {
+	switch info, err := os.Lstat(linkPath); {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			if existing, readErr := os.Readlink(linkPath); readErr == nil && existing == dataDir {
+				return nil // already correct
+			}
+		}
+		return fmt.Errorf("bundle already contains a 'data' entry (%s); remove it before running", info.Mode())
+	case !os.IsNotExist(err):
+		return fmt.Errorf("lstat %s: %w", linkPath, err)
+	}
+	if err := os.Symlink(dataDir, linkPath); err != nil {
+		return fmt.Errorf("symlink data: %w", err)
+	}
+	return nil
+}
+
+// removeDataSymlinkIfOwned removes the <bundle>/data symlink only when it
+// still points at this run's dataDir. A foreign or replaced entry is left
+// alone; a warning is emitted to stderr.
+func removeDataSymlinkIfOwned(linkPath, dataDir string, stderr io.Writer) {
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		return // already gone or unreadable; nothing to do
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		// Not a symlink - someone replaced it. Leave it alone.
+		fmt.Fprintf(stderr, "warning: <bundle>/data is not a symlink after run; leaving it in place\n")
+		return
+	}
+	existing, err := os.Readlink(linkPath)
+	if err != nil || existing != dataDir {
+		// Points elsewhere. Leave it alone.
+		fmt.Fprintf(stderr, "warning: <bundle>/data symlink points to unexpected target; leaving it in place\n")
+		return
+	}
+	if err := os.Remove(linkPath); err != nil {
+		fmt.Fprintf(stderr, "warning: could not remove <bundle>/data symlink: %v\n", err)
+	}
+}
+
+// pollReady polls readyURL every 200 ms until it gets a non-5xx response,
+// ctx is cancelled, or timeout elapses. On success it sends to readyCh.
+func pollReady(ctx context.Context, readyURL string, timeout time.Duration, readyCh chan<- struct{}) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline:
+			return
+		case <-ticker.C:
+			resp, err := client.Get(readyURL) //nolint:noctx
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode < 500 {
+				readyCh <- struct{}{}
+				return
+			}
+		}
+	}
+}
+
+// stopChild sends SIGTERM to the child's process group, waits up to 5 s for a
+// clean exit, then sends SIGKILL.
+func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
+	if cmd.Process == nil {
+		return
+	}
+	// Signal the entire process group.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+
+	select {
+	case <-exitCh:
+		return
+	case <-time.After(5 * time.Second):
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			slog.Warn("SIGKILL failed", "err", err)
+		}
+		<-exitCh
+	}
+}
+
+// exitCode extracts the numeric exit code from a process wait error.
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
+
+// openBrowser opens url in the system default browser, best-effort.
+func openBrowser(url string) {
+	_ = exec.Command("open", url).Start()
+}
