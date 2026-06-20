@@ -12,9 +12,20 @@ import (
 	"time"
 )
 
+// mustGenerateCA wraps generateCA for tests, failing on the (in practice
+// impossible) crypto error rather than discarding it.
+func mustGenerateCA(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	c, k, err := generateCA()
+	if err != nil {
+		t.Fatalf("generateCA: %v", err)
+	}
+	return c, k
+}
+
 func TestLoadCA_RejectsMismatchedKey(t *testing.T) {
 	// A valid CA cert paired with an unrelated private key must be rejected.
-	certPEM, _ := generateCA() // helper added in this task
+	certPEM, _ := mustGenerateCA(t)
 	_, otherKeyPEM := mustGenerateOtherECKey(t)
 	if _, err := loadCA(certPEM, otherKeyPEM, nil); err == nil {
 		t.Fatal("loadCA accepted a cert/key whose public keys differ")
@@ -22,7 +33,7 @@ func TestLoadCA_RejectsMismatchedKey(t *testing.T) {
 }
 
 func TestLoadCA_RejectsTamperedCert(t *testing.T) {
-	certPEM, keyPEM := generateCA()
+	certPEM, keyPEM := mustGenerateCA(t)
 	tampered := flipOneCertByte(t, certPEM) // helper: flip a byte inside the DER
 	if _, err := loadCA(tampered, keyPEM, nil); err == nil {
 		t.Fatal("loadCA accepted a cert with a broken self-signature")
@@ -30,7 +41,7 @@ func TestLoadCA_RejectsTamperedCert(t *testing.T) {
 }
 
 func TestLoadCA_AcceptsValidPair(t *testing.T) {
-	certPEM, keyPEM := generateCA()
+	certPEM, keyPEM := mustGenerateCA(t)
 	ca, err := loadCA(certPEM, keyPEM, nil)
 	if err != nil {
 		t.Fatalf("valid pair rejected: %v", err)

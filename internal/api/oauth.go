@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -66,14 +65,14 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 	tok, err := s.github.Exchange(r.Context(), code)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "github exchange: %v\n", err)
+		reqLog(r).Error("oauth_exchange_failed", "provider", "github", "err", err)
 		writeError(w, http.StatusBadGateway, "OAuth exchange failed")
 		return
 	}
 
 	ghUser, err := s.github.FetchUser(r.Context(), tok)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "github fetch user: %v\n", err)
+		reqLog(r).Error("oauth_fetch_user_failed", "provider", "github", "err", err)
 		writeError(w, http.StatusBadGateway, "failed to fetch GitHub user")
 		return
 	}
@@ -90,7 +89,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		Role: s.jitOAuthRole(),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "github provision oauth user: %v\n", err)
+		reqLog(r).Error("oauth_provision_user_failed", "provider", "github", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -103,7 +102,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	// Refresh the IdP-governed display name from GitHub. No-op for accounts with
 	// a local password (self-managed) or when GitHub sends no name. Non-fatal.
 	if err := s.store.SetDisplayNameFromIdP(user.ID, ghUser.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "github display name from idp: %v\n", err)
+		reqLog(r).Warn("oauth_display_name_failed", "provider", "github", "err", err)
 	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
@@ -170,14 +169,14 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	tok, err := s.googleOAuth.Exchange(r.Context(), code)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "google exchange: %v\n", err)
+		reqLog(r).Error("oauth_exchange_failed", "provider", "google", "err", err)
 		writeError(w, http.StatusBadGateway, "OAuth exchange failed")
 		return
 	}
 
 	gUser, err := s.googleOAuth.FetchUser(r.Context(), tok)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "google fetch user: %v\n", err)
+		reqLog(r).Error("oauth_fetch_user_failed", "provider", "google", "err", err)
 		writeError(w, http.StatusBadGateway, "failed to fetch Google user")
 		return
 	}
@@ -202,7 +201,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		Role: s.jitOAuthRole(),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "google provision oauth user: %v\n", err)
+		reqLog(r).Error("oauth_provision_user_failed", "provider", "google", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -215,7 +214,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	// Refresh the IdP-governed display name from Google. No-op for accounts with
 	// a local password (self-managed) or when Google sends no name. Non-fatal.
 	if err := s.store.SetDisplayNameFromIdP(user.ID, gUser.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "google display name from idp: %v\n", err)
+		reqLog(r).Warn("oauth_display_name_failed", "provider", "google", "err", err)
 	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)

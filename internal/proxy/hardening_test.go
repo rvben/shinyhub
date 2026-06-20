@@ -179,3 +179,19 @@ func TestApplyForwardingHeaders_TrustedPeerPreserves(t *testing.T) {
 		t.Errorf("trusted edge proxy's X-Real-IP must be preserved, got %q", ip)
 	}
 }
+
+func TestNewBackendTransport_HasResponseHeaderTimeout(t *testing.T) {
+	tr := newBackendTransport()
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want > 0 (a hung app must not block the forwarding goroutine forever)", tr.ResponseHeaderTimeout)
+	}
+	// A single app is one host that may carry many concurrent Shiny sessions;
+	// the net/http default of 2 idle conns per host causes connection churn.
+	if tr.MaxIdleConnsPerHost <= 2 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want > 2", tr.MaxIdleConnsPerHost)
+	}
+	// Must be a distinct instance so we never mutate the process-wide default.
+	if tr == http.DefaultTransport {
+		t.Error("newBackendTransport returned the shared http.DefaultTransport; must be a clone")
+	}
+}

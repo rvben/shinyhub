@@ -43,10 +43,10 @@ type CA struct {
 // generateCA creates a fresh self-signed ECDSA P-256 worker CA, returning the
 // cert and key as PEM. (Extracted from OpenCA so both disk import and DB init
 // share one generator.)
-func generateCA() (certPEM, keyPEM []byte) {
+func generateCA() (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		panic(err) // P-256 keygen from crypto/rand cannot fail in practice
+		return nil, nil, fmt.Errorf("generate worker CA key: %w", err)
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -59,15 +59,15 @@ func generateCA() (certPEM, keyPEM []byte) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		panic(err)
+		return nil, nil, fmt.Errorf("create worker CA certificate: %w", err)
 	}
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		panic(err)
+		return nil, nil, fmt.Errorf("marshal worker CA key: %w", err)
 	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return certPEM, keyPEM
+	return certPEM, keyPEM, nil
 }
 
 // OpenCA loads a worker CA keypair from disk, generating and persisting it on
@@ -88,7 +88,10 @@ func OpenCA(dir string, joinTokens []string) (*CA, error) {
 		return loadCA(certPEM, keyPEM, joinTokens)
 	}
 
-	certPEM, keyPEM := generateCA()
+	certPEM, keyPEM, err := generateCA()
+	if err != nil {
+		return nil, err
+	}
 	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write ca cert: %w", err)
 	}
@@ -368,7 +371,11 @@ func loadOrInitCA(store CAStore, caDir, authSecret string, joinTokens []string) 
 		}
 		newCert, newKey = dc, dk
 	} else {
-		newCert, newKey = generateCA()
+		var gerr error
+		newCert, newKey, gerr = generateCA()
+		if gerr != nil {
+			return nil, gerr
+		}
 	}
 	enc, err := secrets.Encrypt(keyEncKey, newKey)
 	if err != nil {

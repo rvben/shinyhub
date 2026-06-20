@@ -23,14 +23,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       # The release is hermetic: it re-runs the full gate against the exact
       # tagged tree rather than trusting a separate workflow's check-run on a
       # racing commit. Same make targets the ci workflow runs, in order.
       - name: Lint
         run: make lint
 
-      - name: Test
+      - name: Test (Go)
         run: make test-go
+
+      - name: Test (JS)
+        run: make test-js
+
+      - name: Vulnerability scan
+        run: make vuln
 
       - name: Log in to GHCR
         uses: docker/login-action@v4

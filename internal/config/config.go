@@ -109,6 +109,7 @@ type Config struct {
 	Defaults         DefaultsConfig
 	Tracing          TracingConfig
 	Metrics          MetricsConfig
+	Maintenance      MaintenanceConfig
 	Branding         BrandingConfig
 	Worker           WorkerConfig
 	OAuth            OAuthConfig  `yaml:"-"`
@@ -186,6 +187,21 @@ type MetricsConfig struct {
 	// HistoryInterval is the sampling cadence for the history collector.
 	// Default 15s; must be within [1s, 10m].
 	HistoryInterval time.Duration
+}
+
+// MaintenanceConfig controls periodic database housekeeping run on the owner
+// instance only. Retention values default to "keep everything" so no history is
+// ever deleted unless the operator opts in - the safe default for an audit
+// trail and run history.
+type MaintenanceConfig struct {
+	// AuditRetentionDays deletes audit_events older than this many days. 0 (the
+	// default) keeps them forever.
+	AuditRetentionDays int `yaml:"audit_retention_days"`
+	// ScheduleRunRetentionCount keeps this many newest runs per schedule and
+	// deletes older ones. 0 (the default) keeps all runs.
+	ScheduleRunRetentionCount int `yaml:"schedule_run_retention_count"`
+	// Interval is how often the maintenance loop runs. Defaults to 1h.
+	Interval time.Duration `yaml:"interval"`
 }
 
 // BrandingConfig customises the ShinyHub front door. Every field is optional;
@@ -308,6 +324,11 @@ type ServerConfig struct {
 	// signal Ready during a zero-downtime upgrade (SIGHUP) before aborting the
 	// upgrade and continuing to serve. Defaults to 60s.
 	UpgradeTimeout time.Duration `yaml:"upgrade_timeout"`
+
+	// StopGrace is the SIGTERM-to-SIGKILL window when stopping a single app
+	// replica (hibernation, stop, restart, shutdown). Raise it for apps that
+	// need longer to flush session state on shutdown. Defaults to 10s.
+	StopGrace time.Duration `yaml:"stop_grace"`
 
 	// PIDFile, when set, receives the ready process's PID on startup and after
 	// each zero-downtime handoff. Required for the systemd path (MAINPID
@@ -904,6 +925,13 @@ func loadRaw(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Validate the listen port range. Port 0 is allowed here (OS-assigned), but
+	// the serve command further rejects it because zero-downtime upgrades need a
+	// fixed port; a negative or out-of-range value is always a misconfiguration.
+	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
+		return nil, fmt.Errorf("server.port must be between 0 and 65535, got %d", cfg.Server.Port)
+	}
+
 	// Parse trusted proxy CIDRs. Default to loopback-only when none are configured,
 	// so XFF is trusted only from local reverse proxies by default.
 	if len(cfg.Server.TrustedProxies) == 0 {
@@ -944,6 +972,9 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Server.DrainTimeout <= 0 {
 		cfg.Server.DrainTimeout = 60 * time.Second
 	}
+	if cfg.Server.StopGrace <= 0 {
+		cfg.Server.StopGrace = 10 * time.Second
+	}
 	if cfg.Server.UpgradeTimeout <= 0 {
 		cfg.Server.UpgradeTimeout = 60 * time.Second
 	}
@@ -956,6 +987,15 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if cfg.Storage.AppQuotaMB < 0 {
 		cfg.Storage.AppQuotaMB = 0
+	}
+	if cfg.Maintenance.Interval <= 0 {
+		cfg.Maintenance.Interval = time.Hour
+	}
+	if cfg.Maintenance.AuditRetentionDays < 0 {
+		cfg.Maintenance.AuditRetentionDays = 0
+	}
+	if cfg.Maintenance.ScheduleRunRetentionCount < 0 {
+		cfg.Maintenance.ScheduleRunRetentionCount = 0
 	}
 	if cfg.Storage.AppDataDir == "" {
 		cfg.Storage.AppDataDir = "./data/app-data"
@@ -1674,6 +1714,16 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Server.UpgradeTimeout = d
 	}
+	if v := os.Getenv("SHINYHUB_STOP_GRACE"); v != "" {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("parse SHINYHUB_STOP_GRACE %q: %w", v, perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("SHINYHUB_STOP_GRACE must be positive, got %q", v)
+		}
+		cfg.Server.StopGrace = d
+	}
 	if v := os.Getenv("SHINYHUB_APPS_DIR"); v != "" {
 		cfg.Storage.AppsDir = v
 	}
@@ -1683,6 +1733,20 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_STORAGE_VERSION_RETENTION: %q is not an integer: %w", v, err)
 		}
 		cfg.Storage.VersionRetention = n
+	}
+	if v := os.Getenv("SHINYHUB_AUDIT_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_AUDIT_RETENTION_DAYS: %q is not an integer: %w", v, err)
+		}
+		cfg.Maintenance.AuditRetentionDays = n
+	}
+	if v := os.Getenv("SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT: %q is not an integer: %w", v, err)
+		}
+		cfg.Maintenance.ScheduleRunRetentionCount = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -1704,8 +1768,18 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
 	}
+	if v := os.Getenv("SHINYHUB_SERVER_HOST"); v != "" {
+		cfg.Server.Host = v
+	}
+	if v := os.Getenv("SHINYHUB_SERVER_PORT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_PORT: %q is not an integer: %w", v, err)
+		}
+		cfg.Server.Port = n
+	}
 	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
-		cfg.Server.TrustedProxies = strings.Split(v, ",")
+		cfg.Server.TrustedProxies = splitCSV(v)
 	}
 	if v := os.Getenv("SHINYHUB_SHUTDOWN_APPS"); v != "" {
 		cfg.Server.ShutdownApps = v

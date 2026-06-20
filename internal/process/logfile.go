@@ -118,6 +118,7 @@ func (r *LogReader) Tail(n int) ([]string, error) {
 
 	ring := make([]string, 0, n)
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLogScanToken)
 	for scanner.Scan() {
 		if len(ring) == n {
 			ring = ring[1:]
@@ -127,6 +128,11 @@ func (r *LogReader) Tail(n int) ([]string, error) {
 	return ring, scanner.Err()
 }
 
+// maxLogScanToken caps a single log line read by Tail/Follow. The bufio.Scanner
+// default of 64 KiB silently drops longer lines (a long Python traceback or a
+// base64 blob), so a crash reason or streamed log chunk could be lost.
+const maxLogScanToken = 512 * 1024
+
 // Follow sends new lines written to the log file to lines until ctx is
 // cancelled. It polls the file at 100 ms intervals.
 func (r *LogReader) Follow(ctx context.Context, lines chan<- string) {
@@ -135,11 +141,17 @@ func (r *LogReader) Follow(ctx context.Context, lines chan<- string) {
 		offset = info.Size()
 	}
 
+	// A single Ticker reused across iterations avoids the per-iteration timer
+	// allocation (and goroutine) that time.After would leak over a long-lived
+	// follow session.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-ticker.C:
 		}
 
 		f, err := os.Open(r.path)
@@ -151,6 +163,7 @@ func (r *LogReader) Follow(ctx context.Context, lines chan<- string) {
 			continue
 		}
 		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxLogScanToken)
 		for scanner.Scan() {
 			select {
 			case lines <- scanner.Text():

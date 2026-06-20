@@ -329,6 +329,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "cannot remove the last admin")
 			return
 		}
+		if errors.Is(err, db.ErrUserOwnsApps) {
+			writeError(w, http.StatusConflict, "user still owns apps; reassign or delete them first")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}

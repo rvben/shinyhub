@@ -8,7 +8,7 @@ import (
 )
 
 func TestSecurityHeaders_ControlPlane(t *testing.T) {
-	h := SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := SecurityHeaders(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	for _, path := range []string{"/", "/login", "/apps/foo/overview", "/api/apps", "/static/app.js"} {
@@ -23,6 +23,14 @@ func TestSecurityHeaders_ControlPlane(t *testing.T) {
 		}
 		if hd.Get("Referrer-Policy") != "same-origin" {
 			t.Errorf("%s: missing Referrer-Policy=same-origin", path)
+		}
+		if hd.Get("Permissions-Policy") == "" {
+			t.Errorf("%s: missing Permissions-Policy", path)
+		}
+		// HSTS must NOT be sent over plain HTTP (the browser ignores it there, and
+		// asserting a clean policy keeps the scheme gating honest).
+		if hd.Get("Strict-Transport-Security") != "" {
+			t.Errorf("%s: HSTS sent over plain HTTP: %q", path, hd.Get("Strict-Transport-Security"))
 		}
 		csp := hd.Get("Content-Security-Policy")
 		if !strings.Contains(csp, "frame-ancestors 'self'") {
@@ -39,12 +47,28 @@ func TestSecurityHeaders_ControlPlane(t *testing.T) {
 	}
 }
 
-func TestSecurityHeaders_ProxiedAppsUntouched(t *testing.T) {
-	h := SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestSecurityHeaders_HSTSOverHTTPS(t *testing.T) {
+	h := SecurityHeaders(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/app/dash/", nil))
+	// A direct TLS request (httptest sets req.TLS for an https target).
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://host/", nil))
+	hsts := rec.Header().Get("Strict-Transport-Security")
+	if !strings.Contains(hsts, "max-age=") {
+		t.Errorf("HTTPS request missing HSTS max-age: %q", hsts)
+	}
+	if !strings.Contains(hsts, "includeSubDomains") {
+		t.Errorf("HSTS missing includeSubDomains: %q", hsts)
+	}
+}
+
+func TestSecurityHeaders_ProxiedAppsUntouched(t *testing.T) {
+	h := SecurityHeaders(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://host/app/dash/", nil))
 	hd := rec.Header()
 	// Proxied app responses must not inherit the control-plane framing/CSP policy:
 	// apps may legitimately be embedded and run their own inline scripts/styles.
@@ -53,5 +77,8 @@ func TestSecurityHeaders_ProxiedAppsUntouched(t *testing.T) {
 	}
 	if hd.Get("Content-Security-Policy") != "" {
 		t.Errorf("/app/ must not get the control-plane CSP, got %q", hd.Get("Content-Security-Policy"))
+	}
+	if hd.Get("Strict-Transport-Security") != "" {
+		t.Errorf("/app/ must not get HSTS, got %q", hd.Get("Strict-Transport-Security"))
 	}
 }

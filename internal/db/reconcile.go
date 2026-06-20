@@ -13,6 +13,12 @@ import (
 // last admin instead.
 var ErrLastAdmin = errors.New("operation would remove the last admin")
 
+// ErrUserOwnsApps is returned by DeleteUser when the target user still owns one
+// or more apps. The apps.owner_id foreign key would otherwise reject the delete
+// with an opaque database error; this lets the API surface a clear 409 telling
+// the operator to reassign or delete those apps first.
+var ErrUserOwnsApps = errors.New("user still owns apps")
+
 // roleMutationLockKey serializes all effective-role writes on Postgres (advisory
 // xact lock). SQLite serializes via BEGIN IMMEDIATE and ignores the key.
 const roleMutationLockKey int64 = 0x53484B524F4C45 // "SHKROLE"

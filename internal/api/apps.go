@@ -888,7 +888,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	out.Close()
 
 	if err := deploy.ExtractBundle(bundleZip, bundleDir); err != nil {
-		fmt.Fprintf(os.Stderr, "extract bundle %s: %v\n", slug, err)
+		slog.Error("deploy_extract_bundle_failed", "slug", slug, "err", err)
 		if errors.Is(err, deploy.ErrBundleRejected) {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
@@ -1071,7 +1071,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}, app))
 	if err != nil {
 		reason := deployFailureMessage(err)
-		fmt.Fprintf(os.Stderr, "deploy.Run %s: %v\n", slug, err)
+		slog.Error("deploy_run_failed", "slug", slug, "err", err)
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
 		// Revert manifest [app] settings so the restored old pool runs under
 		// the settings it was deployed with, not the failed bundle's.
@@ -1129,7 +1129,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			DesiredState: "running",
 			DeploymentID: &depID,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
+			slog.Error("deploy_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
 		}
 	}
 	// Persist indices that failed to boot as crashed (no PID/port) so the
@@ -1141,7 +1141,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			Index:  idx,
 			Status: "crashed",
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "upsert failed replica %s[%d]: %v\n", slug, idx, err)
+			slog.Error("deploy_upsert_failed_replica", "slug", slug, "index", idx, "err", err)
 		}
 	}
 	// Bookkeeping after the proxy switch. Two writes here are different
@@ -1230,12 +1230,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Prune old version directories beyond the retention limit.
-	go func() {
-		if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
-			fmt.Fprintf(os.Stderr, "prune old versions %s: %v\n", slug, err)
-		}
-	}()
+	// Prune old version directories beyond the retention limit. Run synchronously
+	// while the per-slug deploy lock is still held (via defer release above) so a
+	// concurrent redeploy or rollback for the same slug cannot scan and delete the
+	// same version/bundle directories at the same time. A detached goroutine would
+	// outlive the handler's lock release and race the next lock holder.
+	if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
+		slog.Error("prune_old_versions_failed", "slug", slug, "err", err)
+	}
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
@@ -1392,7 +1394,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		AppVersion:            prev.Version,
 	}, app))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rollback %s: %v\n", slug, err)
+		slog.Error("rollback_failed", "slug", slug, "err", err)
 		_ = s.store.FailDeployment(pendingDep.ID)
 		s.restorePreviousPool(slug, app, prevActive)
 		writeError(w, http.StatusInternalServerError, "rollback failed")
@@ -1416,7 +1418,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			DesiredState: "running",
 			DeploymentID: &depID,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
+			slog.Error("rollback_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
 		}
 	}
 	// UpdateAppStatus is soft state — the watchdog reconciles. PromoteDeployment
@@ -1539,9 +1541,9 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		AppVersion:            current.Version,
 	}, app))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "restart %s: %v\n", slug, err)
+		slog.Error("restart_failed", "slug", slug, "err", err)
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
-			fmt.Fprintf(os.Stderr, "update app status for %s: %v\n", slug, err)
+			slog.Error("restart_update_status_failed", "slug", slug, "err", err)
 		}
 		writeError(w, http.StatusInternalServerError, "restart failed")
 		return
@@ -1564,7 +1566,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			DesiredState: "running",
 			DeploymentID: &depID,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "upsert replica %s[%d]: %v\n", slug, r.Index, err)
+			slog.Error("restart_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
 		}
 	}
 	// Bookkeeping after the proxy switch: the restarted pool is already

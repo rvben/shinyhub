@@ -4,9 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -95,20 +93,20 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	tok, err := s.oidcProvider.Exchange(r.Context(), code)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "oidc exchange: %v\n", err)
+		reqLog(r).Error("oidc_exchange_failed", "err", err)
 		writeError(w, http.StatusBadGateway, "OAuth exchange failed")
 		return
 	}
 
 	oidcUser, err := s.oidcProvider.VerifyIDToken(r.Context(), tok)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "oidc verify id_token: %v\n", err)
+		reqLog(r).Error("oidc_verify_id_token_failed", "err", err)
 		writeError(w, http.StatusBadGateway, "failed to verify OIDC ID token")
 		return
 	}
 
 	if oidcUser.GroupsClaimMalformed && s.cfg.OAuth.OIDC.RequireValidGroups {
-		fmt.Fprintf(os.Stderr, "oidc: groups claim malformed for sub %s; refusing login (require_valid_groups)\n", oidcUser.Sub)
+		reqLog(r).Warn("oidc_groups_claim_malformed_refused", "sub", oidcUser.Sub)
 		writeError(w, http.StatusBadGateway, "OIDC groups claim is malformed")
 		return
 	}
@@ -125,7 +123,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		Role: s.jitOAuthRole(),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "oidc provision oauth user: %v\n", err)
+		reqLog(r).Error("oidc_provision_user_failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -138,20 +136,20 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// Refresh the IdP-governed display name from the OIDC name claim. No-op for
 	// accounts with a local password (self-managed) or when the claim is absent.
 	if err := s.store.SetDisplayNameFromIdP(user.ID, oidcUser.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "oidc display name from idp: %v\n", err)
+		reqLog(r).Warn("oidc_display_name_failed", "err", err)
 	}
 
 	// Authoritative role reconciliation from IdP groups. Only when the provider
 	// actually sent the groups claim - an absent claim must not demote the user.
 	if oidcUser.GroupsClaimMalformed {
-		fmt.Fprintf(os.Stderr, "oidc: groups claim present but unparseable for user %s; skipping group reconciliation to avoid demotion\n", user.Username)
+		reqLog(r).Warn("oidc_groups_claim_unparseable_skipped", "username", user.Username)
 	}
 	if oidcUser.GroupsClaimPresent {
 		if err := s.store.ReconcileUserFromGroups(
 			user.ID, oidcUser.Groups,
 			AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole(),
 		); err != nil {
-			fmt.Fprintf(os.Stderr, "oidc reconcile groups: %v\n", err)
+			reqLog(r).Error("oidc_reconcile_groups_failed", "username", user.Username, "err", err)
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
@@ -159,7 +157,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		// here must not issue a session with a stale role claim.
 		fresh, err := s.store.GetUserByID(user.ID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "oidc re-read user after reconcile: %v\n", err)
+			reqLog(r).Error("oidc_reread_user_failed", "username", user.Username, "err", err)
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}

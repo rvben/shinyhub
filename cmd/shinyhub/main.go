@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -200,6 +201,16 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", reg.Handler())
+	// pprof is mounted only on this listener, which binds loopback by default
+	// (cfg.Metrics.Addr), so live goroutine/heap/CPU profiles are available for
+	// diagnosing a hung server without restarting it and without ever exposing
+	// profiling on the public port. The server sets no WriteTimeout, so the
+	// default 30s CPU profile completes.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -207,6 +218,73 @@ func startMetricsListener(listen listenFunc, addr string, reg *metrics.Registry)
 		}
 	}()
 	return srv, ln, nil
+}
+
+// probeWritable confirms dir is writable by creating and removing a temp file.
+// os.MkdirAll succeeds on an existing-but-unwritable directory (e.g. wrong owner
+// left by a prior install), so without this probe the first deploy would fail
+// later with a cryptic permission error instead of a clear startup failure.
+func probeWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".shinyhub-writeprobe-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	return os.Remove(name)
+}
+
+// runMaintenance periodically prunes the audit log and per-schedule run history
+// to keep those tables bounded. It runs on the owner instance only (so HA
+// standbys never prune concurrently) and is a no-op when no retention is
+// configured. It prunes once promptly on start, then on each interval tick.
+func runMaintenance(ctx context.Context, store *db.Store, cfg config.MaintenanceConfig) {
+	auditRetention := time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour
+	keepRuns := cfg.ScheduleRunRetentionCount
+	if auditRetention <= 0 && keepRuns <= 0 {
+		return
+	}
+
+	prune := func() {
+		if auditRetention > 0 {
+			if n, err := store.PruneAuditEvents(auditRetention); err != nil {
+				slog.Warn("prune_audit_events_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_audit_events", "removed", n, "retention_days", cfg.AuditRetentionDays)
+			}
+		}
+		if keepRuns > 0 {
+			ids, err := store.ListAllScheduleIDs()
+			if err != nil {
+				slog.Warn("prune_schedule_runs_list_failed", "err", err)
+				return
+			}
+			var total int64
+			for _, id := range ids {
+				n, err := store.PruneScheduleRuns(id, keepRuns)
+				if err != nil {
+					slog.Warn("prune_schedule_runs_failed", "schedule_id", id, "err", err)
+					continue
+				}
+				total += n
+			}
+			if total > 0 {
+				slog.Info("pruned_schedule_runs", "removed", total, "keep_per_schedule", keepRuns)
+			}
+		}
+	}
+
+	prune()
+	ticker := time.NewTicker(cfg.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
 }
 
 // isClustered reports whether cfg is using the Postgres backend, which means
@@ -386,9 +464,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if err := os.MkdirAll(cfg.Storage.AppsDir, 0o750); err != nil {
 		return fmt.Errorf("create apps dir: %w", err)
 	}
+	if err := probeWritable(cfg.Storage.AppsDir); err != nil {
+		return fmt.Errorf("apps dir %s is not writable: %w", cfg.Storage.AppsDir, err)
+	}
 
 	if err := os.MkdirAll(cfg.Storage.AppDataDir, 0o750); err != nil {
 		return fmt.Errorf("create app-data dir: %w", err)
+	}
+	if err := probeWritable(cfg.Storage.AppDataDir); err != nil {
+		return fmt.Errorf("app-data dir %s is not writable: %w", cfg.Storage.AppDataDir, err)
 	}
 
 	// Normalize the configured app-data dir to an absolute path once, here at
@@ -456,6 +540,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}()
 	if err := store.Migrate(); err != nil {
 		return fmt.Errorf("db migrate: %w", err)
+	}
+	// Refuse to serve a database that a newer build already migrated past this
+	// binary: the schema would carry columns/tables this code cannot read,
+	// risking silent corruption. Fail fast with an actionable message instead.
+	if err := store.VerifySchemaCompatibility(); err != nil {
+		return fmt.Errorf("schema compatibility: %w", err)
 	}
 
 	var (
@@ -563,6 +653,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	mgr.SetDefaultTier(defaultTier)
+	mgr.SetStopGrace(cfg.Server.StopGrace)
 	for _, tierCfg := range cfg.Runtime.Tiers {
 		if tierCfg.Name == defaultTier {
 			continue
@@ -795,7 +886,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 				}
 				return float64(n)
 			},
+			func() float64 {
+				n, err := store.CountCrashedApps()
+				if err != nil {
+					return 0
+				}
+				return float64(n)
+			},
 		)
+		// Surface dropped audit events (e.g. disk full) as a counter so the
+		// silent loss of the compliance trail is alertable.
+		store.SetAuditErrorHook(reg.RecordAuditWriteError)
 		var mln net.Listener
 		metricsSrv, mln, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, reg)
 		if err != nil {
@@ -823,6 +924,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// Tear down the tracer on any early error return below (idempotent with
 		// the ordered shutdown path).
 		defer func() { _ = tracer.Shutdown(context.Background()) }()
+	}
+
+	// Running with neither metrics nor tracing means no external visibility into
+	// request rates, error rates, or a crashed-app fleet - an operational blind
+	// spot. Warn loudly so it is a deliberate choice, not an oversight.
+	if !cfg.Metrics.Enabled && !cfg.Tracing.Enabled {
+		slog.Warn("observability disabled: no Prometheus metrics or OTel tracing are enabled; enable metrics.enabled to get request/error/crashed-app signals")
 	}
 
 	// Emit a structured access log for every proxied app request. Using the
@@ -1242,6 +1350,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		loops.Add(1)
 		go func() { defer loops.Done(); watcher.Start(octx) }()
+		// Database housekeeping (audit + schedule-run retention) runs on the owner
+		// only, so HA standbys never prune concurrently. A no-op unless retention
+		// is configured.
+		loops.Add(1)
+		go func() { defer loops.Done(); runMaintenance(octx, store, cfg.Maintenance) }()
 		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
 		// this restart, so their next access is a warm resume instead of a cold
 		// boot (a frozen process does not survive a service restart, so the warm
@@ -1308,7 +1421,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// and traces record the status/latency the client actually sees, including
 	// timeout 503s and recovered-panic 500s. It is a no-op unless metrics or
 	// tracing are enabled.
-	mux.Handle("/api/", srv.Observe(apiTimeoutHandler(srv.Router())))
+	mux.Handle("/api/", bodyLimitHandler(srv.Observe(apiTimeoutHandler(srv.Router()))))
 	// Re-resolve JWT-claimed users against the live DB on every /app/* hit
 	// so role demotions and account deletions take effect immediately.
 	// Without this an admin's still-valid JWT keeps the admin-bypass path
@@ -1361,10 +1474,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	// ReadTimeout/WriteTimeout bound slow-body and slow-read clients on ordinary
+	// requests so they cannot pin a connection (and its goroutine) indefinitely.
+	// Streaming and long-running routes (the reverse proxy, SSE log tails, large
+	// uploads, lifecycle swaps) clear these per-connection deadlines via
+	// deadlineExemptions so they are not severed mid-flight.
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(rootHandler),
+		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, deadlineExemptions(rootHandler)),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
@@ -1721,4 +1841,91 @@ func isScheduleRunLogsPath(sub string) bool {
 		seg[0] == "schedules" && seg[1] != "" &&
 		seg[2] == "runs" && seg[3] != "" &&
 		seg[4] == "logs"
+}
+
+// maxAPIJSONBody caps the request body for ordinary JSON API endpoints so a
+// malicious or buggy client cannot exhaust server memory with an unbounded
+// body. Bulk-upload routes (bundle deploy, per-app data PUT) are exempt; their
+// handlers apply their own, much larger, http.MaxBytesReader limits.
+const maxAPIJSONBody = 4 << 20 // 4 MiB
+
+// bodyLimitHandler wraps r.Body in an http.MaxBytesReader for every /api route
+// except the bulk-upload routes (see isLargeUploadRoute), bounding the memory a
+// single request can consume. It is mounted outermost on the /api handler so it
+// sees the raw ResponseWriter and the real request body before any inner
+// wrapper, and so the bulk-upload handlers can still install their own limits.
+func bodyLimitHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && !isLargeUploadRoute(r.Method, r.URL.Path) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxAPIJSONBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLargeUploadRoute reports whether method+path is a bulk-upload API route that
+// legitimately carries a body larger than maxAPIJSONBody and applies its own
+// size limit downstream: POST /api/apps/{slug}/deploy (bundle zip) and
+// PUT /api/apps/{slug}/data/<rel> (per-app data file).
+func isLargeUploadRoute(method, path string) bool {
+	const prefix = "/api/apps/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	rest := path[len(prefix):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return false
+	}
+	sub := rest[slash+1:]
+	if sub == "deploy" {
+		return method == http.MethodPost
+	}
+	if method == http.MethodPut && strings.HasPrefix(sub, "data/") && len(sub) > len("data/") {
+		return true
+	}
+	return false
+}
+
+// needsUnboundedDeadline reports whether a request must run without the
+// server's connection-level read/write deadlines. These are the streaming and
+// long-running surfaces that ReadTimeout/WriteTimeout would otherwise sever
+// mid-flight:
+//
+//   - /app/* — the reverse proxy to app processes, which carries Shiny
+//     WebSockets and arbitrarily long streaming responses.
+//   - /internal/fargate-bundle/* — streams a deployment bundle (large body).
+//   - the long-lived /api/ routes enumerated by isLongLivedAPIRoute (SSE log
+//     streams, bundle uploads, lifecycle swaps, per-app data uploads).
+//
+// Every other control-plane route keeps the deadlines so a slow-read or
+// slow-body client cannot pin a connection (and its goroutine) indefinitely.
+func needsUnboundedDeadline(method, path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/app/"):
+		return true
+	case strings.HasPrefix(path, "/internal/fargate-bundle/"):
+		return true
+	case strings.HasPrefix(path, "/api/"):
+		return isLongLivedAPIRoute(method, path)
+	}
+	return false
+}
+
+// deadlineExemptions clears the per-connection read and write deadlines for the
+// streaming and long-running routes identified by needsUnboundedDeadline. The
+// server-level ReadTimeout/WriteTimeout then act as a slow-client backstop on
+// ordinary responses without severing legitimate long-lived connections
+// (WebSocket proxying, SSE log tails, large uploads, dependency-heavy launches).
+func deadlineExemptions(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if needsUnboundedDeadline(r.Method, r.URL.Path) {
+			rc := http.NewResponseController(w)
+			// Best-effort: the underlying writer supports deadlines; ignore
+			// ErrNotSupported so a future wrapper can't break streaming.
+			_ = rc.SetReadDeadline(time.Time{})
+			_ = rc.SetWriteDeadline(time.Time{})
+		}
+		next.ServeHTTP(w, r)
+	})
 }

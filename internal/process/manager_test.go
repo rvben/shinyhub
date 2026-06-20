@@ -1141,3 +1141,39 @@ func TestManager_AutoInstrumentAppsDefault(t *testing.T) {
 		t.Error("SetAutoInstrumentAppsDefault(true) not reflected")
 	}
 }
+
+// panicWaitRuntime panics inside Wait, simulating a runtime or bookkeeping fault
+// in the exit-monitoring goroutine.
+type panicWaitRuntime struct{ *fakeRuntime }
+
+func (panicWaitRuntime) Wait(context.Context, process.RunHandle) error {
+	panic("exit-monitor boom")
+}
+
+// TestManager_ExitMonitorRecoversFromPanic proves a panic in the exit-monitor
+// goroutine is contained (it does not crash the whole server) and that the
+// replica's done channel is still closed, so a concurrent StopReplica returns
+// instead of hanging forever.
+func TestManager_ExitMonitorRecoversFromPanic(t *testing.T) {
+	m := process.NewManager(t.TempDir(), panicWaitRuntime{newFakeRuntime()})
+
+	if _, err := m.Start(process.StartParams{
+		Slug:    "boom",
+		Dir:     t.TempDir(),
+		Command: []string{"x"},
+		Port:    19500,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Let the monitor goroutine run Wait (panic) and recover.
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- m.StopReplica("boom", 0) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("StopReplica hung; a panic in the exit monitor left the done channel unclosed")
+	}
+}

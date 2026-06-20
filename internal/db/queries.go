@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -251,6 +251,16 @@ func (s *Store) DeleteUser(id int64) error {
 		if others == 0 {
 			return ErrLastAdmin
 		}
+	}
+	// apps.owner_id has no ON DELETE action (RESTRICT), so deleting a user who
+	// owns apps would fail with an opaque FK error. Detect it up front and return
+	// a typed sentinel the API maps to a clear 409.
+	var ownedApps int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM apps WHERE owner_id = ?`, id).Scan(&ownedApps); err != nil {
+		return fmt.Errorf("delete user: count owned apps: %w", err)
+	}
+	if ownedApps > 0 {
+		return ErrUserOwnsApps
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
@@ -710,6 +720,15 @@ func (s *Store) ListWarmShrunkApps() ([]*App, error) {
 func (s *Store) CountRunningApps() (int64, error) {
 	var n int64
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps WHERE status = 'running'`).Scan(&n)
+	return n, err
+}
+
+// CountCrashedApps returns the number of apps currently in the crashed state -
+// apps that exhausted their restart budget and are serving nothing. Used by the
+// fleet metrics gauge so operators can alert on the most actionable condition.
+func (s *Store) CountCrashedApps() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps WHERE status = 'crashed'`).Scan(&n)
 	return n, err
 }
 
@@ -1805,15 +1824,19 @@ type AuditEvent struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// LogAuditEvent inserts an audit event. Errors are logged to stderr but do
-// not fail the caller — audit recording must never break normal operation.
+// LogAuditEvent inserts an audit event. A write failure is logged and surfaced
+// via the audit-error hook but does not fail the caller — audit recording must
+// never break normal operation.
 func (s *Store) LogAuditEvent(p AuditEventParams) {
 	_, err := s.db.Exec(`
 		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "audit log: %v\n", err)
+		slog.Error("audit_log_write_failed", "action", p.Action, "err", err)
+		if s.auditErrHook != nil {
+			s.auditErrHook()
+		}
 	}
 }
 
@@ -1875,6 +1898,22 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 		result = append(result, e)
 	}
 	return result, rows.Err()
+}
+
+// PruneAuditEvents deletes audit events older than the retention window and
+// returns the number removed. A non-positive retention is a no-op (returns 0,
+// nil) so the operator can keep the full compliance trail by default. The
+// cutoff is computed on the DB clock, matching how created_at is stamped.
+func (s *Store) PruneAuditEvents(retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	secs := int(retention.Seconds())
+	res, err := s.db.Exec(`DELETE FROM audit_events WHERE created_at < ` + s.d.nowMinusSeconds(secs))
+	if err != nil {
+		return 0, fmt.Errorf("prune audit events: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 // LatestAutoscaleEvent returns the most-recent autoscale_scale_up or

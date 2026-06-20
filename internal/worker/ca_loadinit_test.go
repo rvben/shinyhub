@@ -64,7 +64,7 @@ func TestLoadOrInitCA_WrongSecretFailsLoudly(t *testing.T) {
 
 func TestLoadOrInitCA_ImportsDiskCA(t *testing.T) {
 	dir := t.TempDir()
-	certPEM, keyPEM := generateCA()
+	certPEM, keyPEM := mustGenerateCA(t)
 	writeDiskCA(t, dir, certPEM, keyPEM) // helper: write ca-cert.pem/ca-key.pem
 	st := &fakeCAStore{}
 	ca, err := LoadOrInitCA(st, dir, testSecret, nil)
@@ -83,7 +83,7 @@ func TestLoadOrInitCA_DiskMismatchErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	otherCert, otherKey := generateCA()
+	otherCert, otherKey := mustGenerateCA(t)
 	writeDiskCA(t, dir, otherCert, otherKey)
 	if _, err := LoadOrInitCA(st, dir, testSecret, nil); err == nil {
 		t.Fatal("disk CA differing from DB CA must be a loud error")

@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -126,10 +127,25 @@ func (d *mtlsDialer) tlsConfig(w db.Worker) *tls.Config {
 	}
 }
 
+// workerResponseHeaderTimeout bounds the wait for a remote worker's response
+// headers. It bounds only the header wait, so WebSocket upgrades and NDJSON
+// streaming (whose headers arrive immediately) are unaffected.
+const workerResponseHeaderTimeout = 120 * time.Second
+
 func (d *mtlsDialer) transport(w db.Worker) *http.Transport {
 	return &http.Transport{
 		TLSClientConfig:   d.tlsConfig(w),
 		ForceAttemptHTTP2: false,
+		// Bound dials and the response-header wait so an unreachable or hung
+		// remote worker cannot pin a forwarding goroutine indefinitely.
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: workerResponseHeaderTimeout,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   16,
 	}
 }
 

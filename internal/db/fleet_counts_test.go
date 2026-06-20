@@ -30,6 +30,30 @@ func TestCountRunningApps(t *testing.T) {
 	}
 }
 
+// TestCountCrashedApps counts only apps in the crashed state, so an operator can
+// alert on "apps currently serving nothing" - the most actionable fleet signal.
+func TestCountCrashedApps(t *testing.T) {
+	store := openTestStore(t)
+	u := mustCreateUser(t, store, "owner", "developer")
+
+	crashed := mustCreateApp(t, store, "boom", u.ID)
+	if err := store.MarkAppCrashed(crashed.Slug, "exhausted restart budget"); err != nil {
+		t.Fatal(err)
+	}
+	running := mustCreateApp(t, store, "ok", u.ID)
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: running.Slug, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.CountCrashedApps()
+	if err != nil {
+		t.Fatalf("CountCrashedApps: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("CountCrashedApps = %d, want 1", got)
+	}
+}
+
 // TestCountRunningReplicas counts only replica rows in the running state across
 // all apps, so the fleet gauge reflects live serving capacity.
 func TestCountRunningReplicas(t *testing.T) {
