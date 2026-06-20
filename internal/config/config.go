@@ -676,19 +676,20 @@ type rawSchedulerConfig struct {
 
 // rawConfig mirrors Config for YAML decoding, using string-typed duration fields.
 type rawConfig struct {
-	Database  DatabaseConfig     `yaml:"database"`
-	Server    ServerConfig       `yaml:"server"`
-	Auth      AuthConfig         `yaml:"auth"`
-	Storage   StorageConfig      `yaml:"storage"`
-	Lifecycle rawLifecycleConfig `yaml:"lifecycle"`
-	OAuth     rawOAuthConfig     `yaml:"oauth"`
-	Runtime   rawRuntimeConfig   `yaml:"runtime"`
-	Scheduler rawSchedulerConfig `yaml:"scheduler"`
-	Defaults  rawDefaultsConfig  `yaml:"defaults"`
-	Tracing   rawTracingConfig   `yaml:"tracing"`
-	Metrics   rawMetricsConfig   `yaml:"metrics"`
-	Branding  BrandingConfig     `yaml:"branding"`
-	Worker    WorkerConfig       `yaml:"worker"`
+	Database    DatabaseConfig     `yaml:"database"`
+	Server      ServerConfig       `yaml:"server"`
+	Auth        AuthConfig         `yaml:"auth"`
+	Storage     StorageConfig      `yaml:"storage"`
+	Lifecycle   rawLifecycleConfig `yaml:"lifecycle"`
+	OAuth       rawOAuthConfig     `yaml:"oauth"`
+	Runtime     rawRuntimeConfig   `yaml:"runtime"`
+	Scheduler   rawSchedulerConfig `yaml:"scheduler"`
+	Defaults    rawDefaultsConfig  `yaml:"defaults"`
+	Tracing     rawTracingConfig   `yaml:"tracing"`
+	Metrics     rawMetricsConfig   `yaml:"metrics"`
+	Maintenance MaintenanceConfig  `yaml:"maintenance"`
+	Branding    BrandingConfig     `yaml:"branding"`
+	Worker      WorkerConfig       `yaml:"worker"`
 }
 
 type rawMetricsConfig struct {
@@ -896,8 +897,9 @@ func loadRaw(path string) (*Config, error) {
 			HistoryWindow:   histWindow,
 			HistoryInterval: histInterval,
 		},
-		Branding: raw.Branding,
-		Worker:   raw.Worker,
+		Maintenance: raw.Maintenance,
+		Branding:    raw.Branding,
+		Worker:      raw.Worker,
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
