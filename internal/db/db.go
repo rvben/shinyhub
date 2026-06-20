@@ -406,7 +406,13 @@ func (s *Store) SchemaVersion() (int, error) {
 // by a newer build and cannot be safely restored by this one.
 // Backups are SQLite-only, so the SQLite ledger is the reference.
 func LatestSchemaVersion() (int, error) {
-	ms, err := loadMigrations("sqlite")
+	return latestEmbeddedVersion("sqlite")
+}
+
+// latestEmbeddedVersion returns the highest migration version embedded in this
+// binary for the given dialect subdirectory.
+func latestEmbeddedVersion(subdir string) (int, error) {
+	ms, err := loadMigrations(subdir)
 	if err != nil {
 		return 0, err
 	}
@@ -417,6 +423,28 @@ func LatestSchemaVersion() (int, error) {
 		}
 	}
 	return max, nil
+}
+
+// VerifySchemaCompatibility returns an error if the database's recorded schema
+// version is newer than the highest migration this binary embeds, which means
+// the database was migrated by a newer build. Running an older binary against
+// such a database is unsafe: this code does not understand columns or tables
+// added by the newer migrations, risking silent corruption or panics. Migrate()
+// only applies missing lower-numbered migrations and never removes higher ones,
+// so call this after Migrate() to catch a downgrade before serving traffic.
+func (s *Store) VerifySchemaCompatibility() error {
+	dbVer, err := s.SchemaVersion()
+	if err != nil {
+		return err
+	}
+	binVer, err := latestEmbeddedVersion(s.migrationsSubdir())
+	if err != nil {
+		return err
+	}
+	if dbVer > binVer {
+		return fmt.Errorf("database schema version %d was created by a newer shinyhub build (this binary supports up to version %d); downgrade is not supported - upgrade the server or restore from a compatible backup", dbVer, binVer)
+	}
+	return nil
 }
 
 // BackupTo writes a transactionally consistent copy of the database to dest

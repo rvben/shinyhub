@@ -457,6 +457,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if err := store.Migrate(); err != nil {
 		return fmt.Errorf("db migrate: %w", err)
 	}
+	// Refuse to serve a database that a newer build already migrated past this
+	// binary: the schema would carry columns/tables this code cannot read,
+	// risking silent corruption. Fail fast with an actionable message instead.
+	if err := store.VerifySchemaCompatibility(); err != nil {
+		return fmt.Errorf("schema compatibility: %w", err)
+	}
 
 	var (
 		workerCA  *worker.CA
