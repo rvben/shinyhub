@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -67,10 +68,10 @@ func TestWatchAndRestart_Debounce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	count := 0
+	var count atomic.Int32
 	fired := make(chan struct{}, 10)
 	go watchAndRestart(ctx, dir, nil, func() {
-		count++
+		count.Add(1)
 		fired <- struct{}{}
 	})
 
@@ -85,10 +86,11 @@ func TestWatchAndRestart_Debounce(t *testing.T) {
 	// Wait for debounce to fire at most once (allow up to 2 seconds).
 	time.Sleep(1500 * time.Millisecond)
 
-	if count == 0 {
+	n := count.Load()
+	if n == 0 {
 		t.Fatal("watcher must fire at least once after burst")
 	}
-	if count > 2 {
-		t.Fatalf("watcher fired %d times for a burst; expected debounce to <=2", count)
+	if n > 2 {
+		t.Fatalf("watcher fired %d times for a burst; expected debounce to <=2", n)
 	}
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -63,7 +64,7 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 				defaultEnvFile := filepath.Join(dir, ".env")
 				if fe, err := readRunEnvFile(defaultEnvFile); err == nil {
 					fileEnv = fe
-				} else if !os.IsNotExist(err) {
+				} else if !errors.Is(err, os.ErrNotExist) {
 					return &ExitCodeError{Code: 1, Kind: KindValidation,
 						Err: fmt.Errorf("default .env file: %w", err)}
 				}
@@ -120,11 +121,13 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 	return cmd
 }
 
-// readRunEnvFile reads a file of KEY=VALUE lines (ignoring blank lines and
-// lines starting with '#') and returns them as a slice of raw KEY=VALUE strings
-// suitable for os/exec environment passing. It returns the raw os.Open error if
-// the file does not exist, so callers can distinguish "file missing" from
-// "file malformed".
+// readRunEnvFile reads a file of KEY=VALUE lines and returns them as a slice
+// of raw KEY=VALUE strings suitable for os/exec environment passing. It skips
+// blank lines, '#'-prefixed comment lines, and lines that have no '=' (so bare
+// variable names without values are ignored). A leading "export " prefix is
+// stripped to support shell-sourced .env files. It returns the raw os.Open
+// error if the file does not exist, so callers can distinguish "file missing"
+// from "file malformed".
 func readRunEnvFile(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -134,6 +137,10 @@ func readRunEnvFile(path string) ([]string, error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		if !strings.Contains(line, "=") {
 			continue
 		}
 		lines = append(lines, line)

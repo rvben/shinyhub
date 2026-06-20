@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -44,6 +45,36 @@ type Options struct {
 	Check bool
 }
 
+// reservedEnvKeys are env keys that localrun always controls; user-supplied
+// values for these keys are silently dropped to prevent them from shadowing
+// the platform-authoritative values appended later.
+var reservedEnvKeys = []string{"PORT", "SHINYHUB_APP_DATA"}
+
+// dropReservedKeys returns a copy of env with every "KEY=VALUE" entry whose
+// key appears in reserved removed.
+func dropReservedKeys(env []string) []string {
+	reserved := make(map[string]struct{}, len(reservedEnvKeys))
+	for _, k := range reservedEnvKeys {
+		reserved[k] = struct{}{}
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key := kv
+		if i := len(key); i > 0 {
+			for j, c := range kv {
+				if c == '=' {
+					key = kv[:j]
+					break
+				}
+			}
+		}
+		if _, blocked := reserved[key]; !blocked {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // Run boots the app bundle and blocks until the context is cancelled (or, in
 // --check mode, until the first healthy poll or crash). It streams all app
 // output to stdout/stderr and returns a non-nil error on any failure.
@@ -59,9 +90,17 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	}
 
 	// Step 1: Resolve the data dir and set up <bundle>/data symlink.
+	// Absolutize so that the symlink target and SHINYHUB_APP_DATA agree
+	// regardless of which working directory the caller used.
 	dataDir := o.DataDir
 	if dataDir == "" {
 		dataDir = filepath.Join(bundleDir, ".shinyhub-run", "data")
+	} else {
+		abs, err := filepath.Abs(dataDir)
+		if err != nil {
+			return fmt.Errorf("resolve data dir: %w", err)
+		}
+		dataDir = abs
 	}
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
@@ -85,7 +124,6 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		Port:                  port,
 		Workers:               1,
 		BindHost:              "127.0.0.1",
-		DataDir:               dataDir,
 		Reload:                !o.NoReload,
 		PrepHostDeps:          !o.NoSync,
 		CommandHostDeps:       !o.NoSync,
@@ -106,9 +144,11 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	}
 
 	// Step 5: Assemble the child env. Precedence (lowest to highest):
-	//   SanitizedEnv() base, then o.Env (--env/.env), then plan.Env (PORT),
-	//   then SHINYHUB_APP_DATA. Platform vars win over user-supplied env.
-	childEnv := append(process.SanitizedEnv(), o.Env...)
+	//   SanitizedEnv() base, then o.Env (--env/.env) with reserved keys
+	//   stripped, then plan.Env (PORT), then SHINYHUB_APP_DATA.
+	//   Platform vars always win over user-supplied env.
+	userEnv := dropReservedKeys(o.Env)
+	childEnv := append(process.SanitizedEnv(), userEnv...)
 	childEnv = append(childEnv, plan.Env...)
 	childEnv = append(childEnv, "SHINYHUB_APP_DATA="+dataDir)
 
@@ -139,10 +179,19 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Ensure the child group is always torn down when Run returns.
+	defer func() { stopChild(cmd, exitCh, stderr) }()
 
 	// Step 7: Poll for readiness concurrently with watching for early exit.
+	// pollCtx is cancelled when Run returns so the poller never outlives Run.
+	pollCtx, pollCancel := context.WithCancel(ctx)
+	defer pollCancel()
+
 	readyCh := make(chan struct{}, 1)
-	go pollReady(ctx, readyURL, plan.Timeout, readyCh)
+	go pollReady(pollCtx, readyURL, plan.Timeout, readyCh)
+
+	startTimer := time.NewTimer(plan.Timeout)
+	defer startTimer.Stop()
 
 	select {
 	case exitErr := <-exitCh:
@@ -158,7 +207,8 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 
 		if o.Check {
 			// --check: signal the child group and wait for it to finish.
-			stopChild(cmd, exitCh, stderr)
+			// The deferred stopChild above handles teardown; return nil to
+			// indicate success.
 			return nil
 		}
 
@@ -167,12 +217,10 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			openBrowser(fmt.Sprintf("http://127.0.0.1:%d", port))
 		}
 
-	case <-time.After(plan.Timeout):
-		stopChild(cmd, exitCh, stderr)
+	case <-startTimer.C:
 		return fmt.Errorf("app did not become healthy within %s", plan.Timeout)
 
 	case <-ctx.Done():
-		stopChild(cmd, exitCh, stderr)
 		return nil
 	}
 
@@ -199,7 +247,6 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		for {
 			select {
 			case <-ctx.Done():
-				stopChild(cmd, exitCh, stderr)
 				return nil
 
 			case exitErr := <-exitCh:
@@ -210,12 +257,43 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 
 			case <-changeCh:
 				fmt.Fprintln(stdout, "==> file change detected; restarting")
+				// Re-resolve the launch plan so manifest [app] command changes
+				// are picked up and the new spawn gets a fresh readiness check.
 				stopChild(cmd, exitCh, stderr)
+				newPlan, resolveErr := deploy.ResolveLaunch(bundleDir, launchOpts)
+				if resolveErr != nil {
+					return fmt.Errorf("re-resolve launch after change: %w", resolveErr)
+				}
+				plan = newPlan
 				newCmd, newCh, spawnErr := spawnChild()
 				if spawnErr != nil {
 					return spawnErr
 				}
 				cmd, exitCh = newCmd, newCh
+
+				// Wait for the restarted process to become ready.
+				restartPollCtx, restartPollCancel := context.WithCancel(ctx)
+				restartReadyCh := make(chan struct{}, 1)
+				go pollReady(restartPollCtx, readyURL, plan.Timeout, restartReadyCh)
+				restartTimer := time.NewTimer(plan.Timeout)
+				select {
+				case <-ctx.Done():
+					restartTimer.Stop()
+					restartPollCancel()
+					return nil
+				case restartExitErr := <-exitCh:
+					restartTimer.Stop()
+					restartPollCancel()
+					code := exitCode(restartExitErr)
+					return fmt.Errorf("restarted app exited before becoming healthy (exit %d)", code)
+				case <-restartReadyCh:
+					restartTimer.Stop()
+					restartPollCancel()
+					fmt.Fprintf(stdout, "==> restarted and healthy\n")
+				case <-restartTimer.C:
+					restartPollCancel()
+					return fmt.Errorf("restarted app did not become healthy within %s", plan.Timeout)
+				}
 			}
 		}
 	}
@@ -223,7 +301,6 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	// Long-run without watcher: block until context is cancelled or process exits.
 	select {
 	case <-ctx.Done():
-		stopChild(cmd, exitCh, stderr)
 		return nil
 	case exitErr := <-exitCh:
 		if exitErr != nil {
@@ -245,7 +322,7 @@ func ensureDataSymlink(linkPath, dataDir string) error {
 			}
 		}
 		return fmt.Errorf("bundle already contains a 'data' entry (%s); remove it before running", info.Mode())
-	case !os.IsNotExist(err):
+	case !errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("lstat %s: %w", linkPath, err)
 	}
 	if err := os.Symlink(dataDir, linkPath); err != nil {
@@ -282,14 +359,15 @@ func removeDataSymlinkIfOwned(linkPath, dataDir string, stderr io.Writer) {
 // ctx is cancelled, or timeout elapses. On success it sends to readyCh.
 func pollReady(ctx context.Context, readyURL string, timeout time.Duration, readyCh chan<- struct{}) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.After(timeout)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-deadline:
+		case <-deadline.C:
 			return
 		case <-ticker.C:
 			resp, err := client.Get(readyURL) //nolint:noctx
@@ -306,11 +384,24 @@ func pollReady(ctx context.Context, readyURL string, timeout time.Duration, read
 }
 
 // stopChild sends SIGTERM to the child's process group, waits up to 5 s for a
-// clean exit, then sends SIGKILL.
+// clean exit, then sends SIGKILL. It is safe to call against an already-dead
+// process or when exitCh has already been drained (e.g. by the early-exit
+// select in Run): a non-blocking pre-drain and a non-blocking final receive
+// prevent the caller from hanging.
 func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 	if cmd.Process == nil {
 		return
 	}
+	// If the process already exited (exitCh drained by caller), there is
+	// nothing left to do but ensure the group is gone.
+	select {
+	case <-exitCh:
+		// Already exited; group is done.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // harmless on zombie
+		return
+	default:
+	}
+
 	// Signal the entire process group.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 
@@ -321,7 +412,11 @@ func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
 			slog.Warn("SIGKILL failed", "err", err)
 		}
-		<-exitCh
+		// Non-blocking drain: if the process was already reaped, don't hang.
+		select {
+		case <-exitCh:
+		default:
+		}
 	}
 }
 
@@ -339,5 +434,18 @@ func exitCode(err error) int {
 
 // openBrowser opens url in the system default browser, best-effort.
 func openBrowser(url string) {
-	_ = exec.Command("open", url).Start()
+	var cmd string
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = "open"
+	case "windows":
+		cmd = "cmd"
+	default:
+		cmd = "xdg-open"
+	}
+	if runtime.GOOS == "windows" {
+		_ = exec.Command(cmd, "/c", "start", url).Start()
+	} else {
+		_ = exec.Command(cmd, url).Start()
+	}
 }
