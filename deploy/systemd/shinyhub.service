@@ -23,9 +23,38 @@ ExecReload=/bin/kill -HUP $MAINPID
 PIDFile=/run/shinyhub/shinyhub.pid
 # Generous start timeout: an upgrade may take a moment to become ready.
 TimeoutStartSec=120
-# Intentionally NO Restart=: after a handoff the original PID exits on purpose;
-# the successor (tracked via sd_notify MAINPID + PIDFile) keeps serving. A
-# Restart policy would race the handoff. Use an external watchdog for crash-restart.
+
+# Restart only on genuine failure. A zero-downtime handoff is safe: the
+# successor sends READY=1 + MAINPID=<successor> via sd_notify before the
+# original exits cleanly, so systemd is tracking the live successor (not a
+# failure) when the original goes away. A real crash of the current MAINPID
+# (non-zero exit or signal) does restart, closing the "crash = permanent
+# outage" gap. (Restart=always is NOT used: it would race the handoff.)
+Restart=on-failure
+RestartSec=5s
+
+# Raise the file-descriptor limit well above the default 1024: each proxied
+# WebSocket session holds client+backend sockets, plus DB connections and app
+# log files, so a busy fleet can exhaust the default and fail accept().
+LimitNOFILE=65536
+
+# Defense in depth. These are safe for the control plane AND the operator app
+# processes it spawns (which still need to write to the data dir and install
+# dependencies):
+#   NoNewPrivileges  - apps never need privilege escalation.
+#   PrivateTmp       - per-service /tmp.
+#   ProtectSystem=full - /usr, /boot, /etc become read-only (config is read-only;
+#                      data under /var or a dedicated dir stays writable).
+#   ProtectKernelTunables / RestrictSUIDSGID - apps don't tune the kernel or
+#                      create setuid files.
+# Deliberately NOT set: ProtectControlGroups (native-mode warm-wake manages
+# cgroups) and ProtectSystem=strict (app processes must write the data dir);
+# both would break working deployments.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

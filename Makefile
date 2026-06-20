@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test iac-validate clispec-score
+.PHONY: build clean test test-go test-race vuln test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test iac-validate clispec-score
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -10,6 +10,19 @@ test: test-go test-js
 
 test-go:
 	go test ./... -count=1
+
+# test-race runs the full Go suite under the race detector. Slower (~3-5x) than
+# test-go, so it is its own target/CI job rather than folded into test-go. The
+# control plane crosses many goroutine boundaries (watcher, proxy poolsync,
+# autoscale, worker agent), so this is the primary guard against data races.
+test-race:
+	go test -race ./... -count=1
+
+# vuln scans the module (and its dependencies) against the Go vulnerability
+# database. Run via `go run` so no separate install step is needed and it works
+# the same locally and in CI.
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # test-js runs the JSDOM tests for UI assets. Requires Node 20+. Installs
 # devDependencies (jsdom) the first time it runs; afterwards it's a no-op.

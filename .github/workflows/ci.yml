@@ -19,6 +19,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Lint
         run: go vet ./...
 
@@ -31,11 +35,53 @@ jobs:
       - name: Vet gated tests (integration, e2e)
         run: go vet -tags "integration e2e" ./...
 
-      - name: Test
-        run: go test ./... -count=1
+      - name: Test (Go)
+        run: make test-go
+
+      # The dashboard SPA is plain JS tested with jsdom; an uncaught throw breaks
+      # the whole dashboard, so these tests gate every push too.
+      - name: Test (JS)
+        run: make test-js
+
+      - name: Vulnerability scan
+        run: make vuln
 
       - name: Build
         run: go build -o /tmp/shinyhub ./cmd/shinyhub
+
+  # Full suite under the race detector. Separate job so the ~3-5x slowdown runs
+  # in parallel with the fast feedback of the `test` job.
+  test-race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test (race detector)
+        run: make test-race
+
+  # Full Go suite against a throwaway Postgres, so a Postgres-only regression
+  # (missing column in the baseline, a wrong-dialect query) is caught in CI
+  # rather than only when someone runs `make test-postgres` locally. ubuntu-latest
+  # ships Docker, so no extra setup is needed.
+  test-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test (Postgres backend, Docker)
+        run: make test-postgres
 
   # Remote-worker end-to-end: launches a control plane + a real `shinyhub worker`
   # over mTLS and deploys a Shiny app onto a remote_docker tier (real containers),
