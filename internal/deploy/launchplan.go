@@ -79,7 +79,54 @@ func ResolveLaunch(bundleDir string, opts LaunchOptions) (*LaunchPlan, error) {
 	return resolveInferred(bundleDir, bindHost, m, opts, plan)
 }
 
-// resolveInferred is completed in Task 3.
 func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions, plan *LaunchPlan) (*LaunchPlan, error) {
-	return nil, fmt.Errorf("inferred launch not yet implemented")
+	appType := DetectAppType(bundleDir)
+	plan.AppType = appType
+	switch appType {
+	case "python":
+		if opts.PrepHostDeps {
+			plan.DepPrep = []DepPrepStep{
+				{Label: "ensure project", Run: ensureProjectFn},
+				{Label: "uv sync", Run: pythonSyncFn},
+			}
+		}
+		auto := opts.AutoInstrumentDefault
+		if opts.HonorManifestTracing && m != nil && m.Tracing.Auto != nil {
+			auto = *m.Tracing.Auto
+		}
+		plan.Command = withPythonReload(buildCommand(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
+		if auto {
+			plan.FallbackCommand = withPythonReload(buildCommand(bundleDir, opts.Port, opts.Workers, bindHost, false, opts.CommandHostDeps), opts.Reload)
+		}
+	case "r":
+		if opts.PrepHostDeps {
+			plan.DepPrep = []DepPrepStep{{Label: "renv restore", Run: rSyncFn}}
+		}
+		plan.Command = buildRCommandReload(bundleDir, opts.Port, bindHost, opts.Reload)
+	default:
+		return nil, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", bundleDir)
+	}
+	return plan, nil
+}
+
+// withPythonReload appends `--reload` to an inferred `shiny run` command when
+// reload is requested. The flag targets `shiny run` even when the entrypoint is
+// wrapped by opentelemetry-instrument (the wrapper execs shiny run).
+func withPythonReload(cmd []string, reload bool) []string {
+	if !reload {
+		return cmd
+	}
+	return append(append([]string{}, cmd...), "--reload")
+}
+
+// buildRCommandReload builds the R launch command, optionally enabling Shiny's
+// in-process autoreload. BuildRCommand stays the canonical no-reload builder.
+func buildRCommandReload(bundleDir string, port int, bindHost string, reload bool) []string {
+	if !reload {
+		return BuildRCommand(bundleDir, port, bindHost)
+	}
+	expr := fmt.Sprintf(
+		"options(shiny.autoreload=TRUE); shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)",
+		bindHost, port)
+	return []string{"Rscript", "--vanilla", "-e", expr}
 }

@@ -37,6 +37,41 @@ func TestResolveLaunch_CommandOverride_SubstitutesNoValidate(t *testing.T) {
 	}
 }
 
+func TestResolveLaunch_PythonInferred_Reload(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
+	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9003, BindHost: "127.0.0.1", Reload: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.AppType != "python" {
+		t.Fatalf("AppType = %q, want python", plan.AppType)
+	}
+	if !slices.Contains(plan.Command, "--reload") {
+		t.Fatalf("reload command must contain --reload: %v", plan.Command)
+	}
+	if !slices.Contains(plan.Command, "9003") {
+		t.Fatalf("command must carry the port: %v", plan.Command)
+	}
+}
+
+func TestResolveLaunch_PythonInferred_NoReloadByDefault(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
+	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9004, BindHost: "127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(plan.Command, "--reload") {
+		t.Fatalf("default command must NOT contain --reload: %v", plan.Command)
+	}
+}
+
+func TestResolveLaunch_NoAppType_Errors(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{"readme.txt": "hi\n"})
+	if _, err := ResolveLaunch(dir, LaunchOptions{Port: 9005}); err == nil {
+		t.Fatal("expected an error when no app.py/app.R/[app] command present")
+	}
+}
+
 func TestResolveLaunch_ManifestCommand_NoPrep(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{
 		"app.py":           "x=1\n",
