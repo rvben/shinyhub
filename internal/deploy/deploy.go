@@ -559,61 +559,67 @@ func planPoolWorkers(p Params, asn []process.TierAssignment) map[int]string {
 	return out
 }
 
-// bootReplica starts a single replica, retrying once without
-// auto-instrumentation if the instrumented launch fails to start or pass its
-// health check. A bad overlay (dependency conflict with the app's pins, a
-// broken instrumentor) is an observability regression, not an outage: the uv
-// resolution error is visible in the app's own log, and the fallback is
-// flagged in the server log.
+// bootReplica starts a single replica, retrying once with an uninstrumented
+// fallback command if the instrumented launch fails to start or pass its health
+// check. A bad overlay (dependency conflict with the app's pins, a broken
+// instrumentor) is an observability regression, not an outage: the uv resolution
+// error is visible in the app's own log, and the fallback is flagged in the server
+// log.
+//
+// Each attempt obtains its launch command via bootReplicaAttempt, which calls the
+// shared ResolveLaunch seam. The retry passes AutoInstrumentDefault:false to get the
+// uninstrumented command from ResolveLaunch, matching the same fallback path that
+// plan.FallbackCommand captures for the local `shinyhub run` consumer.
 func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
-	instrumented := autoInstrument && baseCmd == nil && appType == "python"
-	res, err := bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, appType, instrumented, hc, timeout)
-	if err != nil && instrumented {
+	res, err := bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, autoInstrument, hc, timeout)
+	if err != nil && autoInstrument && baseCmd == nil && appType == "python" {
+		// The instrumented launch failed; retry with the uninstrumented fallback.
+		// bootReplicaAttempt calls ResolveLaunch with AutoInstrumentDefault:false,
+		// obtaining the same uninstrumented command that ResolveLaunch exposes as
+		// plan.FallbackCommand for the local-run consumer.
 		slog.Warn("deploy: instrumented launch failed; retrying without auto-instrumentation",
 			"slug", p.Slug, "index", idx, "err", err)
-		res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, appType, false, hc, timeout)
+		res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, false, hc, timeout)
 	}
 	return res, err
 }
 
-// bootReplicaAttempt starts a single replica: allocates a port, starts the
-// process, health-checks it, and registers it with the proxy. baseCmd == nil
-// signals that the command should be built from appType using the allocated
-// port; instrument wraps that inferred command in the OTEL overlay.
+// bootReplicaAttempt starts a single replica: allocates a port, builds the
+// launch command via ResolveLaunch (the shared seam), starts the process,
+// health-checks it, and registers it with the proxy. baseCmd is the
+// already-resolved base command template from resolveBootParams (nil means
+// the command is inferred from the bundle type). instrument controls whether
+// the OTEL overlay is applied to inferred Python commands.
 // targetWorker pins the replica to a pre-planned worker (empty means the runtime
 // self-places, e.g. a single-replica watchdog restart or a worker-agnostic tier).
-func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, instrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
+func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []string, instrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
 	port := AllocatePort()
 
-	var cmd []string
 	bindHost := "127.0.0.1"
 	if p.Manager != nil {
 		bindHost = p.Manager.AppBindHostFor(tier)
 	}
-	if baseCmd != nil {
-		// Per-replica substitution on a FRESH slice: the template is shared
-		// across replica goroutines and each replica gets its own port.
-		// A no-placeholder command (e.g. an API-supplied Params.Command)
-		// passes through unchanged but still gets its own copy.
-		cmd = substituteCommand(baseCmd, port, bindHost)
-	} else {
-		switch appType {
-		case "python":
-			workers := p.Workers
-			if workers <= 0 {
-				workers = 1
-			}
-			// hostDeps gates project mode for a SYNTHESIZED project: a
-			// container/worker replica gets the bundle but not this host's synced
-			// .venv, so it falls back to requirements.txt. An author-shipped
-			// pyproject is project mode regardless.
-			cmd = buildCommandFn(p.BundleDir, port, workers, bindHost, instrument, p.hostPreparesDeps(tier))
-		case "r":
-			cmd = BuildRCommand(p.BundleDir, port, bindHost)
-		default:
-			return Result{}, fmt.Errorf("no app.py or app.R found in %s", p.BundleDir)
-		}
+
+	// Build the launch command via the shared ResolveLaunch seam. Dep-prep
+	// already ran pool-wide in Run; PrepHostDeps:false so no prep steps are
+	// added here. CommandHostDeps gates project-mode for synthesized projects.
+	// autoInstrument carries the per-attempt value (false on the retry).
+	// HonorManifestTracing is false: resolveBootParams already applied the
+	// manifest [tracing] override when computing autoInstrument.
+	plan, err := ResolveLaunch(p.BundleDir, LaunchOptions{
+		CommandOverride:       baseCmd,
+		Port:                  port,
+		Workers:               p.Workers,
+		BindHost:              bindHost,
+		PrepHostDeps:          false,
+		CommandHostDeps:       p.hostPreparesDeps(tier),
+		AutoInstrumentDefault: instrument,
+		HonorManifestTracing:  false,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve launch: %w", err)
 	}
+	cmd := plan.Command
 
 	env := append(append([]string{}, p.Env...), fmt.Sprintf("PORT=%d", port))
 

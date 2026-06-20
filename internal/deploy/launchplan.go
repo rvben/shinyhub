@@ -37,8 +37,15 @@ type LaunchOptions struct {
 	CommandHostDeps       bool // per-tier project-mode flag for buildCommand
 	AutoInstrumentDefault bool
 	HonorManifestTracing  bool // apply manifest [tracing] auto override? server true, run false
-	DataDir               string
-	Reload                bool
+	// BuildFallbackCommand controls whether plan.FallbackCommand is populated for
+	// auto-instrumented Python boots. The `shinyhub run` consumer sets this true
+	// to pre-build the uninstrumented fallback command in one pass. The server
+	// boot path (bootReplicaAttempt) leaves this false: it calls ResolveLaunch
+	// once per attempt and passes AutoInstrumentDefault:false on the retry,
+	// avoiding an extra buildCommandFn call on the happy path.
+	BuildFallbackCommand bool
+	DataDir              string
+	Reload               bool
 }
 
 // ResolveLaunch resolves how a bundle launches, mirroring resolveBootParams +
@@ -94,9 +101,9 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 		if opts.HonorManifestTracing && m != nil && m.Tracing.Auto != nil {
 			auto = *m.Tracing.Auto
 		}
-		plan.Command = withPythonReload(buildCommand(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
-		if auto {
-			plan.FallbackCommand = withPythonReload(buildCommand(bundleDir, opts.Port, opts.Workers, bindHost, false, opts.CommandHostDeps), opts.Reload)
+		plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
+		if auto && opts.BuildFallbackCommand {
+			plan.FallbackCommand = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, false, opts.CommandHostDeps), opts.Reload)
 		}
 	case "r":
 		if opts.PrepHostDeps {

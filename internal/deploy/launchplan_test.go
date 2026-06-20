@@ -74,7 +74,7 @@ func TestResolveLaunch_NoAppType_Errors(t *testing.T) {
 
 func TestResolveLaunch_AutoInstrument_BuildsFallback(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
-	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: true, HonorManifestTracing: true})
+	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: true, HonorManifestTracing: true, BuildFallbackCommand: true})
 	if err != nil {
 		t.Fatal(err)
 	}
