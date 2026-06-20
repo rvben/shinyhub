@@ -1230,12 +1230,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Prune old version directories beyond the retention limit.
-	go func() {
-		if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
-			slog.Error("prune_old_versions_failed", "slug", slug, "err", err)
-		}
-	}()
+	// Prune old version directories beyond the retention limit. Run synchronously
+	// while the per-slug deploy lock is still held (via defer release above) so a
+	// concurrent redeploy or rollback for the same slug cannot scan and delete the
+	// same version/bundle directories at the same time. A detached goroutine would
+	// outlive the handler's lock release and race the next lock holder.
+	if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
+		slog.Error("prune_old_versions_failed", "slug", slug, "err", err)
+	}
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
