@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/secrets"
 )
 
@@ -504,13 +505,55 @@ func TestUpsertAppEnv_WritesAuditEvent(t *testing.T) {
 	}
 }
 
-// TestUpsertAppEnv_RestartTrue_RestartsRunningApp is skipped because the
-// process.Manager does not expose a Restart method and the test server is
-// constructed without a manager. Restarting requires Stop + deploy.Run with
-// the current deployment's bundle dir, which cannot be exercised without a
-// real runtime. This is tracked for a future task.
+// TestUpsertAppEnv_RestartTrue_RestartsRunningApp verifies PUT env with
+// ?restart=true on a running app restarts it via the deploy hook and reports
+// restarted=true with the new replica reflected in the DB.
 func TestUpsertAppEnv_RestartTrue_RestartsRunningApp(t *testing.T) {
-	t.Skip("manager.Restart not yet implemented; restart via ?restart=true returns restarted:false when no manager is present")
+	srv, store := newDataTestServer(t, t.TempDir(), t.TempDir(), 0)
+	srv.SetSecretsKey(secrets.DeriveKey("test-secret"))
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+	seedRunningApp(t, store, "demo", t.TempDir())
+
+	called := make(chan struct{}, 1)
+	srv.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		called <- struct{}{}
+		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 5678, Port: 9100}}}, nil
+	})
+
+	body, _ := json.Marshal(map[string]any{"value": "eu-west-1", "secret": false})
+	req := authedRequest(t, "PUT", "/api/apps/demo/env/AWS_REGION", body, token)
+	req.URL.RawQuery = "restart=true"
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Restarted       bool `json:"restarted"`
+		RestartRequired bool `json:"restart_required"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Restarted {
+		t.Errorf("restarted = false, want true (running app + restart=true + manager wired)")
+	}
+	if resp.RestartRequired {
+		t.Errorf("restart_required = true after a successful restart, want false")
+	}
+	select {
+	case <-called:
+	default:
+		t.Error("deploy hook was not called")
+	}
+
+	app, _ := store.GetAppBySlug("demo")
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) == 0 || reps[0].PID == nil || *reps[0].PID != 5678 {
+		t.Errorf("replica PID not updated to 5678 after restart: %+v", reps)
+	}
 }
 
 // --- DELETE /api/apps/{slug}/env/{key} tests ---
@@ -661,11 +704,47 @@ func TestDeleteAppEnv_AuditLogged(t *testing.T) {
 	}
 }
 
-// TestDeleteAppEnv_RestartTrue_RestartsRunningApp is skipped because the
-// process.Manager does not expose a Restart method and the test server is
-// constructed without a manager. Restarting requires Stop + deploy.Run with
-// the current deployment's bundle dir, which cannot be exercised without a
-// real runtime. This is tracked for a future task.
+// TestDeleteAppEnv_RestartTrue_RestartsRunningApp verifies DELETE env with
+// ?restart=true on a running app restarts it via the deploy hook. On a
+// successful restart the response must NOT advertise X-Shinyhub-Restart-Required
+// (the running process has already been cycled to drop the variable).
 func TestDeleteAppEnv_RestartTrue_RestartsRunningApp(t *testing.T) {
-	t.Skip("manager.Restart not yet implemented; restart via ?restart=true returns restarted:false when no manager is present")
+	srv, store := newDataTestServer(t, t.TempDir(), t.TempDir(), 0)
+	srv.SetSecretsKey(secrets.DeriveKey("test-secret"))
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+	seedRunningApp(t, store, "demo", t.TempDir())
+
+	app, _ := store.GetAppBySlug("demo")
+	if err := store.UpsertAppEnvVar(app.ID, "AWS_REGION", []byte("eu-west-1"), false); err != nil {
+		t.Fatalf("seed var: %v", err)
+	}
+
+	called := make(chan struct{}, 1)
+	srv.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		called <- struct{}{}
+		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 5678, Port: 9100}}}, nil
+	})
+
+	req := authedRequest(t, "DELETE", "/api/apps/demo/env/AWS_REGION", nil, token)
+	req.URL.RawQuery = "restart=true"
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Shinyhub-Restart-Required"); got != "" {
+		t.Errorf("X-Shinyhub-Restart-Required = %q after a successful restart, want absent", got)
+	}
+	select {
+	case <-called:
+	default:
+		t.Error("deploy hook was not called")
+	}
+
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) == 0 || reps[0].PID == nil || *reps[0].PID != 5678 {
+		t.Errorf("replica PID not updated to 5678 after restart: %+v", reps)
+	}
 }
