@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1133,6 +1134,19 @@ func buildScheduleE2EServer(t *testing.T) (srv *api.Server, store *db.Store, tok
 	if err != nil {
 		t.Fatalf("jobs.NewManager: %v", err)
 	}
+	// Drain the jobs manager before t.TempDir() cleanup runs. A run triggered by
+	// the test (run_on_register first-fire, manual run) launches an async execute
+	// goroutine that writes a run log under appsDir (a t.TempDir). If that
+	// goroutine is still writing when Go's RemoveAll cleanup deletes the dir, the
+	// unlink races ("directory not empty") and the test flakes under load. Stop
+	// cancels the run contexts and waits for the goroutines to finish; registered
+	// after t.TempDir()/dbtest.New so it runs first (cleanups are LIFO), draining
+	// the writers before the directory is removed and the store is closed.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		jm.Stop(ctx)
+	})
 	return srv, store, token, jm
 }
 
