@@ -56,5 +56,11 @@ ProtectSystem=full
 ProtectKernelTunables=true
 RestrictSUIDSGID=true
 
+# Delegate the memory controller so the process can manage per-app cgroup v2
+# subtrees. Native-mode memory limits (per-app memory.max) and warm-wake memory
+# reclaim both require this. Without it, both features degrade to no enforcement
+# (logged as a warning) and apps run uncapped.
+Delegate=memory
+
 [Install]
 WantedBy=multi-user.target

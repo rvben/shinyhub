@@ -100,6 +100,12 @@ lifecycle:
 
 runtime:
   mode: native                        # "native" (default) or "docker"
+  # Per-app memory_limit_mb (and default_memory_mb below) is enforced in BOTH
+  # native and docker mode: native mode applies it as a cgroup v2 memory.max on a
+  # per-app cgroup. Native enforcement requires the memory controller to be
+  # delegated to the service (systemd Delegate=memory, set by the reference
+  # unit); without it the app runs uncapped and a warning is logged. CPU quota
+  # (cpu_quota_percent / default_cpu_percent) is still enforced only in docker mode.
   default_replicas: 1                 # applied when an app does not set its own replicas  # SHINYHUB_RUNTIME_DEFAULT_REPLICAS
   max_replicas: 32                    # hard cap enforced by the API  # SHINYHUB_RUNTIME_MAX_REPLICAS
 

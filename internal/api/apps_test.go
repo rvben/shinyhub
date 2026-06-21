@@ -1120,6 +1120,34 @@ func TestPatchAppResourceLimits(t *testing.T) {
 	}
 }
 
+// TestPatchAppResourceLimits_NativeMode verifies that under runtime.mode=native
+// memory_limit_mb is now accepted (enforced via a per-app cgroup memory.max),
+// while cpu_quota_percent is still rejected as docker-only.
+func TestPatchAppResourceLimits_NativeMode(t *testing.T) {
+	srv, store := newManagerTestServerWithRuntimeMode(t, "native")
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token := loginAsAdmin(t, srv)
+	createApp(t, srv, token, "my-app")
+
+	patch := func(body map[string]any) int {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/apps/my-app", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	if code := patch(map[string]any{"memory_limit_mb": 256}); code != http.StatusOK {
+		t.Errorf("native memory_limit_mb: got %d, want 200 (now enforced via cgroup memory.max)", code)
+	}
+	if code := patch(map[string]any{"cpu_quota_percent": 50}); code != http.StatusBadRequest {
+		t.Errorf("native cpu_quota_percent: got %d, want 400 (still docker-only)", code)
+	}
+}
+
 func TestPatchAppResourceLimitsClear(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

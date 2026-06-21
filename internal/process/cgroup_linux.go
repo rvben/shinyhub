@@ -171,6 +171,15 @@ func setupAppCgroup(base, name string, pid int) (string, error) {
 	return dir, nil
 }
 
+// setCgroupMemoryMax writes a memory.max limit (memMB mebibytes, or "max" when
+// memMB <= 0) to an app cgroup directory created by setupAppCgroup. The memory
+// controller must be delegated to the base (it is, when the base came up), so a
+// write failure is a real error worth surfacing rather than silently dropping
+// the limit.
+func setCgroupMemoryMax(dir string, memMB int) error {
+	return writeCgroupFile(filepath.Join(dir, "memory.max"), cgroupMemoryMaxValue(memMB))
+}
+
 // appCgroupCurrentMemory reads memory.current (bytes charged) for an app cgroup
 // directory created by setupAppCgroup.
 func appCgroupCurrentMemory(dir string) (uint64, error) {
