@@ -81,17 +81,18 @@ type NativeRuntime struct {
 	cmds  map[int]*exec.Cmd
 	procs map[int]*gops.Process // cached gopsutil handles for CPU delta computation
 
-	// Warm-wake (Snapshotter) state. snapshotEnabled is the configured intent;
-	// snapshotReady is set once ensureDelegatedBase has prepared the cgroup
-	// subtree (lazily, on the first snapshot-enabled Start). cgroupBase is the
-	// delegated base dir under which per-app cgroups are created; appCgroups maps
-	// a running PID to its app cgroup dir so Suspend/Resume/teardown can find it.
-	// All four are guarded by mu (snapshotEnabled/reclaimMinFraction are set once
-	// at startup before any Start, so reads of them need no lock).
+	// Per-app cgroup state, shared by warm-wake (Snapshotter) and native resource
+	// limits. snapshotEnabled is the warm-wake intent; cgroupBaseReady is set once
+	// ensureCgroupBase has prepared the delegated cgroup subtree (lazily, on the
+	// first Start that needs it - warm-wake on, or a per-app limit set). cgroupBase
+	// is the delegated base dir under which per-app cgroups are created; appCgroups
+	// maps a running PID to its app cgroup dir so Suspend/Resume/teardown can find
+	// it. All are guarded by mu (snapshotEnabled/reclaimMinFraction are set once at
+	// startup before any Start, so reads of them need no lock).
 	snapshotEnabled    bool
 	reclaimMinFraction float64
-	snapshotOnce       sync.Once
-	snapshotReady      bool
+	cgroupOnce         sync.Once
+	cgroupBaseReady    bool
 	cgroupBase         string
 	appCgroups         map[int]string
 }
@@ -108,52 +109,64 @@ func NewNativeRuntime() *NativeRuntime {
 // SetSnapshot enables warm-wake (SIGSTOP freeze + per-app cgroup reclaim) and
 // sets the reclaim-success threshold. Called once at startup from buildRuntime,
 // before any Start. The delegated cgroup base is prepared lazily on the first
-// snapshot-enabled Start (see ensureSnapshotBase); if that preparation fails the
+// Start that needs it (see ensureCgroupBase); if that preparation fails the
 // runtime degrades gracefully and hibernates via Stop as before.
 func (r *NativeRuntime) SetSnapshot(enabled bool, reclaimMinFraction float64) {
 	r.snapshotEnabled = enabled
 	r.reclaimMinFraction = reclaimMinFraction
 }
 
-// ensureSnapshotBase prepares the delegated cgroup base exactly once, on the
-// first snapshot-enabled Start. It runs BEFORE the child is forked so the child
-// is born in base/_supervisor (where shinyhub now lives) rather than base, which
-// must stay empty of processes to delegate the memory controller. Any failure
-// leaves snapshotReady false and warm-wake stays off for the process lifetime.
-func (r *NativeRuntime) ensureSnapshotBase() {
-	if !r.snapshotEnabled {
-		return
-	}
-	r.snapshotOnce.Do(func() {
+// ensureCgroupBase prepares the delegated cgroup base exactly once, before the
+// first child that needs it is forked, so the child is born in base/_supervisor
+// (where shinyhub now lives) rather than base, which must stay empty of
+// processes to delegate the memory controller. It backs both warm-wake (reclaim)
+// and native resource limits. The caller decides when it is needed (warm-wake
+// enabled, or a per-app limit set). Any failure leaves cgroupBaseReady false and
+// both features degrade gracefully for the process lifetime.
+func (r *NativeRuntime) ensureCgroupBase() {
+	r.cgroupOnce.Do(func() {
 		base, err := ensureDelegatedBase()
 		if err != nil {
-			slog.Warn("native: warm-wake unavailable; apps hibernate via stop", "err", err)
+			slog.Warn("native: cgroup base unavailable; warm-wake and resource limits disabled", "err", err)
 			return
 		}
 		r.mu.Lock()
 		r.cgroupBase = base
-		r.snapshotReady = true
+		r.cgroupBaseReady = true
 		r.mu.Unlock()
-		slog.Info("native: warm-wake enabled", "cgroup_base", base)
+		slog.Info("native: cgroup base ready", "cgroup_base", base)
 	})
 }
 
 // placeInAppCgroup moves a just-started replica process into its own per-app
-// cgroup so its memory can be reclaimed in isolation on Suspend. A failure is
-// non-fatal: the replica simply hibernates via Stop instead of warm-freeze.
+// cgroup. The cgroup serves two purposes: isolated memory reclaim on Suspend
+// (warm-wake) and resource enforcement (memory.max) when the app sets a limit.
+// It is created when the base is ready and either warm-wake is enabled or a
+// memory limit is set. Failures are non-fatal: a setup failure means the replica
+// hibernates via Stop instead of warm-freeze and runs without a memory cap; a
+// memory.max write failure leaves the replica running without the cap (logged).
 func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 	r.mu.Lock()
-	ready := r.snapshotReady
+	ready := r.cgroupBaseReady
 	base := r.cgroupBase
 	r.mu.Unlock()
-	if !ready {
+	if !ready || (!r.snapshotEnabled && p.MemoryLimitMB <= 0) {
 		return
 	}
 	dir, err := setupAppCgroup(base, appCgroupName(p.Slug, p.Index), pid)
 	if err != nil {
-		slog.Warn("native: per-app cgroup setup failed; replica hibernates via stop",
+		slog.Warn("native: per-app cgroup setup failed; no warm-wake or memory limit for this replica",
 			"slug", p.Slug, "idx", p.Index, "err", err)
 		return
+	}
+	if p.MemoryLimitMB > 0 {
+		if err := setCgroupMemoryMax(dir, p.MemoryLimitMB); err != nil {
+			slog.Warn("native: memory limit not applied; replica runs uncapped",
+				"slug", p.Slug, "idx", p.Index, "limit_mb", p.MemoryLimitMB, "err", err)
+		} else {
+			slog.Info("native: memory limit applied",
+				"slug", p.Slug, "idx", p.Index, "limit_mb", p.MemoryLimitMB)
+		}
 	}
 	r.mu.Lock()
 	r.appCgroups[pid] = dir
@@ -173,9 +186,12 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 // any other error means the cgroup is gone or no longer holds the PID (the
 // caller logs and degrades).
 func (r *NativeRuntime) ReadoptWarm(slug string, index, pid int) error {
-	r.ensureSnapshotBase()
+	if !r.snapshotEnabled {
+		return ErrRuntimeNotSnapshotter
+	}
+	r.ensureCgroupBase()
 	r.mu.Lock()
-	ready := r.snapshotReady
+	ready := r.cgroupBaseReady
 	base := r.cgroupBase
 	r.mu.Unlock()
 	if !ready {
@@ -215,9 +231,12 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	if err := applySharedMounts(p); err != nil {
 		return ReplicaEndpoint{}, err
 	}
-	// Prepare the delegated cgroup base before forking (once) so the child is
-	// born in base/_supervisor and can be moved into its own app cgroup below.
-	r.ensureSnapshotBase()
+	// Prepare the delegated cgroup base before forking (once) so the child is born
+	// in base/_supervisor and can be moved into its own app cgroup below. Needed
+	// when warm-wake is enabled or the app sets a memory limit.
+	if r.snapshotEnabled || p.MemoryLimitMB > 0 {
+		r.ensureCgroupBase()
+	}
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
 	cmd.Env = nativeChildEnv(p)
@@ -234,11 +253,12 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	r.mu.Lock()
 	r.cmds[pid] = cmd
 	r.mu.Unlock()
-	// Move the replica into its own cgroup for isolated warm-wake reclaim. No-op
-	// when warm-wake is off or unavailable; failures degrade to stop-hibernate.
+	// Move the replica into its own cgroup for isolated warm-wake reclaim and to
+	// enforce a memory limit (memory.max) when set. No-op when neither warm-wake
+	// nor a limit applies, or when cgroup v2 delegation is unavailable; failures
+	// degrade gracefully (stop-hibernate / uncapped). CPUQuotaPercent is still
+	// enforced only by DockerRuntime in native mode.
 	r.placeInAppCgroup(p, pid)
-	// MemoryLimitMB and CPUQuotaPercent are enforced by DockerRuntime only;
-	// the native runtime inherits OS scheduling with no additional limits.
 	return ReplicaEndpoint{
 		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
 		Provider: "native",
@@ -415,7 +435,7 @@ func (r *NativeRuntime) Suspend(_ context.Context, handle RunHandle) (bool, erro
 		return false, ErrRuntimeNotSnapshotter
 	}
 	r.mu.Lock()
-	ready := r.snapshotReady
+	ready := r.cgroupBaseReady
 	dir, tracked := r.appCgroups[handle.PID]
 	r.mu.Unlock()
 	if !ready {

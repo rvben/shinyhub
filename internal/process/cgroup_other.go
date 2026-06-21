@@ -21,6 +21,8 @@ func ensureDelegatedBase() (string, error) { return "", errReclaimUnsupported }
 
 func setupAppCgroup(_, _ string, _ int) (string, error) { return "", errReclaimUnsupported }
 
+func setCgroupMemoryMax(_ string, _ int) error { return errReclaimUnsupported }
+
 func appCgroupCurrentMemory(_ string) (uint64, error) { return 0, errReclaimUnsupported }
 
 func reclaimAppCgroup(_ string, _ uint64) error { return errReclaimUnsupported }

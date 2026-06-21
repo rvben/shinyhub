@@ -34,7 +34,7 @@ func TestNativeSuspend_DisabledNotSnapshotter(t *testing.T) {
 // came up (ensureDelegatedBase failed, e.g. no Delegate=memory) -> not-snapshotter.
 func TestNativeSuspend_NotReadyNotSnapshotter(t *testing.T) {
 	r := NewNativeRuntime()
-	r.snapshotEnabled = true // snapshotReady stays false
+	r.snapshotEnabled = true // cgroupBaseReady stays false
 	freed, err := r.Suspend(context.Background(), RunHandle{PID: 1})
 	if freed || !errors.Is(err, ErrRuntimeNotSnapshotter) {
 		t.Fatalf("Suspend = (%v, %v), want (false, ErrRuntimeNotSnapshotter)", freed, err)
@@ -47,7 +47,7 @@ func TestNativeSuspend_NotReadyNotSnapshotter(t *testing.T) {
 func TestNativeSuspend_UntrackedNotFreed(t *testing.T) {
 	r := NewNativeRuntime()
 	r.snapshotEnabled = true
-	r.snapshotReady = true // no appCgroups entry for this PID
+	r.cgroupBaseReady = true // no appCgroups entry for this PID
 	freed, err := r.Suspend(context.Background(), RunHandle{PID: 999999})
 	if freed || err != nil {
 		t.Fatalf("Suspend = (%v, %v), want (false, nil) for untracked replica", freed, err)

@@ -42,7 +42,7 @@ func TestNativeSuspend_InsufficientReclaimRestores(t *testing.T) {
 	r := NewNativeRuntime()
 	r.snapshotEnabled = true
 	r.reclaimMinFraction = 0.8
-	r.snapshotReady = true
+	r.cgroupBaseReady = true
 	r.appCgroups[pid] = dir
 
 	freed, err := r.Suspend(context.Background(), RunHandle{PID: pid})

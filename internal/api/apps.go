@@ -570,16 +570,13 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fail fast: CPU/memory limits are only enforced by the Docker runtime.
-	// Under native mode they would be silently ignored, giving a false sense
-	// of containment. Reject the write rather than store an unenforceable
-	// limit. Clearing a limit (null) or setting it to 0 is always allowed.
+	// In native mode, memory_limit_mb is enforced via a per-app cgroup v2
+	// memory.max (requires the memory controller to be delegated; the runtime
+	// logs a warning and runs uncapped if it is not). cpu_quota_percent is still
+	// enforced only by the Docker runtime, so reject it under native mode rather
+	// than store an unenforceable limit that gives a false sense of containment.
+	// Clearing a limit (null) or setting it to 0 is always allowed.
 	if s.cfg.Runtime.Mode == "native" {
-		if setMemoryLimitMB && memoryLimitMB != nil && *memoryLimitMB > 0 {
-			writeError(w, http.StatusBadRequest,
-				"memory_limit_mb is unenforceable under runtime.mode=native; switch to docker runtime or unset the limit")
-			return
-		}
 		if setCPUQuotaPercent && cpuQuotaPercent != nil && *cpuQuotaPercent > 0 {
 			writeError(w, http.StatusBadRequest,
 				"cpu_quota_percent is unenforceable under runtime.mode=native; switch to docker runtime or unset the limit")
