@@ -112,9 +112,11 @@ func cgroupV2RelPath(pid int) (string, error) {
 // controller to its children may not itself hold processes. shinyhub's service
 // cgroup (base) initially holds shinyhub, so we (1) require the memory controller
 // to be delegated to base (systemd Delegate=memory), (2) move every process in
-// base into base/_supervisor, then (3) enable +memory in base/cgroup.subtree_control
-// so app children expose memory.current / memory.reclaim. Idempotent: when +memory
-// is already enabled the subtree is prepared and base is returned immediately.
+// base into base/_supervisor, then (3) enable +memory (and +cpu when available
+// via Delegate=cpu) in base/cgroup.subtree_control so app children expose
+// memory.current / memory.reclaim and can set memory.max / cpu.max. Idempotent:
+// once memory is enabled (and cpu, when delegated) the subtree is prepared and
+// base is returned immediately.
 func ensureDelegatedBase() (string, error) {
 	rel, err := cgroupV2RelPath(os.Getpid())
 	if err != nil {
@@ -131,28 +133,47 @@ func ensureDelegatedBase() (string, error) {
 		base = filepath.Dir(selfDir)
 	}
 
-	// Already prepared: +memory in subtree_control implies base holds no procs
-	// (it could not have been enabled otherwise) and shinyhub already lives in
-	// _supervisor. Re-running is then a no-op.
-	if cgroupHasField(filepath.Join(base, "cgroup.subtree_control"), "memory") {
+	subtreePath := filepath.Join(base, "cgroup.subtree_control")
+	controllersPath := filepath.Join(base, "cgroup.controllers")
+	memEnabled := cgroupHasField(subtreePath, "memory")
+	// cpu is delegated best-effort: it lets per-app cgroups set cpu.max for native
+	// CPU limits. It is absent without systemd Delegate=cpu, in which case CPU
+	// limits degrade to no enforcement (memory limits + warm-wake still work).
+	cpuAvail := cgroupHasField(controllersPath, "cpu")
+	cpuEnabled := cgroupHasField(subtreePath, "cpu")
+	// Already prepared: memory in subtree_control implies base holds no procs and
+	// shinyhub already lives in _supervisor. Re-running is a no-op once memory is
+	// enabled and cpu is enabled (or unavailable).
+	if memEnabled && (cpuEnabled || !cpuAvail) {
 		return base, nil
 	}
 	// The memory controller must be available to base. Without systemd
 	// Delegate=memory it is absent, and warm-wake stays off (caller degrades).
-	if !cgroupHasField(filepath.Join(base, "cgroup.controllers"), "memory") {
+	if !cgroupHasField(controllersPath, "memory") {
 		return "", fmt.Errorf("cgroup %s: memory controller not delegated (need systemd Delegate=memory)", rel)
 	}
 	sup := filepath.Join(base, supervisorName)
 	if err := os.Mkdir(sup, 0o755); err != nil && !os.IsExist(err) {
 		return "", fmt.Errorf("mkdir %s: %w", sup, err)
 	}
-	// Empty base of processes (including shinyhub itself) before delegating the
-	// controller; cgroup v2 rejects enabling a controller while procs remain.
+	// Empty base of processes (including shinyhub itself) before delegating
+	// controllers; cgroup v2 rejects enabling a controller while procs remain.
 	if err := drainCgroupProcs(base, sup); err != nil {
 		return "", err
 	}
-	if err := writeCgroupFile(filepath.Join(base, "cgroup.subtree_control"), "+memory"); err != nil {
-		return "", fmt.Errorf("enable +memory on %s: %w", base, err)
+	// Enable the controllers not yet delegated to children: memory (required) and
+	// cpu (when available).
+	var ctrls []string
+	if !memEnabled {
+		ctrls = append(ctrls, "+memory")
+	}
+	if cpuAvail && !cpuEnabled {
+		ctrls = append(ctrls, "+cpu")
+	}
+	if len(ctrls) > 0 {
+		if err := writeCgroupFile(subtreePath, strings.Join(ctrls, " ")); err != nil {
+			return "", fmt.Errorf("enable %s on %s: %w", strings.Join(ctrls, " "), base, err)
+		}
 	}
 	return base, nil
 }
@@ -178,6 +199,15 @@ func setupAppCgroup(base, name string, pid int) (string, error) {
 // the limit.
 func setCgroupMemoryMax(dir string, memMB int) error {
 	return writeCgroupFile(filepath.Join(dir, "memory.max"), cgroupMemoryMaxValue(memMB))
+}
+
+// setCgroupCPUMax writes a cpu.max limit (cpuPct percent of one core, or no
+// limit when cpuPct <= 0) to an app cgroup directory. The cpu controller must be
+// delegated to the base (systemd Delegate=cpu) for the cpu.max file to exist, so
+// a write failure is surfaced for the caller to warn on rather than silently
+// dropping the limit.
+func setCgroupCPUMax(dir string, cpuPct int) error {
+	return writeCgroupFile(filepath.Join(dir, "cpu.max"), cgroupCPUMaxValue(cpuPct))
 }
 
 // appCgroupCurrentMemory reads memory.current (bytes charged) for an app cgroup

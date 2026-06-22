@@ -23,6 +23,8 @@ func setupAppCgroup(_, _ string, _ int) (string, error) { return "", errReclaimU
 
 func setCgroupMemoryMax(_ string, _ int) error { return errReclaimUnsupported }
 
+func setCgroupCPUMax(_ string, _ int) error { return errReclaimUnsupported }
+
 func appCgroupCurrentMemory(_ string) (uint64, error) { return 0, errReclaimUnsupported }
 
 func reclaimAppCgroup(_ string, _ uint64) error { return errReclaimUnsupported }

@@ -22,3 +22,25 @@ func TestCgroupMemoryMaxValue(t *testing.T) {
 		}
 	}
 }
+
+// TestCgroupCPUMaxValue verifies the value written to a cgroup v2 cpu.max file:
+// "<quota> <period>" microseconds where 100% == one full core (quota == period),
+// and "max <period>" for no limit. Mirrors the Docker runtime's NanoCPUs mapping.
+func TestCgroupCPUMaxValue(t *testing.T) {
+	cases := []struct {
+		cpuPct int
+		want   string
+	}{
+		{0, "max 100000"},
+		{-5, "max 100000"},
+		{100, "100000 100000"}, // one full core
+		{50, "50000 100000"},   // half a core
+		{25, "25000 100000"},   // quarter core
+		{1, "1000 100000"},     // 1%
+	}
+	for _, c := range cases {
+		if got := cgroupCPUMaxValue(c.cpuPct); got != c.want {
+			t.Errorf("cgroupCPUMaxValue(%d) = %q, want %q", c.cpuPct, got, c.want)
+		}
+	}
+}
