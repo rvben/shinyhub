@@ -64,6 +64,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.29](https://github.com/rvben/shinyhub/compare/v0.8.28...v0.8.29) - 2026-06-22
+
+### Added
+
+- **security**: drop CSP 'unsafe-inline', allow branding inline by hash ([cb9bc1b](https://github.com/rvben/shinyhub/commit/cb9bc1b6b25174c52ad6b74fa9850c97d1ca3cda))
+
 ## [0.8.28](https://github.com/rvben/shinyhub/compare/v0.8.27...v0.8.28) - 2026-06-22
 
 ### Added
