@@ -62,6 +62,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.27](https://github.com/rvben/shinyhub/compare/v0.8.26...v0.8.27) - 2026-06-22
+
+### Added
+
+- **process**: enforce native-mode memory limits via cgroup v2 ([283755a](https://github.com/rvben/shinyhub/commit/283755a142b8e9bb92094b466aa019cf8061e662))
+
 ## [0.8.26](https://github.com/rvben/shinyhub/compare/v0.8.25...v0.8.26) - 2026-06-20
 
 ### Added
