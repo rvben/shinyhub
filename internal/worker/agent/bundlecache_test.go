@@ -151,3 +151,43 @@ func TestBundleCacheDedupsConcurrentPulls(t *testing.T) {
 		t.Errorf("fetch called %d times, want 1", n)
 	}
 }
+
+// TestBundleCacheRechecksCacheUnderLock guards the stat-miss-then-lock TOCTOU:
+// when a concurrent puller installs the cache dir after our initial stat miss
+// but before we take the coordination lock, Ensure must re-check under the lock
+// and return the hit, never starting a redundant second fetch. The hook
+// simulates that winner deterministically; on the pre-fix code this fetches
+// once (fails), on the fixed code it fetches zero times.
+func TestBundleCacheRechecksCacheUnderLock(t *testing.T) {
+	zipBytes, digest := makeZip(t, map[string]string{"app.py": "recheck"})
+
+	var fetchCount atomic.Int32
+	fetch := func(ctx context.Context, d string) (io.ReadCloser, error) {
+		fetchCount.Add(1)
+		return io.NopCloser(bytes.NewReader(zipBytes)), nil
+	}
+	cache := NewBundleCache(t.TempDir(), fetch)
+
+	cacheDir, err := cache.dirFor(digest)
+	if err != nil {
+		t.Fatalf("dirFor: %v", err)
+	}
+	// A winning puller renames its extracted tree into cacheDir before deleting
+	// its inflight entry, so model that by creating the dir in the race window.
+	cache.testHookAfterStatMiss = func() {
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			t.Errorf("seed cache dir: %v", err)
+		}
+	}
+
+	dir, err := cache.Ensure(context.Background(), digest)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if dir != cacheDir {
+		t.Errorf("dir = %q, want %q", dir, cacheDir)
+	}
+	if n := fetchCount.Load(); n != 0 {
+		t.Errorf("fetch called %d times; the under-lock re-check should have turned the race into a hit", n)
+	}
+}
