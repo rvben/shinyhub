@@ -8,7 +8,8 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write   # required for cosign keyless signing of checksums.txt
+  id-token: write       # cosign keyless signing + SLSA provenance OIDC
+  attestations: write   # SLSA build-provenance attestations for binaries + image
 
 jobs:
   release:
@@ -52,6 +53,10 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      # syft generates the SPDX SBOMs configured in .goreleaser.yaml (sboms:).
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -64,6 +69,31 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # SLSA build provenance. These run after publish: the artifacts are already
+      # released, so an attestation hiccup is re-runnable and never blocks the
+      # release itself. GoReleaser strips the leading v, so the image tag is the
+      # bare version.
+      - name: Resolve published image digest
+        id: image
+        run: |
+          ref="ghcr.io/rvben/shinyhub:${GITHUB_REF_NAME#v}"
+          digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release binaries (SLSA provenance)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/shinyhub_*.tar.gz
+            dist/checksums.txt
+
+      - name: Attest container image (SLSA provenance)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/rvben/shinyhub
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
 
   wheels:
     needs: release

@@ -27,6 +27,15 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# Software bill of materials, one SPDX JSON document per release archive, built
+# with syft. Uploaded as release assets alongside the archives so consumers can
+# audit the dependency set of each binary. Requires syft on PATH.
+sboms:
+  - id: archive
+    artifacts: archive
+    documents:
+      - "${artifact}.sbom.spdx.json"
+
 # Keyless (Sigstore) signature over checksums.txt. Identity is bound to this
 # repo's release workflow + tag; install.sh verifies it when cosign is present.
 signs:
