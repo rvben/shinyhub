@@ -1121,8 +1121,8 @@ func TestPatchAppResourceLimits(t *testing.T) {
 }
 
 // TestPatchAppResourceLimits_NativeMode verifies that under runtime.mode=native
-// memory_limit_mb is now accepted (enforced via a per-app cgroup memory.max),
-// while cpu_quota_percent is still rejected as docker-only.
+// both memory_limit_mb and cpu_quota_percent are accepted (enforced via a
+// per-app cgroup v2 memory.max / cpu.max).
 func TestPatchAppResourceLimits_NativeMode(t *testing.T) {
 	srv, store := newManagerTestServerWithRuntimeMode(t, "native")
 	hash, _ := auth.HashPassword("pass")
@@ -1141,10 +1141,10 @@ func TestPatchAppResourceLimits_NativeMode(t *testing.T) {
 	}
 
 	if code := patch(map[string]any{"memory_limit_mb": 256}); code != http.StatusOK {
-		t.Errorf("native memory_limit_mb: got %d, want 200 (now enforced via cgroup memory.max)", code)
+		t.Errorf("native memory_limit_mb: got %d, want 200 (enforced via cgroup memory.max)", code)
 	}
-	if code := patch(map[string]any{"cpu_quota_percent": 50}); code != http.StatusBadRequest {
-		t.Errorf("native cpu_quota_percent: got %d, want 400 (still docker-only)", code)
+	if code := patch(map[string]any{"cpu_quota_percent": 50}); code != http.StatusOK {
+		t.Errorf("native cpu_quota_percent: got %d, want 200 (enforced via cgroup cpu.max)", code)
 	}
 }
 

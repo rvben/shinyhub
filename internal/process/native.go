@@ -140,22 +140,23 @@ func (r *NativeRuntime) ensureCgroupBase() {
 
 // placeInAppCgroup moves a just-started replica process into its own per-app
 // cgroup. The cgroup serves two purposes: isolated memory reclaim on Suspend
-// (warm-wake) and resource enforcement (memory.max) when the app sets a limit.
-// It is created when the base is ready and either warm-wake is enabled or a
-// memory limit is set. Failures are non-fatal: a setup failure means the replica
-// hibernates via Stop instead of warm-freeze and runs without a memory cap; a
-// memory.max write failure leaves the replica running without the cap (logged).
+// (warm-wake) and resource enforcement (memory.max / cpu.max) when the app sets
+// a limit. It is created when the base is ready and either warm-wake is enabled
+// or a memory/CPU limit is set. Failures are non-fatal: a setup failure means
+// the replica hibernates via Stop instead of warm-freeze and runs uncapped; a
+// limit write failure leaves the replica running without that cap (logged). A
+// cpu.max write fails when the cpu controller is not delegated (no Delegate=cpu).
 func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 	r.mu.Lock()
 	ready := r.cgroupBaseReady
 	base := r.cgroupBase
 	r.mu.Unlock()
-	if !ready || (!r.snapshotEnabled && p.MemoryLimitMB <= 0) {
+	if !ready || (!r.snapshotEnabled && p.MemoryLimitMB <= 0 && p.CPUQuotaPercent <= 0) {
 		return
 	}
 	dir, err := setupAppCgroup(base, appCgroupName(p.Slug, p.Index), pid)
 	if err != nil {
-		slog.Warn("native: per-app cgroup setup failed; no warm-wake or memory limit for this replica",
+		slog.Warn("native: per-app cgroup setup failed; no warm-wake or resource limits for this replica",
 			"slug", p.Slug, "idx", p.Index, "err", err)
 		return
 	}
@@ -166,6 +167,15 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 		} else {
 			slog.Info("native: memory limit applied",
 				"slug", p.Slug, "idx", p.Index, "limit_mb", p.MemoryLimitMB)
+		}
+	}
+	if p.CPUQuotaPercent > 0 {
+		if err := setCgroupCPUMax(dir, p.CPUQuotaPercent); err != nil {
+			slog.Warn("native: cpu limit not applied; replica runs uncapped (needs Delegate=cpu)",
+				"slug", p.Slug, "idx", p.Index, "quota_percent", p.CPUQuotaPercent, "err", err)
+		} else {
+			slog.Info("native: cpu limit applied",
+				"slug", p.Slug, "idx", p.Index, "quota_percent", p.CPUQuotaPercent)
 		}
 	}
 	r.mu.Lock()
@@ -233,8 +243,8 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	}
 	// Prepare the delegated cgroup base before forking (once) so the child is born
 	// in base/_supervisor and can be moved into its own app cgroup below. Needed
-	// when warm-wake is enabled or the app sets a memory limit.
-	if r.snapshotEnabled || p.MemoryLimitMB > 0 {
+	// when warm-wake is enabled or the app sets a memory/CPU limit.
+	if r.snapshotEnabled || p.MemoryLimitMB > 0 || p.CPUQuotaPercent > 0 {
 		r.ensureCgroupBase()
 	}
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
@@ -254,10 +264,9 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	r.cmds[pid] = cmd
 	r.mu.Unlock()
 	// Move the replica into its own cgroup for isolated warm-wake reclaim and to
-	// enforce a memory limit (memory.max) when set. No-op when neither warm-wake
-	// nor a limit applies, or when cgroup v2 delegation is unavailable; failures
-	// degrade gracefully (stop-hibernate / uncapped). CPUQuotaPercent is still
-	// enforced only by DockerRuntime in native mode.
+	// enforce memory.max / cpu.max when a limit is set. No-op when neither
+	// warm-wake nor a limit applies, or when cgroup v2 delegation is unavailable;
+	// failures degrade gracefully (stop-hibernate / uncapped).
 	r.placeInAppCgroup(p, pid)
 	return ReplicaEndpoint{
 		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
