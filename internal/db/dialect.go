@@ -36,6 +36,11 @@ type dialect interface {
 	// nowEpoch renders the DB-clock current time as Unix epoch seconds (integer),
 	// for columns stored as bigint epoch (e.g. replicas.updated_at).
 	nowEpoch() string
+	// nowEpochMillis renders the DB-clock current time as Unix epoch milliseconds
+	// (integer). Used by the shared rate limiter so every instance buckets a
+	// window from one time source (the database) rather than its own clock,
+	// which clock skew between HA replicas could otherwise split.
+	nowEpochMillis() string
 	// beginWrite starts an eagerly-serialized write transaction. lockKey, when
 	// non-zero, serializes a read-then-write invariant across transactions.
 	// The returned writeTx (defined in bound.go) is satisfied by both the
@@ -61,6 +66,9 @@ func (sqliteDialect) nowMinusSeconds(n int) string {
 }
 func (sqliteDialect) nowText() string  { return "datetime('now')" }
 func (sqliteDialect) nowEpoch() string { return "strftime('%s','now')" }
+func (sqliteDialect) nowEpochMillis() string {
+	return "(CAST(strftime('%s','now') AS INTEGER) * 1000)"
+}
 
 // beginWrite on SQLite takes the write lock up front with BEGIN IMMEDIATE on a
 // dedicated connection, dodging the deferred-upgrade SQLITE_BUSY deadlock. The
@@ -91,7 +99,8 @@ func (pgDialect) nowMinusSeconds(n int) string {
 func (pgDialect) nowText() string {
 	return "to_char(now() at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
 }
-func (pgDialect) nowEpoch() string { return "extract(epoch from now())::bigint" }
+func (pgDialect) nowEpoch() string       { return "extract(epoch from now())::bigint" }
+func (pgDialect) nowEpochMillis() string { return "(extract(epoch from now()) * 1000)::bigint" }
 
 // beginWrite on Postgres uses a normal transaction. MVCC plus the existing
 // ON CONFLICT/unique handling cover single-row contention. For a read-then-write

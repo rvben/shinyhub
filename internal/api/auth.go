@@ -103,6 +103,48 @@ func newLoginRateLimiter(limit int, window time.Duration) *loginRateLimiter {
 	return newKeyedRateLimiter(limit, window)
 }
 
+// rateLimiter reports whether a request identified by key may proceed. Both the
+// in-memory keyedRateLimiter and the database-backed dbRateLimiter implement it,
+// so the login handler is oblivious to which is wired.
+type rateLimiter interface {
+	allow(key string) bool
+}
+
+// dbRateLimiter is a shared, database-backed limiter. Its counts live in the
+// rate_limit_attempts table, so every instance against the same database
+// enforces one combined limit per key. This closes the multi-instance bypass of
+// the in-memory limiter, where N replicas behind a balancer would otherwise
+// allow N x limit attempts. Used for login on a Postgres (HA-capable) backend.
+type dbRateLimiter struct {
+	store  *db.Store
+	bucket string
+	limit  int
+	window time.Duration
+}
+
+func (l *dbRateLimiter) allow(key string) bool {
+	ok, err := l.store.RateLimitAllow(l.bucket, key, l.limit, l.window)
+	if err != nil {
+		// Fail open: a transient database error must not lock every user out of
+		// login. The login handler still queries the database to verify the
+		// password, so an attacker gains no advantage during the outage.
+		slog.Warn("login rate limiter degraded; allowing request", "err", err)
+		return true
+	}
+	return ok
+}
+
+// newLoginLimiter selects the limiter by backend: a shared database-backed
+// limiter on Postgres (a load-balanced deployment must share the count across
+// instances), or the in-memory limiter on SQLite (single instance, no DB round
+// trip per attempt).
+func newLoginLimiter(store *db.Store, limit int, window time.Duration) rateLimiter {
+	if store != nil && store.IsPostgres() {
+		return &dbRateLimiter{store: store, bucket: "login", limit: limit, window: window}
+	}
+	return newLoginRateLimiter(limit, window)
+}
+
 // dummyHash is a pre-computed bcrypt hash used to ensure constant-time
 // response for unknown usernames, preventing timing-based enumeration.
 var dummyHash, _ = auth.HashPassword("dummy-sentinel-do-not-use")

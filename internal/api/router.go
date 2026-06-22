@@ -38,7 +38,7 @@ type Server struct {
 	googleOAuth   *oauth.Google       // nil when Google OAuth is not configured
 	oidcProvider  *oauth.OIDCProvider // nil when OIDC SSO is not configured
 	sampler       process.Sampler
-	loginLimiter  *loginRateLimiter
+	loginLimiter  rateLimiter // shared (DB-backed) on Postgres, in-memory on SQLite
 	deployLimiter *keyedRateLimiter
 	userLimiter   *keyedRateLimiter
 	tokenLimiter  *keyedRateLimiter
@@ -180,7 +180,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		manager:       manager,
 		proxy:         prx,
 		sampler:       &process.GopsutilSampler{},
-		loginLimiter:  newLoginRateLimiter(10, time.Minute),
+		loginLimiter:  newLoginLimiter(store, 10, time.Minute),
 		deployLimiter: newKeyedRateLimiter(10, time.Minute),
 		userLimiter:   newKeyedRateLimiter(5, time.Minute),
 		tokenLimiter:  newKeyedRateLimiter(20, time.Minute),

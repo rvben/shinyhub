@@ -264,7 +264,13 @@ func probeWritable(dir string) error {
 func runMaintenance(ctx context.Context, store *db.Store, cfg config.MaintenanceConfig) {
 	auditRetention := time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour
 	keepRuns := cfg.ScheduleRunRetentionCount
-	if auditRetention <= 0 && keepRuns <= 0 {
+	// The database-backed login limiter only writes rows on a Postgres backend,
+	// so its ledger only needs sweeping there. Retention must comfortably exceed
+	// the longest limiter window (login uses 1m) so an in-window row is never
+	// dropped; raise it if a longer-window bucket is ever added.
+	pruneRateLimits := store.IsPostgres()
+	const rateLimitRetention = time.Hour
+	if auditRetention <= 0 && keepRuns <= 0 && !pruneRateLimits {
 		return
 	}
 
@@ -293,6 +299,13 @@ func runMaintenance(ctx context.Context, store *db.Store, cfg config.Maintenance
 			}
 			if total > 0 {
 				slog.Info("pruned_schedule_runs", "removed", total, "keep_per_schedule", keepRuns)
+			}
+		}
+		if pruneRateLimits {
+			if n, err := store.PruneRateLimitCounters(rateLimitRetention); err != nil {
+				slog.Warn("prune_rate_limit_counters_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_rate_limit_counters", "removed", n)
 			}
 		}
 	}
