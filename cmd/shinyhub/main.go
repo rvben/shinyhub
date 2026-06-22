@@ -1509,6 +1509,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(mux)
 	}
 
+	// Branding injects inline <script>/<style> into the SPA shell only when
+	// active; the strict CSP allows exactly those blocks by SHA-256 hash (both
+	// slices stay empty when branding is off, so no inline is served). Computed
+	// from the same resolved branding the renderer uses so they cannot drift.
+	var cspScriptSrc, cspStyleSrc []string
+	if cfg.Branding.IsActive() {
+		brandPub := ui.PublicBranding(cfg.Branding, cfg.Branding.ResolvedAssets())
+		s, st, cspErr := ui.CSPInlineSources(brandPub)
+		if cspErr != nil {
+			return fmt.Errorf("compute branding CSP sources: %w", cspErr)
+		}
+		cspScriptSrc, cspStyleSrc = s, st
+	}
+
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	// ReadTimeout/WriteTimeout bound slow-body and slow-read clients on ordinary
 	// requests so they cannot pin a connection (and its goroutine) indefinitely.
@@ -1517,7 +1531,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// deadlineExemptions so they are not severed mid-flight.
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, deadlineExemptions(rootHandler)),
+		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, cspScriptSrc, cspStyleSrc, deadlineExemptions(rootHandler)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      120 * time.Second,
@@ -1769,6 +1783,10 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 			return
 		}
 		if landingFile != "" {
+			// Operator-supplied trusted HTML may use inline scripts/styles, which
+			// the strict SPA CSP (set by SecurityHeaders) would block. Relax it to
+			// the inline-permitting policy for this one response.
+			w.Header().Set("Content-Security-Policy", api.LandingPageCSP())
 			http.ServeFile(w, r, landingFile)
 			return
 		}

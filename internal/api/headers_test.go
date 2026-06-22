@@ -8,7 +8,7 @@ import (
 )
 
 func TestSecurityHeaders_ControlPlane(t *testing.T) {
-	h := SecurityHeaders(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := SecurityHeaders(nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	for _, path := range []string{"/", "/login", "/apps/foo/overview", "/api/apps", "/static/app.js"} {
@@ -44,11 +44,50 @@ func TestSecurityHeaders_ControlPlane(t *testing.T) {
 		if !strings.Contains(csp, "fonts.gstatic.com") || !strings.Contains(csp, "fonts.googleapis.com") {
 			t.Errorf("%s: CSP must allow Google Fonts hosts or the dashboard fonts break: %q", path, csp)
 		}
+		// No 'unsafe-inline': inline scripts/styles are allowed by hash, not blanket.
+		if strings.Contains(csp, "'unsafe-inline'") {
+			t.Errorf("%s: CSP must not contain 'unsafe-inline': %q", path, csp)
+		}
+	}
+}
+
+// TestBuildControlPlaneCSP asserts the policy is strict with no branding and
+// lists the exact inline hashes (never 'unsafe-inline') when branding is active.
+func TestBuildControlPlaneCSP(t *testing.T) {
+	plain := buildControlPlaneCSP(nil, nil)
+	if strings.Contains(plain, "'unsafe-inline'") {
+		t.Errorf("inactive-branding CSP must not contain 'unsafe-inline': %q", plain)
+	}
+	if !strings.Contains(plain, "script-src 'self';") {
+		t.Errorf("inactive-branding script-src should be just 'self': %q", plain)
+	}
+
+	csp := buildControlPlaneCSP([]string{"'sha256-abc'"}, []string{"'sha256-def'"})
+	if !strings.Contains(csp, "script-src 'self' 'sha256-abc'") {
+		t.Errorf("script-src missing hash source: %q", csp)
+	}
+	if !strings.Contains(csp, "style-src 'self' 'sha256-def' https://fonts.googleapis.com") {
+		t.Errorf("style-src missing hash source or fonts host: %q", csp)
+	}
+	if strings.Contains(csp, "'unsafe-inline'") {
+		t.Errorf("active-branding CSP must not contain 'unsafe-inline': %q", csp)
+	}
+}
+
+// TestLandingPageCSP asserts the operator landing-page policy permits inline
+// scripts/styles (trusted operator HTML), unlike the strict SPA policy.
+func TestLandingPageCSP(t *testing.T) {
+	csp := LandingPageCSP()
+	if !strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Errorf("landing-page CSP must permit inline scripts: %q", csp)
+	}
+	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline'") {
+		t.Errorf("landing-page CSP must permit inline styles: %q", csp)
 	}
 }
 
 func TestSecurityHeaders_HSTSOverHTTPS(t *testing.T) {
-	h := SecurityHeaders(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := SecurityHeaders(nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()
@@ -64,7 +103,7 @@ func TestSecurityHeaders_HSTSOverHTTPS(t *testing.T) {
 }
 
 func TestSecurityHeaders_ProxiedAppsUntouched(t *testing.T) {
-	h := SecurityHeaders(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := SecurityHeaders(nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()
