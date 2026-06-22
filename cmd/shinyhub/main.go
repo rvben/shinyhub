@@ -98,8 +98,10 @@ var backupOut string
 var backupCmd = &cobra.Command{
 	Use:   "backup",
 	Short: "Write a consistent snapshot of all durable state to an archive",
-	Long: "Creates a .tar.gz containing a transactionally consistent SQLite\n" +
-		"snapshot plus the apps and app-data dirs. Safe to run on a live server.",
+	Long: "Creates a .tar.gz containing a transactionally consistent database\n" +
+		"snapshot (SQLite VACUUM INTO, or pg_dump for Postgres) plus the apps\n" +
+		"and app-data dirs. Safe to run on a live server. Postgres backups\n" +
+		"require pg_dump on PATH.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadForMaintenance(serverConfigPath())
 		if err != nil {
@@ -118,8 +120,12 @@ var restoreCmd = &cobra.Command{
 	Use:   "restore <archive>",
 	Short: "Restore durable state from a backup archive (server must be stopped)",
 	Long: "Restores the database, apps, and app-data from a backup archive.\n" +
-		"Stop the server first. Existing state is moved aside with a\n" +
-		"'.pre-restore-<timestamp>' suffix (never deleted) so you can roll back.",
+		"Stop the server first. Existing state is preserved, never deleted, so\n" +
+		"you can roll back: SQLite files and the app trees are moved aside with\n" +
+		"a '.pre-restore-<timestamp>' suffix; for Postgres the current database\n" +
+		"is dumped to 'pre-restore-<timestamp>.dump' beside the archive before\n" +
+		"pg_restore loads the backup. Postgres restores require pg_dump and\n" +
+		"pg_restore on PATH.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadForMaintenance(serverConfigPath())

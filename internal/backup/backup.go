@@ -1,8 +1,10 @@
 // Package backup implements first-class snapshot and restore of all ShinyHub
-// durable state: the SQLite database, deployed app bundles, and per-app data
-// dirs. A backup is a single .tar.gz containing a transactionally consistent
-// DB snapshot (SQLite VACUUM INTO), the apps and app-data trees, and a
-// manifest recording the producing binary version and schema version.
+// durable state: the database, deployed app bundles, and per-app data dirs. A
+// backup is a single .tar.gz containing a transactionally consistent DB
+// snapshot (SQLite VACUUM INTO, or pg_dump custom-format for Postgres), the
+// apps and app-data trees, and a manifest recording the producing binary
+// version, schema version, and DB backend. Postgres backups shell out to
+// pg_dump/pg_restore, which must be on PATH.
 //
 // RPO/RTO: `backup` is point-in-time and safe to run on a live server, so the
 // recovery point objective is "as fresh as your last scheduled backup" (run it
@@ -33,13 +35,23 @@ type Manifest struct {
 	ShinyHubVersion string `json:"shinyhub_version"`
 	SchemaVersion   int    `json:"schema_version"`
 	CreatedAt       string `json:"created_at"`
+	// Backend names the DB engine the archive was produced from: "sqlite" (the
+	// db.sqlite entry is a VACUUM INTO snapshot) or "postgres" (the db.dump
+	// entry is a pg_dump custom-format archive). Empty in archives written by
+	// pre-Backend binaries; those are always SQLite, so a blank value is read
+	// as "sqlite" for backward compatibility.
+	Backend string `json:"backend,omitempty"`
 }
 
 const (
 	manifestEntry = "manifest.json"
 	dbEntry       = "db.sqlite"
+	dbDumpEntry   = "db.dump"
 	appsPrefix    = "apps/"
 	appDataPrefix = "app-data/"
+
+	backendSQLite   = "sqlite"
+	backendPostgres = "postgres"
 )
 
 // dbFilePath extracts the on-disk SQLite file path from a DSN, stripping any
@@ -78,9 +90,18 @@ func pathWithin(base, target string) (bool, error) {
 
 // Create writes a consistent backup archive of all durable state to outPath.
 func Create(cfg *config.Config, version, outPath string) error {
-	dbPath, ok := dbFilePath(cfg.Database.DSN)
-	if !ok {
-		return fmt.Errorf("database %q is in-memory; nothing to back up", cfg.Database.DSN)
+	postgres := db.IsPostgresDSN(cfg.Database.DSN)
+
+	// SQLite snapshots write next to the live DB file; Postgres has no local
+	// file, so dbPath stays empty and the pg_dump output lands beside the
+	// archive instead.
+	var dbPath string
+	if !postgres {
+		var ok bool
+		dbPath, ok = dbFilePath(cfg.Database.DSN)
+		if !ok {
+			return fmt.Errorf("database %q is in-memory; nothing to back up", cfg.Database.DSN)
+		}
 	}
 
 	// The output archive must not live inside a tree we are about to walk:
@@ -107,14 +128,26 @@ func Create(cfg *config.Config, version, outPath string) error {
 		return err
 	}
 
-	snapDir, err := os.MkdirTemp(filepath.Dir(dbPath), "shinyhub-snap-")
+	// Stage the DB snapshot in a temp dir on a filesystem we can write: next to
+	// the live SQLite file (same device as VACUUM INTO wants), or beside the
+	// archive for Postgres.
+	snapBase, snapName, dbArchiveEntry, backend := filepath.Dir(outPath), dbDumpEntry, dbDumpEntry, backendPostgres
+	if !postgres {
+		snapBase, snapName, dbArchiveEntry, backend = filepath.Dir(dbPath), dbEntry, dbEntry, backendSQLite
+	}
+	snapDir, err := os.MkdirTemp(snapBase, "shinyhub-snap-")
 	if err != nil {
 		_ = store.Close()
 		return fmt.Errorf("create snapshot tmp dir: %w", err)
 	}
 	defer os.RemoveAll(snapDir)
-	snapPath := filepath.Join(snapDir, "db.sqlite")
-	if err := store.BackupTo(snapPath); err != nil {
+	snapPath := filepath.Join(snapDir, snapName)
+	if postgres {
+		err = pgDump(cfg.Database.DSN, snapPath)
+	} else {
+		err = store.BackupTo(snapPath)
+	}
+	if err != nil {
 		_ = store.Close()
 		return err
 	}
@@ -134,13 +167,14 @@ func Create(cfg *config.Config, version, outPath string) error {
 		ShinyHubVersion: version,
 		SchemaVersion:   schemaVer,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		Backend:         backend,
 	}
 	if err := writeManifest(tw, manifest); err != nil {
 		closeAll(tw, gz, out)
 		_ = os.Remove(tmpOut)
 		return err
 	}
-	if err := addFile(tw, snapPath, dbEntry); err != nil {
+	if err := addFile(tw, snapPath, dbArchiveEntry); err != nil {
 		closeAll(tw, gz, out)
 		_ = os.Remove(tmpOut)
 		return err
@@ -211,13 +245,24 @@ func ReadManifest(archivePath string) (Manifest, error) {
 
 // Restore rebuilds durable state from archivePath. The server must be stopped.
 // It refuses archives produced by a newer schema (this binary cannot run them),
-// moves existing DB/apps/app-data aside with a ".pre-restore-<ts>" suffix
-// (never deletes — that is your rollback path), then extracts the archive in
-// place. The returned slice lists every path that was moved aside.
+// preserves the current state (never deletes — that is your rollback path),
+// then rebuilds in place. For SQLite the current DB file and app/app-data trees
+// are moved aside with a ".pre-restore-<ts>" suffix and the archive is extracted
+// over them. For Postgres the current database is first dumped to a
+// "pre-restore-<ts>.dump" beside the archive (the rollback), then the archive's
+// pg_dump is loaded with pg_restore --clean; the app/app-data trees are still
+// moved aside. The archive backend must match the configured database. The
+// returned slice lists every path that was preserved.
 func Restore(cfg *config.Config, archivePath string) (movedAside []string, err error) {
-	dbPath, ok := dbFilePath(cfg.Database.DSN)
-	if !ok {
-		return nil, fmt.Errorf("database %q is in-memory; cannot restore into it", cfg.Database.DSN)
+	postgres := db.IsPostgresDSN(cfg.Database.DSN)
+
+	var dbPath string
+	if !postgres {
+		var ok bool
+		dbPath, ok = dbFilePath(cfg.Database.DSN)
+		if !ok {
+			return nil, fmt.Errorf("database %q is in-memory; cannot restore into it", cfg.Database.DSN)
+		}
 	}
 
 	manifest, err := ReadManifest(archivePath)
@@ -234,28 +279,101 @@ func Restore(cfg *config.Config, archivePath string) (movedAside []string, err e
 			manifest.SchemaVersion, latest)
 	}
 
-	ts := time.Now().UTC().Format("20060102T150405Z")
-	// Move current state aside. DB sidecars (-wal/-shm) are relocated too so a
-	// stale WAL cannot graft onto the restored single-file snapshot.
-	for _, p := range append([]string{dbPath, dbPath + "-wal", dbPath + "-shm"},
-		cfg.Storage.AppsDir, cfg.Storage.AppDataDir) {
-		if _, statErr := os.Lstat(p); statErr != nil {
-			continue // nothing there to preserve
-		}
-		aside := p + ".pre-restore-" + ts
-		if mvErr := os.Rename(p, aside); mvErr != nil {
-			return movedAside, fmt.Errorf("preserve %s: %w", p, mvErr)
-		}
-		movedAside = append(movedAside, aside)
+	// The archive's backend must match the configured target; a pg_dump cannot
+	// be loaded into SQLite and vice versa. A blank manifest backend is a
+	// pre-Backend SQLite archive.
+	archiveBackend := manifest.Backend
+	if archiveBackend == "" {
+		archiveBackend = backendSQLite
+	}
+	targetBackend := backendSQLite
+	if postgres {
+		targetBackend = backendPostgres
+	}
+	if archiveBackend != targetBackend {
+		return nil, fmt.Errorf(
+			"archive is a %s backup but the configured database is %s; restore into a matching backend",
+			archiveBackend, targetBackend)
 	}
 
-	if err := extract(archivePath, dbPath, cfg.Storage.AppsDir, cfg.Storage.AppDataDir); err != nil {
+	ts := time.Now().UTC().Format("20060102T150405Z")
+
+	if postgres {
+		// Rollback safety mirroring SQLite's move-aside: snapshot the current
+		// target DB before pg_restore overwrites it. Recover a botched restore
+		// with pg_restore of this file.
+		rollback := filepath.Join(filepath.Dir(archivePath), "pre-restore-"+ts+".dump")
+		if dumpErr := pgDump(cfg.Database.DSN, rollback); dumpErr != nil {
+			return nil, fmt.Errorf("snapshot current db before restore: %w", dumpErr)
+		}
+		movedAside = append(movedAside, rollback)
+	} else {
+		// Move current DB file aside. Sidecars (-wal/-shm) are relocated too so a
+		// stale WAL cannot graft onto the restored single-file snapshot.
+		for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+			aside, mErr := preserve(p, ts)
+			if mErr != nil {
+				return movedAside, mErr
+			}
+			if aside != "" {
+				movedAside = append(movedAside, aside)
+			}
+		}
+	}
+
+	// App source and per-app data are filesystem state regardless of DB backend.
+	for _, p := range []string{cfg.Storage.AppsDir, cfg.Storage.AppDataDir} {
+		aside, mErr := preserve(p, ts)
+		if mErr != nil {
+			return movedAside, mErr
+		}
+		if aside != "" {
+			movedAside = append(movedAside, aside)
+		}
+	}
+
+	// For SQLite the DB entry is written straight to its final path; for Postgres
+	// it is staged to a temp file that pg_restore then loads.
+	dbDest := dbPath
+	if postgres {
+		tmpDir, tErr := os.MkdirTemp(filepath.Dir(archivePath), "shinyhub-restore-")
+		if tErr != nil {
+			return movedAside, fmt.Errorf("create restore tmp dir: %w", tErr)
+		}
+		defer os.RemoveAll(tmpDir)
+		dbDest = filepath.Join(tmpDir, dbDumpEntry)
+	}
+
+	if err := extract(archivePath, dbDest, cfg.Storage.AppsDir, cfg.Storage.AppDataDir); err != nil {
 		return movedAside, fmt.Errorf("extract archive (previous state preserved at *.pre-restore-%s): %w", ts, err)
+	}
+
+	if postgres {
+		if err := pgRestore(cfg.Database.DSN, dbDest); err != nil {
+			return movedAside, fmt.Errorf("load archive into postgres (previous db preserved at pre-restore-%s.dump): %w", ts, err)
+		}
 	}
 	return movedAside, nil
 }
 
-func extract(archivePath, dbPath, appsDir, appDataDir string) error {
+// preserve renames p to "p.pre-restore-<ts>" and returns the new path, or ""
+// when p does not exist (nothing to keep). It never deletes.
+func preserve(p, ts string) (string, error) {
+	if _, statErr := os.Lstat(p); statErr != nil {
+		return "", nil
+	}
+	aside := p + ".pre-restore-" + ts
+	if mvErr := os.Rename(p, aside); mvErr != nil {
+		return "", fmt.Errorf("preserve %s: %w", p, mvErr)
+	}
+	return aside, nil
+}
+
+// extract unpacks the archive: the DB entry (db.sqlite or db.dump, whichever
+// the archive carries) is written to dbDest, and the app/app-data trees to
+// their dirs. The caller decides dbDest: the live SQLite path, or a temp file
+// that pg_restore consumes for Postgres.
+func extract(archivePath, dbDest, appsDir, appDataDir string) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", archivePath, err)
@@ -268,7 +386,7 @@ func extract(archivePath, dbPath, appsDir, appDataDir string) error {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 
-	for _, d := range []string{filepath.Dir(dbPath), appsDir, appDataDir} {
+	for _, d := range []string{filepath.Dir(dbDest), appsDir, appDataDir} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return fmt.Errorf("create %s: %w", d, err)
 		}
@@ -285,8 +403,8 @@ func extract(archivePath, dbPath, appsDir, appDataDir string) error {
 		switch {
 		case hdr.Name == manifestEntry:
 			continue
-		case hdr.Name == dbEntry:
-			if err := writeFile(tr, dbPath, 0o640); err != nil {
+		case hdr.Name == dbEntry || hdr.Name == dbDumpEntry:
+			if err := writeFile(tr, dbDest, 0o640); err != nil {
 				return err
 			}
 		case strings.HasPrefix(hdr.Name, appsPrefix):

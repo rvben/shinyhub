@@ -385,11 +385,14 @@ shared edge rate limiter if you need a global ceiling.
 
 `shinyhub backup --out <archive>` writes a snapshot of the database plus the
 apps and app-data trees. The database is captured point-in-time consistent via
-SQLite `VACUUM INTO`. The apps and app-data trees are then walked while the
-server may still be running, so those trees are a best-effort, *not* a
-point-in-time-consistent, copy: a deploy, prune, upload, or app-written file
-that lands during the walk may be partially or inconsistently captured
-relative to the database snapshot.
+SQLite `VACUUM INTO`, or, on a Postgres backend, via `pg_dump` in custom format
+(a single-transaction online dump). Postgres backups shell out to `pg_dump`, so
+it must be on the server's PATH (install `postgresql-client`); the archive
+manifest records which backend produced it. The apps and app-data trees are
+then walked while the server may still be running, so those trees are a
+best-effort, *not* a point-in-time-consistent, copy: a deploy, prune, upload,
+or app-written file that lands during the walk may be partially or
+inconsistently captured relative to the database snapshot.
 
 This is acceptable for routine periodic backups (a deploy mid-backup is rare
 and the next backup converges). For a strictly consistent cross-tree snapshot,
@@ -402,10 +405,15 @@ trees are captured at the same instant.
   cron at the frequency your tolerated loss window allows, and copy the archive
   off-host.
 - **RTO (recovery time objective):** `shinyhub restore <archive>` is offline
-  (stop the server first). It refuses archives from a newer schema, moves the
-  current database, apps, and app-data aside with a `.pre-restore-<timestamp>`
-  suffix (it never deletes, so that copy is your rollback path), then extracts
-  in place. Recovery time is dominated by archive size, typically minutes.
+  (stop the server first). It refuses archives from a newer schema and from a
+  mismatched backend (a Postgres dump cannot load into SQLite or vice versa),
+  and it never deletes the current state, so you always have a rollback path.
+  For SQLite it moves the current database, apps, and app-data aside with a
+  `.pre-restore-<timestamp>` suffix, then extracts in place. For Postgres it
+  first dumps the current database to `pre-restore-<timestamp>.dump` beside the
+  archive, moves the app trees aside, then loads the backup with `pg_restore
+  --clean` (so `pg_restore` must also be on PATH). Recovery time is dominated by
+  archive size, typically minutes.
 
 Rehearse the restore drill before you need it. Recommended periodic drill:
 
