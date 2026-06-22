@@ -63,6 +63,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.8.28](https://github.com/rvben/shinyhub/compare/v0.8.27...v0.8.28) - 2026-06-22
+
+### Added
+
+- **auth**: share the login rate limiter across instances on Postgres ([c57104c](https://github.com/rvben/shinyhub/commit/c57104c4b4ef4202a96fbc64869e0affe59007ae))
+- **backup**: support Postgres backends via pg_dump/pg_restore ([5825a20](https://github.com/rvben/shinyhub/commit/5825a20b4e6c81cf164467e2f5df6159dfeb9c69))
+- **process**: enforce native-mode CPU limits via cgroup v2 cpu.max ([16ef3be](https://github.com/rvben/shinyhub/commit/16ef3be889282945d168fa34fc40107e20cc411e))
+
 ## [0.8.27](https://github.com/rvben/shinyhub/compare/v0.8.26...v0.8.27) - 2026-06-22
 
 ### Added
