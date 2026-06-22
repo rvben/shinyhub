@@ -2,6 +2,8 @@ package ui
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -73,15 +75,63 @@ func BrandingAssetHandler(allow map[string]string) http.Handler {
 	})
 }
 
+// brandingInlineScript returns the body (between the <script></script> tags) of
+// the inline branding bootstrap RenderIndex emits. It is the exact byte sequence
+// a strict CSP must allow by hash, so it and the CSP source MUST be derived from
+// this one builder to stay in lockstep.
+//
+// HTML-safe JSON: json.Marshal escapes <, >, & to < etc., which neutralises
+// a </script> breakout in any string field.
+func brandingInlineScript(p Public) (string, error) {
+	j, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("ui: marshal branding: %w", err)
+	}
+	return "window.__SHINYHUB_BRANDING__=" + string(j) + ";", nil
+}
+
+// brandingInlineStyle returns the body of the inline <style> RenderIndex emits to
+// set the primary brand color, and whether one is emitted at all (only when a
+// primary color is configured).
+func brandingInlineStyle(p Public) (string, bool) {
+	if p.PrimaryColor == "" {
+		return "", false
+	}
+	return ":root{--brand-primary:" + html.EscapeString(p.PrimaryColor) + "}", true
+}
+
+// cspHashSource renders the CSP source-expression ('sha256-<base64>') for an
+// inline block's exact body, the form a strict script-src/style-src lists to
+// allow that block without 'unsafe-inline'.
+func cspHashSource(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+}
+
+// CSPInlineSources returns the CSP source expressions for the inline <script>
+// and <style> blocks RenderIndex emits for p, so a strict Content-Security-Policy
+// can allow exactly those blocks instead of 'unsafe-inline'. The style slice is
+// empty when no primary color is configured. Because it reuses the same builders
+// RenderIndex uses, the hashes always match the served bytes.
+func CSPInlineSources(p Public) (scriptSources, styleSources []string, err error) {
+	script, err := brandingInlineScript(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	scriptSources = []string{cspHashSource(script)}
+	if style, ok := brandingInlineStyle(p); ok {
+		styleSources = []string{cspHashSource(style)}
+	}
+	return scriptSources, styleSources, nil
+}
+
 // RenderIndex injects branding into the stock SPA shell. Callers MUST only
 // invoke this when branding is active; the zero-branding path serves raw
 // bytes elsewhere and is never routed here.
 func RenderIndex(raw []byte, p Public) ([]byte, error) {
-	// HTML-safe JSON: json.Marshal already escapes <, >, & to < etc.,
-	// which neutralises a </script> breakout in any string field.
-	j, err := json.Marshal(p)
+	script, err := brandingInlineScript(p)
 	if err != nil {
-		return nil, fmt.Errorf("ui: marshal branding: %w", err)
+		return nil, err
 	}
 
 	out := raw
@@ -93,10 +143,10 @@ func RenderIndex(raw []byte, p Public) ([]byte, error) {
 	if p.Favicon != "" {
 		fmt.Fprintf(&head, "<link rel=\"icon\" href=\"%s\">\n", html.EscapeString(p.Favicon))
 	}
-	if p.PrimaryColor != "" {
-		fmt.Fprintf(&head, "<style>:root{--brand-primary:%s}</style>\n", html.EscapeString(p.PrimaryColor))
+	if style, ok := brandingInlineStyle(p); ok {
+		fmt.Fprintf(&head, "<style>%s</style>\n", style)
 	}
-	fmt.Fprintf(&head, "<script>window.__SHINYHUB_BRANDING__=%s;</script>\n", j)
+	fmt.Fprintf(&head, "<script>%s</script>\n", script)
 
 	out = headRe.ReplaceAllLiteral(out, append(head.Bytes(), []byte("</head>")...))
 	return out, nil
