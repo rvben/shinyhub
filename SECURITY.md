@@ -377,9 +377,14 @@ proxy addresses so client-IP attribution (used for rate limiting and logging)
 cannot be spoofed via forwarded headers. Do not set it when ShinyHub is
 directly internet-facing.
 
-In-process rate limiting is per-process and in-memory; it is a single-node
-abuse control, not a distributed quota. Front multi-node deployments with a
-shared edge rate limiter if you need a global ceiling.
+The login limiter (the brute-force-sensitive one) is shared across instances on
+a Postgres backend: attempts are counted in the database keyed by client IP, so
+a load-balanced deployment enforces one global limit instead of limit-per-
+instance. On SQLite it stays in-process and in-memory (a SQLite deployment is
+single-node by definition). The remaining limiters (deploy, user, token, data,
+action, OAuth-start) are per-process in-memory abuse controls, not distributed
+quotas; front multi-node deployments with a shared edge rate limiter if you
+need a global ceiling on those too.
 
 ## Backup, restore, and recovery drill
 

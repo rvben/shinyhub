@@ -75,6 +75,16 @@ func (s *Store) migrationsSubdir() string {
 	return "sqlite"
 }
 
+// IsPostgres reports whether the store is backed by Postgres (rather than
+// SQLite). Callers use it to pick the multi-instance-safe code path: a Postgres
+// backend implies a potentially load-balanced (HA) deployment, so shared state
+// such as the login rate limiter must live in the database rather than in
+// per-process memory.
+func (s *Store) IsPostgres() bool {
+	_, isPG := s.d.(pgDialect)
+	return isPG
+}
+
 type Store struct {
 	db *boundDB
 	d  dialect
