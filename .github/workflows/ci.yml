@@ -80,6 +80,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # pg_dump / pg_restore are exercised by the Postgres backup round-trip
+      # test (internal/backup). The client major version must be >= the server
+      # (postgres:16 in postgres-test.sh); the distro default client meets that
+      # and is forward-compatible with newer servers.
+      - name: Install PostgreSQL client (pg_dump/pg_restore)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
       - name: Test (Postgres backend, Docker)
         run: make test-postgres
 
