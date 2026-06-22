@@ -1752,6 +1752,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		}
 		serveShell(w, r)
 	})
+	mux.Handle("/apps", spa)
 	mux.Handle("/apps/", spa)
 	mux.Handle("/users", spa)
 	mux.Handle("/workers", spa)

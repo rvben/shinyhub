@@ -2049,3 +2049,27 @@ func TestBatchMetricsPoll(t *testing.T) {
 	assertNotContains(t, "metrics-controller.js", "/api/apps/${slug}/metrics",
 		"the metrics poll must not fetch per-app metrics one at a time (the slow sequential path)")
 }
+
+// TestOverviewContract pins the Overview home (the / route) to the API shapes
+// and DOM/routing wiring it depends on, so a server-side rename or a route
+// refactor fails the build instead of silently blanking the dashboard home.
+func TestOverviewContract(t *testing.T) {
+	// GET /api/apps/metrics returns {metrics: {slug: ...}} (internal/api metrics
+	// handler); the Overview resource summary unwraps body.metrics.
+	assertContains(t, "views/overview.js", "b.metrics",
+		"GET /api/apps/metrics returns {metrics}; the Overview reads body.metrics")
+	// GET /api/audit returns {events, total, has_more} (internal/api/audit.go);
+	// the recent-activity panel unwraps body.events.
+	assertContains(t, "views/overview.js", "b.events",
+		"GET /api/audit returns {events, total, has_more}; the Overview reads body.events")
+	// The view renders into these shells defined in index.html.
+	assertContains(t, "index.html", `id="overview-view"`,
+		"overview.js shows #overview-view and renders into #overview-body")
+	assertContains(t, "index.html", `id="overview-body"`,
+		"overview.js renders the Overview body into #overview-body")
+	// app.js mounts the Overview on / and the apps grid on /apps.
+	assertContains(t, "app.js", "mountOverview",
+		"the / route mounts the Overview (views/overview.js)")
+	assertContains(t, "app.js", "router.register('/apps'",
+		"the apps grid moved to the /apps route")
+}

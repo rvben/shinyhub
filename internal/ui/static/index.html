@@ -44,7 +44,11 @@
       </div>
 
       <nav id="primary-nav" aria-label="Sections">
-        <a href="/" data-nav class="nav-item" id="tab-apps">
+        <a href="/" data-nav class="nav-item" id="tab-overview">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span class="nav-label">Overview</span>
+        </a>
+        <a href="/apps" data-nav class="nav-item" id="tab-apps">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Apps</span>
         </a>
@@ -99,6 +103,13 @@
         <a class="github-login" href="/api/auth/github/login">Sign in with GitHub</a>
         <a class="google-login" href="/api/auth/google/login">Sign in with Google</a>
       </div>
+    </section>
+
+    <section id="overview-view" hidden aria-labelledby="overview-heading">
+      <div class="toolbar">
+        <h1 id="overview-heading">Overview</h1>
+      </div>
+      <div id="overview-body"></div>
     </section>
 
     <section id="apps-view" hidden>

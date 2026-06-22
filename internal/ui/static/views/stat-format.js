@@ -10,20 +10,18 @@ export function formatBytes(bytes) {
     : (n / 1024).toFixed(0) + ' KB';
 }
 
-// Aggregate per-replica metrics (m.replicas[]) into the header tiles. The header
-// shows FLEET TOTALS; per-replica detail lives in the Overview replicas panel.
-// Falls back to the top-level legacy cpu_percent/rss_bytes when m.replicas is
-// absent. `configured` is app.replicas (configured replica count).
-//
-// CPU/Memory/Sessions read "—" when the app isn't running; Replicas always shows
-// running / configured so a hibernated app still reads "0 / N".
-export function headerStats(m, configured) {
+// aggregateMetrics sums per-replica metrics (m.replicas[]) into raw fleet totals,
+// falling back to the legacy top-level cpu_percent/rss_bytes scalars when
+// m.replicas is absent. Returns raw numbers; both the app-detail header tiles and
+// the Overview build their displays from these, so the aggregation lives in one
+// place and cannot drift between them.
+export function aggregateMetrics(m) {
   // Distinguish "no replicas array" (use the legacy top-level scalars) from an
   // empty array (genuinely zero tracked replicas → zero counts, never a false 1).
   const replicas = Array.isArray(m && m.replicas) ? m.replicas : null;
   const running = !!(m && m.status === 'running');
   // metrics_available is false when running replicas are PID-less (Fargate /
-  // remote_docker); the grid shows "n/a" there, so the header tiles must too.
+  // remote_docker); callers render "n/a" there.
   const metricsAvailable = !(m && m.metrics_available === false);
   let cpu = 0, rss = 0, sessions = 0, runningCount = 0;
   if (replicas !== null) {
@@ -39,7 +37,26 @@ export function headerStats(m, configured) {
     sessions = Number(m && m.sessions) || 0;
     runningCount = running ? 1 : 0;
   }
-  const cfg = Number(configured) || (replicas ? replicas.length : 1) || 1;
+  return {
+    running,
+    metricsAvailable,
+    cpu,
+    rss,
+    sessions,
+    runningCount,
+    replicaCount: replicas ? replicas.length : running ? 1 : 0,
+  };
+}
+
+// Aggregate per-replica metrics (m.replicas[]) into the header tiles. The header
+// shows FLEET TOTALS; per-replica detail lives in the Overview replicas panel.
+//
+// CPU/Memory/Sessions read "—" when the app isn't running; Replicas always shows
+// running / configured so a hibernated app still reads "0 / N".
+export function headerStats(m, configured) {
+  const agg = aggregateMetrics(m);
+  const { running, metricsAvailable, cpu, rss, sessions, runningCount } = agg;
+  const cfg = Number(configured) || agg.replicaCount || 1;
   return {
     running,
     metricsAvailable,
@@ -47,7 +64,7 @@ export function headerStats(m, configured) {
     ram: !running ? '—' : (metricsAvailable ? formatBytes(rss) : 'n/a'),
     sessions: running ? String(sessions) : '—',
     replicas: runningCount + ' / ' + cfg,
-    multiReplica: (replicas ? replicas.length : (running ? 1 : 0)) > 1,
+    multiReplica: agg.replicaCount > 1,
   };
 }
 

@@ -1,6 +1,7 @@
 import { createRouter } from '/static/router.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
+import { mountOverview } from '/static/views/overview.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
@@ -151,6 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const loginView = document.getElementById('login-view');
+  const overviewView = document.getElementById('overview-view');
   const appsView = document.getElementById('apps-view');
   const appDetailView = document.getElementById('app-detail-view');
   const loginForm = document.getElementById('login-form');
@@ -547,6 +549,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderIdentity(null);
     setHidden(logoutButton, true);
     setHidden(loginView, false);
+    setHidden(overviewView, true);
     setHidden(appsView, true);
     setHidden(usersView, true);
     setHidden(auditView, true);
@@ -3598,8 +3601,7 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const el of document.querySelectorAll('#primary-nav [data-nav]')) {
       const url = new URL(el.href);
       const active = url.pathname === pathname
-        || (pathname === '/' && url.pathname === '/')
-        || (pathname.startsWith('/apps/') && url.pathname === '/');
+        || (pathname.startsWith('/apps/') && url.pathname === '/apps');
       el.classList.toggle('tab-active', active);
       if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     }
@@ -3667,6 +3669,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // /users) there is no previous view to clean up — the sections inherit
   // whatever showLoggedIn left them in.
   function hideAllPageViews() {
+    overviewView.hidden = true;
     appsView.hidden = true;
     usersView.hidden = true;
     workersView.hidden = true;
@@ -3675,6 +3678,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   router.register('/', () => {
+    hideAllPageViews();
+    return mountOverview(ctx);
+  });
+  router.register('/apps', () => {
     hideAllPageViews();
     const view = mountAppsGrid(ctx);
     updateActiveNav(location.pathname);
