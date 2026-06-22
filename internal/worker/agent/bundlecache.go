@@ -36,6 +36,11 @@ type BundleCache struct {
 
 	mu   sync.Mutex
 	keys map[string]*inflightPull // in-flight pulls, to dedup concurrent Ensure
+
+	// testHookAfterStatMiss, when non-nil, runs after the initial cache stat
+	// misses but before the coordination lock is taken. Tests use it to force
+	// the stat-miss-then-lock interleaving deterministically; nil in production.
+	testHookAfterStatMiss func()
 }
 
 func NewBundleCache(root string, fetch FetchFunc) *BundleCache {
@@ -65,6 +70,10 @@ func (c *BundleCache) Ensure(ctx context.Context, digest string) (retDir string,
 		return cacheDir, nil
 	}
 
+	if c.testHookAfterStatMiss != nil {
+		c.testHookAfterStatMiss()
+	}
+
 	// Coordinate concurrent pulls for the same digest.
 	c.mu.Lock()
 	if p, ok := c.keys[digest]; ok {
@@ -77,6 +86,18 @@ func (c *BundleCache) Ensure(ctx context.Context, digest string) (retDir string,
 		// p.dir and p.err were written by the primary puller before close(p.done),
 		// so the channel close provides the happens-before guarantee -- safe to read.
 		return p.dir, p.err
+	}
+	// Re-check the cache while holding the lock. A primary puller renames the
+	// extracted tree into cacheDir before deleting its inflight entry, so once
+	// the entry is gone the directory is already in place. Between our initial
+	// os.Stat miss above and acquiring this lock, such a winner could have
+	// finished; re-checking here turns that into a hit instead of a redundant
+	// second fetch (the os.Stat is brief and pulls are infrequent, so holding
+	// the lock across it is fine).
+	if _, err := os.Stat(cacheDir); err == nil {
+		c.mu.Unlock()
+		slog.Info("bundle: cache hit", "digest", digest)
+		return cacheDir, nil
 	}
 	p := &inflightPull{done: make(chan struct{})}
 	c.keys[digest] = p
