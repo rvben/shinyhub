@@ -439,6 +439,7 @@ type App struct {
 	ID                      int64     `json:"id"`
 	Slug                    string    `json:"slug"`
 	Name                    string    `json:"name"`
+	Description             string    `json:"description,omitempty"`
 	ProjectSlug             string    `json:"project_slug,omitempty"`
 	OwnerID                 int64     `json:"owner_id"`
 	Access                  string    `json:"access"`
@@ -544,7 +545,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
-		       last_error, crashed_at,`
+		       last_error, crashed_at, description,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -1570,6 +1571,24 @@ func (s *Store) SetAppAccess(slug, access string) error {
 	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("set app access rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAppDescription updates the app's optional one-line description (shown on
+// the Launchpad). An empty string clears it.
+func (s *Store) SetAppDescription(slug, description string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, description, slug)
+	if err != nil {
+		return fmt.Errorf("set app description: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app description rows: %w", err)
 	}
 	if n == 0 {
 		return ErrNotFound
@@ -2717,7 +2736,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
-		&a.LastError, &a.CrashedAt,
+		&a.LastError, &a.CrashedAt, &a.Description,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {

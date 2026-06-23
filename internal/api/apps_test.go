@@ -858,6 +858,53 @@ func TestPatchApp_UpdateName(t *testing.T) {
 	}
 }
 
+func TestPatchApp_UpdateDescription(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+
+	patch := func(t *testing.T, desc string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"description": desc})
+		req := authedRequest(t, "PATCH", "/api/apps/myapp", body, token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Set, then clear.
+	if rec := patch(t, "  Sales metrics dashboard  "); rec.Code != http.StatusOK {
+		t.Fatalf("set: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if app, _ := store.GetAppBySlug("myapp"); app.Description != "Sales metrics dashboard" {
+		t.Errorf("description = %q, want trimmed %q", app.Description, "Sales metrics dashboard")
+	}
+	if rec := patch(t, ""); rec.Code != http.StatusOK {
+		t.Fatalf("clear: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if app, _ := store.GetAppBySlug("myapp"); app.Description != "" {
+		t.Errorf("description = %q, want empty after clear", app.Description)
+	}
+
+	// A 280-character multi-byte description (each "é" is 2 UTF-8 bytes, so 560
+	// bytes) is accepted: the limit is counted in characters, not bytes.
+	multibyte := strings.Repeat("é", 280)
+	if rec := patch(t, multibyte); rec.Code != http.StatusOK {
+		t.Fatalf("280-rune multibyte: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if app, _ := store.GetAppBySlug("myapp"); app.Description != multibyte {
+		t.Errorf("multibyte description not persisted intact")
+	}
+
+	// 281 characters is rejected.
+	if rec := patch(t, strings.Repeat("a", 281)); rec.Code != http.StatusBadRequest {
+		t.Errorf("281 chars: expected 400, got %d", rec.Code)
+	}
+}
+
 func TestPatchApp_UpdateProjectSlug(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := auth.HashPassword("pass")

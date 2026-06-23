@@ -234,6 +234,10 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   white-space: nowrap;
   transition: color var(--ease), background var(--ease);
 }
+/* The .nav-item display:flex (author origin) outranks the UA [hidden]
+   display:none, so role-gated nav items (hidden via the attribute in app.js)
+   need this explicit higher-specificity guard to actually hide. */
+.nav-item[hidden] { display: none; }
 .nav-item:hover { color: var(--text-soft); background: var(--surface-2); }
 .nav-item:focus-visible,
 .sidebar-app:focus-visible,
@@ -3782,9 +3786,8 @@ footer.brand-footer a { color:inherit; }
 .ov-empty-note { font-size: 0.84rem; color: var(--text-soft); }
 
 /* First run + error. */
-.ov-firstrun { text-align: center; padding: 36px 24px; }
-.ov-firstrun-kicker { font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--cyan-bright); margin-bottom: 8px; }
-.ov-firstrun-title { font-size: 1.3rem; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.ov-firstrun { text-align: center; padding: 40px 24px; }
+.ov-firstrun-title { font-size: 1.35rem; font-weight: 700; color: var(--text); margin-bottom: 10px; letter-spacing: -0.01em; text-wrap: balance; }
 .ov-firstrun-body { font-size: 0.9rem; color: var(--text-soft); max-width: 52ch; margin: 0 auto 18px; line-height: 1.5; }
 .ov-error { display: flex; align-items: center; gap: 14px; }
 .ov-error-text { color: var(--text-soft); }
@@ -3809,4 +3812,90 @@ footer.brand-footer a { color:inherit; }
 @media (prefers-reduced-motion: reduce) {
   .ov-pulse-dot { animation: none; }
   .ov-skeleton .ov-skel { animation: none; }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Launchpad (viewer/consumer home). An app-forward gallery for launching apps.
+   Warmth comes from the colorful per-app monogram avatars and generous tiles,
+   not a palette change - it stays in the Constellation system.
+   ─────────────────────────────────────────────────────────────────────────── */
+.lp { display: flex; flex-direction: column; gap: 20px; max-width: 1100px; }
+
+.lp-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; flex-wrap: wrap; }
+.lp-welcome { font-size: 1.5rem; font-weight: 700; color: var(--text); letter-spacing: -0.02em; text-wrap: balance; }
+.lp-sub { font-size: 0.9rem; color: var(--text-soft); margin-top: 3px; }
+.lp-search {
+  font: inherit; font-size: 0.9rem; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--radius);
+  padding: 9px 14px; min-width: 220px; transition: border-color var(--ease), box-shadow var(--ease);
+}
+.lp-search::placeholder { color: var(--text-muted); }
+.lp-search:focus { outline: none; border-color: var(--cyan-bright); box-shadow: 0 0 0 3px var(--accent-dim); }
+
+.lp-section { font-size: 0.9rem; font-weight: 650; color: var(--text-soft); letter-spacing: -0.01em; margin: 6px 0 12px; }
+.lp-results > .lp-grid:not(:last-child) { margin-bottom: 22px; }
+
+/* Responsive tile grid: fills the row, no media query needed. The 280px floor
+   keeps tiles wide enough that a one-line description renders without clipping. */
+.lp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+
+.lp-tile {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 16px 18px; text-decoration: none; color: inherit;
+  transition: border-color var(--ease), background var(--ease), transform var(--ease), box-shadow var(--ease);
+}
+a.lp-tile:hover {
+  border-color: var(--line-2); background: var(--surface-2);
+  transform: translateY(-2px); box-shadow: 0 10px 30px -16px rgba(0,0,0,0.8);
+}
+a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3px); }
+.lp-tile--down { opacity: 0.6; }
+
+.lp-avatar {
+  flex: none; width: 46px; height: 46px; border-radius: 12px;
+  display: grid; place-items: center; font-weight: 700; font-size: 1.05rem; letter-spacing: -0.02em;
+  background: oklch(0.42 0.09 var(--avatar-hue, 220));
+  color: oklch(0.92 0.11 var(--avatar-hue, 220));
+  box-shadow: inset 0 0 0 1px oklch(0.6 0.12 var(--avatar-hue, 220) / 0.4);
+}
+
+.lp-tile-main { min-width: 0; flex: 1; }
+.lp-tile-name { font-size: 0.98rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lp-tile-desc {
+  font-size: 0.84rem; color: var(--text-soft); margin-top: 2px; line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.lp-ready { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 0.76rem; color: var(--text-soft); }
+.lp-ready-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); flex: none; }
+.lp-ready--ready .lp-ready-dot { background: var(--green); box-shadow: 0 0 7px var(--green); }
+.lp-ready--sleeping .lp-ready-dot { background: var(--standby); }
+.lp-ready--starting .lp-ready-dot { background: var(--cyan-bright); box-shadow: 0 0 7px var(--cyan-bright); }
+.lp-ready--degraded .lp-ready-dot { background: var(--yellow); box-shadow: 0 0 7px var(--yellow); }
+.lp-ready--degraded { color: var(--yellow); }
+.lp-ready--unavailable .lp-ready-dot { background: var(--red); }
+.lp-ready--unavailable { color: var(--text-muted); }
+
+.lp-tile-go { flex: none; color: var(--text-dim); font-size: 1.1rem; transition: color var(--ease), transform var(--ease); }
+
+.lp-noresults { font-size: 0.9rem; color: var(--text-soft); padding: 8px 2px; }
+
+/* Empty / first-run. */
+.lp-empty { text-align: center; padding: 52px 24px; }
+.lp-empty-title { font-size: 1.4rem; font-weight: 700; color: var(--text); margin-bottom: 10px; letter-spacing: -0.01em; text-wrap: balance; }
+.lp-empty-body { font-size: 0.92rem; color: var(--text-soft); max-width: 52ch; margin: 0 auto 18px; line-height: 1.55; }
+
+/* Loading skeleton. */
+.lp-skeleton .lp-skel { height: 80px; border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%);
+  background-size: 200% 100%; animation: ovShimmer 1.4s linear infinite; }
+
+@media (max-width: 600px) {
+  .lp-search { width: 100%; }
+  .lp-grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  a.lp-tile:hover { transform: none; }
+  a.lp-tile:hover .lp-tile-go { transform: none; }
+  .lp-skeleton .lp-skel { animation: none; }
 }

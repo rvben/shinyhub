@@ -2073,3 +2073,37 @@ func TestOverviewContract(t *testing.T) {
 	assertContains(t, "app.js", "router.register('/apps'",
 		"the apps grid moved to the /apps route")
 }
+
+// TestLaunchpadContract pins the viewer Launchpad (the non-operator / home) to
+// the API shape and DOM/routing wiring it depends on.
+func TestLaunchpadContract(t *testing.T) {
+	assertContains(t, "app.js", "mountLaunchpad",
+		"the / route mounts the Launchpad for non-operators (views/launchpad.js)")
+	assertContains(t, "app.js", "isOperator",
+		"role-adaptive home: operators get the Overview, everyone else the Launchpad")
+	assertContains(t, "index.html", `id="launchpad-view"`,
+		"launchpad.js shows #launchpad-view and renders into #launchpad-body")
+	assertContains(t, "index.html", `id="launchpad-body"`,
+		"launchpad.js renders the gallery into #launchpad-body")
+	assertContains(t, "index.html", `id="tab-launchpad"`,
+		"the non-operator home nav item")
+	assertContains(t, "views/launchpad-model.js", "app.description",
+		"GET /api/apps returns description (db.App.Description); the Launchpad tile shows it")
+	assertContains(t, "views/launchpad.js", "/app/",
+		"a Launchpad tile launches the proxied app at /app/<slug>/")
+	// A pure viewer must not reach the operator detail page (logs / deployments /
+	// configuration) via a sidebar link or a typed URL; the detail mount redirects
+	// them to the Launchpad once the app loads, while a per-app manager (can_manage)
+	// keeps access. Pin the gate so the viewer-only flow can't silently regress.
+	assertContains(t, "views/app-detail.js", "ctx.state.user.role === 'viewer' && !canManage",
+		"app-detail.js gates pure viewers out of the operator detail page (manager via can_manage keeps access)")
+}
+
+// TestAppDescriptionUIContract pins the Configuration > General description
+// field to the PATCH it feeds (the same field the Launchpad renders).
+func TestAppDescriptionUIContract(t *testing.T) {
+	assertContains(t, "index.html", `id="general-description"`,
+		"Configuration > General has a description field")
+	assertContains(t, "app.js", "name, description, project_slug",
+		"saveGeneralInfo PATCHes description alongside name + project_slug")
+}

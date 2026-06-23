@@ -44,9 +44,13 @@
       </div>
 
       <nav id="primary-nav" aria-label="Sections">
-        <a href="/" data-nav class="nav-item" id="tab-overview">
+        <a href="/" data-nav class="nav-item" id="tab-overview" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Overview</span>
+        </a>
+        <a href="/" data-nav class="nav-item" id="tab-launchpad" hidden>
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h3v-6h4v6h3a1 1 0 0 0 1-1v-9"/></svg>
+          <span class="nav-label">Home</span>
         </a>
         <a href="/apps" data-nav class="nav-item" id="tab-apps">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
@@ -110,6 +114,11 @@
         <h1 id="overview-heading">Overview</h1>
       </div>
       <div id="overview-body"></div>
+    </section>
+
+    <section id="launchpad-view" hidden aria-labelledby="launchpad-heading">
+      <h1 id="launchpad-heading" class="sr-only">Your apps</h1>
+      <div id="launchpad-body"></div>
     </section>
 
     <section id="apps-view" hidden>
@@ -292,6 +301,13 @@
                   <span class="scaling-option-help">Shown across the dashboard.</span>
                 </span>
                 <input id="general-name" type="text" maxlength="128" autocomplete="off" aria-label="App display name">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Description</span>
+                  <span class="scaling-option-help">A one-line summary shown on the home Launchpad.</span>
+                </span>
+                <input id="general-description" type="text" autocomplete="off" placeholder="(optional)" aria-label="App description">
               </label>
               <label class="scaling-row">
                 <span>

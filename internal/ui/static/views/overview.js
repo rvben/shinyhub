@@ -172,7 +172,6 @@ export function mountOverview(ctx) {
 
   function renderFirstRun() {
     const sec = el('section', 'ov-panel ov-firstrun');
-    sec.appendChild(el('p', 'ov-firstrun-kicker', 'Ready when you are'));
     sec.appendChild(el('h2', 'ov-firstrun-title', 'Deploy your first Shiny app'));
     sec.appendChild(el('p', 'ov-firstrun-body',
       'Apps you deploy appear here with live health and resource usage. Head to Apps to create one.'));

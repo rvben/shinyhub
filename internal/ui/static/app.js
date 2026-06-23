@@ -2,6 +2,7 @@ import { createRouter } from '/static/router.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountOverview } from '/static/views/overview.js';
+import { mountLaunchpad } from '/static/views/launchpad.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
@@ -153,6 +154,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const loginView = document.getElementById('login-view');
   const overviewView = document.getElementById('overview-view');
+  const launchpadView = document.getElementById('launchpad-view');
   const appsView = document.getElementById('apps-view');
   const appDetailView = document.getElementById('app-detail-view');
   const loginForm = document.getElementById('login-form');
@@ -205,6 +207,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const tabAudit    = document.getElementById('tab-audit');
   const tabUsers    = document.getElementById('tab-users');
   const tabWorkers  = document.getElementById('tab-workers');
+  const tabOverview = document.getElementById('tab-overview');
+  const tabLaunchpad = document.getElementById('tab-launchpad');
+  const tabApps     = document.getElementById('tab-apps');
   let   sidebarDrawer = null; // mobile off-canvas drawer controller (wired below)
   const workersView    = document.getElementById('workers-view');
   const workersError   = document.getElementById('workers-error');
@@ -550,6 +555,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(logoutButton, true);
     setHidden(loginView, false);
     setHidden(overviewView, true);
+    setHidden(launchpadView, true);
     setHidden(appsView, true);
     setHidden(usersView, true);
     setHidden(auditView, true);
@@ -575,6 +581,13 @@ document.addEventListener('DOMContentLoaded', () => {
     tabAudit.hidden = payload.user.role !== 'admin';
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
+    // The home (/) is role-adaptive: fleet operators (admin/operator) get the
+    // Overview, everyone else the Launchpad. Show only the matching nav item,
+    // and hide the operator-flavoured Apps grid from pure viewers.
+    const isOperator = payload.user.role === 'admin' || payload.user.role === 'operator';
+    tabOverview.hidden = !isOperator;
+    tabLaunchpad.hidden = isOperator;
+    tabApps.hidden = payload.user.role === 'viewer';
     newAppButton.hidden = !state.canCreateApps;
     // Load the admin fleet-health banner now that state.user is set; loadApps
     // can fire before this during boot, when the admin gate would skip it.
@@ -1571,10 +1584,12 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(document.getElementById('scaling-status'), true);
     updateScalingCeiling();
 
-    // General info: display name + project slug (rename / regroup).
+    // General info: display name + description + project slug (rename / regroup).
     document.getElementById('general-name').value = app.name ?? '';
+    document.getElementById('general-description').value = app.description ?? '';
     document.getElementById('general-project').value = app.project_slug ?? '';
     document.getElementById('general-name').disabled = !canEdit;
+    document.getElementById('general-description').disabled = !canEdit;
     document.getElementById('general-project').disabled = !canEdit;
     document.getElementById('general-save-btn').hidden = !canEdit;
     setError(document.getElementById('general-error'), '');
@@ -1616,9 +1631,17 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(errEl, '');
     setHidden(statusEl, true);
     const name = document.getElementById('general-name').value.trim();
+    const description = document.getElementById('general-description').value.trim();
     const project = document.getElementById('general-project').value.trim();
     if (name.length < 1 || name.length > 128) {
       setError(errEl, 'Display name must be 1 to 128 characters.');
+      return;
+    }
+    // Count code points (spread iterates by code point), not UTF-16 units, so the
+    // limit matches the server's rune count and an emoji-bearing description that
+    // the backend accepts is not rejected here.
+    if ([...description].length > 280) {
+      setError(errEl, 'Description must be 280 characters or fewer.');
       return;
     }
     const btn = document.getElementById('general-save-btn');
@@ -1627,7 +1650,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ name, project_slug: project }),
+        body: JSON.stringify({ name, description, project_slug: project }),
       });
     } catch {
       setError(errEl, 'Failed to save. Check your connection.');
@@ -1647,7 +1670,7 @@ document.addEventListener('DOMContentLoaded', () => {
     snapshotSettingsSection('general');
     const heading = document.getElementById('app-detail-heading');
     if (heading) heading.textContent = name;
-    if (detailApp) detailApp.name = name;
+    if (detailApp) { detailApp.name = name; detailApp.description = description; }
     await loadApps();
   }
 
@@ -2602,7 +2625,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Register every settings section with the dirty tracker so Save stays
   // disabled until something changes and an "Unsaved changes" hint appears.
   registerSettingsSection('general',
-    () => [document.getElementById('general-name'), document.getElementById('general-project')],
+    () => [document.getElementById('general-name'), document.getElementById('general-description'), document.getElementById('general-project')],
     'general-save-btn', 'general-dirty');
   registerSettingsSection('resources',
     () => [document.getElementById('resources-memory'), document.getElementById('resources-cpu')],
@@ -3670,6 +3693,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // whatever showLoggedIn left them in.
   function hideAllPageViews() {
     overviewView.hidden = true;
+    launchpadView.hidden = true;
     appsView.hidden = true;
     usersView.hidden = true;
     workersView.hidden = true;
@@ -3679,10 +3703,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
   router.register('/', () => {
     hideAllPageViews();
-    return mountOverview(ctx);
+    // Role-adaptive home: fleet operators land on the Overview, everyone else
+    // on the Launchpad. Falls back to the Launchpad when the user is unknown
+    // (the fetch then 401s to the login view, as before).
+    const role = ctx.state.user && ctx.state.user.role;
+    const isOperator = role === 'admin' || role === 'operator';
+    return isOperator ? mountOverview(ctx) : mountLaunchpad(ctx);
   });
   router.register('/apps', () => {
     hideAllPageViews();
+    // The Apps grid is operator-flavoured; pure viewers don't get it (the nav
+    // item is hidden for them). Gate the route too so a typed/bookmarked /apps
+    // bounces back to their Launchpad home rather than mounting the grid.
+    if (ctx.state.user && ctx.state.user.role === 'viewer') {
+      ctx.navigate('/', { replace: true });
+      return;
+    }
     const view = mountAppsGrid(ctx);
     updateActiveNav(location.pathname);
     return view;

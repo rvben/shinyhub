@@ -99,6 +99,17 @@ export function mountAppDetail(ctx) {
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
 
+    // Pure viewers don't get the operator detail page (logs / deployments /
+    // configuration chrome); their home is the launch-focused Launchpad. This
+    // covers every path in — a sidebar app link, a typed URL, a bookmark — since
+    // the gate runs after the app loads. A viewer who manages THIS app (per-app
+    // manager role, reflected by can_manage) keeps full access, and operators,
+    // developers, and admins are unaffected.
+    if (ctx.state.user && ctx.state.user.role === 'viewer' && !canManage) {
+      ctx.navigate('/', { replace: true });
+      return {};
+    }
+
     // Record the app so the static header kebab (wired once in app.js) acts on
     // the right app.
     if (ctx.setDetailApp) ctx.setDetailApp(app);
