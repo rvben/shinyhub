@@ -3,6 +3,7 @@ import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountOverview } from '/static/views/overview.js';
 import { mountLaunchpad } from '/static/views/launchpad.js';
+import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
@@ -1595,6 +1596,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(document.getElementById('general-error'), '');
     setHidden(document.getElementById('general-status'), true);
 
+    renderIconPicker(app, canEdit);
+
     // Resources: per-replica memory/CPU caps. null (no limit) renders as empty.
     // Limits are only enforceable under the docker runtime, so under native we
     // show them read-only with a note rather than letting a Save 400.
@@ -1622,6 +1625,123 @@ document.addEventListener('DOMContentLoaded', () => {
     snapshotSettingsSection('resources');
     snapshotSettingsSection('hibernate');
     snapshotSettingsSection('scaling');
+  }
+
+  // The icon picker uploads immediately (it is not tied to the General Save
+  // button). Handlers are assigned with .onclick/.onchange so re-populating the
+  // tab replaces them rather than stacking listeners across app switches.
+  const ICON_MAX_BYTES = 512 * 1024;
+  const ICON_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'];
+
+  // renderDetailHeaderAvatar fills the app-detail header's icon slot with the
+  // app's uploaded icon (or its monogram). Called on every detail mount (via
+  // setDetailApp) and after an icon upload/removal.
+  function renderDetailHeaderAvatar(app) {
+    const slot = document.getElementById('app-detail-icon');
+    if (!slot || !app) return;
+    slot.replaceChildren(renderAppAvatar(document, avatarView(app), 'app-detail-avatar'));
+  }
+
+  function renderIconPicker(app, canEdit) {
+    const preview = document.getElementById('general-icon-preview');
+    const uploadBtn = document.getElementById('general-icon-upload');
+    const removeBtn = document.getElementById('general-icon-remove');
+    const fileInput = document.getElementById('general-icon-file');
+    const statusEl = document.getElementById('general-icon-status');
+    if (!preview || !uploadBtn || !removeBtn || !fileInput) return;
+
+    setHidden(statusEl, true);
+    preview.replaceChildren(renderAppAvatar(document, avatarView(app), 'icon-picker-preview'));
+    uploadBtn.hidden = !canEdit;
+    removeBtn.hidden = !canEdit || !app.icon_mime;
+
+    if (!canEdit) {
+      uploadBtn.onclick = null;
+      removeBtn.onclick = null;
+      fileInput.onchange = null;
+      return;
+    }
+    uploadBtn.onclick = () => fileInput.click();
+    fileInput.onchange = () => {
+      const f = fileInput.files && fileInput.files[0];
+      fileInput.value = ''; // let the same file be re-picked later
+      if (f) uploadIcon(app, f);
+    };
+    removeBtn.onclick = () => removeIcon(app);
+  }
+
+  async function uploadIcon(app, file) {
+    const errEl = document.getElementById('general-error');
+    const statusEl = document.getElementById('general-icon-status');
+    setError(errEl, '');
+    if (file.size > ICON_MAX_BYTES) {
+      setError(errEl, 'Icon must be 512 KB or smaller.');
+      return;
+    }
+    if (file.type && !ICON_TYPES.includes(file.type)) {
+      setError(errEl, 'Icon must be a PNG, JPEG, WebP, or SVG image.');
+      return;
+    }
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+    } catch {
+      setError(errEl, 'Upload failed. Check your connection.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Upload failed.';
+      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
+      setError(errEl, msg);
+      return;
+    }
+    let body = {};
+    try { body = await resp.json(); } catch { /* tolerate */ }
+    applyIconChange(app, body.icon_mime || file.type);
+    statusEl.textContent = 'Icon updated.';
+    setHidden(statusEl, false);
+  }
+
+  async function removeIcon(app) {
+    const errEl = document.getElementById('general-error');
+    const statusEl = document.getElementById('general-icon-status');
+    setError(errEl, '');
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, { method: 'DELETE' });
+    } catch {
+      setError(errEl, 'Failed to remove icon. Check your connection.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
+    applyIconChange(app, '');
+    statusEl.textContent = 'Icon removed.';
+    setHidden(statusEl, false);
+  }
+
+  // applyIconChange records the new icon state on the app and every cached copy
+  // (detailApp, the sidebar/grid list) and bumps updated_at as the cache-buster,
+  // then re-renders the picker preview and the detail-header avatar so the change
+  // shows everywhere without a reload.
+  function applyIconChange(app, iconMime) {
+    const stamp = new Date().toISOString();
+    app.icon_mime = iconMime;
+    app.updated_at = stamp;
+    if (detailApp && detailApp.slug === app.slug && detailApp !== app) {
+      detailApp.icon_mime = iconMime;
+      detailApp.updated_at = stamp;
+    }
+    const listed = (state.apps || []).find((a) => a && a.slug === app.slug);
+    if (listed) { listed.icon_mime = iconMime; listed.updated_at = stamp; }
+    renderIconPicker(app, true);
+    renderDetailHeaderAvatar(app);
+    if (typeof syncSidebar === 'function') syncSidebar();
   }
 
   async function saveGeneralInfo() {
@@ -1671,6 +1791,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const heading = document.getElementById('app-detail-heading');
     if (heading) heading.textContent = name;
     if (detailApp) { detailApp.name = name; detailApp.description = description; }
+    // A rename changes the monogram initials (derived from the name), so re-render
+    // the header + picker avatar; for an app with an uploaded icon this is a no-op
+    // re-render of the same image.
+    if (detailApp) {
+      renderDetailHeaderAvatar(detailApp);
+      const preview = document.getElementById('general-icon-preview');
+      if (preview) preview.replaceChildren(renderAppAvatar(document, avatarView(detailApp), 'icon-picker-preview'));
+    }
     await loadApps();
   }
 
@@ -3661,8 +3789,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // summary on each 10s poll without a full GET /api/apps/:slug refetch.
     setDetailEnvelope: (env) => { detailLastEnvelope = env; },
     // setDetailApp records the app currently shown on the detail page so the
-    // static header kebab (wired once below) knows which app to act on.
-    setDetailApp: (app) => { detailApp = app; },
+    // static header kebab (wired once below) knows which app to act on, and
+    // renders the header's icon/monogram avatar for that app.
+    setDetailApp: (app) => { detailApp = app; renderDetailHeaderAvatar(app); },
     // restart triggers POST /api/apps/:slug/restart (the same action as the
     // header kebab), exposed so the crash banner's Restart button can reuse it.
     restart: (slug) => restart(slug),

@@ -3749,6 +3749,10 @@ footer.brand-footer a { color:inherit; }
 }
 .ov-btn:hover { color: var(--text); border-color: var(--cyan-bright); background: var(--accent-dim); }
 .ov-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* The author display above overrides the UA [hidden] rule, so an .ov-btn with
+   the hidden attribute (e.g. the Remove icon button when no icon is set) would
+   still show. Restore the hide. */
+.ov-btn[hidden] { display: none; }
 
 /* Footer — resource pressure + recent activity. */
 .ov-footer { display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; }
@@ -3859,6 +3863,35 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   color: oklch(0.92 0.11 var(--avatar-hue, 220));
   box-shadow: inset 0 0 0 1px oklch(0.6 0.12 var(--avatar-hue, 220) / 0.4);
 }
+/* Uploaded-icon variant: the image fills the box; drop the monogram's hued
+   background and letter styling, keep the rounded frame. */
+.lp-avatar--img {
+  background: var(--surface-3); object-fit: cover; object-position: center;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+
+/* ── Shared app avatar on the detail header + the Configuration icon picker.
+   Both reuse the monogram model (hued background + initials) and the same
+   --img override for an uploaded icon. ── */
+.app-detail-avatar, .icon-picker-preview {
+  flex: none; display: grid; place-items: center;
+  border-radius: 12px; font-weight: 700; letter-spacing: -0.02em;
+  background: oklch(0.42 0.09 var(--avatar-hue, 220));
+  color: oklch(0.92 0.11 var(--avatar-hue, 220));
+  box-shadow: inset 0 0 0 1px oklch(0.6 0.12 var(--avatar-hue, 220) / 0.4);
+}
+.app-detail-avatar--img, .icon-picker-preview--img {
+  background: var(--surface-3); object-fit: cover; object-position: center;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+.app-detail-icon-slot { display: inline-flex; }
+.app-detail-avatar { width: 40px; height: 40px; font-size: 0.95rem; border-radius: 11px; }
+.app-detail-identity { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+.icon-picker { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.icon-picker-preview { width: 52px; height: 52px; font-size: 1.15rem; }
+.icon-picker-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.icon-picker-controls .hibernate-status { margin: 0; }
 
 .lp-tile-main { min-width: 0; flex: 1; }
 .lp-tile-name { font-size: 0.98rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

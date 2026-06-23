@@ -1,9 +1,14 @@
 // launchpad-model.js - DOM-free logic for the viewer Launchpad (the consumer
 // home). Turns the GET /api/apps list (already access-scoped server-side) plus
 // a recently-opened slug list into the display model the Launchpad renders:
-// per-app launch readiness, a deterministic monogram avatar, a "recently
-// opened" shortlist, and apps grouped by project. Kept DOM-free so it is
-// unit-testable and the view stays a thin renderer.
+// per-app launch readiness, a visual identity (uploaded icon or monogram), a
+// "recently opened" shortlist, and apps grouped by project. Kept DOM-free so it
+// is unit-testable and the view stays a thin renderer.
+import { appAvatar, appIconUrl } from './app-avatar.js';
+
+// Re-export appAvatar so existing importers (and tests) keep their entry point
+// while the implementation lives in the shared app-avatar module.
+export { appAvatar } from './app-avatar.js';
 
 // Readiness collapses the operator status vocabulary into the few things a
 // viewer cares about: can I open it now, will it wake, or is it down. Status is
@@ -38,23 +43,6 @@ export function launchReadiness(app) {
   return { state: 'unavailable', label: 'Unavailable', openable: false };
 }
 
-// appAvatar derives a deterministic monogram: 1-2 initials from the name and a
-// hue from the slug. The view renders it in OKLCH at a fixed lightness/chroma
-// so every avatar is colorful yet cohesive on the dark theme (no clashing).
-export function appAvatar(app) {
-  const name = (app.name || app.slug || '?').trim();
-  const words = name.split(/[\s_-]+/).filter(Boolean);
-  let initials = words.slice(0, 2).map((w) => w[0]).join('');
-  if (!initials) initials = name.slice(0, 2) || '?';
-  let h = 2166136261;
-  const seed = app.slug || name;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return { initials: initials.slice(0, 2).toUpperCase(), hue: (h >>> 0) % 360 };
-}
-
 /**
  * buildLaunchpadModel turns the apps list + recently-opened slugs into the
  * Launchpad model.
@@ -77,6 +65,9 @@ export function buildLaunchpadModel(apps, recentSlugs) {
     project: app.project_slug || 'default',
     readiness: launchReadiness(app),
     avatar: appAvatar(app),
+    // iconUrl is set when the app has an uploaded icon; the tile renders it in
+    // place of the monogram (falling back to the monogram if it fails to load).
+    iconUrl: appIconUrl(app),
   }));
 
   const bySlug = new Map(tiles.map((t) => [t.slug, t]));

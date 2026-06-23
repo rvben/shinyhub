@@ -2099,6 +2099,43 @@ func TestLaunchpadContract(t *testing.T) {
 		"app-detail.js gates pure viewers out of the operator detail page (manager via can_manage keeps access)")
 }
 
+// TestAppIconUIContract pins the per-app icon wiring: the shared avatar module,
+// the Launchpad tile rendering an icon-or-monogram, the detail-header avatar, and
+// the Configuration icon picker that uploads to PUT /api/apps/<slug>/icon.
+func TestAppIconUIContract(t *testing.T) {
+	// Shared avatar module: monogram model + icon URL + DOM render helper.
+	assertContains(t, "views/app-avatar.js", "export function renderAppAvatar",
+		"app-avatar.js exposes the shared icon-or-monogram renderer")
+	assertContains(t, "views/app-avatar.js", "export function appIconUrl",
+		"app-avatar.js derives the icon URL (with an updated_at cache-buster)")
+
+	// Launchpad tile renders the icon via the shared helper, fed by the model's iconUrl.
+	assertContains(t, "views/launchpad-model.js", "iconUrl: appIconUrl(app)",
+		"the Launchpad tile model carries the icon URL")
+	assertContains(t, "views/launchpad.js", "renderAppAvatar",
+		"the Launchpad tile renders the icon-or-monogram via the shared helper")
+
+	// Detail header avatar is rendered for the current app.
+	assertContains(t, "index.html", `id="app-detail-icon"`,
+		"the app-detail header has an icon slot")
+	assertContains(t, "app.js", "renderDetailHeaderAvatar",
+		"app.js renders the detail-header icon/monogram for the current app")
+
+	// Configuration icon picker: markup + upload/remove wiring + the endpoint.
+	assertContains(t, "index.html", `id="general-icon-preview"`,
+		"Configuration > General has an icon preview")
+	assertContains(t, "index.html", `id="general-icon-file"`,
+		"the icon picker has a file input")
+	assertContains(t, "app.js", "renderIconPicker",
+		"app.js wires the icon picker preview + upload/remove")
+	assertContains(t, "app.js", "app.slug)}/icon",
+		"app.js uploads/removes via /api/apps/<slug>/icon")
+	// The author .ov-btn display would override [hidden]; the Remove button must
+	// actually hide when no icon is set.
+	assertContains(t, "style.css", ".ov-btn[hidden]",
+		"an .ov-btn with the hidden attribute is actually hidden (Remove when no icon)")
+}
+
 // TestAppDescriptionUIContract pins the Configuration > General description
 // field to the PATCH it feeds (the same field the Launchpad renders).
 func TestAppDescriptionUIContract(t *testing.T) {

@@ -5,6 +5,7 @@
 // apps in localStorage. No operator chrome (no deploy/metrics/kebab) - launching
 // is the only action.
 import { buildLaunchpadModel } from './launchpad-model.js';
+import { renderAppAvatar } from './app-avatar.js';
 
 const RECENT_KEY = 'shinyhub.recent-apps';
 const RECENT_MAX = 6;
@@ -146,10 +147,9 @@ export function mountLaunchpad(ctx) {
       node.addEventListener('click', () => pushRecent(recentKey, t.slug));
     }
 
-    const av = el('span', 'lp-avatar', t.avatar.initials);
-    av.style.setProperty('--avatar-hue', String(t.avatar.hue));
-    av.setAttribute('aria-hidden', 'true');
-    node.appendChild(av);
+    node.appendChild(renderAppAvatar(document, {
+      iconUrl: t.iconUrl, initials: t.avatar.initials, hue: t.avatar.hue,
+    }, 'lp-avatar'));
 
     const main = el('div', 'lp-tile-main');
     main.appendChild(el('p', 'lp-tile-name', t.name));
