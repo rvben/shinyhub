@@ -829,7 +829,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // syncSidebar renders the project->app quick-switch list from the FULL app
   // index (state.apps), never the grid-filtered set, so dashboard search/sort
   // never hides apps from the sidebar.
+  // While the viewer-home preview owns the sidebar, suppress the operator-scoped
+  // syncSidebar so a late-resolving loadAppsIndex (fired on login) can't clobber
+  // the viewer-scoped list and flash the operator's private apps. state.apps is
+  // still updated by those loaders; the preview restores the real list on exit.
+  let sidebarPreviewActive = false;
+
   function syncSidebar() {
+    if (sidebarPreviewActive) return;
     const el = document.getElementById('sidebar-apps');
     if (el) renderSidebarApps(el, state.apps, location.pathname, (a) => appCardBadge(a, formatStatus), document);
   }
@@ -3787,6 +3794,17 @@ document.addEventListener('DOMContentLoaded', () => {
     applyGridFilters: renderApps,
     updateActiveNav,
     syncSidebar,
+    // Render an explicit app list into the sidebar without touching state.apps.
+    // The viewer-home preview uses this to show the viewer-scoped list, then
+    // calls syncSidebar() on exit to restore the operator's real list.
+    renderSidebarAppsList: (apps) => {
+      const el = document.getElementById('sidebar-apps');
+      if (el) renderSidebarApps(el, apps, location.pathname, (a) => appCardBadge(a, formatStatus), document);
+    },
+    // While true, syncSidebar() is suppressed so background loaders can't clobber
+    // the preview's viewer-scoped sidebar. The preview sets it on mount, clears it
+    // on exit, then restores the real list.
+    setSidebarPreview: (on) => { sidebarPreviewActive = on; },
     setSettingsSlug: (slug) => { settingsSlug = slug; },
     populateGeneralTab,
     populateAutoscaleTab,
@@ -3852,6 +3870,12 @@ document.addEventListener('DOMContentLoaded', () => {
     hideAllPageViews();
     const role = ctx.state.user && ctx.state.user.role;
     const isOperator = role === 'admin' || role === 'operator';
+    // Admin "preview viewer home": ?preview=viewer mounts the Launchpad in
+    // read-only preview for an operator (the param is meaningless to a viewer,
+    // who already gets the Launchpad).
+    if (isOperator && new URLSearchParams(location.search).get('preview') === 'viewer') {
+      return mountLaunchpad(ctx, { preview: true });
+    }
     return isOperator ? mountOverview(ctx) : mountLaunchpad(ctx);
   };
   router.register('/', mountHome);

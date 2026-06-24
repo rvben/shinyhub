@@ -2099,6 +2099,26 @@ func TestLaunchpadContract(t *testing.T) {
 		"app-detail.js gates pure viewers out of the operator detail page (manager via can_manage keeps access)")
 }
 
+// TestPreviewViewerHomeUIContract pins the admin "preview viewer home" wiring:
+// the Overview entry, the role-gated route, the viewer-scoped fetch, the banner,
+// and the faithful sidebar.
+func TestPreviewViewerHomeUIContract(t *testing.T) {
+	assertContains(t, "index.html", `href="/home?preview=viewer"`,
+		"the Overview has a Preview viewer home entry")
+	assertContains(t, "app.js", "preview') === 'viewer'",
+		"mountHome mounts the Launchpad in preview for an operator on ?preview=viewer")
+	assertContains(t, "app.js", "{ preview: true }",
+		"the preview mounts the Launchpad with preview mode on")
+	assertContains(t, "views/launchpad.js", "/api/apps?as=viewer",
+		"preview fetches the viewer-scoped (public+shared) app list")
+	assertContains(t, "views/launchpad.js", "renderPreviewBanner",
+		"preview shows a banner clarifying it is the viewer home")
+	assertContains(t, "views/launchpad.js", "ctx.renderSidebarAppsList",
+		"preview renders the viewer-scoped list into the sidebar too (faithful)")
+	assertContains(t, "app.js", "sidebarPreviewActive",
+		"syncSidebar is suppressed while the preview owns the sidebar, so a background index load can't clobber it")
+}
+
 // TestRootHomeUIContract pins the client wiring for the auth-aware root: the
 // stable /home alias and logout landing on the contextual root.
 func TestRootHomeUIContract(t *testing.T) {

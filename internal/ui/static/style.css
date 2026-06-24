@@ -3825,6 +3825,21 @@ footer.brand-footer a { color:inherit; }
    ─────────────────────────────────────────────────────────────────────────── */
 .lp { display: flex; flex-direction: column; gap: 20px; max-width: 1100px; }
 
+/* Admin "preview viewer home" banner: a clear, dismissible context strip. */
+.lp-preview-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px 18px; flex-wrap: wrap;
+  margin-bottom: 4px; padding: 11px 16px; border-radius: var(--radius);
+  background: var(--accent-dim); border: 1px solid var(--cyan-bright);
+  color: var(--text); font-size: 0.85rem;
+}
+.lp-preview-text strong { font-weight: 700; color: var(--cyan-bright); }
+.lp-preview-exit {
+  flex: none; font-weight: 600; font-size: 0.82rem; color: var(--text);
+  text-decoration: none; padding: 5px 12px; border-radius: var(--radius);
+  border: 1px solid var(--line-2); transition: border-color var(--ease), background var(--ease);
+}
+.lp-preview-exit:hover { border-color: var(--cyan-bright); background: var(--surface-2); }
+
 .lp-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; flex-wrap: wrap; }
 .lp-welcome { font-size: 1.5rem; font-weight: 700; color: var(--text); letter-spacing: -0.02em; text-wrap: balance; }
 .lp-sub { font-size: 0.9rem; color: var(--text-soft); margin-top: 3px; }

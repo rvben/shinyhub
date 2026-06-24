@@ -44,9 +44,16 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		apps []*db.App
 		err  error
 	)
-	if isPrivilegedAppOperator(u) {
+	switch {
+	case isPrivilegedAppOperator(u) && r.URL.Query().Get("as") == "viewer":
+		// Admin/operator previewing the viewer home: scope to the default viewer
+		// baseline (public + shared) so the preview shows what viewers actually see
+		// rather than the operator's full list. Read-only; the param is ignored for
+		// non-privileged callers, who are already scoped by ListAppsVisibleToUser.
+		apps, err = s.store.ListViewerBaselineApps(limit, offset)
+	case isPrivilegedAppOperator(u):
 		apps, err = s.store.ListApps(limit, offset)
-	} else {
+	default:
 		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
 	}
 	if err != nil {

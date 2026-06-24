@@ -11,11 +11,20 @@ const RECENT_KEY = 'shinyhub.recent-apps';
 const RECENT_MAX = 6;
 const POLL_MS = 20000;
 
-export function mountLaunchpad(ctx) {
+export function mountLaunchpad(ctx, opts = {}) {
   const view = document.getElementById('launchpad-view');
   const body = document.getElementById('launchpad-body');
   view.hidden = false;
   ctx.updateActiveNav(location.pathname);
+
+  // Preview mode: an admin/operator viewing the viewer home. The apps list is
+  // fetched with ?as=viewer (the public+shared baseline a viewer sees), a banner
+  // is shown, and the preview never writes to the admin's real app state, sidebar,
+  // or recently-opened - it is a read-only look at the viewer experience.
+  const preview = !!opts.preview;
+  // Claim the sidebar for the preview (synchronously, at mount) so a background
+  // loadAppsIndex resolving mid-preview can't repaint it with the operator's list.
+  if (preview && typeof ctx.setSidebarPreview === 'function') ctx.setSidebarPreview(true);
 
   // Scope recently-opened to the signed-in user so a shared browser profile does
   // not surface a previous user's launches (which would leak activity on apps
@@ -38,7 +47,7 @@ export function mountLaunchpad(ctx) {
   async function load(initial) {
     let apps = [];
     try {
-      const resp = await ctx.api('/api/apps');
+      const resp = await ctx.api(preview ? '/api/apps?as=viewer' : '/api/apps');
       if (disposed) return;
       if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
       if (!resp.ok) { if (initial) body.replaceChildren(errorState()); return; }
@@ -48,9 +57,15 @@ export function mountLaunchpad(ctx) {
       return;
     }
     if (disposed) return;
-    ctx.state.apps = apps;
-    if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
-    model = buildLaunchpadModel(apps, getRecent(recentKey));
+    if (!preview) {
+      ctx.state.apps = apps;
+      if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
+    } else if (typeof ctx.renderSidebarAppsList === 'function') {
+      // Faithful preview: show the viewer-scoped apps in the sidebar too, without
+      // mutating the operator's real state.apps. unmount() restores the real list.
+      ctx.renderSidebarAppsList(apps);
+    }
+    model = buildLaunchpadModel(apps, preview ? [] : getRecent(recentKey));
     // On the 20s background refresh, re-render only the results region so the
     // header search input keeps its focus, value, and caret while a viewer is
     // typing. A full render runs on first load and on any structural change:
@@ -64,6 +79,7 @@ export function mountLaunchpad(ctx) {
 
   function render() {
     const root = el('div', 'lp');
+    if (preview) root.appendChild(renderPreviewBanner());
     root.appendChild(renderHeader());
     if (model.total === 0) {
       root.appendChild(renderEmpty());
@@ -143,8 +159,10 @@ export function mountLaunchpad(ctx) {
     if (openable) {
       node.href = '/app/' + encodeURIComponent(t.slug) + '/';
       // A real navigation to the proxied app (no data-nav), recording the launch
-      // first so "Recently opened" reflects it on return.
-      node.addEventListener('click', () => pushRecent(recentKey, t.slug));
+      // first so "Recently opened" reflects it on return. In preview the tile
+      // stays launchable but records nothing - the preview is side-effect-free,
+      // so it never touches the operator's recently-opened state.
+      if (!preview) node.addEventListener('click', () => pushRecent(recentKey, t.slug));
     }
 
     node.appendChild(renderAppAvatar(document, {
@@ -169,6 +187,20 @@ export function mountLaunchpad(ctx) {
     return node;
   }
 
+  function renderPreviewBanner() {
+    const bar = el('div', 'lp-preview-banner');
+    bar.setAttribute('role', 'status');
+    const text = el('span', 'lp-preview-text');
+    text.appendChild(el('strong', null, 'Previewing the viewer home.'));
+    text.appendChild(document.createTextNode(' Showing the apps a viewer sees by default (public and shared).'));
+    bar.appendChild(text);
+    const exit = el('a', 'lp-preview-exit', 'Exit preview');
+    exit.href = '/';
+    exit.setAttribute('data-nav', '');
+    bar.appendChild(exit);
+    return bar;
+  }
+
   function renderEmpty() {
     const sec = el('section', 'lp-empty');
     sec.appendChild(el('h2', 'lp-empty-title', 'No apps shared with you yet'));
@@ -178,6 +210,9 @@ export function mountLaunchpad(ctx) {
   }
 
   function welcomeText() {
+    // In preview the greeting would otherwise show the admin's own name, which
+    // reads oddly on a viewer-home preview; use a neutral title instead.
+    if (preview) return 'Viewer home';
     const u = ctx.state && ctx.state.user;
     const name = u && (u.display_name || u.username);
     return name ? `Welcome, ${name}` : 'Welcome';
@@ -214,6 +249,13 @@ export function mountLaunchpad(ctx) {
     unmount() {
       stop();
       view.hidden = true;
+      // Release the sidebar and restore the operator's real list after a
+      // viewer-home preview (preview rendered a viewer-scoped list without
+      // mutating state.apps).
+      if (preview) {
+        if (typeof ctx.setSidebarPreview === 'function') ctx.setSidebarPreview(false);
+        if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
+      }
     },
   };
 }

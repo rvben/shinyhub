@@ -73,6 +73,50 @@ func TestListApps(t *testing.T) {
 	// empty list is fine
 }
 
+func TestListApps_PreviewAsViewer(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	// One app of each visibility, all owned by the admin.
+	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: admin.ID, Access: "public"})
+	store.CreateApp(db.CreateAppParams{Slug: "shr", Name: "Shr", OwnerID: admin.ID, Access: "shared"})
+	store.CreateApp(db.CreateAppParams{Slug: "prv", Name: "Prv", OwnerID: admin.ID, Access: "private"})
+	token, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	slugs := func(rec *httptest.ResponseRecorder) map[string]bool {
+		var apps []struct {
+			Slug string `json:"slug"`
+		}
+		json.NewDecoder(rec.Body).Decode(&apps)
+		out := map[string]bool{}
+		for _, a := range apps {
+			out[a.Slug] = true
+		}
+		return out
+	}
+
+	// Without the param, an admin sees all three apps.
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps", nil, token))
+	all := slugs(rec)
+	if !all["pub"] || !all["shr"] || !all["prv"] {
+		t.Fatalf("admin GET /api/apps should list all three, got %v", all)
+	}
+
+	// With ?as=viewer, the admin sees only the viewer baseline (public + shared);
+	// the private app is excluded.
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps?as=viewer", nil, token))
+	preview := slugs(rec)
+	if !preview["pub"] || !preview["shr"] {
+		t.Errorf("preview should include public + shared, got %v", preview)
+	}
+	if preview["prv"] {
+		t.Error("preview must exclude the private app (viewers do not see it by default)")
+	}
+}
+
 func TestUnauthenticatedRejected(t *testing.T) {
 	srv, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/apps", nil) // no auth header
