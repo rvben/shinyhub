@@ -305,6 +305,10 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .sb-dot-degraded, .sb-dot-crashed, .sb-dot-failed { background: var(--red); box-shadow: 0 0 6px var(--red); }
 .sb-dot-hibernated { background: var(--standby); box-shadow: 0 0 6px var(--standby); }
 .sb-dot-new { background: var(--cyan-bright); box-shadow: 0 0 6px rgba(56,189,248,0.5); }
+/* Viewer-facing dots: openable apps get a neutral bullet (no status color),
+   only an app the viewer cannot open is muted. Keeps internal state hidden. */
+.sb-dot-ok { background: var(--text-soft); }
+.sb-dot-unavailable { background: var(--text-muted); }
 .sidebar-apps-empty { padding: 0.3rem 0.7rem; color: var(--text-muted); font-size: 0.8rem; }
 
 /* Footer: host badge, user, logout, collapse toggle */
@@ -3914,15 +3918,10 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   font-size: 0.84rem; color: var(--text-soft); margin-top: 2px; line-height: 1.4;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.lp-ready { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 0.76rem; color: var(--text-soft); }
-.lp-ready-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); flex: none; }
-.lp-ready--ready .lp-ready-dot { background: var(--green); box-shadow: 0 0 7px var(--green); }
-.lp-ready--sleeping .lp-ready-dot { background: var(--standby); }
-.lp-ready--starting .lp-ready-dot { background: var(--cyan-bright); box-shadow: 0 0 7px var(--cyan-bright); }
-.lp-ready--degraded .lp-ready-dot { background: var(--yellow); box-shadow: 0 0 7px var(--yellow); }
-.lp-ready--degraded { color: var(--yellow); }
-.lp-ready--unavailable .lp-ready-dot { background: var(--red); }
-.lp-ready--unavailable { color: var(--text-muted); }
+/* Only the "Unavailable" state renders a status line now; openable apps show
+   none (the clickable tile + chevron are the affordance). */
+.lp-ready { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 0.76rem; color: var(--text-muted); }
+.lp-ready-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: none; }
 
 .lp-tile-go { flex: none; color: var(--text-dim); font-size: 1.1rem; transition: color var(--ease), transform var(--ease); }
 

@@ -172,10 +172,14 @@ export function mountLaunchpad(ctx, opts = {}) {
     const main = el('div', 'lp-tile-main');
     main.appendChild(el('p', 'lp-tile-name', t.name));
     if (t.description) main.appendChild(el('p', 'lp-tile-desc', t.description));
-    const ready = el('p', 'lp-ready lp-ready--' + t.readiness.state);
-    ready.appendChild(el('span', 'lp-ready-dot'));
-    ready.appendChild(el('span', 'lp-ready-label', t.readiness.label));
-    main.appendChild(ready);
+    // Openable apps carry no status line - the clickable tile + chevron say it
+    // all. Only an app the viewer cannot open is flagged (dimmed, no chevron).
+    if (t.readiness.label) {
+      const ready = el('p', 'lp-ready lp-ready--unavailable');
+      ready.appendChild(el('span', 'lp-ready-dot'));
+      ready.appendChild(el('span', 'lp-ready-label', t.readiness.label));
+      main.appendChild(ready);
+    }
     node.appendChild(main);
 
     if (openable) {

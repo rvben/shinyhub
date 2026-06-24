@@ -4,6 +4,7 @@ import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountOverview } from '/static/views/overview.js';
 import { mountLaunchpad } from '/static/views/launchpad.js';
 import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
+import { launchReadiness } from '/static/views/launchpad-model.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
@@ -835,10 +836,26 @@ document.addEventListener('DOMContentLoaded', () => {
   // still updated by those loaders; the preview restores the real list on exit.
   let sidebarPreviewActive = false;
 
+  // operatorSidebarBadge shows the full status vocabulary (Running/Sleeping/...);
+  // viewerSidebarBadge collapses it to the one distinction a viewer can act on,
+  // matching the Launchpad tiles: openable apps carry no status, only an app they
+  // cannot open is flagged. Viewers/developers (the Launchpad audience) get the
+  // collapsed badge so the sidebar never leaks internal app state.
+  const operatorSidebarBadge = (a) => appCardBadge(a, formatStatus);
+  function viewerSidebarBadge(a) {
+    return launchReadiness(a).openable
+      ? { cls: 'badge badge-ok', text: '' }
+      : { cls: 'badge badge-unavailable', text: 'Unavailable' };
+  }
+  function isOperatorRole(u) {
+    return !!u && (u.role === 'admin' || u.role === 'operator');
+  }
+
   function syncSidebar() {
     if (sidebarPreviewActive) return;
     const el = document.getElementById('sidebar-apps');
-    if (el) renderSidebarApps(el, state.apps, location.pathname, (a) => appCardBadge(a, formatStatus), document);
+    const badge = isOperatorRole(state.user) ? operatorSidebarBadge : viewerSidebarBadge;
+    if (el) renderSidebarApps(el, state.apps, location.pathname, badge, document);
   }
 
   // loadAppsIndex populates the sidebar app list independently of which view is
@@ -3799,7 +3816,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // calls syncSidebar() on exit to restore the operator's real list.
     renderSidebarAppsList: (apps) => {
       const el = document.getElementById('sidebar-apps');
-      if (el) renderSidebarApps(el, apps, location.pathname, (a) => appCardBadge(a, formatStatus), document);
+      // Always the viewer badge: this is only used by the viewer-home preview, so
+      // the previewed sidebar must collapse status like a real viewer's.
+      if (el) renderSidebarApps(el, apps, location.pathname, viewerSidebarBadge, document);
     },
     // While true, syncSidebar() is suppressed so background loaders can't clobber
     // the preview's viewer-scoped sidebar. The preview sets it on mount, clears it

@@ -10,37 +10,36 @@ import { appAvatar, appIconUrl } from './app-avatar.js';
 // while the implementation lives in the shared app-avatar module.
 export { appAvatar } from './app-avatar.js';
 
-// Readiness collapses the operator status vocabulary into the few things a
-// viewer cares about: can I open it now, will it wake, or is it down. Status is
-// the authoritative signal - an app can't be running/hibernated/degraded
-// without a live bundle, and the reverse proxy routes purely on status - so we
-// derive readiness from it directly rather than from soft counters
-// (deploy_count) or a digest that legacy/pre-migration deployments may lack.
-const READY = new Set(['running', 'healthy']);
-const SLEEPING = new Set(['hibernated', 'suspended']);
-const STARTING = new Set(['deploying', 'waking']);
+// Readiness collapses the whole operator status vocabulary to the only thing a
+// viewer cares about: can I open this or not. A viewer never needs to know that
+// an app is sleeping, waking, deploying, or degraded - opening it Just Works
+// (a hibernated app wakes transparently, a degraded one routes to a healthy
+// replica). Status is the authoritative signal: an app can't be running /
+// hibernated / deploying / degraded without a live bundle, and the reverse proxy
+// routes purely on status. So openable apps carry no status label at all; only
+// an app a viewer genuinely cannot open is flagged "Unavailable".
+const OPENABLE = new Set([
+  'running', 'healthy', 'hibernated', 'suspended', 'deploying', 'waking', 'degraded',
+]);
 
 // "Recently opened" is a shortcut for skipping a scan of a large catalog. When
 // the whole catalog already fits in roughly two tile rows, the shortcut only
 // echoes tiles the grid shows right below it, so it is suppressed at or under
 // this size and the grouped grid stands alone.
 const RECENT_MIN_CATALOG = 8;
-// degraded is still routable (at least one healthy replica), so it stays
-// openable but carries a warning.
 
 /**
- * launchReadiness maps an app to its viewer-facing readiness.
- * @returns {{state:'ready'|'sleeping'|'starting'|'degraded'|'unavailable', label:string, openable:boolean}}
+ * launchReadiness maps an app to its viewer-facing readiness. Openable apps get
+ * an empty label (the tile is just a clean, clickable card); only an app the
+ * viewer cannot open is labelled.
+ * @returns {{openable:boolean, label:string}}
  */
 export function launchReadiness(app) {
   const s = (app.status || '').toLowerCase();
-  if (s === 'degraded') return { state: 'degraded', label: 'Degraded', openable: true };
-  if (READY.has(s)) return { state: 'ready', label: 'Ready', openable: true };
-  if (SLEEPING.has(s)) return { state: 'sleeping', label: 'Sleeping · opens in ~1s', openable: true };
-  if (STARTING.has(s)) return { state: 'starting', label: 'Starting…', openable: true };
+  if (OPENABLE.has(s)) return { openable: true, label: '' };
   // crashed / stopped / unknown / never-deployed: nothing a viewer can open
-  // (they cannot start or fix it), so the tile is shown but not launchable.
-  return { state: 'unavailable', label: 'Unavailable', openable: false };
+  // (they cannot start or fix it), so the tile is shown, dimmed, and flagged.
+  return { openable: false, label: 'Unavailable' };
 }
 
 /**

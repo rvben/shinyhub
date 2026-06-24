@@ -2097,6 +2097,11 @@ func TestLaunchpadContract(t *testing.T) {
 	// keeps access. Pin the gate so the viewer-only flow can't silently regress.
 	assertContains(t, "views/app-detail.js", "ctx.state.user.role === 'viewer' && !canManage",
 		"app-detail.js gates pure viewers out of the operator detail page (manager via can_manage keeps access)")
+	// A viewer never sees internal app state, including via the sidebar dots /
+	// tooltips: the sidebar uses a collapsed openable/unavailable badge for
+	// viewers, only the full status vocabulary for operators.
+	assertContains(t, "app.js", "viewerSidebarBadge",
+		"the sidebar collapses status to openable/unavailable for viewers (no internal state leak)")
 }
 
 // TestPreviewViewerHomeUIContract pins the admin "preview viewer home" wiring:

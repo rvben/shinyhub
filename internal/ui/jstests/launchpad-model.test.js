@@ -2,37 +2,31 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildLaunchpadModel, launchReadiness, appAvatar } from '../static/views/launchpad-model.js';
 
-test('launchReadiness: running is ready & openable, hibernated is sleeping & openable', () => {
-  assert.deepEqual(launchReadiness({ status: 'running' }),
-    { state: 'ready', label: 'Ready', openable: true });
-  const sleeping = launchReadiness({ status: 'hibernated' });
-  assert.equal(sleeping.state, 'sleeping');
-  assert.equal(sleeping.openable, true);
+test('launchReadiness: openable states carry no status label (no sleeping/running detail)', () => {
+  // A viewer never sees internal state - running, hibernated, waking, deploying,
+  // and degraded all collapse to "openable, no label".
+  for (const status of ['running', 'healthy', 'hibernated', 'suspended', 'deploying', 'waking', 'degraded']) {
+    assert.deepEqual(launchReadiness({ status }), { openable: true, label: '' },
+      `${status} should be openable with no label`);
+  }
 });
 
-test('launchReadiness: crashed and stopped apps are unavailable & not openable', () => {
-  assert.equal(launchReadiness({ status: 'crashed' }).openable, false);
-  assert.equal(launchReadiness({ status: 'stopped' }).state, 'unavailable');
+test('launchReadiness: only an app the viewer cannot open is flagged Unavailable', () => {
+  for (const status of ['crashed', 'stopped', 'unknown', '']) {
+    assert.deepEqual(launchReadiness({ status }), { openable: false, label: 'Unavailable' },
+      `${status} should be not-openable and labelled`);
+  }
 });
 
 test('launchReadiness: status is authoritative, not soft counters or a digest legacy apps may lack', () => {
   // A running app with a stale deploy_count and no content_digest (a pre-digest
   // legacy deployment) is still openable - status alone proves a live bundle.
-  const r = launchReadiness({ status: 'running', deploy_count: 0 });
-  assert.equal(r.state, 'ready');
-  assert.equal(r.openable, true);
+  assert.deepEqual(launchReadiness({ status: 'running', deploy_count: 0 }), { openable: true, label: '' });
 });
 
 test('launchReadiness: a hibernated app whose LATEST deploy failed stays openable (prior bundle is live)', () => {
-  const r = launchReadiness({ status: 'hibernated', last_deployment_status: 'failed' });
-  assert.equal(r.state, 'sleeping');
-  assert.equal(r.openable, true);
-});
-
-test('launchReadiness: a degraded app is still openable (the proxy routes to a healthy replica)', () => {
-  const r = launchReadiness({ status: 'degraded' });
-  assert.equal(r.state, 'degraded');
-  assert.equal(r.openable, true);
+  assert.deepEqual(launchReadiness({ status: 'hibernated', last_deployment_status: 'failed' }),
+    { openable: true, label: '' });
 });
 
 test('appAvatar: deterministic initials and hue from name/slug', () => {
