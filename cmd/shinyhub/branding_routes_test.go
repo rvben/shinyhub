@@ -179,6 +179,99 @@ func TestBrandingRoutes(t *testing.T) {
 		}
 	})
 
+	t.Run("auto_landing_authenticated_session_serves_shell", func(t *testing.T) {
+		landingContent := []byte("<!DOCTYPE html><html><body>operator landing</body></html>")
+		landingPath := filepath.Join(t.TempDir(), "landing.html")
+		if err := os.WriteFile(landingPath, landingContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := buildBrandingConfigWithLanding(t, landingPath) // default behavior = auto
+		mux, store := buildBrandingMux(t, cfg)
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(brandingSessionCookie(t, store))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET / (authed) status = %d, want 200", rr.Code)
+		}
+		body := rr.Body.Bytes()
+		if bytes.Equal(body, landingContent) {
+			t.Error("authenticated GET / returned the landing page; auto mode must serve the SPA home to a signed-in user")
+		}
+		if !strings.Contains(string(body), "app.js") {
+			t.Error("authenticated GET / did not serve the SPA shell")
+		}
+		// An auth-varying root response must never be shared-cached.
+		if cc := rr.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+			t.Errorf("Cache-Control = %q, want no-store on the auth-varying root", cc)
+		}
+		if v := rr.Header().Get("Vary"); !strings.Contains(v, "Cookie") {
+			t.Errorf("Vary = %q, want Cookie", v)
+		}
+	})
+
+	t.Run("auto_landing_anonymous_serves_landing_with_vary", func(t *testing.T) {
+		landingContent := []byte("<!DOCTYPE html><html><body>operator landing</body></html>")
+		landingPath := filepath.Join(t.TempDir(), "landing.html")
+		if err := os.WriteFile(landingPath, landingContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := buildBrandingConfigWithLanding(t, landingPath)
+		mux, _ := buildBrandingMux(t, cfg)
+
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+		if !bytes.Equal(rr.Body.Bytes(), landingContent) {
+			t.Error("anonymous GET / should serve the landing page in auto mode")
+		}
+		if v := rr.Header().Get("Vary"); !strings.Contains(v, "Cookie") {
+			t.Errorf("Vary = %q, want Cookie", v)
+		}
+	})
+
+	t.Run("landing_behavior_authenticated_still_landing", func(t *testing.T) {
+		landingContent := []byte("<!DOCTYPE html><html><body>portal landing</body></html>")
+		landingPath := filepath.Join(t.TempDir(), "landing.html")
+		if err := os.WriteFile(landingPath, landingContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := buildBrandingConfigWithLandingBehavior(t, landingPath, "landing")
+		mux, store := buildBrandingMux(t, cfg)
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(brandingSessionCookie(t, store))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		if !bytes.Equal(rr.Body.Bytes(), landingContent) {
+			t.Error("root_behavior=landing must serve the landing page even to a signed-in user")
+		}
+	})
+
+	t.Run("home_always_serves_spa_shell", func(t *testing.T) {
+		landingContent := []byte("<!DOCTYPE html><html><body>operator landing</body></html>")
+		landingPath := filepath.Join(t.TempDir(), "landing.html")
+		if err := os.WriteFile(landingPath, landingContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := buildBrandingConfigWithLanding(t, landingPath)
+		mux, _ := buildBrandingMux(t, cfg)
+
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/home", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET /home status = %d, want 200", rr.Code)
+		}
+		body := rr.Body.Bytes()
+		if bytes.Equal(body, landingContent) {
+			t.Error("GET /home returned the landing page; it must always serve the SPA shell")
+		}
+		if !strings.Contains(string(body), "app.js") {
+			t.Error("GET /home did not serve the SPA shell")
+		}
+	})
+
 	t.Run("branding_asset_handler_serves_logo", func(t *testing.T) {
 		// Create a logo file in a temp dir.
 		assetsDir := t.TempDir()
@@ -308,6 +401,45 @@ func buildBrandingConfigWithLanding(t *testing.T, landingPath string) config.Bra
 	appDataDir := filepath.Join(cfgDir, "appdata")
 	// landing_page validation requires assets_dir when the ref is a local path.
 	yaml := "auth:\n  secret: test-secret-for-config-load-minimum32\ndatabase:\n  dsn: " + dbPath + "\nstorage:\n  apps_dir: " + appsDir + "\n  app_data_dir: " + appDataDir + "\nbranding:\n  site_title: AcmeCorp\n  assets_dir: " + assetsDir + "\n  landing_page: " + landingPath + "\n"
+	cfgPath := filepath.Join(cfgDir, "shinyhub.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg.Branding
+}
+
+// brandingSessionCookie creates a viewer in store and returns a ShinyHub session
+// cookie for it, signed with the secret buildBrandingMux uses ("test-secret").
+func brandingSessionCookie(t *testing.T, store *db.Store) *http.Cookie {
+	t.Helper()
+	if err := store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: "x", Role: "viewer"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	u, err := store.GetUserByUsername("viewer")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	tok, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	if err != nil {
+		t.Fatalf("issue jwt: %v", err)
+	}
+	return &http.Cookie{Name: auth.SessionCookieName, Value: tok}
+}
+
+// buildBrandingConfigWithLandingBehavior is buildBrandingConfigWithLanding plus a
+// branding.root_behavior value, resolved through config.Load().
+func buildBrandingConfigWithLandingBehavior(t *testing.T, landingPath, behavior string) config.BrandingConfig {
+	t.Helper()
+	assetsDir := filepath.Dir(landingPath)
+	cfgDir := t.TempDir()
+	dbPath := filepath.Join(cfgDir, "shinyhub.db")
+	appsDir := filepath.Join(cfgDir, "apps")
+	appDataDir := filepath.Join(cfgDir, "appdata")
+	yaml := "auth:\n  secret: test-secret-for-config-load-minimum32\ndatabase:\n  dsn: " + dbPath + "\nstorage:\n  apps_dir: " + appsDir + "\n  app_data_dir: " + appDataDir + "\nbranding:\n  site_title: AcmeCorp\n  assets_dir: " + assetsDir + "\n  landing_page: " + landingPath + "\n  root_behavior: " + behavior + "\n"
 	cfgPath := filepath.Join(cfgDir, "shinyhub.yaml")
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)

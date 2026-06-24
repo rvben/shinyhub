@@ -2099,6 +2099,17 @@ func TestLaunchpadContract(t *testing.T) {
 		"app-detail.js gates pure viewers out of the operator detail page (manager via can_manage keeps access)")
 }
 
+// TestRootHomeUIContract pins the client wiring for the auth-aware root: the
+// stable /home alias and logout landing on the contextual root.
+func TestRootHomeUIContract(t *testing.T) {
+	assertContains(t, "app.js", "router.register('/home'",
+		"the SPA registers /home as the stable authenticated home alias")
+	assertContains(t, "app.js", "window.location.assign('/')",
+		"logout navigates to the contextual root so the landing page shows when one is configured")
+	assertContains(t, "app.js", "suppressUnloadGuard",
+		"logout suppresses the unsaved-changes beforeunload guard so a revoked session never strands the user on-screen")
+}
+
 // TestAppIconUIContract pins the per-app icon wiring: the shared avatar module,
 // the Launchpad tile rendering an icon-or-monogram, the detail-header avatar, and
 // the Configuration icon picker that uploads to PUT /api/apps/<slug>/icon.

@@ -3532,6 +3532,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Set just before a deliberate full navigation away (logout) so the
+  // unsaved-changes beforeunload guard does not strand the user: by then the
+  // session is already revoked, so there is nothing left to save and the prompt
+  // would only leave them logged-out but stuck on the old screen.
+  let suppressUnloadGuard = false;
+
   logoutButton.addEventListener('click', async () => {
     // Distinguish transport errors from server-side rejections. The previous
     // unconditional showLoggedOut() lied to the user when the POST returned a
@@ -3548,7 +3554,12 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (resp.ok || resp.status === 401) {
-      showLoggedOut();
+      // Land on the front door. With auth-aware `/`, a now-sessionless request to
+      // `/` serves the branding landing page when configured, otherwise the SPA
+      // shell falls through to the login view - so a full navigation does the
+      // right thing in both cases without the client knowing the branding config.
+      suppressUnloadGuard = true;
+      window.location.assign('/');
       return;
     }
     flashToast(`Logout failed (${resp.status})`, 'error');
@@ -3743,7 +3754,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // settings edits, so the explicit-save model never silently loses work.
   router.setNavGuard(confirmDiscardIfDirty);
   window.addEventListener('beforeunload', (e) => {
-    if (anySettingsDirty()) { e.preventDefault(); e.returnValue = ''; }
+    if (!suppressUnloadGuard && anySettingsDirty()) { e.preventDefault(); e.returnValue = ''; }
   });
 
   function updateActiveNav(pathname) {
@@ -3752,7 +3763,9 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const el of document.querySelectorAll('#primary-nav [data-nav]')) {
       const url = new URL(el.href);
       const active = url.pathname === pathname
-        || (pathname.startsWith('/apps/') && url.pathname === '/apps');
+        || (pathname.startsWith('/apps/') && url.pathname === '/apps')
+        // /home is the stable alias of the contextual home; highlight the Home nav.
+        || (pathname === '/home' && url.pathname === '/');
       el.classList.toggle('tab-active', active);
       if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     }
@@ -3830,15 +3843,19 @@ document.addEventListener('DOMContentLoaded', () => {
     appDetailView.hidden = true;
   }
 
-  router.register('/', () => {
+  // Role-adaptive home: fleet operators land on the Overview, everyone else on
+  // the Launchpad. Falls back to the Launchpad when the user is unknown (the
+  // fetch then 401s to the login view, as before). Mounted at both `/` (the
+  // contextual root) and `/home` (the stable authenticated alias the branding
+  // landing page links to, so it never loops back to itself).
+  const mountHome = () => {
     hideAllPageViews();
-    // Role-adaptive home: fleet operators land on the Overview, everyone else
-    // on the Launchpad. Falls back to the Launchpad when the user is unknown
-    // (the fetch then 401s to the login view, as before).
     const role = ctx.state.user && ctx.state.user.role;
     const isOperator = role === 'admin' || role === 'operator';
     return isOperator ? mountOverview(ctx) : mountLaunchpad(ctx);
-  });
+  };
+  router.register('/', mountHome);
+  router.register('/home', mountHome);
   router.register('/apps', () => {
     hideAllPageViews();
     // The Apps grid is operator-flavoured; pure viewers don't get it (the nav
