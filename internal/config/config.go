@@ -207,13 +207,20 @@ type MaintenanceConfig struct {
 // BrandingConfig customises the ShinyHub front door. Every field is optional;
 // the zero value behaves as if no branding is configured.
 type BrandingConfig struct {
-	SiteTitle   string       `yaml:"site_title"`
-	AssetsDir   string       `yaml:"assets_dir"`
-	Logo        string       `yaml:"logo"`
-	Favicon     string       `yaml:"favicon"`
-	LandingPage string       `yaml:"landing_page"`
-	Theme       ThemeConfig  `yaml:"theme"`
-	FooterLinks []FooterLink `yaml:"footer_links"`
+	SiteTitle   string `yaml:"site_title"`
+	AssetsDir   string `yaml:"assets_dir"`
+	Logo        string `yaml:"logo"`
+	Favicon     string `yaml:"favicon"`
+	LandingPage string `yaml:"landing_page"`
+	// RootBehavior controls who sees the landing page at GET /:
+	//   "" / "auto" - anonymous visitors see the landing page; a signed-in
+	//                 ShinyHub user is sent to the SPA home (Overview/Launchpad).
+	//   "landing"   - GET / always serves the landing page, even for signed-in
+	//                 users (a pure portal). The SPA home stays reachable at /home.
+	// Only meaningful when LandingPage is set.
+	RootBehavior string       `yaml:"root_behavior"`
+	Theme        ThemeConfig  `yaml:"theme"`
+	FooterLinks  []FooterLink `yaml:"footer_links"`
 
 	// resolvedAssets maps the public basename served at /branding/<name> to
 	// the absolute on-disk path. Populated by Load() after validation.
@@ -245,6 +252,15 @@ func (b BrandingConfig) IsActive() bool {
 // LandingFile returns the resolved absolute path of the operator landing
 // page, or "" when none is configured.
 func (b BrandingConfig) LandingFile() string { return b.landingFile }
+
+// EffectiveRootBehavior normalizes RootBehavior to one of the two supported
+// modes, defaulting the empty value to "auto".
+func (b BrandingConfig) EffectiveRootBehavior() string {
+	if b.RootBehavior == "landing" {
+		return "landing"
+	}
+	return "auto"
+}
 
 // ResolvedAssets returns the basename->absolute-path allow-list used by the
 // /branding/ asset handler. The returned map is a copy; mutations do not affect
@@ -2122,6 +2138,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_BRANDING_LANDING_PAGE"); v != "" {
 		cfg.Branding.LandingPage = v
+	}
+	if v := os.Getenv("SHINYHUB_BRANDING_ROOT_BEHAVIOR"); v != "" {
+		cfg.Branding.RootBehavior = v
 	}
 	if v := os.Getenv("SHINYHUB_WORKER_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

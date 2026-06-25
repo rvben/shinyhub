@@ -117,6 +117,32 @@ func TestBrandingEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestBrandingRootBehavior(t *testing.T) {
+	// Default normalizes to "auto".
+	if got := (BrandingConfig{}).EffectiveRootBehavior(); got != "auto" {
+		t.Errorf("empty root_behavior -> %q, want auto", got)
+	}
+	if got := (BrandingConfig{RootBehavior: "landing"}).EffectiveRootBehavior(); got != "landing" {
+		t.Errorf("root_behavior=landing -> %q, want landing", got)
+	}
+	// Validation accepts the two modes (and empty) and rejects anything else.
+	for _, ok := range []string{"", "auto", "landing"} {
+		if err := validateBranding(&BrandingConfig{RootBehavior: ok}); err != nil {
+			t.Errorf("root_behavior=%q must pass validation: %v", ok, err)
+		}
+	}
+	if err := validateBranding(&BrandingConfig{RootBehavior: "portal"}); err == nil {
+		t.Error("invalid root_behavior must fail validation")
+	}
+	// Env override wiring.
+	t.Setenv("SHINYHUB_BRANDING_ROOT_BEHAVIOR", "landing")
+	cfg := &Config{}
+	applyEnv(cfg)
+	if cfg.Branding.RootBehavior != "landing" {
+		t.Errorf("RootBehavior = %q, want landing", cfg.Branding.RootBehavior)
+	}
+}
+
 func TestValidateBrandingHexColor(t *testing.T) {
 	b := &BrandingConfig{Theme: ThemeConfig{PrimaryColor: "teal"}}
 	if err := validateBranding(b); err == nil {

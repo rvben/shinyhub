@@ -234,6 +234,10 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   white-space: nowrap;
   transition: color var(--ease), background var(--ease);
 }
+/* The .nav-item display:flex (author origin) outranks the UA [hidden]
+   display:none, so role-gated nav items (hidden via the attribute in app.js)
+   need this explicit higher-specificity guard to actually hide. */
+.nav-item[hidden] { display: none; }
 .nav-item:hover { color: var(--text-soft); background: var(--surface-2); }
 .nav-item:focus-visible,
 .sidebar-app:focus-visible,
@@ -301,6 +305,10 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .sb-dot-degraded, .sb-dot-crashed, .sb-dot-failed { background: var(--red); box-shadow: 0 0 6px var(--red); }
 .sb-dot-hibernated { background: var(--standby); box-shadow: 0 0 6px var(--standby); }
 .sb-dot-new { background: var(--cyan-bright); box-shadow: 0 0 6px rgba(56,189,248,0.5); }
+/* Viewer-facing dots: openable apps get a neutral bullet (no status color),
+   only an app the viewer cannot open is muted. Keeps internal state hidden. */
+.sb-dot-ok { background: var(--text-soft); }
+.sb-dot-unavailable { background: var(--text-muted); }
 .sidebar-apps-empty { padding: 0.3rem 0.7rem; color: var(--text-muted); font-size: 0.8rem; }
 
 /* Footer: host badge, user, logout, collapse toggle */
@@ -3650,4 +3658,291 @@ footer.brand-footer a { color:inherit; }
   border-color: var(--red);
   color: var(--red);
   box-shadow: none;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Overview (dashboard home). Extends the Constellation system: a health-first
+   fleet pulse, an attention list, resource pressure, and recent activity.
+   Body-size text uses --text-soft (the lower --text-muted fails AA on the dark
+   surface); --text-muted is kept for large/secondary labels only.
+   ─────────────────────────────────────────────────────────────────────────── */
+.ov-grid { display: flex; flex-direction: column; gap: 16px; max-width: 1100px; }
+
+/* Pulse — the signature panel: a fleet verdict, a proportional status bar, and
+   a legend. Tone tints a faint glow + the dot, never a side stripe. */
+.ov-pulse {
+  position: relative;
+  background:
+    radial-gradient(420px 160px at 100% 0%, var(--tone-glow, transparent), transparent 70%),
+    var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 22px 24px;
+  overflow: hidden;
+}
+.ov-pulse--nominal  { --tone: var(--green);       --tone-glow: rgba(74,222,128,0.10); }
+.ov-pulse--warning  { --tone: var(--yellow);      --tone-glow: rgba(251,191,36,0.10); }
+.ov-pulse--critical { --tone: var(--red);         --tone-glow: rgba(248,113,113,0.13);
+                      border-color: rgba(248,113,113,0.30); }
+
+.ov-pulse-verdict { display: flex; align-items: center; gap: 14px; }
+.ov-pulse-dot {
+  flex: none; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--tone); box-shadow: 0 0 0 4px color-mix(in oklab, var(--tone) 22%, transparent);
+  animation: ovPulse 2.4s ease-out infinite;
+}
+.ov-pulse--nominal .ov-pulse-dot { animation-duration: 3.4s; }
+@keyframes ovPulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--tone) 38%, transparent); }
+  70%  { box-shadow: 0 0 0 9px color-mix(in oklab, var(--tone) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--tone) 0%, transparent); }
+}
+.ov-pulse-headline { font-size: 1.2rem; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
+.ov-pulse-detail { font-size: 0.85rem; color: var(--text-soft); margin-top: 2px; }
+
+.ov-bar { display: flex; gap: 3px; height: 12px; margin-top: 18px; }
+.ov-bar-seg {
+  background: var(--seg); border-radius: 4px; min-width: 6px;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--seg) 55%, transparent),
+              0 0 10px color-mix(in oklab, var(--seg) 30%, transparent);
+}
+.ov-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 14px; list-style: none; }
+.ov-legend-item { display: inline-flex; align-items: center; gap: 7px; font-size: 0.8rem; color: var(--text-soft); }
+.ov-legend-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--seg); }
+.ov-legend-count { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* Generic Overview panel + section title (normal-case, not an all-caps eyebrow). */
+.ov-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px 20px; }
+.ov-section-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.95rem; font-weight: 650; color: var(--text); margin-bottom: 14px; letter-spacing: -0.01em;
+}
+.ov-section-count {
+  font-size: 0.72rem; font-weight: 700; color: var(--red); background: var(--red-bg);
+  padding: 1px 8px; border-radius: 999px; font-variant-numeric: tabular-nums;
+}
+
+/* Attention — actionable rows for crashed / degraded apps. */
+.ov-attention { background:
+  radial-gradient(520px 200px at 0% 0%, rgba(248,113,113,0.06), transparent 70%), var(--surface);
+  border-color: rgba(248,113,113,0.22); }
+.ov-attn-list { list-style: none; display: flex; flex-direction: column; gap: 9px; }
+.ov-attn-row {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 11px 14px; transition: border-color var(--ease), background var(--ease);
+}
+.ov-attn-row:hover { border-color: var(--line-2); background: var(--surface-3); }
+.ov-attn-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.ov-attn-name { color: var(--text); font-weight: 600; text-decoration: none; }
+.ov-attn-name:hover { color: var(--cyan-bright); }
+.ov-attn-reason {
+  font-size: 0.8rem; color: var(--text-soft); font-family: var(--mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.ov-attn-actions { display: flex; gap: 8px; flex: none; }
+
+/* Small ghost button used across the Overview (button + anchor). */
+.ov-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  font: inherit; font-size: 0.8rem; font-weight: 600; line-height: 1;
+  color: var(--text-soft); background: transparent;
+  border: 1px solid var(--line-2); border-radius: var(--radius);
+  padding: 6px 13px; cursor: pointer; text-decoration: none;
+  transition: border-color var(--ease), color var(--ease), background var(--ease);
+}
+.ov-btn:hover { color: var(--text); border-color: var(--cyan-bright); background: var(--accent-dim); }
+.ov-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* The author display above overrides the UA [hidden] rule, so an .ov-btn with
+   the hidden attribute (e.g. the Remove icon button when no icon is set) would
+   still show. Restore the hide. */
+.ov-btn[hidden] { display: none; }
+
+/* Footer — resource pressure + recent activity. */
+.ov-footer { display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; }
+.ov-footer--single { grid-template-columns: 1fr; }
+
+.ov-res-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
+.ov-res-stat { display: inline-flex; align-items: baseline; gap: 6px; }
+.ov-res-stat b { font-size: 1.15rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.ov-res-stat-label { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); }
+.ov-res-sep { color: var(--text-dim); }
+.ov-res-across { font-size: 0.82rem; color: var(--text-soft); margin-left: auto; }
+.ov-res-subhead { margin-top: 16px; margin-bottom: 9px; font-size: 0.78rem; font-weight: 600; color: var(--text-soft); }
+.ov-res-clear { margin-top: 14px; font-size: 0.82rem; color: var(--text-soft); }
+
+.ov-nearlimit { list-style: none; display: flex; flex-direction: column; gap: 9px; }
+.ov-nearlimit-row { display: grid; grid-template-columns: minmax(70px, 0.9fr) 1.4fr auto; align-items: center; gap: 12px; }
+.ov-nearlimit-name { color: var(--text-soft); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-nearlimit-name:hover { color: var(--cyan-bright); }
+.ov-meter { position: relative; height: 6px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
+.ov-meter-fill { position: absolute; inset: 0 auto 0 0; background: var(--yellow); border-radius: 999px; transition: width var(--ease); }
+.ov-meter--hot .ov-meter-fill { background: var(--red); }
+.ov-nearlimit-val { font-family: var(--mono); font-size: 0.76rem; color: var(--text-soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* Recent activity timeline. */
+.ov-timeline { list-style: none; display: flex; flex-direction: column; }
+.ov-tl-row { display: flex; gap: 12px; padding: 8px 0; }
+.ov-tl-row:not(:last-child) { border-bottom: 1px solid var(--line); }
+.ov-tl-rail { flex: none; width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: var(--electric); box-shadow: 0 0 8px var(--accent-glow); }
+.ov-tl-main { min-width: 0; }
+.ov-tl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.ov-tl-action { color: var(--text); font-weight: 600; font-size: 0.85rem; }
+.ov-tl-target { font-family: var(--mono); font-size: 0.78rem; color: var(--cyan); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-tl-meta { display: flex; gap: 8px; font-size: 0.76rem; color: var(--text-soft); margin-top: 1px; }
+.ov-tl-time { color: var(--text-muted); }
+.ov-empty-note { font-size: 0.84rem; color: var(--text-soft); }
+
+/* First run + error. */
+.ov-firstrun { text-align: center; padding: 40px 24px; }
+.ov-firstrun-title { font-size: 1.35rem; font-weight: 700; color: var(--text); margin-bottom: 10px; letter-spacing: -0.01em; text-wrap: balance; }
+.ov-firstrun-body { font-size: 0.9rem; color: var(--text-soft); max-width: 52ch; margin: 0 auto 18px; line-height: 1.5; }
+.ov-error { display: flex; align-items: center; gap: 14px; }
+.ov-error-text { color: var(--text-soft); }
+
+/* Loading skeleton (shimmer). */
+.ov-skeleton .ov-skel { background:
+  linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%);
+  background-size: 200% 100%; border: 1px solid var(--line); border-radius: var(--radius-lg);
+  animation: ovShimmer 1.4s linear infinite; }
+.ov-skel-pulse { height: 132px; }
+.ov-skel-panel { height: 168px; }
+@keyframes ovShimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+@media (max-width: 760px) {
+  .ov-footer { grid-template-columns: 1fr; }
+  .ov-attn-row { flex-wrap: wrap; }
+  .ov-attn-actions { width: 100%; }
+  .ov-nearlimit-row { grid-template-columns: 1fr auto; }
+  .ov-nearlimit-row .ov-meter { grid-column: 1 / -1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-pulse-dot { animation: none; }
+  .ov-skeleton .ov-skel { animation: none; }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Launchpad (viewer/consumer home). An app-forward gallery for launching apps.
+   Warmth comes from the colorful per-app monogram avatars and generous tiles,
+   not a palette change - it stays in the Constellation system.
+   ─────────────────────────────────────────────────────────────────────────── */
+.lp { display: flex; flex-direction: column; gap: 20px; max-width: 1100px; }
+
+/* Admin "preview viewer home" banner: a clear, dismissible context strip. */
+.lp-preview-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px 18px; flex-wrap: wrap;
+  margin-bottom: 4px; padding: 11px 16px; border-radius: var(--radius);
+  background: var(--accent-dim); border: 1px solid var(--cyan-bright);
+  color: var(--text); font-size: 0.85rem;
+}
+.lp-preview-text strong { font-weight: 700; color: var(--cyan-bright); }
+.lp-preview-exit {
+  flex: none; font-weight: 600; font-size: 0.82rem; color: var(--text);
+  text-decoration: none; padding: 5px 12px; border-radius: var(--radius);
+  border: 1px solid var(--line-2); transition: border-color var(--ease), background var(--ease);
+}
+.lp-preview-exit:hover { border-color: var(--cyan-bright); background: var(--surface-2); }
+
+.lp-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; flex-wrap: wrap; }
+.lp-welcome { font-size: 1.5rem; font-weight: 700; color: var(--text); letter-spacing: -0.02em; text-wrap: balance; }
+.lp-sub { font-size: 0.9rem; color: var(--text-soft); margin-top: 3px; }
+.lp-search {
+  font: inherit; font-size: 0.9rem; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--radius);
+  padding: 9px 14px; min-width: 220px; transition: border-color var(--ease), box-shadow var(--ease);
+}
+.lp-search::placeholder { color: var(--text-muted); }
+.lp-search:focus { outline: none; border-color: var(--cyan-bright); box-shadow: 0 0 0 3px var(--accent-dim); }
+
+.lp-section { font-size: 0.9rem; font-weight: 650; color: var(--text-soft); letter-spacing: -0.01em; margin: 6px 0 12px; }
+.lp-results > .lp-grid:not(:last-child) { margin-bottom: 22px; }
+
+/* Responsive tile grid: fills the row, no media query needed. The 280px floor
+   keeps tiles wide enough that a one-line description renders without clipping. */
+.lp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+
+.lp-tile {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 16px 18px; text-decoration: none; color: inherit;
+  transition: border-color var(--ease), background var(--ease), transform var(--ease), box-shadow var(--ease);
+}
+a.lp-tile:hover {
+  border-color: var(--line-2); background: var(--surface-2);
+  transform: translateY(-2px); box-shadow: 0 10px 30px -16px rgba(0,0,0,0.8);
+}
+a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3px); }
+.lp-tile--down { opacity: 0.6; }
+
+.lp-avatar {
+  flex: none; width: 46px; height: 46px; border-radius: 12px;
+  display: grid; place-items: center; font-weight: 700; font-size: 1.05rem; letter-spacing: -0.02em;
+  background: oklch(0.42 0.09 var(--avatar-hue, 220));
+  color: oklch(0.92 0.11 var(--avatar-hue, 220));
+  box-shadow: inset 0 0 0 1px oklch(0.6 0.12 var(--avatar-hue, 220) / 0.4);
+}
+/* Uploaded-icon variant: the image fills the box; drop the monogram's hued
+   background and letter styling, keep the rounded frame. */
+.lp-avatar--img {
+  background: var(--surface-3); object-fit: cover; object-position: center;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+
+/* ── Shared app avatar on the detail header + the Configuration icon picker.
+   Both reuse the monogram model (hued background + initials) and the same
+   --img override for an uploaded icon. ── */
+.app-detail-avatar, .icon-picker-preview {
+  flex: none; display: grid; place-items: center;
+  border-radius: 12px; font-weight: 700; letter-spacing: -0.02em;
+  background: oklch(0.42 0.09 var(--avatar-hue, 220));
+  color: oklch(0.92 0.11 var(--avatar-hue, 220));
+  box-shadow: inset 0 0 0 1px oklch(0.6 0.12 var(--avatar-hue, 220) / 0.4);
+}
+.app-detail-avatar--img, .icon-picker-preview--img {
+  background: var(--surface-3); object-fit: cover; object-position: center;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+.app-detail-icon-slot { display: inline-flex; }
+.app-detail-avatar { width: 40px; height: 40px; font-size: 0.95rem; border-radius: 11px; }
+.app-detail-identity { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+.icon-picker { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.icon-picker-preview { width: 52px; height: 52px; font-size: 1.15rem; }
+.icon-picker-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.icon-picker-controls .hibernate-status { margin: 0; }
+
+.lp-tile-main { min-width: 0; flex: 1; }
+.lp-tile-name { font-size: 0.98rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lp-tile-desc {
+  font-size: 0.84rem; color: var(--text-soft); margin-top: 2px; line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+/* Only the "Unavailable" state renders a status line now; openable apps show
+   none (the clickable tile + chevron are the affordance). */
+.lp-ready { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 0.76rem; color: var(--text-muted); }
+.lp-ready-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: none; }
+
+.lp-tile-go { flex: none; color: var(--text-dim); font-size: 1.1rem; transition: color var(--ease), transform var(--ease); }
+
+.lp-noresults { font-size: 0.9rem; color: var(--text-soft); padding: 8px 2px; }
+
+/* Empty / first-run. */
+.lp-empty { text-align: center; padding: 52px 24px; }
+.lp-empty-title { font-size: 1.4rem; font-weight: 700; color: var(--text); margin-bottom: 10px; letter-spacing: -0.01em; text-wrap: balance; }
+.lp-empty-body { font-size: 0.92rem; color: var(--text-soft); max-width: 52ch; margin: 0 auto 18px; line-height: 1.55; }
+
+/* Loading skeleton. */
+.lp-skeleton .lp-skel { height: 80px; border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%);
+  background-size: 200% 100%; animation: ovShimmer 1.4s linear infinite; }
+
+@media (max-width: 600px) {
+  .lp-search { width: 100%; }
+  .lp-grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  a.lp-tile:hover { transform: none; }
+  a.lp-tile:hover .lp-tile-go { transform: none; }
+  .lp-skeleton .lp-skel { animation: none; }
 }

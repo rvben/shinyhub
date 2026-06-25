@@ -1752,11 +1752,13 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		}
 		serveShell(w, r)
 	})
+	mux.Handle("/apps", spa)
 	mux.Handle("/apps/", spa)
 	mux.Handle("/users", spa)
 	mux.Handle("/workers", spa)
 	mux.Handle("/audit-log", spa)
 	mux.Handle("/login", spa) // always serves the SPA shell, even when landing_page is set
+	mux.Handle("/home", spa)  // stable authenticated home; the SPA resolves it to Overview/Launchpad
 
 	if brandingActive && len(resolved) > 0 {
 		mux.Handle("/branding/", ui.BrandingAssetHandler(resolved))
@@ -1777,18 +1779,38 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	mux.HandleFunc("/.shinyhub/apps.json", optionalUser(srv.HandleAppsJSON))
 
 	landingFile := cfg.Branding.LandingFile()
+	rootBehavior := cfg.Branding.EffectiveRootBehavior()
+
+	// isShinyHubUser reports whether the request is authenticated as a ShinyHub
+	// user by any method the app accepts. ResolveOptionalUser checks the context
+	// user first (forward-auth, when enabled its middleware wraps this mux) then
+	// the session cookie, so this covers both. Edge SSO that ShinyHub is NOT
+	// configured to trust reaches neither, so such a visitor is correctly treated
+	// as anonymous and sees the landing page. This is the root dispatcher's signal.
+	isShinyHubUser := func(r *http.Request) bool {
+		return access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup) != nil
+	}
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
 		if landingFile != "" {
-			// Operator-supplied trusted HTML may use inline scripts/styles, which
-			// the strict SPA CSP (set by SecurityHeaders) would block. Relax it to
-			// the inline-permitting policy for this one response.
-			w.Header().Set("Content-Security-Policy", api.LandingPageCSP())
-			http.ServeFile(w, r, landingFile)
-			return
+			// `/` now varies by auth state, so it must never be shared-cached: a
+			// proxy could otherwise hand one viewer's response to another.
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.Header().Set("Vary", "Cookie")
+			// auto: anonymous sees the landing page, a signed-in user falls through
+			// to the SPA home. landing: always the landing page (a pure portal).
+			if rootBehavior == "landing" || !isShinyHubUser(r) {
+				// Operator-supplied trusted HTML may use inline scripts/styles, which
+				// the strict SPA CSP (set by SecurityHeaders) would block. Relax it to
+				// the inline-permitting policy for this one response.
+				w.Header().Set("Content-Security-Policy", api.LandingPageCSP())
+				http.ServeFile(w, r, landingFile)
+				return
+			}
 		}
 		serveShell(w, r)
 	})

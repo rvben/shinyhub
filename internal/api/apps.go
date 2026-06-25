@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -43,9 +44,16 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		apps []*db.App
 		err  error
 	)
-	if isPrivilegedAppOperator(u) {
+	switch {
+	case isPrivilegedAppOperator(u) && r.URL.Query().Get("as") == "viewer":
+		// Admin/operator previewing the viewer home: scope to the default viewer
+		// baseline (public + shared) so the preview shows what viewers actually see
+		// rather than the operator's full list. Read-only; the param is ignored for
+		// non-privileged callers, who are already scoped by ListAppsVisibleToUser.
+		apps, err = s.store.ListViewerBaselineApps(limit, offset)
+	case isPrivilegedAppOperator(u):
 		apps, err = s.store.ListApps(limit, offset)
-	} else {
+	default:
 		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
 	}
 	if err != nil {
@@ -300,6 +308,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setHibernateTimeout bool
 		newName             string
 		setName             bool
+		newDescription      string
+		setDescription      bool
 		newProjectSlug      string
 		setProjectSlug      bool
 		memoryLimitMB       *int
@@ -351,6 +361,23 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newName, setName = name, true
+	}
+
+	if rawVal, present := raw["description"]; present {
+		var desc string
+		if err := json.Unmarshal(rawVal, &desc); err != nil {
+			writeError(w, http.StatusBadRequest, "description must be a string")
+			return
+		}
+		desc = strings.TrimSpace(desc)
+		// Count runes, not bytes: the limit is advertised in characters, so an
+		// accented or emoji description under 280 characters must not be rejected
+		// because its UTF-8 encoding exceeds 280 bytes.
+		if utf8.RuneCountInString(desc) > 280 {
+			writeError(w, http.StatusBadRequest, "description must be 280 characters or fewer")
+			return
+		}
+		newDescription, setDescription = desc, true
 	}
 
 	if rawVal, present := raw["project_slug"]; present {
@@ -647,6 +674,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 
 	if setManagedBy {
 		if err := s.store.SetAppManagedBy(slug, newManagedBy); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
+	if setDescription {
+		if err := s.store.SetAppDescription(slug, newDescription); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not found")
 				return

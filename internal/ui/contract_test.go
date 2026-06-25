@@ -2049,3 +2049,134 @@ func TestBatchMetricsPoll(t *testing.T) {
 	assertNotContains(t, "metrics-controller.js", "/api/apps/${slug}/metrics",
 		"the metrics poll must not fetch per-app metrics one at a time (the slow sequential path)")
 }
+
+// TestOverviewContract pins the Overview home (the / route) to the API shapes
+// and DOM/routing wiring it depends on, so a server-side rename or a route
+// refactor fails the build instead of silently blanking the dashboard home.
+func TestOverviewContract(t *testing.T) {
+	// GET /api/apps/metrics returns {metrics: {slug: ...}} (internal/api metrics
+	// handler); the Overview resource summary unwraps body.metrics.
+	assertContains(t, "views/overview.js", "b.metrics",
+		"GET /api/apps/metrics returns {metrics}; the Overview reads body.metrics")
+	// GET /api/audit returns {events, total, has_more} (internal/api/audit.go);
+	// the recent-activity panel unwraps body.events.
+	assertContains(t, "views/overview.js", "b.events",
+		"GET /api/audit returns {events, total, has_more}; the Overview reads body.events")
+	// The view renders into these shells defined in index.html.
+	assertContains(t, "index.html", `id="overview-view"`,
+		"overview.js shows #overview-view and renders into #overview-body")
+	assertContains(t, "index.html", `id="overview-body"`,
+		"overview.js renders the Overview body into #overview-body")
+	// app.js mounts the Overview on / and the apps grid on /apps.
+	assertContains(t, "app.js", "mountOverview",
+		"the / route mounts the Overview (views/overview.js)")
+	assertContains(t, "app.js", "router.register('/apps'",
+		"the apps grid moved to the /apps route")
+}
+
+// TestLaunchpadContract pins the viewer Launchpad (the non-operator / home) to
+// the API shape and DOM/routing wiring it depends on.
+func TestLaunchpadContract(t *testing.T) {
+	assertContains(t, "app.js", "mountLaunchpad",
+		"the / route mounts the Launchpad for non-operators (views/launchpad.js)")
+	assertContains(t, "app.js", "isOperator",
+		"role-adaptive home: operators get the Overview, everyone else the Launchpad")
+	assertContains(t, "index.html", `id="launchpad-view"`,
+		"launchpad.js shows #launchpad-view and renders into #launchpad-body")
+	assertContains(t, "index.html", `id="launchpad-body"`,
+		"launchpad.js renders the gallery into #launchpad-body")
+	assertContains(t, "index.html", `id="tab-launchpad"`,
+		"the non-operator home nav item")
+	assertContains(t, "views/launchpad-model.js", "app.description",
+		"GET /api/apps returns description (db.App.Description); the Launchpad tile shows it")
+	assertContains(t, "views/launchpad.js", "/app/",
+		"a Launchpad tile launches the proxied app at /app/<slug>/")
+	// A pure viewer must not reach the operator detail page (logs / deployments /
+	// configuration) via a sidebar link or a typed URL; the detail mount redirects
+	// them to the Launchpad once the app loads, while a per-app manager (can_manage)
+	// keeps access. Pin the gate so the viewer-only flow can't silently regress.
+	assertContains(t, "views/app-detail.js", "ctx.state.user.role === 'viewer' && !canManage",
+		"app-detail.js gates pure viewers out of the operator detail page (manager via can_manage keeps access)")
+	// A viewer never sees internal app state, including via the sidebar dots /
+	// tooltips: the sidebar uses a collapsed openable/unavailable badge for
+	// viewers, only the full status vocabulary for operators.
+	assertContains(t, "app.js", "viewerSidebarBadge",
+		"the sidebar collapses status to openable/unavailable for viewers (no internal state leak)")
+}
+
+// TestPreviewViewerHomeUIContract pins the admin "preview viewer home" wiring:
+// the Overview entry, the role-gated route, the viewer-scoped fetch, the banner,
+// and the faithful sidebar.
+func TestPreviewViewerHomeUIContract(t *testing.T) {
+	assertContains(t, "index.html", `href="/home?preview=viewer"`,
+		"the Overview has a Preview viewer home entry")
+	assertContains(t, "app.js", "preview') === 'viewer'",
+		"mountHome mounts the Launchpad in preview for an operator on ?preview=viewer")
+	assertContains(t, "app.js", "{ preview: true }",
+		"the preview mounts the Launchpad with preview mode on")
+	assertContains(t, "views/launchpad.js", "/api/apps?as=viewer",
+		"preview fetches the viewer-scoped (public+shared) app list")
+	assertContains(t, "views/launchpad.js", "renderPreviewBanner",
+		"preview shows a banner clarifying it is the viewer home")
+	assertContains(t, "views/launchpad.js", "ctx.renderSidebarAppsList",
+		"preview renders the viewer-scoped list into the sidebar too (faithful)")
+	assertContains(t, "app.js", "sidebarPreviewActive",
+		"syncSidebar is suppressed while the preview owns the sidebar, so a background index load can't clobber it")
+}
+
+// TestRootHomeUIContract pins the client wiring for the auth-aware root: the
+// stable /home alias and logout landing on the contextual root.
+func TestRootHomeUIContract(t *testing.T) {
+	assertContains(t, "app.js", "router.register('/home'",
+		"the SPA registers /home as the stable authenticated home alias")
+	assertContains(t, "app.js", "window.location.assign('/')",
+		"logout navigates to the contextual root so the landing page shows when one is configured")
+	assertContains(t, "app.js", "suppressUnloadGuard",
+		"logout suppresses the unsaved-changes beforeunload guard so a revoked session never strands the user on-screen")
+}
+
+// TestAppIconUIContract pins the per-app icon wiring: the shared avatar module,
+// the Launchpad tile rendering an icon-or-monogram, the detail-header avatar, and
+// the Configuration icon picker that uploads to PUT /api/apps/<slug>/icon.
+func TestAppIconUIContract(t *testing.T) {
+	// Shared avatar module: monogram model + icon URL + DOM render helper.
+	assertContains(t, "views/app-avatar.js", "export function renderAppAvatar",
+		"app-avatar.js exposes the shared icon-or-monogram renderer")
+	assertContains(t, "views/app-avatar.js", "export function appIconUrl",
+		"app-avatar.js derives the icon URL (with an updated_at cache-buster)")
+
+	// Launchpad tile renders the icon via the shared helper, fed by the model's iconUrl.
+	assertContains(t, "views/launchpad-model.js", "iconUrl: appIconUrl(app)",
+		"the Launchpad tile model carries the icon URL")
+	assertContains(t, "views/launchpad.js", "renderAppAvatar",
+		"the Launchpad tile renders the icon-or-monogram via the shared helper")
+
+	// Detail header avatar is rendered for the current app.
+	assertContains(t, "index.html", `id="app-detail-icon"`,
+		"the app-detail header has an icon slot")
+	assertContains(t, "app.js", "renderDetailHeaderAvatar",
+		"app.js renders the detail-header icon/monogram for the current app")
+
+	// Configuration icon picker: markup + upload/remove wiring + the endpoint.
+	assertContains(t, "index.html", `id="general-icon-preview"`,
+		"Configuration > General has an icon preview")
+	assertContains(t, "index.html", `id="general-icon-file"`,
+		"the icon picker has a file input")
+	assertContains(t, "app.js", "renderIconPicker",
+		"app.js wires the icon picker preview + upload/remove")
+	assertContains(t, "app.js", "app.slug)}/icon",
+		"app.js uploads/removes via /api/apps/<slug>/icon")
+	// The author .ov-btn display would override [hidden]; the Remove button must
+	// actually hide when no icon is set.
+	assertContains(t, "style.css", ".ov-btn[hidden]",
+		"an .ov-btn with the hidden attribute is actually hidden (Remove when no icon)")
+}
+
+// TestAppDescriptionUIContract pins the Configuration > General description
+// field to the PATCH it feeds (the same field the Launchpad renders).
+func TestAppDescriptionUIContract(t *testing.T) {
+	assertContains(t, "index.html", `id="general-description"`,
+		"Configuration > General has a description field")
+	assertContains(t, "app.js", "name, description, project_slug",
+		"saveGeneralInfo PATCHes description alongside name + project_slug")
+}

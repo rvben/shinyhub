@@ -1,6 +1,10 @@
 import { createRouter } from '/static/router.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
+import { mountOverview } from '/static/views/overview.js';
+import { mountLaunchpad } from '/static/views/launchpad.js';
+import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
+import { launchReadiness } from '/static/views/launchpad-model.js';
 import { mountUsers } from '/static/views/users.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
@@ -151,6 +155,8 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const loginView = document.getElementById('login-view');
+  const overviewView = document.getElementById('overview-view');
+  const launchpadView = document.getElementById('launchpad-view');
   const appsView = document.getElementById('apps-view');
   const appDetailView = document.getElementById('app-detail-view');
   const loginForm = document.getElementById('login-form');
@@ -203,6 +209,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const tabAudit    = document.getElementById('tab-audit');
   const tabUsers    = document.getElementById('tab-users');
   const tabWorkers  = document.getElementById('tab-workers');
+  const tabOverview = document.getElementById('tab-overview');
+  const tabLaunchpad = document.getElementById('tab-launchpad');
+  const tabApps     = document.getElementById('tab-apps');
   let   sidebarDrawer = null; // mobile off-canvas drawer controller (wired below)
   const workersView    = document.getElementById('workers-view');
   const workersError   = document.getElementById('workers-error');
@@ -547,6 +556,8 @@ document.addEventListener('DOMContentLoaded', () => {
     renderIdentity(null);
     setHidden(logoutButton, true);
     setHidden(loginView, false);
+    setHidden(overviewView, true);
+    setHidden(launchpadView, true);
     setHidden(appsView, true);
     setHidden(usersView, true);
     setHidden(auditView, true);
@@ -572,6 +583,13 @@ document.addEventListener('DOMContentLoaded', () => {
     tabAudit.hidden = payload.user.role !== 'admin';
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
+    // The home (/) is role-adaptive: fleet operators (admin/operator) get the
+    // Overview, everyone else the Launchpad. Show only the matching nav item,
+    // and hide the operator-flavoured Apps grid from pure viewers.
+    const isOperator = payload.user.role === 'admin' || payload.user.role === 'operator';
+    tabOverview.hidden = !isOperator;
+    tabLaunchpad.hidden = isOperator;
+    tabApps.hidden = payload.user.role === 'viewer';
     newAppButton.hidden = !state.canCreateApps;
     // Load the admin fleet-health banner now that state.user is set; loadApps
     // can fire before this during boot, when the admin gate would skip it.
@@ -812,9 +830,32 @@ document.addEventListener('DOMContentLoaded', () => {
   // syncSidebar renders the project->app quick-switch list from the FULL app
   // index (state.apps), never the grid-filtered set, so dashboard search/sort
   // never hides apps from the sidebar.
+  // While the viewer-home preview owns the sidebar, suppress the operator-scoped
+  // syncSidebar so a late-resolving loadAppsIndex (fired on login) can't clobber
+  // the viewer-scoped list and flash the operator's private apps. state.apps is
+  // still updated by those loaders; the preview restores the real list on exit.
+  let sidebarPreviewActive = false;
+
+  // operatorSidebarBadge shows the full status vocabulary (Running/Sleeping/...);
+  // viewerSidebarBadge collapses it to the one distinction a viewer can act on,
+  // matching the Launchpad tiles: openable apps carry no status, only an app they
+  // cannot open is flagged. Viewers/developers (the Launchpad audience) get the
+  // collapsed badge so the sidebar never leaks internal app state.
+  const operatorSidebarBadge = (a) => appCardBadge(a, formatStatus);
+  function viewerSidebarBadge(a) {
+    return launchReadiness(a).openable
+      ? { cls: 'badge badge-ok', text: '' }
+      : { cls: 'badge badge-unavailable', text: 'Unavailable' };
+  }
+  function isOperatorRole(u) {
+    return !!u && (u.role === 'admin' || u.role === 'operator');
+  }
+
   function syncSidebar() {
+    if (sidebarPreviewActive) return;
     const el = document.getElementById('sidebar-apps');
-    if (el) renderSidebarApps(el, state.apps, location.pathname, (a) => appCardBadge(a, formatStatus), document);
+    const badge = isOperatorRole(state.user) ? operatorSidebarBadge : viewerSidebarBadge;
+    if (el) renderSidebarApps(el, state.apps, location.pathname, badge, document);
   }
 
   // loadAppsIndex populates the sidebar app list independently of which view is
@@ -1568,14 +1609,18 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(document.getElementById('scaling-status'), true);
     updateScalingCeiling();
 
-    // General info: display name + project slug (rename / regroup).
+    // General info: display name + description + project slug (rename / regroup).
     document.getElementById('general-name').value = app.name ?? '';
+    document.getElementById('general-description').value = app.description ?? '';
     document.getElementById('general-project').value = app.project_slug ?? '';
     document.getElementById('general-name').disabled = !canEdit;
+    document.getElementById('general-description').disabled = !canEdit;
     document.getElementById('general-project').disabled = !canEdit;
     document.getElementById('general-save-btn').hidden = !canEdit;
     setError(document.getElementById('general-error'), '');
     setHidden(document.getElementById('general-status'), true);
+
+    renderIconPicker(app, canEdit);
 
     // Resources: per-replica memory/CPU caps. null (no limit) renders as empty.
     // Limits are only enforceable under the docker runtime, so under native we
@@ -1606,6 +1651,123 @@ document.addEventListener('DOMContentLoaded', () => {
     snapshotSettingsSection('scaling');
   }
 
+  // The icon picker uploads immediately (it is not tied to the General Save
+  // button). Handlers are assigned with .onclick/.onchange so re-populating the
+  // tab replaces them rather than stacking listeners across app switches.
+  const ICON_MAX_BYTES = 512 * 1024;
+  const ICON_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'];
+
+  // renderDetailHeaderAvatar fills the app-detail header's icon slot with the
+  // app's uploaded icon (or its monogram). Called on every detail mount (via
+  // setDetailApp) and after an icon upload/removal.
+  function renderDetailHeaderAvatar(app) {
+    const slot = document.getElementById('app-detail-icon');
+    if (!slot || !app) return;
+    slot.replaceChildren(renderAppAvatar(document, avatarView(app), 'app-detail-avatar'));
+  }
+
+  function renderIconPicker(app, canEdit) {
+    const preview = document.getElementById('general-icon-preview');
+    const uploadBtn = document.getElementById('general-icon-upload');
+    const removeBtn = document.getElementById('general-icon-remove');
+    const fileInput = document.getElementById('general-icon-file');
+    const statusEl = document.getElementById('general-icon-status');
+    if (!preview || !uploadBtn || !removeBtn || !fileInput) return;
+
+    setHidden(statusEl, true);
+    preview.replaceChildren(renderAppAvatar(document, avatarView(app), 'icon-picker-preview'));
+    uploadBtn.hidden = !canEdit;
+    removeBtn.hidden = !canEdit || !app.icon_mime;
+
+    if (!canEdit) {
+      uploadBtn.onclick = null;
+      removeBtn.onclick = null;
+      fileInput.onchange = null;
+      return;
+    }
+    uploadBtn.onclick = () => fileInput.click();
+    fileInput.onchange = () => {
+      const f = fileInput.files && fileInput.files[0];
+      fileInput.value = ''; // let the same file be re-picked later
+      if (f) uploadIcon(app, f);
+    };
+    removeBtn.onclick = () => removeIcon(app);
+  }
+
+  async function uploadIcon(app, file) {
+    const errEl = document.getElementById('general-error');
+    const statusEl = document.getElementById('general-icon-status');
+    setError(errEl, '');
+    if (file.size > ICON_MAX_BYTES) {
+      setError(errEl, 'Icon must be 512 KB or smaller.');
+      return;
+    }
+    if (file.type && !ICON_TYPES.includes(file.type)) {
+      setError(errEl, 'Icon must be a PNG, JPEG, WebP, or SVG image.');
+      return;
+    }
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+    } catch {
+      setError(errEl, 'Upload failed. Check your connection.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Upload failed.';
+      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
+      setError(errEl, msg);
+      return;
+    }
+    let body = {};
+    try { body = await resp.json(); } catch { /* tolerate */ }
+    applyIconChange(app, body.icon_mime || file.type);
+    statusEl.textContent = 'Icon updated.';
+    setHidden(statusEl, false);
+  }
+
+  async function removeIcon(app) {
+    const errEl = document.getElementById('general-error');
+    const statusEl = document.getElementById('general-icon-status');
+    setError(errEl, '');
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, { method: 'DELETE' });
+    } catch {
+      setError(errEl, 'Failed to remove icon. Check your connection.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
+    applyIconChange(app, '');
+    statusEl.textContent = 'Icon removed.';
+    setHidden(statusEl, false);
+  }
+
+  // applyIconChange records the new icon state on the app and every cached copy
+  // (detailApp, the sidebar/grid list) and bumps updated_at as the cache-buster,
+  // then re-renders the picker preview and the detail-header avatar so the change
+  // shows everywhere without a reload.
+  function applyIconChange(app, iconMime) {
+    const stamp = new Date().toISOString();
+    app.icon_mime = iconMime;
+    app.updated_at = stamp;
+    if (detailApp && detailApp.slug === app.slug && detailApp !== app) {
+      detailApp.icon_mime = iconMime;
+      detailApp.updated_at = stamp;
+    }
+    const listed = (state.apps || []).find((a) => a && a.slug === app.slug);
+    if (listed) { listed.icon_mime = iconMime; listed.updated_at = stamp; }
+    renderIconPicker(app, true);
+    renderDetailHeaderAvatar(app);
+    if (typeof syncSidebar === 'function') syncSidebar();
+  }
+
   async function saveGeneralInfo() {
     if (!settingsSlug) return;
     const errEl = document.getElementById('general-error');
@@ -1613,9 +1775,17 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(errEl, '');
     setHidden(statusEl, true);
     const name = document.getElementById('general-name').value.trim();
+    const description = document.getElementById('general-description').value.trim();
     const project = document.getElementById('general-project').value.trim();
     if (name.length < 1 || name.length > 128) {
       setError(errEl, 'Display name must be 1 to 128 characters.');
+      return;
+    }
+    // Count code points (spread iterates by code point), not UTF-16 units, so the
+    // limit matches the server's rune count and an emoji-bearing description that
+    // the backend accepts is not rejected here.
+    if ([...description].length > 280) {
+      setError(errEl, 'Description must be 280 characters or fewer.');
       return;
     }
     const btn = document.getElementById('general-save-btn');
@@ -1624,7 +1794,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ name, project_slug: project }),
+        body: JSON.stringify({ name, description, project_slug: project }),
       });
     } catch {
       setError(errEl, 'Failed to save. Check your connection.');
@@ -1644,7 +1814,15 @@ document.addEventListener('DOMContentLoaded', () => {
     snapshotSettingsSection('general');
     const heading = document.getElementById('app-detail-heading');
     if (heading) heading.textContent = name;
-    if (detailApp) detailApp.name = name;
+    if (detailApp) { detailApp.name = name; detailApp.description = description; }
+    // A rename changes the monogram initials (derived from the name), so re-render
+    // the header + picker avatar; for an app with an uploaded icon this is a no-op
+    // re-render of the same image.
+    if (detailApp) {
+      renderDetailHeaderAvatar(detailApp);
+      const preview = document.getElementById('general-icon-preview');
+      if (preview) preview.replaceChildren(renderAppAvatar(document, avatarView(detailApp), 'icon-picker-preview'));
+    }
     await loadApps();
   }
 
@@ -2599,7 +2777,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Register every settings section with the dirty tracker so Save stays
   // disabled until something changes and an "Unsaved changes" hint appears.
   registerSettingsSection('general',
-    () => [document.getElementById('general-name'), document.getElementById('general-project')],
+    () => [document.getElementById('general-name'), document.getElementById('general-description'), document.getElementById('general-project')],
     'general-save-btn', 'general-dirty');
   registerSettingsSection('resources',
     () => [document.getElementById('resources-memory'), document.getElementById('resources-cpu')],
@@ -3378,6 +3556,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Set just before a deliberate full navigation away (logout) so the
+  // unsaved-changes beforeunload guard does not strand the user: by then the
+  // session is already revoked, so there is nothing left to save and the prompt
+  // would only leave them logged-out but stuck on the old screen.
+  let suppressUnloadGuard = false;
+
   logoutButton.addEventListener('click', async () => {
     // Distinguish transport errors from server-side rejections. The previous
     // unconditional showLoggedOut() lied to the user when the POST returned a
@@ -3394,7 +3578,12 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (resp.ok || resp.status === 401) {
-      showLoggedOut();
+      // Land on the front door. With auth-aware `/`, a now-sessionless request to
+      // `/` serves the branding landing page when configured, otherwise the SPA
+      // shell falls through to the login view - so a full navigation does the
+      // right thing in both cases without the client knowing the branding config.
+      suppressUnloadGuard = true;
+      window.location.assign('/');
       return;
     }
     flashToast(`Logout failed (${resp.status})`, 'error');
@@ -3589,7 +3778,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // settings edits, so the explicit-save model never silently loses work.
   router.setNavGuard(confirmDiscardIfDirty);
   window.addEventListener('beforeunload', (e) => {
-    if (anySettingsDirty()) { e.preventDefault(); e.returnValue = ''; }
+    if (!suppressUnloadGuard && anySettingsDirty()) { e.preventDefault(); e.returnValue = ''; }
   });
 
   function updateActiveNav(pathname) {
@@ -3598,8 +3787,9 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const el of document.querySelectorAll('#primary-nav [data-nav]')) {
       const url = new URL(el.href);
       const active = url.pathname === pathname
-        || (pathname === '/' && url.pathname === '/')
-        || (pathname.startsWith('/apps/') && url.pathname === '/');
+        || (pathname.startsWith('/apps/') && url.pathname === '/apps')
+        // /home is the stable alias of the contextual home; highlight the Home nav.
+        || (pathname === '/home' && url.pathname === '/');
       el.classList.toggle('tab-active', active);
       if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     }
@@ -3621,6 +3811,19 @@ document.addEventListener('DOMContentLoaded', () => {
     applyGridFilters: renderApps,
     updateActiveNav,
     syncSidebar,
+    // Render an explicit app list into the sidebar without touching state.apps.
+    // The viewer-home preview uses this to show the viewer-scoped list, then
+    // calls syncSidebar() on exit to restore the operator's real list.
+    renderSidebarAppsList: (apps) => {
+      const el = document.getElementById('sidebar-apps');
+      // Always the viewer badge: this is only used by the viewer-home preview, so
+      // the previewed sidebar must collapse status like a real viewer's.
+      if (el) renderSidebarApps(el, apps, location.pathname, viewerSidebarBadge, document);
+    },
+    // While true, syncSidebar() is suppressed so background loaders can't clobber
+    // the preview's viewer-scoped sidebar. The preview sets it on mount, clears it
+    // on exit, then restores the real list.
+    setSidebarPreview: (on) => { sidebarPreviewActive = on; },
     setSettingsSlug: (slug) => { settingsSlug = slug; },
     populateGeneralTab,
     populateAutoscaleTab,
@@ -3636,8 +3839,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // summary on each 10s poll without a full GET /api/apps/:slug refetch.
     setDetailEnvelope: (env) => { detailLastEnvelope = env; },
     // setDetailApp records the app currently shown on the detail page so the
-    // static header kebab (wired once below) knows which app to act on.
-    setDetailApp: (app) => { detailApp = app; },
+    // static header kebab (wired once below) knows which app to act on, and
+    // renders the header's icon/monogram avatar for that app.
+    setDetailApp: (app) => { detailApp = app; renderDetailHeaderAvatar(app); },
     // restart triggers POST /api/apps/:slug/restart (the same action as the
     // header kebab), exposed so the crash banner's Restart button can reuse it.
     restart: (slug) => restart(slug),
@@ -3667,6 +3871,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // /users) there is no previous view to clean up — the sections inherit
   // whatever showLoggedIn left them in.
   function hideAllPageViews() {
+    overviewView.hidden = true;
+    launchpadView.hidden = true;
     appsView.hidden = true;
     usersView.hidden = true;
     workersView.hidden = true;
@@ -3674,8 +3880,34 @@ document.addEventListener('DOMContentLoaded', () => {
     appDetailView.hidden = true;
   }
 
-  router.register('/', () => {
+  // Role-adaptive home: fleet operators land on the Overview, everyone else on
+  // the Launchpad. Falls back to the Launchpad when the user is unknown (the
+  // fetch then 401s to the login view, as before). Mounted at both `/` (the
+  // contextual root) and `/home` (the stable authenticated alias the branding
+  // landing page links to, so it never loops back to itself).
+  const mountHome = () => {
     hideAllPageViews();
+    const role = ctx.state.user && ctx.state.user.role;
+    const isOperator = role === 'admin' || role === 'operator';
+    // Admin "preview viewer home": ?preview=viewer mounts the Launchpad in
+    // read-only preview for an operator (the param is meaningless to a viewer,
+    // who already gets the Launchpad).
+    if (isOperator && new URLSearchParams(location.search).get('preview') === 'viewer') {
+      return mountLaunchpad(ctx, { preview: true });
+    }
+    return isOperator ? mountOverview(ctx) : mountLaunchpad(ctx);
+  };
+  router.register('/', mountHome);
+  router.register('/home', mountHome);
+  router.register('/apps', () => {
+    hideAllPageViews();
+    // The Apps grid is operator-flavoured; pure viewers don't get it (the nav
+    // item is hidden for them). Gate the route too so a typed/bookmarked /apps
+    // bounces back to their Launchpad home rather than mounting the grid.
+    if (ctx.state.user && ctx.state.user.role === 'viewer') {
+      ctx.navigate('/', { replace: true });
+      return;
+    }
     const view = mountAppsGrid(ctx);
     updateActiveNav(location.pathname);
     return view;

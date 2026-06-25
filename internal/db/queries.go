@@ -436,9 +436,14 @@ func (s *Store) APIKeyNameExists(userID int64, name string) (bool, error) {
 // --- Apps ---
 
 type App struct {
-	ID                      int64     `json:"id"`
-	Slug                    string    `json:"slug"`
-	Name                    string    `json:"name"`
+	ID          int64  `json:"id"`
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// IconMime is the MIME type of the app's uploaded icon, or "" when none is
+	// set (the UI then renders the generated monogram). The bytes themselves are
+	// never loaded into App; they are read on demand via GetAppIcon.
+	IconMime                string    `json:"icon_mime,omitempty"`
 	ProjectSlug             string    `json:"project_slug,omitempty"`
 	OwnerID                 int64     `json:"owner_id"`
 	Access                  string    `json:"access"`
@@ -544,7 +549,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
-		       last_error, crashed_at,`
+		       last_error, crashed_at, description, icon_mime,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -900,6 +905,36 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// ListViewerBaselineApps returns the apps every authenticated viewer sees
+// regardless of per-app membership: access IN ('public','shared'). It powers the
+// admin "preview viewer home" scope (GET /api/apps?as=viewer), which shows the
+// default viewer experience without impersonating a specific user. Private apps
+// (member-only) are intentionally excluded - those vary per viewer.
+func (s *Store) ListViewerBaselineApps(limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumns+deploymentSummarySQL+`
+		FROM apps
+		WHERE access = 'public' OR access = 'shared'
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -1577,6 +1612,84 @@ func (s *Store) SetAppAccess(slug, access string) error {
 	return nil
 }
 
+// SetAppDescription updates the app's optional one-line description (shown on
+// the Launchpad). An empty string clears it.
+func (s *Store) SetAppDescription(slug, description string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, description, slug)
+	if err != nil {
+		return fmt.Errorf("set app description: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app description rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAppIcon stores the app's icon bytes and MIME type and bumps updated_at,
+// which the UI reads as a cache-buster on the icon URL so a replaced icon shows
+// immediately. Returns ErrNotFound if no app has the slug.
+func (s *Store) SetAppIcon(slug, mime string, data []byte) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET icon_mime = ?, icon_data = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		mime, data, slug)
+	if err != nil {
+		return fmt.Errorf("set app icon: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app icon rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClearAppIcon removes the app's icon (reverting the UI to the monogram) and
+// bumps updated_at. Returns ErrNotFound if no app has the slug. Clearing an
+// already-iconless app is a no-op success.
+func (s *Store) ClearAppIcon(slug string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET icon_mime = '', icon_data = NULL, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		slug)
+	if err != nil {
+		return fmt.Errorf("clear app icon: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("clear app icon rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetAppIcon returns the stored icon bytes and MIME type. It returns ErrNotFound
+// when the app does not exist OR has no icon set, so callers treat "no app" and
+// "no icon" identically (both yield a 404 from the serve handler, and the UI
+// then shows the monogram).
+func (s *Store) GetAppIcon(slug string) (mime string, data []byte, err error) {
+	row := s.db.QueryRow(`SELECT icon_mime, icon_data FROM apps WHERE slug = ?`, slug)
+	var m sql.NullString
+	var d []byte
+	if err := row.Scan(&m, &d); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil, ErrNotFound
+		}
+		return "", nil, fmt.Errorf("get app icon: %w", err)
+	}
+	if !m.Valid || m.String == "" || len(d) == 0 {
+		return "", nil, ErrNotFound
+	}
+	return m.String, d, nil
+}
+
 // SetAppManagedBy sets or clears (nil) the fleet ownership marker.
 func (s *Store) SetAppManagedBy(slug string, managedBy *string) error {
 	result, err := s.db.Exec(
@@ -1796,8 +1909,10 @@ func (s *Store) ConsumeOAuthState(state string) error {
 // literals; new audit producers should prefer constants so handlers and tests
 // can reference the same identifier.
 const (
-	AuditDataPush   = "data.push"
-	AuditDataDelete = "data.delete"
+	AuditDataPush       = "data.push"
+	AuditDataDelete     = "data.delete"
+	AuditAppIconSet     = "app.icon.set"
+	AuditAppIconCleared = "app.icon.clear"
 )
 
 // AuditEventParams holds the fields for a new audit event.
@@ -2717,7 +2832,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
-		&a.LastError, &a.CrashedAt,
+		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {

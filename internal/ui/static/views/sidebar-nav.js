@@ -92,13 +92,15 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
       a.setAttribute('data-app-slug', m.slug);
       a.className = 'sidebar-app' + (m.active ? ' active' : '');
       if (m.active) a.setAttribute('aria-current', 'page');
-      // The status dot is decorative (aria-hidden); fold the status into the
+      // The status dot is decorative (aria-hidden); fold any status into the
       // link's accessible name so screen readers announce e.g. "demo, Failed".
-      a.setAttribute('aria-label', `${m.name}, ${m.statusLabel}`);
+      // When there is no status word (viewer rows for openable apps), the name
+      // stands alone - no trailing comma, no status tooltip.
+      a.setAttribute('aria-label', m.statusLabel ? `${m.name}, ${m.statusLabel}` : m.name);
 
       const dot = d.createElement('span');
       dot.className = m.dotClass;
-      dot.title = m.statusLabel;
+      if (m.statusLabel) dot.title = m.statusLabel;
       dot.setAttribute('aria-hidden', 'true');
 
       const name = d.createElement('span');

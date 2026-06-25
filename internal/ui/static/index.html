@@ -44,7 +44,15 @@
       </div>
 
       <nav id="primary-nav" aria-label="Sections">
-        <a href="/" data-nav class="nav-item" id="tab-apps">
+        <a href="/" data-nav class="nav-item" id="tab-overview" hidden>
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span class="nav-label">Overview</span>
+        </a>
+        <a href="/" data-nav class="nav-item" id="tab-launchpad" hidden>
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h3v-6h4v6h3a1 1 0 0 0 1-1v-9"/></svg>
+          <span class="nav-label">Home</span>
+        </a>
+        <a href="/apps" data-nav class="nav-item" id="tab-apps">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Apps</span>
         </a>
@@ -99,6 +107,19 @@
         <a class="github-login" href="/api/auth/github/login">Sign in with GitHub</a>
         <a class="google-login" href="/api/auth/google/login">Sign in with Google</a>
       </div>
+    </section>
+
+    <section id="overview-view" hidden aria-labelledby="overview-heading">
+      <div class="toolbar">
+        <h1 id="overview-heading">Overview</h1>
+        <a class="ov-btn" id="overview-preview-viewer" href="/home?preview=viewer" data-nav>Preview viewer home</a>
+      </div>
+      <div id="overview-body"></div>
+    </section>
+
+    <section id="launchpad-view" hidden aria-labelledby="launchpad-heading">
+      <h1 id="launchpad-heading" class="sr-only">Your apps</h1>
+      <div id="launchpad-body"></div>
     </section>
 
     <section id="apps-view" hidden>
@@ -215,6 +236,7 @@
       <header class="app-detail-header">
         <div class="app-detail-bar">
           <div class="app-detail-identity">
+            <span id="app-detail-icon" class="app-detail-icon-slot" aria-hidden="true"></span>
             <h1 id="app-detail-heading" class="app-detail-title"></h1>
             <span id="app-detail-status" class="status-pill"></span>
             <span id="app-detail-fleet-badge"></span>
@@ -282,6 +304,28 @@
                 </span>
                 <input id="general-name" type="text" maxlength="128" autocomplete="off" aria-label="App display name">
               </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Description</span>
+                  <span class="scaling-option-help">A one-line summary shown on the home Launchpad.</span>
+                </span>
+                <input id="general-description" type="text" autocomplete="off" placeholder="(optional)" aria-label="App description">
+              </label>
+              <div class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Icon</span>
+                  <span class="scaling-option-help">Shown on the Launchpad and app pages. PNG, JPEG, WebP, or SVG, up to 512&nbsp;KB. Saved immediately.</span>
+                </span>
+                <div class="icon-picker">
+                  <span id="general-icon-preview" class="icon-picker-preview" aria-hidden="true"></span>
+                  <div class="icon-picker-controls">
+                    <button id="general-icon-upload" type="button" class="ov-btn">Upload</button>
+                    <button id="general-icon-remove" type="button" class="ov-btn" hidden>Remove</button>
+                    <span id="general-icon-status" class="hibernate-status" hidden></span>
+                  </div>
+                  <input id="general-icon-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" hidden>
+                </div>
+              </div>
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Project</span>
