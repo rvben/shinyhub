@@ -82,14 +82,14 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Attest release binaries (SLSA provenance)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/shinyhub_*.tar.gz
             dist/checksums.txt
 
       - name: Attest container image (SLSA provenance)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/rvben/shinyhub
           subject-digest: ${{ steps.image.outputs.digest }}
