@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
@@ -134,7 +135,13 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 
 	fmt.Fprintf(out, "shinyhub fleet apply  ·  fleet_id=%s\n\n", fleetID)
 	for _, r := range res {
-		line := fmt.Sprintf("  %s  %-24s %s", statusGlyph(r), r.slug, string(r.status))
+		statusWord := string(r.status)
+		if r.status == statusFailed {
+			if k := finalFailureKind(r); k != "" {
+				statusWord += " [" + string(k) + "]"
+			}
+		}
+		line := fmt.Sprintf("  %s  %-24s %s", statusGlyph(r), r.slug, statusWord)
 		if r.attempts > 1 {
 			line += fmt.Sprintf(" (attempt %d)", r.attempts)
 		}
@@ -145,6 +152,9 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 			line += fmt.Sprintf("   %s", r.duration.Round(100*time.Millisecond))
 		}
 		fmt.Fprintln(out, line)
+		for _, a := range r.attemptsDetail {
+			fmt.Fprintf(out, "     attempt %d: %s\n", a.Attempt, a.Kind)
+		}
 		for _, ff := range r.firstFires {
 			if ff.Status == "" {
 				fmt.Fprintf(out, "     %s: first-fire triggered (run #%d)\n", ff.Schedule, ff.RunID)
@@ -180,12 +190,30 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 // JSON envelope: extends the plan envelope (same schema_version) with a
 // per-app result and summary exit fields.
 
+type jsonAttempt struct {
+	Attempt     int    `json:"attempt"`
+	FailureKind string `json:"failure_kind"`
+	Error       string `json:"error,omitempty"`
+}
+
 type jsonResult struct {
-	Status     string   `json:"status"`
-	Attempts   int      `json:"attempts"`
-	DurationMS int64    `json:"duration_ms"`
-	Error      string   `json:"error,omitempty"`
-	LogTail    []string `json:"log_tail,omitempty"`
+	Status         string        `json:"status"`
+	Attempts       int           `json:"attempts"`
+	FailureKind    string        `json:"failure_kind,omitempty"`
+	AttemptDetails []jsonAttempt `json:"attempt_details,omitempty"`
+	DurationMS     int64         `json:"duration_ms"`
+	Error          string        `json:"error,omitempty"`
+	LogTail        []string      `json:"log_tail,omitempty"`
+}
+
+// finalFailureKind returns the kind to report at the top level for a failed
+// result: the last failed attempt's kind, or Unknown for a non-deploy failure
+// (config patch, ownership stamp) that recorded no attempt detail.
+func finalFailureKind(r applyResult) deployfail.Kind {
+	if n := len(r.attemptsDetail); n > 0 {
+		return r.attemptsDetail[n-1].Kind
+	}
+	return deployfail.Unknown
 }
 
 type applyJSONApp struct {
@@ -240,6 +268,14 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 			}
 			if r.err != nil {
 				jr.Error = r.err.Error()
+			}
+			for _, a := range r.attemptsDetail {
+				jr.AttemptDetails = append(jr.AttemptDetails, jsonAttempt{
+					Attempt: a.Attempt, FailureKind: string(a.Kind), Error: a.Err,
+				})
+			}
+			if r.status == statusFailed {
+				jr.FailureKind = string(finalFailureKind(r))
 			}
 			aj.Result = jr
 			aj.FirstFires = r.firstFires
