@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
@@ -544,5 +546,49 @@ func TestConvergeApp_CreateDeploysThenStampsMarker(t *testing.T) {
 	}
 	if v, _ := stampBody["managed_by"].(string); v != "fleet:eu" {
 		t.Fatalf("marker body = %#v", stampBody["managed_by"])
+	}
+}
+
+// A deploy that fails its first attempt with a readiness timeout, then succeeds
+// on retry, must still record WHY attempt 1 failed - that is the motivating case
+// (an app that eventually came up but flaked once).
+func TestConvergeApp_RetriedSuccessRecordsFailedAttemptKind(t *testing.T) {
+	var deployHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			if atomic.AddInt32(&deployHits, 1) == 1 {
+				w.WriteHeader(500)
+				_, _ = w.Write([]byte(`{"error":"deploy failed: ...","failure_kind":"readiness_timeout"}`))
+				return
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/flaky":
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "flaky", "content_digest": "sha256:NEW"}})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	d := fleet.AppDiff{Slug: "flaky", Action: fleet.ActionCreate}
+	entry := fleet.AppEntry{Slug: "flaky", Source: "./x", Visibility: "private"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{}, dir,
+		convergeOpts{preconditions: true, retries: 1, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+
+	if r.status != statusCreated {
+		t.Fatalf("status = %s (%v), want created (second attempt succeeds)", r.status, r.err)
+	}
+	if len(r.attemptsDetail) != 1 {
+		t.Fatalf("want exactly one failed-attempt record, got %d: %+v", len(r.attemptsDetail), r.attemptsDetail)
+	}
+	if r.attemptsDetail[0].Kind != deployfail.ReadinessTimeout || r.attemptsDetail[0].Attempt != 1 {
+		t.Fatalf("attempt 1 record = %+v, want {Attempt:1 Kind:readiness_timeout}", r.attemptsDetail[0])
 	}
 }

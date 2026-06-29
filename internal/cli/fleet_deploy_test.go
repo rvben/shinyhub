@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/deployfail"
 )
 
 // stepClock returns a now() that advances by step on each call, so a wait loop
@@ -198,7 +200,7 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
-	dg, committed, _, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1", 5*time.Second)
+	dg, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1", 5*time.Second)
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -246,7 +248,7 @@ func TestDeployAppBundle_EmitsHooksSkippedWarning(t *testing.T) {
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
 	var buf bytes.Buffer
-	if _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	out := buf.String()
@@ -276,7 +278,7 @@ func TestDeployAppBundle_ClientRejectionIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}
@@ -309,7 +311,7 @@ func TestDeployAppBundle_ServerErrorIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}
@@ -342,7 +344,7 @@ func TestDeployAppBundle_ReturnsFirstFireRefs(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	var out bytes.Buffer
-	_, committed, refs, err := deployAppBundle(cfg, "warmapp", dir, "", &out, "run-1", time.Minute)
+	_, committed, refs, _, err := deployAppBundle(cfg, "warmapp", dir, "", &out, "run-1", time.Minute)
 	if err != nil {
 		t.Fatalf("deployAppBundle: %v", err)
 	}
@@ -351,5 +353,61 @@ func TestDeployAppBundle_ReturnsFirstFireRefs(t *testing.T) {
 	}
 	if len(refs) != 1 || refs[0].RunID != 42 || refs[0].ScheduleID != 5 || refs[0].Schedule != "warm" {
 		t.Fatalf("refs = %+v, want one {warm 5 42}", refs)
+	}
+}
+
+func TestDeployAppBundle_ReturnsFailureKindFromBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":"deploy failed: ...","failure_kind":"readiness_timeout"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"app":{"slug":"demo"}}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	_, _, _, kind, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected deploy failure")
+	}
+	if kind != deployfail.ReadinessTimeout {
+		t.Fatalf("kind = %q, want readiness_timeout", kind)
+	}
+}
+
+func TestDeployAppBundle_FailureKindFallbackForOldServer(t *testing.T) {
+	// Old server: no failure_kind field; the CLI classifies the body text. A
+	// build error preserves its raw substring, so it is recoverable.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":"deploy failed: uv sync: resolution failed for pandas"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"app":{"slug":"demo"}}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	_, _, _, kind, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected deploy failure")
+	}
+	if kind != deployfail.BuildFailed {
+		t.Fatalf("kind = %q, want build_failed (fallback classification)", kind)
 	}
 }

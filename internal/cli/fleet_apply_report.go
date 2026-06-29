@@ -40,6 +40,10 @@ type applyResult struct {
 	// when a deploy-bearing action fails (e.g. the app crashed on startup), so
 	// the operator sees the cause without a second round-trip to the host.
 	logTail []string
+	// attemptsDetail holds one record per FAILED deploy attempt (empty when the
+	// first attempt succeeded). It is populated even on a retried-then-succeeded
+	// deploy so the operator can see why an earlier attempt failed.
+	attemptsDetail []attemptOutcome
 }
 
 type applyTally struct {
