@@ -20,6 +20,7 @@ import (
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/process"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/rvben/shinyhub/internal/storage"
@@ -1099,6 +1100,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}, app))
 	if err != nil {
 		reason := deployFailureMessage(err)
+		kind := deployfail.Classify(err)
 		slog.Error("deploy_run_failed", "slug", slug, "err", err)
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
 		// Revert manifest [app] settings so the restored old pool runs under
@@ -1132,7 +1134,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		s.restorePreviousPool(slug, &preManifestApp, prevActive)
 		s.recordDeploy("failure")
-		writeError(w, http.StatusInternalServerError, reason)
+		writeErrorWithKind(w, http.StatusInternalServerError, reason, kind)
 		return
 	}
 	// The pool is now serving the new bundle; from here onwards the on-disk

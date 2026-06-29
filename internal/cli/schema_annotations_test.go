@@ -21,3 +21,22 @@ func TestAnnotations_KnownCommandShape(t *testing.T) {
 		t.Error("apps delete must be explicitly mutating=true")
 	}
 }
+
+func TestFleetApplyAnnotation_DocumentsFailureKind(t *testing.T) {
+	ann, ok := schemaAnnotations["fleet apply"]
+	if !ok {
+		t.Fatal("fleet apply must have a schema annotation")
+	}
+	var hasKind, hasDetails bool
+	for _, f := range ann.OutputFields {
+		switch f.Name {
+		case "failure_kind":
+			hasKind = true
+		case "attempt_details":
+			hasDetails = true
+		}
+	}
+	if !hasKind || !hasDetails {
+		t.Fatalf("fleet apply OutputFields must document failure_kind and attempt_details, got %+v", ann.OutputFields)
+	}
+}

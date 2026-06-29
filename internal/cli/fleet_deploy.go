@@ -9,6 +9,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/deployfail"
 )
 
 // fleetHealthTimeout bounds the post-deploy health wait. First-run uv syncs
@@ -47,13 +49,13 @@ func healthTimeoutDuration(seconds int) time.Duration {
 // apply), so the status alone cannot tell whether the new bundle went live -
 // callers that care (adopt) resolve that authoritatively with a digest
 // readback.
-func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, err error) {
+func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
 	if err := ensureFleetApp(cfg, slug, visibility, out); err != nil {
-		return "", false, nil, err
+		return "", false, nil, deployfail.Unknown, err
 	}
 	buf, summary, err := zipDir(dir)
 	if err != nil {
-		return "", false, nil, fmt.Errorf("bundle %s: %w", slug, err)
+		return "", false, nil, deployfail.ZipError, fmt.Errorf("bundle %s: %w", slug, err)
 	}
 	if summary != "" {
 		fmt.Fprintf(out, "  %s: %s\n", slug, summary)
@@ -63,17 +65,18 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("bundle", "bundle.zip")
 	if err != nil {
-		return "", false, nil, err
+		return "", false, nil, deployfail.ZipError, err
 	}
 	if _, err := io.Copy(part, buf); err != nil {
-		return "", false, nil, err
+		return "", false, nil, deployfail.ZipError, err
 	}
 	if err := writer.Close(); err != nil {
-		return "", false, nil, err
+		return "", false, nil, deployfail.ZipError, err
 	}
 	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
 	if err != nil {
-		return "", false, nil, err
+		// A malformed URL/method, not a packaging failure.
+		return "", false, nil, deployfail.Unknown, err
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -82,12 +85,12 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	// Use http.DefaultClient (no timeout) to match the SSE logs command.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", false, nil, fmt.Errorf("deploy %s: %w", slug, err)
+		return "", false, nil, deployfail.TransportError, fmt.Errorf("deploy %s: %w", slug, err)
 	}
 	rb, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", false, nil, &httpStatusError{
+		return "", false, nil, failureKindFromBody(resp.StatusCode, rb), &httpStatusError{
 			Status: resp.StatusCode,
 			msg:    fmt.Sprintf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb)),
 		}
@@ -106,12 +109,49 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	}
 
 	// Bundle accepted: from here on the deploy is committed even if a
-	// post-deploy step fails.
+	// post-deploy step fails. A failure past this point is not the deploy's own
+	// cause (the server already returned 2xx), so it is reported as Unknown.
 	if err := waitForFleetHealthy(cfg, slug, out, timeout); err != nil {
-		return "", true, firstFires, err
+		return "", true, firstFires, deployfail.Unknown, err
 	}
-	promoted, err = readPromotedDigest(cfg, slug)
-	return promoted, true, firstFires, err
+	promoted, derr := readPromotedDigest(cfg, slug)
+	if derr != nil {
+		return promoted, true, firstFires, deployfail.Unknown, derr
+	}
+	return promoted, true, firstFires, "", nil
+}
+
+// failureKindFromBody extracts the failure_kind a deploy failure advertises. A
+// new server emits {"error","failure_kind"}; an old server emits {"error"} only.
+// An explicit, valid failure_kind always wins. Otherwise the status decides: a
+// 4xx is a client-side rejection the server refused before running the deploy,
+// so the 5xx-oriented text classifier (which defaults to server_error) must not
+// run on it - bundle/request-content rejections map to bundle_invalid, other 4xx
+// (auth, rate-limit, not-found) are unclassifiable. A 5xx falls back to text
+// classification (partial recovery: build_failed and bundle_invalid survive in
+// the default-branch text, reworded runtime/health messages fall to server_error).
+func failureKindFromBody(status int, body []byte) deployfail.Kind {
+	var env struct {
+		Error       string `json:"error"`
+		FailureKind string `json:"failure_kind"`
+	}
+	_ = json.Unmarshal(body, &env)
+	if k := deployfail.Kind(env.FailureKind); k.Valid() {
+		return k
+	}
+	switch {
+	case status == http.StatusBadRequest,
+		status == http.StatusRequestEntityTooLarge,
+		status == http.StatusUnprocessableEntity:
+		return deployfail.BundleInvalid
+	case status >= 400 && status < 500:
+		return deployfail.Unknown
+	}
+	msg := env.Error
+	if msg == "" {
+		msg = string(body)
+	}
+	return deployfail.ClassifyMessage(msg)
 }
 
 // readPromotedDigest re-GETs the app list and returns the live (succeeded)

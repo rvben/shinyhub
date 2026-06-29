@@ -8,6 +8,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 )
 
@@ -33,6 +34,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	fmt.Fprintf(w, `{"error":%q}`+"\n", msg)
+}
+
+// writeErrorWithKind writes a JSON error response that also carries a stable
+// machine-readable failure classification: {"error": msg, "failure_kind": kind}.
+// Used by the deploy failure path so a CLI can distinguish a readiness timeout
+// from a crash from a build failure without parsing the human message.
+func writeErrorWithKind(w http.ResponseWriter, status int, msg string, kind deployfail.Kind) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "failure_kind": string(kind)})
 }
 
 // audit records a mutating action with the authenticated user, request IP, and

@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
@@ -121,3 +123,152 @@ func TestWriteFleetApplyJSON_IncludesAppURL(t *testing.T) {
 type errStub string
 
 func (e errStub) Error() string { return string(e) }
+
+func TestRenderApplyReport_ShowsFailureKindAndPerAttempt(t *testing.T) {
+	res := []applyResult{{
+		slug: "cb", action: fleet.ActionUpdateSource, status: statusFailed, attempts: 2,
+		deployFailed: true,
+		err:          errors.New("deploy cb failed: HTTP 500"),
+		attemptsDetail: []attemptOutcome{
+			{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"},
+			{Attempt: 2, Kind: deployfail.Crashed, Err: "y"},
+		},
+	}}
+	var buf bytes.Buffer
+	_ = renderApplyReport(&buf, "eu", res, false)
+	out := buf.String()
+	if !strings.Contains(out, "failed [crashed]") {
+		t.Fatalf("failed line must show the final kind, got:\n%s", out)
+	}
+	if !strings.Contains(out, "attempt 1: readiness_timeout") || !strings.Contains(out, "attempt 2: crashed") {
+		t.Fatalf("must list each failed attempt's kind, got:\n%s", out)
+	}
+}
+
+func TestRenderApplyReport_RetriedSuccessShowsEarlierFailure(t *testing.T) {
+	res := []applyResult{{
+		slug: "flaky", action: fleet.ActionUpdateSource, status: statusUpdated, attempts: 2,
+		attemptsDetail: []attemptOutcome{{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"}},
+	}}
+	var buf bytes.Buffer
+	_ = renderApplyReport(&buf, "eu", res, false)
+	out := buf.String()
+	if !strings.Contains(out, "attempt 1: readiness_timeout") {
+		t.Fatalf("a retried success must still surface attempt 1's reason, got:\n%s", out)
+	}
+	if strings.Contains(out, "updated [") {
+		t.Fatalf("a successful status must not get a [kind] tag, got:\n%s", out)
+	}
+}
+
+// JSON assertions unmarshal the envelope (the test is package cli, so it can
+// read the unexported jsonResult). A string search cannot tell a TOP-LEVEL
+// failure_kind from the failure_kind keys nested in attempt_details, so it would
+// reject correct output; assert on the decoded struct instead.
+func TestWriteFleetApplyJSON_FailureKindAndAttemptDetails(t *testing.T) {
+	d := fleet.AppDiff{Slug: "cb", Action: fleet.ActionUpdateSource}
+	r := applyResult{
+		slug: "cb", action: fleet.ActionUpdateSource, status: statusFailed, attempts: 2,
+		deployFailed: true,
+		err:          errors.New("boom"),
+		attemptsDetail: []attemptOutcome{
+			{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"},
+			{Attempt: 2, Kind: deployfail.Crashed, Err: "y"},
+		},
+	}
+	var buf bytes.Buffer
+	m := &fleet.Manifest{FleetID: "eu"}
+	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, []applyResult{r}, 4, "PARTIAL"); err != nil {
+		t.Fatalf("writeFleetApplyJSON: %v", err)
+	}
+	var env applyJSONEnvelope
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	got := env.Apps[0].Result
+	if got == nil {
+		t.Fatal("result missing from JSON envelope")
+	}
+	if got.FailureKind != "crashed" {
+		t.Fatalf("top-level failure_kind = %q, want crashed", got.FailureKind)
+	}
+	if len(got.AttemptDetails) != 2 ||
+		got.AttemptDetails[0].FailureKind != "readiness_timeout" ||
+		got.AttemptDetails[1].FailureKind != "crashed" {
+		t.Fatalf("attempt_details wrong: %+v", got.AttemptDetails)
+	}
+}
+
+func TestWriteFleetApplyJSON_RetriedSuccessHasDetailsButNoTopLevelKind(t *testing.T) {
+	d := fleet.AppDiff{Slug: "flaky", Action: fleet.ActionUpdateSource}
+	r := applyResult{
+		slug: "flaky", action: fleet.ActionUpdateSource, status: statusUpdated, attempts: 2,
+		attemptsDetail: []attemptOutcome{{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"}},
+	}
+	var buf bytes.Buffer
+	m := &fleet.Manifest{FleetID: "eu"}
+	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, []applyResult{r}, 0, "OK"); err != nil {
+		t.Fatalf("writeFleetApplyJSON: %v", err)
+	}
+	var env applyJSONEnvelope
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	got := env.Apps[0].Result
+	if got == nil || len(got.AttemptDetails) != 1 {
+		t.Fatalf("retried success must keep exactly one attempt_detail, got %+v", got)
+	}
+	if got.FailureKind != "" {
+		t.Fatalf("a non-failed result must omit the top-level failure_kind, got %q", got.FailureKind)
+	}
+}
+
+// A failure AFTER the deploy succeeded (config patch, or a first-fire after a
+// retried-then-succeeded deploy) must NOT inherit a deploy attempt's kind at the
+// top level, even though attempt_details may still record the earlier flake.
+func TestWriteFleetApplyJSON_PostDeployFailureOmitsFailureKind(t *testing.T) {
+	d := fleet.AppDiff{Slug: "pp", Action: fleet.ActionUpdateSourceConfig}
+	r := applyResult{
+		slug: "pp", action: fleet.ActionUpdateSourceConfig, status: statusFailed, attempts: 2,
+		err:            errors.New("patch boom"),
+		deployFailed:   false,
+		attemptsDetail: []attemptOutcome{{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"}},
+	}
+	var buf bytes.Buffer
+	m := &fleet.Manifest{FleetID: "eu"}
+	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, []applyResult{r}, 4, "PARTIAL"); err != nil {
+		t.Fatalf("writeFleetApplyJSON: %v", err)
+	}
+	var env applyJSONEnvelope
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	got := env.Apps[0].Result
+	if got == nil {
+		t.Fatal("result missing from JSON envelope")
+	}
+	if got.FailureKind != "" {
+		t.Fatalf("post-deploy failure must omit the top-level failure_kind, got %q", got.FailureKind)
+	}
+	if len(got.AttemptDetails) != 1 || got.AttemptDetails[0].FailureKind != "readiness_timeout" {
+		t.Fatalf("attempt_details should still record the deploy flake, got %+v", got.AttemptDetails)
+	}
+}
+
+func TestRenderApplyReport_PostDeployFailureNoKindTag(t *testing.T) {
+	res := []applyResult{{
+		slug: "pp", action: fleet.ActionUpdateSourceConfig, status: statusFailed, attempts: 2,
+		err:            errors.New("patch boom"),
+		deployFailed:   false,
+		attemptsDetail: []attemptOutcome{{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"}},
+	}}
+	var buf bytes.Buffer
+	_ = renderApplyReport(&buf, "eu", res, false)
+	out := buf.String()
+	if strings.Contains(out, "failed [") {
+		t.Fatalf("post-deploy failure must not tag the status with a deploy kind, got:\n%s", out)
+	}
+	if !strings.Contains(out, "attempt 1: readiness_timeout") {
+		t.Fatalf("the deploy flake should still be listed, got:\n%s", out)
+	}
+}
