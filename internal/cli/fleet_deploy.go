@@ -90,7 +90,7 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	rb, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", false, nil, failureKindFromBody(rb), &httpStatusError{
+		return "", false, nil, failureKindFromBody(resp.StatusCode, rb), &httpStatusError{
 			Status: resp.StatusCode,
 			msg:    fmt.Sprintf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb)),
 		}
@@ -121,25 +121,37 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	return promoted, true, firstFires, "", nil
 }
 
-// failureKindFromBody extracts the failure_kind a deploy 500 advertises. A new
-// server emits {"error","failure_kind"}; an old server emits {"error"} only, in
-// which case the human message is classified (partial recovery: build_failed and
-// bundle_invalid survive in the default-branch text, reworded runtime/health
-// messages fall to server_error).
-func failureKindFromBody(body []byte) deployfail.Kind {
+// failureKindFromBody extracts the failure_kind a deploy failure advertises. A
+// new server emits {"error","failure_kind"}; an old server emits {"error"} only.
+// An explicit, valid failure_kind always wins. Otherwise the status decides: a
+// 4xx is a client-side rejection the server refused before running the deploy,
+// so the 5xx-oriented text classifier (which defaults to server_error) must not
+// run on it - bundle/request-content rejections map to bundle_invalid, other 4xx
+// (auth, rate-limit, not-found) are unclassifiable. A 5xx falls back to text
+// classification (partial recovery: build_failed and bundle_invalid survive in
+// the default-branch text, reworded runtime/health messages fall to server_error).
+func failureKindFromBody(status int, body []byte) deployfail.Kind {
 	var env struct {
 		Error       string `json:"error"`
 		FailureKind string `json:"failure_kind"`
 	}
-	if err := json.Unmarshal(body, &env); err == nil {
-		if k := deployfail.Kind(env.FailureKind); k.Valid() {
-			return k
-		}
-		if env.Error != "" {
-			return deployfail.ClassifyMessage(env.Error)
-		}
+	_ = json.Unmarshal(body, &env)
+	if k := deployfail.Kind(env.FailureKind); k.Valid() {
+		return k
 	}
-	return deployfail.ClassifyMessage(string(body))
+	switch {
+	case status == http.StatusBadRequest,
+		status == http.StatusRequestEntityTooLarge,
+		status == http.StatusUnprocessableEntity:
+		return deployfail.BundleInvalid
+	case status >= 400 && status < 500:
+		return deployfail.Unknown
+	}
+	msg := env.Error
+	if msg == "" {
+		msg = string(body)
+	}
+	return deployfail.ClassifyMessage(msg)
 }
 
 // readPromotedDigest re-GETs the app list and returns the live (succeeded)

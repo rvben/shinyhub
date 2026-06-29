@@ -411,3 +411,36 @@ func TestDeployAppBundle_FailureKindFallbackForOldServer(t *testing.T) {
 		t.Fatalf("kind = %q, want build_failed (fallback classification)", kind)
 	}
 }
+
+// A 4xx bundle rejection (too large / bad request) with no failure_kind must be
+// classified bundle_invalid, NOT server_error: it is a non-retryable client-side
+// problem and labeling it a server failure misleads operators and automation.
+func TestDeployAppBundle_BundleRejectionClassifiedBundleInvalid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte(`{"error":"bundle exceeds extracted size limit"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"app":{"slug":"demo"}}`))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	_, committed, _, kind, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected deploy failure")
+	}
+	if committed {
+		t.Fatal("a 4xx rejection must report committed=false")
+	}
+	if kind != deployfail.BundleInvalid {
+		t.Fatalf("kind = %q, want bundle_invalid for a 4xx bundle rejection", kind)
+	}
+}
