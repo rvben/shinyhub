@@ -45,6 +45,11 @@ type applyResult struct {
 	// first attempt succeeded). It is populated even on a retried-then-succeeded
 	// deploy so the operator can see why an earlier attempt failed.
 	attemptsDetail []attemptOutcome
+	// deployFailed is true only when the deploy step itself failed (not a
+	// post-deploy config patch / ownership stamp / first-fire failure). The
+	// top-level failure_kind is emitted only when this is set, so a post-deploy
+	// failure never inherits a deploy attempt's kind.
+	deployFailed bool
 }
 
 type applyTally struct {
@@ -136,7 +141,7 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 	fmt.Fprintf(out, "shinyhub fleet apply  ·  fleet_id=%s\n\n", fleetID)
 	for _, r := range res {
 		statusWord := string(r.status)
-		if r.status == statusFailed {
+		if r.status == statusFailed && r.deployFailed {
 			if k := finalFailureKind(r); k != "" {
 				statusWord += " [" + string(k) + "]"
 			}
@@ -274,7 +279,7 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 					Attempt: a.Attempt, FailureKind: string(a.Kind), Error: a.Err,
 				})
 			}
-			if r.status == statusFailed {
+			if r.status == statusFailed && r.deployFailed {
 				jr.FailureKind = string(finalFailureKind(r))
 			}
 			aj.Result = jr

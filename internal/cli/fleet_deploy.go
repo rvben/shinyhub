@@ -75,7 +75,8 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	}
 	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
 	if err != nil {
-		return "", false, nil, deployfail.ZipError, err
+		// A malformed URL/method, not a packaging failure.
+		return "", false, nil, deployfail.Unknown, err
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())

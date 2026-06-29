@@ -206,6 +206,10 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 	// misleading).
 	failDeploy := func(err error, attempts int) applyResult {
 		fail(err, attempts)
+		// Mark this as a deploy-bearing failure so the top-level failure_kind is
+		// attributed to the deploy. A post-deploy failure (config patch, first-fire)
+		// uses fail directly and must NOT inherit a deploy attempt's kind.
+		res.deployFailed = true
 		if res.status == statusFailed {
 			if tail, lerr := fetchLogTail(cfg, d.Slug, logTailLines); lerr == nil {
 				res.logTail = tail
