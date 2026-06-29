@@ -470,8 +470,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	// ── fleet ─────────────────────────────────────────────────────────────────
 	"fleet": {Mutating: ro},
 
-	"fleet init":     {Mutating: mut},
-	"fleet apply":    {Mutating: mut},
+	"fleet init": {Mutating: mut},
+	"fleet apply": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "failure_kind", Type: "string", Desc: "deploy failure classification on a failed app: runtime_missing, build_failed, bundle_invalid, readiness_timeout, crashed, server_error, zip_error, transport_error, or unknown"},
+		{Name: "attempt_details", Type: "array", Desc: "one entry per failed deploy attempt {attempt int, failure_kind string, error string}; present whenever any attempt failed, including a deploy that succeeded on retry"},
+	}, Notes: "Per-app results carry failure_kind (set when status is failed) and attempt_details (failed attempts only) so the reason a deploy attempt failed is visible without reading server logs."},
 	"fleet validate": {Mutating: ro},
 	"fleet plan":     {Mutating: ro},
 	"fleet status": {Mutating: ro, OutputFields: []fieldSpec{
