@@ -27,6 +27,7 @@ type convergeOpts struct {
 	retries            int  // attempts AFTER the first for deploy-bearing actions
 	healthTimeout      time.Duration
 	waitForWarm        bool
+	concurrency        int // max apps converged in parallel; <=1 means serial
 	fleetID            string
 	runID              string
 }
