@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -257,6 +258,60 @@ func TestLoadManifest_RejectsOutOfRangeStartupTimeout(t *testing.T) {
 		writeManifest(t, dir, "[app]\nstartup_timeout_seconds = "+strconv.Itoa(v)+"\n")
 		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "startup_timeout_seconds must be between 1 and 3600") {
 			t.Errorf("startup_timeout_seconds = %d: expected range error, got %v", v, err)
+		}
+	}
+}
+
+func TestLoadManifest_ParsesResourceLimits(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+memory_limit_mb = 2048
+cpu_quota_percent = 150
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.App.MemoryLimitMB == nil || *m.App.MemoryLimitMB != 2048 {
+		t.Errorf("memory_limit_mb = %v, want 2048", m.App.MemoryLimitMB)
+	}
+	if m.App.CPUQuotaPercent == nil || *m.App.CPUQuotaPercent != 150 {
+		t.Errorf("cpu_quota_percent = %v, want 150", m.App.CPUQuotaPercent)
+	}
+}
+
+func TestLoadManifest_AcceptsResourceLimitBoundaries(t *testing.T) {
+	// 0 = explicit unlimited; 16 / 1048576 are the memory floor/ceiling;
+	// 1 / 6400 are the cpu floor/ceiling. All must validate.
+	for _, tc := range []struct{ mem, cpu int }{
+		{0, 0}, {16, 1}, {1048576, 6400},
+	} {
+		dir := t.TempDir()
+		writeManifest(t, dir, fmt.Sprintf("[app]\nmemory_limit_mb = %d\ncpu_quota_percent = %d\n", tc.mem, tc.cpu))
+		if _, err := LoadManifest(dir); err != nil {
+			t.Errorf("mem=%d cpu=%d: unexpected error: %v", tc.mem, tc.cpu, err)
+		}
+	}
+}
+
+func TestLoadManifest_RejectsOutOfRangeMemoryLimit(t *testing.T) {
+	// negative, and the unusable 1..15 MiB band (a likely typo), and above 1 TiB.
+	for _, v := range []int{-1, 1, 15, 1048577} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\nmemory_limit_mb = "+strconv.Itoa(v)+"\n")
+		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "memory_limit_mb must be 0 or between 16 and 1048576") {
+			t.Errorf("memory_limit_mb = %d: expected range error, got %v", v, err)
+		}
+	}
+}
+
+func TestLoadManifest_RejectsOutOfRangeCPUQuota(t *testing.T) {
+	for _, v := range []int{-1, 6401} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\ncpu_quota_percent = "+strconv.Itoa(v)+"\n")
+		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "cpu_quota_percent must be 0 or between 1 and 6400") {
+			t.Errorf("cpu_quota_percent = %d: expected range error, got %v", v, err)
 		}
 	}
 }

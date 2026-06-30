@@ -117,10 +117,14 @@ func cgroupV2RelPath(pid int) (string, error) {
 // memory.current / memory.reclaim and can set memory.max / cpu.max. Idempotent:
 // once memory is enabled (and cpu, when delegated) the subtree is prepared and
 // base is returned immediately.
-func ensureDelegatedBase() (string, error) {
+// ensureDelegatedBase returns the delegated base dir and whether the cpu
+// controller is delegated (so per-app cpu.max is enforceable; memory is always
+// enforceable on success, since it is required). The bool is meaningful only when
+// the error is nil.
+func ensureDelegatedBase() (string, bool, error) {
 	rel, err := cgroupV2RelPath(os.Getpid())
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	selfDir := filepath.Join(cgroupV2Mount, rel)
 	// Resolve the base. On a first call shinyhub is still in its service cgroup,
@@ -145,21 +149,21 @@ func ensureDelegatedBase() (string, error) {
 	// shinyhub already lives in _supervisor. Re-running is a no-op once memory is
 	// enabled and cpu is enabled (or unavailable).
 	if memEnabled && (cpuEnabled || !cpuAvail) {
-		return base, nil
+		return base, cpuAvail, nil
 	}
 	// The memory controller must be available to base. Without systemd
 	// Delegate=memory it is absent, and warm-wake stays off (caller degrades).
 	if !cgroupHasField(controllersPath, "memory") {
-		return "", fmt.Errorf("cgroup %s: memory controller not delegated (need systemd Delegate=memory)", rel)
+		return "", false, fmt.Errorf("cgroup %s: memory controller not delegated (need systemd Delegate=memory)", rel)
 	}
 	sup := filepath.Join(base, supervisorName)
 	if err := os.Mkdir(sup, 0o755); err != nil && !os.IsExist(err) {
-		return "", fmt.Errorf("mkdir %s: %w", sup, err)
+		return "", false, fmt.Errorf("mkdir %s: %w", sup, err)
 	}
 	// Empty base of processes (including shinyhub itself) before delegating
 	// controllers; cgroup v2 rejects enabling a controller while procs remain.
 	if err := drainCgroupProcs(base, sup); err != nil {
-		return "", err
+		return "", false, err
 	}
 	// Enable the controllers not yet delegated to children: memory (required) and
 	// cpu (when available).
@@ -172,10 +176,10 @@ func ensureDelegatedBase() (string, error) {
 	}
 	if len(ctrls) > 0 {
 		if err := writeCgroupFile(subtreePath, strings.Join(ctrls, " ")); err != nil {
-			return "", fmt.Errorf("enable %s on %s: %w", strings.Join(ctrls, " "), base, err)
+			return "", false, fmt.Errorf("enable %s on %s: %w", strings.Join(ctrls, " "), base, err)
 		}
 	}
-	return base, nil
+	return base, cpuAvail, nil
 }
 
 // setupAppCgroup creates base/<name> and moves pid into it, returning the app
@@ -218,6 +222,48 @@ func appCgroupCurrentMemory(dir string) (uint64, error) {
 		return 0, fmt.Errorf("read memory.current: %w", err)
 	}
 	return strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+}
+
+// killAppCgroupProcs SIGKILLs every process still in a cgroup so its directory
+// can be removed. Used when tearing down a one-shot job cgroup: a job may leave
+// backgrounded children in the cgroup after its main process exits, and without
+// reaping them teardown's rmdir fails with EBUSY and both the cgroup and the
+// orphans leak. A missing/unreadable cgroup.procs is a no-op (nothing to reap).
+func killAppCgroupProcs(dir string) {
+	procsPath := filepath.Join(dir, "cgroup.procs")
+	// Loop: a SIGKILLed parent may have already forked a child, and killed PIDs
+	// linger in cgroup.procs briefly. Re-read and re-kill until the cgroup is empty
+	// or a short budget elapses, so the following rmdir does not EBUSY-leak.
+	for i := 0; i < 10; i++ {
+		b, err := os.ReadFile(procsPath)
+		if err != nil {
+			return // cgroup gone
+		}
+		killed := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			if pid, perr := strconv.Atoi(strings.TrimSpace(line)); perr == nil && pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				killed++
+			}
+		}
+		if killed == 0 {
+			return // no members remain
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// readAppCgroupOOMCount reads memory.events for an app cgroup and returns the sum
+// of its kernel OOM-kill counters (oom_kill + oom_group_kill). Returns 0 when the
+// file is unreadable (e.g. the cgroup is gone), so callers treat "no data" as
+// "no new kills" against a baseline.
+func readAppCgroupOOMCount(dir string) uint64 {
+	b, err := os.ReadFile(filepath.Join(dir, "memory.events"))
+	if err != nil {
+		return 0
+	}
+	n, _ := parseCgroupOOMCounts(string(b))
+	return n
 }
 
 // reclaimAppCgroup reclaims up to targetBytes from an app cgroup directory.

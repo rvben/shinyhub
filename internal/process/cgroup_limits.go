@@ -1,6 +1,36 @@
 package process
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
+
+// parseCgroupOOMCounts sums the kernel OOM-kill counters from the contents of a
+// cgroup v2 memory.events file: oom_kill (per-process kills) plus oom_group_kill
+// (whole-cgroup kills, present on kernels with memory.oom.group). The bare "oom"
+// line (an event counter, not a kill) is deliberately ignored. ok is false when
+// the content has no recognizable memory.events lines at all (e.g. an empty read
+// or a non-Linux stub), so callers can distinguish "no kills" from "no data".
+func parseCgroupOOMCounts(content string) (total uint64, ok bool) {
+	for _, line := range strings.Split(content, "\n") {
+		field, valStr, found := strings.Cut(strings.TrimSpace(line), " ")
+		if !found {
+			continue
+		}
+		switch field {
+		case "low", "high", "max", "oom", "oom_kill", "oom_group_kill":
+			ok = true // a recognizable memory.events file
+		default:
+			continue
+		}
+		if field == "oom_kill" || field == "oom_group_kill" {
+			if v, err := strconv.ParseUint(valStr, 10, 64); err == nil {
+				total += v
+			}
+		}
+	}
+	return total, ok
+}
 
 // cgroupV2CPUPeriod is the cpu.max enforcement window in microseconds. 100ms is
 // the cgroup v2 default; a 100% quota over a 100000us period is one full core.

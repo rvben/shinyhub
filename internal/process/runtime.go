@@ -176,6 +176,29 @@ type WarmReadopter interface {
 	ReadoptWarm(slug string, index, pid int) error
 }
 
+// ResourceEnforcer is the optional runtime capability to report whether per-app
+// memory/CPU limits are ACTUALLY enforced on this host. Only the native runtime
+// implements it (enforcement is best-effort, gated on cgroup v2 delegation);
+// container/remote runtimes always enforce, so they do not implement it and the
+// manager treats them as enforcing.
+type ResourceEnforcer interface {
+	// ResourceEnforcement reports whether memory and cpu limits are enforced.
+	ResourceEnforcement() (memory, cpu bool)
+}
+
+// CgroupReadopter re-registers a replica's per-app resource-limit cgroup after a
+// server restart, INDEPENDENT of warm-wake. Without it, an adopted replica that
+// has a memory/CPU limit (but no warm-wake) loses its cgroup mapping, so the
+// runtime can neither tear it down nor detect an OOM-kill for it. Only the native
+// runtime implements it; container runtimes hold this state in their daemon.
+type CgroupReadopter interface {
+	// ReadoptCgroup re-registers the deterministic app-<slug>-<index> cgroup for
+	// an adopted pid when it exists and still contains the pid, and seeds its OOM
+	// baseline. Best-effort: returns nil when there is no such cgroup (no limit
+	// was set, or warm-wake is off and no base exists).
+	ReadoptCgroup(slug string, index, pid int) error
+}
+
 // PartialInventoryError reports that a tier's aggregated inventory is
 // incomplete: at least one worker was queried successfully, but Workers could
 // not be reached. The returned items hold what the reachable workers reported.

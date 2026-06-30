@@ -264,6 +264,35 @@ func TestManager_NormalizesRelativeAppDataDir(t *testing.T) {
 	}
 }
 
+// TestManager_Run_AppliesResourceLimits guards that a scheduled run inherits the
+// app's resolved per-replica memory/CPU ceiling and carries a JobRunID so the
+// native runtime can cap it in its OWN cgroup (not a live replica's). Without
+// this a heavy refresh-data job runs uncapped and can starve co-located apps.
+func TestManager_Run_AppliesResourceLimits(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	m.SetResourceResolver(func(_ *db.App) (int, int) { return 1024, 200 })
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+
+	rt.mu.Lock()
+	p := rt.lastParams
+	rt.mu.Unlock()
+	if p.MemoryLimitMB != 1024 {
+		t.Errorf("StartParams.MemoryLimitMB = %d, want 1024 (resolved app limit)", p.MemoryLimitMB)
+	}
+	if p.CPUQuotaPercent != 200 {
+		t.Errorf("StartParams.CPUQuotaPercent = %d, want 200 (resolved app limit)", p.CPUQuotaPercent)
+	}
+	if p.JobRunID == 0 {
+		t.Error("StartParams.JobRunID = 0, want the run id (namespaces the job cgroup)")
+	}
+}
+
 // TestManager_Run_PassesAppDataPathToRuntime guards the contract between
 // jobs.Manager and the runtime: every scheduled run must hand StartParams a
 // per-app AppDataPath. The runtime turns that into SHINYHUB_APP_DATA in the

@@ -177,6 +177,72 @@ func TestApplyAppManifestSettings_AbsentFieldsUntouched(t *testing.T) {
 	}
 }
 
+// TestApplyAppManifestSettings_ResourceLimits verifies that memory_limit_mb and
+// cpu_quota_percent are written when their Set* flag is set, left untouched when
+// it is not, and cleared to NULL when the pointer is nil (the failed-deploy
+// revert restores a pre-manifest NULL this way).
+func TestApplyAppManifestSettings_ResourceLimits(t *testing.T) {
+	store := mustOpenDB(t)
+	u := mustCreateUser(t, store, "owner", "developer")
+	app := mustCreateApp(t, store, "alpha", u.ID)
+
+	// Set both limits.
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID: app.ID, Slug: "alpha",
+		SetMemoryLimitMB: true, MemoryLimitMB: ptrInt(2048),
+		SetCPUQuotaPercent: true, CPUQuotaPercent: ptrInt(150),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MemoryLimitMB == nil || *got.MemoryLimitMB != 2048 {
+		t.Errorf("memory_limit_mb = %v, want 2048", got.MemoryLimitMB)
+	}
+	if got.CPUQuotaPercent == nil || *got.CPUQuotaPercent != 150 {
+		t.Errorf("cpu_quota_percent = %v, want 150", got.CPUQuotaPercent)
+	}
+
+	// Change only memory; cpu must survive (declared-only, like replicas).
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID: app.ID, Slug: "alpha",
+		SetMemoryLimitMB: true, MemoryLimitMB: ptrInt(512),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MemoryLimitMB == nil || *got.MemoryLimitMB != 512 {
+		t.Errorf("memory_limit_mb = %v, want 512", got.MemoryLimitMB)
+	}
+	if got.CPUQuotaPercent == nil || *got.CPUQuotaPercent != 150 {
+		t.Errorf("cpu_quota_percent clobbered: %v, want 150", got.CPUQuotaPercent)
+	}
+
+	// Revert path: a nil pointer with Set=true clears the column to NULL.
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID: app.ID, Slug: "alpha",
+		SetMemoryLimitMB: true, MemoryLimitMB: nil,
+		SetCPUQuotaPercent: true, CPUQuotaPercent: nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MemoryLimitMB != nil {
+		t.Errorf("memory_limit_mb = %v, want nil (NULL)", got.MemoryLimitMB)
+	}
+	if got.CPUQuotaPercent != nil {
+		t.Errorf("cpu_quota_percent = %v, want nil (NULL)", got.CPUQuotaPercent)
+	}
+}
+
 // TestApplyAppManifestSettings_IdentityHeadersTriState verifies the tri-state
 // reconcile semantics for identity_headers:
 //   - SetIdentityHeaders=true + non-nil false => column set to false

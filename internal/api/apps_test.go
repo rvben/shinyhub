@@ -1211,6 +1211,117 @@ func TestPatchAppResourceLimits(t *testing.T) {
 	}
 }
 
+// TestPatchAppResourceLimits_CPUAboveOneCore verifies that cpu_quota_percent
+// above 100 (multiple cores, e.g. 150 = 1.5 cores) is accepted on a non-Fargate
+// host, while a value past the 6400 (64-core) ceiling is rejected.
+func TestPatchAppResourceLimits_CPUAboveOneCore(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token := loginAsAdmin(t, srv)
+	createApp(t, srv, token, "my-app")
+
+	patch := func(body map[string]any) int {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/apps/my-app", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	if code := patch(map[string]any{"cpu_quota_percent": 150}); code != http.StatusOK {
+		t.Errorf("cpu_quota_percent=150 (1.5 cores): got %d, want 200", code)
+	}
+	if code := patch(map[string]any{"cpu_quota_percent": 6400}); code != http.StatusOK {
+		t.Errorf("cpu_quota_percent=6400 (64 cores): got %d, want 200", code)
+	}
+	if code := patch(map[string]any{"cpu_quota_percent": 6401}); code != http.StatusBadRequest {
+		t.Errorf("cpu_quota_percent=6401 (over ceiling): got %d, want 400", code)
+	}
+}
+
+// TestPatchAppResourceLimits_MemoryUpperBound verifies the API rejects an absurd
+// memory_limit_mb (which would overflow when a runtime multiplies MiB to bytes)
+// while still accepting the 1 TiB ceiling. The historical >=0 floor is preserved.
+func TestPatchAppResourceLimits_MemoryUpperBound(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token := loginAsAdmin(t, srv)
+	createApp(t, srv, token, "my-app")
+
+	patch := func(body map[string]any) int {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/apps/my-app", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	if code := patch(map[string]any{"memory_limit_mb": 1048576}); code != http.StatusOK {
+		t.Errorf("memory_limit_mb=1048576 (1 TiB): got %d, want 200", code)
+	}
+	if code := patch(map[string]any{"memory_limit_mb": 1048577}); code != http.StatusBadRequest {
+		t.Errorf("memory_limit_mb=1048577 (over ceiling): got %d, want 400", code)
+	}
+	if code := patch(map[string]any{"memory_limit_mb": 8}); code != http.StatusOK {
+		t.Errorf("memory_limit_mb=8 (small but allowed via API): got %d, want 200", code)
+	}
+}
+
+// TestPatchAppResourceLimits_NoOpDoesNotAudit verifies that a resource-only PATCH
+// that changes nothing logs no update_app audit event (and, by the same gate,
+// triggers no redeploy), while a real change does log one naming the field.
+func TestPatchAppResourceLimits_NoOpDoesNotAudit(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token := loginAsAdmin(t, srv)
+	createApp(t, srv, token, "my-app")
+
+	patch := func(body map[string]any) {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/apps/my-app", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PATCH %v: got %d: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+	countUpdateApp := func() int {
+		events, _ := store.ListAuditEvents("", 50, 0)
+		n := 0
+		for _, e := range events {
+			if e.Action == "update_app" && e.ResourceID == "my-app" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// cpu_quota_percent starts NULL; setting it to null again is a no-op.
+	patch(map[string]any{"cpu_quota_percent": nil})
+	if n := countUpdateApp(); n != 0 {
+		t.Errorf("no-op resource PATCH logged %d update_app events, want 0", n)
+	}
+
+	// A real change logs exactly one event naming the field.
+	patch(map[string]any{"cpu_quota_percent": 150})
+	if n := countUpdateApp(); n != 1 {
+		t.Errorf("real resource change logged %d update_app events, want 1", n)
+	}
+	events, _ := store.ListAuditEvents("update_app", 10, 0)
+	if len(events) == 0 || !strings.Contains(events[0].Detail, "cpu_quota_percent") {
+		t.Errorf("audit detail missing cpu_quota_percent: %+v", events)
+	}
+}
+
 // TestPatchAppResourceLimits_NativeMode verifies that under runtime.mode=native
 // both memory_limit_mb and cpu_quota_percent are accepted (enforced via a
 // per-app cgroup v2 memory.max / cpu.max).

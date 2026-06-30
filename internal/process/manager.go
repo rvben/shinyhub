@@ -87,6 +87,22 @@ type ProcessInfo struct {
 	WorkerID     string
 	AppVersion   string
 	DeploymentID int64
+	// OOMKilled is set when this replica's most recent exit was a kernel
+	// OOM-kill (it exceeded its memory limit). Used to surface a crash reason
+	// that names the limit rather than a generic crash.
+	OOMKilled bool
+}
+
+// ExitVerdict records how a replica's most recent process exited. It survives
+// the entry being replaced on restart so the watcher can still name an OOM-kill
+// after the crash-restart budget is spent.
+type ExitVerdict struct {
+	OOMKilled bool
+	// MemoryLimitMB is the enforced per-replica limit at the time of the exit
+	// (0 when unknown, e.g. an adopted process). The watcher falls back to the
+	// app's stored limit when this is 0.
+	MemoryLimitMB int
+	At            time.Time
 }
 
 type StartParams struct {
@@ -134,6 +150,10 @@ type StartParams struct {
 	// worker data plane. 0 means no cap. Persisted as a Docker label so re-adoption
 	// after an agent restart restores the same limit.
 	MaxSessions int
+	// JobRunID, when non-zero, marks this as a one-shot scheduled-job run (via
+	// RunOnce, not Start). It namespaces the job's own cgroup (job-<slug>-<runID>)
+	// so a capped job never shares replica 0's app-<slug>-0 cgroup.
+	JobRunID int64
 }
 
 type entry struct {
@@ -156,6 +176,7 @@ type Manager struct {
 	mu            sync.Mutex
 	entries       map[string][]*entry
 	logFiles      map[replicaKey]*LogFile
+	lastExit      map[replicaKey]ExitVerdict
 	appsDir       string
 	runtimesMu    sync.RWMutex
 	runtimes      map[string]Runtime
@@ -291,6 +312,7 @@ func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
 		entries:     make(map[string][]*entry),
 		logFiles:    make(map[replicaKey]*LogFile),
+		lastExit:    make(map[replicaKey]ExitVerdict),
 		appsDir:     appsDir,
 		runtimes:    map[string]Runtime{DefaultTier: rt},
 		defaultTier: DefaultTier,
@@ -508,6 +530,10 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			}
 		}()
 		rt.Wait(context.Background(), handle)
+		// Consume the OOM verdict from the runtime BEFORE taking m.mu: the
+		// runtime read takes its own lock, and the verdict was stashed by Wait
+		// before it tore the cgroup down.
+		oom := consumeOOM(rt, handle.PID)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		// Only the entry's current owner reacts to this exit. After an eviction or
@@ -516,12 +542,17 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		// close the replacement replica's log out from under it.
 		if pool := m.entries[p.Slug]; p.Index < len(pool) {
 			if e := pool[p.Index]; e != nil && e.handle == handle {
+				key := replicaKey{p.Slug, p.Index}
+				// Record the exit verdict (and OOM flag) BEFORE flipping Status,
+				// so no reader under m.mu can observe the crash without it. Every
+				// exit overwrites the verdict, so a non-OOM exit clears a stale OOM.
+				e.info.OOMKilled = oom
+				m.lastExit[key] = ExitVerdict{OOMKilled: oom, MemoryLimitMB: p.MemoryLimitMB, At: time.Now()}
 				if e.stopped {
 					e.info.Status = StatusStopped
 				} else {
 					e.info.Status = StatusCrashed
 				}
-				key := replicaKey{p.Slug, p.Index}
 				if lf := m.logFiles[key]; lf != nil {
 					lf.Close()
 					delete(m.logFiles, key)
@@ -586,6 +617,9 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	}
 
 	m.mu.Lock()
+	// A clean stop is not a crash: drop any exit verdict so a later unrelated
+	// crash never reads a stale OOM flag from this incarnation.
+	delete(m.lastExit, replicaKey{slug, index})
 	pool = m.entries[slug]
 	if index < len(pool) {
 		pool[index] = nil
@@ -1047,6 +1081,14 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 				"slug", slug, "idx", info.Index, "err", err)
 		}
 	}
+	// Re-register the resource-limit cgroup independent of warm-wake so an adopted
+	// limited replica can still be torn down and have OOM-kills detected.
+	if cr, ok := rt.(CgroupReadopter); ok {
+		if err := cr.ReadoptCgroup(slug, info.Index, handle.PID); err != nil {
+			slog.Warn("manager: resource-limit cgroup re-adopt failed",
+				"slug", slug, "idx", info.Index, "err", err)
+		}
+	}
 
 	go func() {
 		// See the Start monitor: deferred close keeps StopReplica from hanging on
@@ -1060,14 +1102,69 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 			}
 		}()
 		rt.Wait(context.Background(), handle)
+		oom := consumeOOM(rt, handle.PID)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if p := m.entries[slug]; info.Index < len(p) {
 			if e := p[info.Index]; e != nil && e.handle == handle && !e.stopped {
+				key := replicaKey{slug, info.Index}
+				// MemoryLimitMB is unknown for an adopted process (no StartParams);
+				// the watcher falls back to the app's stored limit when it is 0.
+				e.info.OOMKilled = oom
+				m.lastExit[key] = ExitVerdict{OOMKilled: oom, MemoryLimitMB: 0, At: time.Now()}
 				e.info.Status = StatusCrashed
 			}
 		}
 	}()
+}
+
+// oomReporter is the optional runtime capability to report whether a just-exited
+// process was OOM-killed (exceeded its cgroup memory limit). Only the native
+// runtime implements it; container/remote runtimes report false here (Docker
+// surfaces OOM through its own container state).
+type oomReporter interface {
+	ConsumeOOMKill(pid int) bool
+}
+
+// consumeOOM reads-and-clears the OOM verdict for a just-exited pid from the
+// runtime, or false when the runtime does not track OOM.
+func consumeOOM(rt Runtime, pid int) bool {
+	if r, ok := rt.(oomReporter); ok {
+		return r.ConsumeOOMKill(pid)
+	}
+	return false
+}
+
+// ResourceEnforcement reports whether per-app memory/CPU limits are actually
+// enforced across the given tiers (an app may span several). A limit is reported
+// enforced only when enforced on EVERY tier (AND), so an app that runs partly on
+// a native host without cgroup delegation is correctly flagged. The native
+// runtime is best-effort (gated on cgroup v2 delegation); container/remote
+// runtimes apply hard limits, so a runtime that does not implement
+// ResourceEnforcer is treated as enforcing both. With no tiers, the default tier
+// is used.
+func (m *Manager) ResourceEnforcement(tiers ...string) (memory, cpu bool) {
+	if len(tiers) == 0 {
+		tiers = []string{m.defaultTier}
+	}
+	memory, cpu = true, true
+	for _, tier := range tiers {
+		if re, ok := m.runtimeFor(tier).(ResourceEnforcer); ok {
+			tm, tc := re.ResourceEnforcement()
+			memory = memory && tm
+			cpu = cpu && tc
+		}
+	}
+	return memory, cpu
+}
+
+// LastExit returns the most recent exit verdict for a replica (whether it was
+// OOM-killed and the limit in force), or ok=false when none is recorded.
+func (m *Manager) LastExit(slug string, index int) (ExitVerdict, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.lastExit[replicaKey{slug, index}]
+	return v, ok
 }
 
 // ForceEntry directly inserts a ProcessInfo without starting an exit-monitoring

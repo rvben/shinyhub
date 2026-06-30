@@ -77,6 +77,12 @@ type Manager struct {
 	appsDir     string
 	appDataDir  string
 
+	// resolveResources resolves an app's effective per-replica memory/CPU limits
+	// (per-app value over the runtime default) so a scheduled job is capped by the
+	// same ceiling as its replicas. nil leaves jobs uncapped (the pre-existing
+	// behavior). Set once at startup via SetResourceResolver, before any run.
+	resolveResources func(app *db.App) (memoryMB, cpuPct int)
+
 	// globalSem caps the number of schedule runs executing simultaneously
 	// across every schedule. overlap_policy "concurrent" otherwise spawns an
 	// unbounded goroutine+process per trigger; this bounds the host/container
@@ -141,6 +147,13 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 		active:            make(map[int64]context.CancelFunc),
 		operatorCancelled: make(map[int64]bool),
 	}, nil
+}
+
+// SetResourceResolver installs the closure that resolves an app's effective
+// per-replica memory/CPU limits so scheduled jobs inherit the same ceiling as the
+// app's replicas. Call once at startup before any run is dispatched.
+func (m *Manager) SetResourceResolver(fn func(app *db.App) (memoryMB, cpuPct int)) {
+	m.resolveResources = fn
 }
 
 // lockFor returns the per-schedule lock for the given schedule ID, creating
@@ -620,6 +633,13 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		ContentDigest: deployments[0].ContentDigest,
 		AppVersion:    deployments[0].Version,
 		DeploymentID:  deployments[0].ID,
+		// JobRunID namespaces this one-shot run's own cgroup so a capped job never
+		// shares a live replica's. The resolved limits below mirror the per-replica
+		// ceiling so a heavy refresh job cannot exceed the app's memory/CPU budget.
+		JobRunID: runID,
+	}
+	if m.resolveResources != nil {
+		params.MemoryLimitMB, params.CPUQuotaPercent = m.resolveResources(app)
 	}
 
 	// Remote tiers do not have host-side app data. Drop the host-only paths

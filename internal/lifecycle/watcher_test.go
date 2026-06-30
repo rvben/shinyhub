@@ -32,12 +32,23 @@ type fakeManager struct {
 
 	// logTail is returned verbatim by LogTail (the captured crash diagnostic).
 	logTail string
+
+	// lastExit scripts LastExit(slug,index): the most recent exit verdict per
+	// replica, used to surface an OOM-kill reason.
+	lastExit map[replicaKey]process.ExitVerdict
 }
 
 func (f *fakeManager) LogTail(_ string, _, _ int) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.logTail
+}
+
+func (f *fakeManager) LastExit(slug string, index int) (process.ExitVerdict, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.lastExit[replicaKey{slug, index}]
+	return v, ok
 }
 
 func (f *fakeManager) All() []*process.ProcessInfo {
@@ -1699,6 +1710,9 @@ func (m *orderCheckingManager) Stop(slug string) error {
 	return m.inner.Stop(slug)
 }
 func (m *orderCheckingManager) Suspend(slug string) (bool, error) { return m.inner.Suspend(slug) }
+func (m *orderCheckingManager) LastExit(slug string, index int) (process.ExitVerdict, bool) {
+	return m.inner.LastExit(slug, index)
+}
 func (m *orderCheckingManager) LogTail(slug string, index, n int) string {
 	return m.inner.LogTail(slug, index, n)
 }

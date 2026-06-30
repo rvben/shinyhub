@@ -1623,17 +1623,36 @@ document.addEventListener('DOMContentLoaded', () => {
     renderIconPicker(app, canEdit);
 
     // Resources: per-replica memory/CPU caps. null (no limit) renders as empty.
-    // Limits are only enforceable under the docker runtime, so under native we
-    // show them read-only with a note rather than letting a Save 400.
-    const dockerRuntime = app.runtime_mode === 'docker';
-    document.getElementById('resources-memory').value =
-      app.memory_limit_mb != null ? String(app.memory_limit_mb) : '';
-    document.getElementById('resources-cpu').value =
-      app.cpu_quota_percent != null ? String(app.cpu_quota_percent) : '';
-    document.getElementById('resources-memory').disabled = !canEdit || !dockerRuntime;
-    document.getElementById('resources-cpu').disabled = !canEdit || !dockerRuntime;
-    document.getElementById('resources-save-btn').hidden = !canEdit || !dockerRuntime;
-    setHidden(document.getElementById('resources-runtime-note'), dockerRuntime);
+    // Limits are enforced in BOTH native and docker mode, so the controls are
+    // editable in both. Native enforcement is best-effort (needs cgroup v2
+    // delegation), so resource_enforcement drives a warning when it is absent.
+    const memInput = document.getElementById('resources-memory');
+    const cpuInput = document.getElementById('resources-cpu');
+    memInput.value = app.memory_limit_mb != null ? String(app.memory_limit_mb) : '';
+    cpuInput.value = app.cpu_quota_percent != null ? String(app.cpu_quota_percent) : '';
+    memInput.disabled = !canEdit;
+    cpuInput.disabled = !canEdit;
+    document.getElementById('resources-save-btn').hidden = !canEdit;
+    // Stash originals + status so saveResources confirms the restart only when a
+    // value actually changes on a running app (mirrors the scaling guard).
+    memInput.dataset.original = memInput.value;
+    cpuInput.dataset.original = cpuInput.value;
+    memInput.dataset.appStatus = app.status || '';
+    const enf = app.resource_enforcement;
+    const nativeMode = app.runtime_mode !== 'docker';
+    const note = document.getElementById('resources-runtime-note');
+    let warn = '';
+    if (nativeMode && enf) {
+      if (!enf.memory && !enf.cpu) {
+        warn = 'This host has no cgroup v2 delegation, so memory and CPU limits set here are not enforced. Configure systemd Delegate=cpu memory on the service to apply them.';
+      } else if (!enf.cpu) {
+        warn = 'CPU limits are not enforced on this host (the cgroup cpu controller is not delegated; needs Delegate=cpu). Memory limits are enforced.';
+      } else if (!enf.memory) {
+        warn = 'Memory limits are not enforced on this host (the cgroup memory controller is not delegated; needs Delegate=memory).';
+      }
+    }
+    note.textContent = warn;
+    setHidden(note, warn === '');
     setError(document.getElementById('resources-error'), '');
     setHidden(document.getElementById('resources-status'), true);
 
@@ -1832,9 +1851,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusEl = document.getElementById('resources-status');
     setError(errEl, '');
     setHidden(statusEl, true);
-    const parseLimit = (raw, label, max) => {
+    const parseLimit = (raw, label, min, max) => {
       const t = raw.trim();
-      if (t === '') return null; // empty == no limit
+      if (t === '') return null; // empty == no limit (inherit)
       // The API contract is a non-negative integer; reject fractional/exponent
       // input (e.g. "1.5", "1e2") instead of letting parseInt silently truncate.
       if (!/^\d+$/.test(t)) {
@@ -1844,6 +1863,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!Number.isInteger(n) || n < 0) {
         throw new Error(`${label} must be 0 or a positive whole number (leave empty for no limit).`);
       }
+      // 0 always means "no limit"; a positive value must fall in [min, max].
+      if (n !== 0 && min != null && n < min) {
+        throw new Error(`${label} must be 0 (no limit) or at least ${min} (leave empty to inherit).`);
+      }
       if (max != null && n > max) {
         throw new Error(`${label} must be between 0 and ${max} (leave empty for no limit).`);
       }
@@ -1851,11 +1874,23 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     let memory, cpu;
     try {
-      memory = parseLimit(document.getElementById('resources-memory').value, 'Memory limit', null);
-      cpu = parseLimit(document.getElementById('resources-cpu').value, 'CPU quota', 100);
+      memory = parseLimit(document.getElementById('resources-memory').value, 'Memory limit', 16, 1048576);
+      cpu = parseLimit(document.getElementById('resources-cpu').value, 'CPU quota', 1, 6400);
     } catch (e) {
       setError(errEl, e.message);
       return;
+    }
+    // A resource-limit change restarts the app (the cgroup ceiling is applied at
+    // spawn), dropping active sessions. Confirm before the disruptive case, only
+    // when a value actually changed on a running app (mirrors the scaling guard).
+    const memInput = document.getElementById('resources-memory');
+    const cpuInput = document.getElementById('resources-cpu');
+    const wasRunning = memInput.dataset.appStatus === 'running';
+    const changed = memInput.value.trim() !== (memInput.dataset.original ?? '') ||
+      cpuInput.value.trim() !== (cpuInput.dataset.original ?? '');
+    if (wasRunning && changed) {
+      const ok = window.confirm('Changing resource limits will restart the app and drop all active sessions. Continue?');
+      if (!ok) return;
     }
     const btn = document.getElementById('resources-save-btn');
     btn.disabled = true;

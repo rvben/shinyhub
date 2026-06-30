@@ -189,12 +189,27 @@ ceiling at 30-session offered load (up from 77 % uncached) and
 dropped p50 from ~100 ms to ~3 ms. Cheap to try, big win when it
 hits.
 
-### Memory limits (`memory_limit_mb`)
+### Resource limits (`memory_limit_mb`, `cpu_quota_percent`)
 
-`memory_limit_mb` is enforced **per replica** (Docker runtime). If
-you set `replicas: 3` and `memory_limit_mb: 512`, each of the three
-processes is allowed 512 MiB — total 1.5 GiB on the host. Size the
-host accordingly.
+`memory_limit_mb` and `cpu_quota_percent` are enforced **per replica**
+in BOTH native and docker mode. If you set `replicas: 3` and
+`memory_limit_mb: 512`, each of the three processes is allowed 512 MiB,
+for 1.5 GiB total on the host. Size the host accordingly.
+`cpu_quota_percent` is a percent of one core (100 = 1 core, 150 = 1.5
+cores); a replica that exceeds `memory_limit_mb` is OOM-killed by the
+kernel and surfaces through the crash path with a reason naming the limit.
+
+Both can be set per app in `shinyhub.toml [app]` (travels with the bundle,
+reconciled on deploy), via `shinyhub apps set --memory-limit-mb N
+--cpu-quota-percent M`, or in the Configuration tab. Scheduled jobs inherit
+the same per-replica ceiling.
+
+Native enforcement uses cgroup v2 (`memory.max` / `cpu.max`) and is
+**best-effort**: it requires the relevant controller to be delegated to the
+service (systemd `Delegate=cpu memory`). Without delegation the limit is not
+enforced (the app runs uncapped) and a warning is logged; the Configuration
+tab shows whether enforcement is active. CPU enforcement additionally needs
+`Delegate=cpu`; memory works with `Delegate=memory` alone.
 
 ### Hibernation
 
@@ -210,7 +225,8 @@ wake, but each replica handles its share of the post-wake burst.
 
 Replicas and cap work identically under `runtime.mode: docker`;
 each replica is its own container. Container memory/CPU limits
-from `memory_limit_mb` and `cpu_quota_percent` apply per container.
+from `memory_limit_mb` and `cpu_quota_percent` apply per container,
+and are always enforced (no cgroup-delegation caveat as in native mode).
 
 ## Runtime-level defaults
 

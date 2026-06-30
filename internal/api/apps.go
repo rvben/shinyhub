@@ -264,10 +264,19 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	asStatus := buildAutoscaleStatus(asEvent, asFound, s.cfg.Runtime.Autoscale.Cooldown)
 	envelope["autoscale_status"] = asStatus
 	envelope["global_autoscale_enabled"] = s.cfg.Runtime.Autoscale.Enabled
-	// runtime_mode lets the UI render per-app resource limits honestly: they are
-	// only enforceable under the docker runtime, so the Configuration tab shows
-	// the Resources controls read-only with an explanation under native.
+	// runtime_mode + resource_enforcement let the UI render per-app limits
+	// honestly. Limits are enforced in BOTH native and docker mode (native applies
+	// them as cgroup v2 memory.max / cpu.max), but native enforcement is best-effort
+	// and requires the controllers to be delegated to the service. resource_enforcement
+	// reports whether each controller is actually delegated, so the Resources controls
+	// can warn when a limit would be silently ignored.
 	envelope["runtime_mode"] = s.cfg.Runtime.Mode
+	if s.manager != nil {
+		// Aggregate across the app's actual placement tiers, not just the default
+		// tier, so a tier-placed app reports enforcement honestly.
+		memEnf, cpuEnf := s.manager.ResourceEnforcement(s.tiersForApp(app)...)
+		envelope["resource_enforcement"] = map[string]bool{"memory": memEnf, "cpu": cpuEnf}
+	}
 	// release_number/released_at drive the header's "vN · date" display (the
 	// human-friendly version). Omitted entirely until the app has a succeeded
 	// deploy, so the UI hides the version chip rather than showing "v0".
@@ -396,8 +405,11 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "memory_limit_mb must be an integer or null")
 			return
 		}
-		if v != nil && *v < 0 {
-			http.Error(w, "memory_limit_mb must be non-negative", http.StatusBadRequest)
+		// Keep the historical >=0 floor (no breaking change; the stricter >=16
+		// floor is manifest/UI-only) but bound the top so an absurd value cannot
+		// overflow when a runtime multiplies MiB into bytes.
+		if v != nil && (*v < 0 || *v > deploy.MaxMemoryLimitMB) {
+			http.Error(w, fmt.Sprintf("memory_limit_mb must be between 0 and %d", deploy.MaxMemoryLimitMB), http.StatusBadRequest)
 			return
 		}
 		memoryLimitMB, setMemoryLimitMB = v, true
@@ -409,9 +421,11 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "cpu_quota_percent must be an integer or null")
 			return
 		}
-		if v != nil && (*v < 0 || *v > 100) {
-			http.Error(w, "cpu_quota_percent must be between 0 and 100", http.StatusBadRequest)
-			return
+		if v != nil {
+			if err := deploy.ValidateCPUQuotaPercent(*v); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		cpuQuotaPercent, setCPUQuotaPercent = v, true
 	}
@@ -605,35 +619,22 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// delegated. Both are also enforced by the Docker runtime. No native-mode
 	// rejection is needed.
 
-	// Write-time rejection for single-tier Fargate deployments: a per-app
-	// memory or CPU limit that exceeds the task-definition ceiling would cause
-	// a cryptic RunTask error. Reject it here when every declared tier uses the
-	// fargate runtime so the operator gets a clear message. For mixed-tier
-	// deployments (some tiers are docker/native), the RunTask clamp in
-	// fargate.buildContainerOverride handles the enforcement silently because a
-	// single ceiling answer does not exist at the API layer.
-	if s.allTiersFargate() {
-		fargateCfg := s.cfg.Runtime.Fargate
-		if setMemoryLimitMB && memoryLimitMB != nil && *memoryLimitMB > 0 &&
-			fargateCfg.TaskMemoryMB > 0 && *memoryLimitMB > fargateCfg.TaskMemoryMB {
-			writeError(w, http.StatusBadRequest,
-				fmt.Sprintf("memory_limit_mb %d exceeds the Fargate task ceiling of %d MiB (runtime.fargate.task_memory_mb); reduce the limit or raise the task definition",
-					*memoryLimitMB, fargateCfg.TaskMemoryMB))
-			return
+	// Write-time rejection when a per-app memory/CPU limit exceeds the Fargate
+	// task ceiling (gated on allTiersFargate, the platform's single-ceiling rule;
+	// mixed-tier deployments are guarded at RunTask). Without it the limit would
+	// persist and Fargate silently clamp it, leaving the DB/UI/audit claiming a
+	// higher limit than is enforced. The manifest deploy path runs the same check.
+	{
+		var memArg, cpuArg *int
+		if setMemoryLimitMB {
+			memArg = memoryLimitMB
 		}
-		// CPU: convert quota percent to ECS units for the ceiling comparison using
-		// integer division (conservative: rejects only when the truncated units
-		// clearly exceed the ceiling; the clamp in buildContainerOverride rounds
-		// so the write-time check is never more restrictive than the actual cap).
-		if setCPUQuotaPercent && cpuQuotaPercent != nil && *cpuQuotaPercent > 0 &&
-			fargateCfg.TaskCPUUnits > 0 {
-			cpuUnits := (*cpuQuotaPercent * 1024) / 100
-			if cpuUnits > fargateCfg.TaskCPUUnits {
-				writeError(w, http.StatusBadRequest,
-					fmt.Sprintf("cpu_quota_percent %d%% (%d units) exceeds the Fargate task ceiling of %d units (runtime.fargate.task_cpu_units)",
-						*cpuQuotaPercent, cpuUnits, fargateCfg.TaskCPUUnits))
-				return
-			}
+		if setCPUQuotaPercent {
+			cpuArg = cpuQuotaPercent
+		}
+		if msg := s.fargateLimitViolation(memArg, cpuArg); msg != "" {
+			writeError(w, http.StatusBadRequest, msg)
+			return
 		}
 	}
 
@@ -645,7 +646,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// never leaves the row half-updated. The managed_by marker is a separate
 	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
 	// the post-patch refetch exposes the final consistent state to the caller.
-	priorStatus, _, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:               slug,
 		SetHibernate:       setHibernateTimeout,
 		HibernateMinutes:   hibernateTimeout,
@@ -732,13 +733,25 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A resource-limit change must reach the running replicas: the cgroup/
+	// container ceiling is set at spawn, so the pool is cycled (same as a
+	// replica-count change). The prior values come from inside PatchAppSettings'
+	// transaction (not the pre-write app snapshot), so detection is free of a
+	// time-of-check/time-of-use race with a concurrent PATCH. Per-field "changed"
+	// (not merely "present in the PATCH") gates both the redeploy and the audit
+	// entry, so a no-op PATCH neither restarts nor logs a phantom change.
+	oldMemoryLimitMB, oldCPUQuotaPercent := priorMemoryLimitMB, priorCPUQuotaPercent
+	memChanged := setMemoryLimitMB && !intPtrEqual(oldMemoryLimitMB, memoryLimitMB)
+	cpuChanged := setCPUQuotaPercent && !intPtrEqual(oldCPUQuotaPercent, cpuQuotaPercent)
+	resourceChanged := memChanged || cpuChanged
+
 	// Post-commit side effects. These only take effect once the settings are
 	// durably persisted.
 	if setMaxSessions && s.proxy != nil {
 		s.proxy.SetPoolCap(slug,
 			deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
-	if (setReplicas || setPlacement || clearPlacement) && priorStatus == "running" {
+	if (setReplicas || setPlacement || clearPlacement || resourceChanged) && priorStatus == "running" {
 		// Mark in-flight synchronously before launching the goroutine so the
 		// first GET after this PATCH returns observes the redeploy even though
 		// the app row still reads "running". The redeploy goroutine clears it.
@@ -756,8 +769,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if u := auth.UserFromContext(r.Context()); u != nil {
-		detail := patchAppAuditDetail(setMinWarmReplicas, newMinWarmReplicas)
+	// Audit any non-resource field touch exactly as before (these log even with
+	// an empty detail). For resource limits, audit only a real change, so a no-op
+	// resource-only PATCH neither redeploys nor logs a phantom update_app event.
+	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug ||
+		setReplicas || setMaxSessions || setMinWarmReplicas || setManagedBy ||
+		setPlacement || clearPlacement || setAutoscale
+	if u := auth.UserFromContext(r.Context()); u != nil && (nonResourceTouched || memChanged || cpuChanged) {
+		detail := patchAppAuditDetail(
+			setMinWarmReplicas, newMinWarmReplicas,
+			memChanged, oldMemoryLimitMB, memoryLimitMB,
+			cpuChanged, oldCPUQuotaPercent, cpuQuotaPercent)
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r),
@@ -766,13 +788,31 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, app)
 }
 
+// intPtrEqual reports whether two *int hold the same nullness and value.
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 // patchAppAuditDetail builds a JSON detail blob for the update_app audit event,
-// including only the fields that were actually changed in this PATCH. Currently
-// records the pre-warming floor when it is the changed field.
-func patchAppAuditDetail(setMinWarmReplicas bool, minWarmReplicas int) string {
+// recording only the fields that were actually changed in this PATCH. Resource
+// limits are recorded as {old,new} (nil renders as JSON null = inherit).
+func patchAppAuditDetail(
+	setMinWarmReplicas bool, minWarmReplicas int,
+	setMemoryLimitMB bool, oldMem, newMem *int,
+	setCPUQuotaPercent bool, oldCPU, newCPU *int,
+) string {
 	d := map[string]any{}
 	if setMinWarmReplicas {
 		d["min_warm_replicas"] = minWarmReplicas
+	}
+	if setMemoryLimitMB {
+		d["memory_limit_mb"] = map[string]any{"old": oldMem, "new": newMem}
+	}
+	if setCPUQuotaPercent {
+		d["cpu_quota_percent"] = map[string]any{"old": oldCPU, "new": newCPU}
 	}
 	if len(d) == 0 {
 		return ""
@@ -1106,14 +1146,18 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// Revert manifest [app] settings so the restored old pool runs under
 		// the settings it was deployed with, not the failed bundle's.
 		if manifestApplied {
-			if _, _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
-				Slug:             slug,
-				SetHibernate:     true,
-				HibernateMinutes: preManifestApp.HibernateTimeoutMinutes,
-				SetReplicas:      true,
-				Replicas:         preManifestApp.Replicas,
-				SetMaxSessions:   true,
-				MaxSessions:      preManifestApp.MaxSessionsPerReplica,
+			if _, _, _, _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+				Slug:               slug,
+				SetHibernate:       true,
+				HibernateMinutes:   preManifestApp.HibernateTimeoutMinutes,
+				SetReplicas:        true,
+				Replicas:           preManifestApp.Replicas,
+				SetMaxSessions:     true,
+				MaxSessions:        preManifestApp.MaxSessionsPerReplica,
+				SetMemoryLimitMB:   true,
+				MemoryLimitMB:      preManifestApp.MemoryLimitMB,
+				SetCPUQuotaPercent: true,
+				CPUQuotaPercent:    preManifestApp.CPUQuotaPercent,
 			}); rerr != nil {
 				slog.Error("deploy: revert manifest [app] settings after failed deploy", "slug", slug, "err", rerr)
 			}
@@ -2541,6 +2585,32 @@ func (s *Server) allTiersFargate() bool {
 		}
 	}
 	return true
+}
+
+// fargateLimitViolation returns a clear message when a per-app memory/CPU limit
+// would exceed the Fargate task ceiling, or "" when there is none. It is gated on
+// allTiersFargate (the platform's deliberate, single-answer rule: only an
+// all-Fargate cluster has one task ceiling to check against; mixed-tier
+// deployments are guarded at RunTask). Shared by the API PATCH and the manifest
+// deploy paths so both reject up front rather than letting Fargate silently clamp
+// (which would leave the DB/UI/audit claiming a higher limit than is enforced).
+// nil mem/cpu are skipped (the field is not being set).
+func (s *Server) fargateLimitViolation(memMB, cpuPct *int) string {
+	if !s.allTiersFargate() {
+		return ""
+	}
+	fc := s.cfg.Runtime.Fargate
+	if memMB != nil && *memMB > 0 && fc.TaskMemoryMB > 0 && *memMB > fc.TaskMemoryMB {
+		return fmt.Sprintf("memory_limit_mb %d exceeds the Fargate task ceiling of %d MiB (runtime.fargate.task_memory_mb); reduce the limit or raise the task definition", *memMB, fc.TaskMemoryMB)
+	}
+	if cpuPct != nil && *cpuPct > 0 && fc.TaskCPUUnits > 0 {
+		// Integer division mirrors buildContainerOverride's conservative clamp.
+		cpuUnits := (*cpuPct * 1024) / 100
+		if cpuUnits > fc.TaskCPUUnits {
+			return fmt.Sprintf("cpu_quota_percent %d%% (%d units) exceeds the Fargate task ceiling of %d units (runtime.fargate.task_cpu_units)", *cpuPct, cpuUnits, fc.TaskCPUUnits)
+		}
+	}
+	return ""
 }
 
 // hasLiveReplica reports whether at least one replica process for slug is

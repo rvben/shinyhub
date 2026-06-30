@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/spf13/cobra"
 )
 
@@ -657,6 +658,8 @@ type appsSetFlags struct {
 	replicas              int
 	maxSessionsPerReplica int
 	minWarmReplicas       int
+	memoryLimitMB         int
+	cpuQuotaPercent       int
 	tiers                 []string
 	autoscale             bool
 	autoscaleMin          int
@@ -688,6 +691,10 @@ func newAppsSetCmd() *cobra.Command {
 		"Per-replica new-session admission cap (0 = runtime default; 1..1000 = explicit)")
 	cmd.Flags().IntVar(&f.minWarmReplicas, "min-warm-replicas", 0,
 		"Pre-warming floor: replicas kept running during idle hibernation (0..1000)")
+	cmd.Flags().IntVar(&f.memoryLimitMB, "memory-limit-mb", 0,
+		"Per-replica memory ceiling in MiB (-1 = clear/inherit global, 0 = unlimited, 16..1048576 = explicit). Restarts the app.")
+	cmd.Flags().IntVar(&f.cpuQuotaPercent, "cpu-quota-percent", 0,
+		"Per-replica CPU ceiling in percent of one core (-1 = clear/inherit, 0 = unlimited, 1..6400; 100 = 1 core, 150 = 1.5 cores). Restarts the app.")
 	cmd.Flags().StringArrayVar(&f.tiers, "tier", nil,
 		"Per-tier replica placement as name=count (repeatable, e.g. --tier local=2 --tier burst=1); mutually exclusive with --replicas")
 	cmd.Flags().BoolVar(&f.autoscale, "autoscale", false,
@@ -712,6 +719,8 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	replicasChanged := cmd.Flags().Changed("replicas")
 	capChanged := cmd.Flags().Changed("max-sessions-per-replica")
 	minWarmReplicasChanged := cmd.Flags().Changed("min-warm-replicas")
+	memoryLimitChanged := cmd.Flags().Changed("memory-limit-mb")
+	cpuQuotaChanged := cmd.Flags().Changed("cpu-quota-percent")
 	tierChanged := cmd.Flags().Changed("tier")
 	autoscaleChanged := cmd.Flags().Changed("autoscale")
 	autoscaleMinChanged := cmd.Flags().Changed("autoscale-min")
@@ -719,8 +728,18 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	autoscaleTargetChanged := cmd.Flags().Changed("autoscale-target")
 	anyAutoscaleChanged := autoscaleChanged || autoscaleMinChanged || autoscaleMaxChanged || autoscaleTargetChanged
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --autoscale)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale)")
+	}
+	if memoryLimitChanged && f.memoryLimitMB != -1 {
+		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
+			return fmt.Errorf("--memory-limit-mb: %w (or -1 to clear/inherit)", err)
+		}
+	}
+	if cpuQuotaChanged && f.cpuQuotaPercent != -1 {
+		if err := deploy.ValidateCPUQuotaPercent(f.cpuQuotaPercent); err != nil {
+			return fmt.Errorf("--cpu-quota-percent: %w (or -1 to clear/inherit)", err)
+		}
 	}
 	if replicasChanged && f.replicas < 1 {
 		return fmt.Errorf("--replicas must be >= 1")
@@ -770,13 +789,15 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		}
 	}
 
-	// A replica or tier change restarts the app and drops active sessions.
+	// A replica, tier, or resource-limit change restarts the app and drops
+	// active sessions (the new pool/cgroup ceiling is applied at spawn).
 	// --yes bypasses the interactive prompt. On a non-TTY without --yes,
 	// refuse before any config or network access so the error is the first
 	// thing the caller sees, not a config-not-found or auth failure.
-	if (replicasChanged || tierChanged) && !f.yes && !isStdinTTY() {
+	restartChange := replicasChanged || tierChanged || memoryLimitChanged || cpuQuotaChanged
+	if restartChange && !f.yes && !isStdinTTY() {
 		return confirmationRequiredError(
-			"changing the replica pool restarts the app and drops active sessions",
+			"this change restarts the app and drops active sessions",
 			"--yes")
 	}
 
@@ -787,9 +808,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	slug := args[0]
 
 	// On a TTY without --yes, prompt interactively before proceeding.
-	if (replicasChanged || tierChanged) && !f.yes {
+	if restartChange && !f.yes {
 		fmt.Fprintf(cmd.ErrOrStderr(),
-			"Changing the replica pool restarts %q and drops active sessions. Continue? [y/N]: ", slug)
+			"This change restarts %q and drops active sessions. Continue? [y/N]: ", slug)
 		var confirm string
 		if _, err := fmt.Fscan(cmd.InOrStdin(), &confirm); err != nil {
 			return fmt.Errorf("read confirmation: %w", err)
@@ -798,7 +819,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		case "y", "yes":
 			// proceed
 		default:
-			return fmt.Errorf("aborted - replica pool unchanged")
+			return fmt.Errorf("aborted - no changes applied")
 		}
 	}
 
@@ -824,6 +845,23 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if minWarmReplicasChanged {
 		payload["min_warm_replicas"] = f.minWarmReplicas
+	}
+	if memoryLimitChanged {
+		// -1 → send null (clear/inherit); 0+ → send the value (0 = unlimited).
+		var v *int
+		if f.memoryLimitMB != -1 {
+			m := f.memoryLimitMB
+			v = &m
+		}
+		payload["memory_limit_mb"] = v
+	}
+	if cpuQuotaChanged {
+		var v *int
+		if f.cpuQuotaPercent != -1 {
+			c := f.cpuQuotaPercent
+			v = &c
+		}
+		payload["cpu_quota_percent"] = v
 	}
 	if anyAutoscaleChanged {
 		// Send only the fields the caller changed; the server merges them over
@@ -898,6 +936,26 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if minWarmReplicasChanged {
 		fmt.Printf("%s: min-warm-replicas set to %d\n", slug, f.minWarmReplicas)
+	}
+	if memoryLimitChanged {
+		switch f.memoryLimitMB {
+		case -1:
+			lines = append(lines, fmt.Sprintf("%s: memory-limit cleared (inherit global default)", slug))
+		case 0:
+			lines = append(lines, fmt.Sprintf("%s: memory-limit set to unlimited", slug))
+		default:
+			lines = append(lines, fmt.Sprintf("%s: memory-limit set to %d MiB per replica", slug, f.memoryLimitMB))
+		}
+	}
+	if cpuQuotaChanged {
+		switch f.cpuQuotaPercent {
+		case -1:
+			lines = append(lines, fmt.Sprintf("%s: cpu-quota cleared (inherit global default)", slug))
+		case 0:
+			lines = append(lines, fmt.Sprintf("%s: cpu-quota set to unlimited", slug))
+		default:
+			lines = append(lines, fmt.Sprintf("%s: cpu-quota set to %d%% of a core per replica", slug, f.cpuQuotaPercent))
+		}
 	}
 	if anyAutoscaleChanged {
 		if autoscaleChanged {

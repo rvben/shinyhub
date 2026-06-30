@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http/httptest"
 	"sync"
@@ -126,6 +127,37 @@ func TestHandleGetApp_AdvertisesRedeployInFlight(t *testing.T) {
 	}
 	if !body.RedeployInFlight {
 		t.Fatalf("GET app must advertise redeploy_in_flight while marked; body=%s", rec.Body.String())
+	}
+}
+
+// TestPatchApp_ResourceLimitChangeTriggersRedeploy proves a memory/cpu limit
+// change on a running app cycles the pool (so the new cgroup ceiling reaches the
+// running replicas), the same way a replica-count change does. The pre-held
+// deploy lock blocks the launched redeployApp goroutine so the synchronously-set
+// marker can be observed deterministically.
+func TestPatchApp_ResourceLimitChangeTriggersRedeploy(t *testing.T) {
+	const slug = "limited"
+	store, _ := newRedeployTestStore(t, slug, "running")
+	s := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, store,
+		process.NewManager(t.TempDir(), process.NewNativeRuntime()), proxy.New())
+
+	release := s.acquireDeployLock(slug)
+	defer release()
+
+	patch := map[string]any{"cpu_quota_percent": 150}
+	body, _ := json.Marshal(patch)
+	token, _ := auth.IssueJWT(1, "bob", "admin", "test-secret")
+	req := httptest.NewRequest("PATCH", "/api/apps/"+slug, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("PATCH cpu_quota_percent: got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	if !s.isRedeployInFlight(slug) {
+		t.Fatal("a resource-limit change on a running app must mark redeploy_in_flight (cycle the pool)")
 	}
 }
 

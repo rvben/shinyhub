@@ -86,6 +86,12 @@ func summarizeManifest(m *deploy.Manifest) []string {
 	} else if m.App.HibernateTimeoutMinutes != nil {
 		appParts = append(appParts, fmt.Sprintf("hibernate_timeout_minutes=%d", *m.App.HibernateTimeoutMinutes))
 	}
+	if m.App.MemoryLimitMB != nil {
+		appParts = append(appParts, fmt.Sprintf("memory_limit_mb=%d", *m.App.MemoryLimitMB))
+	}
+	if m.App.CPUQuotaPercent != nil {
+		appParts = append(appParts, fmt.Sprintf("cpu_quota_percent=%d", *m.App.CPUQuotaPercent))
+	}
 	if len(appParts) > 0 {
 		lines = append(lines, "app: "+strings.Join(appParts, ", "))
 	}
