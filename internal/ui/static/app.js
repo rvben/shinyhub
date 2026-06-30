@@ -766,10 +766,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Surface which apps are degraded (and why) without crowding the banner:
     // a hover tooltip plus the accessible name carry the actionable detail.
-    const tip = degradedTooltip(s);
+    // Name stale schedules in the tooltip/aria (slug: schedule), XSS-safe via textContent paths.
+    const staleNames = (s.staleSchedules || []).map((x) => `${x.slug}: ${x.schedule}`);
+    const baseTip = degradedTooltip(s);
+    const tipParts = [];
+    if (baseTip) tipParts.push(baseTip);
+    if (staleNames.length) tipParts.push(`Stale schedules - ${staleNames.join(', ')}`);
+    const tip = tipParts.join(' | ');
     if (tip) {
       fleetHealthEl.title = tip;
-      fleetHealthEl.setAttribute('aria-label', `Fleet health: ${s.statusLabel}. Degraded - ${tip}`);
+      fleetHealthEl.setAttribute('aria-label', `Fleet health: ${s.statusLabel}. ${tip}`);
     } else {
       fleetHealthEl.removeAttribute('title');
       fleetHealthEl.setAttribute('aria-label', `Fleet health: ${s.statusLabel}`);

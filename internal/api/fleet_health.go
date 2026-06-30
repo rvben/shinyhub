@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 )
@@ -11,12 +12,19 @@ import (
 // GET /api/fleet/health. It answers "is my fleet healthy across all backends?"
 // in one call, and is generic enough to drive an external status page.
 type fleetHealthResponse struct {
-	ServerVersion string                `json:"server_version"`
-	Apps          fleetAppCounts        `json:"apps"`
-	Replicas      fleetReplicaCounts    `json:"replicas"`
-	Workers       *fleetWorkerCounts    `json:"workers,omitempty"`
-	Tiers         []fleetHealthTier     `json:"tiers"`
-	DegradedApps  []fleetHealthDegraded `json:"degraded_apps"`
+	ServerVersion     string                `json:"server_version"`
+	Apps              fleetAppCounts        `json:"apps"`
+	Replicas          fleetReplicaCounts    `json:"replicas"`
+	Workers           *fleetWorkerCounts    `json:"workers,omitempty"`
+	Tiers             []fleetHealthTier     `json:"tiers"`
+	DegradedApps      []fleetHealthDegraded `json:"degraded_apps"`
+	StaleSchedules    int                   `json:"stale_schedules"`
+	StaleScheduleList []staleScheduleItem   `json:"stale_schedule_list"`
+}
+
+type staleScheduleItem struct {
+	Slug     string `json:"slug"`
+	Schedule string `json:"schedule"`
 }
 
 type fleetAppCounts struct {
@@ -199,6 +207,25 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(extras)
 	for _, t := range extras {
 		emit(t)
+	}
+
+	// Stale schedules (cron-aware) for the admin banner. Same query the
+	// metrics collector and `schedule status` use; bounded fleet, indexed.
+	// The list is capped by maxDegradedApps (50): the same "actionable list"
+	// bound used for degraded apps, so the response stays bounded on a large
+	// unhealthy fleet. The count (StaleSchedules) is uncapped.
+	resp.StaleScheduleList = []staleScheduleItem{}
+	if frs, ferr := s.store.ScheduleFreshness(); ferr == nil {
+		def := s.cfg.Scheduler.Location
+		now := time.Now()
+		for _, fr := range frs {
+			if scheduleStale(fr, def, now) {
+				resp.StaleSchedules++
+				if len(resp.StaleScheduleList) < maxDegradedApps {
+					resp.StaleScheduleList = append(resp.StaleScheduleList, staleScheduleItem{Slug: fr.Slug, Schedule: fr.Name})
+				}
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

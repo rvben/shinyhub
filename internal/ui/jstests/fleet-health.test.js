@@ -113,3 +113,31 @@ test('summariseFleetHealth: a crashed app → degraded/red + headline', () => {
   assert.equal(s.statusLabel, 'degraded');
   assert.match(s.headline, /1 crashed/);
 });
+
+test('summariseFleetHealth: stale schedules escalate to degraded', () => {
+  const s = summariseFleetHealth({
+    apps: { total: 3, running: 3, degraded: 0, crashed: 0 },
+    replicas: { running: 6, lost: 0, stopped: 0 },
+    tiers: [],
+    degraded_apps: [],
+    stale_schedules: 2,
+    stale_schedule_list: [
+      { slug: 'jp-dash', schedule: 'refresh-data' },
+      { slug: 'ccro-kpi', schedule: 'refresh-data' },
+    ],
+  });
+  assert.equal(s.statusClass, 'lost');
+  assert.equal(s.statusLabel, 'degraded');
+  assert.match(s.headline, /2 schedules stale/);
+  assert.equal(s.staleSchedules.length, 2);
+});
+
+test('summariseFleetHealth: no stale schedules stays healthy', () => {
+  const s = summariseFleetHealth({
+    apps: { total: 3, running: 3, degraded: 0, crashed: 0 },
+    replicas: { running: 6, lost: 0, stopped: 0 },
+    tiers: [], degraded_apps: [], stale_schedules: 0,
+  });
+  assert.equal(s.statusLabel, 'healthy');
+  assert.equal(s.staleSchedules.length, 0);
+});
