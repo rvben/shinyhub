@@ -22,6 +22,8 @@ func TestClassify(t *testing.T) {
 		{"crashed", `all replicas failed health check: replica 0: health: app at http://127.0.0.1:1/ crashed on startup before becoming healthy`, Crashed},
 		{"mixed crash and timeout prefers crashed", `all replicas failed health check: replica 0: health: app at x crashed on startup before becoming healthy` + "\n" + `replica 1: health: app at y did not become healthy within 120s`, Crashed},
 		{"unclassified 5xx", `internal error: database is locked`, ServerError},
+		{"build timeout", `uv sync: build exceeded the build timeout: context deadline exceeded`, BuildFailed},
+		{"renv build timeout", `renv restore: build exceeded the build timeout: context deadline exceeded`, BuildFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
