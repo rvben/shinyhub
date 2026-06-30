@@ -930,6 +930,26 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 				return float64(n)
 			},
 		)
+		// Schedule last-success gauge: DB-backed (restart-safe), one sample per
+		// schedule that has ever succeeded.
+		if err := reg.Register(metrics.NewScheduleFreshnessCollector(func() ([]metrics.ScheduleSample, error) {
+			rows, qerr := store.ScheduleFreshness()
+			if qerr != nil {
+				return nil, qerr
+			}
+			out := make([]metrics.ScheduleSample, len(rows))
+			for i, fr := range rows {
+				s := metrics.ScheduleSample{Slug: fr.Slug, Name: fr.Name}
+				if fr.LastSuccessAt != nil {
+					s.LastSuccessUnix = fr.LastSuccessAt.Unix()
+					s.OK = true
+				}
+				out[i] = s
+			}
+			return out, nil
+		})); err != nil {
+			slog.Warn("register schedule freshness collector", "err", err)
+		}
 		// Surface dropped audit events (e.g. disk full) as a counter so the
 		// silent loss of the compliance trail is alertable.
 		store.SetAuditErrorHook(reg.RecordAuditWriteError)
