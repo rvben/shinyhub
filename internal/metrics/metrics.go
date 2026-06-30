@@ -38,6 +38,7 @@ type Registry struct {
 
 	autoscaleScales  *prometheus.CounterVec
 	auditWriteErrors prometheus.Counter
+	runs             *prometheus.CounterVec
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -143,6 +144,12 @@ func New(version string) *Registry {
 	})
 	reg.MustRegister(auditWriteErrors)
 
+	runs := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_schedule_runs_total",
+		Help: "Total scheduled-job runs by app, schedule, and terminal status.",
+	}, []string{"slug", "schedule", "status"})
+	reg.MustRegister(runs)
+
 	return &Registry{
 		reg:              reg,
 		httpRequests:     httpRequests,
@@ -160,6 +167,7 @@ func New(version string) *Registry {
 
 		autoscaleScales:  autoscaleScales,
 		auditWriteErrors: auditWriteErrors,
+		runs:             runs,
 	}
 }
 
@@ -167,6 +175,20 @@ func New(version string) *Registry {
 // should be "success" or "failure".
 func (r *Registry) RecordDeploy(result string) {
 	r.deploys.WithLabelValues(result).Inc()
+}
+
+// RecordScheduleRun increments the per-status counter for a terminal scheduled
+// run. Called from jobs.Manager.finishRun, which only ever passes terminal
+// statuses (succeeded, failed, timed_out, cancelled, interrupted,
+// skipped_overlap).
+func (r *Registry) RecordScheduleRun(slug, schedule, status string) {
+	r.runs.WithLabelValues(slug, schedule, status).Inc()
+}
+
+// Register adds a custom collector to the registry. Used to wire the
+// DB-backed schedule-freshness collector from main.go.
+func (r *Registry) Register(c prometheus.Collector) error {
+	return r.reg.Register(c)
 }
 
 // RecordStateTransition increments the app lifecycle transition counter for the
