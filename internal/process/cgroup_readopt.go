@@ -23,6 +23,14 @@ func appCgroupDir(base, slug string, index int) string {
 	return filepath.Join(base, appCgroupName(slug, index))
 }
 
+// jobCgroupName is the cgroup directory name for a one-shot scheduled-job run. It
+// is deliberately distinct from appCgroupName so a capped job never lands in (and
+// writes its PID into) a live replica's app-<slug>-<index> cgroup. The run id
+// makes concurrent runs of the same schedule disjoint.
+func jobCgroupName(slug string, runID int64) string {
+	return fmt.Sprintf("job-%s-%d", slug, runID)
+}
+
 // cgroupContainsPID reports whether pid is a member of the cgroup at dir by
 // reading its cgroup.procs (one PID per line). A missing/unreadable file is an
 // error so the caller treats the cgroup as gone and degrades to stop-hibernate

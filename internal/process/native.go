@@ -95,14 +95,26 @@ type NativeRuntime struct {
 	cgroupBaseReady    bool
 	cgroupBase         string
 	appCgroups         map[int]string
+	// oomBaseline records each running PID's cgroup oom-kill counter at placement
+	// time; oomVerdict records, after exit, whether that counter advanced (a
+	// kernel OOM-kill due to the per-app memory limit). Both guarded by mu.
+	oomBaseline map[int]uint64
+	oomVerdict  map[int]bool
+	// limitsMemoryEnforced / limitsCPUEnforced report whether the corresponding
+	// cgroup v2 controller is delegated to the service, so a per-app limit is
+	// actually enforced (vs silently ignored). Set when ensureCgroupBase succeeds.
+	limitsMemoryEnforced bool
+	limitsCPUEnforced    bool
 }
 
 // NewNativeRuntime returns a ready-to-use NativeRuntime.
 func NewNativeRuntime() *NativeRuntime {
 	return &NativeRuntime{
-		cmds:       make(map[int]*exec.Cmd),
-		procs:      make(map[int]*gops.Process),
-		appCgroups: make(map[int]string),
+		cmds:        make(map[int]*exec.Cmd),
+		procs:       make(map[int]*gops.Process),
+		appCgroups:  make(map[int]string),
+		oomBaseline: make(map[int]uint64),
+		oomVerdict:  make(map[int]bool),
 	}
 }
 
@@ -125,7 +137,7 @@ func (r *NativeRuntime) SetSnapshot(enabled bool, reclaimMinFraction float64) {
 // both features degrade gracefully for the process lifetime.
 func (r *NativeRuntime) ensureCgroupBase() {
 	r.cgroupOnce.Do(func() {
-		base, err := ensureDelegatedBase()
+		base, cpuAvailable, err := ensureDelegatedBase()
 		if err != nil {
 			slog.Warn("native: cgroup base unavailable; warm-wake and resource limits disabled", "err", err)
 			return
@@ -133,9 +145,24 @@ func (r *NativeRuntime) ensureCgroupBase() {
 		r.mu.Lock()
 		r.cgroupBase = base
 		r.cgroupBaseReady = true
+		// Memory is required for the base to come up, so it is enforced on success;
+		// cpu is enforced only when its controller is also delegated (Delegate=cpu).
+		r.limitsMemoryEnforced = true
+		r.limitsCPUEnforced = cpuAvailable
 		r.mu.Unlock()
-		slog.Info("native: cgroup base ready", "cgroup_base", base)
+		slog.Info("native: cgroup base ready", "cgroup_base", base, "memory_enforced", true, "cpu_enforced", cpuAvailable)
 	})
+}
+
+// ResourceEnforcement reports whether per-app memory / cpu limits are actually
+// enforced on this host (the controller is delegated to the service), preparing
+// the cgroup base on first call. The UI/API surface this so an operator is not
+// misled into thinking a limit applies when cgroup delegation is absent.
+func (r *NativeRuntime) ResourceEnforcement() (memory, cpu bool) {
+	r.ensureCgroupBase()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.limitsMemoryEnforced, r.limitsCPUEnforced
 }
 
 // placeInAppCgroup moves a just-started replica process into its own per-app
@@ -180,7 +207,37 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 	}
 	r.mu.Lock()
 	r.appCgroups[pid] = dir
+	r.oomBaseline[pid] = readAppCgroupOOMCount(dir)
 	r.mu.Unlock()
+}
+
+// recordOOMVerdict reads the replica's cgroup oom-kill counter at exit and, if it
+// advanced past the placement-time baseline, marks the pid OOM-killed. Called from
+// Wait before teardown (which removes the cgroup dir). A no-op for untracked pids.
+func (r *NativeRuntime) recordOOMVerdict(pid int) {
+	r.mu.Lock()
+	dir, ok := r.appCgroups[pid]
+	base := r.oomBaseline[pid]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	if cur := readAppCgroupOOMCount(dir); cur > base {
+		r.mu.Lock()
+		r.oomVerdict[pid] = true
+		r.mu.Unlock()
+	}
+}
+
+// ConsumeOOMKill reports whether the pid's last exit was a kernel OOM-kill and
+// clears the per-pid OOM bookkeeping. Implements the manager's oomReporter.
+func (r *NativeRuntime) ConsumeOOMKill(pid int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v := r.oomVerdict[pid]
+	delete(r.oomVerdict, pid)
+	delete(r.oomBaseline, pid)
+	return v
 }
 
 // ReadoptWarm re-registers the per-app cgroup of a replica adopted from a prior
@@ -217,6 +274,37 @@ func (r *NativeRuntime) ReadoptWarm(slug string, index, pid int) error {
 	}
 	r.mu.Lock()
 	r.appCgroups[pid] = dir
+	r.mu.Unlock()
+	return nil
+}
+
+// ReadoptCgroup re-registers an adopted replica's per-app cgroup independent of
+// warm-wake, so a limited replica adopted after a server restart can still be
+// torn down and have its OOM-kills detected. Best-effort and idempotent: it
+// no-ops when the delegated base is unavailable or the deterministic cgroup
+// either does not exist or no longer holds the pid (i.e. the replica was
+// uncapped). It re-seeds the OOM baseline so only post-readopt kills count.
+func (r *NativeRuntime) ReadoptCgroup(slug string, index, pid int) error {
+	r.ensureCgroupBase()
+	r.mu.Lock()
+	ready := r.cgroupBaseReady
+	base := r.cgroupBase
+	r.mu.Unlock()
+	if !ready {
+		return nil
+	}
+	dir := appCgroupDir(base, slug, index)
+	ok, err := cgroupContainsPID(dir, pid)
+	if err != nil || !ok {
+		// No per-app cgroup for this replica (uncapped, no warm-wake), or it is
+		// gone. Not an error: the replica simply has nothing to re-adopt.
+		return nil
+	}
+	r.mu.Lock()
+	r.appCgroups[pid] = dir
+	if _, seeded := r.oomBaseline[pid]; !seeded {
+		r.oomBaseline[pid] = readAppCgroupOOMCount(dir)
+	}
 	r.mu.Unlock()
 	return nil
 }
@@ -298,6 +386,8 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 		// no *exec.Cmd to wait on. Poll the kernel for liveness; signal 0 is a
 		// permission/existence probe that returns ESRCH once the PID is gone.
 		err := waitForPIDExit(ctx, handle.PID)
+		// Read the OOM counter before teardown removes the cgroup dir.
+		r.recordOOMVerdict(handle.PID)
 		r.teardownAppCgroupFor(handle.PID)
 		return err
 	}
@@ -308,6 +398,8 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 	delete(r.procs, handle.PID)
 	r.mu.Unlock()
 	// The process has exited, so its cgroup is now empty and can be removed.
+	// Read the OOM counter first: teardown rmdirs the cgroup.
+	r.recordOOMVerdict(handle.PID)
 	r.teardownAppCgroupFor(handle.PID)
 	return err
 }
@@ -383,6 +475,60 @@ func (r *NativeRuntime) Stats(_ context.Context, handle RunHandle) (float64, uin
 	return cpu, mem.RSS, nil
 }
 
+// jobHasLimit reports whether a one-shot job run carries a per-replica resource
+// limit that the native runtime should enforce via a dedicated cgroup.
+func jobHasLimit(p StartParams) bool {
+	return p.JobRunID != 0 && (p.MemoryLimitMB > 0 || p.CPUQuotaPercent > 0)
+}
+
+// placeJobInCgroup moves a one-shot job process into its OWN cgroup
+// (job-<slug>-<runID>, never a live replica's app-<slug>-<index>) and applies the
+// app's memory/CPU limits, returning a teardown closure for the caller to defer.
+// Best-effort: returns a no-op when no limit is set or the delegated base is
+// unavailable (the job then runs uncapped, exactly as before this existed).
+func (r *NativeRuntime) placeJobInCgroup(p StartParams, pid int) func() {
+	noop := func() {}
+	if !jobHasLimit(p) {
+		return noop
+	}
+	r.mu.Lock()
+	ready := r.cgroupBaseReady
+	base := r.cgroupBase
+	r.mu.Unlock()
+	if !ready {
+		return noop
+	}
+	dir, err := setupAppCgroup(base, jobCgroupName(p.Slug, p.JobRunID), pid)
+	if err != nil {
+		slog.Warn("native: per-job cgroup setup failed; job runs uncapped",
+			"slug", p.Slug, "run_id", p.JobRunID, "err", err)
+		return noop
+	}
+	if p.MemoryLimitMB > 0 {
+		if err := setCgroupMemoryMax(dir, p.MemoryLimitMB); err != nil {
+			slog.Warn("native: job memory limit not applied; job runs uncapped",
+				"slug", p.Slug, "run_id", p.JobRunID, "limit_mb", p.MemoryLimitMB, "err", err)
+		}
+	}
+	if p.CPUQuotaPercent > 0 {
+		if err := setCgroupCPUMax(dir, p.CPUQuotaPercent); err != nil {
+			slog.Warn("native: job cpu limit not applied; job runs uncapped (needs Delegate=cpu)",
+				"slug", p.Slug, "run_id", p.JobRunID, "quota_percent", p.CPUQuotaPercent, "err", err)
+		}
+	}
+	return func() {
+		// A one-shot job may background children that outlive its main process and
+		// stay in this cgroup. Reap them first so rmdir does not EBUSY-leak the
+		// cgroup (and the orphans). For a job whose process group is intact this is
+		// belt-and-suspenders; for children that escaped the group via setsid the
+		// cgroup membership is the authoritative handle.
+		killAppCgroupProcs(dir)
+		if err := teardownAppCgroup(dir); err != nil {
+			slog.Warn("native: job cgroup teardown failed", "slug", p.Slug, "run_id", p.JobRunID, "dir", dir, "err", err)
+		}
+	}
+}
+
 // RunOnce blocks until the process exits or ctx is cancelled. On ctx cancel,
 // the process group receives SIGTERM, then SIGKILL after a 10-second grace.
 func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error) {
@@ -391,6 +537,12 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	}
 	if err := applySharedMounts(p); err != nil {
 		return ExitInfo{}, err
+	}
+	// Prepare the delegated cgroup base before forking (once) when this job needs
+	// a limit, so the child is born in base/_supervisor and can be moved into its
+	// own job cgroup below.
+	if jobHasLimit(p) {
+		r.ensureCgroupBase()
 	}
 	cmd := exec.Command(p.Command[0], p.Command[1:]...)
 	cmd.Dir = p.Dir
@@ -402,6 +554,10 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	if err := cmd.Start(); err != nil {
 		return ExitInfo{}, fmt.Errorf("start one-shot: %w", err)
 	}
+	// Cap the job in its own cgroup; teardown on every exit path (success,
+	// error, ctx timeout/cancel) via defer.
+	teardownJob := r.placeJobInCgroup(p, cmd.Process.Pid)
+	defer teardownJob()
 
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()

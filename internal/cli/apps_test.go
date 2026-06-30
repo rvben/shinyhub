@@ -86,6 +86,67 @@ func TestAppsSet_MaxSessionsZeroResetsToDefault(t *testing.T) {
 	}
 }
 
+func TestAppsSet_MemoryLimitMB(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--memory-limit-mb", "2048", "--yes"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := body["memory_limit_mb"]; got != float64(2048) {
+		t.Errorf("expected memory_limit_mb=2048, got %v", got)
+	}
+}
+
+func TestAppsSet_CPUQuotaPercent(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--cpu-quota-percent", "150", "--yes"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := body["cpu_quota_percent"]; got != float64(150) {
+		t.Errorf("expected cpu_quota_percent=150, got %v", got)
+	}
+}
+
+// -1 clears the column back to NULL (inherit global), sent as JSON null.
+func TestAppsSet_MemoryLimitClear(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--memory-limit-mb", "-1", "--yes"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	v, present := body["memory_limit_mb"]
+	if !present {
+		t.Fatalf("expected memory_limit_mb present (value null), got absent")
+	}
+	if v != nil {
+		t.Errorf("expected memory_limit_mb=null (clear), got %v", v)
+	}
+}
+
+func TestAppsSet_RejectsCPUQuotaOverCeiling(t *testing.T) {
+	setupCLITest(t)
+	_, err := execCLI(t, "apps", "set", "demo", "--cpu-quota-percent", "6401", "--yes")
+	if err == nil || !strings.Contains(err.Error(), "cpu_quota_percent must be 0 or between 1 and 6400") {
+		t.Errorf("expected cpu range error, got %v", err)
+	}
+}
+
 func TestAppsSet_CombinedFlags(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{}`)

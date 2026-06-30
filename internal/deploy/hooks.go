@@ -78,17 +78,30 @@ type AppSettings struct {
 	// reconciled into the DB.
 	StartupTimeoutSeconds *int `toml:"startup_timeout_seconds"`
 
+	// MemoryLimitMB / CPUQuotaPercent cap each replica's resources. They
+	// reconcile into apps.memory_limit_mb / apps.cpu_quota_percent on every
+	// deploy (declared-only, like Replicas: nil leaves the stored value
+	// unchanged). 0 = explicit unlimited; a positive value maps to cgroup v2
+	// memory.max / cpu.max per replica (cpu_quota_percent 100 = 1 full core).
+	// There is no manifest form for NULL (inherit-global); clear via
+	// `apps set --memory-limit-mb -1` / `--cpu-quota-percent -1`.
+	MemoryLimitMB   *int `toml:"memory_limit_mb"`
+	CPUQuotaPercent *int `toml:"cpu_quota_percent"`
+
 	HibernateResetToDefault bool `toml:"-"`
 }
 
 // Command and StartupTimeoutSeconds are not part of IsZero: they are read at
-// boot, not reconciled into the DB.
+// boot, not reconciled into the DB. MemoryLimitMB / CPUQuotaPercent ARE
+// reconciled into the DB (like Replicas), so they count.
 func (a AppSettings) IsZero() bool {
 	return a.HibernateTimeoutMinutes == nil &&
 		a.Replicas == nil &&
 		a.MaxSessionsPerReplica == nil &&
 		a.IdentityHeaders == nil &&
 		a.MinWarmReplicas == nil &&
+		a.MemoryLimitMB == nil &&
+		a.CPUQuotaPercent == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -254,6 +267,16 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.StartupTimeoutSeconds != nil && (*a.StartupTimeoutSeconds < 1 || *a.StartupTimeoutSeconds > 3600) {
 		return fmt.Errorf("startup_timeout_seconds must be between 1 and 3600, got %d", *a.StartupTimeoutSeconds)
+	}
+	if a.MemoryLimitMB != nil {
+		if err := ValidateMemoryLimitMB(*a.MemoryLimitMB); err != nil {
+			return err
+		}
+	}
+	if a.CPUQuotaPercent != nil {
+		if err := ValidateCPUQuotaPercent(*a.CPUQuotaPercent); err != nil {
+			return err
+		}
 	}
 	if a.Command != nil {
 		if err := validateCommandTemplate(a.Command); err != nil {

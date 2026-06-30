@@ -241,6 +241,40 @@ func TestManagerCrashDetection(t *testing.T) {
 	t.Error("expected StatusCrashed after process exited unexpectedly")
 }
 
+// TestManagerLastExit_RecordsCrash proves the exit monitor records a LastExit
+// verdict (carrying the enforced memory limit) when a replica exits, and that an
+// ordinary crash is not flagged OOMKilled. The OOM=true path is covered by the
+// watcher's crash-reason test; here the real native runtime has no cgroup OOM on
+// this host, so the verdict is a non-OOM crash.
+func TestManagerLastExit_RecordsCrash(t *testing.T) {
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+
+	if _, err := m.Start(process.StartParams{
+		Slug:          "exit-verdict",
+		Dir:           t.TempDir(),
+		Command:       []string{"sh", "-c", "exit 1"},
+		Port:          19222,
+		MemoryLimitMB: 512,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := m.LastExit("exit-verdict", 0); ok {
+			if v.OOMKilled {
+				t.Fatal("ordinary crash must not be flagged OOMKilled")
+			}
+			if v.MemoryLimitMB != 512 {
+				t.Errorf("LastExit.MemoryLimitMB = %d, want 512 (the enforced limit)", v.MemoryLimitMB)
+			}
+			return // pass
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("expected a LastExit verdict after the replica exited")
+}
+
 func TestManagerAdopt(t *testing.T) {
 	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	pid := os.Getpid()

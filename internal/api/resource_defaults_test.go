@@ -91,19 +91,32 @@ func TestResourceDefaults_AllSitesUseAppAwarePath(t *testing.T) {
 }
 
 func TestPatchApp_FargateRejection_ContractExists(t *testing.T) {
-	// Assert that handlePatchApp contains a write-time rejection for single-tier Fargate.
-	// allTiersFargate is the actual gate function; it has no other call site in
-	// apps.go, so its absence means the rejection block was removed.
-	path := filepath.Join(".", "apps.go")
-	b, err := os.ReadFile(path)
+	// Both write paths (API PATCH and manifest deploy) must reject a per-app limit
+	// that exceeds the Fargate task ceiling for an app placed on a fargate tier,
+	// via the shared fargateLimitViolation gate; otherwise Fargate silently clamps
+	// and the DB/UI/audit overstate the enforced limit.
+	apps, err := os.ReadFile(filepath.Join(".", "apps.go"))
 	if err != nil {
 		t.Fatalf("read apps.go: %v", err)
 	}
-	src := string(b)
-	if !strings.Contains(src, "allTiersFargate") {
-		t.Error("apps.go handlePatchApp: missing allTiersFargate gate (write-time Fargate rejection)")
+	src := string(apps)
+	if !strings.Contains(src, "func (s *Server) fargateLimitViolation(memMB, cpuPct *int)") {
+		t.Error("apps.go: missing the shared fargateLimitViolation ceiling gate")
 	}
-	if !strings.Contains(src, "TaskMemoryMB") {
-		t.Error("apps.go handlePatchApp: missing TaskMemoryMB ceiling check")
+	if !strings.Contains(src, "s.fargateLimitViolation(memArg, cpuArg)") {
+		t.Error("apps.go handlePatchApp: must call fargateLimitViolation as the write-time Fargate rejection")
+	}
+	if !strings.Contains(src, "allTiersFargate()") {
+		t.Error("apps.go fargateLimitViolation: must gate on allTiersFargate (single task-ceiling rule)")
+	}
+	if !strings.Contains(src, "TaskMemoryMB") || !strings.Contains(src, "TaskCPUUnits") {
+		t.Error("apps.go fargateLimitViolation: missing the TaskMemoryMB / TaskCPUUnits ceiling checks")
+	}
+	manifest, err := os.ReadFile(filepath.Join(".", "manifest_apply.go"))
+	if err != nil {
+		t.Fatalf("read manifest_apply.go: %v", err)
+	}
+	if !strings.Contains(string(manifest), "s.fargateLimitViolation(m.MemoryLimitMB, m.CPUQuotaPercent)") {
+		t.Error("manifest_apply.go validateManifestForServer: must reject manifest limits over the Fargate ceiling")
 	}
 }

@@ -2581,6 +2581,16 @@ type ApplyAppManifestSettingsParams struct {
 
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
+
+	// Resource limits reconcile like replicas (declared-only). The value is a
+	// *int so a non-nil pointer (including 0 = explicit unlimited) writes the
+	// column and a nil pointer with Set*=true clears it to NULL — the latter is
+	// how the failed-deploy revert restores a pre-manifest inherit state.
+	SetMemoryLimitMB bool
+	MemoryLimitMB    *int
+
+	SetCPUQuotaPercent bool
+	CPUQuotaPercent    *int
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -2652,6 +2662,24 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 		}
 	}
 
+	if p.SetMemoryLimitMB {
+		if _, err := tx.Exec(
+			`UPDATE apps SET memory_limit_mb = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.MemoryLimitMB, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update memory_limit_mb: %w", err)
+		}
+	}
+
+	if p.SetCPUQuotaPercent {
+		if _, err := tx.Exec(
+			`UPDATE apps SET cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.CPUQuotaPercent, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update cpu_quota_percent: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -2696,10 +2724,10 @@ type PatchAppSettingsParams struct {
 // row half-updated. It returns the app's prior status and replica count
 // (read inside the same transaction) so the caller can decide whether a
 // running pool needs a redeploy. Returns ErrNotFound if no app has the slug.
-func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, priorReplicas int, err error) {
+func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, priorReplicas int, priorMem, priorCPU *int, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return "", 0, fmt.Errorf("begin: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -2710,9 +2738,9 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 		p.Slug,
 	).Scan(&appID, &priorStatus, &priorReplicas, &curMem, &curCPU); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", 0, ErrNotFound
+			return "", 0, nil, nil, ErrNotFound
 		}
-		return "", 0, fmt.Errorf("load app: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("load app: %w", err)
 	}
 
 	if p.SetHibernate {
@@ -2720,7 +2748,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.HibernateMinutes, appID,
 		); err != nil {
-			return "", 0, fmt.Errorf("update hibernate: %w", err)
+			return "", 0, nil, nil, fmt.Errorf("update hibernate: %w", err)
 		}
 	}
 	if p.SetName {
@@ -2728,7 +2756,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Name, appID,
 		); err != nil {
-			return "", 0, fmt.Errorf("update name: %w", err)
+			return "", 0, nil, nil, fmt.Errorf("update name: %w", err)
 		}
 	}
 	if p.SetProjectSlug {
@@ -2736,7 +2764,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET project_slug = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.ProjectSlug, appID,
 		); err != nil {
-			return "", 0, fmt.Errorf("update project_slug: %w", err)
+			return "", 0, nil, nil, fmt.Errorf("update project_slug: %w", err)
 		}
 	}
 	if p.SetMemoryLimitMB || p.SetCPUQuotaPercent {
@@ -2752,7 +2780,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET memory_limit_mb = ?, cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			newMem, newCPU, appID,
 		); err != nil {
-			return "", 0, fmt.Errorf("update resource limits: %w", err)
+			return "", 0, nil, nil, fmt.Errorf("update resource limits: %w", err)
 		}
 	}
 	if p.SetReplicas {
@@ -2761,14 +2789,14 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 				`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`,
 				appID, p.Replicas,
 			); err != nil {
-				return "", 0, fmt.Errorf("prune replicas: %w", err)
+				return "", 0, nil, nil, fmt.Errorf("prune replicas: %w", err)
 			}
 		}
 		if _, err := tx.Exec(
 			`UPDATE apps SET replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Replicas, appID,
 		); err != nil {
-			return "", 0, fmt.Errorf("update replicas: %w", err)
+			return "", 0, nil, nil, fmt.Errorf("update replicas: %w", err)
 		}
 	}
 	if p.SetMaxSessions {
@@ -2776,7 +2804,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MaxSessions, appID,
 		); err != nil {
-			return "", 0, fmt.Errorf("update max_sessions_per_replica: %w", err)
+			return "", 0, nil, nil, fmt.Errorf("update max_sessions_per_replica: %w", err)
 		}
 	}
 
@@ -2785,14 +2813,26 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MinWarmReplicas, appID,
 		); err != nil {
-			return "", 0, fmt.Errorf("update min_warm_replicas: %w", err)
+			return "", 0, nil, nil, fmt.Errorf("update min_warm_replicas: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", 0, fmt.Errorf("commit: %w", err)
+		return "", 0, nil, nil, fmt.Errorf("commit: %w", err)
 	}
-	return priorStatus, priorReplicas, nil
+	// priorMem/priorCPU are the resource columns read inside this transaction, so
+	// callers detect a real change (and audit the true old value) without a
+	// time-of-check/time-of-use race against a concurrent PATCH.
+	return priorStatus, priorReplicas, intPtrFromNull(curMem), intPtrFromNull(curCPU), nil
+}
+
+// intPtrFromNull maps a sql.NullInt64 to a *int (invalid ⇒ nil).
+func intPtrFromNull(n sql.NullInt64) *int {
+	if !n.Valid {
+		return nil
+	}
+	v := int(n.Int64)
+	return &v
 }
 
 // nullIntFromPtr maps a *int to a sql.NullInt64 (nil ⇒ NULL).

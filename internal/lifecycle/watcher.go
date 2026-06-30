@@ -68,6 +68,9 @@ type manager interface {
 	// LogTail returns the last n lines of a replica's log joined by newlines (or
 	// "" if unreadable), used to capture a crash diagnostic.
 	LogTail(slug string, index, n int) string
+	// LastExit returns the most recent exit verdict for a replica (whether it
+	// was OOM-killed and the limit in force), or ok=false when none is recorded.
+	LastExit(slug string, index int) (process.ExitVerdict, bool)
 }
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
@@ -533,7 +536,7 @@ const (
 // (when present) followed by the tail of the replica's log, where a Python/R
 // traceback lands. The end of the text - the actual error - is preserved when the
 // reason is truncated.
-func (w *Watcher) crashReason(slug string, index int, bootErr error) string {
+func (w *Watcher) crashReason(slug string, index int, bootErr error, appMemLimitMB int) string {
 	tail := w.mgr.LogTail(slug, index, crashLogTailLines)
 	var reason string
 	switch {
@@ -544,10 +547,43 @@ func (w *Watcher) crashReason(slug string, index int, bootErr error) string {
 	default:
 		reason = tail
 	}
+	// When the most recent exit was a kernel OOM-kill, lead with a line that
+	// names the memory limit so the operator sees the ceiling was hit rather
+	// than reading it as a code bug. The verdict's own limit wins; fall back to
+	// the app's stored limit (e.g. for an adopted process where it is unknown).
+	if v, ok := w.mgr.LastExit(slug, index); ok && v.OOMKilled && time.Since(v.At) <= crashLoopWindow {
+		limit := v.MemoryLimitMB
+		if limit == 0 {
+			limit = appMemLimitMB
+		}
+		line := oomCrashReasonLine(limit)
+		if reason != "" {
+			reason = line + "\n\n" + reason
+		} else {
+			reason = line
+		}
+	}
 	if len(reason) > crashReasonMaxBytes {
 		reason = "...\n" + reason[len(reason)-crashReasonMaxBytes:]
 	}
 	return reason
+}
+
+// oomCrashReasonLine is the leading crash-reason line for an OOM-killed replica.
+// It names the memory limit when known so the reason is actionable.
+func oomCrashReasonLine(limitMB int) string {
+	if limitMB > 0 {
+		return fmt.Sprintf("exceeded memory limit: the kernel OOM-killed this replica (memory_limit_mb=%d)", limitMB)
+	}
+	return "exceeded memory limit: the kernel OOM-killed this replica"
+}
+
+// derefIntOr0 returns *p, or 0 when p is nil.
+func derefIntOr0(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // wakeReplica brings one replica back up. For a replica persisted as suspended it
@@ -745,7 +781,7 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 	w.mu.Unlock()
 
 	if count > w.cfg.RestartMaxAttempts {
-		reason := w.crashReason(slug, index, nil)
+		reason := w.crashReason(slug, index, nil, derefIntOr0(app.MemoryLimitMB))
 		if reason == "" {
 			reason = "the app crashed repeatedly"
 		}
@@ -893,7 +929,7 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 	// proxy can show it with a Restart action instead of an endless spinner. The
 	// app leaves the reconcilable set, so the watcher stops here until a restart.
 	if running == 0 && warm == 0 && downIdx >= 0 && w.allReplicasExhausted(app.Slug, app.Replicas) {
-		reason := w.crashReason(app.Slug, downIdx, nil)
+		reason := w.crashReason(app.Slug, downIdx, nil, derefIntOr0(app.MemoryLimitMB))
 		if reason == "" {
 			reason = "all replicas crashed and the restart budget is exhausted"
 		}

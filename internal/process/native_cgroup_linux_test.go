@@ -186,7 +186,7 @@ func TestEnsureDelegatedBase_Integration(t *testing.T) {
 	if os.Getenv("WWC_DELEGATE_IT") == "" {
 		t.Skip("set WWC_DELEGATE_IT=1 and run under systemd Delegate=memory")
 	}
-	base, err := ensureDelegatedBase()
+	base, _, err := ensureDelegatedBase()
 	if err != nil {
 		t.Fatalf("ensureDelegatedBase: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestEnsureDelegatedBase_Integration(t *testing.T) {
 		t.Fatalf("base %s does not have +memory in subtree_control", base)
 	}
 	// Idempotent: a second call returns the same base without error.
-	base2, err := ensureDelegatedBase()
+	base2, _, err := ensureDelegatedBase()
 	if err != nil || base2 != base {
 		t.Fatalf("ensureDelegatedBase not idempotent: base2=%q err=%v", base2, err)
 	}

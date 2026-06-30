@@ -1272,6 +1272,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("init jobs manager: %w", err)
 	}
+	// Cap scheduled jobs by the same per-replica memory/CPU ceiling as the app, so
+	// a heavy refresh-data run cannot exceed the app's resource budget on a shared
+	// native host.
+	jobsMgr.SetResourceResolver(func(app *db.App) (memoryMB, cpuPct int) {
+		defaultMem, defaultCPU := cfg.Runtime.DefaultResourcesForApp(app)
+		return deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem),
+			deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU)
+	})
 	sched := scheduler.New(jobsMgr, store, cfg.Scheduler.Location)
 	srv.SetJobs(jobsMgr, sched)
 

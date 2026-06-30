@@ -7,6 +7,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 // A runtime crash loop - the replica boots fine but keeps exiting shortly after
@@ -39,6 +40,38 @@ func TestHandleCrashed_RuntimeCrashLoopMarksCrashed(t *testing.T) {
 	}
 	if boots != 2 {
 		t.Fatalf("boots = %d, want 2 (restarts before giving up on the 3rd crash)", boots)
+	}
+}
+
+// When the most recent exit was an OOM-kill (the replica exceeded its memory
+// limit), the crash reason must NAME the limit rather than reading as a generic
+// crash, so the operator can see it was the ceiling - not a code bug.
+func TestHandleCrashed_OOMKillNamesMemoryLimit(t *testing.T) {
+	app := &db.App{ID: 1, Slug: "hungry", Status: "running", Replicas: 1}
+	st := newFakeStore(map[string]*db.App{"hungry": app}, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/hungry"}})
+	mgr := &fakeManager{
+		logTail: "loading frame...",
+		lastExit: map[replicaKey]process.ExitVerdict{
+			{"hungry", 0}: {OOMKilled: true, MemoryLimitMB: 2048, At: time.Now()},
+		},
+	}
+	deployFn := func(_, _ string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{Index: idx, PID: 1, Port: 2}, nil
+	}
+	w := newTestWatcher(Config{RestartMaxAttempts: 2}, mgr, newFakeProxy(), st, deployFn)
+
+	for i := 0; i < 3; i++ {
+		w.handleCrashed("hungry", 0)
+	}
+
+	if got := appStatusOf(st, "hungry"); got != "crashed" {
+		t.Fatalf("status = %q, want crashed", got)
+	}
+	st.mu.Lock()
+	reason := st.crashReasons["hungry"]
+	st.mu.Unlock()
+	if !strings.Contains(reason, "memory limit") || !strings.Contains(reason, "2048") {
+		t.Fatalf("crash reason = %q, want it to name the exceeded memory limit (2048)", reason)
 	}
 }
 

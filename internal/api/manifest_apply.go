@@ -39,6 +39,13 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 	if m.Replicas != nil && s.cfg.Runtime.MaxReplicas > 0 && *m.Replicas > s.cfg.Runtime.MaxReplicas {
 		return newValidationError("replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas)
 	}
+	// Reject a manifest resource limit that exceeds the Fargate task ceiling BEFORE
+	// Phase A writes it / the pool is torn down - otherwise the limit persists and
+	// Fargate silently clamps it. Gated on allTiersFargate, matching the API PATCH
+	// path. msg already contains rendered "%"/digits, so pass it as an arg.
+	if msg := s.fargateLimitViolation(m.MemoryLimitMB, m.CPUQuotaPercent); msg != "" {
+		return newValidationError("%s", msg)
+	}
 	return nil
 }
 
@@ -73,6 +80,10 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		IdentityHeaders:          m.IdentityHeaders,
 		SetMinWarmReplicas:       m.MinWarmReplicas != nil,
 		MinWarmReplicas:          derefOrZero(m.MinWarmReplicas),
+		SetMemoryLimitMB:         m.MemoryLimitMB != nil,
+		MemoryLimitMB:            m.MemoryLimitMB,
+		SetCPUQuotaPercent:       m.CPUQuotaPercent != nil,
+		CPUQuotaPercent:          m.CPUQuotaPercent,
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -313,6 +324,12 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.MinWarmReplicas != nil {
 		d["min_warm_replicas"] = *m.MinWarmReplicas
 	}
+	if m.MemoryLimitMB != nil {
+		d["memory_limit_mb"] = *m.MemoryLimitMB
+	}
+	if m.CPUQuotaPercent != nil {
+		d["cpu_quota_percent"] = *m.CPUQuotaPercent
+	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command
 	}
@@ -337,6 +354,12 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.MinWarmReplicas != nil {
 		d["min_warm_replicas"] = *m.MinWarmReplicas
+	}
+	if m.MemoryLimitMB != nil {
+		d["memory_limit_mb"] = *m.MemoryLimitMB
+	}
+	if m.CPUQuotaPercent != nil {
+		d["cpu_quota_percent"] = *m.CPUQuotaPercent
 	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command

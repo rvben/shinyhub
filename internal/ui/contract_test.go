@@ -47,6 +47,25 @@ func TestDeployModalReadsManifestSummary(t *testing.T) {
 		"the deploy modal must keep #deploy-result as the slot for the post-deploy manifest summary")
 }
 
+// TestResourceLimitsUIWiring guards the Configuration → Resources controls
+// against the API contract: per-app memory/CPU limits are enforced in BOTH
+// native and docker mode, the CPU ceiling is 6400 (64 cores, matching the
+// widened API), and the envelope's resource_enforcement {memory,cpu} drives a
+// "not enforced" warning so an operator on a host without cgroup delegation is
+// not misled. The save path must confirm the restart a limit change triggers.
+func TestResourceLimitsUIWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="resources-cpu"`,
+		"the Resources section must keep the CPU quota input")
+	assertContains(t, "index.html", `max="6400"`,
+		"the CPU quota input must allow up to 6400 (64 cores), matching the widened API")
+	assertContains(t, "app.js", "app.resource_enforcement",
+		"the Resources render must read the envelope's resource_enforcement to warn when native enforcement is absent; see internal/api/apps.go (resource_enforcement)")
+	assertContains(t, "app.js", "6400",
+		"saveResources must validate the CPU quota against the 6400 ceiling")
+	assertContains(t, "app.js", "will restart the app and drop all active sessions",
+		"saveResources must confirm the restart a resource-limit change triggers")
+}
+
 // TestEnvListUnwrapsResponse guards the env-list consumer.
 // GET /api/apps/:slug/env returns {env: [...]} (internal/api/env.go
 // handleEnvList) and refreshEnvList in app.js reads data.env.
@@ -1518,17 +1537,20 @@ func TestConfigurationSurfacesGeneralAndResources(t *testing.T) {
 	}
 }
 
-// TestResourcesGatedByRuntimeMode guards that per-app resource limits adapt to
-// the runtime: they are only enforceable under docker, so the server exposes
-// runtime_mode and the client renders Resources read-only (with a note) under
-// native instead of letting a Save 400.
-func TestResourcesGatedByRuntimeMode(t *testing.T) {
+// TestResourcesEnforcementHonesty guards that per-app resource limits are
+// editable in BOTH native and docker mode, and that the client surfaces the
+// envelope's runtime_mode + resource_enforcement so a native host without cgroup
+// delegation shows a "not enforced" note rather than silently accepting an
+// unenforced limit. The detail view must merge both envelope fields onto app.
+func TestResourcesEnforcementHonesty(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "body.runtime_mode",
 		"the detail view must read runtime_mode from the GET envelope")
-	assertContains(t, "app.js", "app.runtime_mode === 'docker'",
-		"the Resources section must gate editing on the docker runtime")
+	assertContains(t, "views/app-detail.js", "body.resource_enforcement",
+		"the detail view must merge resource_enforcement from the envelope so app.resource_enforcement is defined; see internal/api/apps.go")
+	assertContains(t, "app.js", "app.runtime_mode !== 'docker'",
+		"the Resources render must treat non-docker as native (limits still apply) and key the enforcement warning off it")
 	assertContains(t, "index.html", `id="resources-runtime-note"`,
-		"a note must explain that limits need the docker runtime")
+		"a note element must remain so the render can show the native not-enforced warning")
 }
 
 // TestSettingsExplicitSaveDirtyTracking guards the explicit-save model: every

@@ -1065,6 +1065,41 @@ func ResolveCPUQuotaPercent(perAppPct *int, defaultPct int) int {
 	return defaultPct
 }
 
+// Resource-limit bounds shared across the manifest, the CLI/API, and the UI so
+// every surface agrees on the same contract. 0 means "explicit unlimited";
+// positive values map to cgroup v2 memory.max / cpu.max per replica.
+const (
+	// MinMemoryLimitMB is the smallest enforceable per-app memory ceiling; below
+	// this no R/Python runtime can start, so a value in 1..15 is rejected as a
+	// likely typo. The API PATCH endpoint keeps its historical >=0 floor for
+	// backward compatibility; this stricter floor applies to the manifest + UI.
+	MinMemoryLimitMB = 16
+	// MaxMemoryLimitMB caps the memory ceiling at 1 TiB as a sanity bound.
+	MaxMemoryLimitMB = 1024 * 1024
+	// MaxCPUQuotaPercent caps the CPU ceiling at 64 cores. The bound is
+	// host-independent so a bundle validates identically everywhere; the host
+	// enforces only the cores it physically has.
+	MaxCPUQuotaPercent = 6400
+)
+
+// ValidateMemoryLimitMB enforces the manifest/UI memory contract: 0 (explicit
+// unlimited) or MinMemoryLimitMB..MaxMemoryLimitMB.
+func ValidateMemoryLimitMB(v int) error {
+	if v != 0 && (v < MinMemoryLimitMB || v > MaxMemoryLimitMB) {
+		return fmt.Errorf("memory_limit_mb must be 0 or between %d and %d, got %d", MinMemoryLimitMB, MaxMemoryLimitMB, v)
+	}
+	return nil
+}
+
+// ValidateCPUQuotaPercent enforces the shared CPU contract used by the manifest,
+// the API PATCH endpoint, and the UI: 0 (inherit/unlimited) or 1..MaxCPUQuotaPercent.
+func ValidateCPUQuotaPercent(v int) error {
+	if v < 0 || v > MaxCPUQuotaPercent {
+		return fmt.Errorf("cpu_quota_percent must be 0 or between 1 and %d, got %d", MaxCPUQuotaPercent, v)
+	}
+	return nil
+}
+
 // ResolveIdentityHeaders resolves an app's effective identity-forwarding
 // flag: the global config false is a hard kill switch a manifest cannot
 // override; otherwise the per-app column applies (nil = inherit = on).

@@ -84,7 +84,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 			{Name: "deploy_count", Type: "integer", Desc: "Cumulative deployment number; 0 when the server does not report one"},
 			{Name: "version", Type: "string", Desc: "Version string from the deployment; empty when the server does not report one"},
 		},
-		Notes: "shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; it travels with the bundle and also applies on wake, scale, and rollback.",
+		Notes: "shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; it travels with the bundle and also applies on wake, scale, and rollback. shinyhub.toml [app] also accepts memory_limit_mb (0 or 16-1048576) and cpu_quota_percent (0 or 1-6400; 100 = 1 core) - per-replica cgroup v2 ceilings reconciled into the app on deploy (declared-only, like replicas); 0 = explicit unlimited, omitted = unchanged. Clear back to inherit-global with `shinyhub apps set --memory-limit-mb -1` / `--cpu-quota-percent -1`.",
 	},
 
 	// ── apps (container) ─────────────────────────────────────────────────────
@@ -108,6 +108,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "owner_id", Type: "integer"},
 		{Name: "replicas", Type: "integer"},
 		{Name: "max_sessions_per_replica", Type: "integer"},
+		{Name: "memory_limit_mb", Type: "integer", Desc: "Per-replica memory ceiling in MiB; null = inherit global default, 0 = unlimited"},
+		{Name: "cpu_quota_percent", Type: "integer", Desc: "Per-replica CPU ceiling in percent of one core (100 = 1 core); null = inherit, 0 = unlimited"},
 		{Name: "deploy_count", Type: "integer"},
 		{Name: "created_at", Type: "string"},
 		{Name: "updated_at", Type: "string"},
@@ -122,6 +124,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "can_manage", Type: "boolean"},
 		{Name: "autoscale_status", Type: "object"},
 		{Name: "global_autoscale_enabled", Type: "boolean"},
+		{Name: "runtime_mode", Type: "string", Desc: "native | docker"},
+		{Name: "resource_enforcement", Type: "object", Desc: "{memory,cpu} booleans: whether each per-app limit is actually enforced (native is best-effort, gated on cgroup delegation)"},
 	}},
 	"apps logs": {Mutating: ro, Streaming: true},
 	"apps metrics": {Mutating: ro, OutputFields: []fieldSpec{
@@ -495,7 +499,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 
 	// ── manifest ──────────────────────────────────────────────────────────────
 	"manifest":          {Mutating: ro},
-	"manifest validate": {Mutating: ro},
+	"manifest validate": {Mutating: ro, Notes: "Validates shinyhub.toml [app] fields including memory_limit_mb (0 or 16-1048576 MiB) and cpu_quota_percent (0 or 1-6400; 100 = 1 core); out-of-range values are rejected with a clear message."},
 
 	// ── schema ────────────────────────────────────────────────────────────────
 	"schema": {Mutating: ro},

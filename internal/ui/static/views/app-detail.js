@@ -85,8 +85,14 @@ export function mountAppDetail(ctx) {
     const body = await resp.json();
     const app = body.app || body;
     if (typeof body.can_manage === 'boolean') app.can_manage = body.can_manage;
-    // runtime_mode gates the Resources controls (limits are docker-only).
+    // runtime_mode + resource_enforcement drive the Resources controls: limits
+    // apply in both native and docker mode, and resource_enforcement {memory,cpu}
+    // says whether native cgroup enforcement is actually active. Copy both onto
+    // app so the render reads app.* consistently.
     if (typeof body.runtime_mode === 'string') app.runtime_mode = body.runtime_mode;
+    if (body.resource_enforcement && typeof body.resource_enforcement === 'object') {
+      app.resource_enforcement = body.resource_enforcement;
+    }
     // release_number/released_at (human-friendly "vN · date") live at the envelope
     // level — copy onto app so the header and overview read app.* consistently.
     // Absent until the app has a succeeded deploy (then the version chip hides).
