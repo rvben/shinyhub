@@ -65,6 +65,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.9.0](https://github.com/rvben/shinyhub/compare/v0.8.29...v0.9.0) - 2026-06-30
+
+### Added
+
+- **ui**: surface stale schedules in the admin fleet-health banner ([c857386](https://github.com/rvben/shinyhub/commit/c8573866cbb2ca6da1ceed4317d1b8818fc2e208))
+- **cli**: add schedule status command for fleet data-freshness ([eee56b1](https://github.com/rvben/shinyhub/commit/eee56b1b3cdd8dd2cde30412dc093baeeebc10e2))
+- **api**: add admin schedule-status endpoint with cron-aware stale flag ([9132a89](https://github.com/rvben/shinyhub/commit/9132a896bb20cdbe1bf2380ee065e57d210e15f9))
+- **metrics**: add DB-backed schedule last-success collector ([dbd6090](https://github.com/rvben/shinyhub/commit/dbd60903680dec07e56b266dead07aacd3963a82))
+- **jobs**: record terminal scheduled-run outcomes to metrics ([29137b1](https://github.com/rvben/shinyhub/commit/29137b19538e35fb0ce408e03d9e8bb4e1702557))
+- **metrics**: add schedule_runs_total counter and Register hook ([375a84a](https://github.com/rvben/shinyhub/commit/375a84acea227533dd5292efed4c5f41b668f0d1))
+- **db**: add ScheduleFreshness query and shared timezone resolution ([ac1fd4d](https://github.com/rvben/shinyhub/commit/ac1fd4d57d685d0f8065984af1f2c8b3604d0d69))
+- **schedulespec**: add cron-aware IsStale freshness policy ([1825d20](https://github.com/rvben/shinyhub/commit/1825d20415966bd4ff1ddeabf2fecacf83e53083))
+- **cli**: parallelise fleet apply with bounded --concurrency (default 3) ([6c99095](https://github.com/rvben/shinyhub/commit/6c990950bf429504ddcddf4c279a730335ede996))
+- **cli**: document fleet apply --concurrency in the schema ([b6845f9](https://github.com/rvben/shinyhub/commit/b6845f962c4e69b4f7a1d4780d76a4ec05eeed9c))
+- **cli**: run fleet apply deploys under a bounded worker pool ([6e61995](https://github.com/rvben/shinyhub/commit/6e61995a41625a796d5def7d354598e3d0872e97))
+- **cli**: add --concurrency flag to fleet apply ([d7068c2](https://github.com/rvben/shinyhub/commit/d7068c2c6301b9741555b766713cea16007d7936))
+- **deploy**: bound the environment build with build_timeout_seconds + progress logging ([0f33508](https://github.com/rvben/shinyhub/commit/0f3350829c091f5fccc363ebc9b965db1fdcf29e))
+- **localrun**: cancel in-flight build on run cancellation; detect build cancel ([8bffbf2](https://github.com/rvben/shinyhub/commit/8bffbf2e6c9b97e177cd20835a9503b4976c09a3))
+- **cli**: document build_timeout_seconds in the deploy schema ([64eed4e](https://github.com/rvben/shinyhub/commit/64eed4e8dad2556a032d7fc94abb6749cee8d9e1))
+- **deploy**: bound the environment build with build_timeout_seconds and log progress ([cd916d9](https://github.com/rvben/shinyhub/commit/cd916d975fd5752d6c8d189650aa6079d6060d24))
+- **deploy**: add per-app build_timeout_seconds manifest setting ([b924c5f](https://github.com/rvben/shinyhub/commit/b924c5fafd63c240fc4cdeef78c144b67b93a4bf))
+- **limits**: per-app CPU/memory limits in shinyhub.toml [app] ([09cd7ac](https://github.com/rvben/shinyhub/commit/09cd7ac44200d6f762b75062272af4ff9eddfd24))
+- **cli**: structured deploy failure_kind + per-attempt reasons in fleet apply ([fb76845](https://github.com/rvben/shinyhub/commit/fb768458789b649ad69a09c6aea10ec2d98095df))
+- **cli**: document fleet apply failure_kind in the schema ([dee3638](https://github.com/rvben/shinyhub/commit/dee36387cccb0192f8c442b0b63fa4da6127ae82))
+- **cli**: surface failure_kind in fleet apply report and JSON ([88b5c83](https://github.com/rvben/shinyhub/commit/88b5c83bc0cb82936af0ea603ed1cddf4ac91bfe))
+- **cli**: record per-attempt deploy failure kind in fleet apply ([8178f79](https://github.com/rvben/shinyhub/commit/8178f798883d90c58beaed7b4d100e0f8277426a))
+- **api**: emit structured failure_kind in deploy failure response ([f35c99b](https://github.com/rvben/shinyhub/commit/f35c99b7e16e9b1ba5fcc126d9021d85337e0016))
+- **deployfail**: classify deploy errors into failure kinds ([e5b9156](https://github.com/rvben/shinyhub/commit/e5b915647690fe376fa85cdf72ce91ad66e84d5c))
+- **deployfail**: add deploy failure kind vocabulary ([af88429](https://github.com/rvben/shinyhub/commit/af88429e48b9fdfe2bb7850d5b212dc3470a9c91))
+- **ui**: hide internal app state from the viewer Launchpad ([2c75129](https://github.com/rvben/shinyhub/commit/2c75129fb1999129e3958b930d8c6f8bdee2e272))
+- **ui**: admin preview of the viewer home ([0c47cc4](https://github.com/rvben/shinyhub/commit/0c47cc4e23edc1438d5b1a4c06de4ea98c55dc41))
+- **branding**: auth-aware root + stable /home alias ([242eeac](https://github.com/rvben/shinyhub/commit/242eeacfbc9f60c854ca6329d65a5745080560aa))
+- **ui**: per-app uploadable icons with monogram fallback ([3e22116](https://github.com/rvben/shinyhub/commit/3e2211696a5b6bb2aecf022e0c2c02d79b3c876b))
+- **ui**: viewer Launchpad home + per-app description ([3f16a34](https://github.com/rvben/shinyhub/commit/3f16a34beaca08f1b0487a91bb06210faae0e4e9))
+- **ui**: operator Overview dashboard home ([77ae8c1](https://github.com/rvben/shinyhub/commit/77ae8c104b9e559a1150eae1f9c185dbcd8e98aa))
+
+### Fixed
+
+- **cli**: write deploy log tail as one block so parallel apply does not interleave it ([597a195](https://github.com/rvben/shinyhub/commit/597a195bf1618ec48c49f18c89452a307d75f665))
+- **cli**: classify 4xx deploy rejections as bundle_invalid, not server_error ([4b32cbe](https://github.com/rvben/shinyhub/commit/4b32cbe8164c72b162bba5874724b136150ebc69))
+- **cli**: attribute top-level failure_kind only to deploy failures ([cb6e560](https://github.com/rvben/shinyhub/commit/cb6e560d171a12d593eba88de8a0724fb848683f))
+- **worker**: close bundle-cache pull dedup TOCTOU between stat and lock ([d8df05a](https://github.com/rvben/shinyhub/commit/d8df05a1095c55ec6c2ebf903a3afe02f8fc5cf2))
+
 ## [0.8.29](https://github.com/rvben/shinyhub/compare/v0.8.28...v0.8.29) - 2026-06-22
 
 ### Added
