@@ -78,6 +78,14 @@ type AppSettings struct {
 	// reconciled into the DB.
 	StartupTimeoutSeconds *int `toml:"startup_timeout_seconds"`
 
+	// BuildTimeoutSeconds bounds the environment build (uv sync / renv::restore)
+	// the host runs before the app process starts. nil = inherit the platform
+	// default. Read from the bundle at every boot and never reconciled into the
+	// DB (like StartupTimeoutSeconds). Distinct from StartupTimeoutSeconds, which
+	// bounds only the post-build readiness window. Inert under the Docker runtime
+	// (the build runs in-container).
+	BuildTimeoutSeconds *int `toml:"build_timeout_seconds"`
+
 	// MemoryLimitMB / CPUQuotaPercent cap each replica's resources. They
 	// reconcile into apps.memory_limit_mb / apps.cpu_quota_percent on every
 	// deploy (declared-only, like Replicas: nil leaves the stored value
@@ -267,6 +275,9 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.StartupTimeoutSeconds != nil && (*a.StartupTimeoutSeconds < 1 || *a.StartupTimeoutSeconds > 3600) {
 		return fmt.Errorf("startup_timeout_seconds must be between 1 and 3600, got %d", *a.StartupTimeoutSeconds)
+	}
+	if a.BuildTimeoutSeconds != nil && (*a.BuildTimeoutSeconds < 30 || *a.BuildTimeoutSeconds > 7200) {
+		return fmt.Errorf("build_timeout_seconds must be between 30 and 7200, got %d", *a.BuildTimeoutSeconds)
 	}
 	if a.MemoryLimitMB != nil {
 		if err := ValidateMemoryLimitMB(*a.MemoryLimitMB); err != nil {
