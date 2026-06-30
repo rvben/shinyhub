@@ -65,6 +65,12 @@ func (l *schedLock) lock(ctx context.Context) bool {
 // previously acquired it via tryLock or lock.
 func (l *schedLock) unlock() { <-l.ch }
 
+// scheduleRunRecorder receives terminal scheduled-run outcomes for metrics.
+// A local interface keeps the jobs package free of a metrics import.
+type scheduleRunRecorder interface {
+	RecordScheduleRun(slug, schedule, status string)
+}
+
 // Manager orchestrates scheduled command runs end-to-end: enforcing overlap
 // policies, building run contexts, recording run rows, invoking the runtime,
 // and updating final status.
@@ -73,6 +79,7 @@ type Manager struct {
 	tierOrder   []string
 	defaultTier string
 	store       Store
+	metrics     scheduleRunRecorder
 	secretsKey  []byte
 	appsDir     string
 	appDataDir  string
@@ -155,6 +162,11 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 func (m *Manager) SetResourceResolver(fn func(app *db.App) (memoryMB, cpuPct int)) {
 	m.resolveResources = fn
 }
+
+// SetScheduleMetrics wires the metrics recorder that finishRun pushes terminal
+// run outcomes to. Nil-safe: when unset (metrics disabled), no metric is
+// recorded. Must be called before runs start.
+func (m *Manager) SetScheduleMetrics(rec scheduleRunRecorder) { m.metrics = rec }
 
 // lockFor returns the per-schedule lock for the given schedule ID, creating
 // it lazily. Must be called with m.mu held.
@@ -710,6 +722,14 @@ func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exit
 		ExitCode:   exitCode,
 		FinishedAt: time.Now().UTC(),
 	})
+
+	if m.metrics != nil {
+		slug := ""
+		if app, err := m.store.GetAppByID(sched.AppID); err == nil {
+			slug = app.Slug
+		}
+		m.metrics.RecordScheduleRun(slug, sched.Name, status)
+	}
 
 	m.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       userID,

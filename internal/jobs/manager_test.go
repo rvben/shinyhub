@@ -1166,3 +1166,54 @@ func TestJobsManager_RoutesToLowestIndexedTier(t *testing.T) {
 		t.Errorf("SharedMounts[0].SourceSlug = %q, want %q", params.SharedMounts[0].SourceSlug, "shared-src")
 	}
 }
+
+type fakeScheduleRecorder struct {
+	mu    sync.Mutex
+	calls []scheduleRunCall
+}
+
+type scheduleRunCall struct{ Slug, Schedule, Status string }
+
+func (f *fakeScheduleRecorder) RecordScheduleRun(slug, schedule, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, scheduleRunCall{slug, schedule, status})
+}
+
+// TestManager_Run_RecordsScheduleMetric verifies finishRun pushes a terminal
+// run to the injected recorder with {app slug, schedule name, status}.
+func TestManager_Run_RecordsScheduleMetric(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	rec := &fakeScheduleRecorder{}
+	m.SetScheduleMetrics(rec)
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+
+	// finishRun (and the metric push) runs asynchronously after the run
+	// goroutine exits, so poll the recorder rather than sleeping a fixed amount.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rec.mu.Lock()
+		n := len(rec.calls)
+		rec.mu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.calls) == 0 {
+		t.Fatal("expected RecordScheduleRun to be called")
+	}
+	c := rec.calls[0]
+	if c.Slug != "test-app" || c.Schedule != "test-schedule" || c.Status != "succeeded" {
+		t.Fatalf("RecordScheduleRun = %+v, want {test-app test-schedule succeeded}", c)
+	}
+}

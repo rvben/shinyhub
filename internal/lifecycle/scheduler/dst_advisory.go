@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // dstScanWindow bounds how far ahead DSTAdvisory looks for a transition. A DST
@@ -34,7 +35,7 @@ func DSTAdvisory(cronExpr string, loc *time.Location, ref time.Time) string {
 		return ""
 	}
 	spec := "CRON_TZ=" + loc.String() + " " + cronExpr
-	schedule, err := productionParser().Parse(spec)
+	schedule, err := schedulespec.ProductionParser.Parse(spec)
 	if err != nil {
 		return ""
 	}

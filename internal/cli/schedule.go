@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-shellwords"
 	"github.com/spf13/cobra"
@@ -26,6 +28,7 @@ func newScheduleCmd() *cobra.Command {
 		newScheduleRunCmd(),
 		newScheduleRunsCmd(),
 		newScheduleLogsCmd(),
+		newScheduleStatusCmd(),
 	)
 	return cmd
 }
@@ -764,6 +767,98 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 		sw.WriteLine(line)
 	}
 	return scanner.Err()
+}
+
+func newScheduleStatusCmd() *cobra.Command {
+	f := &listFlags{}
+	cmd := &cobra.Command{
+		Use:   "status [<slug>]",
+		Short: "Show data-freshness for scheduled jobs across the fleet",
+		Args:  cobra.MaximumNArgs(1),
+	}
+	addListFlags(cmd, f)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		url := cfg.Host + "/api/fleet/schedules/status"
+		if len(args) == 1 {
+			url += "?slug=" + neturl.QueryEscape(args[0])
+		}
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return httpError(cfg.Token, "schedule status", resp, out)
+		}
+		var items []map[string]any
+		if err := json.Unmarshal(out, &items); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+		return renderList(cmd, f, items, nil, func(w io.Writer, rows []map[string]any) {
+			if len(rows) == 0 {
+				fmt.Fprintln(w, "No schedules.")
+				return
+			}
+			fmt.Fprintf(w, "%-12s  %-16s  %-11s  %-13s  %-8s  %s\n",
+				"APP", "SCHEDULE", "LAST RUN", "LAST SUCCESS", "AGE", "STALE")
+			for _, r := range rows {
+				lastRun := strOrDash(r["last_run_status"])
+				lastSuccess := "never"
+				age := "-"
+				if r["last_success_at"] != nil {
+					lastSuccess = fmt.Sprintf("%v", r["last_success_at"])
+					if r["last_success_age_s"] != nil {
+						age = humanizeAgeSeconds(r["last_success_age_s"])
+					}
+				}
+				stale := "-"
+				if b, ok := r["stale"].(bool); ok && b {
+					stale = "yes"
+				}
+				fmt.Fprintf(w, "%-12v  %-16v  %-11s  %-13s  %-8s  %s\n",
+					r["slug"], r["schedule"], lastRun, lastSuccess, age, stale)
+			}
+		})
+	}
+	return cmd
+}
+
+// strOrDash renders an empty/absent string field as a dash.
+func strOrDash(v any) string {
+	if s, ok := v.(string); ok && s != "" {
+		return s
+	}
+	return "-"
+}
+
+// humanizeAgeSeconds renders a JSON number of seconds as a compact age (e.g.
+// "2h", "3d"). JSON numbers decode to float64.
+func humanizeAgeSeconds(v any) string {
+	secs, ok := v.(float64)
+	if !ok {
+		return "-"
+	}
+	d := time.Duration(secs) * time.Second
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
+	}
 }
 
 // scheduleRunResult is the subset of a schedule run's JSON used to derive an

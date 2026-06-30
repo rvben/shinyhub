@@ -29,9 +29,11 @@ export function summariseFleetHealth(h) {
   const degradedApps = num(apps.degraded);
   const crashedApps = num(apps.crashed);
   const workersDown = workers ? num(workers.down) : 0;
+  const staleSchedules = Array.isArray(env.stale_schedule_list) ? env.stale_schedule_list : [];
+  const staleCount = num(env.stale_schedules);
 
   let statusClass, statusLabel;
-  if (lostReplicas > 0 || degradedApps > 0 || crashedApps > 0) {
+  if (lostReplicas > 0 || degradedApps > 0 || crashedApps > 0 || staleCount > 0) {
     statusClass = 'lost';
     statusLabel = 'degraded';
   } else if (workersDown > 0) {
@@ -47,6 +49,7 @@ export function summariseFleetHealth(h) {
   if (degradedApps > 0) parts.push(`${degradedApps} degraded`);
   if (lostReplicas > 0) parts.push(`${lostReplicas} replicas lost`);
   if (workers) parts.push(`${num(workers.up)}/${num(workers.total)} workers up`);
+  if (staleCount > 0) parts.push(`${staleCount} schedule${staleCount === 1 ? '' : 's'} stale`);
   const headline = parts.join(' · ');
 
   const tierChips = tiers
@@ -57,7 +60,7 @@ export function summariseFleetHealth(h) {
       workersDown: num(t.workers_down),
     }));
 
-  return { statusClass, statusLabel, headline, tierChips, degraded };
+  return { statusClass, statusLabel, headline, tierChips, degraded, staleSchedules };
 }
 
 /**

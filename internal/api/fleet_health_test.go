@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -193,5 +194,61 @@ func TestFleetHealth_AdminOnly(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-admin status = %d, want 403", rec.Code)
+	}
+}
+
+func TestFleetHealth_CountsStaleSchedules(t *testing.T) {
+	srv, store := newFleetHealthServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	store.CreateApp(db.CreateAppParams{Slug: "jp-dash", Name: "jp-dash", OwnerID: admin.ID})
+	app, _ := store.GetAppBySlug("jp-dash")
+	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh-data", CronExpr: "0 6 * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	// Last success ~30h ago -> a daily schedule is now stale.
+	old := time.Now().Add(-30 * time.Hour)
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "schedule", StartedAt: old, LogPath: "x.log",
+	})
+	if err != nil {
+		t.Fatalf("InsertScheduleRun: %v", err)
+	}
+	exit := 0
+	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &exit, FinishedAt: old.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("FinishScheduleRun: %v", err)
+	}
+
+	req := authedRequest(t, "GET", "/api/fleet/health", nil, adminTok)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		StaleSchedules    int `json:"stale_schedules"`
+		StaleScheduleList []struct {
+			Slug     string `json:"slug"`
+			Schedule string `json:"schedule"`
+		} `json:"stale_schedule_list"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.StaleSchedules != 1 {
+		t.Fatalf("stale_schedules = %d, want 1", got.StaleSchedules)
+	}
+	if len(got.StaleScheduleList) != 1 || got.StaleScheduleList[0].Slug != "jp-dash" {
+		t.Fatalf("stale_schedule_list = %+v, want [jp-dash/refresh-data]", got.StaleScheduleList)
 	}
 }

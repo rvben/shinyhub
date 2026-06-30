@@ -39,6 +39,21 @@ type Schedule struct {
 	UpdatedAt time.Time
 }
 
+// resolveLocation resolves an optional per-entity IANA timezone against a
+// server default. nil/empty or an unloadable zone falls back to def (UTC if
+// def is nil). Single source of truth for schedule timezone inheritance.
+func resolveLocation(tz *string, def *time.Location) *time.Location {
+	if def == nil {
+		def = time.UTC
+	}
+	if tz != nil && *tz != "" {
+		if loc, err := time.LoadLocation(*tz); err == nil {
+			return loc
+		}
+	}
+	return def
+}
+
 // EffectiveLocation resolves the schedule's timezone with the given server
 // default. Returns the resolved *time.Location.
 //
@@ -47,21 +62,10 @@ type Schedule struct {
 //  2. Otherwise return def (the server-configured default or UTC).
 //
 // If a stored timezone fails to load (corrupted DB row), def is used as a
-// safe fallback. This is the single place the inherit/resolution logic lives;
-// all callers must go through here.
+// safe fallback. Delegates to resolveLocation, the single source of truth for
+// this inherit/fallback logic.
 func (s *Schedule) EffectiveLocation(def *time.Location) *time.Location {
-	if def == nil {
-		def = time.UTC
-	}
-	if s.Timezone != nil && *s.Timezone != "" {
-		loc, err := time.LoadLocation(*s.Timezone)
-		if err != nil {
-			// Stored value failed to load; fall back to server default.
-			return def
-		}
-		return loc
-	}
-	return def
+	return resolveLocation(s.Timezone, def)
 }
 
 type CreateScheduleParams struct {
@@ -756,6 +760,77 @@ func (s *Store) ListSharedDataSources(consumerAppID int64) ([]*SharedDataMount, 
 			return nil, err
 		}
 		out = append(out, &m)
+	}
+	return out, rows.Err()
+}
+
+// ScheduleFreshness is one row of the cross-fleet freshness view: a schedule
+// joined to its app, plus the last run and last successful run. It feeds the
+// Prometheus collector, the `schedule status` CLI, and the admin banner.
+type ScheduleFreshness struct {
+	Slug           string
+	Name           string
+	Enabled        bool
+	CronExpr       string
+	Timezone       *string
+	CreatedAt      time.Time
+	TimeoutSeconds int
+	LastRunAt      *time.Time // started_at of the most recent run, nil if never run
+	LastRunStatus  string     // status of that run, "" if never run
+	LastSuccessAt  *time.Time // finished_at of the most recent succeeded run, nil if never
+}
+
+// EffectiveLocation resolves this schedule's timezone against the server
+// default, mirroring Schedule.EffectiveLocation.
+func (f *ScheduleFreshness) EffectiveLocation(def *time.Location) *time.Location {
+	return resolveLocation(f.Timezone, def)
+}
+
+// ScheduleFreshness returns one row per schedule across all apps, with the last
+// run and last success resolved via correlated subqueries (SQLite has no
+// LATERAL; same shape as SchedulesNeedingFirstFireRetry). last success uses
+// finished_at so a slow-but-recently-finished job reads as fresh.
+func (s *Store) ScheduleFreshness() ([]ScheduleFreshness, error) {
+	rows, err := s.db.Query(`
+		SELECT a.slug, sc.name, sc.enabled, sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
+		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC LIMIT 1),
+		  (SELECT status      FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC LIMIT 1),
+		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC LIMIT 1)
+		FROM app_schedules sc JOIN apps a ON a.id = sc.app_id
+		ORDER BY a.slug, sc.name`)
+	if err != nil {
+		return nil, fmt.Errorf("schedule freshness: %w", err)
+	}
+	defer rows.Close()
+	var out []ScheduleFreshness
+	for rows.Next() {
+		var fr ScheduleFreshness
+		var enabled int // SQLite stores BOOLEAN as INTEGER; database/sql has no int->bool scan
+		var tz sql.NullString
+		var lastRunAt sql.NullTime
+		var lastStatus sql.NullString
+		var lastSuccess sql.NullTime
+		if err := rows.Scan(&fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
+			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunAt, &lastStatus, &lastSuccess); err != nil {
+			return nil, err
+		}
+		fr.Enabled = enabled != 0
+		if tz.Valid && tz.String != "" {
+			v := tz.String
+			fr.Timezone = &v
+		}
+		if lastRunAt.Valid {
+			v := lastRunAt.Time
+			fr.LastRunAt = &v
+		}
+		if lastStatus.Valid {
+			fr.LastRunStatus = lastStatus.String
+		}
+		if lastSuccess.Valid {
+			v := lastSuccess.Time
+			fr.LastSuccessAt = &v
+		}
+		out = append(out, fr)
 	}
 	return out, rows.Err()
 }

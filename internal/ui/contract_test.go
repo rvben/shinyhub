@@ -2013,6 +2013,12 @@ func TestCrashedAppUX(t *testing.T) {
 	// The fleet-health panel counts crashed apps.
 	assertContains(t, "views/fleet-health.js", "apps.crashed",
 		"the fleet health summary must read apps.crashed; see internal/api/fleet_health.go fleetAppCounts.Crashed")
+	assertContains(t, "views/fleet-health.js", "stale_schedule_list",
+		"fleet-health summary must read stale_schedule_list from GET /api/fleet/health; see internal/api/fleet_health.go")
+	assertContains(t, "views/fleet-health.js", "schedule${staleCount === 1 ? '' : 's'} stale",
+		"fleet-health headline must include the stale-schedule count part")
+	assertContains(t, "app.js", "s.staleSchedules",
+		"renderFleetHealth must surface the stale schedule list in the banner tooltip/aria")
 }
 
 // TestAppCardMetricsReserveSpace guards against the layout shift where the app
