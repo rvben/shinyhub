@@ -53,3 +53,13 @@ func TestDeployAnnotation_DocumentsBuildTimeout(t *testing.T) {
 		t.Fatalf("deploy Notes must document build_timeout_seconds, got %q", ann.Notes)
 	}
 }
+
+func TestFleetApplyAnnotation_DocumentsConcurrency(t *testing.T) {
+	ann, ok := schemaAnnotations["fleet apply"]
+	if !ok {
+		t.Fatal("fleet apply must have a schema annotation")
+	}
+	if !strings.Contains(ann.Notes, "concurrency") {
+		t.Fatalf("fleet apply Notes must mention concurrency, got %q", ann.Notes)
+	}
+}

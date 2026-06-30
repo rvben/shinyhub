@@ -470,11 +470,18 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 	if len(lines) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "--- last log lines ---")
+	// Build the whole block and write it once so a syncWriter (parallel fleet
+	// apply, where log-tail lines are raw app output and not slug-prefixed) keeps
+	// one app's tail intact instead of interleaving it line-by-line with another
+	// failing app's tail.
+	var b strings.Builder
+	b.WriteString("--- last log lines ---\n")
 	for _, l := range lines {
-		fmt.Fprintln(w, l)
+		b.WriteString(l)
+		b.WriteByte('\n')
 	}
-	fmt.Fprintf(w, "--- run `shinyhub apps logs %s` for full logs ---\n", slug)
+	fmt.Fprintf(&b, "--- run `shinyhub apps logs %s` for full logs ---\n", slug)
+	_, _ = io.WriteString(w, b.String())
 }
 
 // parsePlainLines reads a plain-text response body (one log line per line,

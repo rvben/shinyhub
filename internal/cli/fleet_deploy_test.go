@@ -130,6 +130,30 @@ func TestFleetApplyCmd_HasWaitForWarmFlag(t *testing.T) {
 	}
 }
 
+func TestFleetApplyCmd_HasConcurrencyFlag(t *testing.T) {
+	cmd := newFleetApplyCmd()
+	f := cmd.Flags().Lookup("concurrency")
+	if f == nil {
+		t.Fatal("fleet apply must expose a --concurrency flag")
+	}
+	if f.DefValue != "3" {
+		t.Fatalf("--concurrency default = %q, want 3", f.DefValue)
+	}
+}
+
+func TestValidateConcurrency(t *testing.T) {
+	for _, ok := range []int{1, 3, 64} {
+		if err := validateConcurrency(ok); err != nil {
+			t.Errorf("concurrency %d must be valid, got %v", ok, err)
+		}
+	}
+	for _, bad := range []int{0, -1} {
+		if err := validateConcurrency(bad); err == nil {
+			t.Errorf("concurrency %d must be rejected", bad)
+		}
+	}
+}
+
 // FLT-11: fleet reconciles visibility through its own config-drift path, so
 // the deploy-layer "--visibility ignored for existing apps" warning is noise
 // in the fleet context (and leaked once per retry). ensureFleetApp must not
