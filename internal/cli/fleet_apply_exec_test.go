@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/fleet"
@@ -590,5 +592,159 @@ func TestConvergeApp_RetriedSuccessRecordsFailedAttemptKind(t *testing.T) {
 	}
 	if r.attemptsDetail[0].Kind != deployfail.ReadinessTimeout || r.attemptsDetail[0].Attempt != 1 {
 		t.Fatalf("attempt 1 record = %+v, want {Attempt:1 Kind:readiness_timeout}", r.attemptsDetail[0])
+	}
+}
+
+// buildConcurrencyPreflight makes a preflightResult of n ActionUpdateSource apps
+// (app0..app(n-1)), all sourced from dir, for exercising convergeFleet.
+func buildConcurrencyPreflight(n int, dir string) *preflightResult {
+	apps := make([]fleet.AppEntry, n)
+	diff := make([]fleet.AppDiff, n)
+	observed := make(map[string]fleet.ObservedApp, n)
+	sources := make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		s := fmt.Sprintf("app%d", i)
+		apps[i] = fleet.AppEntry{Slug: s, Source: "./x", Visibility: "private"}
+		diff[i] = fleet.AppDiff{Slug: s, Action: fleet.ActionUpdateSource, Owned: true, ServerDigest: "sha256:OLD"}
+		observed[s] = fleet.ObservedApp{Slug: s}
+		sources[s] = dir
+	}
+	return &preflightResult{
+		manifest: &fleet.Manifest{FleetID: "eu", Apps: apps},
+		diff:     diff, observed: observed, sources: sources,
+	}
+}
+
+// concurrencyTestServer answers the deploy/health/list calls convergeApp makes
+// for an ActionUpdateSource app, tracking the max number of concurrent deploys.
+func concurrencyTestServer(t *testing.T, n int, maxInflight *atomic.Int32, sleep time.Duration) *httptest.Server {
+	t.Helper()
+	var inflight atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			cur := inflight.Add(1)
+			for {
+				m := maxInflight.Load()
+				if cur <= m || maxInflight.CompareAndSwap(m, cur) {
+					break
+				}
+			}
+			time.Sleep(sleep)
+			inflight.Add(-1)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			apps := make([]map[string]any, n)
+			for i := 0; i < n; i++ {
+				apps[i] = map[string]any{"slug": fmt.Sprintf("app%d", i), "content_digest": "sha256:NEW"}
+			}
+			_ = json.NewEncoder(w).Encode(apps)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/apps/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestConvergeFleet_BoundedConcurrency(t *testing.T) {
+	const n, limit = 6, 4
+	var maxInflight atomic.Int32
+	srv := concurrencyTestServer(t, n, &maxInflight, 40*time.Millisecond)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+
+	pf := buildConcurrencyPreflight(n, dir)
+	opt := convergeOpts{preconditions: true, concurrency: limit, fleetID: "eu", runID: "r"}
+	results := convergeFleet(cfg, pf, opt, io.Discard)
+
+	if got := maxInflight.Load(); got <= 1 || int(got) > limit {
+		t.Fatalf("max concurrent deploys = %d, want >1 and <=%d", got, limit)
+	}
+	if len(results) != n {
+		t.Fatalf("got %d results, want %d", len(results), n)
+	}
+	for i, r := range results {
+		if want := fmt.Sprintf("app%d", i); r.slug != want {
+			t.Fatalf("results[%d].slug = %q, want %q (manifest order preserved)", i, r.slug, want)
+		}
+		if r.status != statusUpdated {
+			t.Fatalf("app%d status = %s (%v), want updated", i, r.status, r.err)
+		}
+	}
+}
+
+func TestConvergeFleet_SerialWhenConcurrencyOne(t *testing.T) {
+	const n = 4
+	var maxInflight atomic.Int32
+	srv := concurrencyTestServer(t, n, &maxInflight, 10*time.Millisecond)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+
+	pf := buildConcurrencyPreflight(n, dir)
+	opt := convergeOpts{preconditions: true, concurrency: 1, fleetID: "eu", runID: "r"}
+	results := convergeFleet(cfg, pf, opt, io.Discard)
+
+	if got := maxInflight.Load(); got != 1 {
+		t.Fatalf("concurrency 1 must be serial; max concurrent deploys = %d, want 1", got)
+	}
+	if len(results) != n {
+		t.Fatalf("got %d results, want %d", len(results), n)
+	}
+}
+
+// Parallelism must not change the exit code: a mixed diff (one app fails its
+// deploy, the rest succeed) must tally to the same applyExitCode under serial
+// and parallel convergence (spec section 8).
+func TestConvergeFleet_ExitCodeParityParallelSerial(t *testing.T) {
+	const n = 4
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	// app0 always fails its deploy (500); app1..app3 succeed.
+	mkServer := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/apps/app0/"):
+				w.WriteHeader(500)
+				_, _ = w.Write([]byte(`{"error":"deploy app0 failed"}`))
+			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			case r.URL.Path == "/api/apps":
+				apps := make([]map[string]any, n)
+				for i := 0; i < n; i++ {
+					apps[i] = map[string]any{"slug": fmt.Sprintf("app%d", i), "content_digest": "sha256:NEW"}
+				}
+				_ = json.NewEncoder(w).Encode(apps)
+			case strings.HasSuffix(r.URL.Path, "/logs"):
+				_, _ = io.WriteString(w, "boom\n")
+			case strings.HasPrefix(r.URL.Path, "/api/apps/"):
+				_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+			default:
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{}`))
+			}
+		}))
+	}
+	run := func(concurrency int) (int, string) {
+		srv := mkServer()
+		defer srv.Close()
+		cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+		opt := convergeOpts{preconditions: true, concurrency: concurrency, fleetID: "eu", runID: "r"}
+		return applyExitCode(convergeFleet(cfg, buildConcurrencyPreflight(n, dir), opt, io.Discard))
+	}
+	sCode, sReason := run(1)
+	pCode, pReason := run(4)
+	if sCode != pCode || sReason != pReason {
+		t.Fatalf("exit differs: serial=(%d,%q) parallel=(%d,%q)", sCode, sReason, pCode, pReason)
+	}
+	if sCode != 4 {
+		t.Fatalf("one failing app must yield exit 4, got %d (%q)", sCode, sReason)
 	}
 }

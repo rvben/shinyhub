@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/deployfail"
@@ -32,14 +33,26 @@ type convergeOpts struct {
 	runID              string
 }
 
-// convergeFleet drives every diff entry in manifest order, continue-on-error,
-// returning one applyResult per app.
+// convergeFleet drives every diff entry, continue-on-error, returning one
+// applyResult per app in manifest order. With concurrency>1 it runs a bounded
+// worker pool; otherwise the serial path. Both share convergeApp; any change to
+// one loop body MUST be mirrored in the other so the paths cannot diverge.
 func convergeFleet(cfg *cliConfig, pf *preflightResult, opt convergeOpts, out io.Writer) []applyResult {
 	marker := "fleet:" + opt.fleetID
 	entries := make(map[string]fleet.AppEntry, len(pf.manifest.Apps))
 	for _, a := range pf.manifest.Apps {
 		entries[a.Slug] = a
 	}
+	if opt.concurrency <= 1 {
+		return convergeSerial(cfg, pf, entries, opt, marker, out)
+	}
+	return convergeParallel(cfg, pf, entries, opt, marker, out)
+}
+
+// convergeSerial is the original loop, kept verbatim so --concurrency 1 is
+// byte-for-byte today's behaviour (same output order). Any loop-body change
+// here must also be made in convergeParallel.
+func convergeSerial(cfg *cliConfig, pf *preflightResult, entries map[string]fleet.AppEntry, opt convergeOpts, marker string, out io.Writer) []applyResult {
 	results := make([]applyResult, 0, len(pf.diff))
 	for _, d := range pf.diff {
 		results = append(results, convergeApp(
@@ -47,6 +60,43 @@ func convergeFleet(cfg *cliConfig, pf *preflightResult, opt convergeOpts, out io
 			opt, marker, out))
 	}
 	return results
+}
+
+// convergeParallel runs up to opt.concurrency convergeApp calls at once. Each
+// goroutine writes its own results[i] index (pre-allocated slice, never
+// appended) so the returned order is manifest order regardless of completion
+// order. Progress writes are serialized whole-line by syncWriter.
+func convergeParallel(cfg *cliConfig, pf *preflightResult, entries map[string]fleet.AppEntry, opt convergeOpts, marker string, out io.Writer) []applyResult {
+	results := make([]applyResult, len(pf.diff))
+	sw := &syncWriter{w: out}
+	sem := make(chan struct{}, opt.concurrency)
+	var wg sync.WaitGroup
+	for i, d := range pf.diff {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, d fleet.AppDiff) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = convergeApp(
+				cfg, d, entries[d.Slug], pf.observed[d.Slug], pf.sources[d.Slug],
+				opt, marker, sw)
+		}(i, d)
+	}
+	wg.Wait()
+	return results
+}
+
+// syncWriter serializes concurrent writes so each progress line (one Fprintf =
+// one Write) stays whole when N apps converge in parallel.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // precondPtrs returns the (ifDigest, ifManagedBy) header pointers for a
