@@ -361,6 +361,21 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 	}},
+	"schedule status": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "slug", Type: "string"},
+		{Name: "schedule", Type: "string"},
+		{Name: "enabled", Type: "boolean"},
+		{Name: "last_run_at", Type: "string", Desc: "RFC3339; null if never run"},
+		{Name: "last_run_status", Type: "string"},
+		{Name: "last_success_at", Type: "string", Desc: "RFC3339; null if never succeeded"},
+		{Name: "last_success_age_s", Type: "integer", Desc: "seconds since last success; null if never succeeded"},
+		{Name: "stale", Type: "boolean", Desc: "cron-aware: next expected fire after the last success is overdue"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+	}},
 	"schedule add": {
 		Mutating:            mut,
 		ExitCodePassthrough: true,
