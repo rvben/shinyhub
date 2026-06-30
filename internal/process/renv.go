@@ -32,8 +32,11 @@ func SyncR(ctx context.Context, bundleDir string) error {
 
 	out, err := renvRestoreCmd(ctx, bundleDir).CombinedOutput()
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
 			return fmt.Errorf("build exceeded the build timeout: %w", ctx.Err())
+		case context.Canceled:
+			return fmt.Errorf("build canceled: %w", ctx.Err())
 		}
 		return fmt.Errorf("%w\n%s", err, out)
 	}
