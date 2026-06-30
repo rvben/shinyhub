@@ -1283,6 +1283,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	sched := scheduler.New(jobsMgr, store, cfg.Scheduler.Location)
 	srv.SetJobs(jobsMgr, sched)
 
+	// Push scheduled-run outcomes into Prometheus when metrics are enabled.
+	if metricsReg != nil {
+		jobsMgr.SetScheduleMetrics(metricsReg)
+	}
+
 	// Replica autoscaling is opt-in per app and gated by a global switch. When
 	// enabled, the controller evaluates opted-in apps on its own interval and
 	// drives the same incremental scale primitives the API exposes; it never
