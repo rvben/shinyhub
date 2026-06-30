@@ -334,11 +334,12 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 				// mechanism for every Python app. Best-effort: a failed
 				// conversion cleans itself up and the app falls back to
 				// requirements mode, never blocking the boot.
-				if cerr := ensureProjectFn(p.BundleDir); cerr != nil {
+				bgctx := context.Background()
+				if cerr := ensureProjectFn(bgctx, p.BundleDir); cerr != nil {
 					slog.Warn("deploy: project conversion failed; using requirements.txt",
 						"slug", p.Slug, "err", cerr)
 				}
-				if err = pythonSyncFn(p.BundleDir); err != nil {
+				if err = pythonSyncFn(bgctx, p.BundleDir); err != nil {
 					return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
 				}
 			}
@@ -348,7 +349,7 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 			autoInstrument = resolveAutoInstrument(p, m)
 		case "r":
 			if hostDeps {
-				if err = rSyncFn(p.BundleDir); err != nil {
+				if err = rSyncFn(context.Background(), p.BundleDir); err != nil {
 					return nil, "", false, nil, 0, fmt.Errorf("renv restore: %w", err)
 				}
 			}

@@ -138,7 +138,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	// Step 4: Run each dep-prep step, streaming output to the terminal.
 	for _, step := range plan.DepPrep {
 		fmt.Fprintf(stdout, "==> %s\n", step.Label)
-		if err := step.Run(bundleDir); err != nil {
+		if err := step.Run(context.Background(), bundleDir); err != nil {
 			return fmt.Errorf("dep prep (%s): %w", step.Label, err)
 		}
 	}

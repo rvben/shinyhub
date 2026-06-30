@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,7 +11,7 @@ import (
 // renv restore). The runner executes each in order before launch.
 type DepPrepStep struct {
 	Label string
-	Run   func(bundleDir string) error
+	Run   func(ctx context.Context, bundleDir string) error
 }
 
 // LaunchPlan is the canonical description of how a single app replica launches.
@@ -92,8 +93,8 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 					// will still catch real problems). This matches server
 					// behaviour (deploy.go warns and continues on ensureProjectFn
 					// failure).
-					Run: func(bundleDir string) error {
-						if err := ensureProjectFn(bundleDir); err != nil {
+					Run: func(ctx context.Context, bundleDir string) error {
+						if err := ensureProjectFn(ctx, bundleDir); err != nil {
 							slog.Warn("ensure project failed; continuing", "err", err)
 						}
 						return nil

@@ -1,10 +1,13 @@
 package process_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
 )
@@ -24,7 +27,7 @@ func TestUVAvailable(t *testing.T) {
 func TestEnsureProject_NoOpPaths(t *testing.T) {
 	t.Run("no requirements.txt", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := process.EnsureProject(dir); err != nil {
+		if err := process.EnsureProject(context.Background(), dir); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); !os.IsNotExist(err) {
@@ -42,7 +45,7 @@ func TestEnsureProject_NoOpPaths(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(authored), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := process.EnsureProject(dir); err != nil {
+		if err := process.EnsureProject(context.Background(), dir); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
 		got, _ := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
@@ -64,5 +67,21 @@ func TestIsSynthesizedProject(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, process.SynthesizedProjectMarker), []byte("1\n"), 0o644)
 	if !process.IsSynthesizedProject(dir) {
 		t.Error("a dir with the marker must report a synthesized project")
+	}
+}
+
+// Sync reports a build-timeout when the context is already expired, regardless
+// of whether uv is installed (it keys off ctx.Err(), not the failure text).
+func TestSync_BuildTimeout(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname=\"x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(2 * time.Millisecond)
+	err := process.Sync(ctx, dir)
+	if err == nil || !strings.Contains(err.Error(), "build exceeded the build timeout") {
+		t.Fatalf("want build-timeout error, got %v", err)
 	}
 }

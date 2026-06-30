@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -127,11 +128,11 @@ func TestResolveLaunch_PrepHostDeps_GatesDepPrep(t *testing.T) {
 func TestResolveLaunch_EnsureProject_IsNonfatal(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
 
-	restoreEnsure := SetEnsureProjectForTest(func(string) error {
+	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error {
 		return errors.New("simulated ensure-project failure")
 	})
 	defer restoreEnsure()
-	restoreSync := SetSyncHooksForTest(func(string) error { return nil }, func(string) error { return nil })
+	restoreSync := SetSyncHooksForTest(func(context.Context, string) error { return nil }, func(context.Context, string) error { return nil })
 	defer restoreSync()
 
 	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9100, PrepHostDeps: true})
@@ -140,7 +141,7 @@ func TestResolveLaunch_EnsureProject_IsNonfatal(t *testing.T) {
 	}
 	// Run each dep-prep step; ensure-project must not propagate its error.
 	for _, step := range plan.DepPrep {
-		if stepErr := step.Run(dir); stepErr != nil {
+		if stepErr := step.Run(context.Background(), dir); stepErr != nil {
 			t.Fatalf("dep-prep step %q returned error: %v (ensure-project must be nonfatal)", step.Label, stepErr)
 		}
 	}
