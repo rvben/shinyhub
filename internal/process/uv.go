@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,8 +20,8 @@ func CheckUV() error {
 // uvSyncCmd builds the `uv sync` command. uv runs the project's build
 // backend, which is deployer-controlled code, so the env is scrubbed of
 // server secrets via SanitizedEnv.
-func uvSyncCmd(dir string) *exec.Cmd {
-	cmd := exec.Command("uv", "sync")
+func uvSyncCmd(ctx context.Context, dir string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "uv", "sync")
 	cmd.Dir = dir
 	cmd.Env = SanitizedEnv()
 	return cmd
@@ -37,13 +38,19 @@ func uvPythonInstallCmd(version string) *exec.Cmd {
 // Sync runs `uv sync` in dir if a pyproject.toml is present, creating/updating
 // the .venv. For requirements.txt-only projects, dependency installation is
 // handled lazily by `uv run --with-requirements` at process start.
-func Sync(dir string) error {
+func Sync(ctx context.Context, dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
 		return nil
 	}
-	out, err := uvSyncCmd(dir).CombinedOutput()
+	out, err := uvSyncCmd(ctx, dir).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("uv sync: %w\n%s", err, out)
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			return fmt.Errorf("build exceeded the build timeout: %w", ctx.Err())
+		case context.Canceled:
+			return fmt.Errorf("build canceled: %w", ctx.Err())
+		}
+		return fmt.Errorf("%w\n%s", err, out)
 	}
 	return nil
 }
@@ -54,29 +61,29 @@ func Sync(dir string) error {
 // the .venv) from one the author shipped (valid everywhere).
 const SynthesizedProjectMarker = ".shinyhub-synthesized-project"
 
-func uvInitCmd(dir string) *exec.Cmd {
+func uvInitCmd(ctx context.Context, dir string) *exec.Cmd {
 	// --bare yields a non-package project (no [build-system]), so `uv sync`
 	// installs only the dependencies, never the app directory itself. --name is
 	// explicit because the version dir is an all-digits timestamp, which uv
 	// would otherwise use as the project name.
-	cmd := exec.Command("uv", "init", "--bare", "--name", "shinyhub-app")
+	cmd := exec.CommandContext(ctx, "uv", "init", "--bare", "--name", "shinyhub-app")
 	cmd.Dir = dir
 	cmd.Env = SanitizedEnv()
 	return cmd
 }
 
-func uvAddRequirementsCmd(dir string) *exec.Cmd {
+func uvAddRequirementsCmd(ctx context.Context, dir string) *exec.Cmd {
 	// uv parses the requirements file (including its grammar) and writes the
 	// resolved deps into pyproject.toml plus a native uv.lock.
-	cmd := exec.Command("uv", "add", "--requirements", "requirements.txt")
+	cmd := exec.CommandContext(ctx, "uv", "add", "--requirements", "requirements.txt")
 	cmd.Dir = dir
 	cmd.Env = SanitizedEnv()
 	return cmd
 }
 
 // uvAddCmd builds a `uv add <pkgs...>` command with a scrubbed env.
-func uvAddCmd(dir string, pkgs ...string) *exec.Cmd {
-	cmd := exec.Command("uv", append([]string{"add"}, pkgs...)...)
+func uvAddCmd(ctx context.Context, dir string, pkgs ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "uv", append([]string{"add"}, pkgs...)...)
 	cmd.Dir = dir
 	cmd.Env = SanitizedEnv()
 	return cmd
@@ -124,17 +131,17 @@ func requirementsImplyPydantic(requirements string) bool {
 // prior conversion) or when there is no requirements.txt to convert. On a failed
 // `uv add` it removes the half-built project so the app falls back cleanly to
 // requirements mode rather than launching against an incomplete environment.
-func EnsureProject(dir string) error {
+func EnsureProject(ctx context.Context, dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err == nil {
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(dir, "requirements.txt")); err != nil {
 		return nil
 	}
-	if out, err := uvInitCmd(dir).CombinedOutput(); err != nil {
+	if out, err := uvInitCmd(ctx, dir).CombinedOutput(); err != nil {
 		return fmt.Errorf("uv init: %w\n%s", err, out)
 	}
-	if out, err := uvAddRequirementsCmd(dir).CombinedOutput(); err != nil {
+	if out, err := uvAddRequirementsCmd(ctx, dir).CombinedOutput(); err != nil {
 		_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 		_ = os.Remove(filepath.Join(dir, "uv.lock"))
 		_ = os.RemoveAll(filepath.Join(dir, ".venv"))
@@ -144,7 +151,7 @@ func EnsureProject(dir string) error {
 	// declaring it optional (shinychat 0.5.0). Add pydantic for shiny apps so they
 	// do not crash on `import shiny.ui`. See requirementsImplyPydantic.
 	if reqs, rerr := os.ReadFile(filepath.Join(dir, "requirements.txt")); rerr == nil && requirementsImplyPydantic(string(reqs)) {
-		if out, err := uvAddCmd(dir, "pydantic").CombinedOutput(); err != nil {
+		if out, err := uvAddCmd(ctx, dir, "pydantic").CombinedOutput(); err != nil {
 			_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 			_ = os.Remove(filepath.Join(dir, "uv.lock"))
 			_ = os.RemoveAll(filepath.Join(dir, ".venv"))

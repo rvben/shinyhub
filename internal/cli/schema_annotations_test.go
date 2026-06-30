@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestAnnotations_KnownCommandShape spot-checks representative entries so the
 // registry types stay honest. Full-tree coverage is enforced by the
@@ -38,5 +41,15 @@ func TestFleetApplyAnnotation_DocumentsFailureKind(t *testing.T) {
 	}
 	if !hasKind || !hasDetails {
 		t.Fatalf("fleet apply OutputFields must document failure_kind and attempt_details, got %+v", ann.OutputFields)
+	}
+}
+
+func TestDeployAnnotation_DocumentsBuildTimeout(t *testing.T) {
+	ann, ok := schemaAnnotations["deploy"]
+	if !ok {
+		t.Fatal("deploy must have a schema annotation")
+	}
+	if !strings.Contains(ann.Notes, "build_timeout_seconds") {
+		t.Fatalf("deploy Notes must document build_timeout_seconds, got %q", ann.Notes)
 	}
 }

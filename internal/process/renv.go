@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,8 +13,8 @@ import (
 // renvRestoreCmd builds the renv::restore command. renv evaluates the
 // project's renv profile (deployer-controlled R code), so the env is
 // scrubbed of server secrets via SanitizedEnv.
-func renvRestoreCmd(bundleDir string) *exec.Cmd {
-	cmd := exec.Command("Rscript", "-e",
+func renvRestoreCmd(ctx context.Context, bundleDir string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "Rscript", "-e",
 		`options(renv.config.sandbox.enabled=FALSE); renv::restore(prompt=FALSE)`)
 	cmd.Dir = bundleDir
 	cmd.Env = SanitizedEnv()
@@ -22,14 +23,22 @@ func renvRestoreCmd(bundleDir string) *exec.Cmd {
 
 // SyncR runs renv::restore() in bundleDir to install R package dependencies.
 // It is a no-op when renv.lock does not exist (app manages its own packages).
-func SyncR(bundleDir string) error {
+// The caller adds the "renv restore:" prefix that deployfail classifies on.
+func SyncR(ctx context.Context, bundleDir string) error {
 	lockfile := filepath.Join(bundleDir, "renv.lock")
 	if _, err := os.Stat(lockfile); errors.Is(err, fs.ErrNotExist) {
 		return nil // no renv.lock — nothing to restore
 	}
 
-	if out, err := renvRestoreCmd(bundleDir).CombinedOutput(); err != nil {
-		return fmt.Errorf("renv::restore: %w\n%s", err, out)
+	out, err := renvRestoreCmd(ctx, bundleDir).CombinedOutput()
+	if err != nil {
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			return fmt.Errorf("build exceeded the build timeout: %w", ctx.Err())
+		case context.Canceled:
+			return fmt.Errorf("build canceled: %w", ctx.Err())
+		}
+		return fmt.Errorf("%w\n%s", err, out)
 	}
 	return nil
 }

@@ -98,6 +98,15 @@ const maxAllocateProbes = 1000
 // override it via [app] startup_timeout_seconds in shinyhub.toml.
 const defaultHealthTimeout = 120 * time.Second
 
+// defaultBuildTimeout bounds the host-side environment build (uv sync /
+// renv::restore) when the bundle does not set [app] build_timeout_seconds.
+// Generous: a cold first build of heavy native deps can take many minutes.
+const defaultBuildTimeout = 900 * time.Second
+
+// buildProgressInterval is how often a long build emits a heartbeat log. A var
+// (not const) so tests can shrink it without timing flakiness.
+var buildProgressInterval = 15 * time.Second
+
 // portIsBindable returns true if a TCP listener can be opened on
 // 127.0.0.1:port right now. The probe listener is closed immediately; the
 // caller is responsible for reserving the port via the actual app process
@@ -295,6 +304,70 @@ func (p Params) hostPreparesDeps(tiers ...string) bool {
 //     so an unreadable on-disk one is a pre-validation bundle or a hand-edit, and
 //     silently ignoring a declared command could boot the wrong server).
 //  3. Type detection (app.py / app.R) — falls through when no manifest command.
+
+// resolveBuildTimeout returns the per-bundle build budget: manifest
+// [app] build_timeout_seconds, else the platform default.
+func resolveBuildTimeout(m *Manifest) time.Duration {
+	if m != nil && m.App.BuildTimeoutSeconds != nil {
+		return time.Duration(*m.App.BuildTimeoutSeconds) * time.Second
+	}
+	return defaultBuildTimeout
+}
+
+// buildEnvironment runs the host-side dependency build under one timeout covering
+// the whole phase, with periodic progress logs. It owns the single uv sync: /
+// renv restore: error prefix that deployfail.Classify keys on, so a build failure
+// (including a timeout) is reported build_failed. EnsureProject stays best-effort
+// (a failure, including a timeout, warns and falls through to requirements mode).
+func buildEnvironment(p Params, appType string, buildTimeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	defer cancel()
+
+	start := time.Now()
+	slog.Info("deploy: building environment", "slug", p.Slug, "type", appType, "budget_s", buildTimeout.Seconds())
+	stop := startBuildProgress(p.Slug, start)
+	defer stop()
+
+	switch appType {
+	case "python":
+		if cerr := ensureProjectFn(ctx, p.BundleDir); cerr != nil {
+			slog.Warn("deploy: project conversion failed; using requirements.txt", "slug", p.Slug, "err", cerr)
+		}
+		if err := pythonSyncFn(ctx, p.BundleDir); err != nil {
+			return fmt.Errorf("uv sync: %w", err)
+		}
+	case "r":
+		if err := rSyncFn(ctx, p.BundleDir); err != nil {
+			return fmt.Errorf("renv restore: %w", err)
+		}
+	}
+	slog.Info("deploy: environment built", "slug", p.Slug, "elapsed", time.Since(start).Round(time.Second))
+	return nil
+}
+
+// startBuildProgress emits a heartbeat every buildProgressInterval until the
+// returned stop func is called, so a long build is visibly alive in the log.
+// stop blocks until the goroutine has exited, so no heartbeat can fire after
+// buildEnvironment returns (keeps the slog default and tests deterministic).
+func startBuildProgress(slug string, start time.Time) (stop func()) {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(buildProgressInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				slog.Info("deploy: still building environment", "slug", slug, "elapsed", time.Since(start).Round(time.Second))
+			}
+		}
+	}()
+	return func() { close(done); <-finished }
+}
+
 func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration, err error) {
 	// One manifest load per boot, shared by the command override, the [tracing]
 	// auto override, and the [app] startup_timeout_seconds. File absent = nil
@@ -327,30 +400,22 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 		// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
 		// caller from the tiers this boot touches.
 		switch appType {
-		case "python":
+		case "python", "r":
+			// Convert a requirements.txt-only Python app into a uv project (best-
+			// effort), then sync deps - all under one build_timeout_seconds budget
+			// (default 900s) so a hung build cannot block the deploy forever. A
+			// build failure exits here, before the replica loop, so it is reported
+			// build_failed, distinct from the readiness window.
 			if hostDeps {
-				// Convert a requirements.txt-only app into a uv project on first
-				// prep so it locks via the native uv.lock - one reproducibility
-				// mechanism for every Python app. Best-effort: a failed
-				// conversion cleans itself up and the app falls back to
-				// requirements mode, never blocking the boot.
-				if cerr := ensureProjectFn(p.BundleDir); cerr != nil {
-					slog.Warn("deploy: project conversion failed; using requirements.txt",
-						"slug", p.Slug, "err", cerr)
-				}
-				if err = pythonSyncFn(p.BundleDir); err != nil {
-					return nil, "", false, nil, 0, fmt.Errorf("uv sync: %w", err)
+				if err = buildEnvironment(p, appType, resolveBuildTimeout(m)); err != nil {
+					return nil, "", false, nil, 0, err
 				}
 			}
 			// Only inferred-command Python boots resolve auto-instrumentation:
 			// opentelemetry-instrument is Python-only, and user-supplied
 			// commands are never rewritten.
-			autoInstrument = resolveAutoInstrument(p, m)
-		case "r":
-			if hostDeps {
-				if err = rSyncFn(p.BundleDir); err != nil {
-					return nil, "", false, nil, 0, fmt.Errorf("renv restore: %w", err)
-				}
+			if appType == "python" {
+				autoInstrument = resolveAutoInstrument(p, m)
 			}
 		default:
 			return nil, "", false, nil, 0, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", p.BundleDir)

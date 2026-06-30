@@ -138,7 +138,11 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	// Step 4: Run each dep-prep step, streaming output to the terminal.
 	for _, step := range plan.DepPrep {
 		fmt.Fprintf(stdout, "==> %s\n", step.Label)
-		if err := step.Run(bundleDir); err != nil {
+		// Pass the run's context so a Ctrl-C / cancellation kills an in-flight
+		// build (uv sync / renv restore) promptly. It carries no build deadline,
+		// so local runs remain un-timeout-bounded; the build_timeout budget is
+		// server-deploy-only.
+		if err := step.Run(ctx, bundleDir); err != nil {
 			return fmt.Errorf("dep prep (%s): %w", step.Label, err)
 		}
 	}

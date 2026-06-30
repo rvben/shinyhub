@@ -262,6 +262,46 @@ func TestLoadManifest_RejectsOutOfRangeStartupTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadManifest_ParsesBuildTimeout(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "[app]\nbuild_timeout_seconds = 300\n")
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.App.BuildTimeoutSeconds == nil || *m.App.BuildTimeoutSeconds != 300 {
+		t.Errorf("build_timeout_seconds = %v, want 300", m.App.BuildTimeoutSeconds)
+	}
+}
+
+func TestLoadManifest_RejectsOutOfRangeBuildTimeout(t *testing.T) {
+	for _, v := range []int{0, 29, 7201} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\nbuild_timeout_seconds = "+strconv.Itoa(v)+"\n")
+		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "build_timeout_seconds must be between 30 and 7200") {
+			t.Errorf("build_timeout_seconds = %d: expected range error, got %v", v, err)
+		}
+	}
+}
+
+func TestLoadManifest_AcceptsBuildTimeoutBoundaries(t *testing.T) {
+	for _, v := range []int{30, 7200} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\nbuild_timeout_seconds = "+strconv.Itoa(v)+"\n")
+		if _, err := LoadManifest(dir); err != nil {
+			t.Errorf("build_timeout_seconds = %d: unexpected error: %v", v, err)
+		}
+	}
+}
+
+func TestBuildTimeoutSeconds_NotInIsZero(t *testing.T) {
+	v := 300
+	a := AppSettings{BuildTimeoutSeconds: &v}
+	if !a.IsZero() {
+		t.Fatal("BuildTimeoutSeconds must be excluded from IsZero (read at boot, not DB-reconciled)")
+	}
+}
+
 func TestLoadManifest_ParsesResourceLimits(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, `
