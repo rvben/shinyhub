@@ -62,8 +62,8 @@ func resolveLocation(tz *string, def *time.Location) *time.Location {
 //  2. Otherwise return def (the server-configured default or UTC).
 //
 // If a stored timezone fails to load (corrupted DB row), def is used as a
-// safe fallback. This is the single place the inherit/resolution logic lives;
-// all callers must go through here.
+// safe fallback. Delegates to resolveLocation, the single source of truth for
+// this inherit/fallback logic.
 func (s *Schedule) EffectiveLocation(def *time.Location) *time.Location {
 	return resolveLocation(s.Timezone, def)
 }

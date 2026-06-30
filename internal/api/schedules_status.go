@@ -48,6 +48,8 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	filter := r.URL.Query().Get("slug")
+	// May be nil when the config is constructed directly (e.g. in tests);
+	// EffectiveLocation tolerates a nil default and falls back to UTC.
 	def := s.cfg.Scheduler.Location
 	now := time.Now()
 	out := make([]scheduleStatusItem, 0, len(rows))

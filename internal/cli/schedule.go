@@ -812,7 +812,7 @@ func newScheduleStatusCmd() *cobra.Command {
 			fmt.Fprintf(w, "%-12s  %-16s  %-11s  %-13s  %-8s  %s\n",
 				"APP", "SCHEDULE", "LAST RUN", "LAST SUCCESS", "AGE", "STALE")
 			for _, r := range rows {
-				lastRun := fmt.Sprintf("%v", strOrDash(r["last_run_status"]))
+				lastRun := strOrDash(r["last_run_status"])
 				lastSuccess := "never"
 				age := "-"
 				if r["last_success_at"] != nil {

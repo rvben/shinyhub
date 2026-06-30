@@ -766,7 +766,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Surface which apps are degraded (and why) without crowding the banner:
     // a hover tooltip plus the accessible name carry the actionable detail.
-    // Name stale schedules in the tooltip/aria (slug: schedule), XSS-safe via textContent paths.
+    // Name stale schedules in the tooltip/aria (slug: schedule); written via
+    // the .title and aria-label attributes (not innerHTML), so the
+    // operator-controlled slug/schedule strings are XSS-safe.
     const staleNames = (s.staleSchedules || []).map((x) => `${x.slug}: ${x.schedule}`);
     const baseTip = degradedTooltip(s);
     const tipParts = [];
