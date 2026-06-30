@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // fakeJobs records calls to Run.
@@ -486,8 +487,7 @@ func TestScheduler_MissedRun_TimezoneAware(t *testing.T) {
 // and returns the next fire time after `from`.
 func nextAfter(t *testing.T, spec string, from time.Time) time.Time {
 	t.Helper()
-	parser := productionParser()
-	schedule, err := parser.Parse(spec)
+	schedule, err := schedulespec.ProductionParser.Parse(spec)
 	if err != nil {
 		t.Fatalf("parse spec %q: %v", spec, err)
 	}

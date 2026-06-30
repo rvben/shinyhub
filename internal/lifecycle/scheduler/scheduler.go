@@ -10,6 +10,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // Jobs is the narrow interface scheduler needs from the jobs package, satisfied
@@ -181,12 +182,6 @@ func (s *Scheduler) prefixedSpec(sched *db.Schedule) string {
 	return "CRON_TZ=" + loc.String() + " " + sched.CronExpr
 }
 
-// productionParser returns the cron parser with the same flags as used in
-// dispatchMissedIfDue. Exported for tests to drive the exact same path.
-func productionParser() cron.Parser {
-	return cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-}
-
 func (s *Scheduler) register(sched *db.Schedule) error {
 	s.mu.Lock()
 	c := s.cron
@@ -221,7 +216,7 @@ func (s *Scheduler) dispatchMissedIfDue(sched *db.Schedule) {
 		return
 	}
 	spec := s.prefixedSpec(sched)
-	parser := productionParser()
+	parser := schedulespec.ProductionParser
 	schedule, err := parser.Parse(spec)
 	if err != nil {
 		slog.Warn("parse cron for missed-run check", "schedule", sched.ID, "err", err)
