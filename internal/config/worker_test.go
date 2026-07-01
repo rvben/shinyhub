@@ -21,7 +21,7 @@ func TestValidateWorkerSettings(t *testing.T) {
 		{"multiplex default ok", WorkerSettings{Isolation: IsolationMultiplex}, false, 0, 0, ""},
 		{"multiplex clustered ok", WorkerSettings{Isolation: IsolationMultiplex}, true, 0, 0, ""},
 		{"grouped needs size", WorkerSettings{Isolation: IsolationGrouped, MaxWorkers: 5}, false, 0, 0, "grouped_size"},
-		{"grouped size zero errors", WorkerSettings{Isolation: IsolationGrouped, GroupedSize: 0, MaxWorkers: 5}, false, 0, 0, "grouped_size"},
+		{"negative lifetime rejected", WorkerSettings{Isolation: IsolationPerSession, MaxWorkers: 1, MaxSessionLifetime: -1}, false, 0, 0, "max_session_lifetime"},
 		{"grouped ok", WorkerSettings{Isolation: IsolationGrouped, GroupedSize: 8, MaxWorkers: 5}, false, 0, 0, ""},
 		{"per_session needs max_workers", WorkerSettings{Isolation: IsolationPerSession}, false, 0, 0, "max_workers"},
 		{"per_session ok", WorkerSettings{Isolation: IsolationPerSession, MaxWorkers: 20}, false, 0, 0, ""},
