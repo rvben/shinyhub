@@ -163,29 +163,49 @@ func (r *NativeRuntime) sandboxWrap(p StartParams) (argv, extraEnv []string, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve self for sandbox: %w", err)
 	}
+	// The Landlock rules and the resolved command must be absolute. The shim runs
+	// with its working dir set to the app dir and re-resolves relative paths
+	// against it, so a relative app dir would double-path both the write rules
+	// (silently dropped by IgnoreIfMissing, leaving the app unable to write its
+	// own dir) and the executable. p.Dir is normally already absolute (config
+	// resolves apps_dir at load), but normalize here so any caller passing a
+	// relative dir is still confined correctly.
+	appDir, err := filepath.Abs(p.Dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve app dir %q: %w", p.Dir, err)
+	}
+	dataDir := p.AppDataPath
+	if dataDir != "" {
+		if dataDir, err = filepath.Abs(dataDir); err != nil {
+			return nil, nil, fmt.Errorf("resolve app data dir %q: %w", p.AppDataPath, err)
+		}
+	}
 	// Resolve the executable to an absolute path in the parent, matching the
 	// unsandboxed path's lookup (a bare name via the server PATH, a path with a
 	// separator against the app working dir). Passing the resolved absolute path
 	// to the shim keeps command resolution identical: the shim does not re-look-up
 	// the name against the app-provided PATH, and a missing executable fails the
 	// launch synchronously here.
-	bin, err := resolveExecutable(p.Command[0], p.Dir)
+	bin, err := resolveExecutable(p.Command[0], appDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve command %q: %w", p.Command[0], err)
 	}
-	// A private TMPDIR inside the app dir (already writable) gives a well-behaved
-	// app an isolated temp area while /tmp stays a fallback.
-	tmpDir := filepath.Join(p.Dir, ".sandbox-tmp")
-	if err := os.MkdirAll(tmpDir, 0o770); err != nil {
-		return nil, nil, fmt.Errorf("sandbox tmp dir: %w", err)
-	}
-	spec := sandbox.ComputeSpec(r.isolation, p.Dir, p.AppDataPath)
+	spec := sandbox.ComputeSpec(r.isolation, appDir, dataDir)
 	enc, err := spec.Encode()
 	if err != nil {
 		return nil, nil, err
 	}
+	// A private TMPDIR inside the app dir (already writable) gives a well-behaved
+	// app an isolated temp area. If it cannot be created (e.g. a read-only
+	// deployment dir), fall back to the default /tmp - which stays writable under
+	// standard - rather than failing the launch.
+	tmpDir := filepath.Join(appDir, ".sandbox-tmp")
+	if err := os.MkdirAll(tmpDir, 0o770); err != nil {
+		slog.Warn("sandbox private tmp dir unavailable, leaving TMPDIR at the default", "dir", tmpDir, "err", err)
+		tmpDir = ""
+	}
 	argv = append([]string{self, sandbox.ShimCommand, "--", bin}, p.Command[1:]...)
-	extraEnv = sandboxLaunchEnv(p.Dir, tmpDir, enc)
+	extraEnv = sandboxLaunchEnv(appDir, tmpDir, enc)
 	return argv, extraEnv, nil
 }
 
@@ -217,16 +237,20 @@ func resolveExecutable(name, workDir string) (string, error) {
 // redirects tool caches into the app's own writable tree: launchers like
 // `uv run` must initialize a cache even with --frozen --no-sync, and under the
 // read-only root that write would be denied and the app would fail to start, so
-// UV_CACHE_DIR / XDG_CACHE_HOME (and TMPDIR) point at writable app subdirs.
-// These are appended after the app's own env, so they take effect under the
-// sandbox. Pure, so the cache contract is unit-testable on any platform.
+// UV_CACHE_DIR / XDG_CACHE_HOME (and TMPDIR, when tmpDir is non-empty) point at
+// writable app subdirs. These are appended after the app's own env, so they take
+// effect under the sandbox. Pure, so the cache contract is unit-testable on any
+// platform.
 func sandboxLaunchEnv(appDir, tmpDir, encSpec string) []string {
-	return []string{
-		"TMPDIR=" + tmpDir,
+	env := []string{
 		"UV_CACHE_DIR=" + filepath.Join(appDir, ".uv-cache"),
 		"XDG_CACHE_HOME=" + filepath.Join(appDir, ".cache"),
 		sandbox.EnvVar + "=" + encSpec,
 	}
+	if tmpDir != "" {
+		env = append(env, "TMPDIR="+tmpDir)
+	}
+	return env
 }
 
 // ensureCgroupBase prepares the delegated cgroup base exactly once, before the
