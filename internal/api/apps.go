@@ -1168,6 +1168,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			if rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 				AppID: preManifestApp.ID, Slug: slug,
 				SetIdentityHeaders: true, IdentityHeaders: preManifestApp.IdentityHeaders,
+				// Restore the pre-manifest autoscale policy. Unconditional like
+				// identity_headers: a no-op when the failed manifest declared no
+				// autoscale (writes back the same values), correct when it did.
+				SetAutoscale:         true,
+				AutoscaleEnabled:     preManifestApp.AutoscaleEnabled,
+				AutoscaleMinReplicas: preManifestApp.AutoscaleMinReplicas,
+				AutoscaleMaxReplicas: preManifestApp.AutoscaleMaxReplicas,
+				AutoscaleTarget:      preManifestApp.AutoscaleTarget,
 			}); rerr != nil {
 				slog.Error("deploy: revert identity_headers after failed deploy", "slug", slug, "err", rerr)
 			}

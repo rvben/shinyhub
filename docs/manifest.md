@@ -80,6 +80,7 @@ starts.
 | `min_warm_replicas` | int 0..1000 | Minimum number of replicas kept running when the app idles. `0` (default) allows full hibernation. When set above `0`, the watcher stops only enough replicas to reach this floor so the first post-idle request hits a warm process. If the stored `replicas` value is less than `min_warm_replicas`, the floor self-clamps to `replicas`. Absent key leaves the stored value unchanged (same declared-only semantics as `replicas`). See [Pre-warming](scaling.md#pre-warming). |
 | `command` | array of strings | Launch-command override. See [`[app] command`](#app-command) below. |
 | `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
+| `autoscale` | inline table | Per-app session-saturation autoscale policy. See [`[app] autoscale`](#app-autoscale) below. |
 
 All fields are optional. Omitted fields are left untouched: the
 manifest does not assert a complete state, so existing values set via the
@@ -178,6 +179,33 @@ operator has disabled identity forwarding globally, setting
 `identity_headers = true` in a manifest has no effect. See
 [Identity Forwarding](identity.md) for the full semantics, header reference,
 and JWT verification examples.
+
+### `[app] autoscale`
+
+Declare the session-saturation autoscale policy so it travels with the bundle
+and is reconciled on every deploy. Autoscale also requires the global
+`runtime.autoscale.enabled` flag; see [Autoscaling](scaling.md#autoscaling).
+
+```toml
+[app]
+autoscale = { enabled = true, min_replicas = 1, max_replicas = 8, target = 0.8 }
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | **Required.** Turn the policy on or off. Still gated on the global `runtime.autoscale.enabled` flag. |
+| `min_replicas` | int | Lower bound. Must be `>= 1` when enabled. The effective floor is `max(min_replicas, min_warm_replicas)`. |
+| `max_replicas` | int | Upper bound. Must be `>= min_replicas` when enabled and may not exceed the runtime `max_replicas` ceiling. |
+| `target` | float `(0,1]` | Target average active sessions per replica as a fraction of the per-replica cap. `0` inherits the runtime-wide default target. |
+
+The block is atomic: when present it writes the full policy (all four columns);
+when absent the stored policy is left untouched, so a policy set with `shinyhub
+apps set --autoscale ...` survives a deploy that does not declare one. `enabled`
+must be stated explicitly - a block that omits it (for example only `target`) is
+rejected, so an incomplete block can never silently persist an all-zero policy.
+Bounds are range-checked `0..1000` even when disabled, so a later re-enable never
+hits an out-of-range stored value. An unknown key inside the table fails the
+deploy under strict-mode parsing.
 
 ### Sentinel: reset hibernate to default
 

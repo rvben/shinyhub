@@ -39,6 +39,13 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 	if m.Replicas != nil && s.cfg.Runtime.MaxReplicas > 0 && *m.Replicas > s.cfg.Runtime.MaxReplicas {
 		return newValidationError("replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas)
 	}
+	// The runtime MaxReplicas ceiling needs server config, so it is enforced
+	// here rather than at parse time (matching the replicas check above and the
+	// PATCH /api/apps autoscale handler). Only meaningful when enabled.
+	if m.Autoscale != nil && m.Autoscale.Enabled != nil && *m.Autoscale.Enabled &&
+		s.cfg.Runtime.MaxReplicas > 0 && m.Autoscale.MaxReplicas > s.cfg.Runtime.MaxReplicas {
+		return newValidationError("autoscale.max_replicas must be <= %d", s.cfg.Runtime.MaxReplicas)
+	}
 	// Reject a manifest resource limit that exceeds the Fargate task ceiling BEFORE
 	// Phase A writes it / the pool is torn down - otherwise the limit persists and
 	// Fargate silently clamps it. Gated on allTiersFargate, matching the API PATCH
@@ -66,6 +73,19 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 //
 // Returns wrapped DB errors on storage failure (handler → 500 + degraded).
 func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy.AppSettings) error {
+	// Autoscale reconciles atomically only when the block is declared; the
+	// zero values below are inert because SetAutoscale gates the DB write.
+	var asEnabled bool
+	var asMin, asMax int
+	var asTarget float64
+	if m.Autoscale != nil {
+		// Enabled is guaranteed non-nil here: LoadManifest rejects a declared
+		// autoscale block that omits it.
+		asEnabled = m.Autoscale.Enabled != nil && *m.Autoscale.Enabled
+		asMin = m.Autoscale.MinReplicas
+		asMax = m.Autoscale.MaxReplicas
+		asTarget = m.Autoscale.Target
+	}
 	if err := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:                    app.ID,
 		Slug:                     app.Slug,
@@ -84,6 +104,11 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		MemoryLimitMB:            m.MemoryLimitMB,
 		SetCPUQuotaPercent:       m.CPUQuotaPercent != nil,
 		CPUQuotaPercent:          m.CPUQuotaPercent,
+		SetAutoscale:             m.Autoscale != nil,
+		AutoscaleEnabled:         asEnabled,
+		AutoscaleMinReplicas:     asMin,
+		AutoscaleMaxReplicas:     asMax,
+		AutoscaleTarget:          asTarget,
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -330,6 +355,14 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.CPUQuotaPercent != nil {
 		d["cpu_quota_percent"] = *m.CPUQuotaPercent
 	}
+	if m.Autoscale != nil {
+		d["autoscale"] = map[string]any{
+			"enabled":      m.Autoscale.Enabled != nil && *m.Autoscale.Enabled,
+			"min_replicas": m.Autoscale.MinReplicas,
+			"max_replicas": m.Autoscale.MaxReplicas,
+			"target":       m.Autoscale.Target,
+		}
+	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command
 	}
@@ -360,6 +393,14 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.CPUQuotaPercent != nil {
 		d["cpu_quota_percent"] = *m.CPUQuotaPercent
+	}
+	if m.Autoscale != nil {
+		d["autoscale"] = map[string]any{
+			"enabled":      m.Autoscale.Enabled != nil && *m.Autoscale.Enabled,
+			"min_replicas": m.Autoscale.MinReplicas,
+			"max_replicas": m.Autoscale.MaxReplicas,
+			"target":       m.Autoscale.Target,
+		}
 	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command

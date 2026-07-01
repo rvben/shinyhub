@@ -11,6 +11,9 @@ export function formatManifestSummary(manifest) {
       const parts = keys.map((k) => {
         const v = manifest.app[k];
         if (v === null) return `${k}=default`;
+        if (k === 'autoscale' && v && typeof v === 'object') {
+          return `autoscale=${formatAutoscaleSummary(v)}`;
+        }
         return `${k}=${v}`;
       });
       lines.push(`Applied [app] settings: ${parts.join('; ')}`);
@@ -25,6 +28,19 @@ export function formatManifestSummary(manifest) {
     lines.push(`Schedules: ${created} created, ${updated} updated`);
   }
   return lines;
+}
+
+// formatAutoscaleSummary mirrors formatAutoscaleSummary in
+// internal/cli/manifest_summary.go: "off" when disabled, else
+// "on (min-max @ target)" with target as a two-decimal fraction, or
+// "@ default" when target is 0 (inherit the runtime default).
+function formatAutoscaleSummary(as) {
+  if (!as.enabled) return 'off';
+  const min = Number(as.min_replicas) || 0;
+  const max = Number(as.max_replicas) || 0;
+  const target = Number(as.target) || 0;
+  if (target > 0) return `on (${min}-${max} @ ${target.toFixed(2)})`;
+  return `on (${min}-${max} @ default)`;
 }
 
 // renderDeployResult populates the result block with one <li> per line and

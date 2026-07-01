@@ -243,6 +243,62 @@ func TestApplyAppManifestSettings_ResourceLimits(t *testing.T) {
 	}
 }
 
+// TestApplyAppManifestSettings_Autoscale verifies the [app] autoscale block
+// reconciles atomically (all four columns), survives an unrelated apply that
+// does not declare it, and can be re-declared disabled (bounds persist).
+func TestApplyAppManifestSettings_Autoscale(t *testing.T) {
+	store := mustOpenDB(t)
+	u := mustCreateUser(t, store, "owner", "developer")
+	app := mustCreateApp(t, store, "alpha", u.ID)
+
+	// Declare the full policy.
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID: app.ID, Slug: "alpha",
+		SetAutoscale:         true,
+		AutoscaleEnabled:     true,
+		AutoscaleMinReplicas: 2,
+		AutoscaleMaxReplicas: 8,
+		AutoscaleTarget:      0.75,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.AutoscaleEnabled || got.AutoscaleMinReplicas != 2 || got.AutoscaleMaxReplicas != 8 || got.AutoscaleTarget != 0.75 {
+		t.Fatalf("autoscale = {en:%v min:%d max:%d tgt:%v}, want {true 2 8 0.75}",
+			got.AutoscaleEnabled, got.AutoscaleMinReplicas, got.AutoscaleMaxReplicas, got.AutoscaleTarget)
+	}
+
+	// A later apply that does NOT declare autoscale must leave it intact.
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID: app.ID, Slug: "alpha",
+		SetReplicas: true, Replicas: 4, PreviousReplicas: app.Replicas,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetAppBySlug("alpha")
+	if !got.AutoscaleEnabled || got.AutoscaleMaxReplicas != 8 {
+		t.Errorf("autoscale clobbered by an unrelated apply: en=%v max=%d", got.AutoscaleEnabled, got.AutoscaleMaxReplicas)
+	}
+
+	// Re-declaring disabled writes all four columns; bounds persist for re-enable.
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID: app.ID, Slug: "alpha",
+		SetAutoscale: true, AutoscaleEnabled: false, AutoscaleMinReplicas: 1, AutoscaleMaxReplicas: 3, AutoscaleTarget: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetAppBySlug("alpha")
+	if got.AutoscaleEnabled {
+		t.Errorf("autoscale still enabled after a disable apply")
+	}
+	if got.AutoscaleMaxReplicas != 3 {
+		t.Errorf("max_replicas = %d, want 3 (bounds persist while disabled)", got.AutoscaleMaxReplicas)
+	}
+}
+
 // TestApplyAppManifestSettings_IdentityHeadersTriState verifies the tri-state
 // reconcile semantics for identity_headers:
 //   - SetIdentityHeaders=true + non-nil false => column set to false

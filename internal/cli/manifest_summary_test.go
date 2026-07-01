@@ -32,6 +32,21 @@ func TestFormatManifestSummary_FromServerShape(t *testing.T) {
 			want: []string{"Applied [app] settings: hibernate_timeout_minutes=default"},
 		},
 		{
+			name: "autoscale enabled renders compactly",
+			body: `{"manifest":{"app":{"autoscale":{"enabled":true,"min_replicas":1,"max_replicas":8,"target":0.8}}}}`,
+			want: []string{"Applied [app] settings: autoscale=on (1-8 @ 0.80)"},
+		},
+		{
+			name: "autoscale disabled renders off",
+			body: `{"manifest":{"app":{"autoscale":{"enabled":false,"min_replicas":0,"max_replicas":0,"target":0}}}}`,
+			want: []string{"Applied [app] settings: autoscale=off"},
+		},
+		{
+			name: "autoscale target 0 inherits default",
+			body: `{"manifest":{"app":{"autoscale":{"enabled":true,"min_replicas":2,"max_replicas":4,"target":0}}}}`,
+			want: []string{"Applied [app] settings: autoscale=on (2-4 @ default)"},
+		},
+		{
 			name: "schedules only",
 			body: `{"manifest":{"schedules":[{"name":"a","action":"created"},{"name":"b","action":"updated"}]}}`,
 			want: []string{"Schedules: 1 created, 1 updated"},

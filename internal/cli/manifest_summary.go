@@ -76,6 +76,12 @@ func formatAppFields(app map[string]any) string {
 			parts = append(parts, k+"=default")
 			continue
 		}
+		if k == "autoscale" {
+			if as, ok := v.(map[string]any); ok {
+				parts = append(parts, "autoscale="+formatAutoscaleSummary(as))
+				continue
+			}
+		}
 		if f, ok := v.(float64); ok {
 			parts = append(parts, fmt.Sprintf("%s=%d", k, int(f)))
 			continue
@@ -83,4 +89,29 @@ func formatAppFields(app map[string]any) string {
 		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// formatAutoscaleSummary renders the nested autoscale block from a deploy
+// summary as a compact value: "off" when disabled, else "on (min-max @ target)"
+// with target as a two-decimal fraction, or "@ default" when target is 0
+// (inherit the runtime default).
+func formatAutoscaleSummary(as map[string]any) string {
+	enabled, _ := as["enabled"].(bool)
+	if !enabled {
+		return "off"
+	}
+	min := jsonInt(as["min_replicas"])
+	max := jsonInt(as["max_replicas"])
+	if target, _ := as["target"].(float64); target > 0 {
+		return fmt.Sprintf("on (%d-%d @ %.2f)", min, max, target)
+	}
+	return fmt.Sprintf("on (%d-%d @ default)", min, max)
+}
+
+// jsonInt reads a JSON number (decoded as float64) as an int, or 0 if absent.
+func jsonInt(v any) int {
+	if f, ok := v.(float64); ok {
+		return int(f)
+	}
+	return 0
 }

@@ -295,6 +295,111 @@ cmd     = "echo hello"
 	}
 }
 
+// TestDeploy_AppliesManifestAutoscale_EndToEnd deploys a bundle whose
+// shinyhub.toml declares an [app] autoscale block and verifies the policy is
+// reconciled into the app row and echoed in the deploy response summary — the
+// full production path (LoadManifest → validate → applyManifestAppSettings).
+func TestDeploy_AppliesManifestAutoscale_EndToEnd(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "scaler", Name: "Scaler", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := `
+[app]
+replicas = 1
+autoscale = { enabled = true, min_replicas = 1, max_replicas = 3, target = 0.8 }
+`
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/scaler/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	app, err := store.GetAppBySlug("scaler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !app.AutoscaleEnabled {
+		t.Errorf("AutoscaleEnabled = false, want true")
+	}
+	if app.AutoscaleMinReplicas != 1 || app.AutoscaleMaxReplicas != 3 {
+		t.Errorf("autoscale bounds = [%d,%d], want [1,3]", app.AutoscaleMinReplicas, app.AutoscaleMaxReplicas)
+	}
+	if app.AutoscaleTarget != 0.8 {
+		t.Errorf("autoscale target = %v, want 0.8", app.AutoscaleTarget)
+	}
+
+	// The deploy response summary must echo the autoscale block so the CLI can
+	// show "Applied [app] settings: ...".
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	appSummary, ok := resp["manifest"].(map[string]any)["app"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.app missing in response: %s", rec.Body.String())
+	}
+	as, ok := appSummary["autoscale"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.app.autoscale missing: %v", appSummary)
+	}
+	if as["enabled"] != true {
+		t.Errorf("summary autoscale.enabled = %v, want true", as["enabled"])
+	}
+	if v, _ := as["max_replicas"].(float64); int(v) != 3 {
+		t.Errorf("summary autoscale.max_replicas = %v, want 3", as["max_replicas"])
+	}
+}
+
+// TestDeploy_ManifestAutoscaleExceedsMaxReplicas_Fails400 verifies the
+// server-policy ceiling (runtime MaxReplicas) rejects an autoscale block whose
+// max_replicas exceeds it with 400, and Phase A never runs (autoscale stays
+// off on the app row).
+func TestDeploy_ManifestAutoscaleExceedsMaxReplicas_Fails400(t *testing.T) {
+	srv, store, token := newManifestE2EServerCfg(t, config.RuntimeConfig{MaxReplicas: 2})
+	admin, _ := store.GetUserByUsername("admin")
+
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "capped", Name: "Capped", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := `
+[app]
+autoscale = { enabled = true, min_replicas = 1, max_replicas = 5, target = 0.8 }
+`
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/capped/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	app, _ := store.GetAppBySlug("capped")
+	if app.AutoscaleEnabled {
+		t.Errorf("autoscale enabled despite policy rejection (Phase A must not have run)")
+	}
+}
+
 // TestDeploy_ManifestBadAppSettingFails400 verifies that a bundle containing
 // a shinyhub.toml with an invalid [app] setting (replicas = -1) results in
 // HTTP 400 and leaves the app row unchanged (no partial write).

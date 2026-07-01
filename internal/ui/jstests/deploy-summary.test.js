@@ -27,6 +27,29 @@ test('formatManifestSummary renders null values as "default"', () => {
   assert.deepEqual(lines, ['Applied [app] settings: memory_limit_mb=default']);
 });
 
+// Mirrors internal/cli/manifest_summary_test.go: the nested autoscale object
+// must render as a compact policy string, not "[object Object]".
+test('formatManifestSummary renders autoscale compactly when enabled', () => {
+  const lines = formatManifestSummary({
+    app: { autoscale: { enabled: true, min_replicas: 1, max_replicas: 8, target: 0.8 } },
+  });
+  assert.deepEqual(lines, ['Applied [app] settings: autoscale=on (1-8 @ 0.80)']);
+});
+
+test('formatManifestSummary renders autoscale off when disabled', () => {
+  const lines = formatManifestSummary({
+    app: { autoscale: { enabled: false, min_replicas: 0, max_replicas: 0, target: 0 } },
+  });
+  assert.deepEqual(lines, ['Applied [app] settings: autoscale=off']);
+});
+
+test('formatManifestSummary renders autoscale target 0 as default', () => {
+  const lines = formatManifestSummary({
+    app: { autoscale: { enabled: true, min_replicas: 2, max_replicas: 4, target: 0 } },
+  });
+  assert.deepEqual(lines, ['Applied [app] settings: autoscale=on (2-4 @ default)']);
+});
+
 test('formatManifestSummary counts schedule actions', () => {
   const lines = formatManifestSummary({
     schedules: [
