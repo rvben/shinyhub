@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-race vuln test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test iac-validate clispec-score
+.PHONY: build clean test test-go test-race vuln test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -35,6 +35,28 @@ test-js:
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required for UI tests)"; exit 1; }
 	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
 	node --test internal/ui/jstests/*.test.js
+
+# test-identity runs the client-helper suites plus the cross-language
+# conformance check. Kept out of the default `test` target so the core Go/JS
+# gate does not require uv or R; wire it into CI as its own step.
+test-identity: test-py-identity test-identity-conformance test-r-identity
+
+# test-py-identity runs the shinyhub-identity Python helper's unit tests via uv.
+test-py-identity:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python identity helper tests)"; exit 1; }
+	cd packaging/python-identity && PYTHONPATH=src uv run --with pytest --with pyjwt --no-project python -m pytest tests/ -q
+
+# test-r-identity runs the shinyhubidentity R helper's testthat suite. Needs R
+# with jose, sodium and testthat; skips cleanly when Rscript is absent.
+test-r-identity:
+	@command -v Rscript >/dev/null 2>&1 || { echo "Rscript not found; skipping R identity helper tests"; exit 0; }
+	Rscript -e 'testthat::test_local("packaging/r-identity")'
+
+# test-identity-conformance verifies the shipped Python and R helpers against a
+# token minted by the real production MintToken. Each language subtest skips
+# when its toolchain (uv / Rscript) is absent.
+test-identity-conformance:
+	SHINYHUB_CONFORMANCE=1 go test ./internal/identity/ -run TestConformance -count=1 -v
 
 # test-remote-e2e launches a control plane and a real `shinyhub worker` against
 # the local Docker daemon, deploys an app onto the remote tier with two

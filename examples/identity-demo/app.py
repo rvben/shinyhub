@@ -1,3 +1,7 @@
+# This demo decodes the ShinyHub identity token inline to stay dependency-light
+# and show what the verification does under the hood. In your own app, prefer
+# the one-call helper: `pip install shinyhub-identity`, then
+# `from shinyhub_identity import current_user`. See docs/identity.md.
 import os
 
 import jwt
