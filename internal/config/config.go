@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/sandbox"
 )
 
 // OAuthConfig holds OAuth2 provider credentials.
@@ -449,6 +450,7 @@ type StorageConfig struct {
 type RuntimeConfig struct {
 	Mode            string // "native" (default) or "docker"
 	Docker          DockerRuntimeConfig
+	Native          NativeRuntimeConfig
 	DefaultReplicas int
 	MaxReplicas     int
 	// DefaultMaxSessionsPerReplica is the fallback session cap enforced by the
@@ -471,6 +473,14 @@ type RuntimeConfig struct {
 	// Snapshot controls warm-wake (freeze + cgroup reclaim), shared by the
 	// native and docker runtimes.
 	Snapshot SnapshotConfig
+}
+
+// NativeRuntimeConfig holds settings for the native (non-container) runtime.
+type NativeRuntimeConfig struct {
+	// Isolation is the process-isolation dial for native app processes: "off"
+	// (default) or "standard" (Landlock filesystem confinement + NO_NEW_PRIVS,
+	// Linux-only, best-effort). Validated at load against sandbox.ParseLevel.
+	Isolation string
 }
 
 // FargateRuntimeConfig holds the AWS ECS/Fargate runtime settings shared by every
@@ -729,7 +739,7 @@ var validTopLevelKeys = map[string]bool{
 // the top level is a common mistake; the unknown-key error hints at the correct
 // nesting for these.
 var runtimeSubKeys = map[string]bool{
-	"docker": true, "tiers": true, "autoscale": true, "fargate": true, "snapshot": true,
+	"docker": true, "tiers": true, "autoscale": true, "fargate": true, "snapshot": true, "native": true,
 }
 
 // checkTopLevelKeys rejects any top-level YAML key that is not a known config
@@ -801,6 +811,7 @@ type rawLifecycleConfig struct {
 type rawRuntimeConfig struct {
 	Mode            string                 `yaml:"mode"`
 	Docker          rawDockerRuntimeConfig `yaml:"docker"`
+	Native          rawNativeRuntimeConfig `yaml:"native"`
 	DefaultReplicas int                    `yaml:"default_replicas"`
 	MaxReplicas     int                    `yaml:"max_replicas"`
 	// Pointer so an explicit 0 (documented as "unlimited") is
@@ -810,6 +821,10 @@ type rawRuntimeConfig struct {
 	Autoscale                    rawAutoscaleConfig      `yaml:"autoscale"`
 	Fargate                      rawFargateRuntimeConfig `yaml:"fargate"`
 	Snapshot                     rawSnapshotConfig       `yaml:"snapshot"`
+}
+
+type rawNativeRuntimeConfig struct {
+	Isolation string `yaml:"isolation"`
 }
 
 type rawFargateRuntimeConfig struct {
@@ -1626,6 +1641,11 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	if r.Mode != "" {
 		rc.Mode = r.Mode
 	}
+	isolation, err := sandbox.ParseLevel(r.Native.Isolation)
+	if err != nil {
+		return RuntimeConfig{}, fmt.Errorf("runtime.native.isolation: %w", err)
+	}
+	rc.Native.Isolation = string(isolation)
 	rc.Snapshot.Enabled = r.Snapshot.Enabled
 	if r.Snapshot.MaxSuspended > 0 {
 		rc.Snapshot.MaxSuspended = r.Snapshot.MaxSuspended
@@ -1933,6 +1953,13 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_MODE"); v != "" {
 		cfg.Runtime.Mode = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_NATIVE_ISOLATION"); v != "" {
+		level, err := sandbox.ParseLevel(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_NATIVE_ISOLATION: %w", err)
+		}
+		cfg.Runtime.Native.Isolation = string(level)
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_SOCKET"); v != "" {
 		cfg.Runtime.Docker.Socket = v

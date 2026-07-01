@@ -9,11 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	gops "github.com/shirou/gopsutil/v4/process"
+
+	"github.com/rvben/shinyhub/internal/sandbox"
 )
 
 // nativeChildEnv returns the env slice for a native child process: the
@@ -105,6 +108,11 @@ type NativeRuntime struct {
 	// actually enforced (vs silently ignored). Set when ensureCgroupBase succeeds.
 	limitsMemoryEnforced bool
 	limitsCPUEnforced    bool
+
+	// isolation is the process-isolation dial. When enabled (and the platform
+	// supports it), Start/RunOnce launch the app through the re-exec sandbox shim
+	// so Landlock confines it. Set once at startup before any Start.
+	isolation sandbox.Level
 }
 
 // NewNativeRuntime returns a ready-to-use NativeRuntime.
@@ -126,6 +134,99 @@ func NewNativeRuntime() *NativeRuntime {
 func (r *NativeRuntime) SetSnapshot(enabled bool, reclaimMinFraction float64) {
 	r.snapshotEnabled = enabled
 	r.reclaimMinFraction = reclaimMinFraction
+}
+
+// SetIsolation sets the native process-isolation dial. Called once at startup
+// from buildRuntime, before any Start. If isolation is requested on a platform
+// with no enforcement backend (non-Linux), it warns and runs without it rather
+// than failing to start apps.
+func (r *NativeRuntime) SetIsolation(level sandbox.Level) {
+	if level.Enabled() && !sandbox.Supported() {
+		slog.Warn("native isolation requested but unsupported on this platform; running without it",
+			"isolation", string(level))
+	}
+	r.isolation = level
+}
+
+// sandboxWrap wraps the app command in the re-exec sandbox shim when isolation
+// is enabled and supported, returning the argv to launch plus extra env (a
+// private TMPDIR and the encoded spec). It creates the private temp dir. When
+// isolation is off or unsupported it returns the command unchanged.
+func (r *NativeRuntime) sandboxWrap(p StartParams) (argv, extraEnv []string, err error) {
+	if !r.isolation.Enabled() || !sandbox.Supported() {
+		return p.Command, nil, nil
+	}
+	if len(p.Command) == 0 {
+		return nil, nil, fmt.Errorf("command must not be empty")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve self for sandbox: %w", err)
+	}
+	// Resolve the executable to an absolute path in the parent, matching the
+	// unsandboxed path's lookup (a bare name via the server PATH, a path with a
+	// separator against the app working dir). Passing the resolved absolute path
+	// to the shim keeps command resolution identical: the shim does not re-look-up
+	// the name against the app-provided PATH, and a missing executable fails the
+	// launch synchronously here.
+	bin, err := resolveExecutable(p.Command[0], p.Dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve command %q: %w", p.Command[0], err)
+	}
+	// A private TMPDIR inside the app dir (already writable) gives a well-behaved
+	// app an isolated temp area while /tmp stays a fallback.
+	tmpDir := filepath.Join(p.Dir, ".sandbox-tmp")
+	if err := os.MkdirAll(tmpDir, 0o770); err != nil {
+		return nil, nil, fmt.Errorf("sandbox tmp dir: %w", err)
+	}
+	spec := sandbox.ComputeSpec(r.isolation, p.Dir, p.AppDataPath)
+	enc, err := spec.Encode()
+	if err != nil {
+		return nil, nil, err
+	}
+	argv = append([]string{self, sandbox.ShimCommand, "--", bin}, p.Command[1:]...)
+	extraEnv = sandboxLaunchEnv(p.Dir, tmpDir, enc)
+	return argv, extraEnv, nil
+}
+
+// resolveExecutable returns the absolute path of name for a child whose working
+// directory is workDir, matching os/exec + native launch semantics: a name
+// containing a path separator is resolved relative to workDir (or used as is
+// when absolute), otherwise it is looked up on the server PATH. Returning an
+// absolute path lets the shim exec it directly without a second, app-PATH-
+// dependent lookup.
+func resolveExecutable(name, workDir string) (string, error) {
+	if strings.ContainsRune(name, filepath.Separator) {
+		path := name
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workDir, path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			return "", fmt.Errorf("%s is not an executable file", path)
+		}
+		return path, nil
+	}
+	return exec.LookPath(name)
+}
+
+// sandboxLaunchEnv builds the extra environment for a sandboxed launch. It
+// redirects tool caches into the app's own writable tree: launchers like
+// `uv run` must initialize a cache even with --frozen --no-sync, and under the
+// read-only root that write would be denied and the app would fail to start, so
+// UV_CACHE_DIR / XDG_CACHE_HOME (and TMPDIR) point at writable app subdirs.
+// These are appended after the app's own env, so they take effect under the
+// sandbox. Pure, so the cache contract is unit-testable on any platform.
+func sandboxLaunchEnv(appDir, tmpDir, encSpec string) []string {
+	return []string{
+		"TMPDIR=" + tmpDir,
+		"UV_CACHE_DIR=" + filepath.Join(appDir, ".uv-cache"),
+		"XDG_CACHE_HOME=" + filepath.Join(appDir, ".cache"),
+		sandbox.EnvVar + "=" + encSpec,
+	}
 }
 
 // ensureCgroupBase prepares the delegated cgroup base exactly once, before the
@@ -335,9 +436,13 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	if r.snapshotEnabled || p.MemoryLimitMB > 0 || p.CPUQuotaPercent > 0 {
 		r.ensureCgroupBase()
 	}
-	cmd := exec.Command(p.Command[0], p.Command[1:]...)
+	argv, extraEnv, err := r.sandboxWrap(p)
+	if err != nil {
+		return ReplicaEndpoint{}, err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = p.Dir
-	cmd.Env = nativeChildEnv(p)
+	cmd.Env = append(nativeChildEnv(p), extraEnv...)
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
 	// Place the child in its own process group so signals can be sent to the
@@ -544,9 +649,15 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	if jobHasLimit(p) {
 		r.ensureCgroupBase()
 	}
-	cmd := exec.Command(p.Command[0], p.Command[1:]...)
+	// One-shot jobs (e.g. scheduled runs) are app code too, so they get the same
+	// isolation as the long-running Start path.
+	argv, extraEnv, err := r.sandboxWrap(p)
+	if err != nil {
+		return ExitInfo{}, err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = p.Dir
-	cmd.Env = nativeChildEnv(p)
+	cmd.Env = append(nativeChildEnv(p), extraEnv...)
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
