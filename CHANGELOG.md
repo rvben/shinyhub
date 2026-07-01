@@ -66,6 +66,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.9.1](https://github.com/rvben/shinyhub/compare/v0.9.0...v0.9.1) - 2026-07-01
+
+### Added
+
+- **runtime**: native process isolation dial (Landlock, standard tier) ([9e9c0f3](https://github.com/rvben/shinyhub/commit/9e9c0f319000c20e6c0443cafdaca8f1e91fdfa6))
+- **identity**: persist SSO email so X-Shinyhub-Email works for native sessions ([ec97374](https://github.com/rvben/shinyhub/commit/ec97374a0a98e9512e711ec9ce3a1f0477ae0ba4))
+- **identity**: forward user email (X-Shinyhub-Email + email claim) ([b4c1348](https://github.com/rvben/shinyhub/commit/b4c1348a6378b28c112e69af4d988af5c4bf9f64))
+- **identity**: shinyhub-identity Python + R client helper packages ([b0ef309](https://github.com/rvben/shinyhub/commit/b0ef309b7d771f5ea7a92df54ba346d424c1890d))
+- **fleet**: declarative autoscale in the fleet manifest [app.config] ([52e0602](https://github.com/rvben/shinyhub/commit/52e0602e7dd143267430d1e729cfdd3cb9c6c0dd))
+- **metrics**: per-app session and admission-ceiling gauges ([3f28c6c](https://github.com/rvben/shinyhub/commit/3f28c6cc0e8ec97f2c77828da43ed44c2d370097))
+- **autoscale**: declarative per-app autoscale in shinyhub.toml [app] ([ea50cd7](https://github.com/rvben/shinyhub/commit/ea50cd72228d3b3e0af1b863a6510bfe70a5dcdc))
+
+### Fixed
+
+- **runtime**: normalize sandbox paths to absolute and fall back TMPDIR ([61fd482](https://github.com/rvben/shinyhub/commit/61fd48269e7e47acd1b7ea7f03fffd78d9eb7146))
+- **identity**: resolve GitHub private-email primary for X-Shinyhub-Email ([ea83605](https://github.com/rvben/shinyhub/commit/ea8360524170250547985ef7c3260d6ec771bdda))
+- **config**: strict top-level config - reject unknown, empty, multi-doc ([4277290](https://github.com/rvben/shinyhub/commit/42772908b7895bebc2aae0034a9db7fdefa27321))
+- **identity**: correct the R helper missing-exp test construction ([a7239e8](https://github.com/rvben/shinyhub/commit/a7239e83a3962088dab7be9164d27fc9bd9762c6))
+
 ## [0.9.0](https://github.com/rvben/shinyhub/compare/v0.8.29...v0.9.0) - 2026-06-30
 
 ### Added
