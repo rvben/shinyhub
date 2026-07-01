@@ -534,6 +534,13 @@ type App struct {
 	// CrashedAt is the Unix-epoch seconds of the transition into "crashed", or
 	// 0 when the app is not crashed. Cleared alongside LastError on (re)start.
 	CrashedAt int64 `json:"crashed_at,omitempty"`
+	// WorkerIsolation is the session-isolation mode: "multiplex" (default),
+	// "grouped", or "per_session". Non-multiplex modes are demand-driven and
+	// single-node only in Phase 1.
+	WorkerIsolation              string `json:"worker_isolation"`
+	WorkerGroupedSize            int    `json:"worker_grouped_size"`
+	WorkerMaxWorkers             int    `json:"worker_max_workers"`
+	WorkerMaxSessionLifetimeSecs int    `json:"worker_max_session_lifetime_secs"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -575,7 +582,9 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
-		       last_error, crashed_at, description, icon_mime,`
+		       last_error, crashed_at, description, icon_mime,
+		       worker_isolation, worker_grouped_size, worker_max_workers,
+		       worker_max_session_lifetime_secs,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -2920,6 +2929,8 @@ func scanApp(s scanner) (*App, error) {
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime,
+		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
+		&a.WorkerMaxSessionLifetimeSecs,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {
