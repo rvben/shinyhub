@@ -1505,3 +1505,28 @@ func TestRun_InstrumentedFailureFallsBackUninstrumented(t *testing.T) {
 		t.Errorf("builder calls = %v, want %v (instrumented then fallback)", autos, want)
 	}
 }
+
+func TestResolveWorkerIsolation(t *testing.T) {
+	cases := []struct {
+		perApp string
+		def    string
+		want   string
+	}{
+		// per-app value wins when set
+		{"per_session", "multiplex", "per_session"},
+		{"grouped", "multiplex", "grouped"},
+		{"multiplex", "grouped", "multiplex"},
+		// fall through to fleet default when per-app is empty
+		{"", "grouped", "grouped"},
+		{"", "per_session", "per_session"},
+		{"", "multiplex", "multiplex"},
+		// both empty - hard default is multiplex
+		{"", "", "multiplex"},
+	}
+	for _, c := range cases {
+		got := deploy.ResolveWorkerIsolation(c.perApp, c.def)
+		if got != c.want {
+			t.Errorf("ResolveWorkerIsolation(%q, %q) = %q; want %q", c.perApp, c.def, got, c.want)
+		}
+	}
+}

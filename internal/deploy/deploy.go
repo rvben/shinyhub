@@ -1181,3 +1181,15 @@ func ResolveMaxSessionsPerReplica(perApp, defaultVal int) int {
 	}
 	return defaultVal
 }
+
+// ResolveWorkerIsolation returns perApp if non-empty, otherwise def. An empty
+// stored value means "inherit the fleet default".
+func ResolveWorkerIsolation(perApp, def string) string {
+	if perApp != "" {
+		return perApp
+	}
+	if def == "" {
+		return "multiplex"
+	}
+	return def
+}
