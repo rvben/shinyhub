@@ -1193,6 +1193,44 @@ func (p *Proxy) ReplicaSessionCounts(slug string) []int64 {
 	return out
 }
 
+// PoolSessionStat is a per-pool session snapshot for the metrics collector:
+// total active sessions across all live replicas, the per-replica admission cap
+// (0 = unlimited), and the number of replicas available for NEW admission. The
+// current admission ceiling is Cap*Replicas when Cap > 0.
+type PoolSessionStat struct {
+	Sessions int
+	Cap      int
+	// Replicas counts slots that admit new sessions: non-nil and not draining.
+	// A draining replica (scale-down in progress) still holds its existing
+	// sessions - which are counted in Sessions - but the picker routes no new
+	// session to it, so it must not inflate the admission ceiling.
+	Replicas int
+}
+
+// PoolSessionSnapshot returns a best-effort snapshot of session usage for every
+// registered pool, keyed by slug. Taken under the read lock, but per-replica
+// counts are loaded independently (not one global instant), matching
+// ReplicaSessionCounts. Intended for the Prometheus session gauges.
+func (p *Proxy) PoolSessionSnapshot() map[string]PoolSessionStat {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]PoolSessionStat, len(p.pools))
+	for slug, pool := range p.pools {
+		var sessions, admitting int
+		for _, rep := range pool.replicas {
+			if rep == nil {
+				continue
+			}
+			sessions += int(rep.activeConns.Load())
+			if !rep.draining.Load() {
+				admitting++
+			}
+		}
+		out[slug] = PoolSessionStat{Sessions: sessions, Cap: pool.maxSessions, Replicas: admitting}
+	}
+	return out
+}
+
 // appIDForSlug returns the numeric database app ID recorded for slug's pool and
 // true, or 0 and false if the pool is not registered or has no ID set. Used by
 // FleetSignal to resolve slug->appID without a DB round-trip at signal time.

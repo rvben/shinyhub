@@ -65,6 +65,13 @@ series count.
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `shinyhub_admission_rejects_total` | counter | `slug`, `reason` | Proxy admission rejections. `slug` is `__unknown__` for requests to slugs that are not registered apps. |
+| `shinyhub_app_sessions` | gauge | `slug` | Active proxied sessions for an app, summed across live replicas (evaluated at scrape time). |
+| `shinyhub_app_sessions_limit` | gauge | `slug` | Admission ceiling for an app: the number of replicas that admit new sessions (live, not draining) times the per-replica session cap. Absent for uncapped apps, so `shinyhub_app_sessions / shinyhub_app_sessions_limit` is the saturation fraction wherever a cap applies. |
+
+Both session gauges are exported **per control-plane instance**, like every metric
+here. On a single-node deployment they are exact. In a clustered deployment,
+scrape every instance and aggregate in PromQL (`sum by (slug) (...)`) rather than
+reading one instance in isolation - the example alert below already does this.
 
 ### Fleet and lifecycle
 
@@ -91,6 +98,14 @@ groups:
         expr: increase(shinyhub_replica_restarts_total[10m]) > 5
         annotations:
           summary: "A ShinyHub replica is crash-restarting repeatedly"
+
+      - alert: ShinyHubSessionsNearCap
+        # sum by (slug) aggregates across control-plane instances; on a single
+        # node it is simply the one series.
+        expr: sum by (slug) (shinyhub_app_sessions) / sum by (slug) (shinyhub_app_sessions_limit) > 0.9
+        for: 5m
+        annotations:
+          summary: "{{ $labels.slug }} is above 90% of its admission ceiling"
 ```
 
 ## Access log
