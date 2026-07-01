@@ -17,6 +17,7 @@ def mint(
     sub="42",
     username="alice",
     role="admin",
+    email="alice@example.com",
     groups=("team-a", "team-b"),
     iss="shinyhub",
     exp_delta=300,
@@ -33,6 +34,8 @@ def mint(
         "iat": now,
         "exp": now + exp_delta,
     }
+    if email is not None:
+        claims["email"] = email
     return jwt.encode(claims, key, algorithm="HS256")
 
 
@@ -45,9 +48,15 @@ def test_valid_token_returns_identity():
     assert isinstance(u, Identity)
     assert u.username == "alice"
     assert u.user_id == "42"
+    assert u.email == "alice@example.com"
     assert u.role == "admin"
     assert u.groups == ("team-a", "team-b")
     assert u.groups_truncated is False
+
+
+def test_email_absent_is_empty_string():
+    u = current_user(headers(mint(email=None)), key=KEY, slug=SLUG)
+    assert u.email == ""
 
 
 def test_missing_token_is_anonymous():

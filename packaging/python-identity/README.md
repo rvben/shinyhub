@@ -27,7 +27,8 @@ def server(input, output, session):
 ```
 
 `current_user(headers)` returns an `Identity` (`user_id`, `username`, `role`,
-`groups`, `groups_truncated`, and the raw `claims`) or `None`. It works with any
+`email`, `groups`, `groups_truncated`, and the raw `claims`) or `None`. `email`
+is `""` unless the deployment's forward-auth SSO asserts one. It works with any
 header mapping - Shiny for Python's `session.http_conn.headers`, a
 Starlette/Flask request's headers, or a plain `dict`.
 

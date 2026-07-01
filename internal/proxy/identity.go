@@ -86,6 +86,9 @@ func applyIdentityHeaders(req *http.Request, pool *backendPool, slug string, pro
 	req.Header.Set(identity.HeaderUser, pl.Username)
 	req.Header.Set(identity.HeaderUserID, pl.UserID)
 	req.Header.Set(identity.HeaderRole, pl.Role)
+	if pl.Email != "" {
+		req.Header.Set(identity.HeaderEmail, pl.Email)
+	}
 	if pl.GroupsHeader != "" {
 		req.Header.Set(identity.HeaderGroups, pl.GroupsHeader)
 	}

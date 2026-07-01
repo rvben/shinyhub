@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -110,6 +111,40 @@ func TestMintToken_RoundTripsWithDerivedKey(t *testing.T) {
 	}
 	if len(claims.Groups) != 2 {
 		t.Fatalf("groups = %v", claims.Groups)
+	}
+}
+
+func TestMintToken_CarriesEmail(t *testing.T) {
+	key := DeriveKey("secret", 7)
+	tok, err := MintToken(key, TokenParams{
+		UserID: 12, Username: "ruben", Role: "admin",
+		Email: "ruben@example.com", Slug: "demo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := &TokenClaims{}
+	if _, err := jwt.ParseWithClaims(tok, claims, func(*jwt.Token) (any, error) {
+		return key, nil
+	}, jwt.WithAudience("demo"), jwt.WithIssuer(Issuer)); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if claims.Email != "ruben@example.com" {
+		t.Fatalf("email claim = %q, want ruben@example.com", claims.Email)
+	}
+}
+
+func TestMintToken_OmitsEmptyEmail(t *testing.T) {
+	key := DeriveKey("secret", 7)
+	tok, _ := MintToken(key, TokenParams{UserID: 1, Username: "u", Role: "viewer", Slug: "demo"})
+	// An empty email must be absent from the serialized claims (omitempty).
+	parts := strings.Split(tok, ".")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "email") {
+		t.Fatalf("empty email must be omitted from claims, got: %s", payload)
 	}
 }
 

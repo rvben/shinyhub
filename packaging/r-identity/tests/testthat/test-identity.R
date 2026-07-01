@@ -7,10 +7,11 @@ slug <- "sales-dashboard"
 
 mint <- function(k = key, s = slug, iss = "shinyhub", role = "admin",
                  groups = list("team-a", "team-b"), username = "alice",
-                 sub = "42", exp = as.numeric(Sys.time()) + 300) {
+                 email = "alice@example.com", sub = "42",
+                 exp = as.numeric(Sys.time()) + 300) {
   claims <- jose::jwt_claim(
     iss = iss, sub = sub, aud = s,
-    preferred_username = username, role = role, groups = groups,
+    preferred_username = username, role = role, email = email, groups = groups,
     exp = exp
   )
   jose::jwt_encode_hmac(claims, secret = k)
@@ -20,6 +21,7 @@ test_that("a valid token returns the identity", {
   u <- verify_token(mint(), key = key, slug = slug)
   expect_equal(u$preferred_username, "alice")
   expect_equal(u$role, "admin")
+  expect_equal(u$email, "alice@example.com")
   expect_equal(as.character(u$sub), "42")
 })
 

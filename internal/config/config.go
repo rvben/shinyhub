@@ -408,8 +408,11 @@ func (a *AuthConfig) IdentityHeadersEnabled() bool {
 type ForwardAuthConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 	UserHeader string `yaml:"user_header"`
-	// EmailHeader is accepted but not yet consumed by the middleware (reserved;
-	// the users table has no email column). Setting it has no effect today.
+	// EmailHeader is the proxy header carrying the user's email (e.g. Authelia's
+	// Remote-Email). When set, the middleware captures it request-scoped and
+	// forwards it to apps as X-Shinyhub-Email and the identity token's email
+	// claim. Not persisted (the users table has no email column). Empty disables
+	// email capture.
 	EmailHeader string `yaml:"email_header"`
 	// NameHeader is the proxy header carrying the user's friendly name (e.g.
 	// Authelia's Remote-Name). When set, the middleware captures it as the

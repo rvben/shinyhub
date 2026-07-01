@@ -27,7 +27,7 @@ func TestConformance_HelpersVerifyRealToken(t *testing.T) {
 	keyHex := hex.EncodeToString(key)
 	const slug = "sales-dashboard"
 	tok, err := identity.MintToken(key, identity.TokenParams{
-		UserID: 42, Username: "alice", Role: "admin",
+		UserID: 42, Username: "alice", Role: "admin", Email: "alice@example.com",
 		Groups: []string{"team-a", "team-b"}, Slug: slug,
 	})
 	if err != nil {
@@ -39,8 +39,9 @@ func TestConformance_HelpersVerifyRealToken(t *testing.T) {
 		if got == nil {
 			t.Fatal("helper returned anonymous for a valid production token")
 		}
-		if got["username"] != "alice" || got["role"] != "admin" || got["user_id"] != "42" {
-			t.Errorf("helper decoded %v, want username=alice role=admin user_id=42", got)
+		if got["username"] != "alice" || got["role"] != "admin" || got["user_id"] != "42" ||
+			got["email"] != "alice@example.com" {
+			t.Errorf("helper decoded %v, want username=alice role=admin user_id=42 email=alice@example.com", got)
 		}
 	}
 
@@ -52,7 +53,7 @@ func TestConformance_HelpersVerifyRealToken(t *testing.T) {
 		script := `import os, json
 from shinyhub_identity import current_user
 u = current_user({"x-shinyhub-identity-token": os.environ["TOK"]})
-print(json.dumps(None if u is None else {"username": u.username, "role": u.role, "user_id": u.user_id, "groups": list(u.groups)}))`
+print(json.dumps(None if u is None else {"username": u.username, "role": u.role, "user_id": u.user_id, "email": u.email, "groups": list(u.groups)}))`
 		cmd := exec.Command("uv", "run", "--with", "pyjwt", "--no-project", "python", "-c", script)
 		cmd.Env = append(os.Environ(),
 			"PYTHONPATH="+src, "TOK="+tok,
@@ -71,7 +72,7 @@ print(json.dumps(None if u is None else {"username": u.username, "role": u.role,
 		rfile, _ := filepath.Abs("../../packaging/r-identity/R/identity.R")
 		script := `source(Sys.getenv("RFILE"))
 u <- verify_token(Sys.getenv("TOK"), key = Sys.getenv("SHINYHUB_IDENTITY_KEY"), slug = Sys.getenv("SHINYHUB_APP_SLUG"))
-if (is.null(u)) cat("null\n") else cat(sprintf('{"username":"%s","role":"%s","user_id":"%s"}\n', u$preferred_username, u$role, as.character(u$sub)))`
+if (is.null(u)) cat("null\n") else cat(sprintf('{"username":"%s","role":"%s","user_id":"%s","email":"%s"}\n', u$preferred_username, u$role, as.character(u$sub), u$email))`
 		cmd := exec.Command("Rscript", "-e", script)
 		cmd.Env = append(os.Environ(),
 			"RFILE="+rfile, "TOK="+tok,

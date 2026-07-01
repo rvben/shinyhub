@@ -32,7 +32,9 @@ server <- function(input, output, session) {
 ```
 
 `current_user(session)` returns the verified JWT claims
-(`preferred_username`, `role`, `groups`, `sub`, ...) or `NULL`. Every failure -
+(`preferred_username`, `role`, `email`, `groups`, `sub`, ...) or `NULL`
+(`email` is present only when the deployment's forward-auth SSO asserts one).
+Every failure -
 no token, bad signature, wrong audience/issuer, expired, or no ShinyHub in front
 (running locally) - returns `NULL` rather than erroring, so your app stays
 testable without SSO.
