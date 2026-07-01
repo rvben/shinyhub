@@ -46,6 +46,66 @@ source = "git+https://example.com/beta.git"
 	}
 }
 
+func TestParseManifest_Autoscale(t *testing.T) {
+	src := `
+fleet_id = "eu"
+
+[[app]]
+slug = "a"
+source = "git+https://example.com/a.git"
+
+  [app.config]
+  autoscale = { enabled = true, min_replicas = 1, max_replicas = 8, target = 0.8 }
+`
+	m, probs := ParseManifest([]byte(src), "f.toml")
+	if len(probs) != 0 {
+		t.Fatalf("unexpected problems: %v", probs)
+	}
+	as := m.Apps[0].Config.Autoscale
+	if as == nil {
+		t.Fatal("Config.Autoscale = nil, want the declared block")
+	}
+	if as.Enabled == nil || !*as.Enabled || as.MinReplicas != 1 || as.MaxReplicas != 8 || as.Target != 0.8 {
+		t.Fatalf("autoscale = %+v, want {enabled:true min:1 max:8 target:0.8}", as)
+	}
+}
+
+func TestParseManifest_AutoscaleInvalid(t *testing.T) {
+	// enabled omitted (incomplete block) and max < min: both flagged locally.
+	src := `
+fleet_id = "eu"
+
+[[app]]
+slug = "a"
+source = "./a"
+
+  [app.config]
+  autoscale = { min_replicas = 5, max_replicas = 2 }
+`
+	_, probs := ParseManifest([]byte(src), "f.toml")
+	joined := problemsString(probs)
+	if !strings.Contains(joined, "autoscale.enabled is required") {
+		t.Fatalf("missing enabled-required problem\n--- got ---\n%s", joined)
+	}
+}
+
+func TestParseManifest_AutoscaleUnknownSubkey(t *testing.T) {
+	src := `
+fleet_id = "eu"
+
+[[app]]
+slug = "a"
+source = "./a"
+
+  [app.config]
+  autoscale = { enabled = true, min_replicas = 1, max_replicas = 2, targett = 0.5 }
+`
+	_, probs := ParseManifest([]byte(src), "f.toml")
+	if !strings.Contains(problemsString(probs), "unknown key") {
+		t.Fatalf("expected unknown-key problem for a mistyped autoscale subkey, got %v", probs)
+	}
+}
+
 func TestParseManifest_AggregatesAllProblems(t *testing.T) {
 	src := `
 [[app]]

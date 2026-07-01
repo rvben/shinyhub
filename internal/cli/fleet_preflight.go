@@ -166,6 +166,14 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			MaxSessionsPerReplica:   intPtrIfPositive(a.MaxSessionsPerReplica),
 			ContentDigest:           a.ContentDigest,
 			ManagedBy:               a.ManagedBy,
+			// A live GET /api/apps observation is always populated (never nil),
+			// so an on-server off policy stays distinct from "not observed".
+			Autoscale: &fleet.ObservedAutoscale{
+				Enabled:     a.AutoscaleEnabled,
+				MinReplicas: a.AutoscaleMinReplicas,
+				MaxReplicas: a.AutoscaleMaxReplicas,
+				Target:      a.AutoscaleTarget,
+			},
 		}
 		observed = append(observed, oa)
 		observedBySlug[a.Slug] = oa

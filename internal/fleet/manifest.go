@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/rvben/shinyhub/internal/autoscalespec"
 )
 
 // Problem is a single, user-facing validation failure. File/Line/Col are
@@ -40,9 +41,21 @@ func (p Problem) Error() string {
 // Config mirrors the reconcilable subset of shinyhub.toml [app]. Pointers
 // distinguish "declared" (drift-protected) from "absent" (server/bundle wins).
 type Config struct {
-	HibernateTimeoutMinutes *int `toml:"hibernate_timeout_minutes"`
-	Replicas                *int `toml:"replicas"`
-	MaxSessionsPerReplica   *int `toml:"max_sessions_per_replica"`
+	HibernateTimeoutMinutes *int             `toml:"hibernate_timeout_minutes"`
+	Replicas                *int             `toml:"replicas"`
+	MaxSessionsPerReplica   *int             `toml:"max_sessions_per_replica"`
+	Autoscale               *AutoscaleConfig `toml:"autoscale"`
+}
+
+// AutoscaleConfig mirrors the [app.config] autoscale inline table. It matches
+// the bundle manifest's [app] autoscale block (internal/deploy) and the PATCH
+// /api/apps autoscale object. Enabled is a pointer so a declared block must
+// state it explicitly; nil (block absent) means the policy is not fleet-managed.
+type AutoscaleConfig struct {
+	Enabled     *bool   `toml:"enabled"`
+	MinReplicas int     `toml:"min_replicas"`
+	MaxReplicas int     `toml:"max_replicas"`
+	Target      float64 `toml:"target"`
 }
 
 // AppEntry is one [[app]] block after validation. Visibility defaults to
@@ -74,6 +87,7 @@ var validVisibility = map[string]bool{"private": true, "shared": true, "public":
 var knownKeys = []string{
 	"fleet_id", "app", "slug", "source", "visibility", "config",
 	"hibernate_timeout_minutes", "replicas", "max_sessions_per_replica",
+	"autoscale", "enabled", "min_replicas", "max_replicas", "target",
 }
 
 // ParseManifest strictly decodes a fleet manifest and runs all cheap, local,
@@ -185,6 +199,16 @@ func validateConfig(file, who string, c Config) []Problem {
 	if c.MaxSessionsPerReplica != nil && *c.MaxSessionsPerReplica < 1 {
 		probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
 			"%s: max_sessions_per_replica must be >= 1, got %d", who, *c.MaxSessionsPerReplica)})
+	}
+	if c.Autoscale != nil {
+		if err := autoscalespec.Validate(autoscalespec.Params{
+			Enabled:     c.Autoscale.Enabled,
+			MinReplicas: c.Autoscale.MinReplicas,
+			MaxReplicas: c.Autoscale.MaxReplicas,
+			Target:      c.Autoscale.Target,
+		}); err != nil {
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: %v", who, err)})
+		}
 	}
 	return probs
 }

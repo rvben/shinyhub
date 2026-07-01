@@ -28,6 +28,21 @@ type ObservedApp struct {
 	MaxSessionsPerReplica   *int
 	ContentDigest           string
 	ManagedBy               *string
+
+	// Autoscale is the server's stored policy, or nil when not observed (as in
+	// DeclaredConfig's zero ObservedApp). nil is distinct from an all-zero
+	// (off) policy: it makes a declared block always assert on create - so an
+	// explicit `autoscale = { enabled = false }` still wins over a bundle that
+	// enables autoscale. This mirrors the *int scalar fields above.
+	Autoscale *ObservedAutoscale
+}
+
+// ObservedAutoscale is the server's stored autoscale policy.
+type ObservedAutoscale struct {
+	Enabled     bool
+	MinReplicas int
+	MaxReplicas int
+	Target      float64
 }
 
 // ConfigDriftItem is one fleet-declared key whose server value differs from
@@ -141,7 +156,58 @@ func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	d = appendIntDrift(d, "hibernate_timeout_minutes", app.Config.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes)
 	d = appendIntDrift(d, "replicas", app.Config.Replicas, o.Replicas)
 	d = appendIntDrift(d, "max_sessions_per_replica", app.Config.MaxSessionsPerReplica, o.MaxSessionsPerReplica)
+	d = appendAutoscaleDrift(d, app.Config.Autoscale, o.Autoscale)
 	return d
+}
+
+// appendAutoscaleDrift adds a single "autoscale" drift item when the declared
+// policy differs from the observed one. A nil desired (block absent) means "not
+// fleet-declared" => no drift. A nil observed (server not observed, as on
+// create) always asserts a declared block, so an explicit off policy still wins
+// over the bundle. The whole block is one item because autoscale is reconciled
+// atomically (all four columns together).
+func appendAutoscaleDrift(d []ConfigDriftItem, desired *AutoscaleConfig, o *ObservedAutoscale) []ConfigDriftItem {
+	if desired == nil {
+		return d
+	}
+	enabled := desired.Enabled != nil && *desired.Enabled
+	if o != nil &&
+		enabled == o.Enabled &&
+		desired.MinReplicas == o.MinReplicas &&
+		desired.MaxReplicas == o.MaxReplicas &&
+		desired.Target == o.Target {
+		return d
+	}
+	server := "(unset)"
+	if o != nil {
+		server = autoscaleDisplay(o.Enabled, o.MinReplicas, o.MaxReplicas, o.Target)
+	}
+	return append(d, ConfigDriftItem{
+		Key:     "autoscale",
+		Server:  server,
+		Desired: autoscaleDisplay(enabled, desired.MinReplicas, desired.MaxReplicas, desired.Target),
+	})
+}
+
+// autoscaleDisplay renders an autoscale policy as a compact drift string:
+// "off" when disabled with no remembered bounds, "off (min-max)" when disabled
+// but carrying bounds (so a bounds-only change is not shown as "off -> off"),
+// else "on(min-max @ target)" with target as a two-decimal fraction, or
+// "@ default" when target is 0 (inherit the runtime default).
+func autoscaleDisplay(enabled bool, min, max int, target float64) string {
+	if !enabled {
+		if min == 0 && max == 0 && target == 0 {
+			return "off"
+		}
+		if target > 0 {
+			return fmt.Sprintf("off (%d-%d @ %.2f)", min, max, target)
+		}
+		return fmt.Sprintf("off (%d-%d)", min, max)
+	}
+	if target > 0 {
+		return fmt.Sprintf("on(%d-%d @ %.2f)", min, max, target)
+	}
+	return fmt.Sprintf("on(%d-%d @ default)", min, max)
 }
 
 // DeclaredConfig returns the manifest's declared numeric config for an app as

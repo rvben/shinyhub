@@ -101,3 +101,45 @@ func TestFleetConfigBody_OnlyDeclaredKeys(t *testing.T) {
 		t.Fatal("empty config must yield empty body")
 	}
 }
+
+func TestFleetConfigBody_Autoscale(t *testing.T) {
+	en := true
+	body := fleetConfigBody(fleet.Config{
+		Autoscale: &fleet.AutoscaleConfig{Enabled: &en, MinReplicas: 1, MaxReplicas: 8, Target: 0.8},
+	})
+	as, ok := body["autoscale"].(map[string]any)
+	if !ok {
+		t.Fatalf("body[autoscale] = %#v, want a map", body["autoscale"])
+	}
+	if as["enabled"] != true || as["min_replicas"] != 1 || as["max_replicas"] != 8 || as["target"] != 0.8 {
+		t.Fatalf("autoscale body = %#v, want {enabled:true min:1 max:8 target:0.8}", as)
+	}
+}
+
+// applyConfigDrift must reconstruct the autoscale PATCH object from the declared
+// Config (not by parsing the human display string), so a drifted "autoscale"
+// key sends a full {enabled,min_replicas,max_replicas,target} object.
+func TestApplyConfigDrift_Autoscale(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+
+	en := true
+	declared := fleet.Config{Autoscale: &fleet.AutoscaleConfig{Enabled: &en, MinReplicas: 1, MaxReplicas: 8, Target: 0.8}}
+	drift := []fleet.ConfigDriftItem{{Key: "autoscale", Server: "off", Desired: "on(1-8 @ 0.80)"}}
+	if err := applyConfigDrift(cfg, "demo", drift, declared, nil, nil, "r"); err != nil {
+		t.Fatalf("applyConfigDrift: %v", err)
+	}
+	as, ok := gotBody["autoscale"].(map[string]any)
+	if !ok {
+		t.Fatalf("PATCH body autoscale = %#v, want a reconstructed object", gotBody["autoscale"])
+	}
+	if as["enabled"] != true || as["max_replicas"].(float64) != 8 || as["target"].(float64) != 0.8 {
+		t.Fatalf("autoscale patch = %#v", as)
+	}
+}

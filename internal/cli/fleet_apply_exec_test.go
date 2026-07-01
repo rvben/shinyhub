@@ -157,6 +157,109 @@ func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
 	}
 }
 
+func TestConvergeApp_UpdateSourceReassertsAutoscaleOnly(t *testing.T) {
+	// A source-only deploy can overwrite the autoscale columns from the new
+	// bundle's shinyhub.toml. convergeApp reasserts ONLY autoscale (gated on the
+	// promoted digest): autoscale does not trigger a redeploy, so fleet
+	// precedence is restored in one pass. Crucially, `replicas` (declared here)
+	// must NOT be re-PATCHed - that would cycle the pool a second time.
+	var patchBody map[string]any
+	var patchDigest string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/srconly":
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "srconly", "content_digest": "sha256:PROMOTED"}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/srconly":
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &patchBody)
+			patchDigest = r.Header.Get("X-Shinyhub-If-Content-Digest")
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+
+	en := true
+	entry := fleet.AppEntry{Slug: "srconly", Source: "./x", Visibility: "private",
+		Config: fleet.Config{Replicas: stateInt(2), Autoscale: &fleet.AutoscaleConfig{Enabled: &en, MinReplicas: 1, MaxReplicas: 8, Target: 0.8}}}
+	d := fleet.AppDiff{Slug: "srconly", Action: fleet.ActionUpdateSource, Owned: true, ServerDigest: "sha256:OLD"}
+
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srconly"}, dir,
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusUpdated {
+		t.Fatalf("status = %s (%v), want updated", r.status, r.err)
+	}
+	if _, ok := patchBody["autoscale"]; !ok {
+		t.Errorf("expected an autoscale reassert PATCH, body = %#v", patchBody)
+	}
+	if _, ok := patchBody["replicas"]; ok {
+		t.Error("replicas must NOT be re-PATCHed on a source-only deploy (would cause a second pool cycle)")
+	}
+	if patchDigest != "sha256:PROMOTED" {
+		t.Errorf("reassert precondition = %q, want the promoted digest", patchDigest)
+	}
+}
+
+func TestConvergeApp_UpdateSourceConfigReassertsAutoscale(t *testing.T) {
+	// Source+config change where autoscale matched at plan time (so it is NOT in
+	// d.ConfigDrift) but another key (replicas) drifted. The redeployed bundle can
+	// still overwrite autoscale, so it must be reasserted after the deploy even
+	// though it was absent from the pre-deploy drift list.
+	var sawAutoscalePatch bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/srccfg":
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "srccfg", "content_digest": "sha256:PROMOTED"}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/srccfg":
+			b, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(b, &body)
+			if _, ok := body["autoscale"]; ok {
+				sawAutoscalePatch = true
+			}
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+
+	en := true
+	entry := fleet.AppEntry{Slug: "srccfg", Source: "./x", Visibility: "private",
+		Config: fleet.Config{Replicas: stateInt(2), Autoscale: &fleet.AutoscaleConfig{Enabled: &en, MinReplicas: 1, MaxReplicas: 8, Target: 0.8}}}
+	// Pre-deploy drift is replicas only; autoscale matched at plan time.
+	d := fleet.AppDiff{Slug: "srccfg", Action: fleet.ActionUpdateSourceConfig, Owned: true,
+		ServerDigest: "sha256:OLD", ConfigDrift: []fleet.ConfigDriftItem{{Key: "replicas", Server: "1", Desired: "2"}}}
+
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srccfg"}, dir,
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusUpdated {
+		t.Fatalf("status = %s (%v), want updated", r.status, r.err)
+	}
+	if !sawAutoscalePatch {
+		t.Error("autoscale must be reasserted after a source+config deploy even when absent from the pre-deploy drift")
+	}
+}
+
 func TestConvergeApp_AdoptReservesOwnershipBeforeDeployAndReleasesOnFailure(t *testing.T) {
 	// Two properties at once:
 	//  1. Ownership is RESERVED (preconditioned stamp) BEFORE the bundle is
