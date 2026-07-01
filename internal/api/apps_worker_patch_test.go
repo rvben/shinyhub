@@ -141,3 +141,64 @@ func TestPatchApp_WorkerIsolationRejectedWhenClustered(t *testing.T) {
 		t.Errorf("expected error to mention single-node, got: %s", rec.Body.String())
 	}
 }
+
+// TestPatchApp_WorkerPartialPatchFallbackAllowsMaxWorkersUpdate proves the
+// orString/orInt fallback path end-to-end: after establishing grouped isolation
+// with a valid grouped_size, a subsequent PATCH that sets only max_workers must
+// succeed because the validator sees the stored "grouped" + grouped_size via
+// fallback and considers the dial consistent.
+func TestPatchApp_WorkerPartialPatchFallbackAllowsMaxWorkersUpdate(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	// Establish grouped isolation with grouped_size=4 and max_workers=10.
+	rec := patchWorkerApp(t, srv, token, []byte(
+		`{"worker_isolation":"grouped","worker_grouped_size":4,"worker_max_workers":10}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial grouped PATCH: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Partial PATCH: change only max_workers. The validator must use the stored
+	// "grouped" + grouped_size=4 via fallback and accept the new value.
+	rec = patchWorkerApp(t, srv, token, []byte(`{"worker_max_workers":999}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partial max_workers PATCH: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	app, _ := store.GetAppBySlug("wapp")
+	if app.WorkerIsolation != "grouped" {
+		t.Errorf("WorkerIsolation = %q after partial PATCH, want grouped", app.WorkerIsolation)
+	}
+	if app.WorkerGroupedSize != 4 {
+		t.Errorf("WorkerGroupedSize = %d after partial PATCH, want 4", app.WorkerGroupedSize)
+	}
+	if app.WorkerMaxWorkers != 999 {
+		t.Errorf("WorkerMaxWorkers = %d after partial PATCH, want 999", app.WorkerMaxWorkers)
+	}
+}
+
+// TestPatchApp_WorkerPartialPatchFallbackRejectsZeroGroupedSize verifies that
+// a partial PATCH setting grouped_size=0 on an app already using grouped
+// isolation is rejected: the validator sees the stored "grouped" isolation via
+// fallback and fails the grouped_size >= 1 check.
+func TestPatchApp_WorkerPartialPatchFallbackRejectsZeroGroupedSize(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	// Establish grouped isolation with a valid grouped_size.
+	rec := patchWorkerApp(t, srv, token, []byte(
+		`{"worker_isolation":"grouped","worker_grouped_size":4,"worker_max_workers":10}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial grouped PATCH: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Partial PATCH: set grouped_size=0 only. The stored "grouped" isolation plus
+	// the new size=0 must fail validation.
+	rec = patchWorkerApp(t, srv, token, []byte(`{"worker_grouped_size":0}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("zero grouped_size PATCH: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "grouped_size") {
+		t.Errorf("expected error to mention grouped_size, got: %s", rec.Body.String())
+	}
+}

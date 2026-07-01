@@ -346,12 +346,12 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		autoMax             int
 		autoTarget          float64
 
-		newWorkerIsolation         string
-		setWorkerIsolation         bool
-		newWorkerGroupedSize       int
-		setWorkerGroupedSize       bool
-		newWorkerMaxWorkers        int
-		setWorkerMaxWorkers        bool
+		newWorkerIsolation          string
+		setWorkerIsolation          bool
+		newWorkerGroupedSize        int
+		setWorkerGroupedSize        bool
+		newWorkerMaxWorkers         int
+		setWorkerMaxWorkers         bool
 		newWorkerMaxSessionLifetime int
 		setWorkerMaxSessionLifetime bool
 	)
@@ -707,35 +707,43 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture old worker values before the update so the audit record can include
+	// old/new pairs, consistent with how memory_limit_mb and cpu_quota_percent are
+	// recorded. The app object still holds the pre-update state at this point.
+	oldWorkerIsolation := app.WorkerIsolation
+	oldWorkerGroupedSize := app.WorkerGroupedSize
+	oldWorkerMaxWorkers := app.WorkerMaxWorkers
+	oldWorkerMaxSessionLifetime := app.WorkerMaxSessionLifetimeSecs
+
 	// Apply core settings in a single transaction so a storage failure mid-write
 	// never leaves the row half-updated. The managed_by marker is a separate
 	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
 	// the post-patch refetch exposes the final consistent state to the caller.
 	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
-		Slug:               slug,
-		SetHibernate:       setHibernateTimeout,
-		HibernateMinutes:   hibernateTimeout,
-		SetName:            setName,
-		Name:               newName,
-		SetProjectSlug:     setProjectSlug,
-		ProjectSlug:        newProjectSlug,
-		SetMemoryLimitMB:   setMemoryLimitMB,
-		MemoryLimitMB:      memoryLimitMB,
-		SetCPUQuotaPercent: setCPUQuotaPercent,
-		CPUQuotaPercent:    cpuQuotaPercent,
-		SetReplicas:        setReplicas,
-		Replicas:           newReplicas,
-		SetMaxSessions:     setMaxSessions,
-		MaxSessions:        newMaxSessions,
-		SetMinWarmReplicas:          setMinWarmReplicas,
-		MinWarmReplicas:             newMinWarmReplicas,
-		SetWorkerIsolation:          setWorkerIsolation,
-		WorkerIsolation:             newWorkerIsolation,
-		SetWorkerGroupedSize:        setWorkerGroupedSize,
-		WorkerGroupedSize:           newWorkerGroupedSize,
-		SetWorkerMaxWorkers:         setWorkerMaxWorkers,
-		WorkerMaxWorkers:            newWorkerMaxWorkers,
-		SetWorkerMaxSessionLifetime: setWorkerMaxSessionLifetime,
+		Slug:                         slug,
+		SetHibernate:                 setHibernateTimeout,
+		HibernateMinutes:             hibernateTimeout,
+		SetName:                      setName,
+		Name:                         newName,
+		SetProjectSlug:               setProjectSlug,
+		ProjectSlug:                  newProjectSlug,
+		SetMemoryLimitMB:             setMemoryLimitMB,
+		MemoryLimitMB:                memoryLimitMB,
+		SetCPUQuotaPercent:           setCPUQuotaPercent,
+		CPUQuotaPercent:              cpuQuotaPercent,
+		SetReplicas:                  setReplicas,
+		Replicas:                     newReplicas,
+		SetMaxSessions:               setMaxSessions,
+		MaxSessions:                  newMaxSessions,
+		SetMinWarmReplicas:           setMinWarmReplicas,
+		MinWarmReplicas:              newMinWarmReplicas,
+		SetWorkerIsolation:           setWorkerIsolation,
+		WorkerIsolation:              newWorkerIsolation,
+		SetWorkerGroupedSize:         setWorkerGroupedSize,
+		WorkerGroupedSize:            newWorkerGroupedSize,
+		SetWorkerMaxWorkers:          setWorkerMaxWorkers,
+		WorkerMaxWorkers:             newWorkerMaxWorkers,
+		SetWorkerMaxSessionLifetime:  setWorkerMaxSessionLifetime,
 		WorkerMaxSessionLifetimeSecs: newWorkerMaxSessionLifetime,
 	})
 	if err != nil {
@@ -855,10 +863,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setMinWarmReplicas, newMinWarmReplicas,
 			memChanged, oldMemoryLimitMB, memoryLimitMB,
 			cpuChanged, oldCPUQuotaPercent, cpuQuotaPercent,
-			setWorkerIsolation, newWorkerIsolation,
-			setWorkerGroupedSize, newWorkerGroupedSize,
-			setWorkerMaxWorkers, newWorkerMaxWorkers,
-			setWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime)
+			setWorkerIsolation, oldWorkerIsolation, newWorkerIsolation,
+			setWorkerGroupedSize, oldWorkerGroupedSize, newWorkerGroupedSize,
+			setWorkerMaxWorkers, oldWorkerMaxWorkers, newWorkerMaxWorkers,
+			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime)
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r),
@@ -901,10 +909,10 @@ func patchAppAuditDetail(
 	setMinWarmReplicas bool, minWarmReplicas int,
 	setMemoryLimitMB bool, oldMem, newMem *int,
 	setCPUQuotaPercent bool, oldCPU, newCPU *int,
-	setWorkerIsolation bool, workerIsolation string,
-	setWorkerGroupedSize bool, workerGroupedSize int,
-	setWorkerMaxWorkers bool, workerMaxWorkers int,
-	setWorkerMaxSessionLifetime bool, workerMaxSessionLifetime int,
+	setWorkerIsolation bool, oldWorkerIsolation, newWorkerIsolation string,
+	setWorkerGroupedSize bool, oldWorkerGroupedSize, newWorkerGroupedSize int,
+	setWorkerMaxWorkers bool, oldWorkerMaxWorkers, newWorkerMaxWorkers int,
+	setWorkerMaxSessionLifetime bool, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime int,
 ) string {
 	d := map[string]any{}
 	if setMinWarmReplicas {
@@ -917,16 +925,16 @@ func patchAppAuditDetail(
 		d["cpu_quota_percent"] = map[string]any{"old": oldCPU, "new": newCPU}
 	}
 	if setWorkerIsolation {
-		d["worker_isolation"] = workerIsolation
+		d["worker_isolation"] = map[string]any{"old": oldWorkerIsolation, "new": newWorkerIsolation}
 	}
 	if setWorkerGroupedSize {
-		d["worker_grouped_size"] = workerGroupedSize
+		d["worker_grouped_size"] = map[string]any{"old": oldWorkerGroupedSize, "new": newWorkerGroupedSize}
 	}
 	if setWorkerMaxWorkers {
-		d["worker_max_workers"] = workerMaxWorkers
+		d["worker_max_workers"] = map[string]any{"old": oldWorkerMaxWorkers, "new": newWorkerMaxWorkers}
 	}
 	if setWorkerMaxSessionLifetime {
-		d["worker_max_session_lifetime_secs"] = workerMaxSessionLifetime
+		d["worker_max_session_lifetime_secs"] = map[string]any{"old": oldWorkerMaxSessionLifetime, "new": newWorkerMaxSessionLifetime}
 	}
 	if len(d) == 0 {
 		return ""
