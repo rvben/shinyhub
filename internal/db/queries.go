@@ -2636,6 +2636,15 @@ type ApplyAppManifestSettingsParams struct {
 	AutoscaleMinReplicas int
 	AutoscaleMaxReplicas int
 	AutoscaleTarget      float64
+
+	SetWorkerIsolation  bool
+	WorkerIsolation     string
+	SetWorkerGroupedSize bool
+	WorkerGroupedSize   int
+	SetWorkerMaxWorkers bool
+	WorkerMaxWorkers    int
+	SetWorkerMaxSessionLifetime  bool
+	WorkerMaxSessionLifetimeSecs int
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -2736,6 +2745,39 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 		}
 	}
 
+	if p.SetWorkerIsolation {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_isolation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerIsolation, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_isolation: %w", err)
+		}
+	}
+	if p.SetWorkerGroupedSize {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_grouped_size = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerGroupedSize, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_grouped_size: %w", err)
+		}
+	}
+	if p.SetWorkerMaxWorkers {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_workers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxWorkers, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_max_workers: %w", err)
+		}
+	}
+	if p.SetWorkerMaxSessionLifetime {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxSessionLifetimeSecs, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -2773,6 +2815,15 @@ type PatchAppSettingsParams struct {
 
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
+
+	SetWorkerIsolation  bool
+	WorkerIsolation     string
+	SetWorkerGroupedSize bool
+	WorkerGroupedSize   int
+	SetWorkerMaxWorkers bool
+	WorkerMaxWorkers    int
+	SetWorkerMaxSessionLifetime  bool
+	WorkerMaxSessionLifetimeSecs int
 }
 
 // PatchAppSettings applies any subset of the user-editable app settings in a
@@ -2870,6 +2921,38 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			p.MinWarmReplicas, appID,
 		); err != nil {
 			return "", 0, nil, nil, fmt.Errorf("update min_warm_replicas: %w", err)
+		}
+	}
+	if p.SetWorkerIsolation {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_isolation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerIsolation, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_isolation: %w", err)
+		}
+	}
+	if p.SetWorkerGroupedSize {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_grouped_size = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerGroupedSize, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_grouped_size: %w", err)
+		}
+	}
+	if p.SetWorkerMaxWorkers {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_workers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxWorkers, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_max_workers: %w", err)
+		}
+	}
+	if p.SetWorkerMaxSessionLifetime {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxSessionLifetimeSecs, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
 		}
 	}
 
