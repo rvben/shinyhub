@@ -2591,6 +2591,16 @@ type ApplyAppManifestSettingsParams struct {
 
 	SetCPUQuotaPercent bool
 	CPUQuotaPercent    *int
+
+	// Autoscale reconciles atomically: SetAutoscale=true writes all four
+	// autoscale_* columns in one UPDATE (the manifest block is the complete
+	// policy, mirroring SetAppAutoscale). SetAutoscale=false leaves the stored
+	// policy - including anything set via `apps set --autoscale` - untouched.
+	SetAutoscale         bool
+	AutoscaleEnabled     bool
+	AutoscaleMinReplicas int
+	AutoscaleMaxReplicas int
+	AutoscaleTarget      float64
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -2677,6 +2687,17 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			p.CPUQuotaPercent, p.AppID,
 		); err != nil {
 			return fmt.Errorf("update cpu_quota_percent: %w", err)
+		}
+	}
+
+	if p.SetAutoscale {
+		if _, err := tx.Exec(
+			`UPDATE apps SET autoscale_enabled = ?, autoscale_min_replicas = ?,
+			        autoscale_max_replicas = ?, autoscale_target = ?,
+			        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			boolToInt(p.AutoscaleEnabled), p.AutoscaleMinReplicas, p.AutoscaleMaxReplicas, p.AutoscaleTarget, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update autoscale: %w", err)
 		}
 	}
 

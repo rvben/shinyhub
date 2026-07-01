@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,15 @@ type AppSettings struct {
 	Replicas                *int `toml:"replicas"`
 	MaxSessionsPerReplica   *int `toml:"max_sessions_per_replica"`
 
+	// Autoscale declares the per-app session-saturation autoscale policy. A
+	// non-nil pointer means the block is present and reconciles atomically into
+	// the four autoscale_* columns on every deploy (like Replicas); nil means
+	// "not declared" and leaves the stored policy - including anything set via
+	// `apps set --autoscale` - untouched. Declaring it in the bundle lets the
+	// policy travel with the app and survive rebuild-from-config hosts, instead
+	// of having to be re-applied imperatively after each deploy.
+	Autoscale *AutoscaleSettings `toml:"autoscale"`
+
 	// IdentityHeaders opts this app out of (or explicitly into) identity
 	// forwarding. nil = inherit the global auth.identity_headers flag.
 	// Reconciled into apps.identity_headers on every deploy; removing the
@@ -99,6 +109,20 @@ type AppSettings struct {
 	HibernateResetToDefault bool `toml:"-"`
 }
 
+// AutoscaleSettings mirrors the [app] autoscale inline table. The block is an
+// atomic unit: when present, all four columns are reconciled together (matching
+// the PATCH /api/apps autoscale object and `SetAppAutoscale`). Enabled is a
+// pointer so a declared block must state it explicitly - this rejects an
+// incomplete block like `{ target = 0.9 }` that would otherwise persist an
+// incoherent all-zero policy. Target is a fraction (0,1] of the per-replica
+// session cap; 0 inherits the runtime default.
+type AutoscaleSettings struct {
+	Enabled     *bool   `toml:"enabled"`
+	MinReplicas int     `toml:"min_replicas"`
+	MaxReplicas int     `toml:"max_replicas"`
+	Target      float64 `toml:"target"`
+}
+
 // Command and StartupTimeoutSeconds are not part of IsZero: they are read at
 // boot, not reconciled into the DB. MemoryLimitMB / CPUQuotaPercent ARE
 // reconciled into the DB (like Replicas), so they count.
@@ -110,6 +134,7 @@ func (a AppSettings) IsZero() bool {
 		a.MinWarmReplicas == nil &&
 		a.MemoryLimitMB == nil &&
 		a.CPUQuotaPercent == nil &&
+		a.Autoscale == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -292,6 +317,45 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	if a.Command != nil {
 		if err := validateCommandTemplate(a.Command); err != nil {
 			return err
+		}
+	}
+	if a.Autoscale != nil {
+		if err := validateAutoscale(*a.Autoscale); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateAutoscale enforces the parse-time bounds of a declared [app]
+// autoscale block. It mirrors the PATCH /api/apps autoscale validation minus
+// the runtime MaxReplicas ceiling, which needs server config and is checked in
+// validateManifestForServer. Bounds are range-checked even when disabled so a
+// stored value is never out of the column range on a later re-enable.
+func validateAutoscale(as AutoscaleSettings) error {
+	if as.Enabled == nil {
+		return errors.New("autoscale.enabled is required when the autoscale block is present (true or false)")
+	}
+	// TOML permits the special floats nan/inf. NaN compares false to every
+	// bound, so reject non-finite targets explicitly before the range check.
+	if math.IsNaN(as.Target) || math.IsInf(as.Target, 0) {
+		return fmt.Errorf("autoscale.target must be a finite number in [0,1], got %g", as.Target)
+	}
+	if as.Target < 0 || as.Target > 1 {
+		return fmt.Errorf("autoscale.target must be in [0,1] (0 inherits the runtime default), got %g", as.Target)
+	}
+	if as.MinReplicas < 0 || as.MinReplicas > 1000 {
+		return fmt.Errorf("autoscale.min_replicas must be between 0 and 1000, got %d", as.MinReplicas)
+	}
+	if as.MaxReplicas < 0 || as.MaxReplicas > 1000 {
+		return fmt.Errorf("autoscale.max_replicas must be between 0 and 1000, got %d", as.MaxReplicas)
+	}
+	if *as.Enabled {
+		if as.MinReplicas < 1 {
+			return fmt.Errorf("autoscale.min_replicas must be >= 1 when enabled, got %d", as.MinReplicas)
+		}
+		if as.MaxReplicas < as.MinReplicas {
+			return fmt.Errorf("autoscale.max_replicas must be >= min_replicas, got max=%d min=%d", as.MaxReplicas, as.MinReplicas)
 		}
 	}
 	return nil

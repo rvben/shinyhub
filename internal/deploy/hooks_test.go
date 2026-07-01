@@ -385,6 +385,130 @@ slug = "new-name"
 	}
 }
 
+func TestLoadManifest_ParsesAutoscale(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+autoscale = { enabled = true, min_replicas = 2, max_replicas = 8, target = 0.75 }
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.App.Autoscale == nil {
+		t.Fatal("autoscale = nil, want the declared block")
+	}
+	if m.App.Autoscale.Enabled == nil || !*m.App.Autoscale.Enabled {
+		t.Errorf("enabled = %v, want true", m.App.Autoscale.Enabled)
+	}
+	if m.App.Autoscale.MinReplicas != 2 {
+		t.Errorf("min_replicas = %d, want 2", m.App.Autoscale.MinReplicas)
+	}
+	if m.App.Autoscale.MaxReplicas != 8 {
+		t.Errorf("max_replicas = %d, want 8", m.App.Autoscale.MaxReplicas)
+	}
+	if m.App.Autoscale.Target != 0.75 {
+		t.Errorf("target = %v, want 0.75", m.App.Autoscale.Target)
+	}
+}
+
+func TestLoadManifest_AutoscaleAbsentIsNil(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "[app]\nreplicas = 2\n")
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.App.Autoscale != nil {
+		t.Errorf("autoscale = %+v, want nil when the block is absent", m.App.Autoscale)
+	}
+}
+
+// A declared autoscale block reconciles into the DB (like replicas), so it must
+// make IsZero false — otherwise the deploy handler would skip applying it.
+func TestAutoscale_CountsInIsZero(t *testing.T) {
+	enabled := true
+	a := AppSettings{Autoscale: &AutoscaleSettings{Enabled: &enabled, MinReplicas: 1, MaxReplicas: 2}}
+	if a.IsZero() {
+		t.Fatal("a declared autoscale block must make IsZero false")
+	}
+}
+
+func TestLoadManifest_RejectsAutoscaleUnknownSubkey(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "[app]\nautoscale = { enabld = true }\n")
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Errorf("expected unknown-field error for a mistyped autoscale key, got %v", err)
+	}
+}
+
+func TestLoadManifest_AcceptsAutoscaleBoundaries(t *testing.T) {
+	for _, body := range []string{
+		`autoscale = { enabled = true, min_replicas = 1, max_replicas = 1000, target = 1.0 }`,
+		`autoscale = { enabled = true, min_replicas = 2, max_replicas = 8, target = 0.0 }`, // target 0 = inherit runtime default
+		`autoscale = { enabled = false }`, // disabled: bounds default to 0
+	} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\n"+body+"\n")
+		if _, err := LoadManifest(dir); err != nil {
+			t.Errorf("%s: unexpected error: %v", body, err)
+		}
+	}
+}
+
+func TestLoadManifest_RejectsAutoscaleOutOfRange(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{`autoscale = { enabled = true, min_replicas = 1, max_replicas = 2, target = 1.5 }`, "autoscale.target must be in [0,1]"},
+		{`autoscale = { enabled = true, min_replicas = 1, max_replicas = 2, target = -0.1 }`, "autoscale.target must be in [0,1]"},
+		{`autoscale = { enabled = false, min_replicas = -1 }`, "autoscale.min_replicas must be between 0 and 1000"},
+		{`autoscale = { enabled = false, min_replicas = 1001 }`, "autoscale.min_replicas must be between 0 and 1000"},
+		{`autoscale = { enabled = false, max_replicas = 1001 }`, "autoscale.max_replicas must be between 0 and 1000"},
+		{`autoscale = { enabled = true, min_replicas = 0, max_replicas = 2 }`, "autoscale.min_replicas must be >= 1 when enabled"},
+		{`autoscale = { enabled = true, min_replicas = 5, max_replicas = 2 }`, "autoscale.max_replicas must be >= min_replicas"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\n"+tc.body+"\n")
+		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want error containing %q, got %v", tc.body, tc.want, err)
+		}
+	}
+}
+
+// A declared autoscale block must state `enabled` explicitly. Without it, an
+// incomplete block like `{ target = 0.9 }` would otherwise be accepted and
+// persisted as an incoherent all-zero policy, silently disabling autoscale.
+func TestLoadManifest_RejectsAutoscaleWithoutEnabled(t *testing.T) {
+	for _, body := range []string{
+		`autoscale = { min_replicas = 2, max_replicas = 4 }`, // bounds but no enabled
+		`autoscale = { target = 0.9 }`,                       // target but no enabled
+		`autoscale = { }`,                                    // empty block
+	} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\n"+body+"\n")
+		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "autoscale.enabled is required") {
+			t.Errorf("%s: want 'autoscale.enabled is required' error, got %v", body, err)
+		}
+	}
+}
+
+// TOML's special float literals (nan, inf) must not slip past the target range
+// check: NaN compares false to every bound, and a non-finite target would poison
+// the autoscale math or fail Phase A after the old pool is already stopped.
+func TestLoadManifest_RejectsAutoscaleNonFiniteTarget(t *testing.T) {
+	for _, body := range []string{
+		`autoscale = { enabled = true, min_replicas = 1, max_replicas = 2, target = nan }`,
+		`autoscale = { enabled = true, min_replicas = 1, max_replicas = 2, target = inf }`,
+		`autoscale = { enabled = true, min_replicas = 1, max_replicas = 2, target = -inf }`,
+	} {
+		dir := t.TempDir()
+		writeManifest(t, dir, "[app]\n"+body+"\n")
+		if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "autoscale.target") {
+			t.Errorf("%s: want an autoscale.target rejection, got %v", body, err)
+		}
+	}
+}
+
 func TestLoadManifest_ParsesSchedules(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, `

@@ -176,6 +176,58 @@ curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
   -d '{"min_warm_replicas": 1}'
 ```
 
+## Autoscaling
+
+Autoscale adjusts an app's replica count automatically from session saturation:
+it scales toward a **target** average number of active sessions per replica (a
+fraction of the per-replica cap) and biases up when the pool sheds 503s.
+Scale-up jumps the full delta in one step; scale-down removes one replica at a
+time with a drain grace.
+
+Autoscale is **opt-in at two levels**, and both must be true for it to run:
+
+1. **Globally**, via `runtime.autoscale.enabled: true` in `shinyhub.yaml`. Off,
+   and no app is autoscaled regardless of its per-app setting.
+2. **Per app**, via the policy below. Off (the default), and the app keeps a
+   fixed replica count.
+
+### Declaring the policy (travels with the bundle)
+
+Put the policy in `shinyhub.toml [app]` so it is committed with the app and
+**reconciled on every deploy**. It then survives hosts rebuilt from config (CDK,
+GitOps) instead of having to be re-applied by hand after each deploy:
+
+```toml
+[app]
+replicas = 1                                # starting count; autoscale takes over from here
+autoscale = { enabled = true, min_replicas = 1, max_replicas = 8, target = 0.8 }
+```
+
+- `enabled` turns the policy on (still gated on the global flag above).
+- `min_replicas` / `max_replicas` are the bounds the controller stays within.
+  When enabled they must be `>= 1` with `min <= max`, and `max_replicas` may not
+  exceed the runtime `max_replicas` ceiling. The effective floor is the larger
+  of `min_replicas` and `min_warm_replicas`.
+- `target` is the target average active sessions per replica as a fraction
+  `(0,1]` of the per-replica cap. `0.8` with a cap of `10` aims for ~8 sessions
+  per replica before adding one. `0` inherits the runtime-wide default target.
+
+The block is atomic: declaring it writes the whole policy; omitting it leaves
+whatever was set imperatively untouched. A failed deploy reverts it to the
+pre-deploy policy.
+
+### Setting it imperatively
+
+The same policy can be set without a redeploy:
+
+```bash
+shinyhub apps set <slug> --autoscale \
+  --autoscale-min 1 --autoscale-max 8 --autoscale-target 0.8
+```
+
+or in the Configuration tab. A policy set this way is **lost when the host is
+rebuilt from config**, so prefer the declarative form for reproducible fleets.
+
 ## Interaction with other features
 
 ### Output caching
