@@ -138,6 +138,11 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SetDisplayNameFromIdP(user.ID, oidcUser.Name); err != nil {
 		reqLog(r).Warn("oidc_display_name_failed", "err", err)
 	}
+	// Persist the IdP email so native session requests forward X-Shinyhub-Email.
+	// No-op for local-password accounts or when the email claim is absent.
+	if err := s.store.SetEmailFromIdP(user.ID, oidcUser.Email); err != nil {
+		reqLog(r).Warn("oidc_email_failed", "err", err)
+	}
 
 	// Authoritative role reconciliation from IdP groups. Only when the provider
 	// actually sent the groups claim - an absent claim must not demote the user.

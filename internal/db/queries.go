@@ -46,7 +46,11 @@ type User struct {
 	PasswordHash string
 	Role         string
 	DisplayName  string
-	CreatedAt    time.Time
+	// Email is the address asserted by the identity provider on SSO login,
+	// persisted so native session requests can forward X-Shinyhub-Email. Empty
+	// for local username/password accounts and until the first SSO login sets it.
+	Email     string
+	CreatedAt time.Time
 }
 
 // HasLocalPassword reports whether the hash is a usable bcrypt password (i.e.
@@ -77,11 +81,11 @@ func (s *Store) CreateUser(p CreateUserParams) error {
 
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, created_at FROM users WHERE username = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users WHERE username = ?`,
 		username,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -92,11 +96,11 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, created_at FROM users WHERE id = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users WHERE id = ?`,
 		id,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -108,7 +112,7 @@ func (s *Store) GetUserByID(id int64) (*User, error) {
 // ListUsers returns all users ordered by username.
 func (s *Store) ListUsers() ([]*User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, password_hash, role, display_name, created_at FROM users ORDER BY username`)
+		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +120,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 	var users []*User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, &u)
@@ -214,6 +218,28 @@ func (s *Store) SetDisplayNameFromIdP(id int64, name string) error {
 		name, id,
 	); err != nil {
 		return fmt.Errorf("set display name from idp: %w", err)
+	}
+	return nil
+}
+
+// SetEmailFromIdP refreshes a user's email from an external identity provider
+// on login. Like SetDisplayNameFromIdP it applies ONLY to IdP-governed accounts
+// (those without a local bcrypt password), so a locally-managed account is never
+// given SSO-derived PII even if it has also linked a provider. SSO accounts are
+// refreshed on every login so an address changed upstream propagates. A blank
+// email is a no-op, so a login that omits the email claim never blanks a stored
+// one. The "$2%" guard mirrors HasLocalPassword; keep the two in sync. Not
+// finding a matching row is not an error.
+func (s *Store) SetEmailFromIdP(id int64, email string) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil
+	}
+	if _, err := s.db.Exec(
+		`UPDATE users SET email = ? WHERE id = ? AND password_hash NOT LIKE '$2%'`,
+		email, id,
+	); err != nil {
+		return fmt.Errorf("set email from idp: %w", err)
 	}
 	return nil
 }
@@ -359,11 +385,11 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 
 func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
 		FROM users u JOIN api_keys k ON k.user_id = u.id
 		WHERE k.key_hash = ?`, hash)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1736,12 +1762,12 @@ func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
 
 func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`, provider, providerID)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1788,7 +1814,7 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	scanUser := func(row *sql.Row) (*User, error) {
 		var u User
-		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.CreatedAt); err != nil {
+		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrNotFound
 			}
@@ -1797,12 +1823,12 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return &u, nil
 	}
 	const linkedQuery = `
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`
 	const userByIDQuery = `
-		SELECT id, username, password_hash, role, display_name, created_at
+		SELECT id, username, password_hash, role, display_name, email, created_at
 		FROM users WHERE id = ?`
 
 	if u, gerr := scanUser(tx.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {

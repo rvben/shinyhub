@@ -86,7 +86,7 @@ key and cannot be reached with the old one.
 | `X-Shinyhub-User` | Username string | Absent for anonymous visitors |
 | `X-Shinyhub-User-Id` | Decimal user ID | Integer encoded as a string |
 | `X-Shinyhub-Role` | One of `viewer`, `developer`, `operator`, `admin` | The user's global platform role |
-| `X-Shinyhub-Email` | Email address | Present only when the upstream IdP asserts one via the forward-auth `email_header`; absent otherwise |
+| `X-Shinyhub-Email` | Email address | Present when the IdP asserts one: from the forward-auth `email_header`, or persisted from an OAuth/OIDC login for native sessions. Absent for local-password accounts and anonymous visitors |
 | `X-Shinyhub-Groups` | Comma-joined sorted group names | Capped at 100 names; group names that contain a comma are omitted from this header (they appear in the JWT claim instead) |
 | `X-Shinyhub-Groups-Truncated` | `"true"` | Present only when the group list exceeded 100 and was truncated |
 | `X-Shinyhub-Identity-Token` | Signed HS256 JWT | The authoritative identity artifact; verify before acting on it |
@@ -96,11 +96,12 @@ absent when every group name contains a comma (in that case only the JWT claim
 carries them). `X-Shinyhub-Groups-Truncated` is absent when the cap did not
 fire.
 
-Email is forwarded only when the deployment sits behind forward-auth SSO and the
-proxy header is named via `auth.forward_auth.email_header` (e.g. Authelia's
-`Remote-Email`). It is request-scoped, not persisted. Users authenticated
-through a ShinyHub session (native login, OAuth, OIDC) do not currently carry an
-email; the helper simply returns an empty email for them.
+Email comes from one of two sources. Behind forward-auth SSO it is read
+request-scoped from the header named by `auth.forward_auth.email_header` (e.g.
+Authelia's `Remote-Email`). For native ShinyHub sessions it is the address the
+identity provider asserted at OAuth/OIDC login, persisted on the user record and
+refreshed on each SSO login. Local username/password accounts have no email
+source, so the header (and the helper) return empty for them.
 
 
 ## Token reference
@@ -114,7 +115,7 @@ The identity token is a standard JWT signed with HS256. Its claims are:
 | `sub` | string | Decimal user ID |
 | `preferred_username` | string | Username |
 | `role` | string | One of `viewer`, `developer`, `operator`, `admin` |
-| `email` | string | The user's email; present only when the upstream IdP asserts one (forward-auth `email_header`), omitted otherwise |
+| `email` | string | The user's email when the IdP asserts one (forward-auth `email_header`, or persisted from an OAuth/OIDC login); omitted for local-password accounts |
 | `groups` | array of strings | Sorted group names, capped at 100 (all names, including comma-bearing ones) |
 | `groups_truncated` | bool | `true` when the list was truncated to 100; absent otherwise |
 | `iat` | NumericDate | Token issue time |

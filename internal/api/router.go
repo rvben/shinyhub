@@ -620,7 +620,7 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	if db.IsSystemUser(u.Username) {
 		return nil, fmt.Errorf("api key owned by system user is not honored")
 	}
-	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role, Email: u.Email}, nil
 }
 
 // userLookup satisfies auth.UserLookup by re-resolving the user against the
@@ -632,7 +632,7 @@ func (s *Server) userLookup(userID int64) (*auth.ContextUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role, Email: u.Email}, nil
 }
 
 // revocationChecker returns an auth.RevocationChecker bound to the server's
