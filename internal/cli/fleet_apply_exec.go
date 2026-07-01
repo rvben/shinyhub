@@ -167,7 +167,7 @@ func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt con
 // applyConfigDrift patches exactly the drifted fleet-declared keys. A
 // "visibility" drift goes to the access endpoint; the numeric keys go to
 // PATCH /api/apps/{slug}. Both carry the same precondition.
-func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem, ifD, ifMB *string, runID string) error {
+func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem, declared fleet.Config, ifD, ifMB *string, runID string) error {
 	body := map[string]any{}
 	for _, c := range drift {
 		switch c.Key {
@@ -181,9 +181,27 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
 			}
 			body[c.Key] = n
+		case "autoscale":
+			// autoscale is a compound value: reconstruct the PATCH object from the
+			// declared config rather than parsing the human display string.
+			if declared.Autoscale != nil {
+				body["autoscale"] = autoscalePatchBody(declared.Autoscale)
+			}
 		}
 	}
 	return patchApp(cfg, slug, body, ifD, ifMB, runID)
+}
+
+// reassertFleetAutoscale re-PATCHes the fleet-declared autoscale policy after a
+// bundle deploy, which may have overwritten the autoscale columns from the new
+// bundle's shinyhub.toml. Unlike replicas, an autoscale PATCH does not trigger a
+// redeploy, so this is safe to run after any deploy (and idempotent if the
+// policy was already applied via drift). No-op when the manifest declares none.
+func reassertFleetAutoscale(cfg *cliConfig, slug string, c fleet.Config, ifD, ifMB *string, runID string) error {
+	if c.Autoscale == nil {
+		return nil
+	}
+	return patchApp(cfg, slug, map[string]any{"autoscale": autoscalePatchBody(c.Autoscale)}, ifD, ifMB, runID)
 }
 
 // adoptBundleWentLive answers whether an adopt redeploy that returned an error
@@ -387,7 +405,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 					ifDc = &p
 				}
 			}
-			if err := applyConfigDrift(cfg, d.Slug, cfgDrift, ifDc, ifMc, opt.runID); err != nil {
+			if err := applyConfigDrift(cfg, d.Slug, cfgDrift, entry.Config, ifDc, ifMc, opt.runID); err != nil {
 				res.note = "created; declared config not fully applied, next plan shows update(config): " + err.Error()
 				return done(statusCreated)
 			}
@@ -395,7 +413,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusCreated)
 
 	case fleet.ActionUpdateSource:
-		_, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -404,11 +422,19 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
+		// A source-only diff means the pre-deploy config matched the manifest, but
+		// the new bundle's shinyhub.toml can overwrite the autoscale columns.
+		// Reassert just the autoscale (gated on the freshly promoted digest).
+		ifD, ifM := precondPtrs(opt, promoted, marker)
+		if err := reassertFleetAutoscale(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
+			res.note = "source updated; autoscale not reasserted, next plan corrects it: " + err.Error()
+			return done(statusUpdated)
+		}
 		return done(statusUpdated)
 
 	case fleet.ActionUpdateConfig:
 		ifD, ifM := precondPtrs(opt, d.ServerDigest, marker)
-		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, ifD, ifM, opt.runID); err != nil {
+		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, entry.Config, ifD, ifM, opt.runID); err != nil {
 			return fail(err, 1)
 		}
 		return done(statusUpdated)
@@ -427,8 +453,16 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 			return fail(ffErr, attempts)
 		}
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, ifD, ifM, opt.runID); err != nil {
+		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, entry.Config, ifD, ifM, opt.runID); err != nil {
 			return fail(err, attempts)
+		}
+		// d.ConfigDrift was computed pre-deploy: if autoscale matched then but the
+		// new bundle overwrites it, it is not in the drift list. Reassert it (a
+		// no-op re-PATCH when it was already applied above; idempotent and
+		// non-redeploy-triggering) so the fleet manifest still wins.
+		if err := reassertFleetAutoscale(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
+			res.note = "updated; autoscale not fully reasserted, next plan corrects it: " + err.Error()
+			return done(statusUpdated)
 		}
 		return done(statusUpdated)
 	}

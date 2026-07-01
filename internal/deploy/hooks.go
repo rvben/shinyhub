@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/mattn/go-shellwords"
+	"github.com/rvben/shinyhub/internal/autoscalespec"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
@@ -328,37 +328,16 @@ func normalizeAndValidateApp(a *AppSettings) error {
 }
 
 // validateAutoscale enforces the parse-time bounds of a declared [app]
-// autoscale block. It mirrors the PATCH /api/apps autoscale validation minus
-// the runtime MaxReplicas ceiling, which needs server config and is checked in
-// validateManifestForServer. Bounds are range-checked even when disabled so a
-// stored value is never out of the column range on a later re-enable.
+// autoscale block via the shared autoscalespec validator (also used by the
+// fleet manifest), minus the runtime MaxReplicas ceiling, which needs server
+// config and is checked in validateManifestForServer.
 func validateAutoscale(as AutoscaleSettings) error {
-	if as.Enabled == nil {
-		return errors.New("autoscale.enabled is required when the autoscale block is present (true or false)")
-	}
-	// TOML permits the special floats nan/inf. NaN compares false to every
-	// bound, so reject non-finite targets explicitly before the range check.
-	if math.IsNaN(as.Target) || math.IsInf(as.Target, 0) {
-		return fmt.Errorf("autoscale.target must be a finite number in [0,1], got %g", as.Target)
-	}
-	if as.Target < 0 || as.Target > 1 {
-		return fmt.Errorf("autoscale.target must be in [0,1] (0 inherits the runtime default), got %g", as.Target)
-	}
-	if as.MinReplicas < 0 || as.MinReplicas > 1000 {
-		return fmt.Errorf("autoscale.min_replicas must be between 0 and 1000, got %d", as.MinReplicas)
-	}
-	if as.MaxReplicas < 0 || as.MaxReplicas > 1000 {
-		return fmt.Errorf("autoscale.max_replicas must be between 0 and 1000, got %d", as.MaxReplicas)
-	}
-	if *as.Enabled {
-		if as.MinReplicas < 1 {
-			return fmt.Errorf("autoscale.min_replicas must be >= 1 when enabled, got %d", as.MinReplicas)
-		}
-		if as.MaxReplicas < as.MinReplicas {
-			return fmt.Errorf("autoscale.max_replicas must be >= min_replicas, got max=%d min=%d", as.MaxReplicas, as.MinReplicas)
-		}
-	}
-	return nil
+	return autoscalespec.Validate(autoscalespec.Params{
+		Enabled:     as.Enabled,
+		MinReplicas: as.MinReplicas,
+		MaxReplicas: as.MaxReplicas,
+		Target:      as.Target,
+	})
 }
 
 func resolveAndValidateSchedule(s *ScheduleSpec) error {

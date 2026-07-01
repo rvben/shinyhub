@@ -60,12 +60,35 @@ visibility = "public"
 | `hibernate_timeout_minutes` | int | Idle minutes before hibernation. `-1` resets the field to the server default (the same sentinel as the bundle `shinyhub.toml`). Otherwise must be `>= 1`. |
 | `replicas` | int `>= 1` | Number of replica processes. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int `>= 1` | Per-replica admission cap for new cookieless sessions. |
+| `autoscale` | inline table | Session-saturation autoscale policy. Reconciled atomically and drift-protected as one unit. See [autoscale](#appconfig-autoscale) below. |
 
 Only the keys you declare are reconciled. An omitted key is not asserted: a
 value set through the UI, the CLI, or the bundle's own `shinyhub.toml`
 survives untouched. The fleet manifest does not assert a complete config
 state, so drift protection covers exactly the keys it declares and nothing
 else.
+
+#### `[app.config]` autoscale
+
+Manage the per-app autoscale policy from the fleet manifest so it is reconciled
+on every `fleet apply` and drift back to the manifest is corrected:
+
+```toml
+  [app.config]
+  autoscale = { enabled = true, min_replicas = 1, max_replicas = 8, target = 0.8 }
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | **Required.** Turn the policy on or off. Also gated on the global `runtime.autoscale.enabled` server flag. |
+| `min_replicas` / `max_replicas` | int | Bounds the controller stays within. When enabled, `min_replicas >= 1`, `max_replicas >= min_replicas`, and `max_replicas` may not exceed the runtime `max_replicas` ceiling. |
+| `target` | float `(0,1]` | Target average active sessions per replica as a fraction of the per-replica cap. `0` inherits the runtime default. |
+
+The block reconciles atomically (all four columns) and is one drift unit: `fleet
+plan` shows a single line (e.g. `autoscale off -> on(1-8 @ 0.80)`) when the
+server policy differs from the manifest. It is the same policy the bundle
+`shinyhub.toml [app] autoscale` block sets; per [config precedence](#config-precedence)
+the fleet manifest wins. See [Autoscaling](scaling.md#autoscaling) for behaviour.
 
 ## Source resolution
 

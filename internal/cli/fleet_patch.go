@@ -93,7 +93,23 @@ func fleetConfigBody(c fleet.Config) map[string]any {
 	if c.MaxSessionsPerReplica != nil {
 		body["max_sessions_per_replica"] = *c.MaxSessionsPerReplica
 	}
+	if c.Autoscale != nil {
+		body["autoscale"] = autoscalePatchBody(c.Autoscale)
+	}
 	return body
+}
+
+// autoscalePatchBody renders a declared fleet autoscale block as the PATCH
+// /api/apps `autoscale` object the server expects. Enabled is dereferenced (the
+// manifest requires it explicitly); the whole policy is sent so the server
+// writes all four columns atomically.
+func autoscalePatchBody(a *fleet.AutoscaleConfig) map[string]any {
+	return map[string]any{
+		"enabled":      a.Enabled != nil && *a.Enabled,
+		"min_replicas": a.MinReplicas,
+		"max_replicas": a.MaxReplicas,
+		"target":       a.Target,
+	}
 }
 
 // patchAppAccess issues PATCH /api/apps/{slug}/access {"access": ...}.

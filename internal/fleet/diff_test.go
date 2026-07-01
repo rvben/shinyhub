@@ -5,8 +5,62 @@ import (
 	"testing"
 )
 
-func ptr(i int) *int { return &i }
+func ptr(i int) *int      { return &i }
 func sp(s string) *string { return &s }
+func bp(b bool) *bool     { return &b }
+
+func TestConfigDrift_Autoscale(t *testing.T) {
+	on := AppEntry{
+		Slug: "a", Source: "./a", Visibility: "private",
+		Config: Config{Autoscale: &AutoscaleConfig{Enabled: bp(true), MinReplicas: 1, MaxReplicas: 8, Target: 0.8}},
+	}
+
+	// Create path (no observation): a declared block always asserts; the server
+	// side renders "(unset)", mirroring the *int scalar drift convention.
+	d := configDrift(on, ObservedApp{Slug: "a"})
+	if len(d) != 1 || d[0].Key != "autoscale" || d[0].Server != "(unset)" || d[0].Desired != "on(1-8 @ 0.80)" {
+		t.Fatalf("create drift = %+v, want [autoscale (unset) -> on(1-8 @ 0.80)]", d)
+	}
+
+	// Update path: declared differs from observed-off -> drift with server display.
+	d = configDrift(on, ObservedApp{Slug: "a", Autoscale: &ObservedAutoscale{}})
+	if len(d) != 1 || d[0].Server != "off" || d[0].Desired != "on(1-8 @ 0.80)" {
+		t.Fatalf("update drift = %+v, want [autoscale off -> on(1-8 @ 0.80)]", d)
+	}
+
+	// Declared == observed -> no drift.
+	match := ObservedApp{Slug: "a", Autoscale: &ObservedAutoscale{Enabled: true, MinReplicas: 1, MaxReplicas: 8, Target: 0.8}}
+	if x := configDrift(on, match); len(x) != 0 {
+		t.Errorf("matching autoscale must not drift, got %+v", x)
+	}
+
+	// No declared autoscale -> never drifts (server value wins).
+	noAS := AppEntry{Slug: "a", Source: "./a", Config: Config{}}
+	if x := configDrift(noAS, ObservedApp{Slug: "a", Autoscale: &ObservedAutoscale{Enabled: true, MinReplicas: 2, MaxReplicas: 5}}); len(x) != 0 {
+		t.Errorf("absent declared autoscale must not drift, got %+v", x)
+	}
+
+	// An explicit autoscale-off with zero bounds must still assert on CREATE, so
+	// it wins over a bundle shinyhub.toml that enables autoscale (fleet
+	// precedence). Against an unset observation it produces a drift item.
+	off := AppEntry{Slug: "a", Source: "./a", Config: Config{Autoscale: &AutoscaleConfig{Enabled: bp(false)}}}
+	if x := configDrift(off, ObservedApp{Slug: "a"}); len(x) != 1 || x[0].Key != "autoscale" {
+		t.Fatalf("explicit off on create must assert, got %+v", x)
+	}
+	// ...but explicit-off vs an already-off server is a no-op on update.
+	if x := configDrift(off, ObservedApp{Slug: "a", Autoscale: &ObservedAutoscale{}}); len(x) != 0 {
+		t.Errorf("off vs already-off must not drift, got %+v", x)
+	}
+
+	// Disabled on both sides but different remembered bounds still drifts, shown
+	// with bounds rather than a confusing "off -> off".
+	disM := AppEntry{Slug: "a", Source: "./a", Config: Config{
+		Autoscale: &AutoscaleConfig{Enabled: bp(false), MinReplicas: 2, MaxReplicas: 8}}}
+	dd := configDrift(disM, ObservedApp{Slug: "a", Autoscale: &ObservedAutoscale{MinReplicas: 1, MaxReplicas: 3}})
+	if len(dd) != 1 || dd[0].Server == dd[0].Desired || dd[0].Server == "off" || dd[0].Desired == "off" {
+		t.Errorf("disabled-bounds drift not shown clearly: %+v", dd)
+	}
+}
 
 func mani(fleetID string, apps ...AppEntry) *Manifest {
 	return &Manifest{FleetID: fleetID, Apps: apps}
