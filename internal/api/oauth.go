@@ -105,7 +105,9 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Warn("oauth_display_name_failed", "provider", "github", "err", err)
 	}
 	// Persist the IdP email so native session requests forward X-Shinyhub-Email.
-	// No-op for local-password accounts or when GitHub sends no (public) email.
+	// FetchUser resolves the verified primary for private-email accounts, so this
+	// is a no-op only for local-password accounts or when GitHub exposes no
+	// verified email at all.
 	if err := s.store.SetEmailFromIdP(user.ID, ghUser.Email); err != nil {
 		reqLog(r).Warn("oauth_email_failed", "provider", "github", "err", err)
 	}
