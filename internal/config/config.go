@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"os"
@@ -711,6 +714,61 @@ type rawConfig struct {
 	Worker      WorkerConfig       `yaml:"worker"`
 }
 
+// validTopLevelKeys is the set of accepted top-level YAML keys, mirroring the
+// rawConfig fields' yaml tags. TestValidTopLevelKeys_MatchRawConfig keeps the
+// two in sync, so adding a section to rawConfig without listing it here (which
+// would make configs using it error) is caught at test time.
+var validTopLevelKeys = map[string]bool{
+	"database": true, "server": true, "auth": true, "storage": true,
+	"lifecycle": true, "oauth": true, "runtime": true, "scheduler": true,
+	"defaults": true, "tracing": true, "metrics": true, "maintenance": true,
+	"branding": true, "worker": true,
+}
+
+// runtimeSubKeys are the section names nested under `runtime:`. Placing one at
+// the top level is a common mistake; the unknown-key error hints at the correct
+// nesting for these.
+var runtimeSubKeys = map[string]bool{
+	"docker": true, "tiers": true, "autoscale": true, "fargate": true, "snapshot": true,
+}
+
+// checkTopLevelKeys rejects any top-level YAML key that is not a known config
+// section, so a misplaced or misspelled key is a clear error rather than a
+// silent no-op. data is the raw config bytes (already known to decode as a
+// mapping, since the struct decode above succeeded).
+func checkTopLevelKeys(data []byte) error {
+	var top map[string]yaml.Node
+	if err := yaml.Unmarshal(data, &top); err != nil {
+		// A non-mapping document is already rejected by the struct decode.
+		return nil
+	}
+	var unknown []string
+	for k := range top {
+		if !validTopLevelKeys[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	slices.Sort(unknown)
+	parts := make([]string, 0, len(unknown))
+	for _, k := range unknown {
+		if runtimeSubKeys[k] {
+			parts = append(parts, fmt.Sprintf("%q (did you mean runtime.%s?)", k, k))
+		} else {
+			parts = append(parts, fmt.Sprintf("%q", k))
+		}
+	}
+	valid := make([]string, 0, len(validTopLevelKeys))
+	for k := range validTopLevelKeys {
+		valid = append(valid, k)
+	}
+	slices.Sort(valid)
+	return fmt.Errorf("config: unknown top-level key(s): %s; valid top-level keys are: %s",
+		strings.Join(parts, ", "), strings.Join(valid, ", "))
+}
+
 type rawMetricsConfig struct {
 	Enabled         bool   `yaml:"enabled"`
 	Addr            string `yaml:"addr"`
@@ -861,14 +919,36 @@ func loadRaw(path string) (*Config, error) {
 		Storage:  StorageConfig{AppsDir: "./data/apps", AppDataDir: "./data/app-data", MaxBundleMB: 128},
 	}
 	if path != "" {
-		f, err := os.Open(path)
+		data, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("open config: %w", err)
 		}
 		if err == nil {
-			defer f.Close()
-			if err := yaml.NewDecoder(f).Decode(raw); err != nil {
-				return nil, fmt.Errorf("parse config: %w", err)
+			// Decode via a streaming Decoder (not yaml.Unmarshal) so an empty
+			// or comment-only file yields io.EOF and fails loud instead of
+			// silently loading defaults - a botched mount or truncated write
+			// must not start the server on defaults. The same decoder is reused
+			// below to detect a trailing document; the bytes feed the top-level
+			// key check.
+			dec := yaml.NewDecoder(bytes.NewReader(data))
+			if derr := dec.Decode(raw); derr != nil {
+				return nil, fmt.Errorf("parse config: %w", derr)
+			}
+			// Reject misplaced/misspelled top-level keys (e.g. a `snapshot:` block
+			// that belongs under `runtime:`). YAML's recursive strict mode is too
+			// broad, so this is scoped to the top level - the level operators most
+			// often get wrong, where a silent drop is invisible.
+			if kerr := checkTopLevelKeys(data); kerr != nil {
+				return nil, kerr
+			}
+			// Reject a trailing YAML document: the decode above read only the
+			// first, so a "---"-separated document would be silently ignored -
+			// another silent drop. A single leading "---" is one document and
+			// this second Decode returns io.EOF.
+			if derr := dec.Decode(new(yaml.Node)); derr == nil {
+				return nil, fmt.Errorf("config: multiple YAML documents found; the config must be a single document (remove the '---' separator)")
+			} else if !errors.Is(derr, io.EOF) {
+				return nil, fmt.Errorf("parse config: %w", derr)
 			}
 		}
 	}
