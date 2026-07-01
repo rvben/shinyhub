@@ -104,6 +104,11 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SetDisplayNameFromIdP(user.ID, ghUser.Name); err != nil {
 		reqLog(r).Warn("oauth_display_name_failed", "provider", "github", "err", err)
 	}
+	// Persist the IdP email so native session requests forward X-Shinyhub-Email.
+	// No-op for local-password accounts or when GitHub sends no (public) email.
+	if err := s.store.SetEmailFromIdP(user.ID, ghUser.Email); err != nil {
+		reqLog(r).Warn("oauth_email_failed", "provider", "github", "err", err)
+	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
 	if err != nil {
@@ -215,6 +220,11 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	// a local password (self-managed) or when Google sends no name. Non-fatal.
 	if err := s.store.SetDisplayNameFromIdP(user.ID, gUser.Name); err != nil {
 		reqLog(r).Warn("oauth_display_name_failed", "provider", "google", "err", err)
+	}
+	// Persist the IdP email so native session requests forward X-Shinyhub-Email.
+	// No-op for local-password accounts. Google always sends a verified email.
+	if err := s.store.SetEmailFromIdP(user.ID, gUser.Email); err != nil {
+		reqLog(r).Warn("oauth_email_failed", "provider", "google", "err", err)
 	}
 
 	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
