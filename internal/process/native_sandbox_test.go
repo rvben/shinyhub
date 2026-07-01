@@ -67,3 +67,14 @@ func TestSandboxLaunchEnv_RedirectsCaches(t *testing.T) {
 		}
 	}
 }
+
+// When the private tmp dir could not be created, TMPDIR is omitted so the app
+// falls back to the default (/tmp, writable under standard) rather than getting
+// an unusable TMPDIR pointed at a directory it cannot access.
+func TestSandboxLaunchEnv_OmitsTMPDIRWhenEmpty(t *testing.T) {
+	for _, kv := range sandboxLaunchEnv("/srv/app", "", "ENCODED") {
+		if strings.HasPrefix(kv, "TMPDIR=") {
+			t.Errorf("TMPDIR must be omitted when tmpDir is empty, got %q", kv)
+		}
+	}
+}
