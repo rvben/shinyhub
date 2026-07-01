@@ -26,6 +26,11 @@ type ContextUser struct {
 	// when the IdP name header is unchanged; empty on JWT/API-key paths, which
 	// do not need it.
 	DisplayName string
+	// Email is the user's email address when the upstream IdP asserts one
+	// (forward-auth email header). Request-scoped and advisory: it is forwarded
+	// to apps as X-Shinyhub-Email and the identity token's email claim, but is
+	// not persisted. Empty when no upstream email is available.
+	Email string
 }
 
 // TokenInfo describes the JWT the current request was authenticated with.

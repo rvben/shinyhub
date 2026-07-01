@@ -20,6 +20,7 @@ type Payload struct {
 	Username        string
 	UserID          string
 	Role            string
+	Email           string
 	GroupsHeader    string
 	GroupsTruncated bool
 	Token           string
@@ -79,7 +80,7 @@ func (p *Provider) PayloadFor(user *auth.ContextUser, slug string, appID int64) 
 	p.warnCommaGroups(groups)
 	header, claim, truncated := SanitizeGroups(groups)
 	tok, err := MintToken(DeriveKey(p.secret, appID), TokenParams{
-		UserID: user.ID, Username: user.Username, Role: user.Role,
+		UserID: user.ID, Username: user.Username, Role: user.Role, Email: user.Email,
 		Groups: claim, GroupsTruncated: truncated, Slug: slug,
 	})
 	if err != nil {
@@ -89,6 +90,7 @@ func (p *Provider) PayloadFor(user *auth.ContextUser, slug string, appID int64) 
 		Username:        user.Username,
 		UserID:          strconv.FormatInt(user.ID, 10),
 		Role:            user.Role,
+		Email:           user.Email,
 		GroupsHeader:    header,
 		GroupsTruncated: truncated,
 		Token:           tok,

@@ -812,6 +812,46 @@ func TestForwardAuth_NameHeader_CapturesDisplayName(t *testing.T) {
 	}
 }
 
+func TestForwardAuth_EmailHeader_CapturesEmail(t *testing.T) {
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{
+		Enabled: true, UserHeader: "Remote-User", EmailHeader: "Remote-Email", DefaultRole: "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("Remote-User", "alice")
+	r.Header.Set("Remote-Email", "alice@example.com")
+	mw.ServeHTTP(httptest.NewRecorder(), r)
+
+	if h.user == nil || h.user.Email != "alice@example.com" {
+		t.Fatalf("expected email on context, got %+v", h.user)
+	}
+}
+
+func TestForwardAuth_EmailHeader_IgnoredWhenUnconfigured(t *testing.T) {
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{Enabled: true, UserHeader: "Remote-User", DefaultRole: "developer"}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(h)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("Remote-User", "alice")
+	r.Header.Set("Remote-Email", "alice@example.com") // sent but not configured => ignored
+	mw.ServeHTTP(httptest.NewRecorder(), r)
+
+	if h.user == nil || h.user.Email != "" {
+		t.Fatalf("email must not be captured when EmailHeader is unconfigured, got %+v", h.user)
+	}
+}
+
 // TestForwardAuth_NameHeader_UnchangedSkipsWrite verifies the equality guard:
 // when the header matches the stored display name, no write is issued (this
 // middleware runs on every request, so the unchanged case must stay read-only).

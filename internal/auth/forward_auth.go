@@ -20,7 +20,9 @@ var ErrUserNotFound = errors.New("forward auth: user not found")
 type ForwardAuthConfig struct {
 	Enabled    bool
 	UserHeader string
-	// EmailHeader is accepted but not yet consumed by the middleware (reserved).
+	// EmailHeader is the proxy header carrying the user's email. When set, the
+	// middleware captures it request-scoped onto the ContextUser (forwarded to
+	// apps as X-Shinyhub-Email and the token email claim); not persisted.
 	EmailHeader string
 	// NameHeader is the proxy header carrying the user's friendly name (e.g.
 	// Authelia's Remote-Name). When set and present, the middleware captures it
@@ -150,6 +152,13 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 						user.DisplayName = name
 					}
 				}
+			}
+
+			// Capture the email the proxy asserts, if configured. It is
+			// request-scoped (the users table has no email column) and forwarded
+			// to apps via X-Shinyhub-Email and the identity token's email claim.
+			if cfg.EmailHeader != "" {
+				user.Email = strings.TrimSpace(r.Header.Get(cfg.EmailHeader))
 			}
 
 			ctx := WithUser(r.Context(), user)

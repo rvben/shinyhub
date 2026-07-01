@@ -26,9 +26,12 @@ func (f *fakeGroups) GetUserGroups(userID int64) ([]string, error) {
 func TestProvider_PayloadCarriesIdentity(t *testing.T) {
 	src := &fakeGroups{groups: []string{"eng", "ops"}}
 	p := NewProvider("secret", src)
-	pl := p.PayloadFor(&auth.ContextUser{ID: 5, Username: "ana", Role: "developer"}, "demo", 42)
+	pl := p.PayloadFor(&auth.ContextUser{ID: 5, Username: "ana", Role: "developer", Email: "ana@example.com"}, "demo", 42)
 	if pl.Username != "ana" || pl.UserID != "5" || pl.Role != "developer" {
 		t.Fatalf("payload = %+v", pl)
+	}
+	if pl.Email != "ana@example.com" {
+		t.Fatalf("payload email = %q, want ana@example.com", pl.Email)
 	}
 	if pl.GroupsHeader != "eng,ops" {
 		t.Fatalf("groups header = %q", pl.GroupsHeader)

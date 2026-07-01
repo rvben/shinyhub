@@ -63,17 +63,29 @@ func doIdentityReq(t *testing.T, p *Proxy, user *auth.ContextUser, hdr map[strin
 func TestIdentityHeaders_InjectedForAuthenticatedUser(t *testing.T) {
 	srv, got := startEchoBackend(t)
 	p := newIdentityProxy(t, srv.URL, true)
-	doIdentityReq(t, p, &auth.ContextUser{ID: 5, Username: "ana", Role: "developer"}, nil)
+	doIdentityReq(t, p, &auth.ContextUser{ID: 5, Username: "ana", Role: "developer", Email: "ana@example.com"}, nil)
 	h := got()
 	if h.Get(identity.HeaderUser) != "ana" || h.Get(identity.HeaderUserID) != "5" ||
 		h.Get(identity.HeaderRole) != "developer" {
 		t.Fatalf("headers = %v", h)
+	}
+	if h.Get(identity.HeaderEmail) != "ana@example.com" {
+		t.Fatalf("email header = %q, want ana@example.com", h.Get(identity.HeaderEmail))
 	}
 	if h.Get(identity.HeaderGroups) != "eng" { // "a,b" omitted from the plain header
 		t.Fatalf("groups header = %q", h.Get(identity.HeaderGroups))
 	}
 	if h.Get(identity.HeaderToken) == "" {
 		t.Fatal("identity token must be injected")
+	}
+}
+
+func TestIdentityHeaders_EmailOmittedWhenAbsent(t *testing.T) {
+	srv, got := startEchoBackend(t)
+	p := newIdentityProxy(t, srv.URL, true)
+	doIdentityReq(t, p, &auth.ContextUser{ID: 5, Username: "ana", Role: "developer"}, nil)
+	if v := got().Get(identity.HeaderEmail); v != "" {
+		t.Fatalf("email header = %q, want absent when the user has no email", v)
 	}
 }
 
