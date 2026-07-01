@@ -51,7 +51,10 @@ test_that("an expired token is anonymous", {
 test_that("a token missing exp is anonymous", {
   # Plain claim list (not jwt_claim) so no exp is added; a signed token without
   # an expiry must not bypass the short-lived-token guarantee.
-  no_exp <- list(
+  # jwt_claim() without exp produces a jwt_claim carrying no expiry (jose adds
+  # iat but not exp); a signed token without an expiry must not bypass the
+  # short-lived-token guarantee.
+  no_exp <- jose::jwt_claim(
     iss = "shinyhub", sub = "42", aud = slug,
     preferred_username = "alice", role = "admin", groups = list("team-a")
   )
