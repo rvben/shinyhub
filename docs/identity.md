@@ -116,7 +116,56 @@ When verifying, check `iss == "shinyhub"`, `aud == SHINYHUB_APP_SLUG`, the
 signature, and `exp` (allow about 30 seconds of clock leeway).
 
 
-## Verifying in Python
+## Client helpers (recommended)
+
+Rather than decode the token yourself, use the one-call helper for your
+language. Each returns the verified identity or a defined anonymous value
+(`None` / `NULL`), so your app needs no JWT plumbing and stays testable without
+SSO. Both read the injected `SHINYHUB_IDENTITY_KEY` / `SHINYHUB_APP_SLUG`
+automatically.
+
+### Python
+
+```
+pip install shinyhub-identity   # or: uv add shinyhub-identity
+```
+
+```python
+from shinyhub_identity import current_user
+
+def server(input, output, session):
+    user = current_user(session.http_conn.headers)   # None when anonymous
+    if user and "platform-admins" in user.groups:
+        ...  # gate on the VERIFIED groups
+```
+
+### R
+
+```r
+install.packages(c("jose", "sodium"))
+remotes::install_github("rvben/shinyhub", subdir = "packaging/r-identity")
+```
+
+```r
+library(shinyhubidentity)
+
+server <- function(input, output, session) {
+  user <- current_user(session)   # NULL when anonymous
+}
+```
+
+**Migrating from a hand-rolled per-app JWT fetch?** Delete it - the client-side
+`get_jwt` / `decode_jwt` code and any browser-side token fetch. ShinyHub already
+injects and signs the identity server-side; call `current_user` instead. That
+also removes the internal-CA `ERR_CERT_AUTHORITY_INVALID` failure mode a
+client-side fetch hits, and makes the app load-testable (a forged or absent
+session is simply anonymous, not an error).
+
+The manual recipes below show what the helpers do under the hood, for languages
+or frameworks the packages do not cover.
+
+
+## Verifying manually (Python)
 
 Install [PyJWT](https://pyjwt.readthedocs.io/en/stable/):
 
@@ -159,7 +208,7 @@ def server(input, output, session):
 A runnable demo is in `examples/identity-demo/`.
 
 
-## Verifying in R
+## Verifying manually (R)
 
 Install the [`jose`](https://cran.r-project.org/package=jose) and
 [`sodium`](https://cran.r-project.org/package=sodium) packages:

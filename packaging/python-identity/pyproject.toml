@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shinyhub-identity"
+version = "0.1.0"
+description = "Read the signed ShinyHub identity a Shiny/Streamlit/Dash app receives, in one call."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+  { name = "Ruben J. Jongejan", email = "ruben.jongejan@gmail.com" },
+]
+keywords = ["shinyhub", "shiny", "identity", "auth", "jwt"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+]
+dependencies = [
+  "PyJWT>=2.0",
+]
+
+[project.urls]
+Homepage   = "https://github.com/rvben/shinyhub"
+Repository = "https://github.com/rvben/shinyhub"
+Issues     = "https://github.com/rvben/shinyhub/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shinyhub_identity"]
