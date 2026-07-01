@@ -51,6 +51,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/sandbox"
 	"github.com/rvben/shinyhub/internal/secrets"
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
@@ -178,10 +179,25 @@ var buildRootOnce sync.Once
 // tests to call; registration happens exactly once per process.
 func buildRoot() *cobra.Command {
 	buildRootOnce.Do(func() {
-		rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd())
+		rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd(), newSandboxCmd())
 		cli.AddCommandsTo(rootCmd)
 	})
 	return rootCmd
+}
+
+// newSandboxCmd is the hidden re-exec shim the native runtime launches apps
+// through when isolation is enabled: it applies the sandbox spec from the
+// environment, then execs the real command that follows "--". It is not a
+// user-facing command.
+func newSandboxCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                sandbox.ShimCommand,
+		Hidden:             true,
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return sandbox.RunShim(args)
+		},
+	}
 }
 
 func main() {
@@ -385,6 +401,7 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 		// runtime degrades gracefully: Suspend reports not-supported and the
 		// watcher hibernates via Stop exactly as before.
 		nativeRT.SetSnapshot(cfg.Runtime.Snapshot.Enabled, cfg.Runtime.Snapshot.ReclaimMinFraction)
+		nativeRT.SetIsolation(sandbox.Level(cfg.Runtime.Native.Isolation))
 		return nativeRT, nil
 	case "fargate":
 		return buildFargateRuntime(ctx, cfg, tier, bundleTokenKey)
