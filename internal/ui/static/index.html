@@ -193,6 +193,19 @@
       </table>
     </section>
 
+    <section id="tokens-view" hidden aria-labelledby="tokens-heading">
+      <div class="toolbar">
+        <h1 id="tokens-heading">API tokens</h1>
+        <div class="toolbar-actions">
+          <button id="new-token-button" type="button" class="btn-primary">+ New token</button>
+          <button id="tokens-refresh" type="button">Refresh</button>
+        </div>
+      </div>
+      <p class="tokens-intro">Personal tokens for the CLI and API. Use with <code>Authorization: token &lt;value&gt;</code> or <code>SHINYHUB_TOKEN</code>. A token is shown once at creation — store it somewhere safe.</p>
+      <p id="tokens-error" class="error" hidden></p>
+      <div id="tokens-list" class="tokens-list"></div>
+    </section>
+
     <section id="workers-view" hidden>
       <div class="toolbar">
         <h1>Workers</h1>
@@ -893,6 +906,10 @@
             </fieldset>
             <p id="profile-password-managed" class="profile-hint" hidden>Your name and password are managed by your identity provider.</p>
 
+            <p class="profile-tokens-link">
+              <a href="/tokens" data-nav id="profile-tokens-link">Manage API tokens &rarr;</a>
+            </p>
+
             <p id="profile-error" class="error" hidden></p>
             <p id="profile-success" class="profile-success" role="status" aria-live="polite" hidden></p>
 
@@ -904,6 +921,49 @@
         </div>
       </div>
     </div>
+    <!-- New API token modal -->
+    <div id="new-token-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="new-token-heading">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="new-token-heading" class="modal-title">New API token</h2>
+          <button id="new-token-close" type="button" aria-label="Close new token modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+        </div>
+        <div class="modal-body">
+          <form id="new-token-form">
+            <label for="new-token-name">Token name</label>
+            <input id="new-token-name" type="text" required maxlength="64"
+                   autocomplete="off" spellcheck="false" placeholder="e.g. ci-deploy or laptop">
+            <p class="profile-hint">A label to recognise it later. Must be unique among your tokens.</p>
+
+            <p id="new-token-error" class="error" hidden></p>
+
+            <div class="modal-actions">
+              <button type="button" id="new-token-cancel">Cancel</button>
+              <button type="submit" id="new-token-submit" class="btn-primary">Create token</button>
+            </div>
+          </form>
+
+          <div id="token-reveal" class="token-reveal" hidden>
+            <p class="token-reveal-warning" role="alert">
+              Copy this token now — for security it is <strong>shown only once</strong> and cannot be retrieved again.
+            </p>
+            <div class="snippet">
+              <pre><code id="token-reveal-value"></code></pre>
+              <button type="button" id="token-reveal-copy" class="copy-btn"
+                      aria-label="Copy token to clipboard">
+                <span class="copy-label">Copy</span>
+              </button>
+            </div>
+            <p id="token-reveal-status" class="sr-only" role="status" aria-live="polite"></p>
+            <div class="modal-actions">
+              <button type="button" id="token-reveal-done" class="btn-primary">Done</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- New user modal (admin only) -->
     <div id="new-user-modal" class="modal-overlay" hidden
          role="dialog" aria-modal="true" aria-labelledby="new-user-heading">

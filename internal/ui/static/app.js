@@ -6,6 +6,7 @@ import { mountLaunchpad } from '/static/views/launchpad.js';
 import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
 import { launchReadiness } from '/static/views/launchpad-model.js';
 import { mountUsers } from '/static/views/users.js';
+import { tokenListModels, renderTokenList } from '/static/views/tokens.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
 import { createFocusTrap } from '/static/views/focus-trap.js';
@@ -234,6 +235,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const newUserError    = document.getElementById('new-user-error');
   const newUserSnippet  = document.getElementById('new-user-snippet');
   const newUserSnippetCopy = document.getElementById('new-user-snippet-copy');
+  // API tokens page + new-token modal
+  const tokensView      = document.getElementById('tokens-view');
+  const tokensList      = document.getElementById('tokens-list');
+  const tokensError     = document.getElementById('tokens-error');
+  const tokensRefresh   = document.getElementById('tokens-refresh');
+  const newTokenButton  = document.getElementById('new-token-button');
+  const newTokenModal   = document.getElementById('new-token-modal');
+  const newTokenClose   = document.getElementById('new-token-close');
+  const newTokenCancel  = document.getElementById('new-token-cancel');
+  const newTokenForm    = document.getElementById('new-token-form');
+  const newTokenName    = document.getElementById('new-token-name');
+  const newTokenError   = document.getElementById('new-token-error');
+  const tokenReveal     = document.getElementById('token-reveal');
+  const tokenRevealValue = document.getElementById('token-reveal-value');
+  const tokenRevealCopy = document.getElementById('token-reveal-copy');
+  const tokenRevealDone = document.getElementById('token-reveal-done');
+  const tokenRevealStatus = document.getElementById('token-reveal-status');
+  const profileTokensLink = document.getElementById('profile-tokens-link');
   const resetPwModal    = document.getElementById('reset-password-modal');
   const resetPwClose    = document.getElementById('reset-password-close');
   const resetPwCancel   = document.getElementById('reset-password-cancel');
@@ -1364,6 +1383,99 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     closeNewUserModal();
     loadUsers();
+  }
+
+  // ── API tokens (self-service, /tokens page) ────────────────────────────────
+  async function loadTokens() {
+    if (!tokensList) return;
+    setError(tokensError, '');
+    let resp;
+    try {
+      resp = await api('/api/tokens');
+    } catch {
+      setError(tokensError, 'Network error loading tokens');
+      renderTokenList(tokensList, [], document);
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      setError(tokensError, 'Failed to load tokens');
+      renderTokenList(tokensList, [], document);
+      return;
+    }
+    let tokens = [];
+    try { tokens = await resp.json(); } catch {}
+    renderTokenList(tokensList, tokenListModels(Array.isArray(tokens) ? tokens : []), document);
+  }
+
+  function openNewTokenModal() {
+    newTokenForm.reset();
+    setError(newTokenError, '');
+    newTokenForm.hidden = false;
+    tokenReveal.hidden = true;
+    tokenRevealValue.textContent = '';
+    newTokenModal.hidden = false;
+    modalTrap(newTokenModal).activate();
+    newTokenName.focus();
+  }
+
+  function closeNewTokenModal() {
+    newTokenModal.hidden = true;
+    modalTrap(newTokenModal).release();
+    newTokenForm.reset();
+    setError(newTokenError, '');
+    // Clear the revealed secret so it never lingers in the DOM after close.
+    tokenRevealValue.textContent = '';
+    tokenReveal.hidden = true;
+    newTokenForm.hidden = false;
+  }
+
+  async function submitNewToken(event) {
+    event.preventDefault();
+    const name = newTokenName.value.trim();
+    if (!name) { setError(newTokenError, 'A token name is required'); return; }
+    let resp;
+    try {
+      resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) });
+    } catch {
+      setError(newTokenError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Failed to create token';
+      if (resp.status === 409) {
+        msg = 'You already have a token with that name';
+      } else {
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+      }
+      setError(newTokenError, msg);
+      return;
+    }
+    let body = {};
+    try { body = await resp.json(); } catch {}
+    // Reveal the raw token ONCE: swap the form for the reveal panel. The value is
+    // never re-fetchable (only the hash is stored server-side).
+    newTokenForm.hidden = true;
+    tokenRevealValue.textContent = body.token || '';
+    tokenReveal.hidden = false;
+    if (tokenRevealDone) tokenRevealDone.focus();
+    loadTokens(); // refresh the list behind the modal
+  }
+
+  async function revokeToken(id, name) {
+    if (!confirm(`Revoke token "${name}"? Any CLI or app using it will stop working immediately.`)) return;
+    let resp;
+    try {
+      resp = await api(`/api/tokens/${id}`, { method: 'DELETE' });
+    } catch {
+      setError(tokensError, 'Network error');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) { setError(tokensError, `Failed to revoke ${name}`); return; }
+    setError(tokensError, '');
+    loadTokens();
   }
 
   async function restart(slug) {
@@ -2743,6 +2855,41 @@ document.addEventListener('DOMContentLoaded', () => {
   newUserForm.addEventListener('submit', submitNewUser);
   newUserUsername.addEventListener('input', renderNewUserSnippet);
 
+  // API tokens page + new-token modal wiring.
+  if (newTokenButton) newTokenButton.addEventListener('click', openNewTokenModal);
+  if (newTokenClose)  newTokenClose.addEventListener('click', closeNewTokenModal);
+  if (newTokenCancel) newTokenCancel.addEventListener('click', closeNewTokenModal);
+  if (tokenRevealDone) tokenRevealDone.addEventListener('click', closeNewTokenModal);
+  if (newTokenForm)   newTokenForm.addEventListener('submit', submitNewToken);
+  if (tokensRefresh)  tokensRefresh.addEventListener('click', () => loadTokens());
+  if (newTokenModal)  newTokenModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeNewTokenModal();
+  });
+  if (tokensList) tokensList.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-token-id]');
+    if (btn) revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'));
+  });
+  if (profileTokensLink) profileTokensLink.addEventListener('click', () => {
+    // The data-nav link navigates to /tokens; close the profile modal behind it.
+    closeProfileModal();
+  });
+  if (tokenRevealCopy) {
+    const copyLabel = tokenRevealCopy.querySelector('.copy-label');
+    tokenRevealCopy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(tokenRevealValue.textContent);
+        tokenRevealCopy.classList.add('is-copied');
+        if (copyLabel) copyLabel.textContent = 'Copied';
+        if (tokenRevealStatus) tokenRevealStatus.textContent = 'Copied to clipboard';
+        setTimeout(() => {
+          tokenRevealCopy.classList.remove('is-copied');
+          if (copyLabel) copyLabel.textContent = 'Copy';
+          if (tokenRevealStatus) tokenRevealStatus.textContent = '';
+        }, 2000);
+      } catch { /* clipboard unavailable */ }
+    });
+  }
+
   // Profile modal: open from the sidebar identity card; close/submit wiring.
   if (identityCard) identityCard.addEventListener('click', openProfileModal);
   if (profileClose) profileClose.addEventListener('click', closeProfileModal);
@@ -4028,6 +4175,7 @@ document.addEventListener('DOMContentLoaded', () => {
     workersView.hidden = true;
     auditView.hidden = true;
     appDetailView.hidden = true;
+    if (tokensView) tokensView.hidden = true;
   }
 
   // Role-adaptive home: fleet operators land on the Overview, everyone else on
@@ -4065,6 +4213,12 @@ document.addEventListener('DOMContentLoaded', () => {
   router.register('/users', () => {
     hideAllPageViews();
     return mountUsers({ ...ctx, loadUsers });
+  });
+  router.register('/tokens', () => {
+    hideAllPageViews();
+    if (tokensView) tokensView.hidden = false;
+    loadTokens();
+    return { unmount() { if (tokensView) tokensView.hidden = true; } };
   });
   router.register('/workers', () => {
     hideAllPageViews();
@@ -4164,7 +4318,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // must not contain `\` (Windows-separator normalization). It must not be
   // `/` or `/login` (those would no-op or loop). Anything else falls
   // through silently.
-  const SPA_ROUTE_PREFIXES = ['/apps/', '/users', '/workers', '/audit-log'];
+  const SPA_ROUTE_PREFIXES = ['/apps/', '/users', '/workers', '/audit-log', '/tokens'];
   function consumeNextParam() {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('next');

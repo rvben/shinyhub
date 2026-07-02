@@ -3946,3 +3946,73 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   a.lp-tile:hover .lp-tile-go { transform: none; }
   .lp-skeleton .lp-skel { animation: none; }
 }
+
+/* ── API tokens page ──────────────────────────────────────────────────────── */
+.tokens-intro {
+  color: var(--text-soft);
+  max-width: 62ch;
+  margin: 0 0 1.25rem;
+  line-height: 1.55;
+}
+.tokens-intro code {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.85em;
+  color: var(--cyan);
+}
+.tokens-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.token-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.8rem 1rem;
+}
+.token-row:hover { border-color: var(--line-2); }
+.token-meta { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.token-name {
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.token-created { color: var(--text-muted); font-size: 0.82rem; }
+.token-revoke { padding: 0.35rem 0.7rem; font-size: 0.85rem; flex: none; }
+.tokens-empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 2.5rem 1rem;
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+/* Reveal-once panel inside the new-token modal */
+.token-reveal { display: flex; flex-direction: column; gap: 0.9rem; }
+/* The explicit display above outranks the UA [hidden] rule, so restore it -
+   otherwise the reveal panel shows (empty) before a token is created. */
+.token-reveal[hidden] { display: none; }
+.token-reveal-warning {
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  background: var(--yellow-bg);
+  border: 1px solid rgba(251,191,36,0.35);
+  border-radius: var(--radius);
+  color: var(--yellow);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.token-reveal .snippet code { overflow-wrap: anywhere; }
+
+/* Profile modal → tokens link */
+.profile-tokens-link { margin: 0.25rem 0 0.5rem; }
+.profile-tokens-link a { color: var(--brand-primary); text-decoration: none; font-size: 0.9rem; }
+.profile-tokens-link a:hover { text-decoration: underline; }

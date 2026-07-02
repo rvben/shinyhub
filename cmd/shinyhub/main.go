@@ -1983,13 +1983,15 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		}
 		serveShell(w, r)
 	})
-	mux.Handle("/apps", spa)
-	mux.Handle("/apps/", spa)
-	mux.Handle("/users", spa)
-	mux.Handle("/workers", spa)
-	mux.Handle("/audit-log", spa)
-	mux.Handle("/login", spa) // always serves the SPA shell, even when landing_page is set
-	mux.Handle("/home", spa)  // stable authenticated home; the SPA resolves it to Overview/Launchpad
+	// Register every exact SPA route from the single source of truth in the ui
+	// package, so the mux registrations and IsUIPath cannot drift (a route in one
+	// but not the other would silently 404 on deep links). Includes /login (always
+	// serves the shell even when landing_page is set), /home (stable authenticated
+	// home the SPA resolves to Overview/Launchpad), and /tokens.
+	for _, route := range ui.ExactUIRoutes() {
+		mux.Handle(route, spa)
+	}
+	mux.Handle("/apps/", spa) // prefix: /apps/<slug> and /apps/<slug>/<tab>
 
 	if brandingActive && len(resolved) > 0 {
 		mux.Handle("/branding/", ui.BrandingAssetHandler(resolved))
