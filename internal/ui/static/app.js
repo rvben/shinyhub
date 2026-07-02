@@ -23,6 +23,7 @@ import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { workerCapacityLine } from '/static/views/worker-isolation.js';
+import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
@@ -663,9 +664,19 @@ document.addEventListener('DOMContentLoaded', () => {
     profileNewPw.value = '';
     setError(profileError, '');
     setHidden(profileSuccess, true);
+    reflectThemeRadios();
     profileModal.hidden = false;
     modalTrap(profileModal).activate();
     (isLocalAccount ? profileDisplayName : (profileClose || logoutButton)).focus();
+  }
+
+  // reflectThemeRadios checks the radio matching the stored theme preference, so
+  // the Appearance control shows the current choice each time the modal opens.
+  function reflectThemeRadios() {
+    const pref = getThemePreference(window);
+    document.querySelectorAll('input[name="theme-pref"]').forEach((el) => {
+      el.checked = el.value === pref;
+    });
   }
 
   function closeProfileModal() {
@@ -2889,6 +2900,16 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch { /* clipboard unavailable */ }
     });
   }
+
+  // Theme: re-apply the saved preference (the inline head script already set it
+  // pre-paint) and, while on 'system', track OS light/dark changes live; keep the
+  // Appearance radios in sync when the OS flips.
+  initTheme(window, reflectThemeRadios);
+  document.querySelectorAll('input[name="theme-pref"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      if (el.checked) setThemePreference(window, el.value);
+    });
+  });
 
   // Profile modal: open from the sidebar identity card; close/submit wiring.
   if (identityCard) identityCard.addEventListener('click', openProfileModal);

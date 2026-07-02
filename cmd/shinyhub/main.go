@@ -1752,6 +1752,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("compute branding CSP sources: %w", cspErr)
 		}
 		cspScriptSrc, cspStyleSrc = s, st
+	} else {
+		// Branding off: the raw shell is served, but its static inline
+		// scripts (the pre-paint theme bootstrap) still need CSP hashes.
+		s, cspErr := ui.StaticShellInlineScriptSources()
+		if cspErr != nil {
+			return fmt.Errorf("compute shell CSP sources: %w", cspErr)
+		}
+		cspScriptSrc = s
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

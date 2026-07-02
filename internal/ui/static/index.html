@@ -4,6 +4,21 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ShinyHub</title>
+  <!-- Apply the saved theme before first paint so there is no dark/light flash.
+       Mirrors resolveTheme() in views/theme.js (preference 'system'|'light'|'dark';
+       'system' follows prefers-color-scheme). theme.js re-applies and keeps it in
+       sync once the module loads. -->
+  <script>
+    (function () {
+      try {
+        var p = localStorage.getItem('shinyhub-theme');
+        if (p !== 'light' && p !== 'dark') {
+          p = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.dataset.theme = p;
+      } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -885,6 +900,15 @@
               <span id="profile-login" class="profile-login"></span>
             </div>
           </div>
+
+          <fieldset id="theme-picker" class="profile-appearance">
+            <legend>Appearance</legend>
+            <div class="theme-options">
+              <label class="theme-option"><input type="radio" name="theme-pref" value="system"> System</label>
+              <label class="theme-option"><input type="radio" name="theme-pref" value="light"> Light</label>
+              <label class="theme-option"><input type="radio" name="theme-pref" value="dark"> Dark</label>
+            </div>
+          </fieldset>
 
           <form id="profile-form">
             <div id="profile-name-field">
