@@ -79,6 +79,10 @@ shinyhub login --host http://localhost:8080 --username admin
 shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
 ```
 
+> Tip: run the bundle locally first with `shinyhub run ./my-app` (add `--check`
+> for a dependency preflight) to catch missing packages before a multi-minute
+> deploy.
+
 > `uvx shinyhub <cmd>` runs any subcommand one-shot, without installing first.
 > `pip install shinyhub` installs the server too, but native Python apps launch
 > via `uv run`, so you still need `uv` on the host to deploy them.
@@ -207,9 +211,13 @@ Docker containers and are proxied per slug.
 
 ## Status
 
-Active development. ShinyHub is single-node and self-hosted (no clustering or
-HA) and is run in production by the maintainer, offered with no SLA or support
-guarantees. See [CHANGELOG.md](CHANGELOG.md) for the current release.
+Active development. ShinyHub is self-hosted and run in production by the
+maintainer, offered with no SLA or support guarantees. It runs single-node on
+SQLite by default; an optional high-availability mode (multiple control-plane
+instances behind a shared Postgres, with an ownership lease and off-host worker
+tiers) is also supported - see
+[docs/deployment/ha-data-plane.md](docs/deployment/ha-data-plane.md). See
+[CHANGELOG.md](CHANGELOG.md) for the current release.
 
 ## Contributing
 

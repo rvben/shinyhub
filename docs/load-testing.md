@@ -6,8 +6,10 @@ provide the evidence for the platform's key performance claims:
 - **cold-start**: real wake latency from a hibernated app (< 15 s p95 claim)
 - **sessions**: concurrent WebSocket sessions at scale (1 000-session claim)
 
-All load tests are make targets; no pipeline-specific tooling is needed. CI
-runs the same `make load-test` invocation that you run locally.
+All load tests are make targets; no pipeline-specific tooling is needed. They
+are run manually against a live server (they need a running instance and the
+`k6` binary), not in CI. Run the same `make load-test` invocation locally, and
+add `ASSERT=1` to fail the run when a threshold is missed.
 
 ---
 
