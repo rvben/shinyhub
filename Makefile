@@ -27,13 +27,13 @@ vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # test-js runs the JSDOM tests for UI assets. Requires Node 20+. Installs
-# devDependencies (jsdom) the first time it runs; afterwards it's a no-op.
+# devDependencies (jsdom, axe-core) the first time it runs; afterwards it's a no-op.
 # The glob is left unquoted so the shell expands it to the matching files;
 # node --test does not expand glob patterns itself before Node 21, so quoting
 # would break on Node 20.
 test-js:
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required for UI tests)"; exit 1; }
-	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
+	@if [ ! -d node_modules/jsdom ] || [ ! -d node_modules/axe-core ]; then npm install --no-audit --no-fund --silent; fi
 	node --test internal/ui/jstests/*.test.js
 
 # test-identity runs the client-helper suites plus the cross-language
