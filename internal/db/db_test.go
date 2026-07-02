@@ -147,6 +147,21 @@ func openTestStore(t *testing.T) *db.Store {
 	return mustOpenDB(t)
 }
 
+// TestDeploymentsAppIndexExists guards idx_deployments_app_created (migration
+// 042). deploymentSummarySQL runs four correlated subqueries keyed on
+// deployments(app_id, created_at DESC, id DESC) on the watchdog, autoscaler,
+// and dashboard hot paths; without the index each is a full table scan. If a
+// future migration drops it the regression is silent, so pin its existence.
+func TestDeploymentsAppIndexExists(t *testing.T) {
+	s := openTestStore(t)
+	var name string
+	if err := s.DB().QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_deployments_app_created'`,
+	).Scan(&name); err != nil {
+		t.Fatalf("idx_deployments_app_created must exist after migrations: %v", err)
+	}
+}
+
 func mustCreateUser(t *testing.T, s *db.Store, name, role string) *db.User {
 	t.Helper()
 	if err := s.CreateUser(db.CreateUserParams{Username: name, PasswordHash: "h", Role: role}); err != nil {
