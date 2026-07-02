@@ -15,16 +15,18 @@ bridge network (`shinyhub-apps`) created with inter-container communication
 (ICC) disabled. The proxy always reaches apps over the loopback ports published
 on the host, so app-to-app traffic on that network is what ICC blocks.
 
-**Enforcement caveat (verify in your environment).** Whether ICC-disabled
-actually blocks container-to-container traffic depends on the daemon. It is
-enforced by the Docker Engine's netfilter rules on Linux (recent Engine
-versions); some developer daemons - notably **OrbStack** on macOS - flat-route
-all containers for convenience and do **not** enforce Docker network isolation
-at all (containers reach each other even across separate networks). So treat
-app-to-app network isolation as a property of a Linux Docker Engine deployment,
-not of every daemon, and confirm it on yours before relying on it for untrusted
-multi-tenant code. Setting `runtime.docker.network_mode: host` opts out entirely
-(the container shares the host network stack); use it only when apps are trusted.
+**Enforcement depends on the daemon.** Whether ICC-disabled actually blocks
+container-to-container traffic is enforced by the Docker Engine's netfilter
+(iptables/nftables) rules, which is a Linux Docker Engine feature. This is
+verified on a stock Linux Engine (Docker 29.x): a container on the ICC-disabled
+network cannot open a connection to a sibling container, while on the default
+bridge it can. Some developer daemons - notably **OrbStack** on macOS -
+flat-route all containers for convenience and do **not** enforce Docker network
+isolation at all (containers reach each other even across separate networks), so
+this isolation is a property of a Linux Docker Engine deployment, not of every
+daemon; confirm it on yours before relying on it for untrusted multi-tenant
+code. Setting `runtime.docker.network_mode: host` opts out entirely (the
+container shares the host network stack); use it only when apps are trusted.
 
 ## The dial
 
