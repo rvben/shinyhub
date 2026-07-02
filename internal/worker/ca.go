@@ -307,6 +307,13 @@ func (c *CA) ListenerTLSConfig(hosts ...string) (*tls.Config, error) {
 // workerCAKeyInfo domain-separates the CA key derivation from app env secrets.
 const workerCAKeyInfo = "shinyhub-worker-ca-v1"
 
+// CAKeyEncKey derives the key-encryption key that protects the worker CA private
+// key at rest, from the auth secret. Exposed so auth.secret-rotation tooling can
+// re-encrypt the stored CA key without duplicating the domain-separation string.
+func CAKeyEncKey(authSecret string) []byte {
+	return secrets.DeriveKeyWithInfo(authSecret, workerCAKeyInfo)
+}
+
 // CAStore is the minimal store the worker CA bootstrap needs. *db.Store
 // satisfies it. found (not an ErrNotFound sentinel) signals an empty row.
 type CAStore interface {

@@ -146,6 +146,87 @@ var restoreCmd = &cobra.Command{
 	},
 }
 
+var rotateSecretCmd = &cobra.Command{
+	Use:   "rotate-secret",
+	Short: "Re-encrypt all at-rest secrets under a new auth.secret",
+	Long: "Re-encrypts every stored app-env secret and the worker CA private key\n" +
+		"from the current auth.secret to a new one, in a single transaction. Run\n" +
+		"with the server STOPPED. The current (old) secret is read from the config\n" +
+		"/ SHINYHUB_AUTH_SECRET; the new secret from SHINYHUB_NEW_AUTH_SECRET.\n\n" +
+		"On success, set SHINYHUB_AUTH_SECRET to the new value and start the\n" +
+		"server. If the command fails, nothing is changed (atomic), so it is safe\n" +
+		"to retry. Without this, changing auth.secret leaves every stored secret\n" +
+		"undecryptable.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load(serverConfigPath()) // requires the CURRENT (old) auth.secret
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		oldSecret := cfg.Auth.Secret
+		newSecret := os.Getenv("SHINYHUB_NEW_AUTH_SECRET")
+		if err := validateRotationSecret(oldSecret, newSecret); err != nil {
+			return err
+		}
+
+		store, err := db.Open(cfg.Database.DSN)
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer store.Close()
+
+		oldEnv, newEnv := secrets.DeriveKey(oldSecret), secrets.DeriveKey(newSecret)
+		oldCA, newCA := worker.CAKeyEncKey(oldSecret), worker.CAKeyEncKey(newSecret)
+		reEnv := func(old []byte) ([]byte, error) {
+			p, derr := secrets.Decrypt(oldEnv, old)
+			if derr != nil {
+				return nil, fmt.Errorf("decrypt env secret with the current auth.secret: %w", derr)
+			}
+			return secrets.Encrypt(newEnv, p)
+		}
+		reCA := func(old []byte) ([]byte, error) {
+			p, derr := secrets.Decrypt(oldCA, old)
+			if derr != nil {
+				return nil, fmt.Errorf("decrypt worker CA key with the current auth.secret: %w", derr)
+			}
+			return secrets.Encrypt(newCA, p)
+		}
+
+		n, caRotated, err := store.RotateSecretsTx(reEnv, reCA)
+		if err != nil {
+			return fmt.Errorf("rotation failed (no changes committed - safe to retry): %w", err)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Rotated %d app-env secret(s)%s.\nNext: set SHINYHUB_AUTH_SECRET to the new value and start the server.\n",
+			n, caRotatedSuffix(caRotated))
+		return cli.RenderAction(cmd, "rotated",
+			map[string]any{"env_secrets": n, "worker_ca_rotated": caRotated},
+			fmt.Sprintf("rotated %d env secret(s); worker_ca_rotated=%v", n, caRotated))
+	},
+}
+
+func caRotatedSuffix(rotated bool) string {
+	if rotated {
+		return " and the worker CA key"
+	}
+	return ""
+}
+
+// validateRotationSecret enforces the same floor as auth.secret and refuses a
+// no-op rotation.
+func validateRotationSecret(oldSecret, newSecret string) error {
+	switch {
+	case newSecret == "":
+		return fmt.Errorf("set SHINYHUB_NEW_AUTH_SECRET to the new secret (generate one with: openssl rand -hex 32)")
+	case newSecret == "change-me-to-a-random-string":
+		return fmt.Errorf("SHINYHUB_NEW_AUTH_SECRET is the placeholder value; generate a strong one with: openssl rand -hex 32")
+	case len(newSecret) < 32:
+		return fmt.Errorf("SHINYHUB_NEW_AUTH_SECRET must be at least 32 characters (got %d)", len(newSecret))
+	case newSecret == oldSecret:
+		return fmt.Errorf("SHINYHUB_NEW_AUTH_SECRET is identical to the current auth.secret; nothing to rotate")
+	}
+	return nil
+}
+
 // configPath holds the value of the --config flag (empty when unset). Bound on
 // serve, backup, and restore so a config file can be selected without an env var.
 var configPath string
@@ -167,7 +248,7 @@ func init() {
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
 	_ = backupCmd.MarkFlagRequired("out")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
-	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd} {
+	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd, rotateSecretCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
 }
