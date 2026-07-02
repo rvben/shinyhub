@@ -47,6 +47,17 @@ func TestRouterErrorBoundaryWired(t *testing.T) {
 		"app.js must register a window unhandledrejection net so async failures are observable")
 }
 
+// TestAppsGridErrorWiring guards that app.js passes a showError callback into
+// the apps-grid ctx so a failed initial /api/apps load surfaces the shared
+// error banner instead of a silent empty grid. See views/apps-grid.js and its
+// jstest for the view-side behaviour.
+func TestAppsGridErrorWiring(t *testing.T) {
+	assertContains(t, "app.js", "showError:",
+		"app.js must pass a showError callback into the apps-grid ctx so a failed load is visible")
+	assertContains(t, "views/apps-grid.js", "ctx.showError",
+		"apps-grid must call ctx.showError on load failure rather than returning a silent empty grid")
+}
+
 // TestDeployModalReadsManifestSummary guards the deploy-response contract.
 // POST /api/apps/:slug/deploy embeds a "manifest" object summarising what
 // [app] settings and [[schedule]] blocks were applied (see

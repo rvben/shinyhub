@@ -3952,6 +3952,10 @@ document.addEventListener('DOMContentLoaded', () => {
     canManageApp,
     renderGridVerbatim,
     applyGridFilters: renderApps,
+    // Surface (or clear, with "") a grid load error in the shared #app-error
+    // banner so a failed initial /api/apps load is visible with a retry hint
+    // instead of showing a silent empty grid.
+    showError: (m) => { if (appError) setError(appError, m); },
     updateActiveNav,
     syncSidebar,
     // Render an explicit app list into the sidebar without touching state.apps.

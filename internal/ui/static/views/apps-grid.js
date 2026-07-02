@@ -17,15 +17,22 @@ export async function mountAppsGrid(ctx) {
 
   appsView.hidden = false;
 
+  // showError is optional so existing callers/tests without it still work; when
+  // present it surfaces load failures instead of leaving a silent empty grid.
+  const showError = typeof ctx.showError === 'function' ? ctx.showError : () => {};
+  const loadFailed = 'Could not load apps. Check your connection and use Refresh to retry.';
+
   let resp;
   try {
     resp = await ctx.api('/api/apps');
   } catch {
+    showError(loadFailed);
     return viewObject();
   }
   if (resp.status === 401) { ctx.onUnauthorized(); return viewObject(); }
-  if (!resp.ok) { return viewObject(); }
+  if (!resp.ok) { showError(loadFailed); return viewObject(); }
   const apps = (await resp.json()) || [];
+  showError('');
   ctx.state.apps = apps;
   // Use applyGridFilters when available so persisted search/sort apply on
   // first mount; otherwise fall back to the verbatim renderer.
