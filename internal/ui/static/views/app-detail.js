@@ -65,9 +65,11 @@ export function mountAppDetail(ctx) {
   if (tabsNav) {
     tabsNav.addEventListener('scroll', updateTabOverflow, { passive: true });
     window.addEventListener('resize', updateTabOverflow, { passive: true });
-    // WAI-ARIA tablist keyboard nav: arrow/Home/End move focus between the
-    // visible tabs and activate them (activation follows focus, matching the SPA
-    // route model). Reuses the delegated data-nav click handler to navigate.
+    // WAI-ARIA tablist keyboard nav (manual activation): arrow/Home/End move
+    // focus between the visible tabs; Enter/Space commit the focused tab by
+    // reusing the delegated data-nav click handler to navigate. Manual (not
+    // focus-follows) activation is required here because navigating moves page
+    // focus to the section heading, which would otherwise break the next arrow.
     // Wired once; roving tabindex is refreshed per render in the loop below.
     createTablistNav(tabsNav, document, { onActivate: (el) => el.click() });
   }

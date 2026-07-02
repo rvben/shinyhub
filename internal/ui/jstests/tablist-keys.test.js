@@ -57,43 +57,73 @@ function fixture({ hiddenTabs = [] } = {}) {
   return dom.window.document;
 }
 
-function arrow(doc, el, key) {
+function key(doc, el, k) {
   el.focus();
-  const evt = new doc.defaultView.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+  const evt = new doc.defaultView.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
   const notPrevented = el.dispatchEvent(evt);
   return { prevented: !notPrevented };
 }
 
-test('ArrowRight moves focus to the next tab and activates it', () => {
+test('ArrowRight moves focus to the next tab WITHOUT activating (manual activation)', () => {
   const doc = fixture();
   const activated = [];
   createTablistNav(doc.querySelector('.settings-tabs'), doc, { onActivate: (el) => activated.push(el.id) });
-  const { prevented } = arrow(doc, doc.getElementById('tab-overview'), 'ArrowRight');
+  const { prevented } = key(doc, doc.getElementById('tab-overview'), 'ArrowRight');
   assert.equal(prevented, true);
   assert.equal(doc.activeElement.id, 'tab-logs');
+  assert.deepEqual(activated, [], 'arrow must move focus only, not navigate (navigation would steal focus to the page heading)');
+});
+
+test('arrow browsing keeps working across successive keypresses', () => {
+  const doc = fixture();
+  createTablistNav(doc.querySelector('.settings-tabs'), doc, { onActivate: () => { throw new Error('arrows must not activate'); } });
+  const first = doc.getElementById('tab-overview');
+  key(doc, first, 'ArrowRight');
+  assert.equal(doc.activeElement.id, 'tab-logs');
+  // Focus is now on tab-logs; a second arrow must continue navigating tabs (the
+  // regression codex caught: an activating arrow would have moved focus off the
+  // tablist to the page <h1>, so this second press would do nothing).
+  key(doc, doc.activeElement, 'ArrowRight');
+  assert.equal(doc.activeElement.id, 'tab-configuration');
+});
+
+test('Enter activates the focused tab', () => {
+  const doc = fixture();
+  const activated = [];
+  createTablistNav(doc.querySelector('.settings-tabs'), doc, { onActivate: (el) => activated.push(el.id) });
+  const { prevented } = key(doc, doc.getElementById('tab-logs'), 'Enter');
+  assert.equal(prevented, true, 'Enter is handled so the anchor native nav does not double-fire');
   assert.deepEqual(activated, ['tab-logs']);
+});
+
+test('Space activates the focused tab', () => {
+  const doc = fixture();
+  const activated = [];
+  createTablistNav(doc.querySelector('.settings-tabs'), doc, { onActivate: (el) => activated.push(el.id) });
+  key(doc, doc.getElementById('tab-data'), ' ');
+  assert.deepEqual(activated, ['tab-data']);
 });
 
 test('ArrowRight skips a hidden tab', () => {
   const doc = fixture({ hiddenTabs: ['logs'] });
   createTablistNav(doc.querySelector('.settings-tabs'), doc, {});
-  arrow(doc, doc.getElementById('tab-overview'), 'ArrowRight');
+  key(doc, doc.getElementById('tab-overview'), 'ArrowRight');
   assert.equal(doc.activeElement.id, 'tab-configuration'); // logs skipped
 });
 
 test('landing on a tab sets roving tabindex (only it is 0)', () => {
   const doc = fixture();
   createTablistNav(doc.querySelector('.settings-tabs'), doc, {});
-  arrow(doc, doc.getElementById('tab-overview'), 'ArrowRight');
+  key(doc, doc.getElementById('tab-overview'), 'ArrowRight');
   assert.equal(doc.getElementById('tab-logs').getAttribute('tabindex'), '0');
   assert.equal(doc.getElementById('tab-overview').getAttribute('tabindex'), '-1');
   assert.equal(doc.getElementById('tab-configuration').getAttribute('tabindex'), '-1');
 });
 
-test('a non-navigation key is left untouched (no preventDefault, no move)', () => {
+test('an unrelated key is left untouched (no preventDefault, no move)', () => {
   const doc = fixture();
   createTablistNav(doc.querySelector('.settings-tabs'), doc, {});
-  const { prevented } = arrow(doc, doc.getElementById('tab-overview'), 'Enter');
+  const { prevented } = key(doc, doc.getElementById('tab-overview'), 'x');
   assert.equal(prevented, false);
   assert.equal(doc.activeElement.id, 'tab-overview');
 });
@@ -102,7 +132,7 @@ test('destroy() detaches the handler', () => {
   const doc = fixture();
   const nav = createTablistNav(doc.querySelector('.settings-tabs'), doc, {});
   nav.destroy();
-  const { prevented } = arrow(doc, doc.getElementById('tab-overview'), 'ArrowRight');
+  const { prevented } = key(doc, doc.getElementById('tab-overview'), 'ArrowRight');
   assert.equal(prevented, false);
   assert.equal(doc.activeElement.id, 'tab-overview'); // no move after destroy
 });
