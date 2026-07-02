@@ -59,6 +59,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "status", Type: "string", Desc: "restored"},
 		{Name: "archive", Type: "string"},
 	}},
+	"rotate-secret": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "rotated"},
+		{Name: "env_secrets", Type: "integer", Desc: "number of app-env secrets re-encrypted"},
+		{Name: "worker_ca_rotated", Type: "boolean", Desc: "whether the worker CA key was re-encrypted"},
+	}},
 	"worker": {Mutating: mut, Streaming: true},
 
 	// ── auth ─────────────────────────────────────────────────────────────────
