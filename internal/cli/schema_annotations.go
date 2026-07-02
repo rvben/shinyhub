@@ -64,6 +64,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "env_secrets", Type: "integer", Desc: "number of app-env secrets re-encrypted"},
 		{Name: "worker_ca_rotated", Type: "boolean", Desc: "whether the worker CA key was re-encrypted"},
 	}},
+	"migrate-backend": {Mutating: mut, ArgTypes: map[string]string{"--to": "string"}, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "migrated"},
+		{Name: "tables", Type: "integer", Desc: "number of tables copied"},
+		{Name: "rows", Type: "integer", Desc: "total rows copied"},
+	}},
 	"worker": {Mutating: mut, Streaming: true},
 
 	// ── auth ─────────────────────────────────────────────────────────────────

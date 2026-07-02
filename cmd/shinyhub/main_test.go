@@ -18,6 +18,23 @@ func TestRootCmd_HasServeSubcommand(t *testing.T) {
 	t.Fatalf("rootCmd does not have a `serve` subcommand; has: %v", buildRoot().Commands())
 }
 
+// TestRootCmd_HasMaintenanceSubcommands guards that the server-side maintenance
+// commands are actually grafted onto the tree. Their RunE can be unit-tested
+// directly without registration, and schema conformance only checks
+// tree->annotation (not the reverse), so an unregistered command would be
+// silently unreachable at the CLI - as rotate-secret initially was.
+func TestRootCmd_HasMaintenanceSubcommands(t *testing.T) {
+	have := map[string]bool{}
+	for _, sub := range buildRoot().Commands() {
+		have[sub.Name()] = true
+	}
+	for _, want := range []string{"backup", "restore", "rotate-secret", "migrate-backend"} {
+		if !have[want] {
+			t.Errorf("rootCmd is missing the %q subcommand (unreachable at the CLI); has: %v", want, buildRoot().Commands())
+		}
+	}
+}
+
 func TestRootCmd_HasDeploySubcommand(t *testing.T) {
 	for _, sub := range buildRoot().Commands() {
 		if sub.Name() == "deploy" {
