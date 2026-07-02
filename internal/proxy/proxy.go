@@ -168,6 +168,12 @@ type replicaBackend struct {
 	// established sessions finish before the slot is stopped. Reset implicitly
 	// because RegisterReplica installs a fresh replicaBackend.
 	draining atomic.Bool
+
+	// Phase 1 worker-isolation fields. Used only when the owning pool is elastic
+	// (mode == grouped or per_session). Zero-valued and unused in multiplex pools.
+	slotID          int
+	status          workerStatus
+	assignedClients int
 }
 
 // backendPool holds a fixed-size slice of replicas for one slug.
@@ -193,6 +199,15 @@ type backendPool struct {
 	// Director runs inside picked.rp.ServeHTTP AFTER p.mu is released,
 	// while SetPoolIdentityHeaders performs live updates under p.mu.
 	identityHeaders atomic.Bool
+
+	// Phase 1 worker-isolation additions. When mode != multiplex the pool is
+	// demand-driven: workers live in the map keyed by monotonic slotID, and
+	// replicas (the dense slice) is unused.
+	mode        config.WorkerIsolationMode
+	groupedSize int
+	maxWorkers  int
+	workers     map[int]*replicaBackend // slotID -> backend; nil for multiplex
+	nextSlotID  int
 }
 
 // AccessLogEntry describes a single proxied request. It is passed to the
@@ -806,6 +821,34 @@ func (p *Proxy) SetPoolCap(slug string, max int) {
 		p.pools[slug] = pool
 	}
 	pool.maxSessions = max
+}
+
+// SetPoolMode sets the worker-isolation mode and elastic sizing parameters for
+// slug's pool. When mode is grouped or per_session the pool switches to
+// demand-driven routing via the workers map; when mode is multiplex (or the
+// empty string) the pool reverts to the dense replicas slice. Mirrors
+// SetPoolCap's locking pattern. Creates the pool (size 1) if absent.
+func (p *Proxy) SetPoolMode(slug string, mode config.WorkerIsolationMode, groupedSize, maxWorkers int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok {
+		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		p.pools[slug] = pool
+	}
+	pool.mode = mode
+	pool.groupedSize = groupedSize
+	pool.maxWorkers = maxWorkers
+	if mode != config.IsolationMultiplex && mode != "" {
+		// Elastic mode: initialise workers map if not already set.
+		if pool.workers == nil {
+			pool.workers = make(map[int]*replicaBackend)
+		}
+	} else {
+		// Multiplex (including zero value): clear any elastic state so a stale
+		// workers map never makes the pool look routable via poolHasAny.
+		pool.workers = nil
+	}
 }
 
 // SetPoolAppID records the numeric database primary key for the app that owns
@@ -1836,8 +1879,15 @@ func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Reques
 	return best, false, saturated
 }
 
-// poolHasAny reports whether the pool contains at least one non-nil replica.
+// poolHasAny reports whether the pool has at least one routable backend.
+// For multiplex pools (mode == "" or "multiplex") this means a non-nil replica
+// slot. For elastic pools (grouped or per_session) this means a non-empty
+// workers map -- checking pool.workers ONLY when poolIsElastic so a stale or
+// accidentally non-nil map on a multiplex pool never makes it look routable.
 func poolHasAny(pool *backendPool) bool {
+	if poolIsElastic(pool) {
+		return len(pool.workers) > 0
+	}
 	for _, r := range pool.replicas {
 		if r != nil {
 			return true

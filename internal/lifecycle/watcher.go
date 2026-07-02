@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
@@ -89,6 +90,11 @@ type proxyBackend interface {
 	// Called alongside SetPoolSize and SetPoolCap wherever the app object is
 	// available.
 	SetPoolIdentityHeaders(slug string, enabled bool)
+	// SetPoolMode configures the worker-isolation mode for slug's pool.
+	// groupedSize and maxWorkers are used only when mode is grouped or
+	// per_session; they are ignored for multiplex (pass zero). Creates the
+	// pool (size 1) if absent, mirroring SetPoolCap.
+	SetPoolMode(slug string, mode config.WorkerIsolationMode, groupedSize, maxWorkers int)
 }
 
 // MetricsRecorder records lifecycle business metrics. A nil recorder disables
