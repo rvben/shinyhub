@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,8 +69,10 @@ func TestClientID_TamperedCookie(t *testing.T) {
 	const slug = "myapp"
 	const knownID = "aabbccddeeff00112233445566778899"
 	signed := signClientValue(key, slug, knownID)
-	// Tamper: flip the last character of the HMAC segment.
-	tampered := signed[:len(signed)-1] + "x"
+	// Tamper: replace the 16-char HMAC segment with all-zeros so the mutation
+	// is always different from the real MAC, regardless of what it happens to be.
+	dot := strings.Index(signed, ".")
+	tampered := signed[:dot+1] + "0000000000000000"
 
 	r := httptest.NewRequest(http.MethodGet, "/app/"+slug+"/", nil)
 	r.AddCookie(&http.Cookie{
@@ -92,7 +95,8 @@ func TestClientID_TamperedCookie(t *testing.T) {
 }
 
 // TestSetClientCookie verifies that setClientCookie writes a cookie with the
-// correct name, path, HttpOnly=true, and SameSite=Lax.
+// correct name, path, HttpOnly=true, SameSite=Lax, and Secure mirroring the
+// request scheme (matching the sticky routing cookie policy exactly).
 func TestSetClientCookie(t *testing.T) {
 	p := New()
 	p.SetStickySecret([]byte("test-secret-key-for-client-id"))
@@ -100,33 +104,60 @@ func TestSetClientCookie(t *testing.T) {
 	const slug = "myapp"
 	const id = "aabbccddeeff00112233445566778899"
 
-	rec := httptest.NewRecorder()
-	p.setClientCookie(rec, slug, id)
-
-	cookies := rec.Result().Cookies()
-	var found *http.Cookie
-	for _, c := range cookies {
-		if c.Name == clientCookiePrefix+slug {
-			found = c
-			break
+	findCookie := func(rec *httptest.ResponseRecorder) *http.Cookie {
+		t.Helper()
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == clientCookiePrefix+slug {
+				return c
+			}
 		}
+		return nil
 	}
-	if found == nil {
-		t.Fatalf("cookie %q not set", clientCookiePrefix+slug)
-	}
-	if found.Path != "/app/"+slug+"/" {
-		t.Errorf("Path = %q, want %q", found.Path, "/app/"+slug+"/")
-	}
-	if !found.HttpOnly {
-		t.Error("HttpOnly should be true")
-	}
-	if found.SameSite != http.SameSiteLaxMode {
-		t.Errorf("SameSite = %v, want Lax", found.SameSite)
-	}
-	// Value must contain the id.
-	if !strings.Contains(found.Value, id) {
-		t.Errorf("cookie value %q does not contain id %q", found.Value, id)
-	}
+
+	// HTTP request -> Secure must be false (Secure over HTTPS only, mirrors
+	// the sticky routing cookie's scheme-aware policy).
+	t.Run("http_request_not_secure", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "http://localhost/app/"+slug+"/", nil)
+		p.setClientCookie(rec, r, slug, id)
+
+		found := findCookie(rec)
+		if found == nil {
+			t.Fatalf("cookie %q not set", clientCookiePrefix+slug)
+		}
+		if found.Path != "/app/"+slug+"/" {
+			t.Errorf("Path = %q, want %q", found.Path, "/app/"+slug+"/")
+		}
+		if !found.HttpOnly {
+			t.Error("HttpOnly should be true")
+		}
+		if found.SameSite != http.SameSiteLaxMode {
+			t.Errorf("SameSite = %v, want Lax", found.SameSite)
+		}
+		if found.Secure {
+			t.Error("Secure should be false for a plain http:// request")
+		}
+		if !strings.Contains(found.Value, id) {
+			t.Errorf("cookie value %q does not contain id %q", found.Value, id)
+		}
+	})
+
+	// TLS request -> Secure must be true. r.TLS != nil is the authoritative
+	// signal for direct HTTPS connections (checked before X-Forwarded-Proto).
+	t.Run("tls_request_is_secure", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "https://localhost/app/"+slug+"/", nil)
+		r.TLS = &tls.ConnectionState{}
+		p.setClientCookie(rec, r, slug, id)
+
+		found := findCookie(rec)
+		if found == nil {
+			t.Fatalf("cookie %q not set", clientCookiePrefix+slug)
+		}
+		if !found.Secure {
+			t.Error("Secure should be true for a TLS request")
+		}
+	})
 }
 
 // TestClientID_NoSecret_UnsignedFallback verifies that when no secret is

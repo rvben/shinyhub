@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/proxytrust"
 )
 
 // clientCookiePrefix is the name prefix for the per-slug client-id cookie.
@@ -76,22 +77,26 @@ func (p *Proxy) clientID(r *http.Request, slug string) (id string, isNew bool) {
 // setClientCookie writes the client-id cookie onto w. The cookie value is
 // signed when a sticky secret is configured; otherwise the bare id is stored.
 // Cookie attributes (Path, HttpOnly, SameSite, Secure) mirror the sticky
-// routing cookie's policy exactly.
-func (p *Proxy) setClientCookie(w http.ResponseWriter, slug, id string) {
+// routing cookie exactly: Secure is set when the request was received over
+// HTTPS (as determined by X-Forwarded-Proto, trusted only from configured
+// proxy CIDRs).
+func (p *Proxy) setClientCookie(w http.ResponseWriter, r *http.Request, slug, id string) {
 	var value string
 	if key := p.stickySecretBytes(); len(key) > 0 {
 		value = signClientValue(key, slug, id)
 	} else {
 		value = id
 	}
-	// Secure is omitted here; callers that route through ServeHTTP and need
-	// scheme-aware Secure should layer it on top via setClientCookieSecure.
 	http.SetCookie(w, &http.Cookie{
 		Name:     clientCookiePrefix + slug,
 		Value:    value,
 		Path:     "/app/" + slug + "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		// Mirror the sticky routing cookie's scheme-aware policy: Secure over
+		// HTTPS so the cookie is never sent in cleartext. X-Forwarded-Proto is
+		// trusted only from configured proxy CIDRs.
+		Secure: proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
 	})
 }
 
