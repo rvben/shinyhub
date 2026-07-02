@@ -871,11 +871,12 @@ func (s *Server) rateLimitAuthFailures(next http.Handler) http.Handler {
 }
 
 // authFailWriter wraps the response writer for an Authorization-bearing request.
-// When the downstream handler emits 401 (auth failed), it records the failure
-// against ip and, if that ip is already over the limit, rewrites the response to
-// a 429 error envelope. Any other status passes straight through, so a valid
-// credential (200) is never affected. Flush/Hijack are delegated so SSE log
-// streaming and WebSocket proxying through the authenticated group keep working.
+// When the downstream handler emits 401 (auth failed), it consumes one slot in
+// the per-IP failure limiter; once that IP is over the limit it rewrites the
+// response to a 429 error envelope. Any other status passes straight through, so
+// a valid credential (200) is never affected. Flush/Hijack are delegated so SSE
+// log streaming and WebSocket proxying through the authenticated group keep
+// working.
 type authFailWriter struct {
 	http.ResponseWriter
 	ip        string
@@ -890,9 +891,12 @@ func (w *authFailWriter) WriteHeader(code int) {
 	}
 	w.wroteHead = true
 	if code == http.StatusUnauthorized {
-		over := w.lim.blocked(w.ip)
-		w.lim.record(w.ip)
-		if over {
+		// allow() checks-and-consumes atomically under one lock, so concurrent
+		// floods from one IP cannot all slip past a check-then-record gap. It
+		// returns false once the IP is at the limit (and stops growing the
+		// bucket), which is our 429 signal. Only 401s call it, so a valid
+		// credential never consumes a slot.
+		if !w.lim.allow(w.ip) {
 			w.swallow = true
 			writeError(w.ResponseWriter, http.StatusTooManyRequests, "too many failed authentication attempts, try again later")
 			return
