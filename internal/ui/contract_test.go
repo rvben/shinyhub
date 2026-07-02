@@ -21,13 +21,29 @@ import (
 //
 // When the wrap was introduced, the frontend kept doing `const app = await
 // resp.json()`, which made every field undefined and silently broke Save
-// buttons on the detail page. This test ensures app-detail.js keeps reading
-// from body.app so the class of regression can't recur.
+// buttons on the detail page. The unwrap now lives in the pure, unit-tested
+// views/app-detail-envelope.js (normalizeAppEnvelope); this test pins that the
+// module keeps reading body.app/body.replicas_status AND that app-detail.js
+// keeps calling it, so the class of regression can't recur.
 func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
-	assertContains(t, "views/app-detail.js", "body.app",
-		"GET /api/apps/:slug returns {app, replicas_status}; see internal/api/apps.go handleGetApp")
-	assertContains(t, "views/app-detail.js", "body.replicas_status",
-		"GET /api/apps/:slug returns {app, replicas_status}; the Overview Replicas panel seeds from replicas_status")
+	assertContains(t, "views/app-detail-envelope.js", "body.app",
+		"GET /api/apps/:slug returns {app, replicas_status}; normalizeAppEnvelope must unwrap body.app (see internal/api/apps.go handleGetApp)")
+	assertContains(t, "views/app-detail-envelope.js", "body.replicas_status",
+		"normalizeAppEnvelope must read body.replicas_status; the Overview Replicas panel seeds from it")
+	assertContains(t, "views/app-detail.js", "normalizeAppEnvelope",
+		"app-detail.js must call normalizeAppEnvelope to unwrap the GET /api/apps/:slug envelope")
+}
+
+// TestAppDetailAccessResolverWired pins that app-detail.js delegates its tab
+// resolution + access redirects + tablist visibility to the pure, unit-tested
+// views/app-detail-nav.js (resolveDetailAccess, tabViewModels) rather than
+// re-inlining the decisions in the untestable mount closure. The behaviour is
+// covered by internal/ui/jstests/app-detail-nav.test.js.
+func TestAppDetailAccessResolverWired(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "resolveDetailAccess",
+		"app-detail.js must resolve the tab + access redirects via resolveDetailAccess (viewer -> '/', non-manager off manager-only tabs)")
+	assertContains(t, "views/app-detail.js", "tabViewModels",
+		"app-detail.js must build the tab strip visibility/href/roving-tabindex model via tabViewModels")
 }
 
 // TestTablistKeyboardNavWired guards the WAI-ARIA tablist keyboard pattern on
@@ -1474,8 +1490,8 @@ func TestGroupAccessSectionWiring(t *testing.T) {
 func TestCanManageAppHonorsServerValue(t *testing.T) {
 	assertContains(t, "app.js", "typeof app.can_manage === 'boolean'",
 		"canManageApp must prefer the server-computed app.can_manage when present")
-	assertContains(t, "views/app-detail.js", "body.can_manage",
-		"the detail view must copy body.can_manage onto the app object so canManageApp sees it")
+	assertContains(t, "views/app-detail-envelope.js", "body.can_manage",
+		"normalizeAppEnvelope must copy body.can_manage onto the app object so canManageApp sees it")
 }
 
 // TestGroupAccessShowsManifestSource guards that manifest-sourced group rules are
@@ -1624,10 +1640,10 @@ func TestConfigurationSurfacesGeneralAndResources(t *testing.T) {
 // delegation shows a "not enforced" note rather than silently accepting an
 // unenforced limit. The detail view must merge both envelope fields onto app.
 func TestResourcesEnforcementHonesty(t *testing.T) {
-	assertContains(t, "views/app-detail.js", "body.runtime_mode",
-		"the detail view must read runtime_mode from the GET envelope")
-	assertContains(t, "views/app-detail.js", "body.resource_enforcement",
-		"the detail view must merge resource_enforcement from the envelope so app.resource_enforcement is defined; see internal/api/apps.go")
+	assertContains(t, "views/app-detail-envelope.js", "body.runtime_mode",
+		"normalizeAppEnvelope must read runtime_mode from the GET envelope")
+	assertContains(t, "views/app-detail-envelope.js", "body.resource_enforcement",
+		"normalizeAppEnvelope must merge resource_enforcement from the envelope so app.resource_enforcement is defined; see internal/api/apps.go")
 	assertContains(t, "app.js", "app.runtime_mode !== 'docker'",
 		"the Resources render must treat non-docker as native (limits still apply) and key the enforcement warning off it")
 	assertContains(t, "index.html", `id="resources-runtime-note"`,
@@ -1831,8 +1847,8 @@ func TestSidebarLayoutCSS(t *testing.T) {
 // deployments row renders the release label, and the raw epoch is no longer the
 // visible version label (kept only on hover/title).
 func TestVersionDisplayUsesReleaseNumber(t *testing.T) {
-	assertContains(t, "views/app-detail.js", "body.release_number",
-		"the detail view must read release_number from the GET envelope")
+	assertContains(t, "views/app-detail-envelope.js", "body.release_number",
+		"normalizeAppEnvelope must read release_number from the GET envelope")
 	assertContains(t, "views/app-detail.js", "'v' + app.release_number",
 		"the header/overview version must show the release number, not the epoch")
 	assertContains(t, "views/app-detail.js", "m.releaseLabel",
@@ -2204,8 +2220,8 @@ func TestLaunchpadContract(t *testing.T) {
 	// configuration) via a sidebar link or a typed URL; the detail mount redirects
 	// them to the Launchpad once the app loads, while a per-app manager (can_manage)
 	// keeps access. Pin the gate so the viewer-only flow can't silently regress.
-	assertContains(t, "views/app-detail.js", "ctx.state.user.role === 'viewer' && !canManage",
-		"app-detail.js gates pure viewers out of the operator detail page (manager via can_manage keeps access)")
+	assertContains(t, "views/app-detail-nav.js", "user.role === 'viewer' && !canManage",
+		"resolveDetailAccess gates pure viewers out of the operator detail page (manager via can_manage keeps access); app-detail.js wires it, see TestAppDetailAccessResolverWired")
 	// A viewer never sees internal app state, including via the sidebar dots /
 	// tooltips: the sidebar uses a collapsed openable/unavailable badge for
 	// viewers, only the full status vocabulary for operators.
