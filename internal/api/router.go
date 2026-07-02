@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -30,29 +32,30 @@ import (
 
 // Server holds the dependencies shared by all API handlers.
 type Server struct {
-	cfg           *config.Config
-	store         *db.Store
-	manager       *process.Manager
-	proxy         *proxy.Proxy
-	github        *oauth.GitHub       // nil when GitHub OAuth is not configured
-	googleOAuth   *oauth.Google       // nil when Google OAuth is not configured
-	oidcProvider  *oauth.OIDCProvider // nil when OIDC SSO is not configured
-	sampler       process.Sampler
-	loginLimiter  rateLimiter // shared (DB-backed) on Postgres, in-memory on SQLite
-	deployLimiter *keyedRateLimiter
-	userLimiter   *keyedRateLimiter
-	tokenLimiter  *keyedRateLimiter
-	dataLimiter   *keyedRateLimiter // per-user: data uploads
-	actionLimiter *keyedRateLimiter // per-user: restart/rollback/manual schedule run
-	oauthLimiter  *keyedRateLimiter // per-IP: OAuth/OIDC login-start
-	jobs          *jobs.Manager
-	scheduler     *scheduler.Scheduler
-	secretsKey    []byte
-	traceBuffer   *tracing.Buffer
-	metrics       *metrics.Registry   // nil when metrics are disabled
-	history       *history.Store      // nil when metrics-history collection is disabled
-	tracer        *servertrace.Tracer // nil when server tracing is disabled
-	router        chi.Router
+	cfg             *config.Config
+	store           *db.Store
+	manager         *process.Manager
+	proxy           *proxy.Proxy
+	github          *oauth.GitHub       // nil when GitHub OAuth is not configured
+	googleOAuth     *oauth.Google       // nil when Google OAuth is not configured
+	oidcProvider    *oauth.OIDCProvider // nil when OIDC SSO is not configured
+	sampler         process.Sampler
+	loginLimiter    rateLimiter // shared (DB-backed) on Postgres, in-memory on SQLite
+	deployLimiter   *keyedRateLimiter
+	userLimiter     *keyedRateLimiter
+	tokenLimiter    *keyedRateLimiter
+	dataLimiter     *keyedRateLimiter // per-user: data uploads
+	actionLimiter   *keyedRateLimiter // per-user: restart/rollback/manual schedule run
+	oauthLimiter    *keyedRateLimiter // per-IP: OAuth/OIDC login-start
+	authFailLimiter *keyedRateLimiter // per-IP: FAILED bearer/API-token auth attempts
+	jobs            *jobs.Manager
+	scheduler       *scheduler.Scheduler
+	secretsKey      []byte
+	traceBuffer     *tracing.Buffer
+	metrics         *metrics.Registry   // nil when metrics are disabled
+	history         *history.Store      // nil when metrics-history collection is disabled
+	tracer          *servertrace.Tracer // nil when server tracing is disabled
+	router          chi.Router
 
 	// version is the binary version string advertised by GET /api/server-info,
 	// set by the parent binary via SetVersion. Empty until SetVersion is called
@@ -175,21 +178,22 @@ func (s *Server) isRedeployInFlight(slug string) bool {
 // when running in test contexts that exercise only auth/data handlers.
 func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *proxy.Proxy) *Server {
 	s := &Server{
-		cfg:           cfg,
-		store:         store,
-		manager:       manager,
-		proxy:         prx,
-		sampler:       &process.GopsutilSampler{},
-		loginLimiter:  newLoginLimiter(store, 10, time.Minute),
-		deployLimiter: newKeyedRateLimiter(10, time.Minute),
-		userLimiter:   newKeyedRateLimiter(5, time.Minute),
-		tokenLimiter:  newKeyedRateLimiter(20, time.Minute),
-		dataLimiter:   newKeyedRateLimiter(120, time.Minute),
-		actionLimiter: newKeyedRateLimiter(30, time.Minute),
-		oauthLimiter:  newKeyedRateLimiter(20, time.Minute),
-		deployRun:     deploy.Run,
-		deployReplica: deploy.RunReplica,
-		resumeReplica: deploy.ResumeReplica,
+		cfg:             cfg,
+		store:           store,
+		manager:         manager,
+		proxy:           prx,
+		sampler:         &process.GopsutilSampler{},
+		loginLimiter:    newLoginLimiter(store, 10, time.Minute),
+		deployLimiter:   newKeyedRateLimiter(10, time.Minute),
+		userLimiter:     newKeyedRateLimiter(5, time.Minute),
+		tokenLimiter:    newKeyedRateLimiter(20, time.Minute),
+		dataLimiter:     newKeyedRateLimiter(120, time.Minute),
+		actionLimiter:   newKeyedRateLimiter(30, time.Minute),
+		oauthLimiter:    newKeyedRateLimiter(20, time.Minute),
+		authFailLimiter: newKeyedRateLimiter(30, time.Minute),
+		deployRun:       deploy.Run,
+		deployReplica:   deploy.RunReplica,
+		resumeReplica:   deploy.ResumeReplica,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
@@ -680,6 +684,7 @@ func (s *Server) buildRouter() chi.Router {
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.userLookup, s.revocationChecker())
 	csrf := auth.CSRFMiddleware(s.cfg.TrustedProxyNets)
 	r.Group(func(r chi.Router) {
+		r.Use(s.rateLimitAuthFailures) // before bearer: observes and throttles its 401s
 		r.Use(bearer)
 		r.Use(csrf)
 		r.Use(s.ownerGuard)
@@ -839,6 +844,88 @@ func rateLimitByUser(rl *keyedRateLimiter) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// rateLimitAuthFailures throttles repeated FAILED bearer/API-token
+// authentications from a single client IP. It counts only 401s from the
+// downstream auth middleware (requests that carried an Authorization header),
+// and converts a failing request to 429 only once that IP is over the limit.
+//
+// A request presenting a VALID credential produces a non-401 status, so it is
+// never intercepted and never throttled — even after the failure bucket for its
+// IP has filled from a co-located bad actor (e.g. a shared NAT / corporate
+// egress IP where one client has a stale token). That is the key difference
+// from a pre-auth IP block, which would lock out valid clients on the same IP.
+// Unauthenticated (cookie-less) probes carry no Authorization header and fall
+// through to the login limiter instead. This dampens token-guessing /
+// credential-stuffing floods (256-bit tokens make a successful guess infeasible,
+// but the error flood is worth bounding).
+func (s *Server) rateLimitAuthFailures(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(&authFailWriter{ResponseWriter: w, ip: s.ClientIP(r), lim: s.authFailLimiter}, r)
+	})
+}
+
+// authFailWriter wraps the response writer for an Authorization-bearing request.
+// When the downstream handler emits 401 (auth failed), it consumes one slot in
+// the per-IP failure limiter; once that IP is over the limit it rewrites the
+// response to a 429 error envelope. Any other status passes straight through, so
+// a valid credential (200) is never affected. Flush/Hijack are delegated so SSE
+// log streaming and WebSocket proxying through the authenticated group keep
+// working.
+type authFailWriter struct {
+	http.ResponseWriter
+	ip        string
+	lim       *keyedRateLimiter
+	swallow   bool // true once a 401 was converted to 429: drop the handler's body
+	wroteHead bool
+}
+
+func (w *authFailWriter) WriteHeader(code int) {
+	if w.wroteHead {
+		return
+	}
+	w.wroteHead = true
+	if code == http.StatusUnauthorized {
+		// allow() checks-and-consumes atomically under one lock, so concurrent
+		// floods from one IP cannot all slip past a check-then-record gap. It
+		// returns false once the IP is at the limit (and stops growing the
+		// bucket), which is our 429 signal. Only 401s call it, so a valid
+		// credential never consumes a slot.
+		if !w.lim.allow(w.ip) {
+			w.swallow = true
+			writeError(w.ResponseWriter, http.StatusTooManyRequests, "too many failed authentication attempts, try again later")
+			return
+		}
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *authFailWriter) Write(b []byte) (int, error) {
+	if !w.wroteHead {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.swallow {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *authFailWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *authFailWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 }
 
 // rateLimitByIP applies the given limiter keyed by the client IP. Used on
