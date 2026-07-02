@@ -46,6 +46,33 @@ func TestAppDetailAccessResolverWired(t *testing.T) {
 		"app-detail.js must build the tab strip visibility/href/roving-tabindex model via tabViewModels")
 }
 
+// TestTokensUIWiring guards the /tokens page wiring. The create/list/revoke +
+// reveal-once logic lives in app.js's IIFE (not jsdom-importable), so pin it by
+// string search; the pure list rendering is unit-tested in
+// internal/ui/jstests/tokens.test.js.
+func TestTokensUIWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="tokens-view"`,
+		"index.html must keep the #tokens-view page section")
+	assertContains(t, "index.html", `id="new-token-modal"`,
+		"index.html must keep the new-token modal")
+	assertContains(t, "index.html", `id="token-reveal"`,
+		"index.html must keep the reveal-once panel (a token is shown only once)")
+	assertContains(t, "index.html", `id="token-reveal-value"`,
+		"index.html must keep the element that shows the raw token once")
+	assertContains(t, "index.html", `id="profile-tokens-link"`,
+		"the profile modal must keep the 'Manage API tokens' link (the page's entry point)")
+	assertContains(t, "app.js", `'/api/tokens'`,
+		"app.js must call the /api/tokens endpoint to list/create tokens")
+	assertContains(t, "app.js", "renderTokenList",
+		"app.js must render the token list via views/tokens.js")
+	assertContains(t, "app.js", "body.token",
+		"app.js must read body.token from the create response to reveal it once")
+	assertContains(t, "app.js", "Revoke token",
+		"app.js must confirm before revoking a token (destructive)")
+	assertContains(t, "app.js", `router.register('/tokens'`,
+		"app.js must register the /tokens SPA route")
+}
+
 // TestTablistKeyboardNavWired guards the WAI-ARIA tablist keyboard pattern on
 // the app-detail settings tabs. The keydown wiring lives inside app-detail.js's
 // mount closure (not jsdom-importable), so pin it by string search: the module
