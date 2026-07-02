@@ -1666,16 +1666,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.setClientCookie(rec, r, slug, cid)
 		}
 
-		// Resolve the sticky routing pin. For elastic pools the "index" in the
-		// rep cookie is the slotID (not a replica-slice index). Honor the pin only
-		// when the worker exists AND its deploymentID matches the cookie's so a
-		// stale cookie from a deregistered pool does not route to the wrong client.
+		// Resolve the routing pin from the server-side client binding, which is
+		// the authoritative source. The binding is recorded by bindClient when a
+		// new slot is allocated and remains valid after RegisterElasticWorker
+		// stamps the real deploymentID. A cookie-based depID comparison would
+		// fail here because the pin cookie is written with deploymentID=0 at
+		// allocate time and the worker registers with a non-zero ID later.
+		// Reading p.clients under the pool lock already held (p.mu.RLock).
 		pinnedSlot := -1
-		if c, err := r.Cookie(cookiePrefix + slug); err == nil {
-			if slotID, depID, ok := p.stickyIndex(slug, c.Value); ok {
-				if wkr, exists := pool.workers[slotID]; exists && wkr != nil && wkr.deploymentID == depID {
-					pinnedSlot = slotID
-				}
+		if cs := p.clients[slug][cid]; cs != nil {
+			if w := pool.workers[cs.slotID]; w != nil && w.status != workerDraining {
+				pinnedSlot = cs.slotID
 			}
 		}
 
@@ -1683,6 +1684,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		switch d.kind {
 		case decisionRoute:
+			// Quick pre-check under the read lock before upgrading.
 			wkr := pool.workers[d.slotID]
 			if wkr == nil || wkr.status == workerBooting {
 				// Worker not ready yet: serve the loading page so the client retries.
@@ -1692,25 +1694,47 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				p.serveMissPage(rec, slug, nil)
 				return
 			}
-			// Bump activeConns while holding the read lock. BeginHibernate takes the
-			// write lock and inspects activeConns under it; releasing before the bump
-			// would let it observe activeConns=0 and hibernate a pool we are about to
-			// forward to (the same invariant as the multiplex path).
+			// Upgrade from read lock to write lock so that bumping activeConns and
+			// cancelling the client grace timer (clientConnOpenedLocked) are atomic.
+			// Without this, a grace timer armed by a prior connection-close can fire
+			// in the gap between RUnlock and the separate clientConnOpened call and
+			// terminate the worker mid-request.
+			p.mu.RUnlock()
+			p.mu.Lock()
+			// Re-validate: pool or worker may have changed during the lock upgrade.
+			{
+				pool2 := p.pools[slug]
+				if pool2 == nil || !poolIsElastic(pool2) {
+					p.mu.Unlock()
+					p.serveMissPage(rec, slug, nil)
+					return
+				}
+				wkr2 := pool2.workers[d.slotID]
+				if wkr2 == nil || wkr2.status == workerBooting || wkr2.status == workerDraining {
+					p.mu.Unlock()
+					p.serveMissPage(rec, slug, nil)
+					return
+				}
+				wkr = wkr2
+			}
 			wkr.activeConns.Add(1)
 			replicaIndex = wkr.slotID
+			depID := wkr.deploymentID
+			// Cancel the grace timer and increment liveConns under the write lock
+			// so the timer callback cannot observe liveConns==0 in the gap.
+			p.clientConnOpenedLocked(slug, cid)
+			p.mu.Unlock()
 			// Refresh the rep sticky cookie with the current slotID and deploymentID.
+			// The cookie is now informational only for elastic pools; the server-side
+			// p.clients binding is the routing authority.
 			http.SetCookie(rec, &http.Cookie{
 				Name:     cookiePrefix + slug,
-				Value:    p.stickyCookieValue(slug, d.slotID, wkr.deploymentID),
+				Value:    p.stickyCookieValue(slug, d.slotID, depID),
 				Path:     "/app/" + slug + "/",
 				HttpOnly: true,
 				SameSite: http.SameSiteLaxMode,
 				Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
 			})
-			p.mu.RUnlock()
-			// clientConnOpened/Closed acquire the write lock themselves and must be
-			// called outside the read-lock window to avoid deadlock.
-			p.clientConnOpened(slug, cid)
 			defer wkr.activeConns.Add(-1)
 			defer p.clientConnClosed(slug, cid)
 			p.RecordActivity(slug)

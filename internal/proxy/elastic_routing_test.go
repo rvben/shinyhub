@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -139,7 +140,10 @@ func TestElasticRouting_SecondClientWhileBooting(t *testing.T) {
 
 // TestElasticRouting_ForwardsAfterWorkerReady verifies that once RegisterElasticWorker
 // installs a running reverse proxy for slot 0, a request from the same client
-// carrying the rep pin and cid cookie is forwarded to that worker.
+// carrying the cid cookie is forwarded to that worker - even when the worker's
+// real deploymentID (42) differs from the 0 stamped in the rep-pin cookie at
+// allocate time. This is the C-1 regression test: routing must use the
+// server-side client binding (p.clients), not the cookie deploymentID comparison.
 func TestElasticRouting_ForwardsAfterWorkerReady(t *testing.T) {
 	// Backend server that records received requests.
 	backendHit := make(chan struct{}, 1)
@@ -163,9 +167,11 @@ func TestElasticRouting_ForwardsAfterWorkerReady(t *testing.T) {
 	}
 	firstCookies := extractCookies(rec1)
 
-	// Register the elastic worker for slot 0. Use deploymentID=0 so it is
-	// consistent with the pin cookie that was set during decisionAllocate.
-	if err := p.RegisterElasticWorker("myapp", 0, backend.URL, nil, 0); err != nil {
+	// Register the elastic worker for slot 0 with a NON-ZERO deploymentID (42).
+	// The rep-pin cookie written at allocate time carries deploymentID=0, so a
+	// cookie-based depID check would fail. The server-side client binding must
+	// be authoritative so the client is still forwarded to slot 0.
+	if err := p.RegisterElasticWorker("myapp", 0, backend.URL, nil, 42); err != nil {
 		t.Fatalf("RegisterElasticWorker: %v", err)
 	}
 
@@ -221,10 +227,14 @@ func TestElasticRouting_MultiplexUnchanged(t *testing.T) {
 // exactly once per worker.
 func TestElasticRouting_Deregister_TerminatesAllWorkers(t *testing.T) {
 	var terminateCalls int32
+	// Buffered channel: each terminate goroutine sends one signal.
+	terminateCh := make(chan struct{}, 4)
+
 	p := New()
 	p.SetPoolMode("slugX", config.IsolationPerSession, 0, 5)
 	p.SetTerminateFunc(func(slug string, slotID int) {
 		atomic.AddInt32(&terminateCalls, 1)
+		terminateCh <- struct{}{}
 	})
 
 	// Manually install two running workers into the pool.
@@ -236,10 +246,60 @@ func TestElasticRouting_Deregister_TerminatesAllWorkers(t *testing.T) {
 
 	p.Deregister("slugX")
 
-	// Allow goroutines to fire.
-	time.Sleep(30 * time.Millisecond)
+	// Wait for both terminate goroutines to deliver their signals.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-terminateCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("terminate callback not invoked within 2s (got %d/2)", atomic.LoadInt32(&terminateCalls))
+		}
+	}
 	if n := atomic.LoadInt32(&terminateCalls); n != 2 {
 		t.Errorf("terminate calls = %d, want 2", n)
+	}
+}
+
+// TestElasticRouting_ConcurrentAllocate_TOCTOU verifies that two goroutines
+// racing into decisionAllocate on a maxWorkers=1 per_session pool produce
+// exactly one successful reservation (loading page) and one rejection (503),
+// not two reservations. This covers the TOCTOU window between the RLock
+// decide() call and the write-locked reserveWorker.
+func TestElasticRouting_ConcurrentAllocate_TOCTOU(t *testing.T) {
+	p := New()
+	p.SetPoolMode("raceapp", config.IsolationPerSession, 0, 1)
+	p.SetSpawnFunc(func(string, int) {}) // no-op
+
+	var (
+		reservedCount int32
+		rejectedCount int32
+		wg            sync.WaitGroup
+	)
+
+	const goroutines = 2
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("GET", "/app/raceapp/", nil)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+			switch rec.Code {
+			case http.StatusOK:
+				if strings.Contains(rec.Body.String(), "Starting app") {
+					atomic.AddInt32(&reservedCount, 1)
+				}
+			case http.StatusServiceUnavailable:
+				atomic.AddInt32(&rejectedCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&reservedCount); got != 1 {
+		t.Errorf("reservedCount = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&rejectedCount); got != 1 {
+		t.Errorf("rejectedCount = %d, want 1", got)
 	}
 }
 

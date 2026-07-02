@@ -220,14 +220,13 @@ func (p *Proxy) bindClient(slug, clientID string, slotID int) {
 	}
 }
 
-// clientConnOpened records that clientID has opened a new connection to its
-// assigned worker. It cancels any pending release timer (a reconnecting client
-// must not have its worker killed mid-session) and increments liveConns.
-// Caller must NOT hold p.mu.
-func (p *Proxy) clientConnOpened(slug, clientID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+// clientConnOpenedLocked is the write-lock-held core of clientConnOpened.
+// The caller MUST hold p.mu (write lock). It cancels any pending grace timer
+// and increments liveConns for the named client. A no-op when the slot is
+// absent. Use this from code that already owns the write lock (e.g. the
+// elastic decisionRoute path) to keep the activeConns bump and liveConns
+// increment atomic, closing the terminate-race window.
+func (p *Proxy) clientConnOpenedLocked(slug, clientID string) {
 	cs := p.lookupClientSlot(slug, clientID)
 	if cs == nil {
 		return
@@ -237,6 +236,16 @@ func (p *Proxy) clientConnOpened(slug, clientID string) {
 		cs.releaseTimer = nil
 	}
 	cs.liveConns++
+}
+
+// clientConnOpened records that clientID has opened a new connection to its
+// assigned worker. It cancels any pending release timer (a reconnecting client
+// must not have its worker killed mid-session) and increments liveConns.
+// Caller must NOT hold p.mu.
+func (p *Proxy) clientConnOpened(slug, clientID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clientConnOpenedLocked(slug, clientID)
 }
 
 // clientConnClosed records that one connection from clientID has closed. When
