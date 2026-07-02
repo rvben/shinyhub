@@ -9,13 +9,22 @@ kernel's unprivileged, self-imposed access-control mechanism.
 It is a **blast-radius boundary**, not a defense against determined hostile code.
 If your threat model is genuinely untrusted app code in a multi-tenant setting,
 run the [Docker runtime](../README.md#docker) instead, which adds process and
-user-namespace isolation and network isolation between apps: each app runs in
-its own container, and all app containers share a dedicated bridge network
-(`shinyhub-apps`) created with inter-container communication disabled, so one
-app cannot reach another app's container directly - only the loopback ports the
-proxy publishes on the host are reachable. Setting `runtime.docker.network_mode:
-host` opts out of that network isolation (the container shares the host network
-stack), so use it only when apps are trusted.
+user-namespace isolation, and can isolate apps from each other on the network:
+each app runs in its own container, and all app containers share a dedicated
+bridge network (`shinyhub-apps`) created with inter-container communication
+(ICC) disabled. The proxy always reaches apps over the loopback ports published
+on the host, so app-to-app traffic on that network is what ICC blocks.
+
+**Enforcement caveat (verify in your environment).** Whether ICC-disabled
+actually blocks container-to-container traffic depends on the daemon. It is
+enforced by the Docker Engine's netfilter rules on Linux (recent Engine
+versions); some developer daemons - notably **OrbStack** on macOS - flat-route
+all containers for convenience and do **not** enforce Docker network isolation
+at all (containers reach each other even across separate networks). So treat
+app-to-app network isolation as a property of a Linux Docker Engine deployment,
+not of every daemon, and confirm it on yours before relying on it for untrusted
+multi-tenant code. Setting `runtime.docker.network_mode: host` opts out entirely
+(the container shares the host network stack); use it only when apps are trusted.
 
 ## The dial
 
