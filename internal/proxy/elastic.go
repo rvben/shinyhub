@@ -7,10 +7,23 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 )
+
+// clientSlot tracks the live state of one client's binding to an elastic worker.
+// It is stored in p.clients[slug][clientID] and mutated only under p.mu.
+type clientSlot struct {
+	slotID       int
+	liveConns    int
+	releaseTimer *time.Timer
+}
+
+// clientGraceTTL is the grace window between the last connection close and
+// worker retirement. A var (not const) so tests can shorten it to milliseconds.
+var clientGraceTTL = 15 * time.Second
 
 // clientCookiePrefix is the name prefix for the per-slug client-id cookie.
 // The full name is clientCookiePrefix + slug.
@@ -150,4 +163,155 @@ func addElasticWorker(pool *backendPool, r *replicaBackend) {
 // lock.
 func removeElasticWorker(pool *backendPool, slotID int) {
 	delete(pool.workers, slotID)
+}
+
+// reserveWorker atomically allocates a booting slot for a new elastic worker.
+// It acquires the write lock, counts active (non-draining) workers, and
+// returns -1 when the pool is not elastic or already at maxWorkers. Otherwise
+// it inserts a placeholder workerBooting entry and returns its slotID.
+//
+// The caller MUST NOT hold p.mu when calling this function.
+func (p *Proxy) reserveWorker(slug, _ string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok || !poolIsElastic(pool) {
+		return -1
+	}
+
+	// Count active (non-draining) workers: draining slots are leaving and do
+	// not consume capacity for new reservations.
+	active := 0
+	for _, w := range pool.workers {
+		if w.status != workerDraining {
+			active++
+		}
+	}
+	if active >= pool.maxWorkers {
+		return -1
+	}
+
+	slotID := pool.allocateSlotID()
+	addElasticWorker(pool, &replicaBackend{
+		slotID: slotID,
+		status: workerBooting,
+	})
+	return slotID
+}
+
+// bindClient records that clientID is assigned to slotID and increments the
+// worker's assignedClients counter. It must be called after a successful
+// reserveWorker call (before the worker starts). Caller must NOT hold p.mu.
+func (p *Proxy) bindClient(slug, clientID string, slotID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.clients[slug] == nil {
+		p.clients[slug] = make(map[string]*clientSlot)
+	}
+	p.clients[slug][clientID] = &clientSlot{slotID: slotID}
+
+	// Increment the worker's assignedClients.
+	if pool, ok := p.pools[slug]; ok {
+		if w, ok := pool.workers[slotID]; ok {
+			w.assignedClients++
+		}
+	}
+}
+
+// clientConnOpened records that clientID has opened a new connection to its
+// assigned worker. It cancels any pending release timer (a reconnecting client
+// must not have its worker killed mid-session) and increments liveConns.
+// Caller must NOT hold p.mu.
+func (p *Proxy) clientConnOpened(slug, clientID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cs := p.lookupClientSlot(slug, clientID)
+	if cs == nil {
+		return
+	}
+	if cs.releaseTimer != nil {
+		cs.releaseTimer.Stop()
+		cs.releaseTimer = nil
+	}
+	cs.liveConns++
+}
+
+// clientConnClosed records that one connection from clientID has closed. When
+// liveConns reaches zero it arms a grace-period timer; if no connection
+// reopens within clientGraceTTL the client's slot is deleted, the worker's
+// assignedClients is decremented, and - when the worker reaches zero assigned
+// clients - p.terminate is dispatched in a goroutine. Caller must NOT hold p.mu.
+func (p *Proxy) clientConnClosed(slug, clientID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cs := p.lookupClientSlot(slug, clientID)
+	if cs == nil {
+		return
+	}
+	cs.liveConns--
+	if cs.liveConns > 0 {
+		return
+	}
+
+	// liveConns just hit zero: arm the grace-period release timer.
+	slotID := cs.slotID
+	cs.releaseTimer = time.AfterFunc(clientGraceTTL, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
+		// Re-check under the lock: a reconnect may have incremented liveConns.
+		cs2 := p.lookupClientSlot(slug, clientID)
+		if cs2 == nil || cs2.liveConns != 0 {
+			return
+		}
+
+		// Remove the client slot.
+		delete(p.clients[slug], clientID)
+		if len(p.clients[slug]) == 0 {
+			delete(p.clients, slug)
+		}
+
+		// Decrement the worker's assignedClients and optionally terminate.
+		pool, ok := p.pools[slug]
+		if !ok {
+			return
+		}
+		w, ok := pool.workers[slotID]
+		if !ok {
+			return
+		}
+		w.assignedClients--
+		if w.assignedClients == 0 && p.terminate != nil {
+			term := p.terminate
+			// Dispatch outside the lock to avoid re-entry / deadlock.
+			go term(slug, slotID)
+		}
+	})
+}
+
+// releaseReservation removes a booting slot that failed to spawn. This is
+// called by the boot-timeout handler (Task 12) when a worker never becomes
+// ready. Caller must NOT hold p.mu.
+func (p *Proxy) releaseReservation(slug string, slotID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok {
+		return
+	}
+	removeElasticWorker(pool, slotID)
+}
+
+// lookupClientSlot returns the clientSlot for clientID in slug's clients map,
+// or nil if absent. Callers must hold p.mu (read or write).
+func (p *Proxy) lookupClientSlot(slug, clientID string) *clientSlot {
+	if p.clients[slug] == nil {
+		return nil
+	}
+	return p.clients[slug][clientID]
 }

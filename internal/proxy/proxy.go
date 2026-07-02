@@ -340,6 +340,21 @@ type Proxy struct {
 	// next background tick. On single-node this remains nil and the miss path is
 	// byte-for-byte unchanged.
 	onMissSync atomic.Pointer[onMissSyncFuncT]
+
+	// Phase 1 worker-isolation: per-client accounting.
+	//
+	// clients maps slug -> clientID -> *clientSlot. It lives under the SAME pool
+	// lock (p.mu) so reservation, binding, and accounting updates are atomic with
+	// respect to each other and to ServeHTTP's RLock path. A second lock would
+	// invert against ServeHTTP (which holds p.mu.RLock through activeConns bump)
+	// and deadlock.
+	clients map[string]map[string]*clientSlot
+
+	// terminate is called (via goroutine, never inline under p.mu) when an elastic
+	// worker's assignedClients reaches 0 after the grace window expires. Nil
+	// disables automatic termination (tests that only test accounting can leave it
+	// unset). Wire it via SetTerminateFunc.
+	terminate func(slug string, slotID int)
 }
 
 // onMissSyncFuncT is the signature for the injected on-miss synchronous sync.
@@ -358,7 +373,18 @@ func New() *Proxy {
 		wsReady:  make(map[string]struct{}),
 		rejects:  newRejectCounter(),
 		conns:    newConnTracker(),
+		clients:  make(map[string]map[string]*clientSlot),
 	}
+}
+
+// SetTerminateFunc registers the callback invoked (via a goroutine, never
+// inline under p.mu) when an elastic worker's assignedClients count drops to
+// zero after the grace window expires. Typical use: Task 12's boot-timeout
+// handler and the idle-worker reaper.
+func (p *Proxy) SetTerminateFunc(fn func(slug string, slotID int)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.terminate = fn
 }
 
 const (
