@@ -170,3 +170,41 @@ jobs:
 
       - name: Skill smoke (deploy example app)
         run: make skill-smoke
+
+  # Client-side identity-helper tests (Python + R JWT verification against a
+  # token minted by the real production MintToken). Security-relevant surface
+  # that previously only ran when a developer invoked it locally. uv is
+  # installed for the Python helper; the R subtests skip cleanly when Rscript
+  # is absent, so no R toolchain is provisioned here.
+  test-identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Identity helper tests
+        run: make test-identity
+
+  # Terraform fmt/validate for the AWS ECS IaC. No cloud credentials are needed
+  # (init runs with -backend=false), so a syntax/format regression is caught in
+  # CI rather than only when someone runs `make iac-validate` locally.
+  iac-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform fmt/init/validate
+        run: make iac-validate
