@@ -158,6 +158,50 @@ func splitImageTag(image string) (fromImage, tag string) {
 	return image, "latest"
 }
 
+// defaultNetworkMode resolves the Docker network mode for a container, failing
+// secure: an unset mode becomes "bridge" (an isolated network namespace), never
+// "host" (which shares the host stack and is the least isolated option). An
+// explicit mode is preserved.
+func defaultNetworkMode(mode string) string {
+	if mode == "" {
+		return "bridge"
+	}
+	return mode
+}
+
+// ensureAppNetwork makes a user-defined bridge network named `name` present,
+// created with inter-container communication (ICC) disabled so containers
+// attached to it cannot reach each other directly - only the host-published
+// loopback ports the proxy dials remain reachable. Idempotent: an existing
+// network (GET returns 200) or a concurrent create (409 Conflict) is success.
+func (c *dockerClient) ensureAppNetwork(name string) error {
+	resp, err := c.hc.Get(c.base + "/networks/" + name)
+	if err == nil {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"Name":   name,
+		"Driver": "bridge",
+		"Options": map[string]string{
+			"com.docker.network.bridge.enable_icc": "false",
+		},
+	})
+	cresp, err := c.hc.Post(c.base+"/networks/create", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create network %s: %w", name, err)
+	}
+	defer cresp.Body.Close()
+	rb, _ := io.ReadAll(cresp.Body)
+	if cresp.StatusCode == http.StatusCreated || cresp.StatusCode == http.StatusConflict {
+		return nil
+	}
+	return fmt.Errorf("create network %s: daemon returned %d: %s", name, cresp.StatusCode, rb)
+}
+
 // createContainer creates a container and returns its ID.
 func (c *dockerClient) createContainer(cfg containerConfig) (string, error) {
 	mounts := make([]map[string]any, len(cfg.Mounts))
@@ -169,10 +213,7 @@ func (c *dockerClient) createContainer(cfg containerConfig) (string, error) {
 			"ReadOnly": m.Mode == "ro",
 		}
 	}
-	networkMode := cfg.NetworkMode
-	if networkMode == "" {
-		networkMode = "host"
-	}
+	networkMode := defaultNetworkMode(cfg.NetworkMode)
 	hostConfig := map[string]any{
 		"Mounts":      mounts,
 		"NetworkMode": networkMode,

@@ -8,8 +8,14 @@ kernel's unprivileged, self-imposed access-control mechanism.
 
 It is a **blast-radius boundary**, not a defense against determined hostile code.
 If your threat model is genuinely untrusted app code in a multi-tenant setting,
-run the [Docker runtime](../README.md#docker) instead, which adds process, user,
-and network isolation.
+run the [Docker runtime](../README.md#docker) instead, which adds process and
+user-namespace isolation and network isolation between apps: each app runs in
+its own container, and all app containers share a dedicated bridge network
+(`shinyhub-apps`) created with inter-container communication disabled, so one
+app cannot reach another app's container directly - only the loopback ports the
+proxy publishes on the host are reachable. Setting `runtime.docker.network_mode:
+host` opts out of that network isolation (the container shares the host network
+stack), so use it only when apps are trusted.
 
 ## The dial
 
