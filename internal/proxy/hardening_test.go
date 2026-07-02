@@ -126,6 +126,34 @@ func TestClientID_BoundToUser(t *testing.T) {
 	}
 }
 
+// TestStickyCookieAlreadyPins verifies the predicate the elastic route uses to
+// skip re-signing and re-Set-Cookie'ing the sticky cookie on every request: it
+// is true only when the request already carries a valid cookie pinning exactly
+// this (slot, deployment).
+func TestStickyCookieAlreadyPins(t *testing.T) {
+	p := New()
+	key := []byte("sticky-secret-key-0000000000000000")
+	p.SetStickySecret(key)
+	const slug = "app"
+	withCookie := func(idx int, dep int64) *http.Request {
+		r := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+		r.AddCookie(&http.Cookie{Name: cookiePrefix + slug, Value: signStickyValue(key, slug, idx, dep)})
+		return r
+	}
+	if !p.stickyCookieAlreadyPins(withCookie(2, 7), slug, 2, 7) {
+		t.Error("a cookie pinning the same (slot, deployment) must be recognized as already pinned")
+	}
+	if p.stickyCookieAlreadyPins(withCookie(2, 7), slug, 3, 7) {
+		t.Error("a different slot must not be treated as already pinned")
+	}
+	if p.stickyCookieAlreadyPins(withCookie(2, 7), slug, 2, 8) {
+		t.Error("a different deployment must not be treated as already pinned")
+	}
+	if p.stickyCookieAlreadyPins(httptest.NewRequest("GET", "/app/"+slug+"/", nil), slug, 2, 7) {
+		t.Error("an absent cookie must not be treated as already pinned")
+	}
+}
+
 // TestApplyForwardingHeaders_UntrustedPeerOverwrites verifies a direct (untrusted)
 // client cannot spoof the forwarding headers the app backend sees: client-supplied
 // values are discarded and replaced with the proxy's own trusted view.

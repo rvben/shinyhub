@@ -2,10 +2,12 @@ package process
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -105,7 +107,10 @@ func NewLogReader(path string) *LogReader {
 	return &LogReader{path: path}
 }
 
-// Tail returns the last n lines from the log file in chronological order.
+// Tail returns the last n lines from the log file in chronological order. It
+// reads backward from the end in chunks, so the work is proportional to the
+// size of the returned tail rather than the whole (up to multi-MB) file - the
+// hot path for the log viewer and every new SSE follow connection.
 func (r *LogReader) Tail(n int) ([]string, error) {
 	if n <= 0 {
 		return nil, nil
@@ -116,19 +121,52 @@ func (r *LogReader) Tail(n int) ([]string, error) {
 	}
 	defer f.Close()
 
-	ring := make([]string, 0, n)
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLogScanToken)
-	for scanner.Scan() {
-		if len(ring) == n {
-			ring = ring[1:]
-		}
-		ring = append(ring, scanner.Text())
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
-	return ring, scanner.Err()
+	size := info.Size()
+	if size == 0 {
+		return nil, nil
+	}
+
+	const chunkSize = 32 * 1024
+	var buf []byte
+	pos := size
+	newlines := 0
+	// Read backward until we have more than n line terminators (so the first
+	// retained line is whole, not a fragment split by a chunk boundary) or we
+	// reach the start of the file.
+	for pos > 0 && newlines <= n {
+		read := int64(chunkSize)
+		if pos < read {
+			read = pos
+		}
+		pos -= read
+		chunk := make([]byte, read)
+		if _, err := f.ReadAt(chunk, pos); err != nil && err != io.EOF {
+			return nil, err
+		}
+		buf = append(chunk, buf...)
+		newlines = bytes.Count(buf, []byte{'\n'})
+	}
+
+	// Split with bufio.Scanner semantics: a trailing newline does not yield a
+	// final empty line, and a trailing '\r' (CRLF) is stripped.
+	lines := strings.Split(string(buf), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i := range lines {
+		lines[i] = strings.TrimSuffix(lines[i], "\r")
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines, nil
 }
 
-// maxLogScanToken caps a single log line read by Tail/Follow. The bufio.Scanner
+// maxLogScanToken caps a single log line read by Follow. The bufio.Scanner
 // default of 64 KiB silently drops longer lines (a long Python traceback or a
 // base64 blob), so a crash reason or streamed log chunk could be lost.
 const maxLogScanToken = 512 * 1024

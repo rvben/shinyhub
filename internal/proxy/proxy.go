@@ -605,6 +605,20 @@ func (p *Proxy) stickyIndex(slug, value string) (int, int64, bool) {
 	return idx, depID, true
 }
 
+// stickyCookieAlreadyPins reports whether the request already carries a valid
+// sticky cookie pinning exactly (index, deploymentID), so it need not be
+// re-signed and re-set. Used by the elastic route to avoid an HMAC + Set-Cookie
+// on every steady-state request (the server-side client binding is the routing
+// authority there; the cookie is only a hint).
+func (p *Proxy) stickyCookieAlreadyPins(r *http.Request, slug string, index int, deploymentID int64) bool {
+	c, err := r.Cookie(cookiePrefix + slug)
+	if err != nil {
+		return false
+	}
+	idx, dep, ok := p.stickyIndex(slug, c.Value)
+	return ok && idx == index && dep == deploymentID
+}
+
 // stickyCookieValue returns the value to store in the sticky cookie for a
 // replica index and deployment ID: signed when a key is configured,
 // "<idx>.<deploymentID>" in unsigned mode.
@@ -1790,17 +1804,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// so the timer callback cannot observe liveConns==0 in the gap.
 			p.clientConnOpenedLocked(slug, cid)
 			p.mu.Unlock()
-			// Refresh the rep sticky cookie with the current slotID and deploymentID.
-			// The cookie is now informational only for elastic pools; the server-side
+			// Refresh the rep sticky cookie with the current slotID and deploymentID,
+			// but only when it would change - a steady-state request whose cookie
+			// already pins this slot/deployment skips the HMAC + Set-Cookie. The
+			// cookie is informational only for elastic pools; the server-side
 			// p.clients binding is the routing authority.
-			http.SetCookie(rec, &http.Cookie{
-				Name:     cookiePrefix + slug,
-				Value:    p.stickyCookieValue(slug, d.slotID, depID),
-				Path:     "/app/" + slug + "/",
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-				Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
-			})
+			if !p.stickyCookieAlreadyPins(r, slug, d.slotID, depID) {
+				http.SetCookie(rec, &http.Cookie{
+					Name:     cookiePrefix + slug,
+					Value:    p.stickyCookieValue(slug, d.slotID, depID),
+					Path:     "/app/" + slug + "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+					Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
+				})
+			}
 			defer wkr.activeConns.Add(-1)
 			defer p.clientConnClosed(slug, cid)
 			p.RecordActivity(slug)

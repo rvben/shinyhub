@@ -7,13 +7,105 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/worker/api"
 )
+
+// TestRemoteRuntime_Inventory_QueriesWorkersConcurrently verifies inventory
+// fans out across a tier's workers in parallel rather than serially, so one
+// slow worker does not add its latency to every other worker's. Each handler
+// holds a short overlap window and records the max simultaneous in-flight
+// requests; serial querying can never exceed 1.
+func TestRemoteRuntime_Inventory_QueriesWorkersConcurrently(t *testing.T) {
+	var mu sync.Mutex
+	concurrent, maxConcurrent := 0, 0
+	handler := func(container string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			concurrent++
+			if concurrent > maxConcurrent {
+				maxConcurrent = concurrent
+			}
+			mu.Unlock()
+			time.Sleep(150 * time.Millisecond) // overlap window
+			mu.Lock()
+			concurrent--
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]api.InventoryItem{{ContainerID: container, Running: true, URL: "https://x/" + container}})
+		}
+	}
+	sa := httptest.NewServer(handler("ca"))
+	defer sa.Close()
+	sb := httptest.NewServer(handler("cb"))
+	defer sb.Close()
+
+	lookup := newStubLookup(
+		db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "a:8443", Status: "up"},
+		db.Worker{NodeID: "node-b", Tier: "remote", AdvertiseAddr: "b:8443", Status: "up"},
+	)
+	dialer := &perWorkerInventoryDialer{client: sa.Client(), bases: map[string]string{"node-a": sa.URL, "node-b": sb.URL}}
+	rr := newRemoteRuntime(lookup, "remote", dialer)
+
+	items, err := rr.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("want items from both workers, got %d: %+v", len(items), items)
+	}
+	mu.Lock()
+	mc := maxConcurrent
+	mu.Unlock()
+	if mc < 2 {
+		t.Errorf("workers must be queried concurrently; max simultaneous in-flight = %d, want 2", mc)
+	}
+}
+
+// TestRemoteRuntime_Inventory_SlowWorkerHonorsContextDeadline guards that a
+// worker which never responds is bounded by the caller's context deadline (not
+// the multi-minute HTTP header timeout) and does not suppress a healthy
+// worker's items. The recovery path relies on this: it now calls Inventory with
+// a bounded context so one hung off-host worker cannot stall fleet recovery.
+func TestRemoteRuntime_Inventory_SlowWorkerHonorsContextDeadline(t *testing.T) {
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]api.InventoryItem{{ContainerID: "cfast", Running: true, URL: "https://x/cfast"}})
+	}))
+	defer fast.Close()
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // block until the request's context is cancelled
+	}))
+	defer slow.Close()
+
+	lookup := newStubLookup(
+		db.Worker{NodeID: "fast", Tier: "remote", AdvertiseAddr: "f:8443", Status: "up"},
+		db.Worker{NodeID: "slow", Tier: "remote", AdvertiseAddr: "s:8443", Status: "up"},
+	)
+	dialer := &perWorkerInventoryDialer{client: fast.Client(), bases: map[string]string{"fast": fast.URL, "slow": slow.URL}}
+	rr := newRemoteRuntime(lookup, "remote", dialer)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	items, err := rr.Inventory(ctx)
+	elapsed := time.Since(start)
+
+	if len(items) != 1 || items[0].ContainerID != "cfast" {
+		t.Fatalf("healthy worker's item must survive a hung peer, got %+v", items)
+	}
+	var partial *process.PartialInventoryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("want PartialInventoryError naming the hung worker, got %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Inventory blocked %v on the hung worker; must be bounded by the context deadline", elapsed)
+	}
+}
 
 // fakeLister is a fakeRuntime that also lists containers and resolves published
 // ports, standing in for the worker DockerRuntime during inventory and rebuild tests.

@@ -43,6 +43,57 @@ func TestHandleCrashed_RuntimeCrashLoopMarksCrashed(t *testing.T) {
 	}
 }
 
+// TestHandleCrashed_WritesAuditEvent verifies that when the watcher gives up on
+// a crash-looping app it records an "app_crashed" audit event (system-generated,
+// nil user) naming the app and the reason - so the audit log has a queryable
+// record of the app going down, not just the app row's transient last_error.
+func TestHandleCrashed_WritesAuditEvent(t *testing.T) {
+	app := &db.App{ID: 1, Slug: "loopy", Status: "running", Replicas: 1}
+	st := newFakeStore(map[string]*db.App{"loopy": app}, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/loopy"}})
+	mgr := &fakeManager{logTail: "RuntimeError: simulated runtime failure"}
+	deployFn := func(_, _ string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{Index: idx, PID: 1, Port: 2}, nil
+	}
+	w := newTestWatcher(Config{RestartMaxAttempts: 2}, mgr, newFakeProxy(), st, deployFn)
+
+	for i := 0; i < 3; i++ {
+		w.handleCrashed("loopy", 0)
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var crashEvent *db.AuditEventParams
+	for i := range st.auditEvents {
+		if st.auditEvents[i].Action == "app_crashed" && st.auditEvents[i].ResourceID == "loopy" {
+			crashEvent = &st.auditEvents[i]
+			break
+		}
+	}
+	if crashEvent == nil {
+		t.Fatalf("expected an app_crashed audit event for loopy, got %+v", st.auditEvents)
+	}
+	if crashEvent.UserID != nil {
+		t.Errorf("crash audit event must be system-generated (nil user), got %v", *crashEvent.UserID)
+	}
+	if crashEvent.ResourceType != "app" {
+		t.Errorf("resource_type = %q, want app", crashEvent.ResourceType)
+	}
+	if !strings.Contains(crashEvent.Detail, "RuntimeError") {
+		t.Errorf("crash audit detail = %q, want it to carry the reason", crashEvent.Detail)
+	}
+	// Exactly one event even though handleCrashed ran three times (only the
+	// give-up transition is an incident).
+	n := 0
+	for _, e := range st.auditEvents {
+		if e.Action == "app_crashed" && e.ResourceID == "loopy" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("want exactly one app_crashed event, got %d", n)
+	}
+}
+
 // When the most recent exit was an OOM-kill (the replica exceeded its memory
 // limit), the crash reason must NAME the limit rather than reading as a generic
 // crash, so the operator can see it was the ceiling - not a code bug.

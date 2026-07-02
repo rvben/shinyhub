@@ -161,6 +161,10 @@ type fakeStore struct {
 	// slug; cleared by any non-crashed UpdateAppStatus.
 	crashReasons map[string]string
 
+	// auditEvents records every LogAuditEvent call so tests can assert the
+	// crash audit trail.
+	auditEvents []db.AuditEventParams
+
 	// forceHibernatedList, when non-nil, is returned verbatim by
 	// ListHibernatedApps regardless of per-app status (drives the
 	// snapshot-vs-claim race in warm-restore tests).
@@ -245,6 +249,12 @@ func (f *fakeStore) MarkAppCrashed(slug, reason string) error {
 	f.appStatus[slug] = "crashed"
 	f.crashReasons[slug] = reason
 	return nil
+}
+
+func (f *fakeStore) LogAuditEvent(p db.AuditEventParams) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.auditEvents = append(f.auditEvents, p)
 }
 
 // BeginWake mirrors the real store's CAS: hibernated -> waking, winner only.
