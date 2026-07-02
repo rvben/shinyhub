@@ -3313,7 +3313,9 @@ document.addEventListener('DOMContentLoaded', () => {
     renderDeployCliSnippet(app.slug);
     deployModal.hidden = false;
     modalTrap(deployModal).activate();
-    deployDropzone.focus();
+    // The dropzone is a mouse/drag drop region (not a focusable control); land
+    // keyboard focus on the real "pick a file" button instead.
+    deployPick.focus();
   }
 
   function renderDeployCliSnippet(slug) {
@@ -3386,12 +3388,6 @@ document.addEventListener('DOMContentLoaded', () => {
     deployDropzone.addEventListener('click', (e) => {
       if (e.target.tagName === 'BUTTON') return; // pick button handles itself
       deployFileInput.click();
-    });
-    deployDropzone.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        deployFileInput.click();
-      }
     });
     deployPick.addEventListener('click', (e) => {
       e.stopPropagation();
