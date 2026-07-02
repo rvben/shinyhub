@@ -18,9 +18,8 @@ import { appStatusView } from '/static/views/app-card-badge.js';
 import { crashBanner } from '/static/views/crash-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
 import { createTablistNav } from '/static/views/tablist-keys.js';
-
-const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
-const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
+import { TAB_ROUTES, resolveDetailAccess, tabViewModels } from '/static/views/app-detail-nav.js';
+import { normalizeAppEnvelope } from '/static/views/app-detail-envelope.js';
 
 function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
@@ -78,7 +77,6 @@ export function mountAppDetail(ctx) {
 
   return async function mount(params) {
     const { slug } = params;
-    const tab = TAB_ROUTES.includes(params.tab) ? params.tab : 'overview';
 
     // Preserve the user's URL: /apps/<slug>/overview is a legitimate route
     // (every other tab keeps its segment, so /overview should too). The
@@ -89,61 +87,42 @@ export function mountAppDetail(ctx) {
     if (resp.status === 404) { ctx.navigate('/'); return {}; }
     if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
     if (!resp.ok) { return {}; }
-    // GET /api/apps/:slug returns {app, replicas_status}.
+    // GET /api/apps/:slug returns a wrapped envelope; normalizeAppEnvelope folds
+    // the envelope-level fields (can_manage, runtime_mode, resource_enforcement,
+    // release_number/released_at/released_version) onto app and returns
+    // replicas_status. See views/app-detail-envelope.js.
     const body = await resp.json();
-    const app = body.app || body;
-    if (typeof body.can_manage === 'boolean') app.can_manage = body.can_manage;
-    // runtime_mode + resource_enforcement drive the Resources controls: limits
-    // apply in both native and docker mode, and resource_enforcement {memory,cpu}
-    // says whether native cgroup enforcement is actually active. Copy both onto
-    // app so the render reads app.* consistently.
-    if (typeof body.runtime_mode === 'string') app.runtime_mode = body.runtime_mode;
-    if (body.resource_enforcement && typeof body.resource_enforcement === 'object') {
-      app.resource_enforcement = body.resource_enforcement;
-    }
-    // release_number/released_at (human-friendly "vN · date") live at the envelope
-    // level — copy onto app so the header and overview read app.* consistently.
-    // Absent until the app has a succeeded deploy (then the version chip hides).
-    app.release_number = (typeof body.release_number === 'number') ? body.release_number : null;
-    app.released_at = body.released_at || null;
-    // The live succeeded bundle's epoch id (for the "bundle …" hover) — distinct
-    // from current_version, which is the newest row regardless of status.
-    app.released_version = body.released_version || null;
-    const replicasStatus = Array.isArray(body.replicas_status) ? body.replicas_status : [];
+    const { app, replicasStatus } = normalizeAppEnvelope(body);
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
 
-    // Pure viewers don't get the operator detail page (logs / deployments /
-    // configuration chrome); their home is the launch-focused Launchpad. This
-    // covers every path in — a sidebar app link, a typed URL, a bookmark — since
-    // the gate runs after the app loads. A viewer who manages THIS app (per-app
-    // manager role, reflected by can_manage) keeps full access, and operators,
-    // developers, and admins are unaffected.
-    if (ctx.state.user && ctx.state.user.role === 'viewer' && !canManage) {
-      ctx.navigate('/', { replace: true });
-      return {};
-    }
+    // Resolve which tab to show and whether the visitor must be redirected:
+    // a pure viewer who doesn't manage this app is bounced to the Launchpad ('/'),
+    // and a non-manager on a manager-only tab (configuration/data/access) is sent
+    // to the app root. An unknown tab falls back to overview. See
+    // views/app-detail-nav.js. The gate runs after the app loads, so it covers
+    // every path in (a sidebar app link, a typed URL, a bookmark).
+    const { tab, redirect } = resolveDetailAccess({
+      user: ctx.state.user, canManage, requestedTab: params.tab, slug,
+    });
+    if (redirect) { ctx.navigate(redirect.path, { replace: redirect.replace }); return {}; }
 
     // Record the app so the static header kebab (wired once in app.js) acts on
     // the right app.
     if (ctx.setDetailApp) ctx.setDetailApp(app);
 
-    if (!canManage && MANAGER_ONLY_TABS.has(tab)) {
-      ctx.navigate(`/apps/${slug}`, { replace: true });
-      return {};
-    }
-
-    // Populate tab hrefs so middle-click / cmd-click open real URLs.
-    for (const t of TAB_ROUTES) {
-      tabEls[t].hidden = !canManage && MANAGER_ONLY_TABS.has(t);
-      tabEls[t].setAttribute('href', t === 'overview' ? `/apps/${slug}` : `/apps/${slug}/${t}`);
-      tabEls[t].classList.toggle('active', t === tab);
-      tabEls[t].setAttribute('aria-selected', String(t === tab));
-      // Roving tabindex: only the active tab is in the page Tab order; arrow
-      // keys move between the rest (see createTablistNav above).
-      tabEls[t].setAttribute('tabindex', t === tab ? '0' : '-1');
-      if (t === tab) tabEls[t].setAttribute('aria-current', 'page');
-      else tabEls[t].removeAttribute('aria-current');
+    // Apply the per-tab visibility/href/ARIA/roving-tabindex model. Hrefs are
+    // populated so middle-click / cmd-click open real URLs; only the active tab
+    // carries tabindex 0 (arrow keys move between the rest, see createTablistNav).
+    for (const vm of tabViewModels(slug, tab, canManage)) {
+      const el = tabEls[vm.route];
+      el.hidden = vm.hidden;
+      el.setAttribute('href', vm.href);
+      el.classList.toggle('active', vm.active);
+      el.setAttribute('aria-selected', String(vm.ariaSelected));
+      el.setAttribute('tabindex', vm.tabindex);
+      if (vm.ariaCurrent) el.setAttribute('aria-current', vm.ariaCurrent);
+      else el.removeAttribute('aria-current');
     }
     // On narrow screens the tab bar scrolls horizontally; bring the active tab
     // into view so the user can see which section they're on. block:'nearest'
