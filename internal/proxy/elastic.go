@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -16,11 +17,40 @@ import (
 )
 
 // clientSlot tracks the live state of one client's binding to an elastic worker.
-// It is stored in p.clients[slug][clientID] and mutated only under p.mu.
+// It is stored in p.clients[slug][clientID].
+//
+// slotID is set once at creation (bind) and never mutated, so it is safe to read
+// under p.mu.RLock. liveConns and releaseTimer are the per-connection accounting
+// state, guarded by cs.mu so a client's open/close bookkeeping runs under a
+// per-client lock rather than the global pool write lock - letting unrelated
+// clients and unrelated slugs proceed in parallel on the routing hot path.
+//
+// LOCK ORDERING: cs.mu is ALWAYS acquired while already holding p.mu (read or
+// write); it is never held across a p.mu acquisition, which keeps the two-lock
+// scheme deadlock-free. Because every cs.mu holder also holds p.mu, a goroutine
+// holding the exclusive p.mu WRITE lock is the sole possible accessor and may
+// touch liveConns/releaseTimer WITHOUT cs.mu (RWMutex ordering gives it a
+// happens-before edge with the RLock paths). cs.mu is therefore only taken on
+// the scalable RLock paths, where several readers touch different clients at once.
 type clientSlot struct {
 	slotID       int
+	mu           sync.Mutex
 	liveConns    int
 	releaseTimer *time.Timer
+}
+
+// open records a newly-opened connection for this client: it cancels any pending
+// grace timer (a reconnecting client must not have its worker reclaimed) and
+// increments liveConns. The caller must hold p.mu (read or write); open takes
+// cs.mu internally so it is safe on the shared-lock hot path.
+func (cs *clientSlot) open() {
+	cs.mu.Lock()
+	if cs.releaseTimer != nil {
+		cs.releaseTimer.Stop()
+		cs.releaseTimer = nil
+	}
+	cs.liveConns++
+	cs.mu.Unlock()
 }
 
 // clientGraceTTL is the grace window between the last connection close and
@@ -238,59 +268,43 @@ func (p *Proxy) bindClient(slug, clientID string, slotID int) {
 	}
 }
 
-// clientConnOpenedLocked is the write-lock-held core of clientConnOpened.
-// The caller MUST hold p.mu (write lock). It cancels any pending grace timer
-// and increments liveConns for the named client. A no-op when the slot is
-// absent. Use this from code that already owns the write lock (e.g. the
-// elastic decisionRoute path) to keep the activeConns bump and liveConns
-// increment atomic, closing the terminate-race window.
-func (p *Proxy) clientConnOpenedLocked(slug, clientID string) {
-	cs := p.lookupClientSlot(slug, clientID)
-	if cs == nil {
-		return
-	}
-	if cs.releaseTimer != nil {
-		cs.releaseTimer.Stop()
-		cs.releaseTimer = nil
-	}
-	cs.liveConns++
-}
-
 // clientConnOpened records that clientID has opened a new connection to its
 // assigned worker. It cancels any pending release timer (a reconnecting client
 // must not have its worker killed mid-session) and increments liveConns.
-// Caller must NOT hold p.mu.
+// Caller must NOT hold p.mu. Runs under the SHARED read lock plus cs.mu so
+// unrelated clients open connections in parallel.
 func (p *Proxy) clientConnOpened(slug, clientID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.clientConnOpenedLocked(slug, clientID)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if cs := p.lookupClientSlot(slug, clientID); cs != nil {
+		cs.open()
+	}
 }
 
-// armClientReleaseLocked arms the grace-period release timer for the named
-// client. It is a no-op when the client slot is absent, when liveConns is
-// non-zero (a real connection is active), or when a timer is already pending.
-//
-// The timer fires after clientGraceTTL: it re-takes the lock, re-checks that
-// liveConns is still zero, removes the client slot, decrements the worker's
-// assignedClients, and dispatches p.terminate (via goroutine) when the worker
-// reaches zero assigned clients.
-//
-// The caller MUST hold p.mu (write lock).
-func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
-	cs := p.lookupClientSlot(slug, clientID)
-	if cs == nil || cs.liveConns != 0 || cs.releaseTimer != nil {
-		return
-	}
-	slotID := cs.slotID
-	cs.releaseTimer = time.AfterFunc(clientGraceTTL, func() {
+// graceExpiry returns the release-timer callback for one client. It runs under
+// the exclusive p.mu WRITE lock, so it reads/writes liveConns and releaseTimer
+// without cs.mu (see the clientSlot lock-ordering note). It re-checks that
+// liveConns is still zero (a reconnect may have bumped it), removes the client
+// slot, decrements the worker's assignedClients, and dispatches p.terminate (via
+// goroutine, outside the lock) when the worker reaches zero assigned clients.
+func (p *Proxy) graceExpiry(slug, clientID string) func() {
+	return func() {
 		p.mu.Lock()
-		defer p.mu.Unlock()
-
-		// Re-check under the lock: a reconnect may have incremented liveConns.
-		cs2 := p.lookupClientSlot(slug, clientID)
-		if cs2 == nil || cs2.liveConns != 0 {
+		cs := p.lookupClientSlot(slug, clientID)
+		if cs == nil {
+			p.mu.Unlock()
 			return
 		}
+		if cs.liveConns != 0 {
+			// A reconnect bumped liveConns after the timer was scheduled. Its
+			// cs.open() already cleared releaseTimer; clear our stale reference
+			// too and leave the slot in place.
+			cs.releaseTimer = nil
+			p.mu.Unlock()
+			return
+		}
+		slotID := cs.slotID
+		cs.releaseTimer = nil
 
 		// Remove the client slot.
 		delete(p.clients[slug], clientID)
@@ -299,37 +313,54 @@ func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
 		}
 
 		// Decrement the worker's assignedClients and optionally terminate.
-		pool, ok := p.pools[slug]
-		if !ok {
-			return
+		var term func(string, int)
+		if pool, ok := p.pools[slug]; ok {
+			if w, ok := pool.workers[slotID]; ok {
+				w.assignedClients--
+				if w.assignedClients == 0 && p.terminate != nil {
+					term = p.terminate
+				}
+			}
 		}
-		w, ok := pool.workers[slotID]
-		if !ok {
-			return
-		}
-		w.assignedClients--
-		if w.assignedClients == 0 && p.terminate != nil {
-			term := p.terminate
+		p.mu.Unlock()
+		if term != nil {
 			// Dispatch outside the lock to avoid re-entry / deadlock.
 			go term(slug, slotID)
 		}
-	})
+	}
+}
+
+// armClientReleaseLocked arms the grace-period release timer for a bound client
+// that has no live connection (e.g. a ghost client at worker-ready time). It is
+// a no-op when the client slot is absent, when liveConns is non-zero, or when a
+// timer is already pending. The caller MUST hold p.mu WRITE, under which cs
+// fields are touched without cs.mu.
+func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
+	cs := p.lookupClientSlot(slug, clientID)
+	if cs == nil || cs.liveConns != 0 || cs.releaseTimer != nil {
+		return
+	}
+	cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID))
 }
 
 // clientConnClosed records that one connection from clientID has closed. When
-// liveConns reaches zero it arms a grace-period timer via armClientReleaseLocked;
-// if no connection reopens within clientGraceTTL the client's slot is deleted,
-// the worker's assignedClients is decremented, and - when the worker reaches
-// zero assigned clients - p.terminate is dispatched in a goroutine.
-// Caller must NOT hold p.mu.
+// liveConns reaches zero it arms a grace-period timer; if no connection reopens
+// within clientGraceTTL the client's slot is deleted, the worker's
+// assignedClients is decremented, and - when the worker reaches zero assigned
+// clients - p.terminate is dispatched in a goroutine. Caller must NOT hold p.mu.
+// Runs under the SHARED read lock plus cs.mu so unrelated clients close
+// connections in parallel; the grace timer's callback takes the WRITE lock, so
+// it cannot fire while this (or an open) holds the read lock.
 func (p *Proxy) clientConnClosed(slug, clientID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
 	cs := p.lookupClientSlot(slug, clientID)
 	if cs == nil {
 		return
 	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
 	if cs.liveConns <= 0 {
 		return // caller misbehavior: more closes than opens; do not go negative or re-arm the timer
 	}
@@ -337,9 +368,10 @@ func (p *Proxy) clientConnClosed(slug, clientID string) {
 	if cs.liveConns > 0 {
 		return
 	}
-
-	// liveConns just hit zero: arm the grace-period release timer.
-	p.armClientReleaseLocked(slug, clientID)
+	// liveConns just hit zero: arm the grace-period release timer under cs.mu.
+	if cs.releaseTimer == nil {
+		cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID))
+	}
 }
 
 // ReleaseReservation removes a booting slot that failed to spawn. It also
