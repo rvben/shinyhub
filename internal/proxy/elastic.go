@@ -252,6 +252,9 @@ func (p *Proxy) clientConnClosed(slug, clientID string) {
 	if cs == nil {
 		return
 	}
+	if cs.liveConns <= 0 {
+		return // caller misbehavior: more closes than opens; do not go negative or re-arm the timer
+	}
 	cs.liveConns--
 	if cs.liveConns > 0 {
 		return

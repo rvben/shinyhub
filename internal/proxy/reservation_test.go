@@ -21,9 +21,9 @@ func TestReserveWorker_CeilingRaceProof(t *testing.T) {
 	p.SetPoolMode(slug, config.IsolationPerSession, 0, maxWorkers)
 
 	var (
-		mu       sync.Mutex
-		succIDs  []int
-		failCnt  int
+		mu      sync.Mutex
+		succIDs []int
+		failCnt int
 	)
 
 	var wg sync.WaitGroup
@@ -209,6 +209,90 @@ func TestReleaseReservation_RemovesBootingWorker(t *testing.T) {
 	p.mu.RUnlock()
 	if stillIn {
 		t.Error("worker still in pool after releaseReservation")
+	}
+}
+
+// TestClientConnClosed_DoubleCloseIsSafe verifies that calling clientConnClosed
+// twice (spurious extra close) does not drive liveConns below 0, does not
+// arm a second timer, and fires terminate exactly once after the grace TTL.
+func TestClientConnClosed_DoubleCloseIsSafe(t *testing.T) {
+	old := clientGraceTTL
+	clientGraceTTL = 50 * time.Millisecond
+	t.Cleanup(func() { clientGraceTTL = old })
+
+	const slug = "myapp"
+	const clientID = "c-double"
+
+	var terminateCount int
+	var terminateMu sync.Mutex
+	terminateDone := make(chan struct{}, 2) // buffered so goroutine never blocks
+
+	p := New()
+	p.SetPoolMode(slug, config.IsolationPerSession, 0, 5)
+	p.SetTerminateFunc(func(s string, slotID int) {
+		terminateMu.Lock()
+		terminateCount++
+		terminateMu.Unlock()
+		select {
+		case terminateDone <- struct{}{}:
+		default:
+		}
+	})
+
+	slotID := p.reserveWorker(slug, clientID)
+	if slotID < 0 {
+		t.Fatal("reserveWorker returned -1 unexpectedly")
+	}
+	p.bindClient(slug, clientID, slotID)
+	p.clientConnOpened(slug, clientID)
+
+	// First close: arms the grace-period timer normally.
+	p.clientConnClosed(slug, clientID)
+
+	// Second close: spurious extra close; must be a no-op (floor guard).
+	p.clientConnClosed(slug, clientID)
+
+	// liveConns must not have gone below 0.
+	p.mu.RLock()
+	cs := p.lookupClientSlot(slug, clientID)
+	var lc int
+	if cs != nil {
+		lc = cs.liveConns
+	}
+	p.mu.RUnlock()
+	if lc < 0 {
+		t.Errorf("liveConns = %d after double-close, want >= 0", lc)
+	}
+
+	// Wait for the grace period to fire.
+	select {
+	case <-terminateDone:
+		// Good.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("terminate was not called within grace window")
+	}
+
+	// Allow any second (erroneous) timer to fire before we count.
+	time.Sleep(200 * time.Millisecond)
+
+	terminateMu.Lock()
+	count := terminateCount
+	terminateMu.Unlock()
+	if count != 1 {
+		t.Errorf("terminate called %d times, want exactly 1", count)
+	}
+
+	// assignedClients must be back to 0.
+	p.mu.RLock()
+	pool := p.pools[slug]
+	w := pool.workers[slotID]
+	var ac int
+	if w != nil {
+		ac = w.assignedClients
+	}
+	p.mu.RUnlock()
+	if ac != 0 {
+		t.Errorf("assignedClients = %d after retire, want 0", ac)
 	}
 }
 
