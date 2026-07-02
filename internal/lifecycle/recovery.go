@@ -125,6 +125,12 @@ type ContainerLister interface {
 // max_sessions_per_replica == 0. identityGlobal is the global
 // auth.identity_headers enabled flag used to resolve each app's effective
 // identity-forwarding setting.
+// inventoryRecoveryTimeout bounds how long recovery waits for an off-host
+// tier's worker inventory. Inventory fans out to the tier's workers
+// concurrently, so this caps the whole per-tier fetch. Well under the worker
+// dialer's ~120s header timeout: a hung worker must not stall fleet recovery.
+const inventoryRecoveryTimeout = 15 * time.Second
+
 func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool, defaultWorkerIsolation string) {
 	apps, err := store.ListRunningApps()
 	if err != nil {
@@ -163,7 +169,12 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		if ti, ok := remoteInventory[tier]; ok {
 			return ti
 		}
-		items, err := inv.Inventory(context.Background())
+		// Bound the fan-out: one hung off-host worker must not stall fleet
+		// recovery for the multi-minute HTTP header timeout. Inventory queries
+		// the tier's workers concurrently, so this caps the whole tier fetch.
+		ctx, cancel := context.WithTimeout(context.Background(), inventoryRecoveryTimeout)
+		items, err := inv.Inventory(ctx)
+		cancel()
 		var ti tierInventory
 		var partial *process.PartialInventoryError
 		switch {

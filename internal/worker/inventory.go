@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
@@ -69,17 +70,36 @@ func (r *remoteRuntime) Inventory(ctx context.Context) ([]process.InventoryItem,
 	if len(workers) == 0 {
 		return nil, fmt.Errorf("tier %q: %w", r.tier, process.ErrNoLiveWorker)
 	}
+	// Query every worker concurrently so one slow/hung worker adds only its own
+	// latency, not the sum across the tier. Each goroutine writes its own slot,
+	// so no mutex is needed; results are aggregated in worker order afterward to
+	// keep output deterministic. The shared ctx bounds every request.
+	type workerResult struct {
+		items []process.InventoryItem
+		err   error
+	}
+	results := make([]workerResult, len(workers))
+	var wg sync.WaitGroup
+	for i, w := range workers {
+		wg.Add(1)
+		go func(i int, w db.Worker) {
+			defer wg.Done()
+			wi, err := r.inventoryFromWorker(ctx, w)
+			results[i] = workerResult{items: wi, err: err}
+		}(i, w)
+	}
+	wg.Wait()
+
 	var items []process.InventoryItem
 	var errs []error
 	var failed []string
-	for _, w := range workers {
-		wi, err := r.inventoryFromWorker(ctx, w)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("worker %s: %w", w.NodeID, err))
-			failed = append(failed, w.NodeID)
+	for i, res := range results {
+		if res.err != nil {
+			errs = append(errs, fmt.Errorf("worker %s: %w", workers[i].NodeID, res.err))
+			failed = append(failed, workers[i].NodeID)
 			continue
 		}
-		items = append(items, wi...)
+		items = append(items, res.items...)
 	}
 	if len(errs) == len(workers) {
 		return nil, errors.Join(errs...)
