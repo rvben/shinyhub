@@ -2,12 +2,85 @@ package process
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// writeFile writes raw bytes to a fresh log path and returns a reader for it.
+func tailReaderWith(t *testing.T, content string) *LogReader {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "app.log")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return NewLogReader(path)
+}
+
+func eqLines(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d lines %v, want %d %v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("line %d = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestTail_EdgeCases pins the exact line semantics Tail must preserve: last-n in
+// order, files with and without a trailing newline, CRLF stripping, n larger
+// than the line count, and n<=0. These guard the backward-read implementation.
+func TestTail_EdgeCases(t *testing.T) {
+	r := tailReaderWith(t, "a\nb\nc\n")
+	if got, _ := r.Tail(2); true {
+		eqLines(t, got, []string{"b", "c"})
+	}
+	if got, _ := r.Tail(10); true {
+		eqLines(t, got, []string{"a", "b", "c"})
+	}
+
+	// No trailing newline: the final line must still be returned.
+	r = tailReaderWith(t, "a\nb\nc")
+	if got, _ := r.Tail(2); true {
+		eqLines(t, got, []string{"b", "c"})
+	}
+
+	// CRLF endings: the trailing \r is stripped, matching bufio.Scanner.
+	r = tailReaderWith(t, "a\r\nb\r\nc\r\n")
+	if got, _ := r.Tail(2); true {
+		eqLines(t, got, []string{"b", "c"})
+	}
+
+	// n <= 0 and empty file return nothing.
+	if got, _ := tailReaderWith(t, "x\ny\n").Tail(0); got != nil {
+		t.Errorf("Tail(0) = %v, want nil", got)
+	}
+	if got, _ := tailReaderWith(t, "").Tail(5); len(got) != 0 {
+		t.Errorf("Tail on empty file = %v, want none", got)
+	}
+}
+
+// TestTail_LargeFileMultiChunk forces the backward reader across many chunk
+// boundaries (file far larger than the read chunk) and asserts the last n lines
+// are exact - the boundary assembly is where a naive reverse reader breaks.
+func TestTail_LargeFileMultiChunk(t *testing.T) {
+	var sb strings.Builder
+	const total = 5000
+	for i := 0; i < total; i++ {
+		fmt.Fprintf(&sb, "line-%05d\n", i)
+	}
+	r := tailReaderWith(t, sb.String())
+	got, err := r.Tail(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eqLines(t, got, []string{"line-04997", "line-04998", "line-04999"})
+}
 
 func TestLogFile_WriteAndTail(t *testing.T) {
 	dir := t.TempDir()
