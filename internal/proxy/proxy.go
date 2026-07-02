@@ -355,6 +355,11 @@ type Proxy struct {
 	// disables automatic termination (tests that only test accounting can leave it
 	// unset). Wire it via SetTerminateFunc.
 	terminate func(slug string, slotID int)
+
+	// spawn is called (via goroutine, never inline under p.mu) when an elastic
+	// decisionAllocate reserves a new slot and the request is served the loading
+	// page. Tasks 12/13 provide the real implementation; wire via SetSpawnFunc.
+	spawn func(slug string, slotID int)
 }
 
 // onMissSyncFuncT is the signature for the injected on-miss synchronous sync.
@@ -385,6 +390,18 @@ func (p *Proxy) SetTerminateFunc(fn func(slug string, slotID int)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.terminate = fn
+}
+
+// SetSpawnFunc registers the callback invoked (via a goroutine) when the
+// elastic routing decides to allocate a new worker slot (decisionAllocate).
+// The callback is responsible for starting the worker process and subsequently
+// calling RegisterElasticWorker once the backend is ready to serve. Tasks
+// 12/13 wire the real implementation; leaving it unset disables demand-spawn
+// (useful in tests that only exercise accounting).
+func (p *Proxy) SetSpawnFunc(fn func(slug string, slotID int)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spawn = fn
 }
 
 const (
@@ -1051,6 +1068,104 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	return nil
 }
 
+// RegisterElasticWorker installs a ready backend into an elastic pool's worker
+// map at slotID. It is called by the spawn callback (Task 12/13) once the
+// native or Docker process is listening. The pool must already be elastic
+// (SetPoolMode with grouped or per_session) and slotID must have been allocated
+// by a prior reserveWorker call. The Director and transport setup mirrors
+// RegisterReplica exactly so the forwarding behaviour is identical.
+//
+// If a booting placeholder already exists for slotID (inserted by reserveWorker),
+// it is updated in-place to preserve assignedClients; a brand-new entry is
+// created only when the slot is absent (e.g. called out of order in tests).
+func (p *Proxy) RegisterElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64) error {
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("register elastic %s#%d: invalid url: %w", slug, slotID, err)
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return fmt.Errorf("register elastic %s#%d: url needs scheme and host", slug, slotID)
+	}
+	if base == nil {
+		base = defaultBackendTransport
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok || !poolIsElastic(pool) {
+		return fmt.Errorf("register elastic %s#%d: pool not found or not elastic", slug, slotID)
+	}
+
+	slugCopy := slug
+	targetPath := strings.TrimRight(target.Path, "/")
+
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
+		if sr, ok := w.(*statusRecorder); ok {
+			sr.proxyErr = err
+		}
+		p.serveMissPage(w, slugCopy, p.getWakeTrigger())
+	}
+	rp.Transport = &errCapturingTransport{base: base}
+	rp.Director = func(req *http.Request) {
+		scheme := "http"
+		if req.TLS != nil {
+			scheme = "https"
+		}
+		clientIP := ""
+		if cip, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			clientIP = cip
+		}
+		applyForwardingHeaders(req, scheme, clientIP, proxytrust.PeerIsTrusted(req, p.trustedProxyNets()))
+		stripInternalCookies(req)
+		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
+
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		prefix := "/app/" + slugCopy
+		appRelative := strings.TrimPrefix(req.URL.Path, prefix)
+		if appRelative == "" {
+			appRelative = "/"
+		}
+		req.URL.Path = singleJoiningSlash(targetPath, appRelative)
+		if req.URL.RawPath != "" {
+			rawRelative := strings.TrimPrefix(req.URL.RawPath, prefix)
+			if rawRelative == "" {
+				rawRelative = "/"
+			}
+			req.URL.RawPath = singleJoiningSlash(targetPath, rawRelative)
+		}
+		req.Host = target.Host
+	}
+
+	// Update the existing booting placeholder in-place to preserve the
+	// assignedClients count incremented by bindClient. Create a fresh entry
+	// only when the slot is absent (defensive: normal flow always creates a
+	// placeholder via reserveWorker before RegisterElasticWorker is called).
+	if existing := pool.workers[slotID]; existing != nil {
+		existing.rp = rp
+		existing.targetURL = targetURL
+		existing.deploymentID = deploymentID
+		existing.status = workerRunning
+	} else {
+		if pool.workers == nil {
+			pool.workers = make(map[int]*replicaBackend)
+		}
+		pool.workers[slotID] = &replicaBackend{
+			slotID:       slotID,
+			status:       workerRunning,
+			targetURL:    targetURL,
+			deploymentID: deploymentID,
+			rp:           rp,
+		}
+	}
+	p.clearWSReady(slug)
+	return nil
+}
+
 // singleJoiningSlash joins two URL path segments with exactly one slash
 // between them. When a is empty the result is b unchanged, preserving local
 // replica behavior where target.Path is empty.
@@ -1182,8 +1297,32 @@ func (p *Proxy) ReplicaDeploymentID(slug string, index int) int64 {
 }
 
 // Deregister removes the entire pool for slug from the routing table.
+// For elastic pools it dispatches the terminate callback (if set) for every
+// worker in the pool and stops pending client release timers for the slug
+// before dropping the map, so native or Docker processes are not orphaned on
+// redeploy. Multiplex pools retain the previous behaviour (no callbacks).
 func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
+	pool := p.pools[slug]
+	if pool != nil && poolIsElastic(pool) {
+		// Stop all pending client grace timers for this slug so they do not
+		// fire after the pool is gone and attempt to look up a removed worker.
+		for _, cs := range p.clients[slug] {
+			if cs.releaseTimer != nil {
+				cs.releaseTimer.Stop()
+				cs.releaseTimer = nil
+			}
+		}
+		delete(p.clients, slug)
+		// Dispatch terminate for each worker. The callback is captured before
+		// the loop so it is read once under the lock; goroutines run outside it.
+		if term := p.terminate; term != nil {
+			for slotID := range pool.workers {
+				sid := slotID
+				go term(slug, sid)
+			}
+		}
+	}
 	delete(p.pools, slug)
 	p.mu.Unlock()
 	p.clearWSReady(slug)
@@ -1512,6 +1651,112 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Pool is populated; fall through to the routing path below while still
 		// holding p.mu.RLock (matching the normal routing path).
+	}
+
+	// Elastic path: demand-driven per-client routing (per_session or grouped mode).
+	// The multiplex path below is byte-for-byte unchanged; only elastic pools
+	// enter this branch.
+	if poolIsElastic(pool) {
+		// Capture the spawn callback while holding the read lock so the read is
+		// race-free against SetSpawnFunc (which takes the write lock).
+		spawnFn := p.spawn
+
+		cid, isNew := p.clientID(r, slug)
+		if isNew {
+			p.setClientCookie(rec, r, slug, cid)
+		}
+
+		// Resolve the sticky routing pin. For elastic pools the "index" in the
+		// rep cookie is the slotID (not a replica-slice index). Honor the pin only
+		// when the worker exists AND its deploymentID matches the cookie's so a
+		// stale cookie from a deregistered pool does not route to the wrong client.
+		pinnedSlot := -1
+		if c, err := r.Cookie(cookiePrefix + slug); err == nil {
+			if slotID, depID, ok := p.stickyIndex(slug, c.Value); ok {
+				if wkr, exists := pool.workers[slotID]; exists && wkr != nil && wkr.deploymentID == depID {
+					pinnedSlot = slotID
+				}
+			}
+		}
+
+		d := decide(pool.workerStates(), pool.mode, pool.groupedSize, pool.maxWorkers, pinnedSlot)
+
+		switch d.kind {
+		case decisionRoute:
+			wkr := pool.workers[d.slotID]
+			if wkr == nil || wkr.status == workerBooting {
+				// Worker not ready yet: serve the loading page so the client retries.
+				// The pin cookie is already in the browser from the decisionAllocate
+				// response, so the retry will land on the same slot.
+				p.mu.RUnlock()
+				p.serveMissPage(rec, slug, nil)
+				return
+			}
+			// Bump activeConns while holding the read lock. BeginHibernate takes the
+			// write lock and inspects activeConns under it; releasing before the bump
+			// would let it observe activeConns=0 and hibernate a pool we are about to
+			// forward to (the same invariant as the multiplex path).
+			wkr.activeConns.Add(1)
+			replicaIndex = wkr.slotID
+			// Refresh the rep sticky cookie with the current slotID and deploymentID.
+			http.SetCookie(rec, &http.Cookie{
+				Name:     cookiePrefix + slug,
+				Value:    p.stickyCookieValue(slug, d.slotID, wkr.deploymentID),
+				Path:     "/app/" + slug + "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
+			})
+			p.mu.RUnlock()
+			// clientConnOpened/Closed acquire the write lock themselves and must be
+			// called outside the read-lock window to avoid deadlock.
+			p.clientConnOpened(slug, cid)
+			defer wkr.activeConns.Add(-1)
+			defer p.clientConnClosed(slug, cid)
+			p.RecordActivity(slug)
+			if traceEnabled {
+				r = r.WithContext(context.WithValue(r.Context(), recorderCtxKey{}, rec))
+			}
+			wkr.rp.ServeHTTP(rec, r)
+			return
+
+		case decisionAllocate:
+			p.mu.RUnlock()
+			slot := p.reserveWorker(slug, cid)
+			if slot < 0 {
+				// maxWorkers reached between the RUnlock and reserveWorker's Lock;
+				// shed with the same response as decisionReject.
+				p.recordReject(rec, slug, ReasonPoolSaturated, true)
+				rec.Header().Set("Retry-After", "5")
+				http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
+				return
+			}
+			p.bindClient(slug, cid, slot)
+			// Set the rep sticky cookie pinning the newly reserved slot.
+			// deploymentID is 0 until RegisterElasticWorker is called; the booting
+			// placeholder also has deploymentID=0, so retries while the worker is
+			// booting continue to honor the pin.
+			http.SetCookie(rec, &http.Cookie{
+				Name:     cookiePrefix + slug,
+				Value:    p.stickyCookieValue(slug, slot, 0),
+				Path:     "/app/" + slug + "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
+			})
+			if spawnFn != nil {
+				go spawnFn(slug, slot)
+			}
+			p.serveMissPage(rec, slug, nil)
+			return
+
+		case decisionReject:
+			p.mu.RUnlock()
+			p.recordReject(rec, slug, ReasonPoolSaturated, true)
+			rec.Header().Set("Retry-After", "5")
+			http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	picked, isStickyHit, saturated := p.pickReplicaLocked(pool, slug, r)
@@ -1905,14 +2150,17 @@ func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Reques
 	return best, false, saturated
 }
 
-// poolHasAny reports whether the pool has at least one routable backend.
-// For multiplex pools (mode == "" or "multiplex") this means a non-nil replica
-// slot. For elastic pools (grouped or per_session) this means a non-empty
-// workers map -- checking pool.workers ONLY when poolIsElastic so a stale or
-// accidentally non-nil map on a multiplex pool never makes it look routable.
+// poolHasAny reports whether the pool can route (or schedule) an incoming
+// request. For multiplex pools (mode == "" or "multiplex") this means a
+// non-nil replica slot. For elastic pools (grouped or per_session) this is
+// always true: even an empty workers map is acceptable because the elastic
+// branch handles decisionAllocate (first request spawns a new worker) and
+// decisionReject (at capacity). Making elastic pools always "routable" lets
+// ServeHTTP fall through to the elastic branch on every request, including the
+// very first one, without bouncing through the loading page.
 func poolHasAny(pool *backendPool) bool {
 	if poolIsElastic(pool) {
-		return len(pool.workers) > 0
+		return true // elastic pools route via decide(), never need pre-populated workers
 	}
 	for _, r := range pool.replicas {
 		if r != nil {
