@@ -717,6 +717,42 @@ func TestAppsPayloadExposesFleetFields(t *testing.T) {
 	}
 }
 
+// TestWorkerIsolationControlsWired guards the Configuration -> Scaling worker
+// isolation controls. app.js must read app.worker_isolation and
+// app.worker_max_workers from the GET envelope, include worker_isolation in the
+// scaling PATCH payload, and call workerCapacityLine so the host-capacity
+// helper line stays live. If any of these wires drift the controls silently
+// stop reflecting or persisting the isolation mode.
+func TestWorkerIsolationControlsWired(t *testing.T) {
+	// The import must be present so the helper is callable.
+	assertContains(t, "app.js", "/static/views/worker-isolation.js",
+		"app.js must import the worker-isolation helper module")
+	assertContains(t, "app.js", "workerCapacityLine",
+		"app.js must call workerCapacityLine to recompute the host-capacity helper line on input")
+
+	// Populate path: read the API envelope fields.
+	assertContains(t, "app.js", "worker_isolation",
+		"app.js scaling populate must read app.worker_isolation from the GET envelope")
+	assertContains(t, "app.js", "worker_max_workers",
+		"app.js scaling populate must read app.worker_max_workers from the GET envelope")
+
+	// Save path: include the isolation mode in the PATCH payload.
+	assertContains(t, "app.js", "worker_isolation: workerIsolation",
+		"saveScalingSettings must include worker_isolation in the PATCH payload")
+
+	// HTML: the isolation select and capacity helper must exist.
+	assertContains(t, "index.html", `id="worker-isolation"`,
+		"index.html must expose #worker-isolation as the isolation mode select")
+	assertContains(t, "index.html", `id="worker-max-workers"`,
+		"index.html must expose #worker-max-workers as the max workers input")
+	assertContains(t, "index.html", `id="worker-capacity"`,
+		"index.html must expose #worker-capacity as the slot workerCapacityLine populates")
+
+	// The pure helper module must export the function the tests and app.js use.
+	assertContains(t, "views/worker-isolation.js", "export function workerCapacityLine",
+		"worker-isolation.js must export workerCapacityLine so it can be imported by app.js and unit-tested")
+}
+
 // assertFileContains reads an on-disk file (not embedded) by absolute path and
 // asserts it contains needle.
 func assertFileContains(t *testing.T, absPath, needle, contract string) {

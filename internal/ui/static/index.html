@@ -440,7 +440,35 @@
                 <input id="scaling-cap" type="number" min="0" max="1000" step="1"
                        inputmode="numeric" autocomplete="off" aria-label="Maximum new sessions per replica">
               </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Worker isolation</span>
+                  <span class="scaling-option-help">How sessions share worker processes. <strong>Multiplex</strong> runs all sessions in one process per replica. <strong>Per session</strong> spawns one process per session. <strong>Grouped</strong> bundles a fixed number of sessions per process.</span>
+                </span>
+                <select id="worker-isolation" autocomplete="off" aria-label="Worker isolation mode">
+                  <option value="multiplex">Multiplex (default)</option>
+                  <option value="per_session">Per session</option>
+                  <option value="grouped">Grouped</option>
+                </select>
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Clients per group</span>
+                  <span class="scaling-option-help">Sessions bundled into each grouped worker process (grouped mode only).</span>
+                </span>
+                <input id="worker-grouped-size" type="number" min="1" max="100" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Clients per worker group">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Max workers</span>
+                  <span class="scaling-option-help">Upper bound on isolated worker processes per replica (per session and grouped modes). <code>0</code> uses the server default.</span>
+                </span>
+                <input id="worker-max-workers" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Maximum worker processes per replica">
+              </label>
               <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
+              <p id="worker-capacity" class="scaling-ceiling" aria-live="polite"></p>
               <div class="env-form-actions">
                 <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
                 <span id="scaling-dirty" class="settings-dirty" hidden>Unsaved changes</span>
