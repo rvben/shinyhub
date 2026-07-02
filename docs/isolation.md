@@ -118,15 +118,26 @@ shinyhub deploy /path/to/heavy-app --slug demo-mux
 
 # Deploy again as per_session
 shinyhub deploy /path/to/heavy-app --slug demo-iso
-shinyhub apps set --slug demo-iso \
-  --worker-isolation per_session \
-  --worker-max-workers 60
+shinyhub apps set demo-iso \
+  --isolation per_session \
+  --max-workers 60
 ```
 
-The "heavy app" must perform visible CPU-intensive work on session connect (e.g.
-a slow model fit or matrix computation in R/Python) to trigger meaningful HOL
-pressure under `multiplex`. k6 just holds the heavy VU's WebSocket open while
-measuring latency for the other VUs.
+The "heavy app" must perform **sustained** CPU-intensive work that stays busy for
+at least `LT_HOLD` seconds (default 60) - long enough to keep the `multiplex`
+event loop occupied throughout the entire light-VU measurement window. A
+one-shot computation that finishes in a few seconds lets both `multiplex` and
+`per_session` phases show low latency and the `p(95) < 3000` threshold passes
+vacuously with no diagnostic value.
+
+Use a continuously-busy app design: a tight compute loop driven by
+`reactiveTimer`/`invalidateLater` (R/Shiny), or a long-running matrix or numeric
+computation that iterates for the full session duration. The goal is that the
+`multiplex` phase actually degrades (latency rises toward the ~12 s figure
+described above) so the gate is meaningful.
+
+k6 just holds the heavy VU's WebSocket open while measuring latency for the
+other VUs.
 
 ### Command
 
