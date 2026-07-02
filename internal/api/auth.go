@@ -340,12 +340,26 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// the only case where we should re-issue one.
 	if r.Header.Get("Authorization") == "" {
 		if _, err := r.Cookie(auth.SessionCookieName); err == nil {
-			freshToken, err := auth.IssueJWT(u.ID, u.Username, u.Role, s.cfg.Auth.Secret)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal server error")
-				return
+			// Slide the 1h window, but preserve the original login time so the
+			// session cannot be kept alive indefinitely. Past the absolute cap we
+			// stop renewing; the current token then expires within its TTL and the
+			// user re-logs in, which re-runs SSO group reconciliation (so a role
+			// revoked at the IdP takes effect within the cap rather than never).
+			var authTime time.Time
+			if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
+				authTime = ti.AuthTime
 			}
-			auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
+			if auth.CanSlideSession(authTime) {
+				if authTime.IsZero() {
+					authTime = time.Now()
+				}
+				freshToken, err := auth.IssueJWTAt(u.ID, u.Username, u.Role, s.cfg.Auth.Secret, authTime)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "internal server error")
+					return
+				}
+				auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
+			}
 		}
 	}
 	// Prefer the full DB record so display name + password capability ride

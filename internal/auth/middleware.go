@@ -42,6 +42,9 @@ type ContextUser struct {
 type TokenInfo struct {
 	JTI       string
 	ExpiresAt time.Time
+	// AuthTime is the original login time (auth_time claim), zero for a legacy
+	// token. It bounds the absolute session lifetime across sliding renewals.
+	AuthTime time.Time
 }
 
 // APIKeyLookup looks up a user by API key hash. Injected to avoid import cycles.
@@ -70,6 +73,9 @@ func tokenFromClaims(c *Claims) *TokenInfo {
 	info := &TokenInfo{JTI: c.ID}
 	if c.ExpiresAt != nil {
 		info.ExpiresAt = c.ExpiresAt.Time
+	}
+	if c.AuthTime != nil {
+		info.AuthTime = c.AuthTime.Time
 	}
 	return info
 }
