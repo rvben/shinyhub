@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 // keyedRateLimiter is a simple sliding-window in-memory rate limiter keyed by
@@ -319,6 +320,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
+	// Also expire the per-app proxy routing cookies (sticky replica + elastic
+	// client-id) so a shared/kiosk browser does not route the next user to this
+	// user's pinned replica or dedicated worker.
+	proxy.ClearRoutingCookies(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 

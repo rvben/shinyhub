@@ -113,6 +113,38 @@ func (p *Proxy) setClientCookie(w http.ResponseWriter, r *http.Request, slug, id
 	})
 }
 
+// ClearRoutingCookies expires every per-app proxy routing cookie presented on
+// r - the sticky replica cookie (cookiePrefix+slug) and the elastic client-id
+// cookie (clientCookiePrefix+slug) - by writing a matching expired Set-Cookie
+// for each onto w. Called on logout so a shared/kiosk browser does not route a
+// subsequently logged-in user to the previous user's pinned replica or
+// dedicated worker. The slug is recovered from the cookie name to rebuild the
+// original Path (/app/<slug>/) so the browser matches and clears the cookie.
+func ClearRoutingCookies(w http.ResponseWriter, r *http.Request) {
+	for _, c := range r.Cookies() {
+		var slug string
+		switch {
+		case strings.HasPrefix(c.Name, clientCookiePrefix):
+			slug = strings.TrimPrefix(c.Name, clientCookiePrefix)
+		case strings.HasPrefix(c.Name, cookiePrefix):
+			slug = strings.TrimPrefix(c.Name, cookiePrefix)
+		default:
+			continue
+		}
+		if slug == "" {
+			continue
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     c.Name,
+			Value:    "",
+			Path:     "/app/" + slug + "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+}
+
 // poolIsElastic reports whether pool is in demand-driven (elastic) mode.
 // A pool created by an existing SetPoolSize/SetPoolCap caller has a zero-value
 // mode (""), which is intentionally treated as multiplex so the existing

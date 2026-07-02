@@ -1038,6 +1038,10 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	// transport so a mid-stream upstream read error is captured too, which is
 	// the only signal that admits an otherwise-200, not-slow span to the buffer.
 	rp.Transport = &errCapturingTransport{base: base}
+	// Strip any backend Set-Cookie that collides with ShinyHub's reserved
+	// cookie namespaces so a deployer-controlled app cannot set the platform's
+	// session/sticky/elastic-client-id cookies in a visitor's browser.
+	rp.ModifyResponse = filterReservedSetCookies
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -1139,6 +1143,10 @@ func (p *Proxy) RegisterElasticWorker(slug string, slotID int, targetURL string,
 		p.serveMissPage(w, slugCopy, p.getWakeTrigger())
 	}
 	rp.Transport = &errCapturingTransport{base: base}
+	// Strip any backend Set-Cookie that collides with ShinyHub's reserved
+	// cookie namespaces so a deployer-controlled app cannot set the platform's
+	// session/sticky/elastic-client-id cookies in a visitor's browser.
+	rp.ModifyResponse = filterReservedSetCookies
 	rp.Director = func(req *http.Request) {
 		scheme := "http"
 		if req.TLS != nil {
@@ -2065,14 +2073,47 @@ func resolveClientIP(resolver func(*http.Request) string, r *http.Request) strin
 }
 
 // isInternalCookie reports whether a cookie belongs to ShinyHub itself (the
-// session JWT, CSRF token, OAuth-state nonce, or a per-app sticky-routing
-// cookie) and so must never be forwarded to an app backend.
+// session JWT, CSRF token, OAuth-state nonce, the per-app sticky-routing cookie,
+// or the per-app elastic client-id cookie) and so must never be forwarded to an
+// app backend, nor accepted from one via Set-Cookie.
 func isInternalCookie(name string) bool {
 	switch name {
 	case auth.SessionCookieName, auth.CSRFCookieName, auth.OAuthStateCookieName:
 		return true
 	}
-	return strings.HasPrefix(name, cookiePrefix)
+	return strings.HasPrefix(name, cookiePrefix) || strings.HasPrefix(name, clientCookiePrefix)
+}
+
+// filterReservedSetCookies drops any Set-Cookie header on a backend response
+// whose cookie name is in one of ShinyHub's reserved namespaces (see
+// isInternalCookie). Assigned as the reverse proxy's ModifyResponse so a
+// deployer-controlled app backend cannot set the platform's session, sticky, or
+// elastic client-id cookies in a visitor's browser - which would otherwise let
+// one app pin another visitor to a worker it controls. Legitimate app cookies
+// pass through unchanged. Returns nil error unconditionally (the signature
+// satisfies httputil.ReverseProxy.ModifyResponse).
+func filterReservedSetCookies(resp *http.Response) error {
+	raws := resp.Header["Set-Cookie"]
+	if len(raws) == 0 {
+		return nil
+	}
+	kept := raws[:0:0]
+	for _, raw := range raws {
+		name := raw
+		if i := strings.IndexByte(raw, '='); i >= 0 {
+			name = raw[:i]
+		}
+		if isInternalCookie(strings.TrimSpace(name)) {
+			continue
+		}
+		kept = append(kept, raw)
+	}
+	if len(kept) == 0 {
+		resp.Header.Del("Set-Cookie")
+		return nil
+	}
+	resp.Header["Set-Cookie"] = kept
+	return nil
 }
 
 // stripInternalCookies rewrites the request's Cookie header to drop ShinyHub's

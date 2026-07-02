@@ -36,6 +36,48 @@ func TestStripInternalCookies(t *testing.T) {
 	}
 }
 
+// TestStripInternalCookies_StripsClientIDCookie verifies the per-app elastic
+// client-id cookie (shinyhub_cid_<slug>) is stripped before the request reaches
+// the app backend, so a backend cannot harvest another visitor's cid value and
+// later pin that visitor to a worker it controls.
+func TestStripInternalCookies_StripsClientIDCookie(t *testing.T) {
+	req := httptest.NewRequest("GET", "/app/demo/", nil)
+	req.Header.Set("Cookie", clientCookiePrefix+"demo=abcdef0123456789abcdef0123456789.deadbeefdeadbeef; theme=dark")
+
+	stripInternalCookies(req)
+
+	got := cookieMap(req.Header.Get("Cookie"))
+	if _, present := got[clientCookiePrefix+"demo"]; present {
+		t.Errorf("client-id cookie must be stripped before forwarding, got %v", got)
+	}
+	if got["theme"] != "dark" {
+		t.Errorf("non-ShinyHub app cookie must be preserved, got %v", got)
+	}
+}
+
+// TestFilterReservedSetCookies_StripsBackendReservedCookies verifies that a
+// backend response cannot set any cookie in ShinyHub's reserved namespaces
+// (session/CSRF/oauth-state, sticky-routing, or the elastic client-id cookie).
+// Without this a compromised app backend could emit
+// Set-Cookie: shinyhub_cid_<slug>=<victim's value> to hijack another visitor's
+// dedicated worker. Legitimate app cookies must pass through untouched.
+func TestFilterReservedSetCookies_StripsBackendReservedCookies(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Add("Set-Cookie", clientCookiePrefix+"demo=VICTIMVALUE.deadbeefdeadbeef; Path=/app/demo/")
+	resp.Header.Add("Set-Cookie", cookiePrefix+"demo=9; Path=/app/demo/")
+	resp.Header.Add("Set-Cookie", "shiny_session=FORGED_JWT; Path=/")
+	resp.Header.Add("Set-Cookie", "app_pref=blue; Path=/") // legitimate app cookie
+
+	if err := filterReservedSetCookies(resp); err != nil {
+		t.Fatalf("filterReservedSetCookies: %v", err)
+	}
+
+	got := resp.Header["Set-Cookie"]
+	if len(got) != 1 || !strings.HasPrefix(got[0], "app_pref=") {
+		t.Errorf("reserved backend Set-Cookie headers must be stripped, kept: %v", got)
+	}
+}
+
 // TestStripInternalCookies_AllInternalRemovesHeader verifies the Cookie header
 // is removed entirely when nothing remains after stripping.
 func TestStripInternalCookies_AllInternalRemovesHeader(t *testing.T) {
@@ -44,6 +86,39 @@ func TestStripInternalCookies_AllInternalRemovesHeader(t *testing.T) {
 	stripInternalCookies(req)
 	if v := req.Header.Get("Cookie"); v != "" {
 		t.Errorf("Cookie header should be removed when only internal cookies were present, got %q", v)
+	}
+}
+
+// TestClearRoutingCookies_ExpiresRepAndCidCookies verifies logout expires both
+// per-app proxy routing cookies (sticky replica + elastic client-id) at their
+// original path, so a shared/kiosk browser does not route a subsequently
+// logged-in user to the previous user's pinned replica or dedicated worker.
+func TestClearRoutingCookies_ExpiresRepAndCidCookies(t *testing.T) {
+	req := httptest.NewRequest("POST", "/api/auth/logout", nil)
+	req.Header.Set("Cookie", clientCookiePrefix+"demo=abcdef0123456789abcdef0123456789.deadbeefdeadbeef; "+cookiePrefix+"demo=3; theme=dark")
+	rec := httptest.NewRecorder()
+
+	ClearRoutingCookies(rec, req)
+
+	cleared := map[string]*http.Cookie{}
+	for _, c := range rec.Result().Cookies() {
+		cleared[c.Name] = c
+	}
+	for _, name := range []string{clientCookiePrefix + "demo", cookiePrefix + "demo"} {
+		c, ok := cleared[name]
+		if !ok {
+			t.Errorf("routing cookie %q must be cleared on logout", name)
+			continue
+		}
+		if c.MaxAge >= 0 {
+			t.Errorf("cookie %q must be expired (MaxAge<0), got MaxAge=%d", name, c.MaxAge)
+		}
+		if c.Path != "/app/demo/" {
+			t.Errorf("cleared cookie %q Path = %q, must match the original /app/demo/ so the browser clears it", name, c.Path)
+		}
+	}
+	if _, ok := cleared["theme"]; ok {
+		t.Error("non-routing cookie must not be touched")
 	}
 }
 
