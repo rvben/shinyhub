@@ -157,8 +157,6 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "status", Type: "string"},
 		{Name: "failure_reason", Type: "string", Desc: "Why a failed deploy failed; empty for pending/succeeded"},
 		{Name: "created_at", Type: "string"},
-		{Name: "bundle_dir", Type: "string"},
-		{Name: "content_digest", Type: "string"},
 	}, EnvelopeFields: []fieldSpec{
 		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
@@ -327,7 +325,6 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"data ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "path", Type: "string"},
 		{Name: "size", Type: "integer"},
-		{Name: "sha256", Type: "string"},
 		{Name: "modified_at", Type: "integer", Desc: "Unix timestamp"},
 	}, EnvelopeFields: []fieldSpec{
 		{Name: "items", Type: "array"},
