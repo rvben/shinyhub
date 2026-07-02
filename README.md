@@ -39,6 +39,7 @@ no external services to operate.
 - **Fleet reconcile.** Declare a whole set of apps in one `fleet.toml` and converge the server to match, kubectl-apply style. See [docs/fleet.md](docs/fleet.md).
 - **Observability.** OpenTelemetry tracing (proxy, app, and control-plane spans), an opt-in Prometheus `/metrics` endpoint, and a structured access log with request-ID and trace correlation. See [docs/tracing.md](docs/tracing.md) and [docs/metrics.md](docs/metrics.md).
 - **Container isolation (optional).** Run each app inside a Docker container with CPU and memory limits.
+- **Worker isolation.** Per-app session isolation dial: `multiplex` (shared event loop), `grouped` (N clients per worker), or `per_session` (one process per browser client, HOL-free). See [docs/isolation.md](docs/isolation.md).
 - **Branding (white-label).** Customize the front door (title, logo, theme, landing page) without forking. See [docs/branding.md](docs/branding.md).
 - **Audit log.** Mutating actions recorded for admin review.
 - **Single binary, SQLite, no external dependencies.**
@@ -170,6 +171,7 @@ value.
 | [Persistent data dir](docs/data.md) | Pushing data, the app-visible path, authorization, quota, and concurrency. |
 | [Scheduled jobs and shared data](docs/schedules.md) | Per-app cron schedules and read-only cross-app data mounts. |
 | [Horizontal scaling](docs/scaling.md) | Per-app replicas, load balancing, and session admission. |
+| [Worker isolation](docs/isolation.md) | Session isolation dial: multiplex, grouped, and per_session modes. |
 | [App startup performance](docs/app-performance.md) | Why data lags the page shell, and the startup-scope and caching patterns that fix it. |
 | [Fleet reconcile](docs/fleet.md) | Declaring and converging a whole set of apps from one file. |
 | [Deploy manifest](docs/manifest.md) | The `shinyhub.toml` bundle manifest. |

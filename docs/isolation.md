@@ -89,6 +89,214 @@ native runtime; reach for Docker when you need full multi-tenant isolation.
 
 ---
 
+## Worker isolation (session isolation dial)
+
+The **worker isolation dial** controls how many browser sessions share a single
+R/Python worker process. Changing this dial trades resource consumption for
+performance isolation between concurrent users.
+
+### Modes at a glance
+
+| Mode | Clients per worker | HOL blocking | RAM scaling | Performance isolation | Governed by |
+|---|---|---|---|---|---|
+| `multiplex` (default) | Unbounded (all sessions share one process) | Yes - a heavy session stalls others | One process per replica; scales with `replicas` | None within a replica | `replicas`, `max_sessions_per_replica`, autoscale |
+| `grouped` | Up to `grouped_size` clients per worker | Reduced (only within the group) | One process per group; scales with active groups up to `max_workers` | Partial - groups are isolated from each other | `grouped_size`, `max_workers`, `max_session_lifetime_secs` |
+| `per_session` | 1 client per worker (one process per browser client) | Eliminated | One process per active client; scales with active clients up to `max_workers` | Full - each client runs in its own process | `max_workers`, `max_session_lifetime_secs` |
+
+`multiplex` is the historical mode and is unchanged by this feature. `grouped`
+and `per_session` are **elastic**: workers are started on demand and
+terminated when their clients disconnect. Both elastic modes require a
+single-node deployment (see caveats below).
+
+### Config surface
+
+#### Per-app dial
+
+**Via CLI:**
+
+```bash
+# Switch to per_session isolation with a ceiling of 30 workers
+shinyhub apps set <slug> \
+  --isolation per_session \
+  --max-workers 30
+
+# grouped: up to 5 clients per worker, ceiling 20 workers
+shinyhub apps set <slug> \
+  --isolation grouped \
+  --grouped-size 5 \
+  --max-workers 20
+
+# Absolute worker lifetime backstop: terminate after 3600 s regardless of activity
+shinyhub apps set <slug> --max-session-lifetime 3600
+
+# Revert to multiplex (drops the elastic pool)
+shinyhub apps set <slug> --isolation multiplex
+```
+
+Verified CLI flags (`shinyhub apps set --help`):
+
+| Flag | Description |
+|---|---|
+| `--isolation multiplex\|grouped\|per_session` | Session isolation mode |
+| `--grouped-size N` | Clients per worker when using `grouped` (>= 1) |
+| `--max-workers N` | Demand-driven worker ceiling for `grouped`/`per_session` (>= 1) |
+| `--max-session-lifetime SECS` | Absolute worker lifetime in seconds; 0 = unlimited |
+
+**Via PATCH API** (for tooling):
+
+```bash
+curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "worker_isolation": "per_session",
+    "worker_max_workers": 30,
+    "worker_max_session_lifetime_secs": 3600
+  }'
+```
+
+PATCH keys: `worker_isolation`, `worker_grouped_size`, `worker_max_workers`,
+`worker_max_session_lifetime_secs`.
+
+#### Via manifest (travels with the bundle)
+
+Declare the policy in `shinyhub.toml` so it is reconciled on every deploy:
+
+```toml
+[app.worker]
+isolation              = "per_session"
+max_workers            = 30
+max_session_lifetime_secs = 3600
+```
+
+For `grouped` mode, also set:
+
+```toml
+[app.worker]
+isolation    = "grouped"
+grouped_size = 5
+max_workers  = 20
+```
+
+Manifest fields (`WorkerManifest`, `internal/deploy/hooks.go`):
+`isolation`, `grouped_size`, `max_workers`, `max_session_lifetime_secs`.
+
+When the `[app.worker]` block is present, all four columns are reconciled on
+every deploy. Omitting the block leaves any previously-set value unchanged
+(same semantics as the `[app.autoscale]` block).
+
+#### Fleet defaults (server-wide)
+
+```yaml
+# shinyhub.yaml
+runtime:
+  default_worker_isolation: multiplex   # multiplex | grouped | per_session
+
+server:
+  host_budget_mb: 0                     # 0 = no host-level guard; > 0 = MiB limit
+```
+
+Env vars: `SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION`,
+`SHINYHUB_SERVER_HOST_BUDGET_MB`.
+
+`default_worker_isolation` is the fallback applied when an app's
+`worker_isolation` is empty. The default is `multiplex`, preserving backward
+compatibility for every existing app.
+
+`host_budget_mb` enables the host-capacity guard (see below). Leave it at 0
+to disable the guard.
+
+### Caveats and limitations (Phase 1)
+
+**`per_session` isolates the browser CLIENT, not the tab.** A "client" is a
+cookie identity. Multiple tabs in the same browser profile share a single
+cookie jar and therefore share the same worker process. True per-tab
+isolation is not available in Phase 1.
+
+**Single-node only.** `grouped` and `per_session` require a single-node
+deployment. Setting either mode when the server is configured with a Postgres
+(clustered) DSN is rejected at startup as a config error. `multiplex` retains
+full HA behavior and is unaffected.
+
+**Cold start per session (no warm pool yet).** In Phase 1 there is no warm
+pool. The first request from a new client cold-starts a fresh worker process
+and the user sees the "Loading..." page while it boots. Subsequent requests
+from the same client route to the warm worker. Warm spare pre-allocation is a
+Phase 2 item.
+
+**Per-worker cgroup limits.** Each elastic worker receives the FULL per-app
+`memory_limit_mb` and `cpu_quota_percent`, NOT a fraction. With `max_workers = 30`
+and `memory_limit_mb = 512`, the worst-case host RAM for that one app is
+`30 * (512 + 150) = ~19 GiB` (150 MiB base overhead per worker). Size the
+host accordingly.
+
+**Host-capacity guard.** When `server.host_budget_mb` is set, the config
+loader rejects any combination where
+`max_workers * (memory_limit_mb + 150 MiB)` exceeds the budget. This is a
+startup-time check, not a runtime admission check. Set the budget to catch
+misconfigured limits early.
+
+**`max_workers` is a hard ceiling; overflow yields 503.** When all
+`max_workers` slots are occupied, a new client receives `503 Service
+Unavailable` with a `Retry-After: 5` header. The client is not queued.
+
+**`max_session_lifetime_secs` is an absolute backstop.** When set (> 0), a
+worker is terminated after that many seconds regardless of activity. Clients
+whose worker is terminated will be reallocated to a new worker on their next
+request (another cold start). Set this to reclaim long-lived workers from
+abandoned sessions.
+
+**Elastic workers are ephemeral.** They are NOT re-adopted on a server
+restart. The elastic pool starts empty after every restart. Connected clients
+will cold-start a new worker on their next request.
+
+**Elastic apps skip fixed-replica booting at deploy.** For `grouped` and
+`per_session` apps, the deploy pipeline returns immediately without booting
+any replicas. The app is marked running, but there are no warm processes yet.
+Boot errors surface at first-session time, not at deploy time.
+
+**Post-deploy manifest hooks are skipped for elastic apps in Phase 1.** The
+`[[hook]]` blocks in `shinyhub.toml` are not executed for elastic apps.
+Run setup steps as part of the app's own startup instead.
+
+**Compute-idle reclaim is Phase 3.** There is currently no mechanism to
+suspend or throttle a live-but-idle worker in between requests. An allocated
+worker holds its full resource slice until the client disconnects (or
+`max_session_lifetime_secs` expires).
+
+### How to enable
+
+1. **Set the dial via CLI** (no redeploy needed for existing apps):
+
+   ```bash
+   shinyhub apps set myapp --isolation per_session --max-workers 20
+   ```
+
+   The change takes effect immediately for new incoming sessions. The
+   existing multiplex pool is cleared; any currently-connected sessions
+   will cold-start in their new per-session worker on their next request.
+
+2. **Or declare it in `shinyhub.toml`** (recommended for reproducible fleets):
+
+   ```toml
+   [app.worker]
+   isolation   = "per_session"
+   max_workers = 20
+   ```
+
+   The block is reconciled on every subsequent deploy, so the policy
+   survives host rebuilds.
+
+3. **Note on isolation changes.** Switching from `multiplex` to `grouped` or
+   `per_session` (or between elastic modes) clears the current pool and drops
+   all active sessions. Plan the change for a low-traffic window if session
+   continuity matters.
+
+4. **Verify.** After enabling, check `shinyhub apps show <slug>` (or the
+   Configuration tab in the UI) to confirm the dial is set as expected.
+
+---
+
 ## HOL-elimination acceptance (k6)
 
 Worker isolation at `per_session` eliminates head-of-line (HOL) blocking: a

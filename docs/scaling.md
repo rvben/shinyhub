@@ -230,6 +230,18 @@ rebuilt from config**, so prefer the declarative form for reproducible fleets.
 
 ## Interaction with other features
 
+### Worker isolation
+
+While horizontal scaling adds more replica processes to spread load,
+**worker isolation** controls how many clients share each individual worker
+process. The two dimensions are complementary: scale replicas for throughput,
+and tighten the isolation dial to prevent one heavy session from stalling
+others in the same process.
+
+See [docs/isolation.md](isolation.md) for the full operator guide covering
+`multiplex`, `grouped`, and `per_session` modes, the config surface, and
+Phase 1 limitations.
+
 ### Output caching
 
 A cross-session output cache (see
