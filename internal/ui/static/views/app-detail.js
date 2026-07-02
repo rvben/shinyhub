@@ -17,6 +17,7 @@ import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
 import { crashBanner } from '/static/views/crash-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
+import { createTablistNav } from '/static/views/tablist-keys.js';
 
 const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
 const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
@@ -64,6 +65,11 @@ export function mountAppDetail(ctx) {
   if (tabsNav) {
     tabsNav.addEventListener('scroll', updateTabOverflow, { passive: true });
     window.addEventListener('resize', updateTabOverflow, { passive: true });
+    // WAI-ARIA tablist keyboard nav: arrow/Home/End move focus between the
+    // visible tabs and activate them (activation follows focus, matching the SPA
+    // route model). Reuses the delegated data-nav click handler to navigate.
+    // Wired once; roving tabindex is refreshed per render in the loop below.
+    createTablistNav(tabsNav, document, { onActivate: (el) => el.click() });
   }
 
   let tabCleanup = null;
@@ -131,6 +137,9 @@ export function mountAppDetail(ctx) {
       tabEls[t].setAttribute('href', t === 'overview' ? `/apps/${slug}` : `/apps/${slug}/${t}`);
       tabEls[t].classList.toggle('active', t === tab);
       tabEls[t].setAttribute('aria-selected', String(t === tab));
+      // Roving tabindex: only the active tab is in the page Tab order; arrow
+      // keys move between the rest (see createTablistNav above).
+      tabEls[t].setAttribute('tabindex', t === tab ? '0' : '-1');
       if (t === tab) tabEls[t].setAttribute('aria-current', 'page');
       else tabEls[t].removeAttribute('aria-current');
     }

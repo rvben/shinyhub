@@ -30,6 +30,21 @@ func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
 		"GET /api/apps/:slug returns {app, replicas_status}; the Overview Replicas panel seeds from replicas_status")
 }
 
+// TestTablistKeyboardNavWired guards the WAI-ARIA tablist keyboard pattern on
+// the app-detail settings tabs. The keydown wiring lives inside app-detail.js's
+// mount closure (not jsdom-importable), so pin it by string search: the module
+// must import createTablistNav, attach it to the tab strip, and maintain a
+// roving tabindex per render. The pure resolver + DOM behaviour are unit-tested
+// in internal/ui/jstests/tablist-keys.test.js.
+func TestTablistKeyboardNavWired(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "createTablistNav",
+		"app-detail.js must wire createTablistNav onto the settings tab strip for arrow-key navigation")
+	assertContains(t, "views/app-detail.js", "'tabindex'",
+		"app-detail.js must set a roving tabindex per render so only the active tab is in the page Tab order")
+	assertContains(t, "index.html", `role="tablist"`,
+		"the settings tab strip must keep role=tablist for the keyboard pattern to apply")
+}
+
 // TestRouterErrorBoundaryWired guards the global error boundary. A throw inside
 // a view mount function once blanked the whole dashboard (v0.8.7). The router
 // now catches mount throws and calls an onError callback; app.js must pass one
