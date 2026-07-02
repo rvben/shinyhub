@@ -96,6 +96,49 @@ func (rl *keyedRateLimiter) allow(key string) bool {
 	return true
 }
 
+// blocked reports whether key has already reached the limit within the current
+// window, WITHOUT recording a new event. Pair it with record to count only the
+// events you choose (e.g. failed auth attempts) instead of every request, which
+// is what allow does.
+func (rl *keyedRateLimiter) blocked(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	cutoff := time.Now().Add(-rl.window)
+	n := 0
+	for _, t := range rl.windows[key] {
+		if t.After(cutoff) {
+			n++
+		}
+	}
+	return n >= rl.limit
+}
+
+// record adds one event for key at the current time, pruning that key's aged-out
+// timestamps (and periodically sweeping idle keys). Used with blocked to build
+// failure-only accounting: check blocked before doing work, record only when the
+// work turns out to be an abuse signal.
+func (rl *keyedRateLimiter) record(key string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+	if now.Sub(rl.lastSweep) >= rl.window {
+		rl.sweep(cutoff)
+		rl.lastSweep = now
+	}
+
+	reqs := rl.windows[key]
+	recent := make([]time.Time, 0, len(reqs)+1)
+	for _, t := range reqs {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+	rl.windows[key] = append(recent, now)
+}
+
 // loginRateLimiter retains its name for readability at existing call sites.
 type loginRateLimiter = keyedRateLimiter
 

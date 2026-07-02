@@ -112,6 +112,75 @@ func TestActionRateLimit(t *testing.T) {
 	}
 }
 
+// TestBearerAuthFailureRateLimit verifies that repeated FAILED bearer
+// authentications from one client IP are throttled: after enough 401s the
+// limiter returns 429 instead of continuing to answer 401. This dampens
+// token-guessing / credential-stuffing floods on the API auth path.
+func TestBearerAuthFailureRateLimit(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	var last int
+	for i := 0; i < 31; i++ {
+		req := httptest.NewRequest("GET", "/api/apps", nil)
+		req.Header.Set("Authorization", "Bearer not-a-valid-token")
+		req.RemoteAddr = "203.0.113.9:5555"
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		last = rr.Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated bearer-auth failures from one IP, got %d", last)
+	}
+}
+
+// TestBearerAuthFailure_ValidTokenNeverThrottled verifies that a client
+// presenting a VALID token is never throttled by the auth-failure limiter, no
+// matter how many requests it makes — only 401s count against the limit.
+func TestBearerAuthFailure_ValidTokenNeverThrottled(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass-" + strings.Repeat("x", 16))
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("alice")
+	tok, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 60; i++ {
+		req := httptest.NewRequest("GET", "/api/auth/me", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.RemoteAddr = "203.0.113.10:5555"
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		if rr.Code == http.StatusTooManyRequests {
+			t.Fatalf("valid-token request %d was throttled (429); only failed auths must count", i)
+		}
+	}
+}
+
+// TestBearerAuthFailure_NoAuthHeaderNotCounted verifies that requests with no
+// Authorization header (unauthenticated 401s) do not accumulate against the
+// bearer-auth-failure limiter — that path is covered by the login limiter, and
+// counting it would let cookie-less probes trip an unrelated bucket.
+func TestBearerAuthFailure_NoAuthHeaderNotCounted(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	for i := 0; i < 60; i++ {
+		req := httptest.NewRequest("GET", "/api/apps", nil)
+		req.RemoteAddr = "203.0.113.11:5555"
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		if rr.Code == http.StatusTooManyRequests {
+			t.Fatalf("no-Authorization request %d was throttled (429); only Authorization-bearing failures must count", i)
+		}
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d without credentials: got %d, want 401", i, rr.Code)
+		}
+	}
+}
+
 // TestOAuthLoginRateLimitByIP verifies the OAuth login-start endpoint is rate
 // limited per client IP (20/min) even without an authenticated user.
 func TestOAuthLoginRateLimitByIP(t *testing.T) {
