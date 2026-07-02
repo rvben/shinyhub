@@ -117,6 +117,10 @@ type appStore interface {
 	// boot error plus the tail of the app log). Used when an app's replicas
 	// cannot be brought up so the dashboard/proxy can show the reason + Restart.
 	MarkAppCrashed(slug, reason string) error
+	// LogAuditEvent records a system audit event (nil user). Used to write an
+	// "app_crashed" row when the watcher gives up on a crash-looping app, so the
+	// audit trail has a queryable record of why/when an app went down.
+	LogAuditEvent(db.AuditEventParams)
 	BeginWake(slug string) (bool, error)
 	AbortWake(slug string) error
 	FinishWake(slug string) (bool, error)
@@ -558,6 +562,19 @@ const (
 	crashReasonMaxBytes = 8000
 )
 
+// auditAppCrashed records a system-generated (nil user) "app_crashed" audit
+// event so the audit log has a queryable record of an app going down and why,
+// not just the app row's transient last_error. Best-effort, like all audit
+// writes.
+func (w *Watcher) auditAppCrashed(slug, reason string) {
+	w.store.LogAuditEvent(db.AuditEventParams{
+		Action:       "app_crashed",
+		ResourceType: "app",
+		ResourceID:   slug,
+		Detail:       reason,
+	})
+}
+
 // crashReason builds a short diagnostic for a crashed app: the boot/restart error
 // (when present) followed by the tail of the replica's log, where a Python/R
 // traceback lands. The end of the text - the actual error - is preserved when the
@@ -818,6 +835,7 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 		if cerr := w.store.MarkAppCrashed(slug, reason); cerr != nil {
 			slog.Warn("watcher: mark crashed failed", "slug", slug, "err", cerr)
 		}
+		w.auditAppCrashed(slug, reason)
 		slog.Warn("watcher: app crash-looped; marked crashed", "slug", slug, "index", index, "crashes", count)
 		return
 	}
@@ -962,6 +980,7 @@ func (w *Watcher) reconcileAppStatus(app *db.App) {
 		if err := w.store.MarkAppCrashed(app.Slug, reason); err != nil {
 			slog.Warn("watcher: mark crashed failed", "slug", app.Slug, "err", err)
 		}
+		w.auditAppCrashed(app.Slug, reason)
 		return
 	}
 	want := "running"
