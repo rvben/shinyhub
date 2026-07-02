@@ -2489,7 +2489,23 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // lost-status overlay, and the autoscale status. Shared by the single-app
 // (GET /api/apps/{slug}/metrics) and batch (GET /api/apps/metrics) handlers so
 // both report identical shapes.
+// buildAppMetrics assembles one app's live metrics, fetching its DB replicas
+// and latest autoscale event itself. Used by the single-app metrics endpoint;
+// the batch endpoint prefetches those in bulk and calls buildAppMetricsFrom.
 func (s *Server) buildAppMetrics(slug string, app *db.App) metricsResponse {
+	dbReplicas, _ := s.store.ListReplicas(app.ID)
+	ev, found, err := s.store.LatestAutoscaleEvent(slug)
+	if err != nil {
+		slog.Warn("autoscale status metrics query", "err", err)
+	}
+	return s.buildAppMetricsFrom(slug, app, dbReplicas, ev, found)
+}
+
+// buildAppMetricsFrom builds an app's live metrics from prefetched DB replicas
+// and autoscale event, plus in-memory proxy/manager/sampler state. Splitting
+// the DB reads out lets handleBatchMetrics fetch them for all cards in a few
+// queries instead of three per card.
+func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.Replica, autoscaleEvent db.AuditEvent, autoscaleFound bool) metricsResponse {
 	resp := metricsResponse{Status: app.Status, Replicas: []replicaMetrics{}}
 
 	if s.manager == nil {
@@ -2561,36 +2577,30 @@ func (s *Server) buildAppMetrics(slug string, app *db.App) metricsResponse {
 	// poll would render a lost replica as "stopped" (or omit it when the pool is
 	// empty) and drop the worker-unavailable reason the app envelope derives.
 	// Overlay onto the matching slot when present, else append.
-	if dbReplicas, derr := s.store.ListReplicas(app.ID); derr == nil {
-		for _, rep := range dbReplicas {
-			if rep.Status != db.ReplicaStatusLost {
-				continue
-			}
-			reason := s.lostReplicaReason(rep.Tier)
-			if rep.Index < len(resp.Replicas) {
-				resp.Replicas[rep.Index].Status = string(db.ReplicaStatusLost)
-				resp.Replicas[rep.Index].Reason = reason
-				resp.Replicas[rep.Index].Tier = rep.Tier
-				resp.Replicas[rep.Index].Provider = rep.Provider
-				resp.Replicas[rep.Index].MetricsAvailable = false
-			} else {
-				resp.Replicas = append(resp.Replicas, replicaMetrics{
-					Index:    rep.Index,
-					Status:   string(db.ReplicaStatusLost),
-					Reason:   reason,
-					Tier:     rep.Tier,
-					Provider: rep.Provider,
-					Sessions: -1,
-				})
-			}
+	for _, rep := range dbReplicas {
+		if rep.Status != db.ReplicaStatusLost {
+			continue
+		}
+		reason := s.lostReplicaReason(rep.Tier)
+		if rep.Index < len(resp.Replicas) {
+			resp.Replicas[rep.Index].Status = string(db.ReplicaStatusLost)
+			resp.Replicas[rep.Index].Reason = reason
+			resp.Replicas[rep.Index].Tier = rep.Tier
+			resp.Replicas[rep.Index].Provider = rep.Provider
+			resp.Replicas[rep.Index].MetricsAvailable = false
+		} else {
+			resp.Replicas = append(resp.Replicas, replicaMetrics{
+				Index:    rep.Index,
+				Status:   string(db.ReplicaStatusLost),
+				Reason:   reason,
+				Tier:     rep.Tier,
+				Provider: rep.Provider,
+				Sessions: -1,
+			})
 		}
 	}
 
-	metricsEvent, metricsFound, metricsErr := s.store.LatestAutoscaleEvent(slug)
-	if metricsErr != nil {
-		slog.Warn("autoscale status metrics query", "err", metricsErr)
-	}
-	metricsAS := buildAutoscaleStatus(metricsEvent, metricsFound, s.cfg.Runtime.Autoscale.Cooldown)
+	metricsAS := buildAutoscaleStatus(autoscaleEvent, autoscaleFound, s.cfg.Runtime.Autoscale.Cooldown)
 	resp.AutoscaleStatus = &metricsAS
 
 	return resp
@@ -2609,34 +2619,60 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var slugs []string
+	// Resolve the target apps the caller may view. With ?slugs= the requested
+	// cards are fetched in one query and access-filtered; with no ?slugs= the
+	// visible-apps query already returns only viewable apps.
+	var apps []*db.App
 	if raw := strings.TrimSpace(r.URL.Query().Get("slugs")); raw != "" {
+		var slugs []string
 		for _, s := range strings.Split(raw, ",") {
 			if s = strings.TrimSpace(s); s != "" {
 				slugs = append(slugs, s)
 			}
 		}
-	} else {
-		apps, err := s.store.ListAppsVisibleToUser(u.ID, 1_000_000, 0)
+		fetched, err := s.store.GetAppsBySlugs(slugs)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		for _, a := range apps {
-			slugs = append(slugs, a.Slug)
+		for _, app := range fetched {
+			if ok, verr := s.canViewApp(u, app); verr == nil && ok {
+				apps = append(apps, app)
+			}
+			// unknown or not-viewable slugs are silently skipped
 		}
+	} else {
+		visible, err := s.store.ListAppsVisibleToUser(u.ID, 1_000_000, 0)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		apps = visible
 	}
 
-	out := make(map[string]metricsResponse, len(slugs))
-	for _, slug := range slugs {
-		app, err := s.store.GetAppBySlug(slug)
-		if err != nil {
-			continue // unknown slug: skip rather than fail the whole batch
-		}
-		if ok, err := s.canViewApp(u, app); err != nil || !ok {
-			continue // not visible to this caller (or a lookup error): skip silently
-		}
-		out[slug] = s.buildAppMetrics(slug, app)
+	// Batch the two per-card DB reads (replicas, latest autoscale event) so the
+	// whole poll costs a few queries instead of three per card.
+	appIDs := make([]int64, 0, len(apps))
+	slugs := make([]string, 0, len(apps))
+	for _, app := range apps {
+		appIDs = append(appIDs, app.ID)
+		slugs = append(slugs, app.Slug)
+	}
+	replicasByApp, err := s.store.ListReplicasForApps(appIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	autoscaleBySlug, err := s.store.LatestAutoscaleEventForSlugs(slugs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	out := make(map[string]metricsResponse, len(apps))
+	for _, app := range apps {
+		ev, found := autoscaleBySlug[app.Slug]
+		out[app.Slug] = s.buildAppMetricsFrom(app.Slug, app, replicasByApp[app.ID], ev, found)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"metrics": out})
 }

@@ -632,6 +632,51 @@ func (s *Store) GetApp(slug string) (*App, error) {
 	return s.GetAppBySlug(slug)
 }
 
+// inPlaceholders returns an "?,?,..." fragment and the args slice for an IN
+// clause of n items. The bound DB rewrites `?` to the active dialect. Returns
+// ("", nil) for n==0 so callers can short-circuit rather than emit "IN ()".
+func inPlaceholders[T any](items []T) (string, []any) {
+	if len(items) == 0 {
+		return "", nil
+	}
+	args := make([]any, len(items))
+	ph := make([]byte, 0, len(items)*2)
+	for i, it := range items {
+		if i > 0 {
+			ph = append(ph, ',')
+		}
+		ph = append(ph, '?')
+		args[i] = it
+	}
+	return string(ph), args
+}
+
+// GetAppsBySlugs returns the apps for the given slugs in one query (unknown
+// slugs are simply absent), so the batch metrics endpoint need not call
+// GetAppBySlug per card.
+func (s *Store) GetAppsBySlugs(slugs []string) ([]*App, error) {
+	ph, args := inPlaceholders(slugs)
+	if ph == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumns+deploymentSummarySQL+`
+		FROM apps WHERE slug IN (`+ph+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 func (s *Store) GetAppByID(id int64) (*App, error) {
 	row := s.db.QueryRow(`
 		SELECT `+appColumns+deploymentSummarySQL+`
@@ -2101,6 +2146,50 @@ func (s *Store) LatestAutoscaleEvent(slug string) (AuditEvent, bool, error) {
 	return ev, true, nil
 }
 
+// LatestAutoscaleEventForSlugs returns the single most recent autoscale event
+// per slug in one query (greatest-n-per-group via a window function; supported
+// on SQLite >= 3.25 and Postgres). It is the batch form of LatestAutoscaleEvent
+// for the metrics endpoint. Slugs with no autoscale events are absent from the
+// map.
+func (s *Store) LatestAutoscaleEventForSlugs(slugs []string) (map[string]AuditEvent, error) {
+	ph, args := inPlaceholders(slugs)
+	if ph == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT id, user_id, username, action, resource_type, resource_id,
+		       detail, ip_address, created_at
+		FROM (
+			SELECT ae.id, ae.user_id, u.username, ae.action, ae.resource_type,
+			       ae.resource_id, ae.detail, ae.ip_address, ae.created_at,
+			       ROW_NUMBER() OVER (PARTITION BY ae.resource_id
+			                          ORDER BY ae.created_at DESC, ae.id DESC) AS rn
+			FROM audit_events ae
+			LEFT JOIN users u ON u.id = ae.user_id
+			WHERE ae.resource_type = 'app'
+			  AND ae.resource_id IN (`+ph+`)
+			  AND ae.action IN ('autoscale_scale_up', 'autoscale_scale_down')
+		) t
+		WHERE t.rn = 1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]AuditEvent, len(slugs))
+	for rows.Next() {
+		var ev AuditEvent
+		if err := rows.Scan(
+			&ev.ID, &ev.UserID, &ev.Username,
+			&ev.Action, &ev.ResourceType, &ev.ResourceID,
+			&ev.Detail, &ev.IPAddress, &ev.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out[ev.ResourceID] = ev
+	}
+	return out, rows.Err()
+}
+
 // --- App Environment Variables ---
 
 // AppEnvVar represents a per-app environment variable row.
@@ -2374,6 +2463,39 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
 		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// ListReplicasForApps returns the replicas for many apps in one query, grouped
+// by app ID and ordered by index within each app - the batch form of
+// ListReplicas for the metrics endpoint. Apps with no replicas are simply
+// absent from the map.
+func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error) {
+	ph, args := inPlaceholders(appIDs)
+	if ph == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT app_id, idx, pid, port, status, provider, tier,
+		       endpoint_url, worker_id, app_version, desired_state,
+		       deployment_id, updated_at
+		FROM replicas WHERE app_id IN (`+ph+`) ORDER BY app_id, idx`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[int64][]*Replica, len(appIDs))
+	for rows.Next() {
+		var r Replica
+		var updatedAt int64
+		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
+			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
+			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			return nil, err
+		}
+		r.UpdatedAt = time.Unix(updatedAt, 0)
+		out[r.AppID] = append(out[r.AppID], &r)
 	}
 	return out, rows.Err()
 }
