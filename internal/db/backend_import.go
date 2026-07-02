@@ -188,14 +188,16 @@ func (dst *Store) columnTypes(table string) (map[string]string, error) {
 }
 
 // coerceForColumn converts a value read from SQLite into the form the target
-// column expects. The only mismatch in this schema is timestamps: SQLite stores
-// them as int epochs or text, while the target uses timestamptz. Everything else
-// (ints, floats, text, bytea, null) round-trips unchanged.
+// column expects. Two mismatches exist in this schema: timestamps (SQLite stores
+// int epochs or text; the target uses timestamptz) and booleans (SQLite stores
+// 0/1 integers; the target uses BOOLEAN, e.g. apps.identity_headers). Everything
+// else (ints, floats, text, bytea, null) round-trips unchanged.
 func coerceForColumn(v any, pgType string) (any, error) {
 	if v == nil {
 		return nil, nil
 	}
-	if strings.Contains(pgType, "timestamp") {
+	switch {
+	case strings.Contains(pgType, "timestamp"):
 		switch t := v.(type) {
 		case time.Time:
 			return t, nil
@@ -206,6 +208,15 @@ func coerceForColumn(v any, pgType string) (any, error) {
 				return parsed, nil
 			}
 			return nil, fmt.Errorf("unparseable timestamp %q", t)
+		}
+	case pgType == "boolean":
+		switch b := v.(type) {
+		case bool:
+			return b, nil
+		case int64:
+			return b != 0, nil
+		case string:
+			return b == "1" || strings.EqualFold(b, "true"), nil
 		}
 	}
 	return v, nil

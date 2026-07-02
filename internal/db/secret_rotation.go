@@ -37,12 +37,14 @@ func (s *Store) RotateSecretsTx(reencryptEnv, reencryptCA func([]byte) ([]byte, 
 	var secretsToRotate []envRow
 	for rows.Next() {
 		var r envRow
-		var isSecret bool
+		// is_secret is an integer 0/1 column on both dialects; scan it as an int
+		// (as the other accessors do) rather than a bool, which pgx rejects.
+		var isSecret int
 		if err := rows.Scan(&r.appID, &r.key, &r.val, &isSecret); err != nil {
 			rows.Close()
 			return 0, false, fmt.Errorf("scan env var: %w", err)
 		}
-		if isSecret {
+		if isSecret != 0 {
 			secretsToRotate = append(secretsToRotate, r)
 		}
 	}

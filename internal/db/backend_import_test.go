@@ -50,8 +50,9 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 	alpha, _ := src.GetAppBySlug("alpha")
 
 	// A float column (autoscale_target REAL -> double) with a value that would
-	// perturb under float4, and a text-stored timestamp path via audit events.
-	if _, err := src.DB().Exec(`UPDATE apps SET autoscale_target = 0.8, autoscale_enabled = 1 WHERE id = ?`, alpha.ID); err != nil {
+	// perturb under float4, and identity_headers = 1 (INTEGER in SQLite ->
+	// BOOLEAN in Postgres) so the int->bool coercion on the copy path is covered.
+	if _, err := src.DB().Exec(`UPDATE apps SET autoscale_target = 0.8, autoscale_enabled = 1, identity_headers = 1 WHERE id = ?`, alpha.ID); err != nil {
 		t.Fatal(err)
 	}
 
