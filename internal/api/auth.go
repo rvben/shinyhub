@@ -626,7 +626,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 // Rails et al. use for their double-submit-cookie escape hatch.
 func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOriginPost(r) {
-		http.Error(w, "cross-origin handoff rejected", http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "cross-origin handoff rejected")
 		return
 	}
 
