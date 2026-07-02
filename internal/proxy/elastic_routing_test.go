@@ -66,7 +66,7 @@ func TestElasticRouting_FirstRequest(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200 (loading page), got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Starting app") {
+	if !strings.Contains(rec.Body.String(), LoadingPageSentinel) {
 		t.Error("expected loading page body")
 	}
 
@@ -285,7 +285,7 @@ func TestElasticRouting_ConcurrentAllocate_TOCTOU(t *testing.T) {
 			p.ServeHTTP(rec, req)
 			switch rec.Code {
 			case http.StatusOK:
-				if strings.Contains(rec.Body.String(), "Starting app") {
+				if strings.Contains(rec.Body.String(), LoadingPageSentinel) {
 					atomic.AddInt32(&reservedCount, 1)
 				}
 			case http.StatusServiceUnavailable:
@@ -328,7 +328,85 @@ func TestElasticRouting_PinnedSlotBooting(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("pinned+booting: want 200 (loading), got %d: %q", rec2.Code, rec2.Body.String())
 	}
-	if !strings.Contains(rec2.Body.String(), "Starting app") {
+	if !strings.Contains(rec2.Body.String(), LoadingPageSentinel) {
 		t.Errorf("pinned+booting: expected loading page body, got %q", rec2.Body.String())
+	}
+}
+
+// TestElasticRouting_GroupedNewClientIsBound verifies that a new client that
+// reaches decisionRoute in grouped mode (packing onto an under-capacity worker)
+// is bound in p.clients and counted in assignedClients, so the group cap is
+// enforced correctly. This is the Fix 2 regression guard.
+func TestElasticRouting_GroupedNewClientIsBound(t *testing.T) {
+	const slug = "grpapp"
+	const groupedSize = 2
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("from-backend")) //nolint:errcheck
+	}))
+	defer backend.Close()
+
+	p := New()
+	p.SetPoolMode(slug, config.IsolationGrouped, groupedSize, 3)
+	p.SetSpawnFunc(func(string, int) {}) // no-op spawn; we register manually
+
+	// First client: decisionAllocate reserves slot 0 and returns the loading page.
+	req1 := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+	rec1 := httptest.NewRecorder()
+	p.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request: want 200, got %d", rec1.Code)
+	}
+	if !strings.Contains(rec1.Body.String(), LoadingPageSentinel) {
+		t.Fatalf("first request: expected loading page, got %q", rec1.Body.String())
+	}
+
+	// Register the worker as ready (slot 0).
+	slotID := 0
+	if err := p.RegisterElasticWorker(slug, slotID, backend.URL, nil, 1); err != nil {
+		t.Fatalf("RegisterElasticWorker: %v", err)
+	}
+
+	// Verify slot 0 has assignedClients == 1 after first client bind.
+	p.mu.RLock()
+	ac1 := p.pools[slug].workers[slotID].assignedClients
+	p.mu.RUnlock()
+	if ac1 != 1 {
+		t.Fatalf("after first client: assignedClients = %d, want 1", ac1)
+	}
+
+	// Second client: fresh (no cookies). grouped cap is 2, worker has 1 assigned,
+	// so decide returns decisionRoute. The second client must be forwarded AND bound.
+	req2 := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second request: want 200, got %d: %q", rec2.Code, rec2.Body.String())
+	}
+	if strings.Contains(rec2.Body.String(), LoadingPageSentinel) {
+		t.Error("second request: got loading page; expected forward to backend (decisionRoute)")
+	}
+
+	// assignedClients must be 2 after the second client is routed and bound.
+	p.mu.RLock()
+	ac2 := p.pools[slug].workers[slotID].assignedClients
+	p.mu.RUnlock()
+	if ac2 != 2 {
+		t.Errorf("after second client via decisionRoute: assignedClients = %d, want 2", ac2)
+	}
+
+	// Third client: grouped cap is now full (2/2). decisionAllocate must fire
+	// (not decisionRoute to the full slot, not decisionReject because maxWorkers=3).
+	req3 := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+	rec3 := httptest.NewRecorder()
+	p.ServeHTTP(rec3, req3)
+
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("third request: want 200 (new slot loading page), got %d: %q", rec3.Code, rec3.Body.String())
+	}
+	if !strings.Contains(rec3.Body.String(), LoadingPageSentinel) {
+		t.Errorf("third request: expected loading page for new slot, got %q", rec3.Body.String())
 	}
 }

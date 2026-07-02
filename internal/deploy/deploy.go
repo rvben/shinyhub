@@ -492,7 +492,11 @@ func Run(p Params) (*PoolResult, error) {
 	// are spawned on first request via the proxy spawn callback; there are no
 	// fixed replicas to boot. Return an empty pool result so the caller marks the
 	// app running. Boot errors surface at session time, not at deploy time.
+	// Post-deploy manifest hooks are also skipped here; operators should bake any
+	// setup steps into the app's own startup command instead.
 	if resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession {
+		slog.Info("deploy: elastic mode; skipping fixed-replica boot and post-deploy hooks",
+			"slug", p.Slug, "mode", resolvedMode)
 		return &PoolResult{}, nil
 	}
 

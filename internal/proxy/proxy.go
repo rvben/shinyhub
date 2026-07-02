@@ -155,6 +155,12 @@ const readySuffix = "/.shinyhub/ready"
 // Exported so docs/scaling.md can be guarded against drift from this string.
 const MsgPoolSaturated = "Service temporarily at capacity, please retry."
 
+// LoadingPageSentinel is a string that is always present in the loadingPage
+// HTML body. Exported so tests can assert that a response is the loading page
+// without comparing the full HTML; if the copy changes and the sentinel is
+// removed, the build test fails rather than vacuously passing.
+const LoadingPageSentinel = "Starting app"
+
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
 	index        int
@@ -1185,6 +1191,22 @@ func (p *Proxy) RegisterElasticWorker(slug string, slotID int, targetURL string,
 			rp:           rp,
 		}
 	}
+
+	// Arm grace timers for any clients already bound to this slot that have
+	// never opened a connection (ghost clients: they received the loading page
+	// but did not reconnect before the worker became ready). Without this, such
+	// a client keeps assignedClients == 1 forever because the timer is normally
+	// armed only by clientConnClosed, which requires a prior clientConnOpened.
+	// Arming here at worker-ready (not at reserve/bind time) ensures a slow cold
+	// boot never triggers a premature reclaim: the client gets clientGraceTTL
+	// (15 s) from worker-ready to actually connect. clientConnOpened cancels the
+	// timer on a real connect so an active client is never interrupted.
+	for clientID, cs := range p.clients[slug] {
+		if cs.slotID == slotID && cs.liveConns == 0 && cs.releaseTimer == nil {
+			p.armClientReleaseLocked(slug, clientID)
+		}
+	}
+
 	p.clearWSReady(slug)
 	return nil
 }
@@ -1739,6 +1761,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				wkr = wkr2
+			}
+			// Bind a new client that arrived via decisionRoute without a prior
+			// p.clients entry (grouped mode: a new client packing onto an under-
+			// capacity worker, or the first reconnect of a pinned client before
+			// bindClient has run). Without this, assignedClients is not incremented
+			// and the grouped cap is under-counted, allowing a worker to exceed it.
+			// clientConnOpenedLocked also requires a slot to exist, so bind first.
+			if p.lookupClientSlot(slug, cid) == nil {
+				if p.clients[slug] == nil {
+					p.clients[slug] = make(map[string]*clientSlot)
+				}
+				p.clients[slug][cid] = &clientSlot{slotID: d.slotID}
+				wkr.assignedClients++
 			}
 			wkr.activeConns.Add(1)
 			replicaIndex = wkr.slotID

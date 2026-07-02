@@ -403,3 +403,124 @@ func TestReserveWorker_DrainingWorkerDoesNotCountTowardCeiling(t *testing.T) {
 		t.Error("reserveWorker returned -1 when a draining slot should free up capacity")
 	}
 }
+
+// TestGhostClient_ReclaimedAfterWorkerReady verifies that a client which
+// reserved+bound a slot but never opened a connection (ghost client) is
+// reclaimed via the grace timer armed in RegisterElasticWorker. Without
+// Fix 1, assignedClients stays at 1 forever because clientConnClosed (which
+// arms the timer) is never called when liveConns was always 0.
+func TestGhostClient_ReclaimedAfterWorkerReady(t *testing.T) {
+	old := clientGraceTTL
+	clientGraceTTL = 50 * time.Millisecond
+	t.Cleanup(func() { clientGraceTTL = old })
+
+	const slug = "ghostapp"
+	const clientID = "ghost-c1"
+
+	var terminateCount int
+	var terminateMu sync.Mutex
+	terminateDone := make(chan struct{})
+
+	p := New()
+	p.SetPoolMode(slug, config.IsolationPerSession, 0, 5)
+	p.SetTerminateFunc(func(s string, slotID int) {
+		terminateMu.Lock()
+		terminateCount++
+		terminateMu.Unlock()
+		close(terminateDone)
+	})
+
+	slotID := p.reserveWorker(slug, clientID)
+	if slotID < 0 {
+		t.Fatal("reserveWorker returned -1 unexpectedly")
+	}
+	p.bindClient(slug, clientID, slotID)
+	// Do NOT call clientConnOpened: the client received the loading page but
+	// never reconnected (ghost-client scenario).
+
+	// Registering the worker as ready must arm the grace timer for the ghost client.
+	if err := p.RegisterElasticWorker(slug, slotID, "http://127.0.0.1:19999", nil, 1); err != nil {
+		t.Fatalf("RegisterElasticWorker: %v", err)
+	}
+
+	// Wait past the grace window: terminate should fire exactly once.
+	select {
+	case <-terminateDone:
+		// Good: ghost client was reclaimed.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("terminate was not called within grace window after RegisterElasticWorker")
+	}
+
+	terminateMu.Lock()
+	count := terminateCount
+	terminateMu.Unlock()
+	if count != 1 {
+		t.Errorf("terminate called %d times, want 1", count)
+	}
+
+	// assignedClients must be 0 after reclaim.
+	p.mu.RLock()
+	w := p.pools[slug].workers[slotID]
+	var ac int
+	if w != nil {
+		ac = w.assignedClients
+	}
+	p.mu.RUnlock()
+	if ac != 0 {
+		t.Errorf("assignedClients = %d after ghost reclaim, want 0", ac)
+	}
+}
+
+// TestGhostClient_TimerCancelledByRealConnect verifies that when a ghost
+// client (bound but liveConns==0) opens a real connection within the grace
+// window, the grace timer is cancelled and the worker is not terminated.
+func TestGhostClient_TimerCancelledByRealConnect(t *testing.T) {
+	old := clientGraceTTL
+	clientGraceTTL = 100 * time.Millisecond
+	t.Cleanup(func() { clientGraceTTL = old })
+
+	const slug = "ghostapp2"
+	const clientID = "ghost-c2"
+
+	terminated := make(chan struct{}, 1)
+	p := New()
+	p.SetPoolMode(slug, config.IsolationPerSession, 0, 5)
+	p.SetTerminateFunc(func(s string, slotID int) {
+		select {
+		case terminated <- struct{}{}:
+		default:
+		}
+	})
+
+	slotID := p.reserveWorker(slug, clientID)
+	if slotID < 0 {
+		t.Fatal("reserveWorker returned -1 unexpectedly")
+	}
+	p.bindClient(slug, clientID, slotID)
+	// Do NOT open a connection yet.
+
+	// Worker becomes ready: grace timer is armed for the ghost client.
+	if err := p.RegisterElasticWorker(slug, slotID, "http://127.0.0.1:19998", nil, 1); err != nil {
+		t.Fatalf("RegisterElasticWorker: %v", err)
+	}
+
+	// Real connection arrives within the grace window: must cancel the timer.
+	p.clientConnOpened(slug, clientID)
+
+	// Wait well past the grace TTL; terminate must NOT have fired.
+	select {
+	case <-terminated:
+		t.Error("terminate was called after clientConnOpened cancelled the ghost timer")
+	case <-time.After(400 * time.Millisecond):
+		// Good: no termination fired.
+	}
+
+	// assignedClients must still be 1 (binding is intact, connection is live).
+	p.mu.RLock()
+	w := p.pools[slug].workers[slotID]
+	ac := w.assignedClients
+	p.mu.RUnlock()
+	if ac != 1 {
+		t.Errorf("assignedClients = %d, want 1 (real connection is live)", ac)
+	}
+}

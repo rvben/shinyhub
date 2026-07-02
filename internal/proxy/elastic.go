@@ -248,28 +248,21 @@ func (p *Proxy) clientConnOpened(slug, clientID string) {
 	p.clientConnOpenedLocked(slug, clientID)
 }
 
-// clientConnClosed records that one connection from clientID has closed. When
-// liveConns reaches zero it arms a grace-period timer; if no connection
-// reopens within clientGraceTTL the client's slot is deleted, the worker's
-// assignedClients is decremented, and - when the worker reaches zero assigned
-// clients - p.terminate is dispatched in a goroutine. Caller must NOT hold p.mu.
-func (p *Proxy) clientConnClosed(slug, clientID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+// armClientReleaseLocked arms the grace-period release timer for the named
+// client. It is a no-op when the client slot is absent, when liveConns is
+// non-zero (a real connection is active), or when a timer is already pending.
+//
+// The timer fires after clientGraceTTL: it re-takes the lock, re-checks that
+// liveConns is still zero, removes the client slot, decrements the worker's
+// assignedClients, and dispatches p.terminate (via goroutine) when the worker
+// reaches zero assigned clients.
+//
+// The caller MUST hold p.mu (write lock).
+func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
 	cs := p.lookupClientSlot(slug, clientID)
-	if cs == nil {
+	if cs == nil || cs.liveConns != 0 || cs.releaseTimer != nil {
 		return
 	}
-	if cs.liveConns <= 0 {
-		return // caller misbehavior: more closes than opens; do not go negative or re-arm the timer
-	}
-	cs.liveConns--
-	if cs.liveConns > 0 {
-		return
-	}
-
-	// liveConns just hit zero: arm the grace-period release timer.
 	slotID := cs.slotID
 	cs.releaseTimer = time.AfterFunc(clientGraceTTL, func() {
 		p.mu.Lock()
@@ -303,6 +296,32 @@ func (p *Proxy) clientConnClosed(slug, clientID string) {
 			go term(slug, slotID)
 		}
 	})
+}
+
+// clientConnClosed records that one connection from clientID has closed. When
+// liveConns reaches zero it arms a grace-period timer via armClientReleaseLocked;
+// if no connection reopens within clientGraceTTL the client's slot is deleted,
+// the worker's assignedClients is decremented, and - when the worker reaches
+// zero assigned clients - p.terminate is dispatched in a goroutine.
+// Caller must NOT hold p.mu.
+func (p *Proxy) clientConnClosed(slug, clientID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cs := p.lookupClientSlot(slug, clientID)
+	if cs == nil {
+		return
+	}
+	if cs.liveConns <= 0 {
+		return // caller misbehavior: more closes than opens; do not go negative or re-arm the timer
+	}
+	cs.liveConns--
+	if cs.liveConns > 0 {
+		return
+	}
+
+	// liveConns just hit zero: arm the grace-period release timer.
+	p.armClientReleaseLocked(slug, clientID)
 }
 
 // ReleaseReservation removes a booting slot that failed to spawn. It also

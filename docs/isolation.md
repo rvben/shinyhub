@@ -249,6 +249,16 @@ whose worker is terminated will be reallocated to a new worker on their next
 request (another cold start). Set this to reclaim long-lived workers from
 abandoned sessions.
 
+**Not-yet-connected clients are reclaimed after a grace period.** When a new
+client triggers a cold start (loading page), the worker slot is held for that
+client. If the client never opens a real connection after the worker becomes
+ready (e.g. the tab was closed), the slot is automatically released 15 seconds
+after the worker finishes booting. This prevents abandoned cold-start flows
+from leaking worker capacity. A client that does connect within those 15 seconds
+cancels the reclaim and proceeds normally. `max_session_lifetime_secs` is
+therefore not the only reclaim path; the 15-second grace window handles the
+"seen the loading page, then disappeared" case independently.
+
 **Elastic workers are ephemeral.** They are NOT re-adopted on a server
 restart. The elastic pool starts empty after every restart. Connected clients
 will cold-start a new worker on their next request.
