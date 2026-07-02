@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io/fs"
 	"net/http"
 	"path"
 	"regexp"
@@ -108,17 +109,45 @@ func cspHashSource(body string) string {
 	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
 }
 
-// CSPInlineSources returns the CSP source expressions for the inline <script>
-// and <style> blocks RenderIndex emits for p, so a strict Content-Security-Policy
-// can allow exactly those blocks instead of 'unsafe-inline'. The style slice is
-// empty when no primary color is configured. Because it reuses the same builders
-// RenderIndex uses, the hashes always match the served bytes.
+// shellInlineScriptRe matches a bodied <script> block (external scripts are
+// <script src=... defer>, whose tag has attributes and so never matches).
+var shellInlineScriptRe = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
+
+// StaticShellInlineScriptSources returns the CSP hash sources for the inline
+// <script> blocks baked into the embedded index.html shell (e.g. the pre-paint
+// theme bootstrap). These are served in EVERY deployment - branded or not - so a
+// strict CSP must always allow them, independent of branding. Reading the shell
+// that is actually served keeps the hashes from drifting from the served bytes.
+func StaticShellInlineScriptSources() ([]string, error) {
+	raw, err := fs.ReadFile(Static(), "index.html")
+	if err != nil {
+		return nil, fmt.Errorf("ui: read shell for CSP: %w", err)
+	}
+	var out []string
+	for _, m := range shellInlineScriptRe.FindAllSubmatch(raw, -1) {
+		out = append(out, cspHashSource(string(m[1])))
+	}
+	return out, nil
+}
+
+// CSPInlineSources returns the CSP source expressions for every inline <script>
+// and <style> block in the shell RenderIndex emits for p: the static inline
+// scripts baked into index.html plus the branding <script>/<style> RenderIndex
+// injects. A strict Content-Security-Policy can then allow exactly those blocks
+// instead of 'unsafe-inline'. The style slice is empty when no primary color is
+// configured. Because it reuses the same builders/bytes RenderIndex serves, the
+// hashes always match. (The branding-inactive path serves the raw shell and uses
+// StaticShellInlineScriptSources alone - see cmd/shinyhub.)
 func CSPInlineSources(p Public) (scriptSources, styleSources []string, err error) {
+	scriptSources, err = StaticShellInlineScriptSources()
+	if err != nil {
+		return nil, nil, err
+	}
 	script, err := brandingInlineScript(p)
 	if err != nil {
 		return nil, nil, err
 	}
-	scriptSources = []string{cspHashSource(script)}
+	scriptSources = append(scriptSources, cspHashSource(script))
 	if style, ok := brandingInlineStyle(p); ok {
 		styleSources = []string{cspHashSource(style)}
 	}
