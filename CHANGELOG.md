@@ -68,6 +68,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.9.3](https://github.com/rvben/shinyhub/compare/v0.9.2...v0.9.3) - 2026-07-02
+
+### Added
+
+- **ui**: WAI-ARIA keyboard navigation for the app-detail tablist ([573c88f](https://github.com/rvben/shinyhub/commit/573c88f9bb2f485c7d9397d9576d8d18ef888803))
+- **api**: rate-limit failed bearer/token auth per client IP ([c71f769](https://github.com/rvben/shinyhub/commit/c71f769413a4bf7a5b6d8fe63aab1b1af9a88f80))
+
+### Fixed
+
+- **api**: make auth-failure limiter check-and-consume atomic ([24222f6](https://github.com/rvben/shinyhub/commit/24222f6c296a0e8689161623cfc5819f50a00461))
+- **ui**: manual activation for tablist keyboard nav so arrows keep working ([9d35dd1](https://github.com/rvben/shinyhub/commit/9d35dd16a002fb1c165adf83ac675efc5743a4f6))
+- **api**: never throttle a valid token on the auth-failure limiter ([a4a1019](https://github.com/rvben/shinyhub/commit/a4a1019c51fa4a3f9e29f9efb6fe2a60ac5b049d))
+
+### Performance
+
+- **proxy**: move elastic accounting off the global write lock ([1615f38](https://github.com/rvben/shinyhub/commit/1615f38746b0214f5bef698c4b68714e804edcb6))
+
 ## [0.9.2](https://github.com/rvben/shinyhub/compare/v0.9.1...v0.9.2) - 2026-07-02
 
 ### Added
