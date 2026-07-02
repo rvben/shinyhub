@@ -1445,7 +1445,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// Re-adopt any processes that survived a server restart. Must run after
 		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
 		// not a half-applied one.
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled())
+		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation)
 		// Stop any native processes in the Manager that belong to elastic-mode
 		// apps. Elastic workers are ephemeral and must not be re-adopted; the
 		// pool starts empty and clients trigger fresh spawns on next request.

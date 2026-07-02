@@ -433,7 +433,10 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		// Elastic apps (grouped or per_session) are demand-driven: workers are
 		// spawned on the first incoming request and are never pre-warmed. Skip
 		// warm restore entirely; the app stays hibernated and wakes on access.
-		if isElasticIsolation(app.WorkerIsolation) {
+		// Resolve once so the guard and SetPoolMode use the same effective mode
+		// (fleet default applies when the per-app field is empty).
+		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+		if isElasticIsolation(resolvedIso) {
 			continue
 		}
 
@@ -475,7 +478,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		// warm pre-boot above), but set mode unconditionally so the pool is
 		// correctly configured for any future isolation change.
 		w.prx.SetPoolMode(app.Slug,
-			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)),
+			config.WorkerIsolationMode(resolvedIso),
 			app.WorkerGroupedSize, app.WorkerMaxWorkers)
 
 		booted := true
@@ -1440,16 +1443,19 @@ func (w *Watcher) driveWakingApp(slug string) {
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 		w.prx.SetPoolAppID(slug, app.ID)
 		w.prx.SetPoolIdentityHeaders(slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
+		// Resolve once so SetPoolMode and the elastic boot-skip guard both use the
+		// same effective isolation (fleet default applies when per-app field is empty).
+		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
 		// SetPoolMode propagates the isolation strategy so the proxy routes with
 		// the correct algorithm when the first post-wake request arrives.
 		w.prx.SetPoolMode(slug,
-			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)),
+			config.WorkerIsolationMode(resolvedIso),
 			app.WorkerGroupedSize, app.WorkerMaxWorkers)
 
 		// Phase 1: elastic apps (grouped or per_session) are demand-driven. Skip
 		// the replica boot loop; FinishWake transitions the app to running and
 		// the proxy pool is ready to spawn workers on first request.
-		if !isElasticIsolation(app.WorkerIsolation) {
+		if !isElasticIsolation(resolvedIso) {
 			deploymentID := deployments[0].ID
 			// Replicas persisted as suspended take the warm Resume path; the rest
 			// (and any resume failure) cold-boot. Reading the rows once here keeps the

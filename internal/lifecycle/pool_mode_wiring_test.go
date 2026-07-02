@@ -183,6 +183,118 @@ func TestWake_Multiplex_StillBootsReplicas(t *testing.T) {
 	}
 }
 
+// TestWake_FleetDefaultElastic_SkipsReplicaBoot verifies that an app whose
+// per-app WorkerIsolation field is empty inherits the fleet default. When the
+// fleet default is "per_session", driveWakingApp must treat it as elastic:
+// no replica is booted, the app transitions to running, and the proxy pool
+// mode is set to per_session.
+func TestWake_FleetDefaultElastic_SkipsReplicaBoot(t *testing.T) {
+	prx := newModeRecordingProxy()
+	st := newFakeStore(
+		map[string]*db.App{"inherit-app": {
+			ID:               10,
+			Slug:             "inherit-app",
+			Status:           "hibernated",
+			Replicas:         2,
+			WorkerIsolation:  "", // empty: inherits fleet default
+			WorkerMaxWorkers: 5,
+		}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+
+	var deployCount int
+	var deployMu sync.Mutex
+	w := newPoolModeWatcher(
+		Config{
+			RestartMaxAttempts:     5,
+			DefaultWorkerIsolation: "per_session", // fleet default makes app elastic
+		},
+		prx,
+		st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			deployMu.Lock()
+			deployCount++
+			deployMu.Unlock()
+			return &deploy.Result{Index: idx, PID: 99, Port: 20099}, nil
+		},
+	)
+
+	w.WakeTrigger("inherit-app")
+	waitNotWaking(t, st, "inherit-app")
+
+	// The deploy function must NOT have been called: resolved isolation is elastic.
+	deployMu.Lock()
+	got := deployCount
+	deployMu.Unlock()
+	if got != 0 {
+		t.Errorf("deployFn called %d time(s); fleet-default-elastic wake must skip replica boot", got)
+	}
+
+	// App must be running: FinishWake committed the CAS.
+	st.mu.Lock()
+	status := st.apps["inherit-app"].Status
+	st.mu.Unlock()
+	if status != "running" {
+		t.Errorf("app status after fleet-default-elastic wake = %q, want running", status)
+	}
+
+	// Pool mode must be per_session (resolved from fleet default).
+	prx.mu.Lock()
+	mode := prx.poolModes["inherit-app"]
+	prx.mu.Unlock()
+	if mode != config.IsolationPerSession {
+		t.Errorf("pool mode = %q, want %q", mode, config.IsolationPerSession)
+	}
+}
+
+// TestRestoreWarm_FleetDefaultElastic_Skipped verifies that RestoreWarm skips
+// an app whose per-app WorkerIsolation is empty but whose resolved mode (via
+// fleet default) is elastic. No claim is taken, no deploy function is called,
+// and the app remains hibernated.
+func TestRestoreWarm_FleetDefaultElastic_Skipped(t *testing.T) {
+	prx := newModeRecordingProxy()
+	st := newFakeStore(
+		map[string]*db.App{"inherit-hiber": {
+			ID:              20,
+			Slug:            "inherit-hiber",
+			Status:          "hibernated",
+			Replicas:        1,
+			WorkerIsolation: "", // empty: inherits fleet default
+		}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	st.mu.Lock()
+	st.forceHibernatedList = []*db.App{st.apps["inherit-hiber"]}
+	st.mu.Unlock()
+
+	var deployCount int
+	w := newPoolModeWatcher(
+		Config{
+			RestartMaxAttempts:     5,
+			DefaultWorkerIsolation: "per_session", // fleet default makes app elastic
+		},
+		prx,
+		st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			deployCount++
+			return &deploy.Result{Index: idx, PID: 77, Port: 20077}, nil
+		},
+	)
+
+	w.RestoreWarm(context.Background())
+
+	if deployCount != 0 {
+		t.Errorf("RestoreWarm called deployFn %d time(s) for fleet-default-elastic app; want 0", deployCount)
+	}
+	// App stays hibernated: the elastic skip fires before any claim is taken.
+	st.mu.Lock()
+	status := st.apps["inherit-hiber"].Status
+	st.mu.Unlock()
+	if status != "hibernated" {
+		t.Errorf("app status after RestoreWarm = %q, want hibernated", status)
+	}
+}
+
 // TestRestoreWarm_ElasticSkipped verifies that RestoreWarm skips elastic apps
 // entirely (no claim taken, no deployFn called) so they remain hibernated.
 func TestRestoreWarm_ElasticSkipped(t *testing.T) {

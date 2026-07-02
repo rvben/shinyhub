@@ -419,7 +419,7 @@ func TestRecoverProcesses_ElasticAppSetsUpPoolAndStaysRunning(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), rt)
 	prx := proxy.New()
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
 
 	// App must still be "running" - an empty elastic pool is a valid running state.
 	got, err := store.GetAppBySlug("elasticpool")
@@ -428,6 +428,44 @@ func TestRecoverProcesses_ElasticAppSetsUpPoolAndStaysRunning(t *testing.T) {
 	}
 	if got.Status != "running" {
 		t.Errorf("elastic app status = %q after recovery, want \"running\"", got.Status)
+	}
+
+	_ = app // used for setup
+}
+
+// TestRecoverProcesses_FleetDefaultElastic_SetsUpPoolAndStaysRunning verifies
+// the bug: an app with an empty per-app WorkerIsolation that inherits an
+// elastic fleet default ("per_session") must NOT fall through to the replica-
+// adoption loop. Without the fix, isElasticIsolation("") returns false, the
+// replica loop runs, finds no rows, and marks the app stopped. With the fix,
+// the resolved mode ("per_session") fires the elastic branch, the proxy pool
+// is configured, and the app stays "running".
+func TestRecoverProcesses_FleetDefaultElastic_SetsUpPoolAndStaysRunning(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "inheritpool")
+
+	// Set worker_isolation to '' (empty = inherit fleet default). The column
+	// default is 'multiplex', so we must set it explicitly to simulate an app
+	// that defers to the fleet DefaultWorkerIsolation.
+	_, err := store.DB().Exec(`UPDATE apps SET status='running', worker_max_workers=5, worker_isolation='' WHERE slug='inheritpool'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &recordingRuntime{}
+	mgr := process.NewManager(t.TempDir(), rt)
+	prx := proxy.New()
+
+	// Pass "per_session" as the fleet default; the per-app field is empty.
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "per_session")
+
+	// App must still be "running": the elastic pool is ready, no replicas needed.
+	got, err := store.GetAppBySlug("inheritpool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "running" {
+		t.Errorf("fleet-default-elastic app status = %q after recovery, want \"running\"", got.Status)
 	}
 
 	_ = app // used for setup

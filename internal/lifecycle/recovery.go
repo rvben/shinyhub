@@ -125,7 +125,7 @@ type ContainerLister interface {
 // max_sessions_per_replica == 0. identityGlobal is the global
 // auth.identity_headers enabled flag used to resolve each app's effective
 // identity-forwarding setting.
-func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool) {
+func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool, defaultWorkerIsolation string) {
 	apps, err := store.ListRunningApps()
 	if err != nil {
 		slog.Error("process recovery: list running apps", "err", err)
@@ -193,9 +193,12 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		// the elastic proxy pool and keep the app status as "running" so the
 		// first incoming request can trigger a fresh spawn. Skip the normal
 		// replica-adoption loop entirely.
-		if isElasticIsolation(app.WorkerIsolation) {
+		// Resolve once so the guard and SetPoolMode use the same effective mode
+		// (fleet default applies when the per-app field is empty).
+		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
+		if isElasticIsolation(resolvedIso) {
 			prx.SetPoolMode(app.Slug,
-				config.WorkerIsolationMode(app.WorkerIsolation),
+				config.WorkerIsolationMode(resolvedIso),
 				app.WorkerGroupedSize,
 				app.WorkerMaxWorkers)
 			prx.SetPoolAppID(app.Slug, app.ID)
