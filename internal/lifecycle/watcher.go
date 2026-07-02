@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
@@ -45,6 +46,10 @@ type Config struct {
 	// When the count exceeds it, the watcher evicts the oldest-suspended replicas
 	// (stop them; they cold-boot on next wake). 0 disables the cap.
 	MaxSuspended int
+	// DefaultWorkerIsolation is the fleet-level fallback isolation mode from
+	// config.Runtime.DefaultWorkerIsolation, used to resolve each app's
+	// effective isolation on wake when the per-app field is empty.
+	DefaultWorkerIsolation string
 }
 
 // replicaKey uniquely identifies a single replica within a slug.
@@ -89,6 +94,11 @@ type proxyBackend interface {
 	// Called alongside SetPoolSize and SetPoolCap wherever the app object is
 	// available.
 	SetPoolIdentityHeaders(slug string, enabled bool)
+	// SetPoolMode configures the worker-isolation mode for slug's pool.
+	// groupedSize and maxWorkers are used only when mode is grouped or
+	// per_session; they are ignored for multiplex (pass zero). Creates the
+	// pool (size 1) if absent, mirroring SetPoolCap.
+	SetPoolMode(slug string, mode config.WorkerIsolationMode, groupedSize, maxWorkers int)
 }
 
 // MetricsRecorder records lifecycle business metrics. A nil recorder disables
@@ -420,6 +430,16 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			continue
 		}
 
+		// Elastic apps (grouped or per_session) are demand-driven: workers are
+		// spawned on the first incoming request and are never pre-warmed. Skip
+		// warm restore entirely; the app stays hibernated and wakes on access.
+		// Resolve once so the guard and SetPoolMode use the same effective mode
+		// (fleet default applies when the per-app field is empty).
+		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+		if isElasticIsolation(resolvedIso) {
+			continue
+		}
+
 		// Claim the app so a concurrent user wake (WakeTrigger -> BeginWake) cannot
 		// double-boot it. CAS hibernated->waking; if it fails another path already
 		// owns the wake (or the app is no longer hibernated) - leave it to them.
@@ -454,6 +474,12 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		w.prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 		w.prx.SetPoolAppID(app.Slug, app.ID)
 		w.prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
+		// SetPoolMode: warm restore is a multiplex-only path (elastic apps skip
+		// warm pre-boot above), but set mode unconditionally so the pool is
+		// correctly configured for any future isolation change.
+		w.prx.SetPoolMode(app.Slug,
+			config.WorkerIsolationMode(resolvedIso),
+			app.WorkerGroupedSize, app.WorkerMaxWorkers)
 
 		booted := true
 		for i := 0; i < app.Replicas; i++ {
@@ -1417,57 +1443,70 @@ func (w *Watcher) driveWakingApp(slug string) {
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 		w.prx.SetPoolAppID(slug, app.ID)
 		w.prx.SetPoolIdentityHeaders(slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
+		// Resolve once so SetPoolMode and the elastic boot-skip guard both use the
+		// same effective isolation (fleet default applies when per-app field is empty).
+		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+		// SetPoolMode propagates the isolation strategy so the proxy routes with
+		// the correct algorithm when the first post-wake request arrives.
+		w.prx.SetPoolMode(slug,
+			config.WorkerIsolationMode(resolvedIso),
+			app.WorkerGroupedSize, app.WorkerMaxWorkers)
 
-		deploymentID := deployments[0].ID
-		// Replicas persisted as suspended take the warm Resume path; the rest
-		// (and any resume failure) cold-boot. Reading the rows once here keeps the
-		// per-replica goroutines lock-free.
-		suspendedByIdx := make(map[int]bool)
-		if reps, lerr := w.store.ListReplicas(app.ID); lerr == nil {
-			for _, r := range reps {
-				if r.Status == db.ReplicaStatusSuspended {
-					suspendedByIdx[r.Index] = true
+		// Phase 1: elastic apps (grouped or per_session) are demand-driven. Skip
+		// the replica boot loop; FinishWake transitions the app to running and
+		// the proxy pool is ready to spawn workers on first request.
+		if !isElasticIsolation(resolvedIso) {
+			deploymentID := deployments[0].ID
+			// Replicas persisted as suspended take the warm Resume path; the rest
+			// (and any resume failure) cold-boot. Reading the rows once here keeps the
+			// per-replica goroutines lock-free.
+			suspendedByIdx := make(map[int]bool)
+			if reps, lerr := w.store.ListReplicas(app.ID); lerr == nil {
+				for _, r := range reps {
+					if r.Status == db.ReplicaStatusSuspended {
+						suspendedByIdx[r.Index] = true
+					}
 				}
+			} else {
+				slog.Warn("watcher: list replicas for wake failed", "slug", slug, "err", lerr)
 			}
-		} else {
-			slog.Warn("watcher: list replicas for wake failed", "slug", slug, "err", lerr)
-		}
-		var wg sync.WaitGroup
-		var started atomic.Int32
-		for i := 0; i < app.Replicas; i++ {
-			wg.Add(1)
-			go func(idx int) {
-				defer wg.Done()
-				res, err := w.wakeReplica(slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
-				if err != nil {
-					slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
-					return
-				}
-				pid, port := res.PID, res.Port
-				if err := w.store.UpsertReplica(db.UpsertReplicaParams{
-					AppID:        app.ID,
-					Index:        idx,
-					PID:          &pid,
-					Port:         &port,
-					Status:       "running",
-					Provider:     res.Provider,
-					Tier:         res.Tier,
-					EndpointURL:  res.EndpointURL,
-					WorkerID:     res.WorkerID,
-					AppVersion:   deployments[0].Version,
-					DesiredState: "running",
-					DeploymentID: &deploymentID,
-				}); err != nil {
-					slog.Warn("watcher: persist woken replica failed", "slug", slug, "index", idx, "err", err)
-				}
-				started.Add(1)
-			}(i)
-		}
-		wg.Wait()
-		if started.Load() == 0 {
-			// No replica came up; the deferred guard reverts waking -> hibernated
-			// so a later request retries instead of being stuck in waking.
-			return
+			var wg sync.WaitGroup
+			var started atomic.Int32
+			for i := 0; i < app.Replicas; i++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					res, err := w.wakeReplica(slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
+					if err != nil {
+						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
+						return
+					}
+					pid, port := res.PID, res.Port
+					if err := w.store.UpsertReplica(db.UpsertReplicaParams{
+						AppID:        app.ID,
+						Index:        idx,
+						PID:          &pid,
+						Port:         &port,
+						Status:       "running",
+						Provider:     res.Provider,
+						Tier:         res.Tier,
+						EndpointURL:  res.EndpointURL,
+						WorkerID:     res.WorkerID,
+						AppVersion:   deployments[0].Version,
+						DesiredState: "running",
+						DeploymentID: &deploymentID,
+					}); err != nil {
+						slog.Warn("watcher: persist woken replica failed", "slug", slug, "index", idx, "err", err)
+					}
+					started.Add(1)
+				}(i)
+			}
+			wg.Wait()
+			if started.Load() == 0 {
+				// No replica came up; the deferred guard reverts waking -> hibernated
+				// so a later request retries instead of being stuck in waking.
+				return
+			}
 		}
 		// Finalize waking -> running via a conditional CAS. If a concurrent
 		// stop/delete moved the app off waking during the deploy, FinishWake wins

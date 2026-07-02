@@ -179,6 +179,8 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 	s.prx.SetPoolSize(slug, poolSize)
 	s.prx.SetPoolAppID(slug, appID)
 	s.prx.SetPoolCap(slug, maxSess)
+	// SetPoolMode not called here: poolsync reconciles replica membership
+	// from the DB on recovery/attach. Mode is set by recovery.go on startup.
 	// Resolve the per-app tri-state column against this instance's global flag.
 	// NULL inherits global; an explicit false or true overrides it.
 	s.prx.SetPoolIdentityHeaders(slug, s.identityGlobal && (identityCol == nil || *identityCol))

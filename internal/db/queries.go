@@ -534,6 +534,13 @@ type App struct {
 	// CrashedAt is the Unix-epoch seconds of the transition into "crashed", or
 	// 0 when the app is not crashed. Cleared alongside LastError on (re)start.
 	CrashedAt int64 `json:"crashed_at,omitempty"`
+	// WorkerIsolation is the session-isolation mode: "multiplex" (default),
+	// "grouped", or "per_session". Non-multiplex modes are demand-driven and
+	// single-node only in Phase 1.
+	WorkerIsolation              string `json:"worker_isolation"`
+	WorkerGroupedSize            int    `json:"worker_grouped_size"`
+	WorkerMaxWorkers             int    `json:"worker_max_workers"`
+	WorkerMaxSessionLifetimeSecs int    `json:"worker_max_session_lifetime_secs"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -575,7 +582,9 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
-		       last_error, crashed_at, description, icon_mime,`
+		       last_error, crashed_at, description, icon_mime,
+		       worker_isolation, worker_grouped_size, worker_max_workers,
+		       worker_max_session_lifetime_secs,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -2627,6 +2636,15 @@ type ApplyAppManifestSettingsParams struct {
 	AutoscaleMinReplicas int
 	AutoscaleMaxReplicas int
 	AutoscaleTarget      float64
+
+	SetWorkerIsolation           bool
+	WorkerIsolation              string
+	SetWorkerGroupedSize         bool
+	WorkerGroupedSize            int
+	SetWorkerMaxWorkers          bool
+	WorkerMaxWorkers             int
+	SetWorkerMaxSessionLifetime  bool
+	WorkerMaxSessionLifetimeSecs int
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -2727,6 +2745,39 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 		}
 	}
 
+	if p.SetWorkerIsolation {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_isolation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerIsolation, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_isolation: %w", err)
+		}
+	}
+	if p.SetWorkerGroupedSize {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_grouped_size = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerGroupedSize, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_grouped_size: %w", err)
+		}
+	}
+	if p.SetWorkerMaxWorkers {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_workers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxWorkers, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_max_workers: %w", err)
+		}
+	}
+	if p.SetWorkerMaxSessionLifetime {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxSessionLifetimeSecs, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -2764,6 +2815,15 @@ type PatchAppSettingsParams struct {
 
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
+
+	SetWorkerIsolation           bool
+	WorkerIsolation              string
+	SetWorkerGroupedSize         bool
+	WorkerGroupedSize            int
+	SetWorkerMaxWorkers          bool
+	WorkerMaxWorkers             int
+	SetWorkerMaxSessionLifetime  bool
+	WorkerMaxSessionLifetimeSecs int
 }
 
 // PatchAppSettings applies any subset of the user-editable app settings in a
@@ -2863,6 +2923,38 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			return "", 0, nil, nil, fmt.Errorf("update min_warm_replicas: %w", err)
 		}
 	}
+	if p.SetWorkerIsolation {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_isolation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerIsolation, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_isolation: %w", err)
+		}
+	}
+	if p.SetWorkerGroupedSize {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_grouped_size = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerGroupedSize, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_grouped_size: %w", err)
+		}
+	}
+	if p.SetWorkerMaxWorkers {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_workers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxWorkers, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_max_workers: %w", err)
+		}
+	}
+	if p.SetWorkerMaxSessionLifetime {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerMaxSessionLifetimeSecs, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", 0, nil, nil, fmt.Errorf("commit: %w", err)
@@ -2920,6 +3012,8 @@ func scanApp(s scanner) (*App, error) {
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime,
+		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
+		&a.WorkerMaxSessionLifetimeSecs,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {

@@ -1204,6 +1204,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		Clustered:                    isClustered(cfg),
 		InstanceID:                   cfg.Server.InstanceID,
 		MaxSuspended:                 cfg.Runtime.Snapshot.MaxSuspended,
+		DefaultWorkerIsolation:       cfg.Runtime.DefaultWorkerIsolation,
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 	watcher.SetResume(resumeFn)
@@ -1228,6 +1229,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// upstream error so a dead/hibernated replica is woken rather than 502'd,
 	// in single-node and clustered deployments alike.
 	prx.SetWakeTrigger(watcher.WakeTrigger)
+
+	// Wire demand-driven worker spawn and terminate callbacks for elastic
+	// isolation pools (per_session / grouped). The spawner boots one native
+	// worker per slot and registers it with the proxy; the terminate callback
+	// is called when all assigned clients disconnect (after the grace window).
+	elasticSpawner := &lifecycle.ElasticSpawner{
+		Store:      store,
+		Manager:    mgr,
+		Proxy:      prx,
+		RuntimeCfg: cfg.Runtime,
+	}
+	prx.SetSpawnFunc(func(slug string, slotID int) {
+		go elasticSpawner.Spawn(slug, slotID)
+	})
+	prx.SetTerminateFunc(elasticSpawner.Terminate)
 
 	// Let the proxy render a clear status page (instead of the endless loading
 	// spinner) when a request hits an app that is crashed or stopped, surfacing
@@ -1429,7 +1445,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// Re-adopt any processes that survived a server restart. Must run after
 		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
 		// not a half-applied one.
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled())
+		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation)
+		// Stop any native processes in the Manager that belong to elastic-mode
+		// apps. Elastic workers are ephemeral and must not be re-adopted; the
+		// pool starts empty and clients trigger fresh spawns on next request.
+		lifecycle.ReapElasticOrphans(store, mgr)
 		// Remove ShinyHub-managed containers no live replica re-adopted.
 		if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
 			lifecycle.SweepOrphanContainers(mgr, sweeper)

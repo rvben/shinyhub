@@ -1628,3 +1628,60 @@ func TestAppsSet_MinWarmReplicas(t *testing.T) {
 		t.Errorf("expected max_sessions_per_replica to be absent when only min_warm_replicas changed")
 	}
 }
+
+// TestAppsSet_IsolationPopulatesPayload asserts that --isolation puts
+// worker_isolation into the JSON payload sent to the server.
+func TestAppsSet_IsolationPopulatesPayload(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo",
+		"--isolation", "grouped",
+		"--grouped-size", "5",
+		"--max-workers", "3",
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := body["worker_isolation"]; got != "grouped" {
+		t.Errorf("expected worker_isolation=grouped, got %v", got)
+	}
+	if got := body["worker_grouped_size"]; got != float64(5) {
+		t.Errorf("expected worker_grouped_size=5, got %v", got)
+	}
+	if got := body["worker_max_workers"]; got != float64(3) {
+		t.Errorf("expected worker_max_workers=3, got %v", got)
+	}
+	if _, present := body["worker_max_session_lifetime_secs"]; present {
+		t.Errorf("expected worker_max_session_lifetime_secs to be absent when not set")
+	}
+}
+
+// TestAppsSet_MaxSessionLifetimePopulatesPayload asserts that
+// --max-session-lifetime puts worker_max_session_lifetime_secs in the payload.
+func TestAppsSet_MaxSessionLifetimePopulatesPayload(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--max-session-lifetime", "3600"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := body["worker_max_session_lifetime_secs"]; got != float64(3600) {
+		t.Errorf("expected worker_max_session_lifetime_secs=3600, got %v", got)
+	}
+	if _, present := body["worker_isolation"]; present {
+		t.Errorf("expected worker_isolation to be absent when only max-session-lifetime set")
+	}
+}

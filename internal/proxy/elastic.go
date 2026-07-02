@@ -1,0 +1,394 @@
+package proxy
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/proxytrust"
+)
+
+// clientSlot tracks the live state of one client's binding to an elastic worker.
+// It is stored in p.clients[slug][clientID] and mutated only under p.mu.
+type clientSlot struct {
+	slotID       int
+	liveConns    int
+	releaseTimer *time.Timer
+}
+
+// clientGraceTTL is the grace window between the last connection close and
+// worker retirement. A var (not const) so tests can shorten it to milliseconds.
+var clientGraceTTL = 15 * time.Second
+
+// clientCookiePrefix is the name prefix for the per-slug client-id cookie.
+// The full name is clientCookiePrefix + slug.
+const clientCookiePrefix = "shinyhub_cid_"
+
+// signClientValue returns the signed client-cookie value "<idhex>.<hmac16>".
+// The HMAC-SHA256 binds slug and idhex so a value cannot be replayed across
+// apps or with a modified id.
+func signClientValue(key []byte, slug, idhex string) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(slug))
+	mac.Write([]byte{0x00})
+	mac.Write([]byte(idhex))
+	return idhex + "." + hex.EncodeToString(mac.Sum(nil))[:16]
+}
+
+// verifyClientValue parses and authenticates a signed client-cookie value.
+// Returns (idhex, true) when the value has the expected format and the HMAC
+// matches; otherwise returns ("", false).
+func verifyClientValue(key []byte, slug, value string) (string, bool) {
+	idhex, _, found := strings.Cut(value, ".")
+	if !found {
+		return "", false
+	}
+	// Recompute the expected signed form and compare with hmac.Equal to
+	// prevent timing-based side-channel attacks.
+	expected := signClientValue(key, slug, idhex)
+	if !hmac.Equal([]byte(value), []byte(expected)) {
+		return "", false
+	}
+	return idhex, true
+}
+
+// clientID returns the stable client identifier for this request and slug.
+// When the request carries a valid signed (or, in unsigned mode, bare) cid
+// cookie the stored id is returned with isNew=false. When absent or tampered,
+// a fresh random 128-bit id (32 hex chars) is returned with isNew=true.
+func (p *Proxy) clientID(r *http.Request, slug string) (id string, isNew bool) {
+	cookieName := clientCookiePrefix + slug
+	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
+		if key := p.stickySecretBytes(); len(key) > 0 {
+			if idhex, ok := verifyClientValue(key, slug, c.Value); ok {
+				return idhex, false
+			}
+			// Tampered or invalid - fall through to generate a new id.
+		} else {
+			// Unsigned mode: accept a bare 32-hex-char id (no signature).
+			if len(c.Value) == 32 {
+				return c.Value, false
+			}
+		}
+	}
+
+	// Generate a fresh random 128-bit id.
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand failure is extremely rare; panic is appropriate here
+		// because the system's entropy source is broken.
+		panic("proxy: crypto/rand failure: " + err.Error())
+	}
+	return hex.EncodeToString(buf), true
+}
+
+// setClientCookie writes the client-id cookie onto w. The cookie value is
+// signed when a sticky secret is configured; otherwise the bare id is stored.
+// Cookie attributes (Path, HttpOnly, SameSite, Secure) mirror the sticky
+// routing cookie exactly: Secure is set when the request was received over
+// HTTPS (as determined by X-Forwarded-Proto, trusted only from configured
+// proxy CIDRs).
+func (p *Proxy) setClientCookie(w http.ResponseWriter, r *http.Request, slug, id string) {
+	var value string
+	if key := p.stickySecretBytes(); len(key) > 0 {
+		value = signClientValue(key, slug, id)
+	} else {
+		value = id
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     clientCookiePrefix + slug,
+		Value:    value,
+		Path:     "/app/" + slug + "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		// Mirror the sticky routing cookie's scheme-aware policy: Secure over
+		// HTTPS so the cookie is never sent in cleartext. X-Forwarded-Proto is
+		// trusted only from configured proxy CIDRs.
+		Secure: proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
+	})
+}
+
+// poolIsElastic reports whether pool is in demand-driven (elastic) mode.
+// A pool created by an existing SetPoolSize/SetPoolCap caller has a zero-value
+// mode (""), which is intentionally treated as multiplex so the existing
+// single-slot behaviour is byte-for-byte unchanged.
+func poolIsElastic(pool *backendPool) bool {
+	return pool.mode == config.IsolationGrouped || pool.mode == config.IsolationPerSession
+}
+
+// workerStates returns a snapshot of every worker in the elastic pool as a
+// []workerState that the pure decide() function consumes. Callers must hold
+// the pool lock (p.mu) for the duration of the call.
+func (pool *backendPool) workerStates() []workerState {
+	if len(pool.workers) == 0 {
+		return nil
+	}
+	out := make([]workerState, 0, len(pool.workers))
+	for _, w := range pool.workers {
+		out = append(out, workerState{
+			slotID:          w.slotID,
+			assignedClients: w.assignedClients,
+			status:          w.status,
+		})
+	}
+	return out
+}
+
+// allocateSlotID returns the next monotonically increasing slot ID for this
+// pool. IDs are never reused within a pool's lifetime, so a routing pin
+// referencing a removed slot is always stale. Callers must hold the pool lock.
+func (pool *backendPool) allocateSlotID() int {
+	id := pool.nextSlotID
+	pool.nextSlotID++
+	return id
+}
+
+// addElasticWorker inserts a replicaBackend into the elastic workers map.
+// r.slotID must already be set (via allocateSlotID). Callers must hold the
+// pool lock.
+func addElasticWorker(pool *backendPool, r *replicaBackend) {
+	if pool.workers == nil {
+		pool.workers = make(map[int]*replicaBackend)
+	}
+	pool.workers[r.slotID] = r
+}
+
+// removeElasticWorker removes the worker identified by slotID from the elastic
+// workers map. It is a no-op for unknown slot IDs. Callers must hold the pool
+// lock.
+func removeElasticWorker(pool *backendPool, slotID int) {
+	delete(pool.workers, slotID)
+}
+
+// reserveWorker atomically allocates a booting slot for a new elastic worker.
+// It acquires the write lock, counts active (non-draining) workers, and
+// returns -1 when the pool is not elastic or already at maxWorkers. Otherwise
+// it inserts a placeholder workerBooting entry and returns its slotID.
+//
+// The caller MUST NOT hold p.mu when calling this function.
+func (p *Proxy) reserveWorker(slug, _ string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok || !poolIsElastic(pool) {
+		return -1
+	}
+
+	// Count active (non-draining) workers: draining slots are leaving and do
+	// not consume capacity for new reservations.
+	active := 0
+	for _, w := range pool.workers {
+		if w.status != workerDraining {
+			active++
+		}
+	}
+	if active >= pool.maxWorkers {
+		return -1
+	}
+
+	slotID := pool.allocateSlotID()
+	addElasticWorker(pool, &replicaBackend{
+		slotID: slotID,
+		status: workerBooting,
+	})
+	return slotID
+}
+
+// bindClient records that clientID is assigned to slotID and increments the
+// worker's assignedClients counter. It must be called after a successful
+// reserveWorker call (before the worker starts). Caller must NOT hold p.mu.
+func (p *Proxy) bindClient(slug, clientID string, slotID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.clients[slug] == nil {
+		p.clients[slug] = make(map[string]*clientSlot)
+	}
+	p.clients[slug][clientID] = &clientSlot{slotID: slotID}
+
+	// Increment the worker's assignedClients.
+	if pool, ok := p.pools[slug]; ok {
+		if w, ok := pool.workers[slotID]; ok {
+			w.assignedClients++
+		}
+	}
+}
+
+// clientConnOpenedLocked is the write-lock-held core of clientConnOpened.
+// The caller MUST hold p.mu (write lock). It cancels any pending grace timer
+// and increments liveConns for the named client. A no-op when the slot is
+// absent. Use this from code that already owns the write lock (e.g. the
+// elastic decisionRoute path) to keep the activeConns bump and liveConns
+// increment atomic, closing the terminate-race window.
+func (p *Proxy) clientConnOpenedLocked(slug, clientID string) {
+	cs := p.lookupClientSlot(slug, clientID)
+	if cs == nil {
+		return
+	}
+	if cs.releaseTimer != nil {
+		cs.releaseTimer.Stop()
+		cs.releaseTimer = nil
+	}
+	cs.liveConns++
+}
+
+// clientConnOpened records that clientID has opened a new connection to its
+// assigned worker. It cancels any pending release timer (a reconnecting client
+// must not have its worker killed mid-session) and increments liveConns.
+// Caller must NOT hold p.mu.
+func (p *Proxy) clientConnOpened(slug, clientID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clientConnOpenedLocked(slug, clientID)
+}
+
+// armClientReleaseLocked arms the grace-period release timer for the named
+// client. It is a no-op when the client slot is absent, when liveConns is
+// non-zero (a real connection is active), or when a timer is already pending.
+//
+// The timer fires after clientGraceTTL: it re-takes the lock, re-checks that
+// liveConns is still zero, removes the client slot, decrements the worker's
+// assignedClients, and dispatches p.terminate (via goroutine) when the worker
+// reaches zero assigned clients.
+//
+// The caller MUST hold p.mu (write lock).
+func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
+	cs := p.lookupClientSlot(slug, clientID)
+	if cs == nil || cs.liveConns != 0 || cs.releaseTimer != nil {
+		return
+	}
+	slotID := cs.slotID
+	cs.releaseTimer = time.AfterFunc(clientGraceTTL, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
+		// Re-check under the lock: a reconnect may have incremented liveConns.
+		cs2 := p.lookupClientSlot(slug, clientID)
+		if cs2 == nil || cs2.liveConns != 0 {
+			return
+		}
+
+		// Remove the client slot.
+		delete(p.clients[slug], clientID)
+		if len(p.clients[slug]) == 0 {
+			delete(p.clients, slug)
+		}
+
+		// Decrement the worker's assignedClients and optionally terminate.
+		pool, ok := p.pools[slug]
+		if !ok {
+			return
+		}
+		w, ok := pool.workers[slotID]
+		if !ok {
+			return
+		}
+		w.assignedClients--
+		if w.assignedClients == 0 && p.terminate != nil {
+			term := p.terminate
+			// Dispatch outside the lock to avoid re-entry / deadlock.
+			go term(slug, slotID)
+		}
+	})
+}
+
+// clientConnClosed records that one connection from clientID has closed. When
+// liveConns reaches zero it arms a grace-period timer via armClientReleaseLocked;
+// if no connection reopens within clientGraceTTL the client's slot is deleted,
+// the worker's assignedClients is decremented, and - when the worker reaches
+// zero assigned clients - p.terminate is dispatched in a goroutine.
+// Caller must NOT hold p.mu.
+func (p *Proxy) clientConnClosed(slug, clientID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cs := p.lookupClientSlot(slug, clientID)
+	if cs == nil {
+		return
+	}
+	if cs.liveConns <= 0 {
+		return // caller misbehavior: more closes than opens; do not go negative or re-arm the timer
+	}
+	cs.liveConns--
+	if cs.liveConns > 0 {
+		return
+	}
+
+	// liveConns just hit zero: arm the grace-period release timer.
+	p.armClientReleaseLocked(slug, clientID)
+}
+
+// ReleaseReservation removes a booting slot that failed to spawn. It also
+// cancels and removes any client slots already bound to this slotID (a client
+// that pre-bound during the boot window must not be left dangling). Called by
+// the spawn callback (Task 12) when a worker fails to start or pass health
+// checks. Caller must NOT hold p.mu.
+func (p *Proxy) ReleaseReservation(slug string, slotID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok {
+		return
+	}
+	removeElasticWorker(pool, slotID)
+
+	// Cancel and remove any client slots already bound to this slotID so they
+	// do not reference a nonexistent worker after the boot fails.
+	for clientID, cs := range p.clients[slug] {
+		if cs.slotID == slotID {
+			if cs.releaseTimer != nil {
+				cs.releaseTimer.Stop()
+				cs.releaseTimer = nil
+			}
+			delete(p.clients[slug], clientID)
+		}
+	}
+	if len(p.clients[slug]) == 0 {
+		delete(p.clients, slug)
+	}
+}
+
+// DeregisterElasticWorker removes a running elastic worker from the pool and
+// cancels any client slots bound to it. It is the clean-up path for a
+// successfully-started worker that is being intentionally terminated (see
+// ElasticSpawner.Terminate). Idempotent: no-ops on unknown slugs or slotIDs.
+// Caller must NOT hold p.mu.
+func (p *Proxy) DeregisterElasticWorker(slug string, slotID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok {
+		return
+	}
+	removeElasticWorker(pool, slotID)
+
+	for clientID, cs := range p.clients[slug] {
+		if cs.slotID == slotID {
+			if cs.releaseTimer != nil {
+				cs.releaseTimer.Stop()
+				cs.releaseTimer = nil
+			}
+			delete(p.clients[slug], clientID)
+		}
+	}
+	if len(p.clients[slug]) == 0 {
+		delete(p.clients, slug)
+	}
+}
+
+// lookupClientSlot returns the clientSlot for clientID in slug's clients map,
+// or nil if absent. Callers must hold p.mu (read or write).
+func (p *Proxy) lookupClientSlot(slug, clientID string) *clientSlot {
+	if p.clients[slug] == nil {
+		return nil
+	}
+	return p.clients[slug][clientID]
+}

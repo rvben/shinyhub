@@ -226,6 +226,12 @@ func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
 	p.Placement = app.PlacementMap()
 	p.TierOrder = s.cfg.Runtime.TierOrder()
 	p.DefaultTier = s.cfg.Runtime.DefaultTierName()
+	// Worker isolation fields are propagated through every deploy.Params so
+	// deploy.Run can call SetPoolMode with the correct mode and parameters.
+	p.WorkerIsolation = app.WorkerIsolation
+	p.DefaultWorkerIsolation = s.cfg.Runtime.DefaultWorkerIsolation
+	p.WorkerGroupedSize = app.WorkerGroupedSize
+	p.WorkerMaxWorkers = app.WorkerMaxWorkers
 	// Pin a shared-mount consumer to the worker(s) hosting its source data so
 	// each replica lands beside the data it mounts. resolveColocation returns no
 	// pin (and no error) for the common case of no shared mounts or a

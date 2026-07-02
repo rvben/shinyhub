@@ -1011,3 +1011,43 @@ func TestAppSettings_IsZero_MinWarmReplicasAlone(t *testing.T) {
 		t.Error("IsZero should be false when MinWarmReplicas is set")
 	}
 }
+
+// TestLoadManifest_WorkerGroupedRequiresGroupedSize asserts that declaring
+// [app.worker] with isolation="grouped" but no grouped_size is rejected at
+// parse time (shape-only validation; no server config needed).
+func TestLoadManifest_WorkerGroupedRequiresGroupedSize(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app.worker]
+isolation = "grouped"
+max_workers = 4
+`)
+	_, err := LoadManifest(dir)
+	if err == nil || !strings.Contains(err.Error(), "grouped_size") {
+		t.Errorf("expected grouped_size error, got %v", err)
+	}
+}
+
+// TestLoadManifest_WorkerPerSessionValid asserts that a well-formed per_session
+// [app.worker] block (with max_workers) is accepted at parse time.
+func TestLoadManifest_WorkerPerSessionValid(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app.worker]
+isolation = "per_session"
+max_workers = 2
+`)
+	if _, err := LoadManifest(dir); err != nil {
+		t.Errorf("expected valid per_session worker block, got %v", err)
+	}
+}
+
+// TestAppSettings_IsZero_WorkerNonNil confirms that IsZero returns false when
+// a non-nil Worker block is present.
+func TestAppSettings_IsZero_WorkerNonNil(t *testing.T) {
+	iso := "multiplex"
+	a := AppSettings{Worker: &WorkerManifest{Isolation: &iso}}
+	if a.IsZero() {
+		t.Error("IsZero should be false when Worker is non-nil")
+	}
+}

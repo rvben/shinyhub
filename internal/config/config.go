@@ -354,6 +354,11 @@ type ServerConfig struct {
 	// each zero-downtime handoff. Required for the systemd path (MAINPID
 	// tracking via PIDFile=). Empty (default) writes no PID file.
 	PIDFile string `yaml:"pid_file"`
+
+	// HostBudgetMB is the total RAM (in MiB) the host can allocate to app
+	// worker processes. Used by the host-capacity guard to reject deploys that
+	// would exceed available memory. 0 disables the guard.
+	HostBudgetMB int `yaml:"host_budget_mb"`
 }
 
 // GroupRoleMapping maps an IdP group name to a global role. Shared by the OIDC
@@ -458,6 +463,9 @@ type RuntimeConfig struct {
 	// reaches this many active connections, new cookie-less requests are shed
 	// with 503. 0 here disables the cap entirely (unlimited).
 	DefaultMaxSessionsPerReplica int
+	// DefaultWorkerIsolation is the fleet default isolation mode applied when an
+	// app's worker_isolation is empty. Almost always "multiplex".
+	DefaultWorkerIsolation string
 	// Tiers is the ordered list of runtime tiers. The first entry is the
 	// default tier (used when a replica has no explicit tier). When the config
 	// omits tiers, Load synthesizes a single tier named "local" whose runtime
@@ -817,6 +825,7 @@ type rawRuntimeConfig struct {
 	// Pointer so an explicit 0 (documented as "unlimited") is
 	// distinguishable from the key being absent (apply the safe default).
 	DefaultMaxSessionsPerReplica *int                    `yaml:"default_max_sessions_per_replica"`
+	DefaultWorkerIsolation       string                  `yaml:"default_worker_isolation"`
 	Tiers                        []rawTierConfig         `yaml:"tiers"`
 	Autoscale                    rawAutoscaleConfig      `yaml:"autoscale"`
 	Fargate                      rawFargateRuntimeConfig `yaml:"fargate"`
@@ -1700,6 +1709,13 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		rc.DefaultMaxSessionsPerReplica = *r.DefaultMaxSessionsPerReplica
 	}
 
+	switch r.DefaultWorkerIsolation {
+	case string(IsolationGrouped), string(IsolationPerSession):
+		rc.DefaultWorkerIsolation = r.DefaultWorkerIsolation
+	default:
+		rc.DefaultWorkerIsolation = string(IsolationMultiplex)
+	}
+
 	rc.Fargate = FargateRuntimeConfig{
 		Cluster:           r.Fargate.Cluster,
 		TaskDefinition:    r.Fargate.TaskDefinition,
@@ -1898,6 +1914,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_SERVER_PORT: %q is not an integer: %w", v, err)
 		}
 		cfg.Server.Port = n
+	}
+	if v := os.Getenv("SHINYHUB_SERVER_HOST_BUDGET_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_HOST_BUDGET_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Server.HostBudgetMB = n
 	}
 	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
 		cfg.Server.TrustedProxies = splitCSV(v)
@@ -2117,6 +2140,14 @@ func applyEnv(cfg *Config) error {
 			cfg.Runtime.DefaultMaxSessionsPerReplica = n
 		}
 	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION"); v != "" {
+		switch v {
+		case string(IsolationMultiplex), string(IsolationGrouped), string(IsolationPerSession):
+			cfg.Runtime.DefaultWorkerIsolation = v
+		default:
+			return fmt.Errorf("SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION: %q is not a valid mode", v)
+		}
+	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_AUTOSCALE_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)
 		if err != nil {
@@ -2279,3 +2310,7 @@ func applyEnv(cfg *Config) error {
 	}
 	return nil
 }
+
+// HostBudgetMB returns the total RAM budget (in MiB) for app worker processes.
+// 0 means the host-capacity guard is disabled.
+func (c *Config) HostBudgetMB() int { return c.Server.HostBudgetMB }

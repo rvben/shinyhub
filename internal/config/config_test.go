@@ -2716,3 +2716,94 @@ func TestIdentityHeadersEnvVar(t *testing.T) {
 		}
 	})
 }
+
+func TestDefaultWorkerIsolation_DefaultsToMultiplex(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.DefaultWorkerIsolation != "multiplex" {
+		t.Errorf("expected DefaultWorkerIsolation=multiplex when unset, got %q", cfg.Runtime.DefaultWorkerIsolation)
+	}
+}
+
+func TestDefaultWorkerIsolation_FromEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION", "grouped")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.DefaultWorkerIsolation != "grouped" {
+		t.Errorf("expected DefaultWorkerIsolation=grouped, got %q", cfg.Runtime.DefaultWorkerIsolation)
+	}
+}
+
+func TestDefaultWorkerIsolation_FromYAML(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	f := writeYAML(t, `
+auth:
+  secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+runtime:
+  default_worker_isolation: per_session
+`)
+	cfg, err := config.Load(f)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Runtime.DefaultWorkerIsolation != "per_session" {
+		t.Errorf("expected per_session, got %q", cfg.Runtime.DefaultWorkerIsolation)
+	}
+}
+
+func TestDefaultWorkerIsolation_InvalidEnvReturnsError(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION", "bogus")
+	_, err := config.Load("")
+	if err == nil {
+		t.Fatal("expected error for invalid isolation mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION") {
+		t.Fatalf("error should name the variable; got: %v", err)
+	}
+}
+
+func TestHostBudgetMB_DefaultsToZero(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HostBudgetMB() != 0 {
+		t.Errorf("expected HostBudgetMB=0 when unset, got %d", cfg.HostBudgetMB())
+	}
+}
+
+func TestHostBudgetMB_FromEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_SERVER_HOST_BUDGET_MB", "4096")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HostBudgetMB() != 4096 {
+		t.Errorf("expected HostBudgetMB=4096, got %d", cfg.HostBudgetMB())
+	}
+}
+
+func TestHostBudgetMB_FromYAML(t *testing.T) {
+	f := writeYAML(t, `
+auth:
+  secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+server:
+  host_budget_mb: 8192
+`)
+	cfg, err := config.Load(f)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HostBudgetMB() != 8192 {
+		t.Errorf("expected HostBudgetMB=8192, got %d", cfg.HostBudgetMB())
+	}
+}

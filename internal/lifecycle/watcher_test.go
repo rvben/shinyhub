@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
@@ -136,8 +137,9 @@ func (f *fakeProxy) SetPoolCap(slug string, max int) {
 	f.poolCaps[slug] = max
 	f.mu.Unlock()
 }
-func (f *fakeProxy) SetPoolAppID(_ string, _ int64)          {}
-func (f *fakeProxy) SetPoolIdentityHeaders(_ string, _ bool) {}
+func (f *fakeProxy) SetPoolAppID(_ string, _ int64)                               {}
+func (f *fakeProxy) SetPoolIdentityHeaders(_ string, _ bool)                      {}
+func (f *fakeProxy) SetPoolMode(_ string, _ config.WorkerIsolationMode, _, _ int) {}
 
 type fakeStore struct {
 	mu                sync.Mutex

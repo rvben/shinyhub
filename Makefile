@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-race vuln test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
+.PHONY: build clean test test-go test-race vuln test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -175,6 +175,31 @@ load-test: ## Run k6 load tests (LT_SLUG required; see docs/load-testing.md)
 	  echo "==> sessions scenario (slug=$(LT_SLUG), VUs=$(or $(LT_SESSIONS),100))"; \
 	  k6 run $$K6_FLAGS loadtest/sessions.js; \
 	fi
+
+# load-test-isolation runs the HOL-elimination scenario (loadtest/hol.js) to
+# prove that per_session isolation eliminates head-of-line blocking.
+# At least one of LT_SLUG_MUX or LT_SLUG_ISO must be set. Provide both to
+# record a side-by-side comparison in a single k6 run.
+#   LT_SLUG_MUX  - slug of an app configured with worker_isolation=multiplex
+#   LT_SLUG_ISO  - slug of an app configured with worker_isolation=per_session
+#   ASSERT=1     - enable the threshold: hol_light_ms{mode:iso} p(95) < 3 s
+# See docs/isolation.md for setup instructions and result interpretation.
+load-test-isolation: ## HOL-elimination acceptance scenario (LT_SLUG_MUX and/or LT_SLUG_ISO required)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not found. Install: brew install k6 (https://k6.io/docs/get-started/installation/)"; exit 1; }
+	@test -n "$(LT_SLUG_MUX)$(LT_SLUG_ISO)" || { echo "Set LT_SLUG_MUX and/or LT_SLUG_ISO, e.g. make load-test-isolation LT_SLUG_ISO=demo-iso"; exit 1; }
+	@mkdir -p loadtest/results
+	@K6_FLAGS="-e LT_HOST=$(or $(LT_HOST),http://127.0.0.1:8080)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_SLUG_MUX=$(or $(LT_SLUG_MUX),)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_SLUG_ISO=$(or $(LT_SLUG_ISO),)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_SESSIONS=$(or $(LT_SESSIONS),50)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_RAMP=$(or $(LT_RAMP),30s)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_HOLD=$(or $(LT_HOLD),60)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_WS_PATH=$(or $(LT_WS_PATH),/websocket/)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_FIRST_MSG_TIMEOUT=$(or $(LT_FIRST_MSG_TIMEOUT),5)"; \
+	K6_FLAGS="$$K6_FLAGS -e LT_AUTH_COOKIE=$(or $(LT_AUTH_COOKIE),)"; \
+	K6_FLAGS="$$K6_FLAGS -e ASSERT=$(or $(ASSERT),0)"; \
+	echo "==> HOL isolation scenario (mux=$(or $(LT_SLUG_MUX),(none)), iso=$(or $(LT_SLUG_ISO),(none)), sessions=$(or $(LT_SESSIONS),50))"; \
+	k6 run $$K6_FLAGS loadtest/hol.js
 
 # iac-validate runs terraform fmt -check, init -backend=false, and validate on
 # the aws-ecs module and its minimal example. No AWS credentials are required.

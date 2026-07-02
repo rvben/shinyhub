@@ -324,6 +324,8 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 	// invisible to the proxy until the next full redeploy.
 	if s.proxy != nil {
 		s.proxy.SetPoolCap(slug, sessionCap)
+		// SetPoolMode not called here: warm-expand adjusts capacity, not
+		// isolation mode. Mode is set at deploy/recovery/wake time.
 		s.proxy.SetPoolIdentityHeaders(slug, identityEnabled)
 	}
 	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)

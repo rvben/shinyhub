@@ -21,6 +21,7 @@ import { formatManifestSummary, renderDeployResult } from '/static/deploy-summar
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
+import { workerCapacityLine } from '/static/views/worker-isolation.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
@@ -1617,6 +1618,21 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(document.getElementById('scaling-status'), true);
     updateScalingCeiling();
 
+    // Worker isolation controls.
+    const isolationSelect = document.getElementById('worker-isolation');
+    const groupedSizeInput = document.getElementById('worker-grouped-size');
+    const maxWorkersInput = document.getElementById('worker-max-workers');
+    isolationSelect.value = app.worker_isolation || 'multiplex';
+    isolationSelect.dataset.original = isolationSelect.value;
+    isolationSelect.dataset.appStatus = String(app.status ?? '');
+    isolationSelect.dataset.lifetimeSecs = app.worker_max_session_lifetime_secs != null ? String(app.worker_max_session_lifetime_secs) : '';
+    groupedSizeInput.value = String(app.worker_grouped_size ?? 1);
+    maxWorkersInput.value = String(app.worker_max_workers ?? 0);
+    isolationSelect.disabled = !canEdit;
+    groupedSizeInput.disabled = !canEdit;
+    maxWorkersInput.disabled = !canEdit;
+    updateWorkerCapacity();
+
     // General info: display name + description + project slug (rename / regroup).
     document.getElementById('general-name').value = app.name ?? '';
     document.getElementById('general-description').value = app.description ?? '';
@@ -1947,6 +1963,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function updateWorkerCapacity() {
+    const el = document.getElementById('worker-capacity');
+    if (!el) return;
+    const mode = document.getElementById('worker-isolation').value;
+    const gs = parseInt(document.getElementById('worker-grouped-size').value, 10);
+    const mw = parseInt(document.getElementById('worker-max-workers').value, 10);
+    // The per-session RAM estimate uses the configured memory limit so an
+    // operator who has set limits gets a meaningful worst-case figure.
+    const memMB = parseInt(document.getElementById('resources-memory').value || '0', 10);
+    el.textContent = workerCapacityLine(
+      mode,
+      Number.isFinite(gs) ? gs : 0,
+      Number.isFinite(mw) ? mw : 0,
+      Number.isFinite(memMB) ? memMB : 0,
+    );
+  }
+
   function onHibernateModeChange() {
     const selected = document.querySelector('input[name="hibernate-mode"]:checked');
     const customInput = document.getElementById('hibernate-custom-minutes');
@@ -2062,7 +2095,36 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!ok) return;
     }
 
-    const payload = { replicas, max_sessions_per_replica: cap };
+    // Isolation mode changes also restart the app. Confirm before the
+    // disruptive case.
+    const isolationSelect = document.getElementById('worker-isolation');
+    const workerIsolation = isolationSelect.value;
+    const originalIsolation = isolationSelect.dataset.original ?? 'multiplex';
+    const wasRunningIso = isolationSelect.dataset.appStatus === 'running';
+    if (wasRunningIso && workerIsolation !== originalIsolation) {
+      const ok = window.confirm(
+        `Changing worker isolation mode from ${originalIsolation} to ${workerIsolation} will restart the app and drop all active sessions. Continue?`,
+      );
+      if (!ok) return;
+    }
+
+    const groupedSizeRaw = document.getElementById('worker-grouped-size').value.trim();
+    const maxWorkersRaw = document.getElementById('worker-max-workers').value.trim();
+    const workerGroupedSize = parseInt(groupedSizeRaw, 10);
+    const workerMaxWorkers = parseInt(maxWorkersRaw, 10);
+    const lifetimeRaw = isolationSelect.dataset.lifetimeSecs;
+    const workerMaxSessionLifetimeSecs = lifetimeRaw ? parseInt(lifetimeRaw, 10) : null;
+
+    const payload = {
+      replicas,
+      max_sessions_per_replica: cap,
+      worker_isolation: workerIsolation,
+      worker_grouped_size: Number.isFinite(workerGroupedSize) ? workerGroupedSize : 1,
+      worker_max_workers: Number.isFinite(workerMaxWorkers) ? workerMaxWorkers : 0,
+    };
+    if (workerMaxSessionLifetimeSecs !== null && Number.isFinite(workerMaxSessionLifetimeSecs)) {
+      payload.worker_max_session_lifetime_secs = workerMaxSessionLifetimeSecs;
+    }
     const btn = document.getElementById('scaling-save-btn');
     btn.disabled = true;
     let resp;
@@ -2796,6 +2858,11 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('scaling-replicas').addEventListener('input', updateScalingCeiling);
   document.getElementById('scaling-cap').addEventListener('input', updateScalingCeiling);
 
+  // Worker isolation: live capacity helper on any input change.
+  document.getElementById('worker-isolation').addEventListener('change', updateWorkerCapacity);
+  document.getElementById('worker-grouped-size').addEventListener('input', updateWorkerCapacity);
+  document.getElementById('worker-max-workers').addEventListener('input', updateWorkerCapacity);
+
   // Autoscale: enabling seeds sane bounds; bounds inputs + target-mode radios.
   document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
     r.addEventListener('change', onAutoscaleTargetModeChange);
@@ -2831,7 +2898,13 @@ document.addEventListener('DOMContentLoaded', () => {
            document.getElementById('min-warm-replicas')],
     'hibernate-save-btn', 'hibernate-dirty');
   registerSettingsSection('scaling',
-    () => [document.getElementById('scaling-replicas'), document.getElementById('scaling-cap')],
+    () => [
+      document.getElementById('scaling-replicas'),
+      document.getElementById('scaling-cap'),
+      document.getElementById('worker-isolation'),
+      document.getElementById('worker-grouped-size'),
+      document.getElementById('worker-max-workers'),
+    ],
     'scaling-save-btn', 'scaling-dirty');
   registerSettingsSection('autoscale',
     () => [document.getElementById('autoscale-enabled'),

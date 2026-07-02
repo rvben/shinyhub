@@ -668,6 +668,10 @@ type appsSetFlags struct {
 	yes                   bool
 	wait                  bool
 	waitTimeout           time.Duration
+	isolation             string
+	groupedSize           int
+	maxWorkers            int
+	maxSessionLifetime    int
 }
 
 func newAppsSetCmd() *cobra.Command {
@@ -711,6 +715,14 @@ func newAppsSetCmd() *cobra.Command {
 		"After applying, wait until the app is healthy again (useful after a replica change)")
 	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", 300*time.Second,
 		"How long to wait for the app to become healthy when --wait is set")
+	cmd.Flags().StringVar(&f.isolation, "isolation", "",
+		"Session isolation mode: multiplex (default) | grouped | per_session")
+	cmd.Flags().IntVar(&f.groupedSize, "grouped-size", 0,
+		"Clients per worker when --isolation grouped (>= 1)")
+	cmd.Flags().IntVar(&f.maxWorkers, "max-workers", 0,
+		"Demand-driven worker ceiling for grouped/per_session (>= 1)")
+	cmd.Flags().IntVar(&f.maxSessionLifetime, "max-session-lifetime", 0,
+		"Absolute worker lifetime in seconds (0 = unlimited)")
 	return cmd
 }
 
@@ -727,9 +739,14 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	autoscaleMaxChanged := cmd.Flags().Changed("autoscale-max")
 	autoscaleTargetChanged := cmd.Flags().Changed("autoscale-target")
 	anyAutoscaleChanged := autoscaleChanged || autoscaleMinChanged || autoscaleMaxChanged || autoscaleTargetChanged
+	isolationChanged := cmd.Flags().Changed("isolation")
+	groupedSizeChanged := cmd.Flags().Changed("grouped-size")
+	maxWorkersChanged := cmd.Flags().Changed("max-workers")
+	maxSessionLifetimeChanged := cmd.Flags().Changed("max-session-lifetime")
+	anyWorkerChanged := isolationChanged || groupedSizeChanged || maxWorkersChanged || maxSessionLifetimeChanged
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation)")
 	}
 	if memoryLimitChanged && f.memoryLimitMB != -1 {
 		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
@@ -880,6 +897,18 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			as["target"] = f.autoscaleTarget
 		}
 		payload["autoscale"] = as
+	}
+	if isolationChanged {
+		payload["worker_isolation"] = f.isolation
+	}
+	if groupedSizeChanged {
+		payload["worker_grouped_size"] = f.groupedSize
+	}
+	if maxWorkersChanged {
+		payload["worker_max_workers"] = f.maxWorkers
+	}
+	if maxSessionLifetimeChanged {
+		payload["worker_max_session_lifetime_secs"] = f.maxSessionLifetime
 	}
 
 	body, err := json.Marshal(payload)

@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/bundle"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/deployfail"
@@ -344,6 +345,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		autoMin             int
 		autoMax             int
 		autoTarget          float64
+
+		newWorkerIsolation          string
+		setWorkerIsolation          bool
+		newWorkerGroupedSize        int
+		setWorkerGroupedSize        bool
+		newWorkerMaxWorkers         int
+		setWorkerMaxWorkers         bool
+		newWorkerMaxSessionLifetime int
+		setWorkerMaxSessionLifetime bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -553,6 +563,61 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setAutoscale = true
 	}
 
+	if rawVal, present := raw["worker_isolation"]; present {
+		var v string
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "worker_isolation must be a string")
+			return
+		}
+		newWorkerIsolation, setWorkerIsolation = v, true
+	}
+
+	if rawVal, present := raw["worker_grouped_size"]; present {
+		var n int
+		if err := json.Unmarshal(rawVal, &n); err != nil {
+			writeError(w, http.StatusBadRequest, "worker_grouped_size must be an integer")
+			return
+		}
+		newWorkerGroupedSize, setWorkerGroupedSize = n, true
+	}
+
+	if rawVal, present := raw["worker_max_workers"]; present {
+		var n int
+		if err := json.Unmarshal(rawVal, &n); err != nil {
+			writeError(w, http.StatusBadRequest, "worker_max_workers must be an integer")
+			return
+		}
+		newWorkerMaxWorkers, setWorkerMaxWorkers = n, true
+	}
+
+	if rawVal, present := raw["worker_max_session_lifetime_secs"]; present {
+		var n int
+		if err := json.Unmarshal(rawVal, &n); err != nil {
+			writeError(w, http.StatusBadRequest, "worker_max_session_lifetime_secs must be an integer")
+			return
+		}
+		newWorkerMaxSessionLifetime, setWorkerMaxSessionLifetime = n, true
+	}
+
+	// Validate the fully-resolved worker settings when any worker field was set.
+	// orString/orInt merge the incoming value (when set) with the app's current
+	// value so the validator sees the complete dial even when only one field is
+	// being changed.
+	if setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime {
+		ws := config.WorkerSettings{
+			Isolation:          config.WorkerIsolationMode(orString(newWorkerIsolation, setWorkerIsolation, app.WorkerIsolation)),
+			GroupedSize:        orInt(newWorkerGroupedSize, setWorkerGroupedSize, app.WorkerGroupedSize),
+			MaxWorkers:         orInt(newWorkerMaxWorkers, setWorkerMaxWorkers, app.WorkerMaxWorkers),
+			MaxSessionLifetime: orInt(newWorkerMaxSessionLifetime, setWorkerMaxSessionLifetime, app.WorkerMaxSessionLifetimeSecs),
+		}
+		memMB, _ := s.cfg.Runtime.DefaultResourcesForApp(app)
+		effMemMB := deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, memMB)
+		if err := config.ValidateWorkerSettings(ws, s.clustered, effMemMB, s.cfg.HostBudgetMB()); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	if rawVal, present := raw["placement"]; present {
 		placementKeyPresent = true
 		if string(rawVal) == "null" {
@@ -642,28 +707,44 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture old worker values before the update so the audit record can include
+	// old/new pairs, consistent with how memory_limit_mb and cpu_quota_percent are
+	// recorded. The app object still holds the pre-update state at this point.
+	oldWorkerIsolation := app.WorkerIsolation
+	oldWorkerGroupedSize := app.WorkerGroupedSize
+	oldWorkerMaxWorkers := app.WorkerMaxWorkers
+	oldWorkerMaxSessionLifetime := app.WorkerMaxSessionLifetimeSecs
+
 	// Apply core settings in a single transaction so a storage failure mid-write
 	// never leaves the row half-updated. The managed_by marker is a separate
 	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
 	// the post-patch refetch exposes the final consistent state to the caller.
 	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
-		Slug:               slug,
-		SetHibernate:       setHibernateTimeout,
-		HibernateMinutes:   hibernateTimeout,
-		SetName:            setName,
-		Name:               newName,
-		SetProjectSlug:     setProjectSlug,
-		ProjectSlug:        newProjectSlug,
-		SetMemoryLimitMB:   setMemoryLimitMB,
-		MemoryLimitMB:      memoryLimitMB,
-		SetCPUQuotaPercent: setCPUQuotaPercent,
-		CPUQuotaPercent:    cpuQuotaPercent,
-		SetReplicas:        setReplicas,
-		Replicas:           newReplicas,
-		SetMaxSessions:     setMaxSessions,
-		MaxSessions:        newMaxSessions,
-		SetMinWarmReplicas: setMinWarmReplicas,
-		MinWarmReplicas:    newMinWarmReplicas,
+		Slug:                         slug,
+		SetHibernate:                 setHibernateTimeout,
+		HibernateMinutes:             hibernateTimeout,
+		SetName:                      setName,
+		Name:                         newName,
+		SetProjectSlug:               setProjectSlug,
+		ProjectSlug:                  newProjectSlug,
+		SetMemoryLimitMB:             setMemoryLimitMB,
+		MemoryLimitMB:                memoryLimitMB,
+		SetCPUQuotaPercent:           setCPUQuotaPercent,
+		CPUQuotaPercent:              cpuQuotaPercent,
+		SetReplicas:                  setReplicas,
+		Replicas:                     newReplicas,
+		SetMaxSessions:               setMaxSessions,
+		MaxSessions:                  newMaxSessions,
+		SetMinWarmReplicas:           setMinWarmReplicas,
+		MinWarmReplicas:              newMinWarmReplicas,
+		SetWorkerIsolation:           setWorkerIsolation,
+		WorkerIsolation:              newWorkerIsolation,
+		SetWorkerGroupedSize:         setWorkerGroupedSize,
+		WorkerGroupedSize:            newWorkerGroupedSize,
+		SetWorkerMaxWorkers:          setWorkerMaxWorkers,
+		WorkerMaxWorkers:             newWorkerMaxWorkers,
+		SetWorkerMaxSessionLifetime:  setWorkerMaxSessionLifetime,
+		WorkerMaxSessionLifetimeSecs: newWorkerMaxSessionLifetime,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -751,7 +832,29 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.SetPoolCap(slug,
 			deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
-	if (setReplicas || setPlacement || clearPlacement || resourceChanged) && priorStatus == "running" {
+	// SetPoolMode on any worker-field change so a live isolation reconfiguration
+	// reshapes the pool without requiring a full redeploy cycle. The isolation
+	// change will also trigger redeployApp (below), which calls deploy.Run and
+	// therefore sets it again; this call covers the stopped-app case too.
+	if (setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers) && s.proxy != nil {
+		effectiveIsolation := app.WorkerIsolation
+		if setWorkerIsolation {
+			effectiveIsolation = newWorkerIsolation
+		}
+		effectiveGroupedSize := app.WorkerGroupedSize
+		if setWorkerGroupedSize {
+			effectiveGroupedSize = newWorkerGroupedSize
+		}
+		effectiveMaxWorkers := app.WorkerMaxWorkers
+		if setWorkerMaxWorkers {
+			effectiveMaxWorkers = newWorkerMaxWorkers
+		}
+		s.proxy.SetPoolMode(slug,
+			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(effectiveIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
+			effectiveGroupedSize, effectiveMaxWorkers)
+	}
+	workerChanged := setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime
+	if (setReplicas || setPlacement || clearPlacement || resourceChanged || workerChanged) && priorStatus == "running" {
 		// Mark in-flight synchronously before launching the goroutine so the
 		// first GET after this PATCH returns observes the redeploy even though
 		// the app row still reads "running". The redeploy goroutine clears it.
@@ -774,12 +877,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// resource-only PATCH neither redeploys nor logs a phantom update_app event.
 	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug ||
 		setReplicas || setMaxSessions || setMinWarmReplicas || setManagedBy ||
-		setPlacement || clearPlacement || setAutoscale
+		setPlacement || clearPlacement || setAutoscale ||
+		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime
 	if u := auth.UserFromContext(r.Context()); u != nil && (nonResourceTouched || memChanged || cpuChanged) {
 		detail := patchAppAuditDetail(
 			setMinWarmReplicas, newMinWarmReplicas,
 			memChanged, oldMemoryLimitMB, memoryLimitMB,
-			cpuChanged, oldCPUQuotaPercent, cpuQuotaPercent)
+			cpuChanged, oldCPUQuotaPercent, cpuQuotaPercent,
+			setWorkerIsolation, oldWorkerIsolation, newWorkerIsolation,
+			setWorkerGroupedSize, oldWorkerGroupedSize, newWorkerGroupedSize,
+			setWorkerMaxWorkers, oldWorkerMaxWorkers, newWorkerMaxWorkers,
+			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime)
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r),
@@ -796,6 +904,25 @@ func intPtrEqual(a, b *int) bool {
 	return *a == *b
 }
 
+// orString returns newVal when set is true, otherwise returns fallback.
+// Used to merge a PATCH field with the app's current value so a validator
+// that needs the full dial sees the resolved setting even when only one
+// field in a group was changed.
+func orString(newVal string, set bool, fallback string) string {
+	if set {
+		return newVal
+	}
+	return fallback
+}
+
+// orInt returns newVal when set is true, otherwise returns fallback.
+func orInt(newVal int, set bool, fallback int) int {
+	if set {
+		return newVal
+	}
+	return fallback
+}
+
 // patchAppAuditDetail builds a JSON detail blob for the update_app audit event,
 // recording only the fields that were actually changed in this PATCH. Resource
 // limits are recorded as {old,new} (nil renders as JSON null = inherit).
@@ -803,6 +930,10 @@ func patchAppAuditDetail(
 	setMinWarmReplicas bool, minWarmReplicas int,
 	setMemoryLimitMB bool, oldMem, newMem *int,
 	setCPUQuotaPercent bool, oldCPU, newCPU *int,
+	setWorkerIsolation bool, oldWorkerIsolation, newWorkerIsolation string,
+	setWorkerGroupedSize bool, oldWorkerGroupedSize, newWorkerGroupedSize int,
+	setWorkerMaxWorkers bool, oldWorkerMaxWorkers, newWorkerMaxWorkers int,
+	setWorkerMaxSessionLifetime bool, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime int,
 ) string {
 	d := map[string]any{}
 	if setMinWarmReplicas {
@@ -813,6 +944,18 @@ func patchAppAuditDetail(
 	}
 	if setCPUQuotaPercent {
 		d["cpu_quota_percent"] = map[string]any{"old": oldCPU, "new": newCPU}
+	}
+	if setWorkerIsolation {
+		d["worker_isolation"] = map[string]any{"old": oldWorkerIsolation, "new": newWorkerIsolation}
+	}
+	if setWorkerGroupedSize {
+		d["worker_grouped_size"] = map[string]any{"old": oldWorkerGroupedSize, "new": newWorkerGroupedSize}
+	}
+	if setWorkerMaxWorkers {
+		d["worker_max_workers"] = map[string]any{"old": oldWorkerMaxWorkers, "new": newWorkerMaxWorkers}
+	}
+	if setWorkerMaxSessionLifetime {
+		d["worker_max_session_lifetime_secs"] = map[string]any{"old": oldWorkerMaxSessionLifetime, "new": newWorkerMaxSessionLifetime}
 	}
 	if len(d) == 0 {
 		return ""
@@ -1164,6 +1307,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			if s.proxy != nil {
 				s.proxy.SetPoolCap(slug,
 					deploy.ResolveMaxSessionsPerReplica(preManifestApp.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
+				// Restore the pre-manifest pool mode so a revert brings the proxy
+				// back to the mode the old pool was running under.
+				s.proxy.SetPoolMode(slug,
+					config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(preManifestApp.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
+					preManifestApp.WorkerGroupedSize, preManifestApp.WorkerMaxWorkers)
 			}
 			if rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 				AppID: preManifestApp.ID, Slug: slug,

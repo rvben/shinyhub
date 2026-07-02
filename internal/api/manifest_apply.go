@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
@@ -53,6 +54,26 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 	if msg := s.fargateLimitViolation(m.MemoryLimitMB, m.CPUQuotaPercent); msg != "" {
 		return newValidationError("%s", msg)
 	}
+	if m.Worker != nil {
+		ws := config.WorkerSettings{}
+		if m.Worker.Isolation != nil {
+			ws.Isolation = config.WorkerIsolationMode(*m.Worker.Isolation)
+		}
+		if m.Worker.GroupedSize != nil {
+			ws.GroupedSize = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			ws.MaxWorkers = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			ws.MaxSessionLifetime = *m.Worker.MaxSessionLifetimeSecs
+		}
+		memMB, _ := s.cfg.Runtime.DefaultResourcesForApp(app)
+		effMemMB := deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, memMB)
+		if err := config.ValidateWorkerSettings(ws, s.clustered, effMemMB, s.cfg.HostBudgetMB()); err != nil {
+			return newValidationError("%s", err.Error())
+		}
+	}
 	return nil
 }
 
@@ -75,6 +96,23 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy.AppSettings) error {
 	// Autoscale reconciles atomically only when the block is declared; the
 	// zero values below are inert because SetAutoscale gates the DB write.
+	// Resolve worker fields: nil pointer means "absent, leave stored value unchanged".
+	var workerIsolation string
+	var workerGroupedSize, workerMaxWorkers, workerMaxSessionLifetimeSecs int
+	if m.Worker != nil {
+		if m.Worker.Isolation != nil {
+			workerIsolation = *m.Worker.Isolation
+		}
+		if m.Worker.GroupedSize != nil {
+			workerGroupedSize = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			workerMaxWorkers = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			workerMaxSessionLifetimeSecs = *m.Worker.MaxSessionLifetimeSecs
+		}
+	}
 	var asEnabled bool
 	var asMin, asMax int
 	var asTarget float64
@@ -87,28 +125,36 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		asTarget = m.Autoscale.Target
 	}
 	if err := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
-		AppID:                    app.ID,
-		Slug:                     app.Slug,
-		SetHibernate:             m.HibernateTimeoutMinutes != nil || m.HibernateResetToDefault,
-		HibernateMinutes:         m.HibernateTimeoutMinutes, // nil => NULL (reset to default)
-		SetReplicas:              m.Replicas != nil,
-		Replicas:                 derefOrZero(m.Replicas),
-		PreviousReplicas:         app.Replicas,
-		SetMaxSessionsPerReplica: m.MaxSessionsPerReplica != nil,
-		MaxSessionsPerReplica:    derefOrZero(m.MaxSessionsPerReplica),
-		SetIdentityHeaders:       true,
-		IdentityHeaders:          m.IdentityHeaders,
-		SetMinWarmReplicas:       m.MinWarmReplicas != nil,
-		MinWarmReplicas:          derefOrZero(m.MinWarmReplicas),
-		SetMemoryLimitMB:         m.MemoryLimitMB != nil,
-		MemoryLimitMB:            m.MemoryLimitMB,
-		SetCPUQuotaPercent:       m.CPUQuotaPercent != nil,
-		CPUQuotaPercent:          m.CPUQuotaPercent,
-		SetAutoscale:             m.Autoscale != nil,
-		AutoscaleEnabled:         asEnabled,
-		AutoscaleMinReplicas:     asMin,
-		AutoscaleMaxReplicas:     asMax,
-		AutoscaleTarget:          asTarget,
+		AppID:                        app.ID,
+		Slug:                         app.Slug,
+		SetHibernate:                 m.HibernateTimeoutMinutes != nil || m.HibernateResetToDefault,
+		HibernateMinutes:             m.HibernateTimeoutMinutes, // nil => NULL (reset to default)
+		SetReplicas:                  m.Replicas != nil,
+		Replicas:                     derefOrZero(m.Replicas),
+		PreviousReplicas:             app.Replicas,
+		SetMaxSessionsPerReplica:     m.MaxSessionsPerReplica != nil,
+		MaxSessionsPerReplica:        derefOrZero(m.MaxSessionsPerReplica),
+		SetIdentityHeaders:           true,
+		IdentityHeaders:              m.IdentityHeaders,
+		SetMinWarmReplicas:           m.MinWarmReplicas != nil,
+		MinWarmReplicas:              derefOrZero(m.MinWarmReplicas),
+		SetMemoryLimitMB:             m.MemoryLimitMB != nil,
+		MemoryLimitMB:                m.MemoryLimitMB,
+		SetCPUQuotaPercent:           m.CPUQuotaPercent != nil,
+		CPUQuotaPercent:              m.CPUQuotaPercent,
+		SetAutoscale:                 m.Autoscale != nil,
+		AutoscaleEnabled:             asEnabled,
+		AutoscaleMinReplicas:         asMin,
+		AutoscaleMaxReplicas:         asMax,
+		AutoscaleTarget:              asTarget,
+		SetWorkerIsolation:           m.Worker != nil && m.Worker.Isolation != nil,
+		WorkerIsolation:              workerIsolation,
+		SetWorkerGroupedSize:         m.Worker != nil && m.Worker.GroupedSize != nil,
+		WorkerGroupedSize:            workerGroupedSize,
+		SetWorkerMaxWorkers:          m.Worker != nil && m.Worker.MaxWorkers != nil,
+		WorkerMaxWorkers:             workerMaxWorkers,
+		SetWorkerMaxSessionLifetime:  m.Worker != nil && m.Worker.MaxSessionLifetimeSecs != nil,
+		WorkerMaxSessionLifetimeSecs: workerMaxSessionLifetimeSecs,
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -116,6 +162,28 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 	if m.MaxSessionsPerReplica != nil && s.proxy != nil {
 		s.proxy.SetPoolCap(app.Slug,
 			deploy.ResolveMaxSessionsPerReplica(*m.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
+	}
+	// SetPoolMode: propagate any worker-isolation change from the manifest so
+	// the live pool adopts the new routing strategy immediately. The subsequent
+	// deploy.Run (triggered by the caller's redeploy path) will set it again,
+	// but this call covers apps that are stopped or not yet deployed.
+	// Use the resolved manifest values (not app, which is the pre-write snapshot).
+	if m.Worker != nil && (m.Worker.Isolation != nil || m.Worker.GroupedSize != nil || m.Worker.MaxWorkers != nil) && s.proxy != nil {
+		effectiveIsolation := app.WorkerIsolation
+		if workerIsolation != "" {
+			effectiveIsolation = workerIsolation
+		}
+		effectiveGroupedSize := app.WorkerGroupedSize
+		if workerGroupedSize != 0 {
+			effectiveGroupedSize = workerGroupedSize
+		}
+		effectiveMaxWorkers := app.WorkerMaxWorkers
+		if workerMaxWorkers != 0 {
+			effectiveMaxWorkers = workerMaxWorkers
+		}
+		s.proxy.SetPoolMode(app.Slug,
+			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(effectiveIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
+			effectiveGroupedSize, effectiveMaxWorkers)
 	}
 	// Unconditional: a removed key must revert the live pool too (an
 	// atomic store; unconditional costs nothing).
@@ -366,6 +434,22 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if len(m.Command) > 0 {
 		d["command"] = m.Command
 	}
+	if m.Worker != nil {
+		w := map[string]any{}
+		if m.Worker.Isolation != nil {
+			w["isolation"] = *m.Worker.Isolation
+		}
+		if m.Worker.GroupedSize != nil {
+			w["grouped_size"] = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			w["max_workers"] = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs
+		}
+		d["worker"] = w
+	}
 	return d
 }
 
@@ -404,6 +488,22 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command
+	}
+	if m.Worker != nil {
+		w := map[string]any{}
+		if m.Worker.Isolation != nil {
+			w["isolation"] = *m.Worker.Isolation
+		}
+		if m.Worker.GroupedSize != nil {
+			w["grouped_size"] = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			w["max_workers"] = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs
+		}
+		d["worker"] = w
 	}
 	b, _ := json.Marshal(d)
 	return string(b)

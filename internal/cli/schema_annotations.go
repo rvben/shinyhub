@@ -126,6 +126,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "global_autoscale_enabled", Type: "boolean"},
 		{Name: "runtime_mode", Type: "string", Desc: "native | docker"},
 		{Name: "resource_enforcement", Type: "object", Desc: "{memory,cpu} booleans: whether each per-app limit is actually enforced (native is best-effort, gated on cgroup delegation)"},
+		{Name: "worker_isolation", Type: "string", Desc: "Session isolation mode: multiplex (default) | grouped | per_session"},
+		{Name: "worker_grouped_size", Type: "integer", Desc: "Clients per grouped worker (>= 1 when isolation is grouped)"},
+		{Name: "worker_max_workers", Type: "integer", Desc: "Demand-driven worker ceiling for grouped/per_session modes"},
+		{Name: "worker_max_session_lifetime_secs", Type: "integer", Desc: "Absolute worker lifetime in seconds (0 = unlimited)"},
 	}},
 	"apps logs": {Mutating: ro, Streaming: true},
 	"apps metrics": {Mutating: ro, OutputFields: []fieldSpec{
@@ -176,6 +180,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"apps set": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "updated"},
 		{Name: "slug", Type: "string"},
+	}, ArgEnums: map[string][]string{
+		"--isolation": {"multiplex", "grouped", "per_session"},
 	}},
 
 	// ── apps access (container) ───────────────────────────────────────────────
