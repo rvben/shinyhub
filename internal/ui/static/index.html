@@ -272,7 +272,7 @@
             <div class="kebab-menu">
               <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">⋯</button>
               <ul id="app-detail-kebab-menu" class="kebab-list" role="menu" hidden>
-                <li><button id="app-detail-restart" type="button" role="menuitem">Restart</button></li>
+                <li role="none"><button id="app-detail-restart" type="button" role="menuitem">Restart</button></li>
               </ul>
             </div>
           </div>
@@ -348,7 +348,7 @@
                     <button id="general-icon-remove" type="button" class="ov-btn" hidden>Remove</button>
                     <span id="general-icon-status" class="hibernate-status" hidden></span>
                   </div>
-                  <input id="general-icon-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" hidden>
+                  <input id="general-icon-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" aria-label="Choose an icon image" hidden>
                 </div>
               </div>
               <label class="scaling-row">
@@ -809,12 +809,11 @@
           <button id="deploy-modal-close" type="button" aria-label="Close deploy modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
         </div>
         <div class="modal-body">
-          <div id="deploy-dropzone" class="dropzone" tabindex="0" role="button"
-               aria-label="Drop folder or zip, or press Enter to pick a file">
+          <div id="deploy-dropzone" class="dropzone">
             <p>Drop a folder or <code>.zip</code> here,</p>
             <p>or <button id="deploy-pick" type="button" class="linklike">pick a file</button>.</p>
-            <input id="deploy-file" type="file" accept=".zip" hidden>
           </div>
+          <input id="deploy-file" type="file" accept=".zip" aria-label="Choose an app bundle (.zip file)" hidden>
 
           <ul id="deploy-summary" class="deploy-summary" hidden>
             <li>Source: <span id="deploy-source-name">—</span></li>
