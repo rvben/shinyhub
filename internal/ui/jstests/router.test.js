@@ -51,3 +51,23 @@ test('a healthy route still mounts normally when onError is provided', async () 
   await router.start();
   assert.ok(mounted, 'healthy mount function must run');
 });
+
+test('onMounted fires on a successful mount so a prior error state can be cleared', async () => {
+  withDom('/ok');
+  let mountedCalls = 0;
+  const router = createRouter({ onError: () => {}, onMounted: () => mountedCalls++ });
+  router.register('/ok', () => ({ title: 'OK' }));
+  await router.start();
+  assert.equal(mountedCalls, 1, 'onMounted must be called after a successful mount');
+});
+
+test('onMounted is NOT called when the mount throws', async () => {
+  withDom('/boom');
+  let mountedCalls = 0;
+  const router = createRouter({ onError: () => {}, onMounted: () => mountedCalls++ });
+  router.register('/boom', () => {
+    throw new Error('x');
+  });
+  await router.start();
+  assert.equal(mountedCalls, 0, 'onMounted must not fire on a failed mount');
+});

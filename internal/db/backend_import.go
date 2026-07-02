@@ -33,15 +33,19 @@ func (dst *Store) ImportFrom(src *Store) (map[string]int, error) {
 		return nil, err
 	}
 
-	// Refuse a non-empty target on the core tables so an existing deployment is
-	// never overwritten.
-	for _, t := range []string{"users", "apps"} {
+	// Refuse a non-empty target on ANY data table so an existing deployment is
+	// never partially overwritten. A freshly migrated target has every table
+	// empty (no migration seeds data), so this only rejects a target that has
+	// been used - including one merely started once, which would have created a
+	// worker CA or ownership-lease row that a narrower check would miss while
+	// the copy silently skipped the source's version.
+	for _, t := range tables {
 		var exists bool
 		if err := dst.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + quoteIdent(t) + `)`).Scan(&exists); err != nil {
 			return nil, fmt.Errorf("check target %s: %w", t, err)
 		}
 		if exists {
-			return nil, fmt.Errorf("%w (found rows in %s)", ErrTargetNotEmpty, t)
+			return nil, fmt.Errorf("%w (found rows in %s); the target must be a freshly-initialized, unused database", ErrTargetNotEmpty, t)
 		}
 	}
 
@@ -135,7 +139,9 @@ func copyTable(src *Store, tx *boundTx, dst *Store, table string) (int, error) {
 	for i, c := range cols {
 		quoted[i] = quoteIdent(c)
 	}
-	insert := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
+	// No ON CONFLICT: the target was verified empty, so any conflict is a real
+	// anomaly that must fail loudly rather than silently skip a source row.
+	insert := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		quoteIdent(table), strings.Join(quoted, ","), placeholders)
 
 	n := 0

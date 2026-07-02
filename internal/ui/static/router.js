@@ -23,6 +23,10 @@ export function createRouter(opts = {}) {
     typeof opts.onError === 'function'
       ? opts.onError
       : (err) => console.error('router: mount failed', err);
+  // onMounted runs after a successful mount so the app can clear a previously
+  // shown error state; otherwise the error view would linger beside a healthy
+  // page after the user navigates away from a transient failure.
+  const onMounted = typeof opts.onMounted === 'function' ? opts.onMounted : () => {};
   // navGuard, when set, is consulted before any navigation (link click, back/
   // forward, or programmatic navigate). It returns true to allow the navigation
   // and false to cancel it (e.g. unsaved edits the user chose to keep). currentPath
@@ -93,6 +97,9 @@ export function createRouter(opts = {}) {
       return;
     }
     current = view || {};
+    // Clear any prior error state before computing focus, so a recovered
+    // navigation neither shows the error panel nor lets its h1 steal focus.
+    onMounted();
     const brandTitle = (window.__SHINYHUB_BRANDING__ && window.__SHINYHUB_BRANDING__.site_title) || 'ShinyHub';
     document.title = (current && current.title) ? current.title + ' · ' + brandTitle : brandTitle;
     const h1 = document.querySelector('main section:not([hidden]) h1');

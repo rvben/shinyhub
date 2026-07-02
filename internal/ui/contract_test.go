@@ -41,6 +41,8 @@ func TestRouterErrorBoundaryWired(t *testing.T) {
 		"router mount must be guarded and route failures to opts.onError; see internal/ui/jstests/router.test.js")
 	assertContains(t, "app.js", "createRouter({ onError:",
 		"app.js must pass an onError handler to createRouter so a failed mount reveals the error view")
+	assertContains(t, "app.js", "onMounted: clearRouteError",
+		"app.js must pass onMounted so a successful navigation clears a prior route-error view (else it lingers beside the healthy page)")
 	assertContains(t, "index.html", `id="route-error-view"`,
 		"index.html must keep #route-error-view as the visible fallback when a view mount fails")
 	assertContains(t, "app.js", "unhandledrejection",

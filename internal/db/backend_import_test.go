@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -140,6 +141,30 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 	charlie, _ := target.GetAppBySlug("charlie")
 	if charlie.ID <= alpha.ID {
 		t.Errorf("new app id %d must exceed migrated max; sequence was not reset", charlie.ID)
+	}
+}
+
+// TestImportFrom_RefusesTargetWithNonCoreData guards that a target which has
+// been used at all - here a worker CA row, as a server started once would create
+// - is refused, even though users/apps are empty. Without the all-tables check
+// the copy would silently skip the source's worker CA (ON CONFLICT) and report
+// success, leaving the wrong key.
+func TestImportFrom_RefusesTargetWithNonCoreData(t *testing.T) {
+	target, _ := dbtest.NewPostgres(t)
+	srcPath := t.TempDir() + "/src.db"
+	src, err := db.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if err := src.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.PutWorkerCAIfAbsent([]byte("CERT"), []byte("ENC")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.ImportFrom(src); !errors.Is(err, db.ErrTargetNotEmpty) {
+		t.Fatalf("want ErrTargetNotEmpty for a target with a worker CA row, got %v", err)
 	}
 }
 

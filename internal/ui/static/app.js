@@ -3902,7 +3902,10 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const s of document.querySelectorAll('main > section')) s.hidden = true;
     if (routeErrorView) routeErrorView.hidden = false;
   }
-  const router = createRouter({ onError: showRouteError });
+  function clearRouteError() {
+    if (routeErrorView) routeErrorView.hidden = true;
+  }
+  const router = createRouter({ onError: showRouteError, onMounted: clearRouteError });
 
   // Last-resort net for throws outside the router mount path (event handlers,
   // async callbacks): log them so failures are observable rather than silent,
