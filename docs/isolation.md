@@ -215,8 +215,10 @@ isolation is not available in Phase 1.
 
 **Single-node only.** `grouped` and `per_session` require a single-node
 deployment. Setting either mode when the server is configured with a Postgres
-(clustered) DSN is rejected at startup as a config error. `multiplex` retains
-full HA behavior and is unaffected.
+(clustered) DSN is rejected by the PATCH API and the deploy pipeline - the
+server itself boots normally; the error surfaces when you save the worker
+settings or deploy a manifest that sets the mode. `multiplex` retains full HA
+behavior and is unaffected.
 
 **Cold start per session (no warm pool yet).** In Phase 1 there is no warm
 pool. The first request from a new client cold-starts a fresh worker process
@@ -230,10 +232,11 @@ and `memory_limit_mb = 512`, the worst-case host RAM for that one app is
 `30 * (512 + 150) = ~19 GiB` (150 MiB base overhead per worker). Size the
 host accordingly.
 
-**Host-capacity guard.** When `server.host_budget_mb` is set, the config
-loader rejects any combination where
-`max_workers * (memory_limit_mb + 150 MiB)` exceeds the budget. This is a
-startup-time check, not a runtime admission check. Set the budget to catch
+**Host-capacity guard.** When `server.host_budget_mb` is set, the API and
+deploy pipeline reject any combination where
+`max_workers * (memory_limit_mb + 150 MiB)` exceeds the budget. The check
+runs when worker settings are saved (via the API or a manifest deploy), not
+on server startup and not on each incoming request. Set the budget to catch
 misconfigured limits early.
 
 **`max_workers` is a hard ceiling; overflow yields 503.** When all
@@ -272,9 +275,9 @@ worker holds its full resource slice until the client disconnects (or
    shinyhub apps set myapp --isolation per_session --max-workers 20
    ```
 
-   The change takes effect immediately for new incoming sessions. The
-   existing multiplex pool is cleared; any currently-connected sessions
-   will cold-start in their new per-session worker on their next request.
+   The change takes effect immediately for new incoming sessions. Any
+   currently-connected sessions will cold-start in their new per-session
+   worker on their next request.
 
 2. **Or declare it in `shinyhub.toml`** (recommended for reproducible fleets):
 
