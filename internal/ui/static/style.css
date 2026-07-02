@@ -63,11 +63,72 @@ summary:focus-visible {
   --standby:     #A5B4FC;                 /* indigo: hibernated — asleep, wakes on demand */
   --standby-bg:  rgba(129,140,248,0.14);
   --gray-bg:     rgba(107,122,163,0.12);
+  /* RGB triplets for translucent "glass" surfaces (cards, modals, insets):
+     rgba(var(--surface-rgb), a) themes the colour while each site keeps its
+     own alpha. Kept in sync with --surface-2/--surface/--bg-deep above. */
+  --surface-2-rgb: 20, 27, 50;
+  --surface-rgb:   14, 20, 38;
+  --bg-deep-rgb:   6, 9, 20;
   --radius:      8px;
   --radius-lg:   14px;
   --font:        'Manrope', -apple-system, system-ui, 'Segoe UI', sans-serif;
   --mono:        'Space Mono', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
   --ease:        200ms cubic-bezier(.2,.7,.2,1);
+  color-scheme: dark;
+}
+
+/* ── Light theme ──────────────────────────────────────────────────────────
+   Applied when <html data-theme="light"> (set by the no-flash inline script in
+   index.html and views/theme.js). Only the semantic colour tokens are overridden;
+   the whole UI reads through them, so the palette flips wholesale. Brand cyan and
+   the status colours are darkened to keep text at WCAG AA contrast on light
+   surfaces (the dark-theme brights fail on white). Radii, fonts, and timing are
+   theme-independent and inherited from :root. */
+:root[data-theme="light"] {
+  --bg:          #F4F7FC;
+  --bg-deep:     #E8EDF6;
+  --surface:     #FFFFFF;
+  --surface-2:   #F3F6FB;
+  --surface-3:   #E9EEF7;
+  --line:        #DBE2EE;
+  --line-2:      #C6D0E0;
+  --text:        #16203A;
+  --text-soft:   #45526E;
+  --text-muted:  #5B6784;
+  --text-dim:    #93A0B8;
+  --brand-primary: #0369A1;
+  --cyan:        #0284C7;
+  --cyan-bright: #0369A1;
+  --sparkle:     #0284C7;
+  --electric:    #2563EB;
+  --accent:      #0369A1;
+  --accent-glow: rgba(3,105,161,0.14);
+  --accent-dim:  rgba(3,105,161,0.07);
+  --green:       #15803D;
+  --green-bg:    rgba(21,128,61,0.10);
+  --red:         #DC2626;
+  --red-bg:      rgba(220,38,38,0.10);
+  --yellow:      #B45309;
+  --yellow-bg:   rgba(180,83,9,0.13);
+  --standby:     #4F46E5;
+  --standby-bg:  rgba(79,70,229,0.11);
+  --gray-bg:     rgba(100,116,139,0.12);
+  --surface-2-rgb: 243, 246, 251;
+  --surface-rgb:   255, 255, 255;
+  --bg-deep-rgb:   232, 237, 246;
+  color-scheme: light;
+}
+
+/* The decorative starfield is a dark-space motif; hide it on the light theme. */
+:root[data-theme="light"] .bg-stars { opacity: 0; }
+
+/* Replace the dark deep-space wash with a light, barely-there cool gradient (the
+   default's hardcoded dark tail and saturated glows are a dark-mode motif). */
+:root[data-theme="light"] body::before {
+  background:
+    radial-gradient(900px 500px at 85% 0%, rgba(3,105,161,0.05), transparent 60%),
+    radial-gradient(700px 600px at 10% 100%, rgba(37,99,235,0.04), transparent 60%),
+    linear-gradient(180deg, var(--bg-deep) 0%, var(--bg) 100%);
 }
 
 /* ── Base ── */
@@ -196,7 +257,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   display: flex;
   flex-direction: column;
   padding: 1.1rem 0.7rem 0.8rem;
-  background: rgba(6,9,20,0.72);
+  background: rgba(var(--bg-deep-rgb),0.72);
   backdrop-filter: blur(14px) saturate(1.3);
   -webkit-backdrop-filter: blur(14px) saturate(1.3);
   border-right: 1px solid var(--line);
@@ -433,7 +494,7 @@ body.sidebar-collapsed .sidebar-brand .sparkle { width: 22px; height: 22px; }
   align-items: center;
   gap: 0.75rem;
   padding: 0.6rem 1rem;
-  background: rgba(6,9,20,0.85);
+  background: rgba(var(--bg-deep-rgb),0.85);
   backdrop-filter: blur(14px) saturate(1.3);
   -webkit-backdrop-filter: blur(14px) saturate(1.3);
   border-bottom: 1px solid var(--line);
@@ -508,7 +569,7 @@ main {
 .login-box {
   max-width: 400px;
   margin: 4rem auto;
-  background: linear-gradient(180deg, rgba(20,27,50,0.78) 0%, rgba(14,20,38,0.60) 100%);
+  background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 100%);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   padding: 2.25rem 2rem;
@@ -550,7 +611,7 @@ main {
 .login-box input {
   display: block;
   width: 100%;
-  background: rgba(6,9,20,0.65);
+  background: var(--bg-deep);
   border: 1px solid var(--line);
   color: var(--text);
   padding: 0.65rem 0.9rem;
@@ -698,7 +759,7 @@ main {
 
 .app-card {
   background:
-    linear-gradient(180deg, rgba(20,27,50,0.75) 0%, rgba(14,20,38,0.55) 100%);
+    linear-gradient(180deg, rgba(var(--surface-2-rgb),0.75) 0%, rgba(var(--surface-rgb),0.55) 100%);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   padding: 1.3rem 1.4rem 1.15rem;
@@ -795,7 +856,7 @@ main {
   border-radius: var(--radius);
   cursor: pointer;
   border: 1px solid var(--line-2);
-  background: rgba(14,20,38,0.5);
+  background: rgba(var(--surface-rgb),0.5);
   color: var(--text-soft);
   text-decoration: none;
   font-family: var(--font);
@@ -1045,7 +1106,7 @@ main {
   border-collapse: collapse;
   font-size: 0.85rem;
   margin-bottom: 0.5rem;
-  background: linear-gradient(180deg, rgba(20,27,50,0.55) 0%, rgba(14,20,38,0.35) 100%);
+  background: linear-gradient(180deg, rgba(var(--surface-2-rgb),0.55) 0%, rgba(var(--surface-rgb),0.35) 100%);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -1062,7 +1123,7 @@ main {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   font-family: var(--mono);
-  background: rgba(6,9,20,0.4);
+  background: rgba(var(--bg-deep-rgb),0.4);
   border-bottom: 1px solid var(--line);
 }
 
@@ -1085,7 +1146,7 @@ main {
   border-collapse: collapse;
   font-size: 0.85rem;
   margin-bottom: 0.5rem;
-  background: linear-gradient(180deg, rgba(20,27,50,0.55) 0%, rgba(14,20,38,0.35) 100%);
+  background: linear-gradient(180deg, rgba(var(--surface-2-rgb),0.55) 0%, rgba(var(--surface-rgb),0.35) 100%);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -1102,7 +1163,7 @@ main {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   font-family: var(--mono);
-  background: rgba(6,9,20,0.4);
+  background: rgba(var(--bg-deep-rgb),0.4);
   border-bottom: 1px solid var(--line);
 }
 
@@ -1334,7 +1395,7 @@ main {
 .modal-overlay[hidden] { display: none; }
 
 .modal-card {
-  background: linear-gradient(180deg, rgba(20,27,50,0.92) 0%, rgba(14,20,38,0.88) 100%);
+  background: linear-gradient(180deg, rgba(var(--surface-2-rgb),0.92) 0%, rgba(var(--surface-rgb),0.88) 100%);
   border: 1px solid var(--line-2);
   border-radius: var(--radius-lg);
   width: 100%;
@@ -1595,7 +1656,7 @@ fieldset.settings-block { min-width: 0; }
 .grant-row input {
   flex: 1;
   padding: 0.55rem 0.85rem;
-  background: rgba(6,9,20,0.65);
+  background: rgba(var(--bg-deep-rgb),0.65);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   color: var(--text);
@@ -1659,7 +1720,7 @@ fieldset.settings-block { min-width: 0; }
   font-weight: 600;
   cursor: pointer;
   border: 1px solid var(--line-2);
-  background: rgba(14,20,38,0.55);
+  background: rgba(var(--surface-rgb),0.55);
   color: var(--text-soft);
   transition: all var(--ease);
   letter-spacing: -0.005em;
@@ -1740,7 +1801,7 @@ fieldset.settings-block { min-width: 0; }
 
 .danger-zone-label code {
   color: var(--text);
-  background: rgba(6,9,20,0.65);
+  background: rgba(var(--bg-deep-rgb),0.65);
   padding: 0.05rem 0.4rem;
   border-radius: var(--radius);
   font-family: var(--mono);
@@ -1755,7 +1816,7 @@ fieldset.settings-block { min-width: 0; }
 .danger-zone-controls input {
   flex: 1;
   padding: 0.55rem 0.85rem;
-  background: rgba(6,9,20,0.65);
+  background: rgba(var(--bg-deep-rgb),0.65);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   color: var(--text);
@@ -1801,7 +1862,7 @@ fieldset.settings-block { min-width: 0; }
 }
 .btn-row {
   padding: 0.35rem 0.75rem;
-  background: rgba(14,20,38,0.55);
+  background: rgba(var(--surface-rgb),0.55);
   color: var(--text-soft);
   border: 1px solid var(--line-2);
   border-radius: var(--radius);
@@ -2182,7 +2243,7 @@ fieldset.settings-block { min-width: 0; }
 /* === Hand-off card: wraps form + snippet as a single unit === */
 
 .handoff-card {
-  background: rgba(6,9,20,0.4);
+  background: rgba(var(--bg-deep-rgb),0.4);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   padding: 1.1rem 1.1rem 1.2rem;
@@ -2314,7 +2375,7 @@ fieldset.settings-block { min-width: 0; }
 .emptystate-card {
   width: 100%;
   max-width: 640px;
-  background: linear-gradient(180deg, rgba(20,27,50,0.82) 0%, rgba(14,20,38,0.65) 100%);
+  background: linear-gradient(180deg, rgba(var(--surface-2-rgb),0.82) 0%, rgba(var(--surface-rgb),0.65) 100%);
   border: 1px solid var(--line-2);
   border-radius: var(--radius-lg);
   padding: 2rem 1.75rem 1.85rem;
@@ -2396,7 +2457,7 @@ fieldset.settings-block { min-width: 0; }
   text-decoration: none;
   cursor: pointer;
   border: 1px solid var(--line-2);
-  background: rgba(14,20,38,0.5);
+  background: rgba(var(--surface-rgb),0.5);
   color: var(--text-soft);
   transition: all var(--ease);
 }
@@ -2824,7 +2885,7 @@ fieldset.settings-block { min-width: 0; }
 
 .env-form-row input[type="text"] {
   padding: 0.55rem 0.85rem;
-  background: rgba(6,9,20,0.65);
+  background: rgba(var(--bg-deep-rgb),0.65);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   color: var(--text);
@@ -2890,7 +2951,7 @@ fieldset.settings-block { min-width: 0; }
 
 .env-btn-secondary {
   padding: 0.5rem 1.1rem;
-  background: rgba(14,20,38,0.55);
+  background: rgba(var(--surface-rgb),0.55);
   color: var(--text-soft);
   border: 1px solid var(--line-2);
   border-radius: var(--radius);
@@ -3353,7 +3414,7 @@ fieldset.settings-block { min-width: 0; }
   border-radius: var(--radius);
   cursor: pointer;
   border: 1px solid var(--line-2);
-  background: rgba(14,20,38,0.5);
+  background: rgba(var(--surface-rgb),0.5);
   color: var(--text-soft);
   font-family: var(--font);
   transition: all var(--ease);
@@ -3560,7 +3621,7 @@ fieldset.settings-block { min-width: 0; }
   border-radius: var(--radius);
   cursor: pointer;
   border: 1px solid var(--line-2);
-  background: rgba(14,20,38,0.5);
+  background: rgba(var(--surface-rgb),0.5);
   color: var(--text-soft);
   font-family: var(--font);
   font-weight: 600;
@@ -3644,6 +3705,45 @@ footer.brand-footer a { color:inherit; }
   text-transform: uppercase;
   letter-spacing: 0.07em;
 }
+.profile-appearance {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.6rem 1rem 0.9rem;
+  margin-top: 1rem;
+}
+.profile-appearance legend {
+  padding: 0 0.45rem;
+  color: var(--text-soft);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.theme-options { display: flex; gap: 0.4rem; }
+.theme-option {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: border-color var(--ease), color var(--ease), background var(--ease);
+}
+.theme-option:hover { border-color: var(--line-2); color: var(--text); }
+.theme-option input { accent-color: var(--accent); margin: 0; }
+/* Selected pill highlight; the native radio still shows state where :has() is unsupported. */
+.theme-option:has(input:checked) {
+  border-color: var(--cyan-bright);
+  color: var(--text);
+  background: var(--accent-dim);
+}
+.theme-option:focus-within { outline: 2px solid var(--cyan-bright); outline-offset: 1px; }
+
 .profile-success {
   color: var(--green);
   font-size: 0.8rem;

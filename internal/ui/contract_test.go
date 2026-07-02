@@ -46,6 +46,28 @@ func TestAppDetailAccessResolverWired(t *testing.T) {
 		"app-detail.js must build the tab strip visibility/href/roving-tabindex model via tabViewModels")
 }
 
+// TestThemeWiring guards the light/dark theme feature. The pure resolver is
+// unit-tested (jstests/theme.test.js); the wiring lives in the app.js IIFE and
+// index.html, so pin the load-bearing pieces by string search:
+//   - a no-flash inline script sets data-theme before first paint,
+//   - app.js initialises the theme and handles the Appearance radios,
+//   - the palette has a light override keyed on [data-theme="light"],
+//   - the profile modal exposes the theme picker.
+func TestThemeWiring(t *testing.T) {
+	assertContains(t, "index.html", "document.documentElement.dataset.theme",
+		"index.html must set data-theme before first paint (no-flash inline script)")
+	assertContains(t, "index.html", "shinyhub-theme",
+		"the inline theme script must read the persisted preference key")
+	assertContains(t, "index.html", `name="theme-pref"`,
+		"the profile modal must expose the System/Light/Dark theme picker radios")
+	assertContains(t, "app.js", "initTheme(window",
+		"app.js must initialise the theme (re-apply + track OS changes on 'system')")
+	assertContains(t, "app.js", "setThemePreference(window",
+		"app.js must persist the chosen theme when a radio changes")
+	assertContains(t, "style.css", `:root[data-theme="light"]`,
+		"style.css must define the light palette keyed on the data-theme attribute")
+}
+
 // TestTokensUIWiring guards the /tokens page wiring. The create/list/revoke +
 // reveal-once logic lives in app.js's IIFE (not jsdom-importable), so pin it by
 // string search; the pure list rendering is unit-tested in
