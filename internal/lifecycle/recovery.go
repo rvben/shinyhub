@@ -13,6 +13,7 @@ import (
 
 	gops "github.com/shirou/gopsutil/v4/process"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fargate"
@@ -187,6 +188,30 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 	}
 
 	for _, app := range apps {
+		// Elastic-mode apps (grouped or per_session) are demand-driven: workers
+		// are ephemeral and are never persisted to the replicas table. Set up
+		// the elastic proxy pool and keep the app status as "running" so the
+		// first incoming request can trigger a fresh spawn. Skip the normal
+		// replica-adoption loop entirely.
+		if isElasticIsolation(app.WorkerIsolation) {
+			prx.SetPoolMode(app.Slug,
+				config.WorkerIsolationMode(app.WorkerIsolation),
+				app.WorkerGroupedSize,
+				app.WorkerMaxWorkers)
+			prx.SetPoolAppID(app.Slug, app.ID)
+			prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, identityGlobal))
+			// Mark the app running: the empty elastic pool is live and will
+			// spawn workers on demand. A crashed/failed app that was in elastic
+			// mode is re-exposed as "running" here; the next spawn attempt will
+			// surface any boot failure as a "crashed" transition.
+			if err := store.UpdateAppStatus(db.UpdateAppStatusParams{
+				Slug: app.Slug, Status: "running",
+			}); err != nil {
+				slog.Error("process recovery: mark elastic app running", "slug", app.Slug, "err", err)
+			}
+			continue
+		}
+
 		reps, err := store.ListReplicas(app.ID)
 		if err != nil || len(reps) == 0 {
 			markRecoveryStopped(store, app.Slug)

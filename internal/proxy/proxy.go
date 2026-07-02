@@ -479,6 +479,29 @@ func (p *Proxy) poolRoutable(slug string) bool {
 	return pool != nil && poolHasAny(pool)
 }
 
+// PoolHasAny reports whether slug currently has at least one routable backend
+// (a registered replica for multiplex pools, or a running/booting elastic
+// worker for elastic pools). It is the exported counterpart of poolRoutable
+// used by lifecycle tests and external health checks.
+func (p *Proxy) PoolHasAny(slug string) bool {
+	return p.poolRoutable(slug)
+}
+
+// ElasticWorkerCount returns the number of workers (in any state) currently
+// tracked in the elastic pool for slug. Returns 0 for unknown slugs or
+// non-elastic pools. Intended for tests to assert that termination/deregistration
+// correctly empties the workers map (PoolHasAny always returns true for elastic
+// pools because they route on demand; it cannot be used for this assertion).
+func (p *Proxy) ElasticWorkerCount(slug string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool, ok := p.pools[slug]
+	if !ok || !poolIsElastic(pool) {
+		return 0
+	}
+	return len(pool.workers)
+}
+
 // SetAccessLogger registers a callback invoked once per proxied request
 // (including responses served from the loading page). Pass nil to disable.
 // Safe to call concurrently with ServeHTTP; subsequent requests observe the

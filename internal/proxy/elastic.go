@@ -305,10 +305,12 @@ func (p *Proxy) clientConnClosed(slug, clientID string) {
 	})
 }
 
-// releaseReservation removes a booting slot that failed to spawn. This is
-// called by the boot-timeout handler (Task 12) when a worker never becomes
-// ready. Caller must NOT hold p.mu.
-func (p *Proxy) releaseReservation(slug string, slotID int) {
+// ReleaseReservation removes a booting slot that failed to spawn. It also
+// cancels and removes any client slots already bound to this slotID (a client
+// that pre-bound during the boot window must not be left dangling). Called by
+// the spawn callback (Task 12) when a worker fails to start or pass health
+// checks. Caller must NOT hold p.mu.
+func (p *Proxy) ReleaseReservation(slug string, slotID int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -317,6 +319,50 @@ func (p *Proxy) releaseReservation(slug string, slotID int) {
 		return
 	}
 	removeElasticWorker(pool, slotID)
+
+	// Cancel and remove any client slots already bound to this slotID so they
+	// do not reference a nonexistent worker after the boot fails.
+	for clientID, cs := range p.clients[slug] {
+		if cs.slotID == slotID {
+			if cs.releaseTimer != nil {
+				cs.releaseTimer.Stop()
+				cs.releaseTimer = nil
+			}
+			delete(p.clients[slug], clientID)
+		}
+	}
+	if len(p.clients[slug]) == 0 {
+		delete(p.clients, slug)
+	}
+}
+
+// DeregisterElasticWorker removes a running elastic worker from the pool and
+// cancels any client slots bound to it. It is the clean-up path for a
+// successfully-started worker that is being intentionally terminated (see
+// ElasticSpawner.Terminate). Idempotent: no-ops on unknown slugs or slotIDs.
+// Caller must NOT hold p.mu.
+func (p *Proxy) DeregisterElasticWorker(slug string, slotID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok {
+		return
+	}
+	removeElasticWorker(pool, slotID)
+
+	for clientID, cs := range p.clients[slug] {
+		if cs.slotID == slotID {
+			if cs.releaseTimer != nil {
+				cs.releaseTimer.Stop()
+				cs.releaseTimer = nil
+			}
+			delete(p.clients[slug], clientID)
+		}
+	}
+	if len(p.clients[slug]) == 0 {
+		delete(p.clients, slug)
+	}
 }
 
 // lookupClientSlot returns the clientSlot for clientID in slug's clients map,

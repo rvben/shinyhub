@@ -181,7 +181,7 @@ func TestClientConnClosed_RetirePathFiresTerminate(t *testing.T) {
 	}
 }
 
-// TestReleaseReservation_RemovesBootingWorker verifies that releaseReservation
+// TestReleaseReservation_RemovesBootingWorker verifies that ReleaseReservation
 // removes a booting slot from the pool (used by boot-timeout cleanup).
 func TestReleaseReservation_RemovesBootingWorker(t *testing.T) {
 	const slug = "myapp"
@@ -202,13 +202,94 @@ func TestReleaseReservation_RemovesBootingWorker(t *testing.T) {
 		t.Fatal("worker not found in pool after reserveWorker")
 	}
 
-	p.releaseReservation(slug, slotID)
+	p.ReleaseReservation(slug, slotID)
 
 	p.mu.RLock()
 	_, stillIn := p.pools[slug].workers[slotID]
 	p.mu.RUnlock()
 	if stillIn {
-		t.Error("worker still in pool after releaseReservation")
+		t.Error("worker still in pool after ReleaseReservation")
+	}
+}
+
+// TestReleaseReservation_CleansUpClientSlots verifies that ReleaseReservation
+// also removes any client slots bound to the failing slotID, so a pre-bound
+// client is not left referencing a dead worker.
+func TestReleaseReservation_CleansUpClientSlots(t *testing.T) {
+	const slug = "myapp"
+	const clientID = "c1"
+
+	p := New()
+	p.SetPoolMode(slug, config.IsolationPerSession, 0, 5)
+
+	slotID := p.reserveWorker(slug, clientID)
+	if slotID < 0 {
+		t.Fatal("reserveWorker returned -1 unexpectedly")
+	}
+	// Bind a client to the booting slot.
+	p.bindClient(slug, clientID, slotID)
+
+	p.mu.RLock()
+	_, clientBound := p.clients[slug][clientID]
+	p.mu.RUnlock()
+	if !clientBound {
+		t.Fatal("client slot not present after bindClient")
+	}
+
+	// Release the booting reservation on failure.
+	p.ReleaseReservation(slug, slotID)
+
+	p.mu.RLock()
+	_, workerStillIn := p.pools[slug].workers[slotID]
+	_, clientStillIn := p.clients[slug][clientID]
+	p.mu.RUnlock()
+
+	if workerStillIn {
+		t.Error("booting slot still in pool after ReleaseReservation")
+	}
+	if clientStillIn {
+		t.Error("client slot still present after ReleaseReservation; should have been cleaned up")
+	}
+}
+
+// TestDeregisterElasticWorker_RemovesWorkerAndClient verifies that
+// DeregisterElasticWorker removes a running worker and all bound client slots.
+func TestDeregisterElasticWorker_RemovesWorkerAndClient(t *testing.T) {
+	const slug = "myapp"
+
+	p := New()
+	p.SetPoolMode(slug, config.IsolationPerSession, 0, 5)
+
+	// Register a running worker directly.
+	if err := p.RegisterElasticWorker(slug, 7, "http://127.0.0.1:9991", nil, 42); err != nil {
+		t.Fatalf("RegisterElasticWorker: %v", err)
+	}
+	// Bind two clients to it.
+	p.bindClient(slug, "cA", 7)
+	p.bindClient(slug, "cB", 7)
+
+	p.mu.RLock()
+	_, workerIn := p.pools[slug].workers[7]
+	_, cAIn := p.clients[slug]["cA"]
+	_, cBIn := p.clients[slug]["cB"]
+	p.mu.RUnlock()
+	if !workerIn || !cAIn || !cBIn {
+		t.Fatal("precondition: worker and clients must be present before deregister")
+	}
+
+	p.DeregisterElasticWorker(slug, 7)
+
+	p.mu.RLock()
+	_, workerStill := p.pools[slug].workers[7]
+	_, cAStill := p.clients[slug]["cA"]
+	_, cBStill := p.clients[slug]["cB"]
+	p.mu.RUnlock()
+
+	if workerStill {
+		t.Error("worker still in pool after DeregisterElasticWorker")
+	}
+	if cAStill || cBStill {
+		t.Error("client slots still present after DeregisterElasticWorker")
 	}
 }
 
