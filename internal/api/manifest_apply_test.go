@@ -446,3 +446,49 @@ func TestApplyManifestAppSettings_MinWarmReplicasAbsentLeavesStoredValue(t *test
 		t.Errorf("MinWarmReplicas = %d after absent-key apply, want 3 (untouched)", got.MinWarmReplicas)
 	}
 }
+
+// TestValidateManifestForServer_ClusteredRejectsPerSession confirms that a
+// per_session worker isolation manifest is rejected on a clustered (Postgres)
+// server, matching the existing PATCH /api/apps path.
+func TestValidateManifestForServer_ClusteredRejectsPerSession(t *testing.T) {
+	srv, store, _ := newServerWithOwnedApp(t, "alpha")
+	srv.SetCluster("test-instance")
+	app, _ := store.GetAppBySlug("alpha")
+
+	iso := "per_session"
+	maxWorkers := 2
+	m := deploy.AppSettings{
+		Worker: &deploy.WorkerManifest{
+			Isolation:  &iso,
+			MaxWorkers: &maxWorkers,
+		},
+	}
+	verr := srv.validateManifestForServer(app, m)
+	if verr == nil {
+		t.Fatal("expected validation error for per_session on clustered server, got nil")
+	}
+	if !strings.Contains(verr.Error(), "clustered") && !strings.Contains(verr.Error(), "Postgres") {
+		t.Errorf("expected clustered/Postgres mention in error, got: %v", verr)
+	}
+}
+
+// TestValidateManifestForServer_WorkerGroupedValidPasses confirms that a valid
+// grouped worker block passes server-side validation on a non-clustered server.
+func TestValidateManifestForServer_WorkerGroupedValidPasses(t *testing.T) {
+	srv, store, _ := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+
+	iso := "grouped"
+	groupedSize := 5
+	maxWorkers := 2
+	m := deploy.AppSettings{
+		Worker: &deploy.WorkerManifest{
+			Isolation:   &iso,
+			GroupedSize: &groupedSize,
+			MaxWorkers:  &maxWorkers,
+		},
+	}
+	if verr := srv.validateManifestForServer(app, m); verr != nil {
+		t.Errorf("expected valid grouped worker block to pass, got: %v", verr)
+	}
+}

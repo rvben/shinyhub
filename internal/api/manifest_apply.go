@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
@@ -53,6 +54,26 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 	if msg := s.fargateLimitViolation(m.MemoryLimitMB, m.CPUQuotaPercent); msg != "" {
 		return newValidationError("%s", msg)
 	}
+	if m.Worker != nil {
+		ws := config.WorkerSettings{}
+		if m.Worker.Isolation != nil {
+			ws.Isolation = config.WorkerIsolationMode(*m.Worker.Isolation)
+		}
+		if m.Worker.GroupedSize != nil {
+			ws.GroupedSize = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			ws.MaxWorkers = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			ws.MaxSessionLifetime = *m.Worker.MaxSessionLifetimeSecs
+		}
+		memMB, _ := s.cfg.Runtime.DefaultResourcesForApp(app)
+		effMemMB := deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, memMB)
+		if err := config.ValidateWorkerSettings(ws, s.clustered, effMemMB, s.cfg.HostBudgetMB()); err != nil {
+			return newValidationError("%s", err.Error())
+		}
+	}
 	return nil
 }
 
@@ -75,6 +96,23 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy.AppSettings) error {
 	// Autoscale reconciles atomically only when the block is declared; the
 	// zero values below are inert because SetAutoscale gates the DB write.
+	// Resolve worker fields: nil pointer means "absent, leave stored value unchanged".
+	var workerIsolation string
+	var workerGroupedSize, workerMaxWorkers, workerMaxSessionLifetimeSecs int
+	if m.Worker != nil {
+		if m.Worker.Isolation != nil {
+			workerIsolation = *m.Worker.Isolation
+		}
+		if m.Worker.GroupedSize != nil {
+			workerGroupedSize = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			workerMaxWorkers = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			workerMaxSessionLifetimeSecs = *m.Worker.MaxSessionLifetimeSecs
+		}
+	}
 	var asEnabled bool
 	var asMin, asMax int
 	var asTarget float64
@@ -109,6 +147,14 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		AutoscaleMinReplicas:     asMin,
 		AutoscaleMaxReplicas:     asMax,
 		AutoscaleTarget:          asTarget,
+		SetWorkerIsolation:          m.Worker != nil && m.Worker.Isolation != nil,
+		WorkerIsolation:             workerIsolation,
+		SetWorkerGroupedSize:        m.Worker != nil && m.Worker.GroupedSize != nil,
+		WorkerGroupedSize:           workerGroupedSize,
+		SetWorkerMaxWorkers:         m.Worker != nil && m.Worker.MaxWorkers != nil,
+		WorkerMaxWorkers:            workerMaxWorkers,
+		SetWorkerMaxSessionLifetime: m.Worker != nil && m.Worker.MaxSessionLifetimeSecs != nil,
+		WorkerMaxSessionLifetimeSecs: workerMaxSessionLifetimeSecs,
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -123,6 +169,7 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		s.proxy.SetPoolIdentityHeaders(app.Slug,
 			deploy.ResolveIdentityHeaders(m.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()))
 	}
+	// SetPoolMode wired in Task 13
 
 	if !m.IsZero() {
 		s.audit(r, "update_app", "app", app.Slug, manifestAppDetail(m))
@@ -366,6 +413,22 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if len(m.Command) > 0 {
 		d["command"] = m.Command
 	}
+	if m.Worker != nil {
+		w := map[string]any{}
+		if m.Worker.Isolation != nil {
+			w["isolation"] = *m.Worker.Isolation
+		}
+		if m.Worker.GroupedSize != nil {
+			w["grouped_size"] = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			w["max_workers"] = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs
+		}
+		d["worker"] = w
+	}
 	return d
 }
 
@@ -404,6 +467,22 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if len(m.Command) > 0 {
 		d["command"] = m.Command
+	}
+	if m.Worker != nil {
+		w := map[string]any{}
+		if m.Worker.Isolation != nil {
+			w["isolation"] = *m.Worker.Isolation
+		}
+		if m.Worker.GroupedSize != nil {
+			w["grouped_size"] = *m.Worker.GroupedSize
+		}
+		if m.Worker.MaxWorkers != nil {
+			w["max_workers"] = *m.Worker.MaxWorkers
+		}
+		if m.Worker.MaxSessionLifetimeSecs != nil {
+			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs
+		}
+		d["worker"] = w
 	}
 	b, _ := json.Marshal(d)
 	return string(b)

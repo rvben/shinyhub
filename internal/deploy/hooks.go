@@ -16,6 +16,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/mattn/go-shellwords"
 	"github.com/rvben/shinyhub/internal/autoscalespec"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
@@ -106,7 +107,22 @@ type AppSettings struct {
 	MemoryLimitMB   *int `toml:"memory_limit_mb"`
 	CPUQuotaPercent *int `toml:"cpu_quota_percent"`
 
+	// Worker declares per-app session-isolation policy. A non-nil pointer means
+	// the block is present and reconciles the four worker_* columns on every
+	// deploy (like Autoscale); nil means "not declared" and leaves any
+	// previously-set value unchanged.
+	Worker *WorkerManifest `toml:"worker"`
+
 	HibernateResetToDefault bool `toml:"-"`
+}
+
+// WorkerManifest mirrors the [app.worker] inline table. All fields are
+// pointers so "absent" (nil) is distinct from an explicit zero value.
+type WorkerManifest struct {
+	Isolation             *string `toml:"isolation"`
+	GroupedSize           *int    `toml:"grouped_size"`
+	MaxWorkers            *int    `toml:"max_workers"`
+	MaxSessionLifetimeSecs *int   `toml:"max_session_lifetime_secs"`
 }
 
 // AutoscaleSettings mirrors the [app] autoscale inline table. The block is an
@@ -135,6 +151,7 @@ func (a AppSettings) IsZero() bool {
 		a.MemoryLimitMB == nil &&
 		a.CPUQuotaPercent == nil &&
 		a.Autoscale == nil &&
+		a.Worker == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -322,6 +339,26 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	if a.Autoscale != nil {
 		if err := validateAutoscale(*a.Autoscale); err != nil {
 			return err
+		}
+	}
+	if a.Worker != nil {
+		ws := config.WorkerSettings{}
+		if a.Worker.Isolation != nil {
+			ws.Isolation = config.WorkerIsolationMode(*a.Worker.Isolation)
+		}
+		if a.Worker.GroupedSize != nil {
+			ws.GroupedSize = *a.Worker.GroupedSize
+		}
+		if a.Worker.MaxWorkers != nil {
+			ws.MaxWorkers = *a.Worker.MaxWorkers
+		}
+		if a.Worker.MaxSessionLifetimeSecs != nil {
+			ws.MaxSessionLifetime = *a.Worker.MaxSessionLifetimeSecs
+		}
+		// Parse-time validates shape only; clustered and host-budget checks
+		// belong to the server path (validateManifestForServer).
+		if err := config.ValidateWorkerSettings(ws, false, 0, 0); err != nil {
+			return fmt.Errorf("worker: %w", err)
 		}
 	}
 	return nil
