@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -845,31 +847,81 @@ func rateLimitByUser(rl *keyedRateLimiter) func(http.Handler) http.Handler {
 }
 
 // rateLimitAuthFailures throttles repeated FAILED bearer/API-token
-// authentications from a single client IP. Only requests carrying an
-// Authorization header are considered, and only a 401 from the downstream auth
-// middleware counts against the limit — so a client presenting a valid token is
-// never throttled no matter how many requests it makes, and unauthenticated
-// (cookie-less) probes fall through to the login limiter instead. This dampens
-// token-guessing / credential-stuffing floods on the API auth path (256-bit
-// tokens make a successful guess infeasible, but the error flood is worth
-// bounding). Must wrap the bearer middleware so it observes the 401 it emits.
+// authentications from a single client IP. It counts only 401s from the
+// downstream auth middleware (requests that carried an Authorization header),
+// and converts a failing request to 429 only once that IP is over the limit.
+//
+// A request presenting a VALID credential produces a non-401 status, so it is
+// never intercepted and never throttled — even after the failure bucket for its
+// IP has filled from a co-located bad actor (e.g. a shared NAT / corporate
+// egress IP where one client has a stale token). That is the key difference
+// from a pre-auth IP block, which would lock out valid clients on the same IP.
+// Unauthenticated (cookie-less) probes carry no Authorization header and fall
+// through to the login limiter instead. This dampens token-guessing /
+// credential-stuffing floods (256-bit tokens make a successful guess infeasible,
+// but the error flood is worth bounding).
 func (s *Server) rateLimitAuthFailures(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ip := s.ClientIP(r)
-		if s.authFailLimiter.blocked(ip) {
-			writeError(w, http.StatusTooManyRequests, "too many failed authentication attempts, try again later")
+		next.ServeHTTP(&authFailWriter{ResponseWriter: w, ip: s.ClientIP(r), lim: s.authFailLimiter}, r)
+	})
+}
+
+// authFailWriter wraps the response writer for an Authorization-bearing request.
+// When the downstream handler emits 401 (auth failed), it records the failure
+// against ip and, if that ip is already over the limit, rewrites the response to
+// a 429 error envelope. Any other status passes straight through, so a valid
+// credential (200) is never affected. Flush/Hijack are delegated so SSE log
+// streaming and WebSocket proxying through the authenticated group keep working.
+type authFailWriter struct {
+	http.ResponseWriter
+	ip        string
+	lim       *keyedRateLimiter
+	swallow   bool // true once a 401 was converted to 429: drop the handler's body
+	wroteHead bool
+}
+
+func (w *authFailWriter) WriteHeader(code int) {
+	if w.wroteHead {
+		return
+	}
+	w.wroteHead = true
+	if code == http.StatusUnauthorized {
+		over := w.lim.blocked(w.ip)
+		w.lim.record(w.ip)
+		if over {
+			w.swallow = true
+			writeError(w.ResponseWriter, http.StatusTooManyRequests, "too many failed authentication attempts, try again later")
 			return
 		}
-		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-		next.ServeHTTP(ww, r)
-		if ww.Status() == http.StatusUnauthorized {
-			s.authFailLimiter.record(ip)
-		}
-	})
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *authFailWriter) Write(b []byte) (int, error) {
+	if !w.wroteHead {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.swallow {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *authFailWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *authFailWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 }
 
 // rateLimitByIP applies the given limiter keyed by the client IP. Used on

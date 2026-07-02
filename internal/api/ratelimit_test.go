@@ -160,6 +160,45 @@ func TestBearerAuthFailure_ValidTokenNeverThrottled(t *testing.T) {
 	}
 }
 
+// TestBearerAuthFailure_ValidTokenPassesAfterBucketFills verifies that a VALID
+// token is served (200) even from an IP whose failure bucket has already filled
+// from a co-located bad actor. This is the shared-NAT case a pre-auth IP block
+// would wrongly lock out: only failing (401) requests are converted to 429, so a
+// request that authenticates successfully is never throttled.
+func TestBearerAuthFailure_ValidTokenPassesAfterBucketFills(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass-" + strings.Repeat("x", 16))
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("alice")
+	tok, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const sharedIP = "203.0.113.12:5555"
+	// A co-located bad actor exhausts the failure bucket for the shared IP.
+	for i := 0; i < 40; i++ {
+		req := httptest.NewRequest("GET", "/api/apps", nil)
+		req.Header.Set("Authorization", "Bearer bad-token")
+		req.RemoteAddr = sharedIP
+		srv.Router().ServeHTTP(httptest.NewRecorder(), req)
+	}
+	// A legitimate client on the same IP must still be served, not 429'd.
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.RemoteAddr = sharedIP
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("valid token on a shared IP with a filled failure bucket was throttled (429); only failed auths must be throttled")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid token request: got %d, want 200", rr.Code)
+	}
+}
+
 // TestBearerAuthFailure_NoAuthHeaderNotCounted verifies that requests with no
 // Authorization header (unauthenticated 401s) do not accumulate against the
 // bearer-auth-failure limiter — that path is covered by the login limiter, and
