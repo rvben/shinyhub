@@ -2637,12 +2637,12 @@ type ApplyAppManifestSettingsParams struct {
 	AutoscaleMaxReplicas int
 	AutoscaleTarget      float64
 
-	SetWorkerIsolation  bool
-	WorkerIsolation     string
-	SetWorkerGroupedSize bool
-	WorkerGroupedSize   int
-	SetWorkerMaxWorkers bool
-	WorkerMaxWorkers    int
+	SetWorkerIsolation           bool
+	WorkerIsolation              string
+	SetWorkerGroupedSize         bool
+	WorkerGroupedSize            int
+	SetWorkerMaxWorkers          bool
+	WorkerMaxWorkers             int
 	SetWorkerMaxSessionLifetime  bool
 	WorkerMaxSessionLifetimeSecs int
 }
@@ -2816,12 +2816,12 @@ type PatchAppSettingsParams struct {
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
 
-	SetWorkerIsolation  bool
-	WorkerIsolation     string
-	SetWorkerGroupedSize bool
-	WorkerGroupedSize   int
-	SetWorkerMaxWorkers bool
-	WorkerMaxWorkers    int
+	SetWorkerIsolation           bool
+	WorkerIsolation              string
+	SetWorkerGroupedSize         bool
+	WorkerGroupedSize            int
+	SetWorkerMaxWorkers          bool
+	WorkerMaxWorkers             int
 	SetWorkerMaxSessionLifetime  bool
 	WorkerMaxSessionLifetimeSecs int
 }

@@ -21,12 +21,12 @@ func TestRun_PerSession_NoReplicasBooted(t *testing.T) {
 	prx := proxy.New()
 
 	result, err := deploy.Run(deploy.Params{
-		Slug:            "elastic-ps",
-		BundleDir:       bundle,
-		Replicas:        2, // would boot 2 for multiplex; elastic ignores this
-		Manager:         mgr,
-		Proxy:           prx,
-		WorkerIsolation: "per_session",
+		Slug:             "elastic-ps",
+		BundleDir:        bundle,
+		Replicas:         2, // would boot 2 for multiplex; elastic ignores this
+		Manager:          mgr,
+		Proxy:            prx,
+		WorkerIsolation:  "per_session",
 		WorkerMaxWorkers: 5,
 		// HealthCheck and Command are intentionally absent: elastic deploy
 		// must not attempt to boot or health-check any replica.

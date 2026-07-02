@@ -119,10 +119,10 @@ type AppSettings struct {
 // WorkerManifest mirrors the [app.worker] inline table. All fields are
 // pointers so "absent" (nil) is distinct from an explicit zero value.
 type WorkerManifest struct {
-	Isolation             *string `toml:"isolation"`
-	GroupedSize           *int    `toml:"grouped_size"`
-	MaxWorkers            *int    `toml:"max_workers"`
-	MaxSessionLifetimeSecs *int   `toml:"max_session_lifetime_secs"`
+	Isolation              *string `toml:"isolation"`
+	GroupedSize            *int    `toml:"grouped_size"`
+	MaxWorkers             *int    `toml:"max_workers"`
+	MaxSessionLifetimeSecs *int    `toml:"max_session_lifetime_secs"`
 }
 
 // AutoscaleSettings mirrors the [app] autoscale inline table. The block is an
