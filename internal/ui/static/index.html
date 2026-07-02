@@ -8,6 +8,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
+  <!-- Warm the module entry and its History-API router import so they fetch in
+       parallel with the CSS instead of being discovered after app.js parses. -->
+  <link rel="modulepreload" href="/static/app.js">
+  <link rel="modulepreload" href="/static/router.js">
   <script src="/static/zip-writer.js" defer></script>
   <script type="module" src="/static/app.js" defer></script>
 </head>
