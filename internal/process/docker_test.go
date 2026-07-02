@@ -104,6 +104,48 @@ func newDockerRuntimeWithServerAndMode(t *testing.T, handler http.Handler, netwo
 	}
 }
 
+// TestDockerRuntime_EnsureAppNetwork_RealDaemon proves, against a real Docker
+// daemon, that bridge mode provisions the dedicated app network with
+// inter-container communication disabled, and does so idempotently. Combined
+// with TestDockerRuntime_Start_BridgeUsesIsolatedICCNetwork (which proves a
+// container is attached to appNetworkName), this establishes the full isolation
+// chain: app containers share a network on which they cannot reach each other.
+// Skipped (not failed) when no daemon is available - that is environmental.
+func TestDockerRuntime_EnsureAppNetwork_RealDaemon(t *testing.T) {
+	rt, err := NewDockerRuntime(dockerSocketPath, "alpine:3", "alpine:3", "bridge")
+	if err != nil {
+		t.Skipf("Docker daemon unavailable: %v", err)
+	}
+
+	network, err := rt.containerNetwork()
+	if err != nil {
+		t.Fatalf("containerNetwork: %v", err)
+	}
+	if network != appNetworkName {
+		t.Fatalf("bridge mode network = %q, want %q", network, appNetworkName)
+	}
+
+	var got struct {
+		Name    string            `json:"Name"`
+		Driver  string            `json:"Driver"`
+		Options map[string]string `json:"Options"`
+	}
+	if err := rt.client.get("/networks/"+appNetworkName, &got); err != nil {
+		t.Fatalf("inspect network %s: %v", appNetworkName, err)
+	}
+	if got.Driver != "bridge" {
+		t.Errorf("network driver = %q, want bridge", got.Driver)
+	}
+	if got.Options["com.docker.network.bridge.enable_icc"] != "false" {
+		t.Errorf("app network must disable inter-container communication (ICC), got Options=%v", got.Options)
+	}
+
+	// Idempotent: a second resolve on an existing network must succeed.
+	if _, err := rt.containerNetwork(); err != nil {
+		t.Errorf("containerNetwork must be idempotent on an existing network, got %v", err)
+	}
+}
+
 // TestDefaultNetworkMode_FailsSecureToBridge verifies an unset network mode
 // falls back to bridge (an isolated network namespace) rather than host (the
 // least isolated mode). A future caller that forgets to set NetworkMode must
