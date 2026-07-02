@@ -832,6 +832,27 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.SetPoolCap(slug,
 			deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
+	// SetPoolMode on any worker-field change so a live isolation reconfiguration
+	// reshapes the pool without requiring a full redeploy cycle. The isolation
+	// change will also trigger redeployApp (below), which calls deploy.Run and
+	// therefore sets it again; this call covers the stopped-app case too.
+	if (setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers) && s.proxy != nil {
+		effectiveIsolation := app.WorkerIsolation
+		if setWorkerIsolation {
+			effectiveIsolation = newWorkerIsolation
+		}
+		effectiveGroupedSize := app.WorkerGroupedSize
+		if setWorkerGroupedSize {
+			effectiveGroupedSize = newWorkerGroupedSize
+		}
+		effectiveMaxWorkers := app.WorkerMaxWorkers
+		if setWorkerMaxWorkers {
+			effectiveMaxWorkers = newWorkerMaxWorkers
+		}
+		s.proxy.SetPoolMode(slug,
+			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(effectiveIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
+			effectiveGroupedSize, effectiveMaxWorkers)
+	}
 	workerChanged := setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime
 	if (setReplicas || setPlacement || clearPlacement || resourceChanged || workerChanged) && priorStatus == "running" {
 		// Mark in-flight synchronously before launching the goroutine so the
@@ -1286,6 +1307,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			if s.proxy != nil {
 				s.proxy.SetPoolCap(slug,
 					deploy.ResolveMaxSessionsPerReplica(preManifestApp.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
+				// Restore the pre-manifest pool mode so a revert brings the proxy
+				// back to the mode the old pool was running under.
+				s.proxy.SetPoolMode(slug,
+					config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(preManifestApp.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
+					preManifestApp.WorkerGroupedSize, preManifestApp.WorkerMaxWorkers)
 			}
 			if rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 				AppID: preManifestApp.ID, Slug: slug,

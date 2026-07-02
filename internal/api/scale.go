@@ -83,6 +83,8 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		identityEnabled := deploy.ResolveIdentityHeaders(app.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled())
 		if s.proxy != nil {
 			s.proxy.SetPoolCap(slug, sessionCap)
+			// SetPoolMode not called here: scale-defrag adjusts capacity,
+			// not isolation mode. Mode is set at deploy/recovery/wake time.
 			s.proxy.SetPoolIdentityHeaders(slug, identityEnabled)
 		}
 		defragMem, defragCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
@@ -141,6 +143,8 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	if s.proxy != nil {
 		s.proxy.SetPoolSize(slug, total)
 		s.proxy.SetPoolCap(slug, sessionCap)
+		// SetPoolMode not called here: scale adjusts capacity, not isolation
+		// mode. Mode is set at deploy/recovery/wake time.
 		s.proxy.SetPoolIdentityHeaders(slug, identityEnabled)
 	}
 

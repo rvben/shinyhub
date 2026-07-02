@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/bundle"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -192,6 +193,16 @@ type Params struct {
 	// worker-routing tiers honor it; a tier whose runtime ignores TargetWorker
 	// (the native local tier) is unaffected.
 	ColocateWorkers []string
+	// WorkerIsolation is the per-app isolation mode stored in the DB (may be
+	// empty, meaning "inherit fleet default"). DefaultWorkerIsolation is the
+	// fleet-level fallback from config. Both are set by withTierPlacement and
+	// drive SetPoolMode inside Run.
+	WorkerIsolation        string
+	DefaultWorkerIsolation string
+	// WorkerGroupedSize and WorkerMaxWorkers configure the elastic pool when
+	// mode is grouped or per_session; ignored for multiplex.
+	WorkerGroupedSize int
+	WorkerMaxWorkers  int
 }
 
 // Result contains identifiers for a single successfully deployed replica.
@@ -472,6 +483,18 @@ func Run(p Params) (*PoolResult, error) {
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
 	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
 	p.Proxy.SetPoolIdentityHeaders(p.Slug, p.IdentityHeaders)
+	// SetPoolMode propagates the worker-isolation strategy so the proxy can
+	// apply the correct routing algorithm for this pool's sessions.
+	resolvedMode := config.WorkerIsolationMode(ResolveWorkerIsolation(p.WorkerIsolation, p.DefaultWorkerIsolation))
+	p.Proxy.SetPoolMode(p.Slug, resolvedMode, p.WorkerGroupedSize, p.WorkerMaxWorkers)
+
+	// Phase 1: elastic apps (grouped or per_session) are demand-driven. Workers
+	// are spawned on first request via the proxy spawn callback; there are no
+	// fixed replicas to boot. Return an empty pool result so the caller marks the
+	// app running. Boot errors surface at session time, not at deploy time.
+	if resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession {
+		return &PoolResult{}, nil
+	}
 
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.

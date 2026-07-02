@@ -163,13 +163,34 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		s.proxy.SetPoolCap(app.Slug,
 			deploy.ResolveMaxSessionsPerReplica(*m.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
+	// SetPoolMode: propagate any worker-isolation change from the manifest so
+	// the live pool adopts the new routing strategy immediately. The subsequent
+	// deploy.Run (triggered by the caller's redeploy path) will set it again,
+	// but this call covers apps that are stopped or not yet deployed.
+	// Use the resolved manifest values (not app, which is the pre-write snapshot).
+	if m.Worker != nil && (m.Worker.Isolation != nil || m.Worker.GroupedSize != nil || m.Worker.MaxWorkers != nil) && s.proxy != nil {
+		effectiveIsolation := app.WorkerIsolation
+		if workerIsolation != "" {
+			effectiveIsolation = workerIsolation
+		}
+		effectiveGroupedSize := app.WorkerGroupedSize
+		if workerGroupedSize != 0 {
+			effectiveGroupedSize = workerGroupedSize
+		}
+		effectiveMaxWorkers := app.WorkerMaxWorkers
+		if workerMaxWorkers != 0 {
+			effectiveMaxWorkers = workerMaxWorkers
+		}
+		s.proxy.SetPoolMode(app.Slug,
+			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(effectiveIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
+			effectiveGroupedSize, effectiveMaxWorkers)
+	}
 	// Unconditional: a removed key must revert the live pool too (an
 	// atomic store; unconditional costs nothing).
 	if s.proxy != nil {
 		s.proxy.SetPoolIdentityHeaders(app.Slug,
 			deploy.ResolveIdentityHeaders(m.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()))
 	}
-	// SetPoolMode wired in Task 13
 
 	if !m.IsZero() {
 		s.audit(r, "update_app", "app", app.Slug, manifestAppDetail(m))
