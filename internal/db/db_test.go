@@ -3,6 +3,7 @@ package db_test
 import (
 	"database/sql"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -154,10 +155,12 @@ func openTestStore(t *testing.T) *db.Store {
 // future migration drops it the regression is silent, so pin its existence.
 func TestDeploymentsAppIndexExists(t *testing.T) {
 	s := openTestStore(t)
+	query := `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_deployments_app_created'`
+	if os.Getenv("SHINYHUB_TEST_POSTGRES_DSN") != "" {
+		query = `SELECT indexname FROM pg_indexes WHERE indexname = 'idx_deployments_app_created'`
+	}
 	var name string
-	if err := s.DB().QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_deployments_app_created'`,
-	).Scan(&name); err != nil {
+	if err := s.DB().QueryRow(query).Scan(&name); err != nil {
 		t.Fatalf("idx_deployments_app_created must exist after migrations: %v", err)
 	}
 }

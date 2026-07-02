@@ -227,6 +227,69 @@ func validateRotationSecret(oldSecret, newSecret string) error {
 	return nil
 }
 
+var migrateTargetDSN string
+
+var migrateBackendCmd = &cobra.Command{
+	Use:   "migrate-backend",
+	Short: "Copy all data from the current SQLite database to a fresh Postgres database",
+	Long: "One-time migration from single-node SQLite to a Postgres backend (the\n" +
+		"prerequisite for HA). Run with the server STOPPED. The SOURCE is the\n" +
+		"SQLite database in your config; the TARGET Postgres DSN is given via --to\n" +
+		"or SHINYHUB_TARGET_DSN. The target must be empty: it is migrated to the\n" +
+		"current schema, then every row is copied - IDs and references preserved -\n" +
+		"in a single transaction. If anything fails, nothing is committed. On\n" +
+		"success, point the server's database.dsn at the Postgres DSN and start it.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.LoadForMaintenance(serverConfigPath())
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if db.IsPostgresDSN(cfg.Database.DSN) {
+			return fmt.Errorf("source is already Postgres (config database.dsn); migrate-backend goes SQLite -> Postgres")
+		}
+		target := migrateTargetDSN
+		if target == "" {
+			target = os.Getenv("SHINYHUB_TARGET_DSN")
+		}
+		if target == "" {
+			return fmt.Errorf("set the target Postgres DSN with --to <dsn> or SHINYHUB_TARGET_DSN")
+		}
+		if !db.IsPostgresDSN(target) {
+			return fmt.Errorf("target must be a Postgres DSN (postgres://...)")
+		}
+
+		src, err := db.Open(cfg.Database.DSN)
+		if err != nil {
+			return fmt.Errorf("open source (SQLite): %w", err)
+		}
+		defer src.Close()
+
+		dst, err := db.Open(target)
+		if err != nil {
+			return fmt.Errorf("open target (Postgres): %w", err)
+		}
+		defer dst.Close()
+		if err := dst.Migrate(); err != nil {
+			return fmt.Errorf("migrate target schema: %w", err)
+		}
+
+		counts, err := dst.ImportFrom(src)
+		if err != nil {
+			return fmt.Errorf("migration failed (nothing committed - safe to retry): %w", err)
+		}
+		total := 0
+		for _, n := range counts {
+			total += n
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Copied %d rows across %d tables.\nNext: point the server's database.dsn at the Postgres DSN and start it.\n",
+			total, len(counts))
+		return cli.RenderAction(cmd, "migrated",
+			map[string]any{"tables": len(counts), "rows": total},
+			fmt.Sprintf("migrated %d rows across %d tables", total, len(counts)))
+	},
+}
+
 // configPath holds the value of the --config flag (empty when unset). Bound on
 // serve, backup, and restore so a config file can be selected without an env var.
 var configPath string
@@ -247,8 +310,9 @@ func init() {
 	cli.SetVersion(version)
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
 	_ = backupCmd.MarkFlagRequired("out")
+	migrateBackendCmd.Flags().StringVar(&migrateTargetDSN, "to", "", "Target Postgres DSN (overrides SHINYHUB_TARGET_DSN)")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
-	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd, rotateSecretCmd} {
+	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
 }
@@ -260,7 +324,7 @@ var buildRootOnce sync.Once
 // tests to call; registration happens exactly once per process.
 func buildRoot() *cobra.Command {
 	buildRootOnce.Do(func() {
-		rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, newWorkerCmd(), newSandboxCmd())
+		rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, newWorkerCmd(), newSandboxCmd())
 		cli.AddCommandsTo(rootCmd)
 	})
 	return rootCmd
