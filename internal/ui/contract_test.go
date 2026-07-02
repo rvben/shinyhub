@@ -30,6 +30,23 @@ func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
 		"GET /api/apps/:slug returns {app, replicas_status}; the Overview Replicas panel seeds from replicas_status")
 }
 
+// TestRouterErrorBoundaryWired guards the global error boundary. A throw inside
+// a view mount function once blanked the whole dashboard (v0.8.7). The router
+// now catches mount throws and calls an onError callback; app.js must pass one
+// that reveals the generic #route-error-view instead of leaving a blank shell,
+// and must register window error/unhandledrejection nets. If any link breaks,
+// the blank-dashboard failure class can silently return.
+func TestRouterErrorBoundaryWired(t *testing.T) {
+	assertContains(t, "router.js", "opts.onError",
+		"router mount must be guarded and route failures to opts.onError; see internal/ui/jstests/router.test.js")
+	assertContains(t, "app.js", "createRouter({ onError:",
+		"app.js must pass an onError handler to createRouter so a failed mount reveals the error view")
+	assertContains(t, "index.html", `id="route-error-view"`,
+		"index.html must keep #route-error-view as the visible fallback when a view mount fails")
+	assertContains(t, "app.js", "unhandledrejection",
+		"app.js must register a window unhandledrejection net so async failures are observable")
+}
+
 // TestDeployModalReadsManifestSummary guards the deploy-response contract.
 // POST /api/apps/:slug/deploy embeds a "manifest" object summarising what
 // [app] settings and [[schedule]] blocks were applied (see
