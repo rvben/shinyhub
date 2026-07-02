@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/auth"
 )
 
 func cookieMap(raw string) map[string]string {
@@ -89,36 +91,38 @@ func TestStripInternalCookies_AllInternalRemovesHeader(t *testing.T) {
 	}
 }
 
-// TestClearRoutingCookies_ExpiresRepAndCidCookies verifies logout expires both
-// per-app proxy routing cookies (sticky replica + elastic client-id) at their
-// original path, so a shared/kiosk browser does not route a subsequently
-// logged-in user to the previous user's pinned replica or dedicated worker.
-func TestClearRoutingCookies_ExpiresRepAndCidCookies(t *testing.T) {
-	req := httptest.NewRequest("POST", "/api/auth/logout", nil)
-	req.Header.Set("Cookie", clientCookiePrefix+"demo=abcdef0123456789abcdef0123456789.deadbeefdeadbeef; "+cookiePrefix+"demo=3; theme=dark")
-	rec := httptest.NewRecorder()
+// TestClientID_BoundToUser verifies the elastic client-id cookie is bound to the
+// authenticated user: a cid signed for user A is accepted for A but rejected for
+// user B (who gets a fresh id). This is what stops a shared/kiosk browser from
+// routing a subsequently logged-in user to the previous user's dedicated worker
+// - and, unlike a logout-time cookie clear, it works even though the cid cookie
+// is path-scoped to /app/<slug>/ (so it is never sent to /api/auth/logout).
+func TestClientID_BoundToUser(t *testing.T) {
+	p := New()
+	key := []byte("test-secret-key-for-client-id")
+	p.SetStickySecret(key)
+	const slug = "myapp"
+	const id = "aabbccddeeff00112233445566778899"
 
-	ClearRoutingCookies(rec, req)
+	reqAs := func(uid int64) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/app/"+slug+"/", nil)
+		r = r.WithContext(auth.WithUser(r.Context(), &auth.ContextUser{ID: uid, Username: "u", Role: "developer"}))
+		return r
+	}
 
-	cleared := map[string]*http.Cookie{}
-	for _, c := range rec.Result().Cookies() {
-		cleared[c.Name] = c
+	// Sign a cid the way setClientCookie would for user A, then present it.
+	signedForA := signClientValue(key, slug, "1", id)
+
+	rA := reqAs(1)
+	rA.AddCookie(&http.Cookie{Name: clientCookiePrefix + slug, Value: signedForA})
+	if got, isNew := p.clientID(rA, slug); isNew || got != id {
+		t.Errorf("user A must keep their own cid: got=%q isNew=%v", got, isNew)
 	}
-	for _, name := range []string{clientCookiePrefix + "demo", cookiePrefix + "demo"} {
-		c, ok := cleared[name]
-		if !ok {
-			t.Errorf("routing cookie %q must be cleared on logout", name)
-			continue
-		}
-		if c.MaxAge >= 0 {
-			t.Errorf("cookie %q must be expired (MaxAge<0), got MaxAge=%d", name, c.MaxAge)
-		}
-		if c.Path != "/app/demo/" {
-			t.Errorf("cleared cookie %q Path = %q, must match the original /app/demo/ so the browser clears it", name, c.Path)
-		}
-	}
-	if _, ok := cleared["theme"]; ok {
-		t.Error("non-routing cookie must not be touched")
+
+	rB := reqAs(2)
+	rB.AddCookie(&http.Cookie{Name: clientCookiePrefix + slug, Value: signedForA})
+	if got, isNew := p.clientID(rB, slug); !isNew || got == id {
+		t.Errorf("user B must NOT inherit user A's cid: got=%q isNew=%v", got, isNew)
 	}
 }
 

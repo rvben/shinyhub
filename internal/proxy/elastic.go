@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 )
@@ -29,28 +31,44 @@ var clientGraceTTL = 15 * time.Second
 // The full name is clientCookiePrefix + slug.
 const clientCookiePrefix = "shinyhub_cid_"
 
+// clientUserTag identifies the authenticated principal a client-id cookie is
+// bound to. access.Middleware (which wraps the /app/ handler) puts the user in
+// the request context, so an authenticated request tags the cid with its user
+// ID; an anonymous request (public app) uses a shared "anon" tag. Binding the
+// cid to the user is what stops a shared/kiosk browser from routing a
+// subsequently logged-in user to the previous user's dedicated worker: a cid
+// signed for one user fails verification for another, who then gets a fresh one.
+func clientUserTag(r *http.Request) string {
+	if u := auth.UserFromContext(r.Context()); u != nil && u.ID != 0 {
+		return strconv.FormatInt(u.ID, 10)
+	}
+	return "anon"
+}
+
 // signClientValue returns the signed client-cookie value "<idhex>.<hmac16>".
-// The HMAC-SHA256 binds slug and idhex so a value cannot be replayed across
-// apps or with a modified id.
-func signClientValue(key []byte, slug, idhex string) string {
+// The HMAC-SHA256 binds slug, the user tag, and idhex so a value cannot be
+// replayed across apps, across users, or with a modified id.
+func signClientValue(key []byte, slug, userTag, idhex string) string {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(slug))
+	mac.Write([]byte{0x00})
+	mac.Write([]byte(userTag))
 	mac.Write([]byte{0x00})
 	mac.Write([]byte(idhex))
 	return idhex + "." + hex.EncodeToString(mac.Sum(nil))[:16]
 }
 
-// verifyClientValue parses and authenticates a signed client-cookie value.
-// Returns (idhex, true) when the value has the expected format and the HMAC
-// matches; otherwise returns ("", false).
-func verifyClientValue(key []byte, slug, value string) (string, bool) {
+// verifyClientValue parses and authenticates a signed client-cookie value
+// against the given user tag. Returns (idhex, true) when the value has the
+// expected format and the HMAC matches; otherwise returns ("", false).
+func verifyClientValue(key []byte, slug, userTag, value string) (string, bool) {
 	idhex, _, found := strings.Cut(value, ".")
 	if !found {
 		return "", false
 	}
 	// Recompute the expected signed form and compare with hmac.Equal to
 	// prevent timing-based side-channel attacks.
-	expected := signClientValue(key, slug, idhex)
+	expected := signClientValue(key, slug, userTag, idhex)
 	if !hmac.Equal([]byte(value), []byte(expected)) {
 		return "", false
 	}
@@ -65,7 +83,7 @@ func (p *Proxy) clientID(r *http.Request, slug string) (id string, isNew bool) {
 	cookieName := clientCookiePrefix + slug
 	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
 		if key := p.stickySecretBytes(); len(key) > 0 {
-			if idhex, ok := verifyClientValue(key, slug, c.Value); ok {
+			if idhex, ok := verifyClientValue(key, slug, clientUserTag(r), c.Value); ok {
 				return idhex, false
 			}
 			// Tampered or invalid - fall through to generate a new id.
@@ -96,7 +114,7 @@ func (p *Proxy) clientID(r *http.Request, slug string) (id string, isNew bool) {
 func (p *Proxy) setClientCookie(w http.ResponseWriter, r *http.Request, slug, id string) {
 	var value string
 	if key := p.stickySecretBytes(); len(key) > 0 {
-		value = signClientValue(key, slug, id)
+		value = signClientValue(key, slug, clientUserTag(r), id)
 	} else {
 		value = id
 	}
@@ -111,38 +129,6 @@ func (p *Proxy) setClientCookie(w http.ResponseWriter, r *http.Request, slug, id
 		// trusted only from configured proxy CIDRs.
 		Secure: proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
 	})
-}
-
-// ClearRoutingCookies expires every per-app proxy routing cookie presented on
-// r - the sticky replica cookie (cookiePrefix+slug) and the elastic client-id
-// cookie (clientCookiePrefix+slug) - by writing a matching expired Set-Cookie
-// for each onto w. Called on logout so a shared/kiosk browser does not route a
-// subsequently logged-in user to the previous user's pinned replica or
-// dedicated worker. The slug is recovered from the cookie name to rebuild the
-// original Path (/app/<slug>/) so the browser matches and clears the cookie.
-func ClearRoutingCookies(w http.ResponseWriter, r *http.Request) {
-	for _, c := range r.Cookies() {
-		var slug string
-		switch {
-		case strings.HasPrefix(c.Name, clientCookiePrefix):
-			slug = strings.TrimPrefix(c.Name, clientCookiePrefix)
-		case strings.HasPrefix(c.Name, cookiePrefix):
-			slug = strings.TrimPrefix(c.Name, cookiePrefix)
-		default:
-			continue
-		}
-		if slug == "" {
-			continue
-		}
-		http.SetCookie(w, &http.Cookie{
-			Name:     c.Name,
-			Value:    "",
-			Path:     "/app/" + slug + "/",
-			MaxAge:   -1,
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		})
-	}
 }
 
 // poolIsElastic reports whether pool is in demand-driven (elastic) mode.
