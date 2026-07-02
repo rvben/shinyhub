@@ -1751,25 +1751,44 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		switch d.kind {
 		case decisionRoute:
-			// Quick pre-check under the read lock before upgrading.
+			// Pre-check under the read lock (still held). A booting or draining
+			// worker is not routable: serve the loading page so the client retries.
+			// The pin cookie is already in the browser from the decisionAllocate
+			// response, so the retry lands on the same slot. Rejecting draining here
+			// (not only in the bind path's revalidation) lets the steady-state
+			// branch below trust the read-lock snapshot: while the read lock is held
+			// a worker cannot be removed or change status (both need the write lock).
 			wkr := pool.workers[d.slotID]
-			if wkr == nil || wkr.status == workerBooting {
-				// Worker not ready yet: serve the loading page so the client retries.
-				// The pin cookie is already in the browser from the decisionAllocate
-				// response, so the retry will land on the same slot.
+			if wkr == nil || wkr.status == workerBooting || wkr.status == workerDraining {
 				p.mu.RUnlock()
 				p.serveMissPage(rec, slug, nil)
 				return
 			}
-			// Upgrade from read lock to write lock so that bumping activeConns and
-			// cancelling the client grace timer (clientConnOpenedLocked) are atomic.
-			// Without this, a grace timer armed by a prior connection-close can fire
-			// in the gap between RUnlock and the separate clientConnOpened call and
-			// terminate the worker mid-request.
-			p.mu.RUnlock()
-			p.mu.Lock()
-			// Re-validate: pool or worker may have changed during the lock upgrade.
-			{
+			var depID int64
+			if cs := p.lookupClientSlot(slug, cid); cs != nil {
+				// STEADY STATE: an already-bound client routing to a ready worker.
+				// Do the accounting under the SHARED read lock (already held) plus
+				// cs.mu, so unrelated slugs and clients route in parallel instead of
+				// serialising on the global write lock. The grace-timer callback
+				// takes the WRITE lock, so it cannot delete this slot while the read
+				// lock is held; cs.open() cancels any pending timer and bumps
+				// liveConns, closing the terminate race without the write lock the
+				// pre-scaling code acquired here. assignedClients is unchanged (the
+				// client is already counted), so no map mutation is needed.
+				wkr.activeConns.Add(1)
+				replicaIndex = wkr.slotID
+				depID = wkr.deploymentID
+				cs.open()
+				p.mu.RUnlock()
+			} else {
+				// BIND: a client arrived via decisionRoute with no prior p.clients
+				// entry (grouped mode: a new client packing onto an under-capacity
+				// worker, or the first reconnect of a pinned client before bindClient
+				// ran). Binding mutates the clients map and assignedClients, so it
+				// needs the write lock. Upgrade and re-validate: pool or worker may
+				// have changed in the RUnlock->Lock gap.
+				p.mu.RUnlock()
+				p.mu.Lock()
 				pool2 := p.pools[slug]
 				if pool2 == nil || !poolIsElastic(pool2) {
 					p.mu.Unlock()
@@ -1783,27 +1802,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				wkr = wkr2
-			}
-			// Bind a new client that arrived via decisionRoute without a prior
-			// p.clients entry (grouped mode: a new client packing onto an under-
-			// capacity worker, or the first reconnect of a pinned client before
-			// bindClient has run). Without this, assignedClients is not incremented
-			// and the grouped cap is under-counted, allowing a worker to exceed it.
-			// clientConnOpenedLocked also requires a slot to exist, so bind first.
-			if p.lookupClientSlot(slug, cid) == nil {
-				if p.clients[slug] == nil {
-					p.clients[slug] = make(map[string]*clientSlot)
+				// Re-check the binding under the write lock: another request for the
+				// same client may have bound it in the gap. Without the grouped-cap
+				// increment, assignedClients under-counts and a worker can exceed cap.
+				cs := p.lookupClientSlot(slug, cid)
+				if cs == nil {
+					if p.clients[slug] == nil {
+						p.clients[slug] = make(map[string]*clientSlot)
+					}
+					cs = &clientSlot{slotID: d.slotID}
+					p.clients[slug][cid] = cs
+					wkr.assignedClients++
 				}
-				p.clients[slug][cid] = &clientSlot{slotID: d.slotID}
-				wkr.assignedClients++
+				wkr.activeConns.Add(1)
+				replicaIndex = wkr.slotID
+				depID = wkr.deploymentID
+				cs.open()
+				p.mu.Unlock()
 			}
-			wkr.activeConns.Add(1)
-			replicaIndex = wkr.slotID
-			depID := wkr.deploymentID
-			// Cancel the grace timer and increment liveConns under the write lock
-			// so the timer callback cannot observe liveConns==0 in the gap.
-			p.clientConnOpenedLocked(slug, cid)
-			p.mu.Unlock()
 			// Refresh the rep sticky cookie with the current slotID and deploymentID,
 			// but only when it would change - a steady-state request whose cookie
 			// already pins this slot/deployment skips the HMAC + Set-Cookie. The
