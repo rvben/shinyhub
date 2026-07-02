@@ -28,7 +28,25 @@ type RevocationChecker func(jti string) (bool, error)
 type Claims struct {
 	UserID int64  `json:"uid"`
 	Role   string `json:"role"`
+	// AuthTime is the original login time. Unlike IssuedAt/ExpiresAt it is NOT
+	// reset by a sliding renewal, so it bounds the absolute session lifetime.
+	AuthTime *jwt.NumericDate `json:"auth_time,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// AbsoluteSessionMaxAge caps how long a session may be kept alive by sliding
+// renewals from its original login. Past this the session is not renewed and
+// expires within jwtExpiry, forcing a fresh login - which re-runs SSO group
+// reconciliation, so a user removed from an authorizing group loses access
+// within this window instead of indefinitely.
+const AbsoluteSessionMaxAge = 12 * time.Hour
+
+// CanSlideSession reports whether a session that originally logged in at
+// authTime may still be renewed. A zero authTime (a legacy token issued before
+// the auth_time claim existed) is renewable so an upgrade does not log everyone
+// out; its clock starts at the next renewal.
+func CanSlideSession(authTime time.Time) bool {
+	return authTime.IsZero() || time.Since(authTime) < AbsoluteSessionMaxAge
 }
 
 // bcryptCost is the password-hashing work factor. 12 is the OWASP-recommended
@@ -57,20 +75,32 @@ func newJTI() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// IssueJWT issues a fresh session token for a new login, stamping auth_time to
+// now so the absolute session lifetime is measured from this login.
 func IssueJWT(userID int64, username, role, secret string) (string, error) {
+	return IssueJWTAt(userID, username, role, secret, time.Now())
+}
+
+// IssueJWTAt issues a token whose auth_time is authTime. A fresh login passes
+// now (via IssueJWT); a sliding renewal passes the session's original auth_time
+// so renewing does not extend the absolute lifetime. IssuedAt/ExpiresAt/
+// NotBefore always slide to now.
+func IssueJWTAt(userID int64, username, role, secret string, authTime time.Time) (string, error) {
 	jti, err := newJTI()
 	if err != nil {
 		return "", err
 	}
+	now := time.Now()
 	claims := Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:   userID,
+		Role:     role,
+		AuthTime: jwt.NewNumericDate(authTime),
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
 			Subject:   username,
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtExpiry)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(now.Add(jwtExpiry)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

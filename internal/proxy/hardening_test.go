@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/auth"
 )
 
 func cookieMap(raw string) map[string]string {
@@ -36,6 +38,48 @@ func TestStripInternalCookies(t *testing.T) {
 	}
 }
 
+// TestStripInternalCookies_StripsClientIDCookie verifies the per-app elastic
+// client-id cookie (shinyhub_cid_<slug>) is stripped before the request reaches
+// the app backend, so a backend cannot harvest another visitor's cid value and
+// later pin that visitor to a worker it controls.
+func TestStripInternalCookies_StripsClientIDCookie(t *testing.T) {
+	req := httptest.NewRequest("GET", "/app/demo/", nil)
+	req.Header.Set("Cookie", clientCookiePrefix+"demo=abcdef0123456789abcdef0123456789.deadbeefdeadbeef; theme=dark")
+
+	stripInternalCookies(req)
+
+	got := cookieMap(req.Header.Get("Cookie"))
+	if _, present := got[clientCookiePrefix+"demo"]; present {
+		t.Errorf("client-id cookie must be stripped before forwarding, got %v", got)
+	}
+	if got["theme"] != "dark" {
+		t.Errorf("non-ShinyHub app cookie must be preserved, got %v", got)
+	}
+}
+
+// TestFilterReservedSetCookies_StripsBackendReservedCookies verifies that a
+// backend response cannot set any cookie in ShinyHub's reserved namespaces
+// (session/CSRF/oauth-state, sticky-routing, or the elastic client-id cookie).
+// Without this a compromised app backend could emit
+// Set-Cookie: shinyhub_cid_<slug>=<victim's value> to hijack another visitor's
+// dedicated worker. Legitimate app cookies must pass through untouched.
+func TestFilterReservedSetCookies_StripsBackendReservedCookies(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Add("Set-Cookie", clientCookiePrefix+"demo=VICTIMVALUE.deadbeefdeadbeef; Path=/app/demo/")
+	resp.Header.Add("Set-Cookie", cookiePrefix+"demo=9; Path=/app/demo/")
+	resp.Header.Add("Set-Cookie", "shiny_session=FORGED_JWT; Path=/")
+	resp.Header.Add("Set-Cookie", "app_pref=blue; Path=/") // legitimate app cookie
+
+	if err := filterReservedSetCookies(resp); err != nil {
+		t.Fatalf("filterReservedSetCookies: %v", err)
+	}
+
+	got := resp.Header["Set-Cookie"]
+	if len(got) != 1 || !strings.HasPrefix(got[0], "app_pref=") {
+		t.Errorf("reserved backend Set-Cookie headers must be stripped, kept: %v", got)
+	}
+}
+
 // TestStripInternalCookies_AllInternalRemovesHeader verifies the Cookie header
 // is removed entirely when nothing remains after stripping.
 func TestStripInternalCookies_AllInternalRemovesHeader(t *testing.T) {
@@ -44,6 +88,41 @@ func TestStripInternalCookies_AllInternalRemovesHeader(t *testing.T) {
 	stripInternalCookies(req)
 	if v := req.Header.Get("Cookie"); v != "" {
 		t.Errorf("Cookie header should be removed when only internal cookies were present, got %q", v)
+	}
+}
+
+// TestClientID_BoundToUser verifies the elastic client-id cookie is bound to the
+// authenticated user: a cid signed for user A is accepted for A but rejected for
+// user B (who gets a fresh id). This is what stops a shared/kiosk browser from
+// routing a subsequently logged-in user to the previous user's dedicated worker
+// - and, unlike a logout-time cookie clear, it works even though the cid cookie
+// is path-scoped to /app/<slug>/ (so it is never sent to /api/auth/logout).
+func TestClientID_BoundToUser(t *testing.T) {
+	p := New()
+	key := []byte("test-secret-key-for-client-id")
+	p.SetStickySecret(key)
+	const slug = "myapp"
+	const id = "aabbccddeeff00112233445566778899"
+
+	reqAs := func(uid int64) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/app/"+slug+"/", nil)
+		r = r.WithContext(auth.WithUser(r.Context(), &auth.ContextUser{ID: uid, Username: "u", Role: "developer"}))
+		return r
+	}
+
+	// Sign a cid the way setClientCookie would for user A, then present it.
+	signedForA := signClientValue(key, slug, "1", id)
+
+	rA := reqAs(1)
+	rA.AddCookie(&http.Cookie{Name: clientCookiePrefix + slug, Value: signedForA})
+	if got, isNew := p.clientID(rA, slug); isNew || got != id {
+		t.Errorf("user A must keep their own cid: got=%q isNew=%v", got, isNew)
+	}
+
+	rB := reqAs(2)
+	rB.AddCookie(&http.Cookie{Name: clientCookiePrefix + slug, Value: signedForA})
+	if got, isNew := p.clientID(rB, slug); !isNew || got == id {
+		t.Errorf("user B must NOT inherit user A's cid: got=%q isNew=%v", got, isNew)
 	}
 }
 

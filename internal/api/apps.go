@@ -419,7 +419,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		// floor is manifest/UI-only) but bound the top so an absurd value cannot
 		// overflow when a runtime multiplies MiB into bytes.
 		if v != nil && (*v < 0 || *v > deploy.MaxMemoryLimitMB) {
-			http.Error(w, fmt.Sprintf("memory_limit_mb must be between 0 and %d", deploy.MaxMemoryLimitMB), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("memory_limit_mb must be between 0 and %d", deploy.MaxMemoryLimitMB))
 			return
 		}
 		memoryLimitMB, setMemoryLimitMB = v, true
@@ -433,7 +433,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if v != nil {
 			if err := deploy.ValidateCPUQuotaPercent(*v); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		}
@@ -1422,7 +1422,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			// deploy metric records failure to match the client-visible result.
 			slog.Error("manifest [[schedule]] apply failed", "slug", slug, "err", err)
 			s.recordDeploy("failure")
-			writeError(w, http.StatusInternalServerError, "schedule apply failed: "+err.Error())
+			writeError(w, http.StatusInternalServerError, "manifest schedule apply failed")
 			return
 		}
 		manifestSummary.Schedules = scheduleResults
@@ -1436,7 +1436,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Error("manifest [access] apply failed", "slug", slug, "err", err)
 			s.recordDeploy("failure")
-			writeError(w, http.StatusInternalServerError, "access apply failed: "+err.Error())
+			writeError(w, http.StatusInternalServerError, "manifest access apply failed")
 			return
 		}
 		if len(agResults) > 0 {

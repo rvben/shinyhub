@@ -55,10 +55,11 @@ straggler is force-closed.
   Same-version restarts apply no migrations and are always safe.
 - **systemd MAINPID.** With `Type=notify`, ShinyHub sends `READY=1` plus
   `MAINPID=<own pid>` on startup and after each handoff, so systemd retargets the
-  main PID to the successor. The unit intentionally omits `Restart=` so systemd
-  does not fight the original PID's deliberate exit after a handoff. After your
-  first `systemctl reload`, verify with `systemctl show -p MainPID shinyhub` that
-  it matches the new PID file.
+  main PID to the successor. The unit sets `Restart=on-failure` (not
+  `Restart=always`): a genuine crash is restarted, but the original PID's
+  deliberate exit 0 after a handoff is a clean success, so systemd does not fight
+  it. After your first `systemctl reload`, verify with
+  `systemctl show -p MainPID shinyhub` that it matches the new PID file.
 - **Scope.** This is the systemd/VM path and covers all app runtimes (native,
   Docker, Fargate, remote-worker). Multi-pod Kubernetes rolling upgrades are part
   of the separate high-availability project.

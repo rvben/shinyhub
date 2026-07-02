@@ -223,6 +223,56 @@ func TestMeUsesSessionCookie(t *testing.T) {
 	}
 }
 
+// TestMeSlidesFreshSessionButNotPastAbsoluteCap verifies /api/auth/me renews a
+// young cookie session (Set-Cookie present) but stops renewing one whose
+// original login is older than the absolute cap, so the session cannot be kept
+// alive forever (which would let a revoked SSO group role persist indefinitely).
+func TestMeSlidesFreshSessionButNotPastAbsoluteCap(t *testing.T) {
+	srv, store := newTestServer(t)
+	_, uid := seedUserAndJWT(t, store, "alice", "admin")
+
+	// Fresh session: auth_time = now -> must slide.
+	fresh, err := auth.IssueJWTAt(uid, "alice", "admin", "test-secret", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: fresh})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fresh /me = %d, want 200", rec.Code)
+	}
+	if !hasCookie(rec.Result().Cookies(), auth.SessionCookieName) {
+		t.Error("a fresh session must be slid (expected a session Set-Cookie)")
+	}
+
+	// Over-cap session: auth_time older than the absolute max -> must NOT slide.
+	old, err := auth.IssueJWTAt(uid, "alice", "admin", "test-secret", time.Now().Add(-auth.AbsoluteSessionMaxAge-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: old})
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("over-cap /me = %d, want 200 (token itself still valid)", rec.Code)
+	}
+	if hasCookie(rec.Result().Cookies(), auth.SessionCookieName) {
+		t.Error("a session past the absolute cap must not be renewed (no session Set-Cookie expected)")
+	}
+}
+
+func hasCookie(cookies []*http.Cookie, name string) bool {
+	for _, c := range cookies {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestLogoutClearsSessionCookie(t *testing.T) {
 	srv, store := newTestServer(t)
 	token, _ := seedUserAndJWT(t, store, "alice", "admin")

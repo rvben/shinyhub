@@ -49,8 +49,11 @@ test-py-identity:
 # test-r-identity runs the shinyhubidentity R helper's testthat suite. Needs R
 # with jose, sodium and testthat; skips cleanly when Rscript is absent.
 test-r-identity:
-	@command -v Rscript >/dev/null 2>&1 || { echo "Rscript not found; skipping R identity helper tests"; exit 0; }
-	Rscript -e 'testthat::test_local("packaging/r-identity")'
+	@if command -v Rscript >/dev/null 2>&1; then \
+		Rscript -e 'testthat::test_local("packaging/r-identity")'; \
+	else \
+		echo "Rscript not found; skipping R identity helper tests"; \
+	fi
 
 # test-identity-conformance verifies the shipped Python and R helpers against a
 # token minted by the real production MintToken. Each language subtest skips

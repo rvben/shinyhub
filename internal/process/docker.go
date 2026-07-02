@@ -72,6 +72,26 @@ type DockerRuntime struct {
 // Compile-time interface check.
 var _ Runtime = (*DockerRuntime)(nil)
 
+// appNetworkName is the dedicated user-defined bridge network for app
+// containers, created with inter-container communication disabled so a
+// compromised app cannot reach a sibling app's container directly and bypass
+// the proxy's access control. Host-published loopback ports still route.
+const appNetworkName = "shinyhub-apps"
+
+// containerNetwork returns the network mode to apply to an app container,
+// ensuring it exists. In bridge mode (the default isolation mode) that is the
+// dedicated ICC-disabled app network; in host mode the operator has explicitly
+// opted out of network isolation, so the shared host stack is used unchanged.
+func (r *DockerRuntime) containerNetwork() (string, error) {
+	if r.networkMode == "host" {
+		return "host", nil
+	}
+	if err := r.client.ensureAppNetwork(appNetworkName); err != nil {
+		return "", fmt.Errorf("ensure isolated app network: %w", err)
+	}
+	return appNetworkName, nil
+}
+
 // NewDockerRuntime creates a DockerRuntime connected to socketPath.
 // networkMode must be "bridge" or "host" (validated by config).
 // Returns an error if the socket is unreachable (verified by pinging the API).
@@ -187,6 +207,11 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 
 	labels := dockerLabels(p)
 
+	network, err := r.containerNetwork()
+	if err != nil {
+		return ReplicaEndpoint{}, fmt.Errorf("resolve network for %s: %w", p.Slug, err)
+	}
+
 	cfg := containerConfig{
 		Image:   image,
 		Cmd:     p.Command,
@@ -196,7 +221,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"}, // writable: in-container dep prep (uv project sync, renv::restore) writes into the bundle dir
 		},
 		Labels:      labels,
-		NetworkMode: r.networkMode,
+		NetworkMode: network,
 	}
 	// Run as the uid:gid that owns the bundle directory. The container drops all
 	// capabilities (no CAP_DAC_OVERRIDE), so a root process inside is still bound
@@ -480,6 +505,10 @@ func sigName(sig syscall.Signal) string {
 // then SIGKILL after a 10-second grace.
 func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error) {
 	image := r.imageForCommand(p.Command)
+	network, err := r.containerNetwork()
+	if err != nil {
+		return ExitInfo{}, fmt.Errorf("resolve network for %s: %w", p.Slug, err)
+	}
 	cfg := containerConfig{
 		Image:   image,
 		Cmd:     p.Command,
@@ -493,7 +522,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 			"shinyhub.slug":    p.Slug,
 			"shinyhub.kind":    "schedule-run",
 		},
-		NetworkMode: r.networkMode,
+		NetworkMode: network,
 		AutoRemove:  true,
 	}
 	if p.AppDataPath != "" {

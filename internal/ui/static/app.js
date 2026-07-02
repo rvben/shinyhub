@@ -3888,7 +3888,34 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  const router = createRouter();
+  // A failed view mount used to leave the shell blank with no message (the
+  // v0.8.7 dashboard-blanking class). The router now catches mount throws and
+  // routes them here: hide every main view and reveal the generic error state
+  // so one view's failure never takes down the whole dashboard.
+  const routeErrorView = document.getElementById('route-error-view');
+  const routeErrorReload = document.getElementById('route-error-reload');
+  if (routeErrorReload) {
+    routeErrorReload.addEventListener('click', () => location.reload());
+  }
+  function showRouteError(err) {
+    console.error('route mount failed', err);
+    for (const s of document.querySelectorAll('main > section')) s.hidden = true;
+    if (routeErrorView) routeErrorView.hidden = false;
+  }
+  const router = createRouter({ onError: showRouteError });
+
+  // Last-resort net for throws outside the router mount path (event handlers,
+  // async callbacks): log them so failures are observable rather than silent,
+  // and surface the inline banner. The router boundary above owns the full
+  // error view; these never blank an otherwise-working view.
+  window.addEventListener('error', (e) => {
+    console.error('uncaught error', e.error || e.message);
+    if (appError) setError(appError, 'Something went wrong. Some actions may not have completed.');
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    console.error('unhandled rejection', e.reason);
+    if (appError) setError(appError, 'Something went wrong. Some actions may not have completed.');
+  });
 
   // Warn before navigating away (SPA route change or full unload) with unsaved
   // settings edits, so the explicit-save model never silently loses work.
@@ -3925,6 +3952,10 @@ document.addEventListener('DOMContentLoaded', () => {
     canManageApp,
     renderGridVerbatim,
     applyGridFilters: renderApps,
+    // Surface (or clear, with "") a grid load error in the shared #app-error
+    // banner so a failed initial /api/apps load is visible with a retry hint
+    // instead of showing a silent empty grid.
+    showError: (m) => { if (appError) setError(appError, m); },
     updateActiveNav,
     syncSidebar,
     // Render an explicit app list into the sidebar without touching state.apps.

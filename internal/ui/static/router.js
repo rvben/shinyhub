@@ -12,10 +12,17 @@
 // A mount function receives (params, search) and returns an optional view
 // object { unmount, title }. The router calls unmount() on leave and sets
 // document.title to `title` on enter.
-export function createRouter() {
+export function createRouter(opts = {}) {
   const routes = [];
   let current = null;
   let generation = 0;
+  // onError is invoked when a mount function throws or rejects. It lets the app
+  // render a visible error state instead of leaving a blank shell (a single
+  // view's throw must never take down the whole dashboard). Defaults to logging.
+  const onError =
+    typeof opts.onError === 'function'
+      ? opts.onError
+      : (err) => console.error('router: mount failed', err);
   // navGuard, when set, is consulted before any navigation (link click, back/
   // forward, or programmatic navigate). It returns true to allow the navigation
   // and false to cancel it (e.g. unsaved edits the user chose to keep). currentPath
@@ -68,7 +75,16 @@ export function createRouter() {
       }
       return;
     }
-    const view = await hit.route.mountFn(hit.params, search);
+    let view;
+    try {
+      view = await hit.route.mountFn(hit.params, search);
+    } catch (err) {
+      // A later navigation may have superseded this one; only surface the error
+      // if we are still the current mount, so a stale failure can't clobber a
+      // healthy view.
+      if (gen === generation) onError(err, path);
+      return;
+    }
     if (gen !== generation) {
       // A later navigation has superseded us. Discard this result.
       if (view && typeof view.unmount === 'function') {

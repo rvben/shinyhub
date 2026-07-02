@@ -104,6 +104,64 @@ func newDockerRuntimeWithServerAndMode(t *testing.T, handler http.Handler, netwo
 	}
 }
 
+// TestDockerRuntime_EnsureAppNetwork_RealDaemon proves, against a real Docker
+// daemon, that bridge mode provisions the dedicated app network with
+// inter-container communication disabled, and does so idempotently. Combined
+// with TestDockerRuntime_Start_BridgeUsesIsolatedICCNetwork (which proves a
+// container is attached to appNetworkName), this establishes the full isolation
+// chain: app containers share a network on which they cannot reach each other.
+// Skipped (not failed) when no daemon is available - that is environmental.
+func TestDockerRuntime_EnsureAppNetwork_RealDaemon(t *testing.T) {
+	rt, err := NewDockerRuntime(dockerSocketPath, "alpine:3", "alpine:3", "bridge")
+	if err != nil {
+		t.Skipf("Docker daemon unavailable: %v", err)
+	}
+
+	network, err := rt.containerNetwork()
+	if err != nil {
+		t.Fatalf("containerNetwork: %v", err)
+	}
+	if network != appNetworkName {
+		t.Fatalf("bridge mode network = %q, want %q", network, appNetworkName)
+	}
+
+	var got struct {
+		Name    string            `json:"Name"`
+		Driver  string            `json:"Driver"`
+		Options map[string]string `json:"Options"`
+	}
+	if err := rt.client.get("/networks/"+appNetworkName, &got); err != nil {
+		t.Fatalf("inspect network %s: %v", appNetworkName, err)
+	}
+	if got.Driver != "bridge" {
+		t.Errorf("network driver = %q, want bridge", got.Driver)
+	}
+	if got.Options["com.docker.network.bridge.enable_icc"] != "false" {
+		t.Errorf("app network must disable inter-container communication (ICC), got Options=%v", got.Options)
+	}
+
+	// Idempotent: a second resolve on an existing network must succeed.
+	if _, err := rt.containerNetwork(); err != nil {
+		t.Errorf("containerNetwork must be idempotent on an existing network, got %v", err)
+	}
+}
+
+// TestDefaultNetworkMode_FailsSecureToBridge verifies an unset network mode
+// falls back to bridge (an isolated network namespace) rather than host (the
+// least isolated mode). A future caller that forgets to set NetworkMode must
+// not silently get the host network stack.
+func TestDefaultNetworkMode_FailsSecureToBridge(t *testing.T) {
+	if got := defaultNetworkMode(""); got != "bridge" {
+		t.Errorf("empty network mode must fail secure to bridge, got %q", got)
+	}
+	if got := defaultNetworkMode("host"); got != "host" {
+		t.Errorf("explicit host must be preserved, got %q", got)
+	}
+	if got := defaultNetworkMode("bridge"); got != "bridge" {
+		t.Errorf("explicit bridge must be preserved, got %q", got)
+	}
+}
+
 func TestDockerLabels_StampsTierAndProvider(t *testing.T) {
 	got := dockerLabels(StartParams{Slug: "my-app", Index: 2, Tier: "burst"})
 	want := map[string]string{
@@ -522,6 +580,15 @@ func TestDockerRuntime_Start_BridgeModePublishesPortToLoopback(t *testing.T) {
 	mux.HandleFunc("/containers/cont-bridge/start", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Bridge mode attaches to the dedicated ICC-disabled network, so Start
+	// ensures it first: report not-present then accept the create.
+	mux.HandleFunc("/networks/create", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "net-1"})
+	})
+	mux.HandleFunc("/networks/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
 
 	rt := newDockerRuntimeWithServerAndMode(t, mux, "bridge")
 	if _, err := rt.Start(context.Background(), StartParams{
@@ -534,8 +601,8 @@ func TestDockerRuntime_Start_BridgeModePublishesPortToLoopback(t *testing.T) {
 	}
 
 	host, _ := captured["HostConfig"].(map[string]any)
-	if got := host["NetworkMode"]; got != "bridge" {
-		t.Errorf("HostConfig.NetworkMode = %v, want bridge", got)
+	if got := host["NetworkMode"]; got != appNetworkName {
+		t.Errorf("HostConfig.NetworkMode = %v, want the isolated network %q", got, appNetworkName)
 	}
 	bindings, _ := host["PortBindings"].(map[string]any)
 	entry, ok := bindings["20123/tcp"].([]any)
@@ -552,6 +619,50 @@ func TestDockerRuntime_Start_BridgeModePublishesPortToLoopback(t *testing.T) {
 	exposed, _ := captured["ExposedPorts"].(map[string]any)
 	if _, ok := exposed["20123/tcp"]; !ok {
 		t.Errorf("expected ExposedPorts to declare 20123/tcp, got %v", exposed)
+	}
+}
+
+// TestDockerRuntime_Start_BridgeUsesIsolatedICCNetwork verifies that in bridge
+// mode Start attaches the app container to a dedicated user-defined network
+// created with inter-container communication (ICC) disabled, so a compromised
+// app cannot reach a sibling app's container directly and bypass the proxy's
+// access control. Host-published loopback ports are unaffected.
+func TestDockerRuntime_Start_BridgeUsesIsolatedICCNetwork(t *testing.T) {
+	var createdNetwork map[string]any
+	var captured map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/networks/create", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&createdNetwork)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "net-1"})
+	})
+	mux.HandleFunc("/networks/", func(w http.ResponseWriter, _ *http.Request) {
+		// GET /networks/<name>: report not-present so Start creates it.
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "cont-iso"})
+	})
+	mux.HandleFunc("/containers/cont-iso/start", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rt := newDockerRuntimeWithServerAndMode(t, mux, "bridge")
+	if _, err := rt.Start(context.Background(), StartParams{
+		Slug: "iso", Dir: t.TempDir(), Command: []string{"true"}, Port: 20500,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	opts, _ := createdNetwork["Options"].(map[string]any)
+	if opts["com.docker.network.bridge.enable_icc"] != "false" {
+		t.Errorf("app network must disable inter-container communication, got Options=%v", opts)
+	}
+	host, _ := captured["HostConfig"].(map[string]any)
+	if got := host["NetworkMode"]; got != appNetworkName {
+		t.Errorf("HostConfig.NetworkMode = %v, want the isolated network %q", got, appNetworkName)
 	}
 }
 

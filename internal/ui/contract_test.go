@@ -30,6 +30,34 @@ func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
 		"GET /api/apps/:slug returns {app, replicas_status}; the Overview Replicas panel seeds from replicas_status")
 }
 
+// TestRouterErrorBoundaryWired guards the global error boundary. A throw inside
+// a view mount function once blanked the whole dashboard (v0.8.7). The router
+// now catches mount throws and calls an onError callback; app.js must pass one
+// that reveals the generic #route-error-view instead of leaving a blank shell,
+// and must register window error/unhandledrejection nets. If any link breaks,
+// the blank-dashboard failure class can silently return.
+func TestRouterErrorBoundaryWired(t *testing.T) {
+	assertContains(t, "router.js", "opts.onError",
+		"router mount must be guarded and route failures to opts.onError; see internal/ui/jstests/router.test.js")
+	assertContains(t, "app.js", "createRouter({ onError:",
+		"app.js must pass an onError handler to createRouter so a failed mount reveals the error view")
+	assertContains(t, "index.html", `id="route-error-view"`,
+		"index.html must keep #route-error-view as the visible fallback when a view mount fails")
+	assertContains(t, "app.js", "unhandledrejection",
+		"app.js must register a window unhandledrejection net so async failures are observable")
+}
+
+// TestAppsGridErrorWiring guards that app.js passes a showError callback into
+// the apps-grid ctx so a failed initial /api/apps load surfaces the shared
+// error banner instead of a silent empty grid. See views/apps-grid.js and its
+// jstest for the view-side behaviour.
+func TestAppsGridErrorWiring(t *testing.T) {
+	assertContains(t, "app.js", "showError:",
+		"app.js must pass a showError callback into the apps-grid ctx so a failed load is visible")
+	assertContains(t, "views/apps-grid.js", "ctx.showError",
+		"apps-grid must call ctx.showError on load failure rather than returning a silent empty grid")
+}
+
 // TestDeployModalReadsManifestSummary guards the deploy-response contract.
 // POST /api/apps/:slug/deploy embeds a "manifest" object summarising what
 // [app] settings and [[schedule]] blocks were applied (see

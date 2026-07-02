@@ -833,7 +833,7 @@ func rateLimitByUser(rl *keyedRateLimiter) func(http.Handler) http.Handler {
 				return
 			}
 			if !rl.allow(strconv.FormatInt(u.ID, 10)) {
-				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -849,7 +849,7 @@ func (s *Server) rateLimitByIP(rl *keyedRateLimiter) func(http.Handler) http.Han
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !rl.allow(s.ClientIP(r)) {
-				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
 			next.ServeHTTP(w, r)

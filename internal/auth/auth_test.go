@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 )
@@ -38,6 +39,62 @@ func TestIssueAndValidateJWT(t *testing.T) {
 	}
 	if claims.ID == "" {
 		t.Error("expected jti claim to be set on issued token")
+	}
+}
+
+// TestIssueJWT_StampsAuthTime verifies a freshly issued token carries an
+// auth_time claim (the original login time) so the absolute session lifetime
+// can be bounded across sliding renewals.
+func TestIssueJWT_StampsAuthTime(t *testing.T) {
+	secret := "test-secret"
+	token, err := auth.IssueJWT(1, "alice", "admin", secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := auth.ValidateJWT(token, secret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.AuthTime == nil {
+		t.Fatal("issued token must carry an auth_time claim")
+	}
+	if d := time.Since(claims.AuthTime.Time); d < 0 || d > time.Minute {
+		t.Errorf("auth_time = %v, want ~now", claims.AuthTime.Time)
+	}
+}
+
+// TestIssueJWTAt_PreservesAuthTime verifies a sliding renewal keeps the original
+// login time rather than resetting it, so repeated renewals cannot extend a
+// session past its absolute lifetime.
+func TestIssueJWTAt_PreservesAuthTime(t *testing.T) {
+	secret := "test-secret"
+	orig := time.Now().Add(-3 * time.Hour)
+	token, err := auth.IssueJWTAt(1, "alice", "admin", secret, orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := auth.ValidateJWT(token, secret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.AuthTime == nil || claims.AuthTime.Time.Sub(orig).Abs() > time.Second {
+		t.Errorf("auth_time = %v, want the preserved original %v", claims.AuthTime, orig)
+	}
+}
+
+// TestCanSlideSession bounds the absolute session lifetime: a session younger
+// than AbsoluteSessionMaxAge may be renewed; an older one may not (forcing a
+// fresh login, which re-runs SSO group reconciliation). A zero auth_time
+// (legacy token) is renewable so a deploy does not log everyone out.
+func TestCanSlideSession(t *testing.T) {
+	if !auth.CanSlideSession(time.Now().Add(-time.Minute)) {
+		t.Error("a young session must be renewable")
+	}
+	if auth.CanSlideSession(time.Now().Add(-auth.AbsoluteSessionMaxAge - time.Minute)) {
+		t.Error("a session past the absolute max age must not be renewable")
+	}
+	if !auth.CanSlideSession(time.Time{}) {
+		t.Error("a zero (legacy) auth_time must be renewable")
 	}
 }
 

@@ -41,7 +41,8 @@ func TestClientID_ValidCookie(t *testing.T) {
 	// Build a valid signed value using the same function under test.
 	const slug = "myapp"
 	const knownID = "aabbccddeeff00112233445566778899"
-	signed := signClientValue(key, slug, knownID)
+	// No user in context -> clientID uses the "anon" tag, so sign with it.
+	signed := signClientValue(key, slug, "anon", knownID)
 
 	r := httptest.NewRequest(http.MethodGet, "/app/"+slug+"/", nil)
 	r.AddCookie(&http.Cookie{
@@ -68,7 +69,7 @@ func TestClientID_TamperedCookie(t *testing.T) {
 
 	const slug = "myapp"
 	const knownID = "aabbccddeeff00112233445566778899"
-	signed := signClientValue(key, slug, knownID)
+	signed := signClientValue(key, slug, "anon", knownID)
 	// Tamper: replace the 16-char HMAC segment with all-zeros so the mutation
 	// is always different from the real MAC, regardless of what it happens to be.
 	dot := strings.Index(signed, ".")

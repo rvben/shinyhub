@@ -16,6 +16,21 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 )
 
+// storageWriteStatus classifies a data.Put error into an HTTP status and
+// client-facing message. A disk-full write (ENOSPC, possibly wrapped in an
+// *os.PathError) becomes 507 Insufficient Storage so a client/operator can tell
+// "out of space" apart from a generic write failure; anything else is 500.
+func storageWriteStatus(err error) (int, string) {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.ENOSPC) {
+		return http.StatusInsufficientStorage, "insufficient storage"
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return http.StatusInsufficientStorage, "insufficient storage"
+	}
+	return http.StatusInternalServerError, "write file"
+}
+
 // dataListMaxEntries is the upper bound on files returned by handleDataList.
 // List returns ErrTooManyFiles when the count would exceed this cap.
 const dataListMaxEntries = 10000
@@ -228,13 +243,8 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 	// other uploads. Audit logging and the restart hop run lock-free.
 	releaseOnce()
 	if putErr != nil {
-		// Distinguish disk-full from other I/O errors.
-		var pathErr *os.PathError
-		if errors.As(putErr, &pathErr) && errors.Is(pathErr.Err, syscall.ENOSPC) {
-			writeError(w, http.StatusInsufficientStorage, "insufficient storage")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "write file")
+		status, msg := storageWriteStatus(putErr)
+		writeError(w, status, msg)
 		return
 	}
 
