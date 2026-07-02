@@ -67,6 +67,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.9.2](https://github.com/rvben/shinyhub/compare/v0.9.1...v0.9.2) - 2026-07-02
+
+### Added
+
+- shinyhub migrate-backend for SQLite -> Postgres migration ([72c1ea7](https://github.com/rvben/shinyhub/commit/72c1ea760cce82ac33c78768091abb925c1b78ea))
+- shinyhub rotate-secret to re-encrypt at-rest secrets on auth.secret change ([3b07fab](https://github.com/rvben/shinyhub/commit/3b07fabaf55871f28888d68423cf0c4c080d5240))
+- **lifecycle**: audit-log app crashes ([75a04a7](https://github.com/rvben/shinyhub/commit/75a04a732510d064e3ae5e12fd5c885a72ffcb6f))
+- **proxy**: worker isolation dial - native per_session/grouped session isolation ([7a4772a](https://github.com/rvben/shinyhub/commit/7a4772a2d11eb936f9813891a6277372cf75aa4d))
+- **ui**: worker isolation controls and host-capacity helper line ([d4aae82](https://github.com/rvben/shinyhub/commit/d4aae827092d878d346a570eebd3e9ec80dd16d7))
+- **proxy**: wire SetPoolMode at deploy/recovery/patch sites; skip elastic replica boot (Task 13) ([f0c8a57](https://github.com/rvben/shinyhub/commit/f0c8a577887d4ea8b11da74394c76ca7d00cfa31))
+- **lifecycle**: wire elastic worker spawn and terminate (Task 12) ([d352a84](https://github.com/rvben/shinyhub/commit/d352a84b952a457bf5911b33391eb85a38c3348d))
+- **proxy**: demand-driven elastic routing for grouped/per_session ([982c565](https://github.com/rvben/shinyhub/commit/982c5659323ab731e0da9a3cbeaca24b67208ad8))
+- **proxy**: write-locked worker reservation and per-client accounting ([f6aa1ef](https://github.com/rvben/shinyhub/commit/f6aa1ef78eb8bc9010a4589d31d42dfd96369d22))
+- **proxy**: stable signed client-id cookie ([efc1a76](https://github.com/rvben/shinyhub/commit/efc1a760e2ce929fedbf6206891f0207a940d692))
+- **proxy**: add elastic pool storage fields and SetPoolMode for worker isolation ([7abd142](https://github.com/rvben/shinyhub/commit/7abd142d22bcf9a4893e8dd008dffbb2be8265f8))
+- **proxy**: pure worker-allocation decision policy ([71be70e](https://github.com/rvben/shinyhub/commit/71be70e33efc3093812997a32c81e8ac5bf72894))
+- **cli**: apps set isolation flags + manifest [app.worker] block ([d32f6d9](https://github.com/rvben/shinyhub/commit/d32f6d98fdbe7adea1e1d97fe566304610b6dc02))
+- **api**: parse and validate worker isolation fields on PATCH ([664f1b7](https://github.com/rvben/shinyhub/commit/664f1b72f691ead076128d155da58a399f404599))
+- **db**: persist worker isolation settings via patch and manifest apply ([9803599](https://github.com/rvben/shinyhub/commit/98035999d8af2f7897a3f0504624caee343a56f0))
+- **config**: worker isolation fleet default + resolver ([7a1ce04](https://github.com/rvben/shinyhub/commit/7a1ce04d167513d0e0840b1708f642f472fde112))
+- **config**: worker isolation settings type and shared validator ([9024b96](https://github.com/rvben/shinyhub/commit/9024b96979b9588c22d16a3388e7602c02fa5874))
+- **db**: add worker isolation columns (migration 040) ([dece116](https://github.com/rvben/shinyhub/commit/dece116a07e44d991f8d0c54493983fdfbcf6a14))
+
+### Fixed
+
+- refuse non-empty migration targets; clear route-error view on recovery ([d687f33](https://github.com/rvben/shinyhub/commit/d687f33e1a62265a1299fc42d5d0809f2166f31b))
+- **db**: coerce integer booleans in backend migration + rotation scan ([12c53fa](https://github.com/rvben/shinyhub/commit/12c53fa5f6b1217a44ce141c17f7d764b70f74d8))
+- **proxy**: bind client-id cookie to the user instead of clearing on logout ([1b3241f](https://github.com/rvben/shinyhub/commit/1b3241fde9a48a9108cc936e168457a933f62c5a))
+- **ui**: surface apps-grid load failures instead of a silent empty grid ([65f81dc](https://github.com/rvben/shinyhub/commit/65f81dc63650f131bca9ced64725abfb329e1969))
+- **auth**: cap absolute session lifetime so SSO role changes take effect ([6e455ac](https://github.com/rvben/shinyhub/commit/6e455ac347795639414eff2045a0ea0b31c2da68))
+- **process**: isolate Docker app containers on an ICC-disabled network ([fe25454](https://github.com/rvben/shinyhub/commit/fe254547a550bba00e0b47961ee68f7d2a33b627))
+- **api**: JSON error envelope everywhere; stop leaking raw errors ([d4fb290](https://github.com/rvben/shinyhub/commit/d4fb290bd14ec37d083726e2ae9b154ad8cd32cb))
+- **ui**: global error boundary so a view throw can't blank the shell ([08aae2e](https://github.com/rvben/shinyhub/commit/08aae2ef2e18876c9f42c0bc736edc1f819351be))
+- **db**: widen autoscale_target to double precision on Postgres ([20c3016](https://github.com/rvben/shinyhub/commit/20c3016e4ab1d5c3025349c1c5ed7d4822a20a15))
+- **proxy**: close worker-isolation client-id cookie hijack ([3a2c420](https://github.com/rvben/shinyhub/commit/3a2c420de1585ab1241ef42f3311bc53b125c15c))
+- **proxy**: reclaim not-yet-connected elastic worker slots; test-sentinel + deploy-skip log ([aad1c92](https://github.com/rvben/shinyhub/commit/aad1c92b0b77cc7fa8dd59c239dfda4a8af01074))
+- **lifecycle**: resolve isolation mode before elastic skip guard at wake/warm/recovery ([3ee3acd](https://github.com/rvben/shinyhub/commit/3ee3acd71d16b5f99a493ea947aca6b9f5c5086c))
+- **lifecycle**: cancel max_session_lifetime timer on early terminate ([d076e49](https://github.com/rvben/shinyhub/commit/d076e49f997618d2207f29663d56ec657136f13a))
+- **proxy**: route elastic by server-side client binding; close terminate-race window ([8f11848](https://github.com/rvben/shinyhub/commit/8f11848c63b499e8bfd32978963fd481e529013f))
+- **proxy**: floor liveConns to avoid double-close timer leak ([43bc263](https://github.com/rvben/shinyhub/commit/43bc263cbc1dd5d3c17a8c4bded94ac473010a0f))
+- **proxy**: set Secure on client-id cookie; correct doc + tamper test ([21bd0c2](https://github.com/rvben/shinyhub/commit/21bd0c286ddbe5ce43be8684b0cbc3c903b8dd8a))
+
+### Performance
+
+- **api**: batch the dashboard metrics poll instead of 3 queries per card ([0c81ed0](https://github.com/rvben/shinyhub/commit/0c81ed02a38c12717cb6e6d5d0153f1d31d21db9))
+- **proxy**: skip elastic sticky-cookie refresh when it already matches ([27d04ea](https://github.com/rvben/shinyhub/commit/27d04ea551fea0a72442cecc9590cd4285449108))
+- **process**: read log tail backward instead of scanning the whole file ([55e76a2](https://github.com/rvben/shinyhub/commit/55e76a2eb2843fcaa7316c9c2d6af7ae2b8c37a1))
+- **recovery**: parallelize worker inventory and bound its context ([6a4acdd](https://github.com/rvben/shinyhub/commit/6a4acdd82401a28efc5eba16cac3df7a9cc46f5a))
+- **ui**: revalidation cache policy for static assets ([6fd55f7](https://github.com/rvben/shinyhub/commit/6fd55f749389376779473620009bd5e9ed211333))
+- **db**: index deployments(app_id, created_at DESC, id DESC) ([79c757c](https://github.com/rvben/shinyhub/commit/79c757cab4e430d68baab486973ddc9a8e5468af))
+
 ## [0.9.1](https://github.com/rvben/shinyhub/compare/v0.9.0...v0.9.1) - 2026-07-01
 
 ### Added
