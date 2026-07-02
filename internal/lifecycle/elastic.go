@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
@@ -36,6 +38,16 @@ type ElasticSpawner struct {
 	// When nil the default HTTP poller (waitElasticHealthy) is used.
 	// Set in tests to skip real HTTP polling.
 	HealthCheck func(endpointURL string, timeout time.Duration, transport http.RoundTripper) error
+
+	// TerminateHook is called at the start of every Terminate invocation. Nil
+	// in production; set in tests to count or observe termination calls.
+	TerminateHook func(slug string, slotID int)
+
+	// lifetimeTimers holds the armed max_session_lifetime backstop timers,
+	// keyed by "slug/slotID". Terminate cancels the timer via Stop so that
+	// an early client-disconnect does not leave a goroutine for the remaining
+	// lifetime duration.
+	lifetimeTimers sync.Map
 }
 
 // Spawn boots one native elastic worker for slug at the given slotID.
@@ -152,13 +164,20 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	// Arm the absolute session-lifetime backstop. When configured, the worker
 	// is terminated after the deadline regardless of active connections, so a
 	// misbehaving or long-running session cannot pin the worker indefinitely.
+	// The returned timer is stored so Terminate can cancel it on an early exit
+	// and avoid a goroutine lingering for the full remaining lifetime.
 	if app.WorkerMaxSessionLifetimeSecs > 0 {
 		lifetime := time.Duration(app.WorkerMaxSessionLifetimeSecs) * time.Second
-		time.AfterFunc(lifetime, func() {
+		key := slug + "/" + strconv.Itoa(slotID)
+		timer := time.AfterFunc(lifetime, func() {
 			slog.Info("elastic spawn: max session lifetime reached, terminating worker",
 				"slug", slug, "slotID", slotID, "lifetime_s", app.WorkerMaxSessionLifetimeSecs)
+			// Remove our own map entry before calling Terminate so that
+			// Terminate's LoadAndDelete finds nothing and does not double-Stop.
+			s.lifetimeTimers.Delete(key)
 			s.Terminate(slug, slotID)
 		})
+		s.lifetimeTimers.Store(key, timer)
 	}
 }
 
@@ -167,6 +186,16 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 // logged at DEBUG level rather than propagated, so a double-terminate from a
 // grace-window race and a lifetime backstop is harmless.
 func (s *ElasticSpawner) Terminate(slug string, slotID int) {
+	if s.TerminateHook != nil {
+		s.TerminateHook(slug, slotID)
+	}
+	// Cancel the max_session_lifetime backstop timer if it is still armed.
+	// This prevents the timer goroutine from lingering after an early exit.
+	// A missing entry (already fired or never armed) is a no-op.
+	key := slug + "/" + strconv.Itoa(slotID)
+	if v, ok := s.lifetimeTimers.LoadAndDelete(key); ok {
+		v.(*time.Timer).Stop()
+	}
 	if err := s.Manager.StopReplica(slug, slotID); err != nil {
 		slog.Debug("elastic terminate: stop replica (may already be stopped)",
 			"slug", slug, "slotID", slotID, "err", err)
@@ -222,6 +251,7 @@ func ReapElasticOrphans(store *db.Store, mgr *process.Manager) {
 
 // isElasticIsolation reports whether the WorkerIsolation string represents a
 // demand-driven (elastic) mode rather than the default multiplex mode.
+// Must stay in sync with proxy.poolIsElastic if a new isolation mode is added.
 func isElasticIsolation(mode string) bool {
 	return mode == string(config.IsolationGrouped) || mode == string(config.IsolationPerSession)
 }

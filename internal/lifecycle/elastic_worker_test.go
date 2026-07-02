@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -241,6 +242,58 @@ func TestSpawnElasticWorker_MaxSessionLifetimeBackstop(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Error("worker was not terminated after max session lifetime elapsed")
+}
+
+// TestTerminateElasticWorker_CancelsLifetimeTimer verifies that calling
+// Terminate before the max_session_lifetime backstop fires cancels the timer
+// so it does not trigger a second Terminate call after the early one.
+func TestTerminateElasticWorker_CancelsLifetimeTimer(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, "cancelapp")
+
+	// 1 s lifetime so the backstop fires quickly if not cancelled.
+	_, err := store.DB().Exec(
+		`UPDATE apps SET worker_max_session_lifetime_secs=1 WHERE slug='cancelapp'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bundleDir := mustMinimalBundle(t)
+	_ = mustCreateDeploymentInDir(t, store, app.ID, bundleDir)
+
+	rt := &recordingRuntime{}
+	mgr := process.NewManager(t.TempDir(), rt)
+
+	prx := proxy.New()
+	prx.SetPoolMode("cancelapp", config.IsolationPerSession, 1, 5)
+
+	var terminateCalls int64
+	spawner := &lifecycle.ElasticSpawner{
+		Store:       store,
+		Manager:     mgr,
+		Proxy:       prx,
+		RuntimeCfg:  config.RuntimeConfig{},
+		HealthCheck: noopHealthCheck,
+		TerminateHook: func(_ string, _ int) {
+			atomic.AddInt64(&terminateCalls, 1)
+		},
+	}
+
+	spawner.Spawn("cancelapp", 0)
+	if prx.ElasticWorkerCount("cancelapp") == 0 {
+		t.Fatal("worker should be registered in the elastic pool after Spawn")
+	}
+
+	// Terminate well before the 1 s backstop fires.
+	spawner.Terminate("cancelapp", 0)
+
+	// Wait past the 1 s lifetime. If the timer was not cancelled it would fire
+	// and invoke Terminate a second time.
+	time.Sleep(1500 * time.Millisecond)
+
+	if n := atomic.LoadInt64(&terminateCalls); n != 1 {
+		t.Errorf("Terminate called %d time(s), want 1 (backstop timer must be cancelled on early Terminate)", n)
+	}
 }
 
 // TestTerminateElasticWorker_StopsReplicaAndDeregisters verifies that
