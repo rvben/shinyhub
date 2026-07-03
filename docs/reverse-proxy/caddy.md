@@ -40,9 +40,10 @@ shiny.example.com {
         copy_headers X-Forwarded-User X-Forwarded-Email X-Forwarded-Groups
     }
 
-    # Step 2: proxy to ShinyHub.
+    # Step 2: proxy to ShinyHub. A bare reverse_proxy already tunnels the Shiny
+    # WebSocket automatically (see "WebSockets" below); flush_interval -1 also
+    # disables buffering so SSE log-streaming works.
     reverse_proxy localhost:8080 {
-        # Disable buffering so SSE log-streaming works.
         flush_interval -1
     }
 }
@@ -51,6 +52,55 @@ shiny.example.com {
 Adjust `auth-service:9091` and `/api/verify` to match your auth service (for
 example Authelia at `authelia:9091/api/verify`, or oauth2-proxy at
 `oauth2-proxy:4180/oauth2/auth`).
+
+## WebSockets (Shiny reactivity)
+
+Shiny drives every interaction (button clicks, tab switches, reactive updates)
+over a **WebSocket**. The initial page HTML and static assets load over plain
+HTTP, so a broken WebSocket looks deceptive: the app renders and static requests
+return `200`, but **every interaction fails with "Shiny disconnected"** because
+the reactive channel never opens. Python Shiny uses a raw WebSocket with no
+polling fallback, so a failed upgrade disconnects immediately and completely.
+
+Caddy v2's `reverse_proxy` tunnels WebSockets automatically, so the minimal
+config above already works. The upgrade breaks only when something in the chain
+interferes with it. If interactions disconnect, check these in order:
+
+1. **`forward_auth` runs on the WebSocket upgrade too.** Caddy issues the auth
+   subrequest for **every** request, including the WebSocket handshake. If the
+   auth service answers the handshake with a redirect or `401` (for example
+   because the session cookie is not carried on the upgrade, or the WebSocket
+   path is not treated as already-authenticated), Caddy never proxies the
+   upgrade to ShinyHub and the interaction fails, even though ordinary GETs
+   succeed. Make sure the auth service authorizes the WebSocket request the same
+   way it authorizes the page that opened it.
+2. **Keep HTTP/1.1 to the upstream.** A WebSocket `Upgrade` cannot ride HTTP/2.
+   The default transport is HTTP/1.1, which is correct; do **not** force
+   `transport http { versions h2c 2 }` or an HTTP/2 upstream for the ShinyHub
+   route.
+3. **Do not strip the upgrade headers.** A `header_up` / `request_header`
+   directive that overwrites `Connection`, or a `handle` / `route` split that
+   sends the app's WebSocket subpath to a `file_server` or default handler
+   instead of `reverse_proxy`, turns the `101` into a non-upgrade response.
+4. **Watch global timeouts.** Short `servers { timeouts { read_timeout ... } }`
+   values can close long-lived WebSocket sessions. ShinyHub itself never
+   times out an established WebSocket.
+
+### Diagnosing an upgrade failure
+
+- **Read Caddy's access log for the WebSocket request** (the one with
+  `Upgrade: websocket`). Status `101` means it tunneled; `200`, `302`, `401`, or
+  `502` is the smoking gun and points at one of the causes above.
+- **Use ShinyHub's built-in readiness probe.** `GET /app/<slug>/.shinyhub/ready`
+  returns `200 {"ready":true}` only after at least one WebSocket handshake has
+  completed for that app; it returns `503 {"ready":false}` (with `Retry-After: 1`)
+  before the first handshake, and `404` for an unknown slug. If this probe never
+  reports `ready:true` while users are actively interacting, no WebSocket is
+  reaching the app, which localizes the fault to the proxy hop rather than the
+  app.
+- **Bisect the proxy.** Drive the app directly against the ShinyHub port
+  (`http://<host>:8080/app/<slug>/`, bypassing Caddy). If interactions work
+  there but fail through Caddy, the Caddy configuration is the cause.
 
 ## Headers honored by ShinyHub
 
