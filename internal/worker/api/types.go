@@ -20,10 +20,14 @@ type RegisterRequest struct {
 
 // RegisterResponse returns the assigned node id, the signed client certificate,
 // and the CA bundle the worker pins for the control-plane server cert.
+// Incarnation is the generation counter the control plane assigned this
+// registration; the worker echoes it back on every heartbeat so the control
+// plane can fence out a stale incarnation after a restart or reap.
 type RegisterResponse struct {
-	NodeID   string `json:"node_id"`
-	CertPEM  string `json:"cert_pem"`
-	CABundle string `json:"ca_bundle"`
+	NodeID      string `json:"node_id"`
+	CertPEM     string `json:"cert_pem"`
+	CABundle    string `json:"ca_bundle"`
+	Incarnation int64  `json:"incarnation,omitempty"`
 }
 
 // HeartbeatRequest carries the worker's current version. The node id is NOT in
@@ -31,19 +35,27 @@ type RegisterResponse struct {
 // so a heartbeat cannot impersonate another node. RenewCSRPEM, when non-empty,
 // is a PEM-encoded CSR the worker submits to renew its certificate before the
 // current one expires; the control plane re-signs it and returns the new cert.
+// Incarnation is the generation counter the worker received at registration;
+// the control plane compares it against its own record to detect a stale
+// worker that missed a reap.
 type HeartbeatRequest struct {
 	Version     string `json:"version"`
 	RenewCSRPEM string `json:"renew_csr_pem,omitempty"`
+	Incarnation int64  `json:"incarnation,omitempty"`
 }
 
 // HeartbeatResponse carries a renewed certificate when the request included a
 // RenewCSRPEM the control plane re-signed; CertPEM is then non-empty and the
 // agent swaps it in. CABundle carries the control plane's current CA bundle so a
 // rotated trust root reaches the worker; the agent applies it only when it
-// differs from the bundle it already trusts.
+// differs from the bundle it already trusts. Incarnation is the control
+// plane's current generation counter for this node; Fenced is true when the
+// heartbeat's incarnation is stale and the worker must stop serving.
 type HeartbeatResponse struct {
-	CertPEM  string `json:"cert_pem,omitempty"`
-	CABundle string `json:"ca_bundle,omitempty"`
+	CertPEM     string `json:"cert_pem,omitempty"`
+	CABundle    string `json:"ca_bundle,omitempty"`
+	Incarnation int64  `json:"incarnation,omitempty"`
+	Fenced      bool   `json:"fenced,omitempty"`
 }
 
 // FrameKind identifies an NDJSON streaming frame's payload. Used by the replica
