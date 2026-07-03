@@ -672,6 +672,7 @@ type appsSetFlags struct {
 	groupedSize           int
 	maxWorkers            int
 	maxSessionLifetime    int
+	ephemeralDataOk       bool
 }
 
 func newAppsSetCmd() *cobra.Command {
@@ -723,6 +724,8 @@ func newAppsSetCmd() *cobra.Command {
 		"Demand-driven worker ceiling for grouped/per_session (>= 1)")
 	cmd.Flags().IntVar(&f.maxSessionLifetime, "max-session-lifetime", 0,
 		"Absolute worker lifetime in seconds (0 = unlimited)")
+	cmd.Flags().BoolVar(&f.ephemeralDataOk, "ephemeral-data-ok", false,
+		"Accept ephemeral (task-local) app-data on a Fargate tier with no durable backend: allows deploying and pushing data even though it is lost on restart/hibernation and not shared across replicas")
 	return cmd
 }
 
@@ -744,9 +747,10 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	maxWorkersChanged := cmd.Flags().Changed("max-workers")
 	maxSessionLifetimeChanged := cmd.Flags().Changed("max-session-lifetime")
 	anyWorkerChanged := isolationChanged || groupedSizeChanged || maxWorkersChanged || maxSessionLifetimeChanged
+	ephemeralDataOkChanged := cmd.Flags().Changed("ephemeral-data-ok")
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok)")
 	}
 	if memoryLimitChanged && f.memoryLimitMB != -1 {
 		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
@@ -909,6 +913,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if maxSessionLifetimeChanged {
 		payload["worker_max_session_lifetime_secs"] = f.maxSessionLifetime
+	}
+	if ephemeralDataOkChanged {
+		payload["ephemeral_data_ack"] = f.ephemeralDataOk
 	}
 
 	body, err := json.Marshal(payload)
