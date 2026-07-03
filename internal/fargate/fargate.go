@@ -345,6 +345,11 @@ func New(client ECSClient, cfg Config, log *slog.Logger, opts ...Option) *Runtim
 			"cluster", r.cfg.Cluster,
 		)
 	}
+	if r.cfg.S3Files.Configured() && r.cfg.S3Files.AccessPointArn != "" {
+		r.log.Warn("fargate: s3files.access_point_arn is set - all apps on this tier mount the access point's single root, so per-app data isolation is NOT enforced by the platform; the access point (or your app design) is responsible for keeping tenants' data separate",
+			"cluster", r.cfg.Cluster,
+		)
+	}
 	return r
 }
 
