@@ -3285,6 +3285,23 @@ func (s *Store) SetWorkerStatus(nodeID, status string) error {
 	return nil
 }
 
+// ReapWorker marks a worker down and bumps its incarnation in one statement.
+// The control plane calls it when it declares a worker dead and reassigns its
+// replicas; the bumped incarnation is what fences the worker if it later
+// reconnects still running the reassigned copies. Returns ErrNotFound for an
+// unknown node.
+func (s *Store) ReapWorker(nodeID string) error {
+	res, err := s.db.Exec(
+		`UPDATE workers SET status = 'down', incarnation = incarnation + 1 WHERE node_id = ?`, nodeID)
+	if err != nil {
+		return fmt.Errorf("reap worker %q: %w", nodeID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SupersedeTierAddrWorkers marks down every up worker sharing a (tier, advertise
 // address) except the given node id, in a single statement. Used when a worker
 // (re)registers at an endpoint so a stale duplicate at that same endpoint - an
@@ -3303,16 +3320,18 @@ func (s *Store) SupersedeTierAddrWorkers(tier, advertiseAddr, exceptNodeID strin
 	return nil
 }
 
-// RevokeWorker administratively revokes a worker: it marks the node down and
-// stamps revoked_at with the current UTC time, preserving the timestamp of the
-// first revocation if the worker is revoked again (audit stability). A revoked
-// worker's certificate is rejected by the worker API and excluded from
+// RevokeWorker administratively revokes a worker: it marks the node down,
+// bumps its incarnation (revocation is a reap), and stamps revoked_at with
+// the current UTC time, preserving the timestamp of the first revocation if
+// the worker is revoked again (audit stability). A revoked worker's
+// certificate is rejected by the worker API and excluded from
 // control->worker dials, independent of its short cert TTL. Returns ErrNotFound
 // for an unknown node.
 func (s *Store) RevokeWorker(nodeID string) error {
 	res, err := s.db.Exec(`
 		UPDATE workers
 		SET status = 'down',
+		    incarnation = incarnation + 1,
 		    revoked_at = CASE WHEN revoked_at = '' THEN `+s.d.nowText()+` ELSE revoked_at END
 		WHERE node_id = ?`, nodeID)
 	if err != nil {
