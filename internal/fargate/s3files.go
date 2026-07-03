@@ -35,6 +35,12 @@ func (m S3FilesMount) Configured() bool { return m.FileSystemArn != "" }
 // (RootDirectory/<slug>) so apps never see each other's data. With an access
 // point, the access point enforces the root and RootDirectory is left unset (the
 // SDK requires it to be omitted or "/" in that case).
+//
+// CAVEAT (unverified): a non-existent per-app RootDirectory is NOT known to be
+// auto-created on mount (the EFS analog fails "No such file or directory"). Until
+// this is verified live, the per-app subdirectory must already exist on the file
+// system, or an access point (which auto-creates its root) must be used. See
+// .claude/investigations/s3files-per-app-subdir.md.
 func (m S3FilesMount) volumeAndMount(slug string) (ecstypes.Volume, ecstypes.MountPoint, bool) {
 	if !m.Configured() {
 		return ecstypes.Volume{}, ecstypes.MountPoint{}, false
