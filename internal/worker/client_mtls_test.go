@@ -112,7 +112,7 @@ func TestClientMTLSRoundTrip(t *testing.T) {
 	}
 
 	// Heartbeat must succeed over the mTLS connection.
-	if _, err := c.Heartbeat(t.Context(), "v-test", ""); err != nil {
+	if _, err := c.Heartbeat(t.Context(), "v-test", "", 0); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 

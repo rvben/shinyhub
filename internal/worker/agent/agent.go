@@ -68,6 +68,12 @@ type Agent struct {
 	// how long renewal has been stuck; a successful renewal resets it to zero.
 	renewFailures int
 
+	// incarnation is the generation counter this worker was last assigned by
+	// the control plane. It rides on every heartbeat so the control plane can
+	// fence a stale rejoin. It stays 0 (legacy grace) until a later task wires
+	// it up from registration and fence responses.
+	incarnation int64
+
 	// Listen binds the agent's inbound mTLS listener. Run calls it synchronously
 	// before its up-front heartbeat, so a bind failure (e.g. the advertised port
 	// is already in use) is returned before the worker ever announces itself up,
@@ -319,7 +325,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) error {
 		csr = string(a.csrPEM)
 	}
 
-	resp, err := a.client.Heartbeat(ctx, a.cfg.Version, csr)
+	resp, err := a.client.Heartbeat(ctx, a.cfg.Version, csr, a.incarnation)
 	if err != nil {
 		a.recordRenewal(ctx, phase, notAfter, false, err)
 		return err
