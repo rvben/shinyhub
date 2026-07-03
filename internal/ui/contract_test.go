@@ -87,6 +87,8 @@ func TestTokensUIWiring(t *testing.T) {
 		"app.js must call the /api/tokens endpoint to list/create tokens")
 	assertContains(t, "app.js", "renderTokenList",
 		"app.js must render the token list via views/tokens.js")
+	assertContains(t, "app.js", "Array.isArray(body.items)",
+		"app.js loadTokens must read the {items,...} list envelope (body.items), not the raw response body")
 	assertContains(t, "app.js", "body.token",
 		"app.js must read body.token from the create response to reveal it once")
 	assertContains(t, "app.js", "Revoke token",

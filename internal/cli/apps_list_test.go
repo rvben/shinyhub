@@ -213,21 +213,44 @@ func TestAppsAccessGroupList_JSONEnvelopeWithLimit(t *testing.T) {
 
 // ── tokens list ─────────────────────────────────────────────────────────────
 
-func newTokensListServer(t *testing.T) *httptest.Server {
+// newTokensListServer mirrors production: standard list envelope, server-side
+// pagination honouring ?limit=&offset=. gotLimit records the limit the CLI sent.
+func newTokensListServer(t *testing.T, gotLimit *string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"id": 1, "name": "ci-token", "created_at": "2026-01-01T00:00:00Z"},
+		{"id": 2, "name": "dev-token", "created_at": "2026-02-01T00:00:00Z"},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tokens" {
 			http.NotFound(w, r)
 			return
 		}
+		if gotLimit != nil {
+			*gotLimit = r.URL.Query().Get("limit")
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		total := len(all)
+		start := offset
+		if start > total {
+			start = total
+		}
+		end := total
+		if limit > 0 && start+limit < end {
+			end = start + limit
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"id":1,"name":"ci-token","created_at":"2026-01-01T00:00:00Z"},{"id":2,"name":"dev-token","created_at":"2026-02-01T00:00:00Z"}]`))
+		json.NewEncoder(w).Encode(map[string]any{
+			"items": all[start:end], "total": total, "limit": limit, "offset": offset,
+		})
 	}))
 }
 
 func TestTokensList_JSONEnvelopeWithLimit(t *testing.T) {
 	resetFormatState(t)
-	srv := newTokensListServer(t)
+	var gotLimit string
+	srv := newTokensListServer(t, &gotLimit)
 	defer srv.Close()
 	t.Setenv("SHINYHUB_HOST", srv.URL)
 	t.Setenv("SHINYHUB_TOKEN", "shk_test")
@@ -237,6 +260,9 @@ func TestTokensList_JSONEnvelopeWithLimit(t *testing.T) {
 	root.SetArgs([]string{"tokens", "list", "--json", "--limit", "1"})
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
+	}
+	if gotLimit != "1" {
+		t.Errorf("CLI did not forward --limit to the server: got query limit=%q", gotLimit)
 	}
 	var env struct {
 		Items  []map[string]any `json:"items"`

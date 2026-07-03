@@ -1664,11 +1664,15 @@ func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
 	if resp.StatusCode >= 400 {
 		return nil, httpError(cfg.Token, "list tokens", resp, out)
 	}
-	var tokens []tokenInfo
-	if err := json.Unmarshal(out, &tokens); err != nil {
+	// The server returns the standard {items,...} list envelope. This path wants
+	// the full set (to resolve a token by name), so it does not paginate.
+	var env struct {
+		Items []tokenInfo `json:"items"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	return tokens, nil
+	return env.Items, nil
 }
 
 func newTokensListCmd() *cobra.Command {
@@ -1689,25 +1693,11 @@ func runTokensList(cmd *cobra.Command, f *listFlags) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	tokens, total, err := getPaginatedList(cfg, "list tokens", "/api/tokens", f)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "list tokens", resp, out)
-	}
-	var tokens []map[string]any
-	if err := json.Unmarshal(out, &tokens); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return renderList(cmd, f, tokens, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, f, tokens, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintln(w, "No tokens.")
 			return
