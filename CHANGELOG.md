@@ -69,6 +69,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.9.4](https://github.com/rvben/shinyhub/compare/v0.9.3...v0.9.4) - 2026-07-03
+
+### Added
+
+- **ui**: light theme with System/Light/Dark preference ([8236623](https://github.com/rvben/shinyhub/commit/8236623027aa4b7468fa7231ba00bb9a102c7962))
+- **ui**: API tokens management page (create, reveal-once, list, revoke) ([0c20570](https://github.com/rvben/shinyhub/commit/0c20570f360735a7ff2adf8604e774452f667142))
+
+### Fixed
+
+- **ui**: darken light-theme --cyan to WCAG AA; rename inset triplet ([1a1009c](https://github.com/rvben/shinyhub/commit/1a1009c8aca2c8b4f76c6e554e9a6a6294ad9223))
+- **ui**: resolve WCAG A/AA accessibility violations in the dashboard ([3864a28](https://github.com/rvben/shinyhub/commit/3864a287f8c58ba053f0f9d9e7e928a87908cefd))
+- **cli**: drop OutputFields the server never emits ([d935453](https://github.com/rvben/shinyhub/commit/d93545365c815cc1d86e02295ceb6b4c2c98361a))
+
 ## [0.9.3](https://github.com/rvben/shinyhub/compare/v0.9.2...v0.9.3) - 2026-07-02
 
 ### Added
