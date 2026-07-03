@@ -6,21 +6,51 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
+
+// writeMigrationEnvelope mirrors the server's writeList: it paginates the full
+// set server-side by ?limit=&offset= and returns the standard
+// {items,total,limit,offset} envelope (plus any extra sibling keys). Shared by
+// the list-migration mock servers so they behave like production.
+func writeMigrationEnvelope(w http.ResponseWriter, r *http.Request, all []map[string]any, extra map[string]any) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	total := len(all)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := total
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	env := map[string]any{
+		"items": all[start:end], "total": total, "limit": limit, "offset": offset,
+	}
+	for k, v := range extra {
+		env[k] = v
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(env)
+}
 
 // ── env ls ───────────────────────────────────────────────────────────────────
 
 func newEnvLsServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"key": "FOO", "value": "bar", "secret": false, "set": true, "updated_at": 1},
+		{"key": "SECRET", "value": "", "secret": true, "set": true, "updated_at": 2},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/env", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"env":[{"key":"FOO","value":"bar","secret":false,"set":true,"updated_at":1},{"key":"SECRET","value":"","secret":true,"set":true,"updated_at":2}]}`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 
@@ -58,14 +88,17 @@ func TestEnvLs_JSONEnvelopeWithLimit(t *testing.T) {
 
 func newDataLsServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"path": "a.csv", "size": 10, "sha256": "abc", "modified_at": 1735689600},
+		{"path": "b.csv", "size": 20, "sha256": "def", "modified_at": 1735689601},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/data", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"files":[{"path":"a.csv","size":10,"sha256":"abc","modified_at":1735689600},{"path":"b.csv","size":20,"sha256":"def","modified_at":1735689601}],"quota_mb":512,"used_bytes":30}`))
+		writeMigrationEnvelope(w, r, all, map[string]any{"quota_mb": 512, "used_bytes": 30})
 	}))
 }
 
@@ -136,14 +169,17 @@ func TestDataLs_PreservesQuotaEnvelopeKeys(t *testing.T) {
 
 func newScheduleLsServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"id": 1, "name": "nightly", "cron_expr": "0 2 * * *", "command": []string{"python", "run.py"}, "enabled": true, "timeout_seconds": 3600, "overlap_policy": "skip", "missed_policy": "skip", "effective_timezone": "UTC", "timezone_inherited": false},
+		{"id": 2, "name": "weekly", "cron_expr": "0 3 * * 0", "command": []string{"Rscript", "report.R"}, "enabled": false, "timeout_seconds": 7200, "overlap_policy": "skip", "missed_policy": "skip", "effective_timezone": "UTC", "timezone_inherited": true},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/schedules", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"id":1,"name":"nightly","cron_expr":"0 2 * * *","command":["python","run.py"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip","effective_timezone":"UTC","timezone_inherited":false},{"id":2,"name":"weekly","cron_expr":"0 3 * * 0","command":["Rscript","report.R"],"enabled":false,"timeout_seconds":7200,"overlap_policy":"skip","missed_policy":"skip","effective_timezone":"UTC","timezone_inherited":true}]`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 
@@ -181,14 +217,17 @@ func TestScheduleLs_JSONEnvelopeWithLimit(t *testing.T) {
 
 func newShareLsServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"source_slug": "fetcher", "source_id": 7},
+		{"source_slug": "loader", "source_id": 9},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/shared-data", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"source_slug":"fetcher","source_id":7},{"source_slug":"loader","source_id":9}]`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 

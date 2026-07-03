@@ -43,29 +43,12 @@ func newShareLsCmd() *cobra.Command {
 			return err
 		}
 
-		req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/shared-data", nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-
-		resp, err := httpClient.Do(req)
+		mounts, total, err := getPaginatedList(cfg, "list shared-data", "/api/apps/"+slug+"/shared-data", f)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
 
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "list shared-data", resp, out)
-		}
-
-		var mounts []map[string]any
-		if err := json.Unmarshal(out, &mounts); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-
-		return renderList(cmd, f, mounts, nil, func(w io.Writer, items []map[string]any) {
+		return renderServerList(cmd, f, mounts, total, nil, func(w io.Writer, items []map[string]any) {
 			if len(items) == 0 {
 				fmt.Fprintln(w, "No shared-data mounts.")
 				return

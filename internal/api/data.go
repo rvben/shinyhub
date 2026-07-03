@@ -84,8 +84,8 @@ func (s *Server) handleDataList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"files":      files,
+	limit, offset := parsePagination(r)
+	writeList(w, files, limit, offset, map[string]any{
 		"quota_mb":   s.cfg.Storage.AppQuotaMB,
 		"used_bytes": used,
 	})

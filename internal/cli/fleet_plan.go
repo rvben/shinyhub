@@ -86,6 +86,15 @@ func fetchApps(cfg *cliConfig) ([]db.App, error) {
 	if resp.StatusCode >= 400 {
 		return nil, httpError(cfg.Token, "list apps", resp, body)
 	}
+	// The server returns the standard {items,...} list envelope; fleet wants the
+	// full set (reconciliation), so it does not paginate and tolerates a bare
+	// array for resilience across server versions.
+	var env struct {
+		Items []db.App `json:"items"`
+	}
+	if err := json.Unmarshal(body, &env); err == nil && env.Items != nil {
+		return env.Items, nil
+	}
 	var apps []db.App
 	if err := json.Unmarshal(body, &apps); err != nil {
 		return nil, fmt.Errorf("decode apps: %w", err)

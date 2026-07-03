@@ -94,11 +94,24 @@ func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
 		return nil, httpError(cfg.Token, "list schedules", resp, out)
 	}
 
-	var schedules []scheduleDTO
-	if err := json.NewDecoder(resp.Body).Decode(&schedules); err != nil {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// The server returns the standard {items,...} list envelope. This helper
+	// wants the full set (name resolution), so it does not paginate; it tolerates
+	// a bare array too so it stays robust across server versions.
+	var env struct {
+		Items []scheduleDTO `json:"items"`
+	}
+	if err := json.Unmarshal(body, &env); err == nil && env.Items != nil {
+		return env.Items, nil
+	}
+	var bare []scheduleDTO
+	if err := json.Unmarshal(body, &bare); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	return schedules, nil
+	return bare, nil
 }
 
 func newScheduleLsCmd() *cobra.Command {
@@ -115,29 +128,12 @@ func newScheduleLsCmd() *cobra.Command {
 			return err
 		}
 
-		schedules, err := listSchedules(cfg, args[0])
+		items, total, err := getPaginatedList(cfg, "list schedules", "/api/apps/"+args[0]+"/schedules", f)
 		if err != nil {
 			return err
 		}
 
-		// Convert to []map[string]any for the shared list helper.
-		items := make([]map[string]any, len(schedules))
-		for i, s := range schedules {
-			items[i] = map[string]any{
-				"id":                 s.ID,
-				"name":               s.Name,
-				"cron_expr":          s.CronExpr,
-				"command":            s.Command,
-				"enabled":            s.Enabled,
-				"timeout_seconds":    s.TimeoutSeconds,
-				"overlap_policy":     s.OverlapPolicy,
-				"missed_policy":      s.MissedPolicy,
-				"effective_timezone": s.EffectiveTimezone,
-				"timezone_inherited": s.TimezoneInherited,
-			}
-		}
-
-		return renderList(cmd, f, items, nil, func(w io.Writer, rendered []map[string]any) {
+		return renderServerList(cmd, f, items, total, nil, func(w io.Writer, rendered []map[string]any) {
 			if len(rendered) == 0 {
 				fmt.Fprintln(w, "No schedules.")
 				return
@@ -693,10 +689,19 @@ func newScheduleLogsCmd() *cobra.Command {
 			}
 			defer runsResp.Body.Close()
 
-			var runs []struct {
+			// The server returns the standard {items,...} list envelope; tolerate a
+			// bare array for resilience across versions.
+			type runIDItem struct {
 				ID int64 `json:"id"`
 			}
-			if err := json.NewDecoder(runsResp.Body).Decode(&runs); err != nil {
+			runsBody, _ := io.ReadAll(runsResp.Body)
+			var runsEnv struct {
+				Items []runIDItem `json:"items"`
+			}
+			var runs []runIDItem
+			if err := json.Unmarshal(runsBody, &runsEnv); err == nil && runsEnv.Items != nil {
+				runs = runsEnv.Items
+			} else if err := json.Unmarshal(runsBody, &runs); err != nil {
 				return fmt.Errorf("decode runs: %w", err)
 			}
 			if len(runs) == 0 {
@@ -782,29 +787,15 @@ func newScheduleStatusCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		url := cfg.Host + "/api/fleet/schedules/status"
+		path := "/api/fleet/schedules/status"
 		if len(args) == 1 {
-			url += "?slug=" + neturl.QueryEscape(args[0])
+			path += "?slug=" + neturl.QueryEscape(args[0])
 		}
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
+		items, total, err := getPaginatedList(cfg, "schedule status", path, f)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "schedule status", resp, out)
-		}
-		var items []map[string]any
-		if err := json.Unmarshal(out, &items); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-		return renderList(cmd, f, items, nil, func(w io.Writer, rows []map[string]any) {
+		return renderServerList(cmd, f, items, total, nil, func(w io.Writer, rows []map[string]any) {
 			if len(rows) == 0 {
 				fmt.Fprintln(w, "No schedules.")
 				return

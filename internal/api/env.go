@@ -53,7 +53,8 @@ func (s *Server) handleListAppEnv(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, item)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"env": out})
+	limit, offset := parsePagination(r)
+	writeList(w, out, limit, offset, nil)
 }
 
 // envKeyRegex enforces POSIX-style env var naming: uppercase letters, digits,

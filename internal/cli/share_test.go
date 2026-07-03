@@ -10,7 +10,8 @@ import (
 // TestShare_Ls_FormatsRows verifies share ls hits the right URL and prints rows.
 func TestShare_Ls_FormatsRows(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
-	setResp(200, `[{"source_slug":"fetcher","source_id":7},{"source_slug":"loader","source_id":9}]`)
+	// The server returns the standard {items,total,...} list envelope.
+	setResp(200, `{"items":[{"source_slug":"fetcher","source_id":7},{"source_slug":"loader","source_id":9}],"total":2,"limit":0,"offset":0}`)
 
 	cmd := newShareCmd()
 	var buf bytes.Buffer

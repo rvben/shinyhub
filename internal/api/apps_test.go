@@ -79,8 +79,10 @@ func TestListApps(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var apps []any
-	json.NewDecoder(rec.Body).Decode(&apps)
+	env := decodeEnvelope(t, rec)
+	if _, ok := env["items"].([]any); !ok {
+		t.Fatalf("apps list must be the {items,...} envelope; body=%q", rec.Body.String())
+	}
 	// empty list is fine
 }
 
@@ -96,12 +98,14 @@ func TestListApps_PreviewAsViewer(t *testing.T) {
 	token, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
 
 	slugs := func(rec *httptest.ResponseRecorder) map[string]bool {
-		var apps []struct {
-			Slug string `json:"slug"`
+		var env struct {
+			Items []struct {
+				Slug string `json:"slug"`
+			} `json:"items"`
 		}
-		json.NewDecoder(rec.Body).Decode(&apps)
+		json.NewDecoder(rec.Body).Decode(&env)
 		out := map[string]bool{}
-		for _, a := range apps {
+		for _, a := range env.Items {
 			out[a.Slug] = true
 		}
 		return out
@@ -326,16 +330,18 @@ func TestListApps_FilteredByAccess(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var apps []db.App
-	if err := json.NewDecoder(rec.Body).Decode(&apps); err != nil {
+	var env struct {
+		Items []db.App `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
 		t.Fatalf("decode apps: %v", err)
 	}
-	if len(apps) != 2 {
-		t.Fatalf("expected 2 visible apps, got %d", len(apps))
+	if len(env.Items) != 2 {
+		t.Fatalf("expected 2 visible apps, got %d", len(env.Items))
 	}
-	for _, app := range apps {
+	for _, app := range env.Items {
 		if app.Slug == "private-app" {
-			t.Fatalf("viewer should not see private-app: %+v", apps)
+			t.Fatalf("viewer should not see private-app: %+v", env.Items)
 		}
 	}
 }
@@ -455,9 +461,8 @@ func TestGetMembers_Empty(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var members []map[string]any
-	json.NewDecoder(rec.Body).Decode(&members)
-	if len(members) != 0 {
+	env := decodeEnvelope(t, rec)
+	if members, _ := env["items"].([]any); len(members) != 0 {
 		t.Errorf("expected empty list, got %v", members)
 	}
 }
@@ -480,19 +485,20 @@ func TestGetMembers_WithMembers(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var members []map[string]any
-	json.NewDecoder(rec.Body).Decode(&members)
-	if len(members) != 1 {
-		t.Fatalf("expected 1 member, got %d", len(members))
+	env := decodeEnvelope(t, rec)
+	membersAny, _ := env["items"].([]any)
+	if len(membersAny) != 1 {
+		t.Fatalf("expected 1 member, got %d", len(membersAny))
 	}
-	if members[0]["username"] != "alice" {
-		t.Errorf("username = %v, want alice", members[0]["username"])
+	member0 := membersAny[0].(map[string]any)
+	if member0["username"] != "alice" {
+		t.Errorf("username = %v, want alice", member0["username"])
 	}
-	if members[0]["role"] != "viewer" {
-		t.Errorf("role = %v, want viewer", members[0]["role"])
+	if member0["role"] != "viewer" {
+		t.Errorf("role = %v, want viewer", member0["role"])
 	}
-	if members[0]["user_id"] != float64(alice.ID) {
-		t.Errorf("user_id = %v, want %v", members[0]["user_id"], alice.ID)
+	if member0["user_id"] != float64(alice.ID) {
+		t.Errorf("user_id = %v, want %v", member0["user_id"], alice.ID)
 	}
 }
 
@@ -3099,10 +3105,14 @@ func TestGroupAccess_GrantListRevoke(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: expected 200, got %d", rec.Code)
 	}
-	var rules []map[string]any
-	json.Unmarshal(rec.Body.Bytes(), &rules)
-	if len(rules) != 1 || rules[0]["group"] != "finance" || rules[0]["role"] != "manager" {
-		t.Fatalf("list rules = %v", rules)
+	env := decodeEnvelope(t, rec)
+	rulesAny, _ := env["items"].([]any)
+	if len(rulesAny) != 1 {
+		t.Fatalf("list rules = %v", env)
+	}
+	rule0 := rulesAny[0].(map[string]any)
+	if rule0["group"] != "finance" || rule0["role"] != "manager" {
+		t.Fatalf("list rules = %v", rulesAny)
 	}
 	req = authedRequest(t, "DELETE", "/api/apps/ga/group-access/finance", nil, token)
 	rec = httptest.NewRecorder()

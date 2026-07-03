@@ -442,7 +442,7 @@ func TestDataList_OwnerSeesEnvelope(t *testing.T) {
 	}
 
 	var resp struct {
-		Files     []any `json:"files"`
+		Files     []any `json:"items"`
 		QuotaMB   int   `json:"quota_mb"`
 		UsedBytes int64 `json:"used_bytes"`
 	}
@@ -530,14 +530,14 @@ func TestDataList_MissingDataDir(t *testing.T) {
 	}
 
 	var resp struct {
-		Files json.RawMessage `json:"files"`
+		Files json.RawMessage `json:"items"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	// files must be [] not null
+	// items must be [] not null
 	if string(resp.Files) == "null" {
-		t.Error("files must be an empty array [], got null")
+		t.Error("items must be an empty array [], got null")
 	}
 }
 

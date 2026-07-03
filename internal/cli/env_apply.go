@@ -366,8 +366,9 @@ func fetchCurrentEnv(cfg *cliConfig, slug string) ([]envServerVar, error) {
 	if resp.StatusCode >= 400 {
 		return nil, httpError(cfg.Token, "list env", resp, body)
 	}
+	// The server returns the standard {items,...} list envelope.
 	var parsed struct {
-		Env []envServerVar `json:"env"`
+		Env []envServerVar `json:"items"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("decode env list: %w", err)

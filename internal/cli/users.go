@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -93,28 +92,12 @@ func newUsersListCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequest("GET", cfg.Host+"/api/users", nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
+		// The server orders users by username and paginates server-side.
+		users, total, err := getPaginatedList(cfg, "list users", "/api/users", f)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "list users", resp, out)
-		}
-		var users []map[string]any
-		if err := json.Unmarshal(out, &users); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-		sort.Slice(users, func(i, j int) bool {
-			return fmt.Sprintf("%v", users[i]["username"]) < fmt.Sprintf("%v", users[j]["username"])
-		})
-		return renderList(cmd, f, users, nil, func(w io.Writer, items []map[string]any) {
+		return renderServerList(cmd, f, users, total, nil, func(w io.Writer, items []map[string]any) {
 			if len(items) == 0 {
 				fmt.Fprintln(w, "No users.")
 				return

@@ -76,5 +76,6 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 		}
 		out = append(out, item)
 	}
-	writeJSON(w, http.StatusOK, out)
+	limit, offset := parsePagination(r)
+	writeList(w, out, limit, offset, nil)
 }

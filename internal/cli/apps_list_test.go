@@ -12,13 +12,16 @@ import (
 
 func newAppsListServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"slug": "a", "status": "running", "deploy_count": 3},
+		{"slug": "b", "status": "stopped", "deploy_count": 1},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/apps" {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"slug":"a","status":"running","deploy_count":3},{"slug":"b","status":"stopped","deploy_count":1}]`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 
@@ -125,14 +128,17 @@ func TestAppsDeployments_JSONEnvelopeWithLimit(t *testing.T) {
 
 func newAppsAccessListServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"user_id": 1, "username": "alice", "role": "manager"},
+		{"user_id": 2, "username": "bob", "role": "viewer"},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/members", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"user_id":1,"username":"alice","role":"manager"},{"user_id":2,"username":"bob","role":"viewer"}]`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 
@@ -170,14 +176,17 @@ func TestAppsAccessList_JSONEnvelopeWithLimit(t *testing.T) {
 
 func newAppsAccessGroupListServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"group": "eng", "role": "manager"},
+		{"group": "qa", "role": "viewer"},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/group-access", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"group":"eng","role":"manager"},{"group":"qa","role":"viewer"}]`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 

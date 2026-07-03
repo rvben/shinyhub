@@ -858,7 +858,11 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    state.apps = (await response.json()) || [];
+    {
+      // Standard {items,...} list envelope; tolerate a bare array for resilience.
+      const gridBody = (await response.json()) || [];
+      state.apps = Array.isArray(gridBody) ? gridBody : (Array.isArray(gridBody.items) ? gridBody.items : []);
+    }
     clearGridLoading();
     renderApps();
     syncSidebar();
@@ -914,7 +918,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.user !== sessionUser) return;
     if (response.status === 401) { await handleUnauthorized(); return; }
     if (!response.ok) return;
-    const apps = (await response.json()) || [];
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const idxBody = (await response.json()) || [];
+    const apps = Array.isArray(idxBody) ? idxBody : (Array.isArray(idxBody.items) ? idxBody.items : []);
     if (state.user !== sessionUser) return;
     state.apps = apps;
     syncSidebar();
@@ -1134,7 +1140,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resp.status === 403) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Admin only'); return; }
     if (!resp.ok) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Failed to load users'); return; }
     let users = [];
-    try { users = (await resp.json()) || []; }
+    try {
+      const uBody = (await resp.json()) || [];
+      // Standard {items,...} list envelope; tolerate a bare array for resilience.
+      users = Array.isArray(uBody) ? uBody : (Array.isArray(uBody.items) ? uBody.items : []);
+    }
     catch { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Invalid response'); return; }
     clearUsersLoading();
     renderUsers(users);
@@ -2449,7 +2459,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let data;
     try { data = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
 
-    const vars = (data && data.env) || [];
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const vars = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
     const empty = document.getElementById('env-empty');
     const table = document.getElementById('env-list');
     empty.hidden = vars.length > 0;
@@ -2596,7 +2607,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let env;
     try { env = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
 
-    const files = (env && env.files) || [];
+    // Standard {items,...} list envelope (quota_mb/used_bytes are sibling keys);
+    // tolerate a bare array for resilience.
+    const files = Array.isArray(env) ? env : (env && Array.isArray(env.items) ? env.items : []);
     const empty = document.getElementById('data-empty');
     const table = document.getElementById('data-list-table');
     empty.hidden = files.length > 0;
@@ -2745,7 +2758,9 @@ document.addEventListener('DOMContentLoaded', () => {
       resp = await api(`/api/apps/${settingsSlug}/members`);
     } catch { list.innerHTML = ''; return; }
     if (!resp.ok) { list.innerHTML = ''; return; }
-    const members = await resp.json();
+    const memBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const members = Array.isArray(memBody) ? memBody : (memBody && Array.isArray(memBody.items) ? memBody.items : []);
     list.innerHTML = '';
     for (const m of members) {
       const li = document.createElement('li');
@@ -2795,7 +2810,9 @@ document.addEventListener('DOMContentLoaded', () => {
       resp = await api(`/api/apps/${settingsSlug}/group-access`);
     } catch { list.innerHTML = ''; return; }
     if (!resp.ok) { list.innerHTML = ''; return; }
-    const rules = await resp.json();
+    const gaBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const rules = Array.isArray(gaBody) ? gaBody : (gaBody && Array.isArray(gaBody.items) ? gaBody.items : []);
     list.innerHTML = '';
     for (const rule of rules) {
       const li = document.createElement('li');
@@ -4538,7 +4555,9 @@ document.addEventListener('DOMContentLoaded', () => {
       container.innerHTML = '<p class="error">Failed to load schedules.</p>';
       return;
     }
-    const schedules = await resp.json();
+    const schedBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const schedules = Array.isArray(schedBody) ? schedBody : (schedBody && Array.isArray(schedBody.items) ? schedBody.items : []);
     if (schedules.length === 0) {
       container.innerHTML = '<p class="env-empty">No schedules configured for this app.</p>';
       return;
@@ -4616,7 +4635,9 @@ document.addEventListener('DOMContentLoaded', () => {
       container.innerHTML = '<p class="error">Failed to load shared data mounts.</p>';
       return;
     }
-    const mounts = await resp.json();
+    const body = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const mounts = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
     if (mounts.length === 0) {
       container.innerHTML = '<p class="env-empty">No shared data mounts configured.</p>';
       return;
@@ -4757,7 +4778,9 @@ document.addEventListener('DOMContentLoaded', () => {
       flashToast('Failed to load run history: ' + await resp.text().catch(() => 'error'));
       return;
     }
-    const runs = await resp.json();
+    const runsBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const runs = Array.isArray(runsBody) ? runsBody : (runsBody && Array.isArray(runsBody.items) ? runsBody.items : []);
 
     // Reuse existing log pane infrastructure.
     if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
@@ -4765,7 +4788,7 @@ document.addEventListener('DOMContentLoaded', () => {
     logPaneBody.innerHTML = '';
     setHidden(logPane, false);
 
-    if (!runs || runs.length === 0) {
+    if (runs.length === 0) {
       logPaneBody.textContent = 'No runs yet.';
       return;
     }

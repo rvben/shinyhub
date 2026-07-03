@@ -53,7 +53,7 @@ func TestListAppEnv_MasksSecrets(t *testing.T) {
 			Value  string `json:"value"`
 			Secret bool   `json:"secret"`
 			Set    bool   `json:"set"`
-		} `json:"env"`
+		} `json:"items"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -284,7 +284,7 @@ func TestUpsertAppEnv_CreatesNonSecret(t *testing.T) {
 		Env []struct {
 			Key   string `json:"key"`
 			Value string `json:"value"`
-		} `json:"env"`
+		} `json:"items"`
 	}
 	json.NewDecoder(getRec.Body).Decode(&listResp)
 	found := false

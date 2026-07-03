@@ -382,6 +382,15 @@ func (s *Store) PruneScheduleRuns(scheduleID int64, keep int) (int64, error) {
 	return res.RowsAffected()
 }
 
+// CountScheduleRuns returns the total number of run rows for a schedule,
+// independent of any limit/offset page. Used to report an accurate total
+// alongside a server-paginated page of run history.
+func (s *Store) CountScheduleRuns(scheduleID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = ?`, scheduleID).Scan(&n)
+	return n, err
+}
+
 func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*ScheduleRun, error) {
 	rows, err := s.db.Query(`
 		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,

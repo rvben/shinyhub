@@ -10,7 +10,9 @@ import (
 
 func TestUsersList_Table(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
-	setResp(200, `[{"id":2,"username":"bob","role":"developer","created_at":"2026-01-02T00:00:00Z"},{"id":1,"username":"alice","role":"admin","created_at":"2026-01-01T00:00:00Z"}]`)
+	// The server returns the standard {items,...} envelope, already ordered by
+	// username (ListUsers ORDER BY username), so the CLI renders the page as-is.
+	setResp(200, `{"items":[{"id":1,"username":"alice","role":"admin","created_at":"2026-01-01T00:00:00Z"},{"id":2,"username":"bob","role":"developer","created_at":"2026-01-02T00:00:00Z"}],"total":2,"limit":0,"offset":0}`)
 
 	out, err := execCLI(t, "users", "list", "-o", "table")
 	if err != nil {
@@ -30,7 +32,7 @@ func TestUsersList_Table(t *testing.T) {
 
 func TestUsersList_JSONEnvelope(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
-	setResp(200, `[{"id":1,"username":"alice","role":"admin","created_at":"2026-01-01T00:00:00Z"}]`)
+	setResp(200, `{"items":[{"id":1,"username":"alice","role":"admin","created_at":"2026-01-01T00:00:00Z"}],"total":1,"limit":0,"offset":0}`)
 
 	out, err := execCLI(t, "users", "list") // piped => JSON
 	if err != nil {

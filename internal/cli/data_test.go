@@ -116,7 +116,8 @@ func TestDataPush_QuotaError(t *testing.T) {
 func TestDataLs(t *testing.T) {
 	resetFormatState(t)
 	_, _, setResp := setupCLITest(t)
-	setResp(200, `{"files":[{"path":"a.txt","size":2,"sha256":"abc","modified_at":1735689600}],"quota_mb":1024,"used_bytes":2}`)
+	// The server returns the standard {items,...} envelope with quota siblings.
+	setResp(200, `{"items":[{"path":"a.txt","size":2,"sha256":"abc","modified_at":1735689600}],"quota_mb":1024,"used_bytes":2,"total":1,"limit":0,"offset":0}`)
 
 	out, err := execCLI(t, "data", "ls", "demo", "--output", "table")
 	if err != nil {

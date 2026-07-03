@@ -67,25 +67,11 @@ func runAppsList(cmd *cobra.Command, f *listFlags) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	apps, total, err := getPaginatedList(cfg, "list apps", "/api/apps", f)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "list apps", resp, out)
-	}
-	var apps []map[string]any
-	if err := json.Unmarshal(out, &apps); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return renderList(cmd, f, apps, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, f, apps, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintln(w, "No apps.")
 			return
@@ -1218,25 +1204,11 @@ func runAppsAccessList(cmd *cobra.Command, args []string, f *listFlags) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/members", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	members, total, err := getPaginatedList(cfg, "list members", "/api/apps/"+slug+"/members", f)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "list members", resp, out)
-	}
-	var members []map[string]any
-	if err := json.Unmarshal(out, &members); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	return renderList(cmd, f, members, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, f, members, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintf(w, "%s: no members\n", slug)
 			return
@@ -1356,25 +1328,11 @@ func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *listFlags) err
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/group-access", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	rules, total, err := getPaginatedList(cfg, "list group access", "/api/apps/"+slug+"/group-access", f)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "list group access", resp, out)
-	}
-	var rules []map[string]any
-	if err := json.Unmarshal(out, &rules); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	return renderList(cmd, f, rules, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, f, rules, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintf(w, "%s: no group rules\n", slug)
 			return
