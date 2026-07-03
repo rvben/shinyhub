@@ -14,6 +14,19 @@ func newTestStore(t *testing.T) *db.Store {
 	return dbtest.New(t)
 }
 
+// newTestRegistry builds a fresh store-backed registry for tests that need
+// both, returning the store alongside so a test can also assert against it
+// directly.
+func newTestRegistry(t *testing.T) (*Registry, *db.Store) {
+	t.Helper()
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	return reg, store
+}
+
 // joinUp registers a worker and brings it up the normal way: a heartbeat.
 // Register alone leaves a worker "joining" (not routable); it becomes routable
 // only on its first heartbeat, mirroring how an agent reports in only after its
@@ -24,7 +37,7 @@ func joinUp(t *testing.T, reg *Registry, p RegisterParams) db.Worker {
 	if err != nil {
 		t.Fatalf("register %s: %v", p.AdvertiseAddr, err)
 	}
-	if err := reg.Heartbeat(w.NodeID, p.Fingerprint); err != nil {
+	if _, _, err := reg.Heartbeat(w.NodeID, p.Fingerprint, 0); err != nil {
 		t.Fatalf("heartbeat %s: %v", w.NodeID, err)
 	}
 	up, ok := reg.Worker(w.NodeID)
@@ -137,7 +150,7 @@ func TestRegistryHeartbeatPromotesJoiningToUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := reg.Heartbeat(node.NodeID, "aa"); err != nil {
+	if _, _, err := reg.Heartbeat(node.NodeID, "aa", 0); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 
@@ -251,7 +264,7 @@ func TestRegistrySameAddressReregisterSupersedesStaleNode(t *testing.T) {
 
 	// fresh becomes routable on its first heartbeat (promoted joining->up; the
 	// stale node is already down so it does not block the promotion).
-	if err := reg.Heartbeat(fresh.NodeID, "bb"); err != nil {
+	if _, _, err := reg.Heartbeat(fresh.NodeID, "bb", 0); err != nil {
 		t.Fatalf("heartbeat fresh: %v", err)
 	}
 	all := reg.WorkersForTier("burst")
@@ -320,7 +333,7 @@ func TestRegistryConcurrentSameTierRegistrationsConverge(t *testing.T) {
 	for _, id := range nodes {
 		go func(id string) {
 			defer wg.Done()
-			if err := reg.Heartbeat(id, "aa"); err != nil {
+			if _, _, err := reg.Heartbeat(id, "aa", 0); err != nil {
 				t.Errorf("heartbeat: %v", err)
 			}
 		}(id)
@@ -369,12 +382,12 @@ func TestRegistryHeartbeatDoesNotResurrectSupersededWorker(t *testing.T) {
 	}
 	// fresh registering supersedes the up stale node, then heartbeats up to own
 	// the endpoint's routing slot.
-	if err := reg.Heartbeat(fresh.NodeID, "bb"); err != nil {
+	if _, _, err := reg.Heartbeat(fresh.NodeID, "bb", 0); err != nil {
 		t.Fatalf("heartbeat fresh: %v", err)
 	}
 
 	// The superseded worker heartbeats under its old node id.
-	if err := reg.Heartbeat(stale.NodeID, "aa2"); err != nil {
+	if _, _, err := reg.Heartbeat(stale.NodeID, "aa2", 0); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 
@@ -414,12 +427,119 @@ func TestRegistryHeartbeatReupsWhenTierSlotFree(t *testing.T) {
 		t.Fatal("tier slot should be free after the only worker was marked down")
 	}
 
-	if err := reg.Heartbeat(node.NodeID, "bb"); err != nil {
+	if _, _, err := reg.Heartbeat(node.NodeID, "bb", 0); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	got, ok := reg.WorkerForTier("burst")
 	if !ok || got.NodeID != node.NodeID {
 		t.Fatalf("recovered worker not re-upped: %+v ok=%v", got, ok)
+	}
+}
+
+// TestRegistryHeartbeat_FencesStaleIncarnation asserts that a worker the
+// control plane reaped (incarnation bumped, replicas reassigned elsewhere)
+// which later reconnects still reporting its old incarnation is fenced: the
+// heartbeat reports fenced=true, keeps the worker down (not re-upped even
+// though its tier slot is free), and returns the current stored incarnation
+// so the worker can self-fence.
+func TestRegistryHeartbeat_FencesStaleIncarnation(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "203.0.113.2:9000", Tier: "burst", Fingerprint: "fp1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, _, err := reg.Heartbeat(node.NodeID, "fp1", node.Incarnation); err != nil {
+		t.Fatalf("first heartbeat: %v", err)
+	}
+
+	// Control plane reaps it (bumps incarnation) and refreshes the index, as it
+	// would after declaring the worker dead and reassigning its replicas.
+	if err := store.ReapWorker(node.NodeID); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if err := reg.Refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fenced, current, err := reg.Heartbeat(node.NodeID, "fp1", 1) // worker still thinks incarnation 1
+	if err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if !fenced || current != 2 {
+		t.Fatalf("fenced=%v current=%d, want true/2", fenced, current)
+	}
+	if w, _ := reg.Worker(node.NodeID); w.Status == "up" {
+		t.Fatal("a fenced worker must stay down, not be re-upped")
+	}
+}
+
+// TestRegistryHeartbeat_MatchingIncarnationReups asserts a worker reporting an
+// incarnation matching the stored one is never fenced and the current
+// incarnation is returned.
+func TestRegistryHeartbeat_MatchingIncarnationReups(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "203.0.113.2:9000", Tier: "burst", Fingerprint: "fp1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	fenced, current, err := reg.Heartbeat(node.NodeID, "fp1", node.Incarnation)
+	if err != nil || fenced {
+		t.Fatalf("fresh worker must not be fenced: fenced=%v err=%v", fenced, err)
+	}
+	if current != 1 {
+		t.Fatalf("current incarnation = %d, want 1", current)
+	}
+}
+
+// TestRegistryHeartbeat_LegacyZeroIncarnationNeverFences asserts a heartbeat
+// reporting incarnation 0 (a pre-fence agent that has not been upgraded) is
+// never fenced regardless of the stored incarnation, so a rolling upgrade
+// does not fence agents that have not yet learned to report one.
+func TestRegistryHeartbeat_LegacyZeroIncarnationNeverFences(t *testing.T) {
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	node, err := reg.Register(RegisterParams{AdvertiseAddr: "203.0.113.2:9000", Tier: "burst", Fingerprint: "fp1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := store.ReapWorker(node.NodeID); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if err := reg.Refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	fenced, _, err := reg.Heartbeat(node.NodeID, "fp1", 0)
+	if err != nil || fenced {
+		t.Fatalf("legacy (incarnation 0) heartbeat must never be fenced: fenced=%v err=%v", fenced, err)
+	}
+}
+
+// TestRegistryReap_BumpsAndDownsIndex asserts Reap marks a worker down AND
+// bumps its stored incarnation, and refreshes the in-memory index to match, so
+// the down-monitor's reap is what fences a worker that reconnects still
+// running its (now reassigned) replicas.
+func TestRegistryReap_BumpsAndDownsIndex(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+	node, _ := reg.Register(RegisterParams{Tier: "burst", AdvertiseAddr: "203.0.113.2:9000"})
+	_, _, _ = reg.Heartbeat(node.NodeID, "fp1", node.Incarnation) // -> up
+	if err := reg.Reap(node.NodeID); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	w, ok := reg.Worker(node.NodeID)
+	if !ok || w.Status != "down" || w.Incarnation != 2 {
+		t.Fatalf("after reap: status=%s incarnation=%d ok=%v, want down/2", w.Status, w.Incarnation, ok)
 	}
 }
 

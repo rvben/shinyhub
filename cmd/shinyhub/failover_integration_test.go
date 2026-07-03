@@ -156,7 +156,7 @@ func TestFailover_StandbyTakesOverAndRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register on active: %v", err)
 	}
-	if err := regA.Heartbeat(node.NodeID, "fp"); err != nil {
+	if _, _, err := regA.Heartbeat(node.NodeID, "fp", 0); err != nil {
 		t.Fatalf("heartbeat on active: %v", err)
 	}
 	if _, ok := regA.WorkerForTier("burst"); !ok {

@@ -1477,7 +1477,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	)
 	var monitor *lifecycle.WorkerDownMonitor
 	if workerReg != nil {
-		monitor = lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.MarkDown, func(slug string, index int, expectURL string) {
+		monitor = lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.Reap, func(slug string, index int, expectURL string) {
 			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
 		}, mgr.EvictReplicaIfWorker, workerReg.Forget)
 	}

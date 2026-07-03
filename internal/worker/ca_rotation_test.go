@@ -62,14 +62,14 @@ func TestClient_HotReloadsServerCATrust(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := c.Heartbeat(ctx, "v", ""); err == nil {
+	if _, err := c.Heartbeat(ctx, "v", "", 0); err == nil {
 		t.Fatal("expected TLS failure: control-plane cert signed by untrusted CA")
 	}
 
 	if _, err := caSource.Set(rotated.CertPEM()); err != nil {
 		t.Fatalf("rotate CA trust: %v", err)
 	}
-	if _, err := c.Heartbeat(ctx, "v", ""); err != nil {
+	if _, err := c.Heartbeat(ctx, "v", "", 0); err != nil {
 		t.Fatalf("after CA rotation the control plane must be reachable: %v", err)
 	}
 }

@@ -108,6 +108,16 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 	if err := r.store.UpsertWorker(w); err != nil {
 		return db.Worker{}, err
 	}
+	// Re-read the stored row rather than hardcoding the incarnation UpsertWorker
+	// assigns a brand-new node id (1): this mirrors Reap/Revoke, which likewise
+	// return the store's authoritative row rather than trusting an in-memory
+	// guess, and keeps Register correct if UpsertWorker's new-row behavior ever
+	// changes.
+	fresh, err := r.store.GetWorker(nodeID)
+	if err != nil {
+		return db.Worker{}, err
+	}
+	w = *fresh
 	// One up worker per (tier, advertise address): retire any other up worker at
 	// this exact endpoint. A registration at an occupied endpoint means the
 	// occupant is being replaced - the only way to reach this is an agent that
@@ -156,6 +166,27 @@ func (r *Registry) MarkDown(nodeID string) error {
 		w.Status = "down"
 		r.byID[nodeID] = w
 	}
+	r.mu.Unlock()
+	return nil
+}
+
+// Reap marks a worker down AND bumps its incarnation, then refreshes the index
+// from the store so the bumped value is visible to Heartbeat's fence check. The
+// down-monitor calls this (not MarkDown) because a reaped worker also has its
+// replicas stripped and reassigned elsewhere; the incarnation bump is what
+// fences the worker if it later reconnects still running them.
+func (r *Registry) Reap(nodeID string) error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	if err := r.store.ReapWorker(nodeID); err != nil {
+		return err
+	}
+	w, err := r.store.GetWorker(nodeID)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.byID[nodeID] = *w
 	r.mu.Unlock()
 	return nil
 }
@@ -294,7 +325,17 @@ func (r *Registry) PlanPlacementForTier(tier, slug string, count int) []db.Worke
 // endpoint's live owner holds cannot resurrect itself alongside that owner. A
 // joining worker becomes routable here, and the agent sends this first heartbeat
 // only after its listener binds, so an up worker is always one that is listening.
-func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
+//
+// reported is the incarnation the worker last learned from the control plane
+// (at registration or a prior heartbeat). A reported incarnation behind the
+// stored one means the control plane reaped this worker - bumping its
+// incarnation and reassigning its replicas - while it was partitioned: the
+// worker may still be running orphaned copies of those replicas, so the
+// heartbeat is fenced (kept down, told to self-fence) instead of re-upped.
+// reported == 0 is a legacy pre-fence agent and is never fenced, so a rolling
+// upgrade does not fence agents that have not yet learned to report an
+// incarnation. Heartbeat returns (fenced, current incarnation, error).
+func (r *Registry) Heartbeat(nodeID, fingerprint string, reported int64) (bool, int64, error) {
 	// Serialize against Register so the tier-ownership decision is made against a
 	// stable set of up workers, mirroring how Register guards its supersede.
 	r.regMu.Lock()
@@ -304,14 +345,35 @@ func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 	cur, known := r.byID[nodeID]
 	r.mu.RUnlock()
 	if !known {
-		return db.ErrNotFound
+		return false, 0, db.ErrNotFound
 	}
 	// A revoked worker can never be promoted back to up: reject the heartbeat so
 	// a resurrected agent presenting a still-valid cert cannot rejoin within its
 	// TTL. The worker API rejects revoked certs up front; this is defense in
 	// depth against any path that reaches Heartbeat directly.
 	if cur.Revoked() {
-		return db.ErrNotFound
+		return false, 0, db.ErrNotFound
+	}
+
+	// Fence a worker whose reported incarnation is behind the stored one: it was
+	// reaped (and its replicas reassigned) while it was unreachable, so it may
+	// still be running orphan copies. Keep it down and tell it to self-fence.
+	// incarnation 0 from the worker is a legacy/pre-fence agent -> grace, never
+	// fence (rolling upgrade).
+	if reported != 0 && reported < cur.Incarnation {
+		// Refresh liveness so the down-monitor does not immediately re-reap (which
+		// would bump again); keep status down so it is not routable / placeable.
+		if err := r.store.TouchWorkerHeartbeat(nodeID, fingerprint, "down"); err != nil {
+			return false, 0, err
+		}
+		r.mu.Lock()
+		if w, ok := r.byID[nodeID]; ok {
+			w.Fingerprint = fingerprint
+			w.Status = "down"
+			r.byID[nodeID] = w
+		}
+		r.mu.Unlock()
+		return true, cur.Incarnation, nil
 	}
 
 	status := "up"
@@ -334,7 +396,7 @@ func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 	}
 
 	if err := r.store.TouchWorkerHeartbeat(nodeID, fingerprint, status); err != nil {
-		return err
+		return false, 0, err
 	}
 	r.mu.Lock()
 	if w, ok := r.byID[nodeID]; ok {
@@ -343,7 +405,7 @@ func (r *Registry) Heartbeat(nodeID, fingerprint string) error {
 		r.byID[nodeID] = w
 	}
 	r.mu.Unlock()
-	return nil
+	return false, cur.Incarnation, nil
 }
 
 func allocateNodeID() (string, error) {

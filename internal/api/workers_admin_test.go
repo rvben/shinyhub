@@ -103,7 +103,7 @@ func TestHandleListWorkers_ReportsFreshHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := reg.Heartbeat(node.NodeID, "fp-1"); err != nil {
+	if _, _, err := reg.Heartbeat(node.NodeID, "fp-1", 0); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 
@@ -138,7 +138,7 @@ func TestHandleRevokeWorker(t *testing.T) {
 	devUser := ctxUser(t, store, "dev", "developer")
 	node, _ := reg.Register(worker.RegisterParams{Tier: "burst", AdvertiseAddr: "10.0.0.5:8443"})
 	// A worker is routable only after its first heartbeat (Register -> joining).
-	if err := reg.Heartbeat(node.NodeID, ""); err != nil {
+	if _, _, err := reg.Heartbeat(node.NodeID, "", 0); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 

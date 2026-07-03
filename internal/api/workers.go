@@ -125,9 +125,10 @@ func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workerapi.RegisterResponse{
-		NodeID:   node.NodeID,
-		CertPEM:  string(certPEM),
-		CABundle: string(a.ca.CertPEM()),
+		NodeID:      node.NodeID,
+		CertPEM:     string(certPEM),
+		CABundle:    string(a.ca.CertPEM()),
+		Incarnation: node.Incarnation,
 	})
 }
 
@@ -146,15 +147,18 @@ func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var req workerapi.HeartbeatRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	fingerprint := worker.Fingerprint(r.TLS.PeerCertificates[0])
-	if err := a.registry.Heartbeat(nodeID, fingerprint); err != nil {
+	fenced, current, err := a.registry.Heartbeat(nodeID, fingerprint, req.Incarnation)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unknown node")
 		return
 	}
+	var resp workerapi.HeartbeatResponse
+	resp.Incarnation = current
+	resp.Fenced = fenced
 	// Renew the worker's certificate when it submits a CSR, binding the same
 	// node id so the renewed cert keeps the worker's identity and SAN. The
 	// worker presents the current (still-valid) cert on this very call, then
 	// swaps in the returned one before the old cert expires.
-	var resp workerapi.HeartbeatResponse
 	if req.RenewCSRPEM != "" {
 		certPEM, err := a.ca.SignWorkerCSR(nodeID, []byte(req.RenewCSRPEM), a.certTTL)
 		if err != nil {

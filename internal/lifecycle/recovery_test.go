@@ -1053,7 +1053,7 @@ func TestWorkerDownMonitor_ExcludesDownedWorkerFromRouting(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	// A worker is routable only after its first heartbeat (Register -> joining).
-	if err := reg.Heartbeat(node.NodeID, ""); err != nil {
+	if _, _, err := reg.Heartbeat(node.NodeID, "", 0); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	if _, ok := reg.WorkerForTier("remote"); !ok {

@@ -138,9 +138,11 @@ func (c *Client) Transport() http.RoundTripper { return c.httpc.Transport }
 
 // Heartbeat posts a heartbeat and returns the control plane's response. When
 // renewCSRPEM is non-empty it is sent as a certificate renewal request; the
-// caller applies any cert the response carries.
-func (c *Client) Heartbeat(ctx context.Context, version, renewCSRPEM string) (workerapi.HeartbeatResponse, error) {
-	body, _ := json.Marshal(workerapi.HeartbeatRequest{Version: version, RenewCSRPEM: renewCSRPEM})
+// caller applies any cert the response carries. incarnation is the worker's
+// currently-held generation counter, letting the control plane detect and
+// fence a stale rejoin.
+func (c *Client) Heartbeat(ctx context.Context, version, renewCSRPEM string, incarnation int64) (workerapi.HeartbeatResponse, error) {
+	body, _ := json.Marshal(workerapi.HeartbeatRequest{Version: version, RenewCSRPEM: renewCSRPEM, Incarnation: incarnation})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serverURL+"/api/workers/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return workerapi.HeartbeatResponse{}, err
