@@ -70,9 +70,19 @@ type Agent struct {
 
 	// incarnation is the generation counter this worker was last assigned by
 	// the control plane. It rides on every heartbeat so the control plane can
-	// fence a stale rejoin. It stays 0 (legacy grace) until a later task wires
-	// it up from registration and fence responses.
+	// fence a stale rejoin. It is seeded from RegisterResponse.Incarnation on a
+	// fresh join and adopted from HeartbeatResponse.Incarnation thereafter. A
+	// re-adopted (persisted-cert) worker seeds it at 0 (legacy grace) - see
+	// buildAgent's re-adopt caller.
 	incarnation int64
+
+	// OnFenced is invoked when a heartbeat response reports Fenced: the control
+	// plane has reaped this worker's prior incarnation (e.g. after a network
+	// partition healed) and reassigned its work elsewhere, so this node must
+	// stop serving every replica it still runs before adopting the new
+	// incarnation. The boot wiring binds it to replicaServer.StopAll; nil (e.g.
+	// in tests that don't set it) is a no-op.
+	OnFenced func()
 
 	// Listen binds the agent's inbound mTLS listener. Run calls it synchronously
 	// before its up-front heartbeat, so a bind failure (e.g. the advertised port
@@ -171,7 +181,7 @@ func register(ctx context.Context, cfg Config, agentDir string) (*Agent, error) 
 		return nil, fmt.Errorf("write ca bundle: %w", err)
 	}
 
-	return buildAgent(cfg, resp.NodeID, keyPEM, csrPEM, []byte(resp.CertPEM), []byte(resp.CABundle))
+	return buildAgent(cfg, resp.NodeID, keyPEM, csrPEM, []byte(resp.CertPEM), []byte(resp.CABundle), resp.Incarnation)
 }
 
 // registerWithRetry performs the join, retrying while the control plane is
@@ -267,7 +277,12 @@ func readoptFromDisk(cfg Config, agentDir string, now time.Time) (*Agent, bool, 
 		return nil, false, err
 	}
 
-	ag, err := buildAgent(cfg, nodeID, keyPEM, csrPEM, certPEM, caBundle)
+	// Re-adopting a persisted cert has no RegisterResponse to source an
+	// incarnation from (the process restarted; nothing was just registered), so
+	// this seeds 0, the legacy-grace value the control plane never fences.
+	// Persisting the assigned incarnation across a worker-process restart so a
+	// re-adopt can seed its real value is a documented out-of-scope follow-up.
+	ag, err := buildAgent(cfg, nodeID, keyPEM, csrPEM, certPEM, caBundle, 0)
 	if err != nil {
 		return nil, false, err
 	}
@@ -291,7 +306,11 @@ func csrPEMFromKey(key *ecdsa.PrivateKey) ([]byte, error) {
 // buildAgent assembles an Agent from an identity (issued cert + retained key +
 // CSR) and the pinned CA bundle. Both the fresh-join and re-adopt paths converge
 // here so the running agent is wired identically however it obtained its cert.
-func buildAgent(cfg Config, nodeID string, keyPEM, csrPEM, certPEM, caBundle []byte) (*Agent, error) {
+// incarnation seeds the agent's generation counter: the fresh-join caller passes
+// the control plane's RegisterResponse.Incarnation, while the re-adopt caller
+// (no register response available) passes 0, the legacy-grace value the control
+// plane never fences.
+func buildAgent(cfg Config, nodeID string, keyPEM, csrPEM, certPEM, caBundle []byte, incarnation int64) (*Agent, error) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("load issued keypair: %w", err)
@@ -306,7 +325,7 @@ func buildAgent(cfg Config, nodeID string, keyPEM, csrPEM, certPEM, caBundle []b
 		return nil, fmt.Errorf("build mtls client: %w", err)
 	}
 
-	ag := &Agent{cfg: cfg, nodeID: nodeID, client: client, certs: certs, keyPEM: keyPEM, csrPEM: csrPEM, cacerts: cacerts}
+	ag := &Agent{cfg: cfg, nodeID: nodeID, client: client, certs: certs, keyPEM: keyPEM, csrPEM: csrPEM, cacerts: cacerts, incarnation: incarnation}
 	ag.cache = NewBundleCache(filepath.Join(cfg.DataDir, "bundles"), func(ctx context.Context, digest string) (io.ReadCloser, error) {
 		return client.FetchBundle(ctx, digest)
 	})
@@ -329,6 +348,19 @@ func (a *Agent) heartbeatOnce(ctx context.Context) error {
 	if err != nil {
 		a.recordRenewal(ctx, phase, notAfter, false, err)
 		return err
+	}
+	if resp.Fenced {
+		// Reaped while partitioned: kill every replica we're still running (they
+		// were reassigned) and adopt the new incarnation so the next heartbeat
+		// matches and re-ups us clean.
+		if a.OnFenced != nil {
+			a.OnFenced()
+		}
+		a.incarnation = resp.Incarnation
+		return nil
+	}
+	if resp.Incarnation != 0 {
+		a.incarnation = resp.Incarnation
 	}
 	// Apply a rotated CA bundle before the renewed cert: the new cert may be
 	// signed by the new CA, and the worker must trust that root first.

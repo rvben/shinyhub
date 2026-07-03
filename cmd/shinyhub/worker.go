@@ -95,6 +95,10 @@ func newWorkerCmd() *cobra.Command {
 			})
 			ag.Listen = agentSrv.Listen
 			ag.Serve = agentSrv.ServeListener
+			// A fenced heartbeat means the control plane reaped this node's prior
+			// incarnation and reassigned its work elsewhere; stop every replica
+			// this process still runs before adopting the new incarnation.
+			ag.OnFenced = replicas.StopAll
 			return ag.Run(ctx, 10*time.Second)
 		},
 	}
