@@ -40,14 +40,17 @@ func writeMigrationEnvelope(w http.ResponseWriter, r *http.Request, all []map[st
 
 func newEnvLsServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"key": "FOO", "value": "bar", "secret": false, "set": true, "updated_at": 1},
+		{"key": "SECRET", "value": "", "secret": true, "set": true, "updated_at": 2},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/env", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"env":[{"key":"FOO","value":"bar","secret":false,"set":true,"updated_at":1},{"key":"SECRET","value":"","secret":true,"set":true,"updated_at":2}]}`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 
@@ -85,14 +88,17 @@ func TestEnvLs_JSONEnvelopeWithLimit(t *testing.T) {
 
 func newDataLsServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"path": "a.csv", "size": 10, "sha256": "abc", "modified_at": 1735689600},
+		{"path": "b.csv", "size": 20, "sha256": "def", "modified_at": 1735689601},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/data", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"files":[{"path":"a.csv","size":10,"sha256":"abc","modified_at":1735689600},{"path":"b.csv","size":20,"sha256":"def","modified_at":1735689601}],"quota_mb":512,"used_bytes":30}`))
+		writeMigrationEnvelope(w, r, all, map[string]any{"quota_mb": 512, "used_bytes": 30})
 	}))
 }
 

@@ -125,14 +125,17 @@ func TestAppsDeployments_JSONEnvelopeWithLimit(t *testing.T) {
 
 func newAppsAccessListServer(t *testing.T, slug string) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"user_id": 1, "username": "alice", "role": "manager"},
+		{"user_id": 2, "username": "bob", "role": "viewer"},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := fmt.Sprintf("/api/apps/%s/members", slug)
 		if r.URL.Path != expected {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"user_id":1,"username":"alice","role":"manager"},{"user_id":2,"username":"bob","role":"viewer"}]`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 

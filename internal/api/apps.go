@@ -2366,7 +2366,9 @@ func (s *Server) handleGetMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := parsePagination(r)
-	members, err := s.store.ListAppMembers(slug, limit, offset)
+	// Fetch the full (bounded) member set; writeList paginates in-memory so the
+	// envelope carries an accurate total.
+	members, err := s.store.ListAppMembers(slug, 0, 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -2375,7 +2377,7 @@ func (s *Server) handleGetMembers(w http.ResponseWriter, r *http.Request) {
 	for i, m := range members {
 		resp[i] = appMemberResponse{UserID: m.UserID, Username: m.Username, Role: m.Role}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeList(w, resp, limit, offset, nil)
 }
 
 type userLookupResponse struct {

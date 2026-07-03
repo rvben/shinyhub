@@ -89,7 +89,9 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	for i, u := range users {
 		resp[i] = toUserResponse(u)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	// ListUsers already orders by username, so the page is stably sorted.
+	limit, offset := parsePagination(r)
+	writeList(w, resp, limit, offset, nil)
 }
 
 type createUserRequest struct {

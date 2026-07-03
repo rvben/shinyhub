@@ -455,9 +455,8 @@ func TestGetMembers_Empty(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var members []map[string]any
-	json.NewDecoder(rec.Body).Decode(&members)
-	if len(members) != 0 {
+	env := decodeEnvelope(t, rec)
+	if members, _ := env["items"].([]any); len(members) != 0 {
 		t.Errorf("expected empty list, got %v", members)
 	}
 }
@@ -480,19 +479,20 @@ func TestGetMembers_WithMembers(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var members []map[string]any
-	json.NewDecoder(rec.Body).Decode(&members)
-	if len(members) != 1 {
-		t.Fatalf("expected 1 member, got %d", len(members))
+	env := decodeEnvelope(t, rec)
+	membersAny, _ := env["items"].([]any)
+	if len(membersAny) != 1 {
+		t.Fatalf("expected 1 member, got %d", len(membersAny))
 	}
-	if members[0]["username"] != "alice" {
-		t.Errorf("username = %v, want alice", members[0]["username"])
+	member0 := membersAny[0].(map[string]any)
+	if member0["username"] != "alice" {
+		t.Errorf("username = %v, want alice", member0["username"])
 	}
-	if members[0]["role"] != "viewer" {
-		t.Errorf("role = %v, want viewer", members[0]["role"])
+	if member0["role"] != "viewer" {
+		t.Errorf("role = %v, want viewer", member0["role"])
 	}
-	if members[0]["user_id"] != float64(alice.ID) {
-		t.Errorf("user_id = %v, want %v", members[0]["user_id"], alice.ID)
+	if member0["user_id"] != float64(alice.ID) {
+		t.Errorf("user_id = %v, want %v", member0["user_id"], alice.ID)
 	}
 }
 

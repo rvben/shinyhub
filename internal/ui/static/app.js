@@ -1134,7 +1134,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resp.status === 403) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Admin only'); return; }
     if (!resp.ok) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Failed to load users'); return; }
     let users = [];
-    try { users = (await resp.json()) || []; }
+    try {
+      const uBody = (await resp.json()) || [];
+      // Standard {items,...} list envelope; tolerate a bare array for resilience.
+      users = Array.isArray(uBody) ? uBody : (Array.isArray(uBody.items) ? uBody.items : []);
+    }
     catch { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Invalid response'); return; }
     clearUsersLoading();
     renderUsers(users);
@@ -2449,7 +2453,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let data;
     try { data = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
 
-    const vars = (data && data.env) || [];
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const vars = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
     const empty = document.getElementById('env-empty');
     const table = document.getElementById('env-list');
     empty.hidden = vars.length > 0;
@@ -2596,7 +2601,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let env;
     try { env = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
 
-    const files = (env && env.files) || [];
+    // Standard {items,...} list envelope (quota_mb/used_bytes are sibling keys);
+    // tolerate a bare array for resilience.
+    const files = Array.isArray(env) ? env : (env && Array.isArray(env.items) ? env.items : []);
     const empty = document.getElementById('data-empty');
     const table = document.getElementById('data-list-table');
     empty.hidden = files.length > 0;
@@ -2745,7 +2752,9 @@ document.addEventListener('DOMContentLoaded', () => {
       resp = await api(`/api/apps/${settingsSlug}/members`);
     } catch { list.innerHTML = ''; return; }
     if (!resp.ok) { list.innerHTML = ''; return; }
-    const members = await resp.json();
+    const memBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const members = Array.isArray(memBody) ? memBody : (memBody && Array.isArray(memBody.items) ? memBody.items : []);
     list.innerHTML = '';
     for (const m of members) {
       const li = document.createElement('li');

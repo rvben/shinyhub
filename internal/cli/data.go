@@ -104,40 +104,16 @@ func newDataLsCmd() *cobra.Command {
 			return err
 		}
 
-		req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/data", nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-
-		resp, err := httpClient.Do(req)
+		// The server paginates files server-side and carries quota metadata as
+		// sibling envelope keys (quota_mb, used_bytes).
+		files, total, extra, err := getPaginatedListWithExtra(cfg, "list data", "/api/apps/"+slug+"/data", f)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		quotaMB, _ := extra["quota_mb"].(float64)
+		usedBytes, _ := extra["used_bytes"].(float64)
 
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "list data", resp, body)
-		}
-
-		// The server wraps file entries under {"files": [...]} and includes
-		// quota metadata as sibling keys passed through as envelope extras.
-		var result struct {
-			Files     []map[string]any `json:"files"`
-			QuotaMB   int64            `json:"quota_mb"`
-			UsedBytes int64            `json:"used_bytes"`
-		}
-		if err := json.Unmarshal(body, &result); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-
-		extra := map[string]any{
-			"quota_mb":   result.QuotaMB,
-			"used_bytes": result.UsedBytes,
-		}
-
-		return renderList(cmd, f, result.Files, extra, func(w io.Writer, items []map[string]any) {
+		return renderServerList(cmd, f, files, total, extra, func(w io.Writer, items []map[string]any) {
 			fmt.Fprintf(w, "%-48s %6s  %s\n", "PATH", "SIZE", "MODIFIED")
 			for _, fi := range items {
 				path := fmt.Sprintf("%v", fi["path"])
@@ -146,9 +122,9 @@ func newDataLsCmd() *cobra.Command {
 				modTime := time.Unix(int64(modVal), 0).UTC().Format(time.RFC3339)
 				fmt.Fprintf(w, "%-48s %6s  %s\n", path, humanBytes(int64(sizeVal)), modTime)
 			}
-			used := humanBytes(result.UsedBytes)
-			if result.QuotaMB > 0 {
-				quota := humanBytes(result.QuotaMB * 1024 * 1024)
+			used := humanBytes(int64(usedBytes))
+			if quotaMB > 0 {
+				quota := humanBytes(int64(quotaMB) * 1024 * 1024)
 				fmt.Fprintf(w, "Used: %s / %s\n", used, quota)
 			} else {
 				fmt.Fprintf(w, "Used: %s (no quota set)\n", used)

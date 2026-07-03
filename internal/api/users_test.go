@@ -40,8 +40,8 @@ func TestListUsers_Admin(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var users []map[string]any
-	json.NewDecoder(rec.Body).Decode(&users)
+	env := decodeEnvelope(t, rec)
+	users, _ := env["items"].([]any)
 	if len(users) == 0 {
 		t.Error("expected at least one user in list")
 	}

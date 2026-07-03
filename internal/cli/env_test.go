@@ -235,7 +235,8 @@ func TestEnvSet_RestartFlag(t *testing.T) {
 func TestEnvLs_MasksSecrets(t *testing.T) {
 	resetFormatState(t)
 	_, _, setResp := setupCLITest(t)
-	setResp(200, `{"env":[{"key":"AWS_REGION","value":"eu-west-1","secret":false,"set":true,"updated_at":1},{"key":"DB_PASS","value":"","secret":true,"set":true,"updated_at":2}]}`)
+	// The server returns the standard {items,...} list envelope.
+	setResp(200, `{"items":[{"key":"AWS_REGION","value":"eu-west-1","secret":false,"set":true,"updated_at":1},{"key":"DB_PASS","value":"","secret":true,"set":true,"updated_at":2}],"total":2,"limit":0,"offset":0}`)
 
 	// Use --output table to force table rendering and verify secret masking.
 	// Non-TTY runs default to JSON; the masking is a table-mode display choice.

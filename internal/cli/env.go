@@ -156,32 +156,12 @@ func newEnvCmd() *cobra.Command {
 			return err
 		}
 
-		req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/env", nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-
-		resp, err := httpClient.Do(req)
+		vars, total, err := getPaginatedList(cfg, "list env", "/api/apps/"+slug+"/env", lsF)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
 
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "list env", resp, out)
-		}
-
-		// The server wraps env entries under {"env": [...]}.
-		var result struct {
-			Env []map[string]any `json:"env"`
-		}
-		if err := json.Unmarshal(out, &result); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-
-		return renderList(cmd, lsF, result.Env, nil, func(w io.Writer, items []map[string]any) {
+		return renderServerList(cmd, lsF, vars, total, nil, func(w io.Writer, items []map[string]any) {
 			fmt.Fprintf(w, "%-24s %s\n", "KEY", "VALUE")
 			for _, v := range items {
 				key := fmt.Sprintf("%v", v["key"])

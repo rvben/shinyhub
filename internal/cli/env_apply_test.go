@@ -147,7 +147,7 @@ func newEnvApplyServer(t *testing.T, current []envServerVar) *envApplyServer {
 		s.mu.Unlock()
 		switch {
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/env"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"env": s.current})
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": s.current})
 		case r.Method == "PUT":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{}`))

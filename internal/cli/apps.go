@@ -1218,25 +1218,11 @@ func runAppsAccessList(cmd *cobra.Command, args []string, f *listFlags) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/members", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	members, total, err := getPaginatedList(cfg, "list members", "/api/apps/"+slug+"/members", f)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "list members", resp, out)
-	}
-	var members []map[string]any
-	if err := json.Unmarshal(out, &members); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	return renderList(cmd, f, members, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, f, members, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintf(w, "%s: no members\n", slug)
 			return

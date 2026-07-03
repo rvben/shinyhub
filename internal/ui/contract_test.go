@@ -179,20 +179,21 @@ func TestResourceLimitsUIWiring(t *testing.T) {
 }
 
 // TestEnvListUnwrapsResponse guards the env-list consumer.
-// GET /api/apps/:slug/env returns {env: [...]} (internal/api/env.go
-// handleEnvList) and refreshEnvList in app.js reads data.env.
+// GET /api/apps/:slug/env returns the standard {items,...} list envelope
+// (internal/api/env.go handleListAppEnv via writeList) and refreshEnvList in
+// app.js reads data.items.
 func TestEnvListUnwrapsResponse(t *testing.T) {
-	assertContains(t, "app.js", "data.env",
-		"GET /api/apps/:slug/env returns {env: [...]}; see internal/api/env.go handleEnvList")
+	assertContains(t, "app.js", "data.items",
+		"GET /api/apps/:slug/env returns {items: [...]}; see internal/api/env.go handleListAppEnv")
 }
 
 // TestDataTabUnwrapsResponse guards the data-tab consumer.
-// GET /api/apps/:slug/data returns {files, quota_mb, used_bytes}
-// (internal/api/data.go handleDataList) and refreshDataTab in app.js
-// reads env.files.
+// GET /api/apps/:slug/data returns the standard {items,...} list envelope with
+// quota_mb/used_bytes as sibling keys (internal/api/data.go handleDataList via
+// writeList) and refreshDataTab in app.js reads env.items.
 func TestDataTabUnwrapsResponse(t *testing.T) {
-	assertContains(t, "app.js", "env.files",
-		"GET /api/apps/:slug/data returns {files, quota_mb, used_bytes}; see internal/api/data.go handleDataList")
+	assertContains(t, "app.js", "env.items",
+		"GET /api/apps/:slug/data returns {items, quota_mb, used_bytes}; see internal/api/data.go handleDataList")
 }
 
 // TestAppCardBadgeReadsDeploymentStatus guards the failed-vs-never-deployed
