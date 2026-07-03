@@ -354,6 +354,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setWorkerMaxWorkers         bool
 		newWorkerMaxSessionLifetime int
 		setWorkerMaxSessionLifetime bool
+
+		newEphemeralDataAck bool
+		setEphemeralDataAck bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -484,6 +487,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newMinWarmReplicas, setMinWarmReplicas = n, true
+	}
+	if rawVal, present := raw["ephemeral_data_ack"]; present {
+		var b bool
+		if err := json.Unmarshal(rawVal, &b); err != nil {
+			writeError(w, http.StatusBadRequest, "ephemeral_data_ack must be a boolean")
+			return
+		}
+		newEphemeralDataAck, setEphemeralDataAck = b, true
 	}
 
 	if rawVal, present := raw["managed_by"]; present {
@@ -777,6 +788,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if setEphemeralDataAck {
+		if err := s.store.UpdateAppEphemeralDataAck(app.ID, newEphemeralDataAck); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
 	// Placement is the authoritative writer for replica_placement + the derived
 	// replica count, so it runs after the core settings transaction. Clearing
 	// keeps the current replica count (all replicas on the default tier).
@@ -878,7 +900,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug ||
 		setReplicas || setMaxSessions || setMinWarmReplicas || setManagedBy ||
 		setPlacement || clearPlacement || setAutoscale ||
-		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime
+		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime ||
+		setEphemeralDataAck
 	if u := auth.UserFromContext(r.Context()); u != nil && (nonResourceTouched || memChanged || cpuChanged) {
 		detail := patchAppAuditDetail(
 			setMinWarmReplicas, newMinWarmReplicas,
@@ -1174,6 +1197,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if deploy.DetectAppType(bundleDir) == "r" && s.appTargetsFargate(app) {
 		writeError(w, http.StatusBadRequest,
 			"R apps are not supported on Fargate tiers: the Fargate runner image is Python-only. Place this app on a native or docker tier.")
+		return
+	}
+
+	// Durable-data guard: refuse to deploy a data-using app onto a tier whose
+	// storage is ephemeral (bare Fargate with no durable backend) unless the
+	// operator explicitly acknowledged it, before the running pool is torn down.
+	// Otherwise app-data would be silently lost on restart/hibernation and not
+	// shared across replicas.
+	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, manifestCommand(manifest)); gerr != nil {
+		slog.Error("durable-data guard check failed", "slug", slug, "err", gerr)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	} else if blocked {
+		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
 		return
 	}
 
