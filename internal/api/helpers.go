@@ -46,6 +46,50 @@ func writeErrorWithKind(w http.ResponseWriter, status int, msg string, kind depl
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "failure_kind": string(kind)})
 }
 
+// writeList writes a paginated list response with the standard envelope
+// {items, total, limit, offset}. total is the size of the full result set;
+// items is the page selected by limit/offset, sliced in-memory so every list
+// endpoint shares one shape regardless of whether the store paginates. An empty
+// page always marshals as [] (never null). extra carries endpoint-specific
+// envelope keys (e.g. data ls quota_mb/used_bytes) and never clobbers the
+// standard fields.
+func writeList[T any](w http.ResponseWriter, items []T, limit, offset int, extra map[string]any) {
+	total := len(items)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := total
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	page := items[start:end]
+	if len(page) == 0 {
+		page = []T{}
+	}
+	env := map[string]any{
+		"items":  page,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	}
+	for k, v := range extra {
+		switch k {
+		case "items", "total", "limit", "offset":
+			// Standard fields are authoritative; ignore any collision.
+		default:
+			env[k] = v
+		}
+	}
+	writeJSON(w, http.StatusOK, env)
+}
+
 // audit records a mutating action with the authenticated user, request IP, and
 // optional JSON detail blob. detail may be empty.
 func (s *Server) audit(r *http.Request, action, resourceType, resourceID, detail string) {
