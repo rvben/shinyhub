@@ -391,15 +391,18 @@ async function renderDeployments(panel, app, ctx) {
       return;
     }
 
-    let rows;
-    try { rows = await resp.json(); } catch {
+    let body;
+    try { body = await resp.json(); } catch {
       errWrap.querySelector('.error').textContent = 'Invalid response from server.';
       errWrap.hidden = false;
       list.hidden = true;
       return;
     }
 
-    if (!rows || rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
+    // The server returns the standard {items,total,limit,offset} list envelope;
+    // tolerate a bare array for resilience across versions.
+    const rows = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
+    if (rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
 
     const models = deploymentListModels(rows);
     for (const m of models) {

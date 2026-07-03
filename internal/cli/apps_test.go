@@ -840,7 +840,8 @@ func TestAppsDelete_PromptGoesToStderr(t *testing.T) {
 // verbatim inside the tableFn closure in runAppsDeployments.
 func TestAppsDeployments(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
-	setResp(200, `[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}]`)
+	// The server returns the standard {items,total,limit,offset} list envelope.
+	setResp(200, `{"items":[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}],"total":2,"limit":0,"offset":0}`)
 
 	out, err := execCLI(t, "apps", "deployments", "demo")
 	if err != nil {
@@ -1051,7 +1052,8 @@ func TestAppsShow_NotFound(t *testing.T) {
 // TestTokensList lists API tokens.
 func TestTokensList(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
-	setResp(200, `[{"id":1,"name":"ci-token","created_at":"2026-01-01T00:00:00Z"}]`)
+	// The server returns the standard {items,total,...} list envelope.
+	setResp(200, `{"items":[{"id":1,"name":"ci-token","created_at":"2026-01-01T00:00:00Z"}],"total":1,"limit":0,"offset":0}`)
 
 	out, err := execCLI(t, "tokens", "list")
 	if err != nil {
@@ -1186,9 +1188,10 @@ func TestTokensCreate_FormatTextConflictsWithOutputJson(t *testing.T) {
 // token ID and issues a single DELETE request.
 func TestTokensRevoke_ByName_OneMatch(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
-	// The test server returns the same body for both GET /api/tokens (list) and
-	// DELETE /api/tokens/42. The DELETE body is ignored; we care about the path.
-	setResp(200, `[{"id":42,"name":"ci","created_at":"2026-05-01T00:00:00Z"}]`)
+	// The test server returns the same body for both GET /api/tokens (list, the
+	// standard {items,...} envelope) and DELETE /api/tokens/42. The DELETE body
+	// is ignored; we care about the path.
+	setResp(200, `{"items":[{"id":42,"name":"ci","created_at":"2026-05-01T00:00:00Z"}],"total":1}`)
 
 	if _, err := execCLI(t, "tokens", "revoke", "--name", "ci"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1209,7 +1212,7 @@ func TestTokensRevoke_ByName_OneMatch(t *testing.T) {
 // "no token named" error without issuing a DELETE.
 func TestTokensRevoke_ByName_NoMatch(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
-	setResp(200, `[{"id":1,"name":"other","created_at":"2026-05-01T00:00:00Z"}]`)
+	setResp(200, `{"items":[{"id":1,"name":"other","created_at":"2026-05-01T00:00:00Z"}],"total":1}`)
 
 	_, err := execCLI(t, "tokens", "revoke", "--name", "missing")
 	if err == nil {
@@ -1234,7 +1237,7 @@ func TestTokensRevoke_ByName_NoMatch(t *testing.T) {
 // an error pointing users toward revoke-by-id.
 func TestTokensRevoke_ByName_MultipleMatches(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
-	setResp(200, `[{"id":1,"name":"ci","created_at":"2026-05-01T00:00:00Z"},{"id":2,"name":"ci","created_at":"2026-05-02T00:00:00Z"}]`)
+	setResp(200, `{"items":[{"id":1,"name":"ci","created_at":"2026-05-01T00:00:00Z"},{"id":2,"name":"ci","created_at":"2026-05-02T00:00:00Z"}],"total":2}`)
 
 	_, err := execCLI(t, "tokens", "revoke", "--name", "ci")
 	if err == nil {

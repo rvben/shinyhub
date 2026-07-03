@@ -572,7 +572,8 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, keys)
+	limit, offset := parsePagination(r)
+	writeList(w, keys, limit, offset, nil)
 }
 
 func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {

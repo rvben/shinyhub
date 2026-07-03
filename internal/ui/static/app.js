@@ -1414,9 +1414,12 @@ document.addEventListener('DOMContentLoaded', () => {
       renderTokenList(tokensList, [], document);
       return;
     }
-    let tokens = [];
-    try { tokens = await resp.json(); } catch {}
-    renderTokenList(tokensList, tokenListModels(Array.isArray(tokens) ? tokens : []), document);
+    let body = [];
+    try { body = await resp.json(); } catch {}
+    // The server returns the standard {items,...} list envelope; tolerate a bare
+    // array for resilience across versions.
+    const tokens = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
+    renderTokenList(tokensList, tokenListModels(tokens), document);
   }
 
   function openNewTokenModal() {

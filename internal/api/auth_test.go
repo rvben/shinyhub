@@ -431,10 +431,16 @@ func TestListTokens_Empty(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var keys []any
-	json.NewDecoder(rec.Body).Decode(&keys)
+	env := decodeEnvelope(t, rec)
+	keys, ok := env["items"].([]any)
+	if !ok {
+		t.Fatalf("items must be [] not null; body=%q", rec.Body.String())
+	}
 	if len(keys) != 0 {
 		t.Errorf("expected empty list, got %d items", len(keys))
+	}
+	if env["total"] != float64(0) {
+		t.Errorf("total = %v, want 0", env["total"])
 	}
 }
 
@@ -461,15 +467,16 @@ func TestListTokens_AfterCreate(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	var keys []map[string]any
-	json.NewDecoder(rec.Body).Decode(&keys)
-	if len(keys) != 1 {
-		t.Fatalf("expected 1 token, got %d", len(keys))
+	env := decodeEnvelope(t, rec)
+	keysAny, _ := env["items"].([]any)
+	if len(keysAny) != 1 {
+		t.Fatalf("expected 1 token, got %d (env=%v)", len(keysAny), env)
 	}
-	if keys[0]["name"] != "my-ci-token" {
-		t.Errorf("expected name=my-ci-token, got %v", keys[0]["name"])
+	first := keysAny[0].(map[string]any)
+	if first["name"] != "my-ci-token" {
+		t.Errorf("expected name=my-ci-token, got %v", first["name"])
 	}
-	if keys[0]["id"] == nil {
+	if first["id"] == nil {
 		t.Error("expected id in response")
 	}
 }
@@ -533,9 +540,9 @@ func TestDeleteToken(t *testing.T) {
 	req = authedRequest(t, "GET", "/api/tokens", nil, token)
 	rec = httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	var keys []map[string]any
-	json.NewDecoder(rec.Body).Decode(&keys)
-	id := int64(keys[0]["id"].(float64))
+	env := decodeEnvelope(t, rec)
+	keys, _ := env["items"].([]any)
+	id := int64(keys[0].(map[string]any)["id"].(float64))
 
 	// Delete it.
 	path := fmt.Sprintf("/api/tokens/%d", id)
@@ -550,9 +557,9 @@ func TestDeleteToken(t *testing.T) {
 	req = authedRequest(t, "GET", "/api/tokens", nil, token)
 	rec = httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	json.NewDecoder(rec.Body).Decode(&keys)
-	if len(keys) != 0 {
-		t.Errorf("expected empty list after delete, got %d items", len(keys))
+	env = decodeEnvelope(t, rec)
+	if items, _ := env["items"].([]any); len(items) != 0 {
+		t.Errorf("expected empty list after delete, got %d items", len(items))
 	}
 }
 
@@ -913,8 +920,9 @@ func TestDeployToken_DoesNotAppearInTokensList(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
-		t.Errorf("tokens list = %q, want []", got)
+	env := decodeEnvelope(t, rec)
+	if items, _ := env["items"].([]any); len(items) != 0 {
+		t.Errorf("tokens list = %v, want empty (deploy token must not appear)", items)
 	}
 }
 
