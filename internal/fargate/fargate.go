@@ -160,6 +160,19 @@ type Config struct {
 	// by buildFargateRuntime. Must not be nil when ControlPlaneURL is set.
 	BundleTokenKey []byte
 
+	// DurableData asserts (independently of S3Files) that this tier has a durable
+	// app-data backend, e.g. a volume the operator attached to the base task
+	// definition. TierHasDurableData is true when this is set OR S3Files is
+	// configured. When neither holds, task storage is ephemeral scratch: app-data
+	// is lost on restart/hibernation and not shared across replicas.
+	DurableData bool
+
+	// S3Files, when configured (FileSystemArn set), is the managed durable-data
+	// backend: the runtime injects a per-app S3 Files volume + mount point into
+	// each app's task-definition revision so {data_dir} resolves onto durable,
+	// replica-shared storage. Configuring it makes the tier durable.
+	S3Files S3FilesMount
+
 	// LaunchType is the ECS launch type for tasks on this tier. Use
 	// ecstypes.LaunchTypeFargate (default) for Fargate tasks or
 	// ecstypes.LaunchTypeEc2 for EC2 tasks. The zero value defaults to
@@ -191,8 +204,19 @@ type Runtime struct {
 	// instead of plaintext task overrides, keeping them out of ecs:DescribeTasks.
 	// Nil disables the feature: secret env stays plaintext (the Phase 1 behavior).
 	secrets SecretsStore
-	cfg     Config
-	log     *slog.Logger
+	// s3filesDesc + s3put back the S3 Files managed backend's per-app directory
+	// pre-creation (a non-existent per-app rootDirectory fails to mount). Non-nil
+	// only when cfg.S3Files is configured; wired by buildFargateRuntime.
+	s3filesDesc S3FilesDescriber
+	s3put       ObjectPutter
+	// bucketName caches the S3 bucket linked to the S3 Files file system, resolved
+	// once via GetFileSystem. bucketPrefix is the file system's bucket prefix.
+	bucketMu     sync.Mutex
+	bucketName   string
+	bucketPrefix string
+	bucketDone   bool
+	cfg          Config
+	log          *slog.Logger
 	// metrics records AWS operation outcomes. Never nil after New(); defaults to
 	// noopFargateMetrics{} so callers need no nil guard.
 	metrics FargateMetrics
@@ -268,6 +292,20 @@ func WithEC2Client(c EC2Client) Option {
 	return func(r *Runtime) { r.ec2 = c }
 }
 
+// WithS3FilesDescriber supplies the S3 Files client used to resolve the linked
+// bucket for per-app directory pre-creation. Required when cfg.S3Files is
+// configured without an access point.
+func WithS3FilesDescriber(d S3FilesDescriber) Option {
+	return func(r *Runtime) { r.s3filesDesc = d }
+}
+
+// WithObjectPutter supplies the S3 client used to pre-create per-app directory
+// markers in the linked bucket. Required when cfg.S3Files is configured without
+// an access point.
+func WithObjectPutter(p ObjectPutter) Option {
+	return func(r *Runtime) { r.s3put = p }
+}
+
 // WithSecretsStore enables out-of-band secret injection: an app's secret env
 // vars are written to the store and referenced by ARN from a per-app
 // task-definition revision's secrets block, instead of appearing as plaintext
@@ -307,6 +345,11 @@ func New(client ECSClient, cfg Config, log *slog.Logger, opts ...Option) *Runtim
 			"cluster", r.cfg.Cluster,
 		)
 	}
+	if r.cfg.S3Files.Configured() && r.cfg.S3Files.AccessPointArn != "" {
+		r.log.Warn("fargate: s3files.access_point_arn is set - all apps on this tier mount the access point's single root, so per-app data isolation is NOT enforced by the platform; the access point (or your app design) is responsible for keeping tenants' data separate",
+			"cluster", r.cfg.Cluster,
+		)
+	}
 	return r
 }
 
@@ -331,6 +374,15 @@ func (r *Runtime) AppBindHost() string { return "0.0.0.0" }
 // HostProvidesAppData reports false: the task provisions its own app-data; the
 // control-plane host must not create directories or strip-then-dispatch paths.
 func (r *Runtime) HostProvidesAppData() bool { return false }
+
+// TierHasDurableData reports whether app-data on this Fargate tier survives task
+// restart/hibernation and is shared across replicas. Bare Fargate task storage
+// is ephemeral scratch, so this is false unless a managed S3 Files backend is
+// configured or the operator asserts durability (Config.DurableData) for a
+// manually attached volume.
+func (r *Runtime) TierHasDurableData() bool {
+	return r.cfg.DurableData || r.cfg.S3Files.Configured()
+}
 
 // encodeHandle joins the runtime's worker identity and the task ARN into the
 // "<workerID>/<task-arn>" form that recovery also produces, so a handle minted
@@ -550,17 +602,19 @@ func (r *Runtime) runTaskInput(p process.StartParams, taskDef string) *ecs.RunTa
 // lifecycle phase moves the write to env mutation time and persists the chosen
 // revision to avoid version churn.
 func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (taskDef string, routed bool, err error) {
-	if len(p.SecretEnv) == 0 {
+	needsSecrets := len(p.SecretEnv) > 0
+	needsS3Files := r.cfg.S3Files.Configured()
+	if !needsSecrets && !needsS3Files {
 		return r.cfg.TaskDefinition, false, nil
 	}
-	if r.secrets == nil {
+	if needsSecrets && r.secrets == nil {
 		// Fail closed: a Fargate replica with secret env vars must never fall
 		// back to plaintext task overrides, which would expose the values via
 		// ecs:DescribeTasks. The operator must configure the secrets backend
 		// (runtime.fargate.secrets.name_prefix).
 		return "", false, fmt.Errorf("fargate: app %d has %d secret env var(s) but runtime.fargate.secrets is not configured; refusing to expose them as plaintext task overrides", p.AppID, len(p.SecretEnv))
 	}
-	family := taskDefFamily(r.cfg.SecretNamePrefix, p.AppID)
+	family := taskDefFamily(r.familyPrefix(), p.AppID)
 	hash := secretSetHash(p.SecretEnv)
 
 	// Serialize sync for this app so concurrent replica starts collapse into one
@@ -585,7 +639,7 @@ func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (ta
 		base = b
 		baseKey = aws.ToString(b.TaskDefinitionArn)
 	}
-	syncKey := hash + "|" + baseKey
+	syncKey := hash + "|" + baseKey + "|" + r.s3filesSyncKey(p.AppID)
 	if cached, ok := r.cachedSyncKey(p.AppID); ok && cached == syncKey {
 		return family, true, nil
 	}
@@ -603,8 +657,8 @@ func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (ta
 		}
 		refs = append(refs, ecstypes.Secret{Name: aws.String(key), ValueFrom: aws.String(arn)})
 	}
-	if len(refs) == 0 {
-		// SecretEnv held only malformed entries; nothing to route.
+	if len(refs) == 0 && !needsS3Files {
+		// SecretEnv held only malformed entries and no managed volume to inject.
 		return r.cfg.TaskDefinition, false, nil
 	}
 	if base == nil {
@@ -617,6 +671,16 @@ func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (ta
 	}
 	in, err := buildTaskDefInput(base, family, r.cfg.ContainerName, refs)
 	if err != nil {
+		return "", false, err
+	}
+	// Inject the managed durable-data mount (per-app S3 Files subdirectory) and
+	// pre-create that subdirectory on the file system, since a non-existent
+	// per-app rootDirectory fails to mount. Pre-create before registering the def
+	// that mounts it.
+	if err := addS3FilesMount(in, r.cfg.ContainerName, r.cfg.S3Files, p.AppID); err != nil {
+		return "", false, err
+	}
+	if err := r.ensureAppDataDir(ctx, p.AppID); err != nil {
 		return "", false, err
 	}
 	out, err := r.client.RegisterTaskDefinition(ctx, in)
@@ -654,21 +718,30 @@ func (r *Runtime) describeBaseTaskDef(ctx context.Context) (*ecstypes.TaskDefini
 
 // CleanupApp removes the external resources a deleted app left behind: every
 // secret under the app's per-app store prefix and every revision of the app's
-// task-definition family. It is a no-op when no secrets backend is configured.
-// Safe to call repeatedly (idempotent): missing secrets and already-inactive
-// revisions are tolerated. Called from the app-delete path and the startup
-// tombstone reconcile so secrets and task-def revisions never orphan.
+// task-definition family. It is a no-op when the runtime registers neither
+// (no secrets backend and no S3 Files backend). Safe to call repeatedly
+// (idempotent): missing secrets and already-inactive revisions are tolerated.
+// Called from the app-delete path and the startup tombstone reconcile so secrets
+// and task-def revisions never orphan.
+//
+// Note: this deregisters ECS task-definition revisions but does NOT delete the
+// app's data subdirectory on the S3 Files file system; that data outlives the
+// app deletion by design (an operator can recover it), consistent with how the
+// native/docker runtimes leave app-data on disk.
 func (r *Runtime) CleanupApp(ctx context.Context, appID int64) error {
-	if r.secrets == nil {
+	registersTaskDefs := r.secrets != nil || r.cfg.S3Files.Configured()
+	if !registersTaskDefs {
 		return nil
 	}
 	r.forgetSyncKey(appID)
 
-	if err := r.secrets.DeleteByPrefix(ctx, appSecretPrefix(r.cfg.SecretNamePrefix, appID)); err != nil {
-		return fmt.Errorf("fargate: delete secrets for app %d: %w", appID, err)
+	if r.secrets != nil {
+		if err := r.secrets.DeleteByPrefix(ctx, appSecretPrefix(r.cfg.SecretNamePrefix, appID)); err != nil {
+			return fmt.Errorf("fargate: delete secrets for app %d: %w", appID, err)
+		}
 	}
 
-	family := taskDefFamily(r.cfg.SecretNamePrefix, appID)
+	family := taskDefFamily(r.familyPrefix(), appID)
 	var next *string
 	for {
 		out, err := r.client.ListTaskDefinitions(ctx, &ecs.ListTaskDefinitionsInput{

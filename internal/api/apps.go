@@ -340,6 +340,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		clearPlacement      bool // an explicit null placement was provided
 		placementJSON       string
 		placementTotal      int
+		newPlacementTiers   []string // tiers (count>0) the new placement would run on
 		setAutoscale        bool
 		autoEnabled         bool
 		autoMin             int
@@ -354,6 +355,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setWorkerMaxWorkers         bool
 		newWorkerMaxSessionLifetime int
 		setWorkerMaxSessionLifetime bool
+
+		newEphemeralDataAck bool
+		setEphemeralDataAck bool
 	)
 
 	if rawVal, present := raw["hibernate_timeout_minutes"]; present {
@@ -484,6 +488,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newMinWarmReplicas, setMinWarmReplicas = n, true
+	}
+	if rawVal, present := raw["ephemeral_data_ack"]; present {
+		var b bool
+		if err := json.Unmarshal(rawVal, &b); err != nil {
+			writeError(w, http.StatusBadRequest, "ephemeral_data_ack must be a boolean")
+			return
+		}
+		newEphemeralDataAck, setEphemeralDataAck = b, true
 	}
 
 	if rawVal, present := raw["managed_by"]; present {
@@ -660,6 +672,11 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			}
 			b, _ := json.Marshal(pm)
 			placementJSON, placementTotal, setPlacement = string(b), total, true
+			for tier, count := range pm {
+				if count > 0 {
+					newPlacementTiers = append(newPlacementTiers, tier)
+				}
+			}
 		}
 	}
 
@@ -668,6 +685,24 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	if placementKeyPresent && setReplicas {
 		writeError(w, http.StatusBadRequest, "set either replicas or placement, not both")
 		return
+	}
+
+	// Durable-data guard: a placement change must not move a data-using app onto
+	// an ephemeral tier — SetAppPlacement + the async redeploy it triggers would
+	// otherwise silently move the live pool (and its data) onto storage that is
+	// lost on restart. Evaluated against the NEW tiers, before any write.
+	if setPlacement || clearPlacement {
+		newTiers := newPlacementTiers
+		if clearPlacement {
+			newTiers = []string{s.cfg.Runtime.DefaultTierName()}
+		}
+		if tier, blocked, gerr := s.ephemeralDataBlockForTiers(app, nil, newTiers); gerr != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		} else if blocked {
+			writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
+			return
+		}
 	}
 	// Changing the bare replica count on an app that already uses tier placement
 	// would drift the stored placement from the replica count. Require the caller
@@ -768,6 +803,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 
 	if setDescription {
 		if err := s.store.SetAppDescription(slug, newDescription); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
+	if setEphemeralDataAck {
+		if err := s.store.UpdateAppEphemeralDataAck(app.ID, newEphemeralDataAck); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not found")
 				return
@@ -878,7 +924,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug ||
 		setReplicas || setMaxSessions || setMinWarmReplicas || setManagedBy ||
 		setPlacement || clearPlacement || setAutoscale ||
-		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime
+		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime ||
+		setEphemeralDataAck
 	if u := auth.UserFromContext(r.Context()); u != nil && (nonResourceTouched || memChanged || cpuChanged) {
 		detail := patchAppAuditDetail(
 			setMinWarmReplicas, newMinWarmReplicas,
@@ -1174,6 +1221,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if deploy.DetectAppType(bundleDir) == "r" && s.appTargetsFargate(app) {
 		writeError(w, http.StatusBadRequest,
 			"R apps are not supported on Fargate tiers: the Fargate runner image is Python-only. Place this app on a native or docker tier.")
+		return
+	}
+
+	// Durable-data guard: refuse to deploy a data-using app onto a tier whose
+	// storage is ephemeral (bare Fargate with no durable backend) unless the
+	// operator explicitly acknowledged it, before the running pool is torn down.
+	// Otherwise app-data would be silently lost on restart/hibernation and not
+	// shared across replicas.
+	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, manifestCommand(manifest)); gerr != nil {
+		slog.Error("durable-data guard check failed", "slug", slug, "err", gerr)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	} else if blocked {
+		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
 		return
 	}
 
@@ -1608,6 +1669,16 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.Deregister(slug)
 	}
 
+	// Defense in depth: if the app's tier lost its durable backend since the last
+	// deploy, refuse to re-run a data-using app onto now-ephemeral storage.
+	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, nil); gerr != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	} else if blocked {
+		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
+		return
+	}
+
 	rollbackDefaultMem, rollbackDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
@@ -1753,6 +1824,16 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
+	}
+
+	// Defense in depth: refuse to restart a data-using app onto a tier that lost
+	// its durable backend since the last deploy.
+	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, nil); gerr != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	} else if blocked {
+		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
+		return
 	}
 
 	restartDefaultMem, restartDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)

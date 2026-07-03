@@ -541,6 +541,12 @@ type App struct {
 	WorkerGroupedSize            int    `json:"worker_grouped_size"`
 	WorkerMaxWorkers             int    `json:"worker_max_workers"`
 	WorkerMaxSessionLifetimeSecs int    `json:"worker_max_session_lifetime_secs"`
+
+	// EphemeralDataAck records that the operator explicitly accepted ephemeral,
+	// task-local app-data for this app. When true, the durable-data guard allows
+	// deploying (and pushing data to) this app on a Fargate tier whose storage is
+	// ephemeral instead of blocking. Default false.
+	EphemeralDataAck bool `json:"ephemeral_data_ack"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -584,7 +590,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
 		       last_error, crashed_at, description, icon_mime,
 		       worker_isolation, worker_grouped_size, worker_max_workers,
-		       worker_max_session_lifetime_secs,`
+		       worker_max_session_lifetime_secs, ephemeral_data_ack,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -2665,6 +2671,24 @@ func (s *Store) UpdateAppMinWarmReplicas(appID int64, n int) error {
 	return nil
 }
 
+// UpdateAppEphemeralDataAck records (or clears) the operator's explicit
+// acknowledgement that this app's data may be ephemeral, task-local storage.
+// It is the escape hatch consulted by the durable-data guard.
+func (s *Store) UpdateAppEphemeralDataAck(appID int64, ack bool) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET ephemeral_data_ack = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		boolToInt(ack), appID,
+	)
+	if err != nil {
+		return fmt.Errorf("update ephemeral_data_ack: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetAppPlacement persists the per-app replica placement JSON and the resolved
 // total replica count in one update. placementJSON is "" to clear placement
 // (all replicas on the default tier). total is the authoritative replica count.
@@ -3125,6 +3149,7 @@ func scanApp(s scanner) (*App, error) {
 	// value as a string. We parse it manually below.
 	var lastDeployedAtRaw sql.NullString
 	var autoscaleEnabledInt int
+	var ephemeralDataAckInt int
 	err := s.Scan(
 		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
 		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
@@ -3135,7 +3160,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
-		&a.WorkerMaxSessionLifetimeSecs,
+		&a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {
@@ -3145,6 +3170,7 @@ func scanApp(s scanner) (*App, error) {
 		return nil, err
 	}
 	a.AutoscaleEnabled = autoscaleEnabledInt != 0
+	a.EphemeralDataAck = ephemeralDataAckInt != 0
 	if projectSlug.Valid {
 		a.ProjectSlug = projectSlug.String
 	}

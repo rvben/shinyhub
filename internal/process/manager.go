@@ -269,6 +269,20 @@ func (m *Manager) AppBindHostFor(tier string) string {
 	return m.runtimeFor(tier).AppBindHost()
 }
 
+// TierHasDurableDataFor reports whether app-data on the named tier survives task
+// restart/hibernation and is shared across replicas. A runtime that does not
+// implement DurableDataReporter is treated as durable (native/docker/remote all
+// back the data dir with a persistent host directory); only Fargate reports
+// ephemeral storage when no durable backend is configured. An empty or
+// unregistered tier falls back to the default tier. The durable-data guard uses
+// this to block deploying a data-using app onto a tier that would lose its data.
+func (m *Manager) TierHasDurableDataFor(tier string) bool {
+	if r, ok := m.runtimeFor(tier).(DurableDataReporter); ok {
+		return r.TierHasDurableData()
+	}
+	return true
+}
+
 // TransportForWorker returns the HTTP transport a tier's runtime requires for
 // reaching replicas hosted by the named worker, or nil to use the default
 // transport. Runtimes opt in by implementing ReplicaTransporter; routes are

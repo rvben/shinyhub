@@ -76,6 +76,20 @@ type Runtime interface {
 	HostProvidesAppData() bool
 }
 
+// DurableDataReporter is an optional capability for runtimes whose per-app data
+// dir may NOT survive a restart or be shared across replicas. A runtime that
+// does not implement it is treated as durable (native, docker, and remote
+// workers all back the data dir with a persistent host directory). Only the
+// Fargate runtime implements it, returning false unless a durable backend
+// (S3 Files, or an operator-asserted volume) is configured. The durable-data
+// guard consumes it via Manager.TierHasDurableDataFor to block deploying a
+// data-using app onto a tier that would silently lose its data.
+type DurableDataReporter interface {
+	// TierHasDurableData reports whether app-data on this tier survives task
+	// restart/hibernation and is shared across replicas.
+	TierHasDurableData() bool
+}
+
 // ReplicaTransporter is an optional capability for runtimes that route replica
 // traffic through a non-default HTTP transport (for example a remote worker's
 // mTLS tunnel). The proxy and health-check paths use this transport so that

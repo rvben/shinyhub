@@ -166,6 +166,14 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Durable-data guard: pushing data is an explicit intent to persist, so refuse
+	// it when a placement tier has ephemeral storage (bare Fargate) and the
+	// operator has not acknowledged ephemeral data. Fires before the body is read.
+	if tier, blocked := s.ephemeralDataPushBlock(app); blocked {
+		writeError(w, http.StatusUnprocessableEntity, ephemeralDataPushMsg(slug, tier))
+		return
+	}
+
 	// Require a known Content-Length — chunked encoding makes quota math
 	// impossible without buffering the entire body first.
 	if r.ContentLength <= 0 {
