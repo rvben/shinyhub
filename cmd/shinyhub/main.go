@@ -635,10 +635,16 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		BundleTokenKey:   bundleTokenKey,
 		LaunchType:       lt,
 		SecretNamePrefix: fc.SecretsNamePrefix,
-		// A tier is durable if the operator asserts it (durable_data) or an S3
-		// Files backend is configured. Until the S3 Files config lands, the
-		// assertion is the only source.
+		// DurableData is the operator's manual assertion; S3Files is the managed
+		// backend. TierHasDurableData is true when either is set.
 		DurableData: fc.DurableData,
+		S3Files: fargate.S3FilesMount{
+			FileSystemArn:         fc.S3Files.FileSystemArn,
+			RootDirectory:         fc.S3Files.RootDirectory,
+			AccessPointArn:        fc.S3Files.AccessPointArn,
+			TransitEncryptionPort: int32(fc.S3Files.TransitEncryptionPort),
+			MountPath:             fc.S3Files.MountPath,
+		},
 	}, slog.Default(), opts...), nil
 }
 

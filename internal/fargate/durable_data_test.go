@@ -22,3 +22,15 @@ func TestTierHasDurableData_DurableBackendConfigured(t *testing.T) {
 		t.Fatal("durable backend configured: want true, got false")
 	}
 }
+
+func TestTierHasDurableData_S3FilesConfigured(t *testing.T) {
+	cfg := testCfg()
+	cfg.S3Files = S3FilesMount{
+		FileSystemArn: "arn:aws:s3files:us-east-1:123456789012:file-system/fs-abc",
+		MountPath:     "/app/bundle/data",
+	}
+	r := New(&fakeECS{}, cfg, nil)
+	if !r.TierHasDurableData() {
+		t.Fatal("s3files backend configured: want durable=true, got false")
+	}
+}
