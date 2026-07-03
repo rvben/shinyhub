@@ -3181,6 +3181,7 @@ type Worker struct {
 	LastHeartbeat string
 	RevokedAt     string // UTC datetime the worker was revoked; empty when never revoked
 	CreatedAt     time.Time
+	Incarnation   int64 // monotonic; bumped on reap. 0 = legacy (never fenced)
 }
 
 // Revoked reports whether the worker has been administratively revoked. A
@@ -3193,8 +3194,8 @@ func (w Worker) Revoked() bool { return w.RevokedAt != "" }
 // the advertise address and certificate fingerprint.
 func (s *Store) UpsertWorker(w Worker) error {
 	_, err := s.db.Exec(`
-		INSERT INTO workers (node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat)
-		VALUES (?, ?, ?, ?, ?, ?, ?, `+s.d.nowText()+`)
+		INSERT INTO workers (node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, incarnation)
+		VALUES (?, ?, ?, ?, ?, ?, ?, `+s.d.nowText()+`, 1)
 		ON CONFLICT(node_id) DO UPDATE SET
 			name = excluded.name,
 			advertise_addr = excluded.advertise_addr,
@@ -3213,12 +3214,12 @@ func (s *Store) UpsertWorker(w Worker) error {
 // GetWorker returns the worker row for nodeID, or ErrNotFound if it does not exist.
 func (s *Store) GetWorker(nodeID string) (*Worker, error) {
 	row := s.db.QueryRow(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at, incarnation
 		FROM workers WHERE node_id = ?`, nodeID)
 	var w Worker
 	var createdAtRaw string
 	if err := row.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
+		&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw, &w.Incarnation); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -3234,7 +3235,7 @@ func (s *Store) GetWorker(nodeID string) (*Worker, error) {
 // Returns a non-nil empty slice when no workers are registered.
 func (s *Store) ListWorkers() ([]*Worker, error) {
 	rows, err := s.db.Query(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at, incarnation
 		FROM workers ORDER BY node_id`)
 	if err != nil {
 		return nil, err
@@ -3245,7 +3246,7 @@ func (s *Store) ListWorkers() ([]*Worker, error) {
 		var w Worker
 		var createdAtRaw string
 		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw, &w.Incarnation); err != nil {
 			return nil, err
 		}
 		if t, ok := parseSQLiteTime(createdAtRaw); ok {
@@ -3381,7 +3382,7 @@ func (s *Store) DeleteWorker(nodeID string) error {
 // (empty string) sorts before any real timestamp and is reported stale.
 func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
 	rows, err := s.db.Query(`
-		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at
+		SELECT node_id, name, advertise_addr, tier, status, cert_fingerprint, version, last_heartbeat, revoked_at, created_at, incarnation
 		FROM workers WHERE last_heartbeat <= ? AND status != 'down'`,
 		cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
@@ -3393,7 +3394,7 @@ func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
 		var w Worker
 		var createdAtRaw string
 		if err := rows.Scan(&w.NodeID, &w.Name, &w.AdvertiseAddr, &w.Tier, &w.Status,
-			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw); err != nil {
+			&w.Fingerprint, &w.Version, &w.LastHeartbeat, &w.RevokedAt, &createdAtRaw, &w.Incarnation); err != nil {
 			return nil, err
 		}
 		if t, ok := parseSQLiteTime(createdAtRaw); ok {
