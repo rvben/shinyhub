@@ -15,6 +15,15 @@ import (
 // reported by its runtime. A nil manager (servers built without one) never
 // blocks. Fail-closed across mixed placement.
 func (s *Server) ephemeralDataDeployBlock(app *db.App, command []string) (string, bool, error) {
+	return s.ephemeralDataBlockForTiers(app, command, s.tiersForApp(app))
+}
+
+// ephemeralDataBlockForTiers is the guard evaluated against an explicit tier set.
+// Deploy paths pass the app's current tiers; a placement CHANGE passes the
+// proposed new tiers so the move is rejected before it is persisted (otherwise
+// `apps set --tier <ephemeral>` and the async redeploy it triggers would move a
+// data-using app onto ephemeral storage unguarded). A nil manager never blocks.
+func (s *Server) ephemeralDataBlockForTiers(app *db.App, command []string, tiers []string) (string, bool, error) {
 	if s.manager == nil {
 		return "", false, nil
 	}
@@ -22,7 +31,7 @@ func (s *Server) ephemeralDataDeployBlock(app *db.App, command []string) (string
 	if err != nil {
 		return "", false, err
 	}
-	tier, blocked := deploy.EphemeralDataBlockedTier(uses, app.EphemeralDataAck, s.tiersForApp(app), s.manager.TierHasDurableDataFor)
+	tier, blocked := deploy.EphemeralDataBlockedTier(uses, app.EphemeralDataAck, tiers, s.manager.TierHasDurableDataFor)
 	return tier, blocked, nil
 }
 

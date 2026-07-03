@@ -1,6 +1,8 @@
 package api
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/config"
@@ -89,6 +91,37 @@ func TestEphemeralDataDeployBlock_AckAllows(t *testing.T) {
 	}
 	if blocked {
 		t.Fatal("acknowledged app: want allowed, got blocked")
+	}
+}
+
+func TestEphemeralDataBlockForTiers_BlocksDataOnEphemeralNewTiers(t *testing.T) {
+	srv, store := newEphemeralTierServer(t)
+	app := mustGuardApp(t, store)
+	// Give the app data on disk so UsesPersistentData fires without a command.
+	dir := filepath.Join(srv.cfg.Storage.AppDataDir, app.Slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.csv"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Moving this data-using app onto an ephemeral tier must be blocked.
+	tier, blocked, err := srv.ephemeralDataBlockForTiers(app, nil, []string{"cloud"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blocked || tier == "" {
+		t.Fatalf("data-using app on ephemeral new tier: want blocked, got blocked=%v tier=%q", blocked, tier)
+	}
+
+	// A stateless app (no data, no command) is allowed.
+	if err := store.CreateApp(db.CreateAppParams{Slug: "stateless", Name: "S", OwnerID: app.OwnerID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := store.GetAppBySlug("stateless")
+	if _, blocked, _ := srv.ephemeralDataBlockForTiers(s2, nil, []string{"cloud"}); blocked {
+		t.Fatal("stateless app: want allowed on ephemeral tier")
 	}
 }
 
