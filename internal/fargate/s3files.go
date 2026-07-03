@@ -39,7 +39,7 @@ type ObjectPutter interface {
 // Files is not configured, or when an access point is used (the access point
 // auto-creates its root). Called once per app from resolveTaskDef's register
 // path; failures fail the Start closed rather than surfacing as a mount error.
-func (r *Runtime) ensureAppDataDir(ctx context.Context, slug string) error {
+func (r *Runtime) ensureAppDataDir(ctx context.Context, appID int64) error {
 	m := r.cfg.S3Files
 	if !m.Configured() || m.AccessPointArn != "" {
 		return nil
@@ -51,13 +51,13 @@ func (r *Runtime) ensureAppDataDir(ctx context.Context, slug string) error {
 	if err != nil {
 		return err
 	}
-	key := s3filesMarkerKey(prefix, m.RootDirectory, slug)
+	key := s3filesMarkerKey(prefix, m.RootDirectory, appID)
 	if _, err := r.s3put.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 		Body:   strings.NewReader(""),
 	}); err != nil {
-		return fmt.Errorf("fargate: pre-create app-data dir for %q (s3://%s/%s): %w", slug, bucket, key, err)
+		return fmt.Errorf("fargate: pre-create app-data dir for app %d (s3://%s/%s): %w", appID, bucket, key, err)
 	}
 	return nil
 }
@@ -85,17 +85,24 @@ func (r *Runtime) resolveBucket(ctx context.Context) (bucket, prefix string, err
 }
 
 // s3filesMarkerKey builds the bucket object key whose creation makes the per-app
-// directory exist on the file system: <prefix>/<root>/<slug>/.shinyhub-keep,
+// directory exist on the file system: <prefix>/<root>/app-<id>/.shinyhub-keep,
 // with empty segments dropped and no leading slash.
-func s3filesMarkerKey(prefix, root, slug string) string {
-	parts := make([]string, 0, 4)
-	for _, p := range []string{prefix, root, slug} {
+func s3filesMarkerKey(prefix, root string, appID int64) string {
+	return appDataKeyPrefix(prefix, root, appID) + s3filesDirMarker
+}
+
+// appDataKeyPrefix is the S3 key prefix (ending in "/") for an app's durable
+// data on the linked bucket: <prefix>/<root>/app-<id>/. The data API writes,
+// lists, and deletes app files under this prefix; S3 Files mirrors it into the
+// app's mount.
+func appDataKeyPrefix(prefix, root string, appID int64) string {
+	parts := make([]string, 0, 3)
+	for _, p := range []string{prefix, root, appDataSegment(appID)} {
 		if t := strings.Trim(p, "/"); t != "" {
 			parts = append(parts, t)
 		}
 	}
-	parts = append(parts, s3filesDirMarker)
-	return strings.Join(parts, "/")
+	return strings.Join(parts, "/") + "/"
 }
 
 // fileSystemIDFromArn extracts the fs-... id from an S3 Files file-system ARN.
@@ -131,10 +138,17 @@ type S3FilesMount struct {
 // Configured reports whether the S3 Files backend is enabled.
 func (m S3FilesMount) Configured() bool { return m.FileSystemArn != "" }
 
-// volumeAndMount builds the ECS volume and container mount point for slug's
+// appDataSegment is the per-app directory name on the file system. It is keyed
+// on the immutable app id (never reused), NOT the slug: a slug freed by app
+// deletion and reused by a different app must not mount the deleted app's data.
+// It also matches how per-app secrets and task-def families are already named
+// ("app-<id>"), and being numeric it cannot carry path-traversal.
+func appDataSegment(appID int64) string { return fmt.Sprintf("app-%d", appID) }
+
+// volumeAndMount builds the ECS volume and container mount point for the app's
 // durable data, returning ok=false when the backend is not configured. Without
 // an access point, each app is isolated to a per-app subdirectory
-// (RootDirectory/<slug>) so apps never see each other's data. With an access
+// (RootDirectory/app-<id>) so apps never see each other's data. With an access
 // point, the access point enforces the root and RootDirectory is left unset (the
 // SDK requires it to be omitted or "/" in that case).
 //
@@ -142,7 +156,7 @@ func (m S3FilesMount) Configured() bool { return m.FileSystemArn != "" }
 // directory", verified live). ensureAppDataDir pre-creates the subdirectory (via
 // a bucket marker) before the first mount, unless an access point is used (which
 // auto-creates its own root).
-func (m S3FilesMount) volumeAndMount(slug string) (ecstypes.Volume, ecstypes.MountPoint, bool) {
+func (m S3FilesMount) volumeAndMount(appID int64) (ecstypes.Volume, ecstypes.MountPoint, bool) {
 	if !m.Configured() {
 		return ecstypes.Volume{}, ecstypes.MountPoint{}, false
 	}
@@ -152,7 +166,7 @@ func (m S3FilesMount) volumeAndMount(slug string) (ecstypes.Volume, ecstypes.Mou
 	if m.AccessPointArn != "" {
 		vc.AccessPointArn = aws.String(m.AccessPointArn)
 	} else {
-		vc.RootDirectory = aws.String(perAppRoot(m.RootDirectory, slug))
+		vc.RootDirectory = aws.String(perAppRoot(m.RootDirectory, appID))
 	}
 	if m.TransitEncryptionPort > 0 {
 		vc.TransitEncryptionPort = aws.Int32(m.TransitEncryptionPort)
@@ -174,8 +188,8 @@ func (m S3FilesMount) volumeAndMount(slug string) (ecstypes.Volume, ecstypes.Mou
 // misconfigured container_name fails the registration rather than silently
 // producing a task with no durable mount. Applied by resolveTaskDef after
 // buildTaskDefInput clones the base task definition.
-func addS3FilesMount(in *ecs.RegisterTaskDefinitionInput, containerName string, m S3FilesMount, slug string) error {
-	vol, mp, ok := m.volumeAndMount(slug)
+func addS3FilesMount(in *ecs.RegisterTaskDefinitionInput, containerName string, m S3FilesMount, appID int64) error {
+	vol, mp, ok := m.volumeAndMount(appID)
 	if !ok {
 		return nil
 	}
@@ -203,24 +217,24 @@ func (r *Runtime) familyPrefix() string {
 // s3filesSyncKey returns a string that changes whenever the effective per-app
 // S3 Files mount changes, so the task-def registration cache re-registers on a
 // config change. Empty when the backend is not configured.
-func (r *Runtime) s3filesSyncKey(slug string) string {
+func (r *Runtime) s3filesSyncKey(appID int64) string {
 	m := r.cfg.S3Files
 	if !m.Configured() {
 		return ""
 	}
 	root := m.RootDirectory
 	if m.AccessPointArn == "" {
-		root = perAppRoot(m.RootDirectory, slug)
+		root = perAppRoot(m.RootDirectory, appID)
 	}
 	return strings.Join([]string{m.FileSystemArn, m.AccessPointArn, root, m.MountPath}, "|")
 }
 
-// perAppRoot joins the base root directory and slug into an absolute per-app
-// directory: ("/", "demo") -> "/demo"; ("/apps", "demo") -> "/apps/demo".
-func perAppRoot(base, slug string) string {
+// perAppRoot joins the base root directory and per-app segment into an absolute
+// per-app directory: ("/", 7) -> "/app-7"; ("/apps", 7) -> "/apps/app-7".
+func perAppRoot(base string, appID int64) string {
 	b := strings.Trim(base, "/")
 	if b == "" {
-		return "/" + slug
+		return "/" + appDataSegment(appID)
 	}
-	return "/" + b + "/" + slug
+	return "/" + b + "/" + appDataSegment(appID)
 }

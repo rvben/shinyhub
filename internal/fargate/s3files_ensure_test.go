@@ -11,17 +11,19 @@ import (
 
 func TestS3FilesMarkerKey(t *testing.T) {
 	cases := []struct {
-		prefix, root, slug, want string
+		prefix, root string
+		appID        int64
+		want         string
 	}{
-		{"", "/", "demo", "demo/.shinyhub-keep"},
-		{"", "/apps", "demo", "apps/demo/.shinyhub-keep"},
-		{"myfs", "/apps", "demo", "myfs/apps/demo/.shinyhub-keep"},
-		{"myfs", "/", "demo", "myfs/demo/.shinyhub-keep"},
-		{"", "", "demo", "demo/.shinyhub-keep"},
+		{"", "/", 7, "app-7/.shinyhub-keep"},
+		{"", "/apps", 7, "apps/app-7/.shinyhub-keep"},
+		{"myfs", "/apps", 7, "myfs/apps/app-7/.shinyhub-keep"},
+		{"myfs", "/", 7, "myfs/app-7/.shinyhub-keep"},
+		{"", "", 7, "app-7/.shinyhub-keep"},
 	}
 	for _, c := range cases {
-		if got := s3filesMarkerKey(c.prefix, c.root, c.slug); got != c.want {
-			t.Errorf("s3filesMarkerKey(%q,%q,%q) = %q, want %q", c.prefix, c.root, c.slug, got, c.want)
+		if got := s3filesMarkerKey(c.prefix, c.root, c.appID); got != c.want {
+			t.Errorf("s3filesMarkerKey(%q,%q,%d) = %q, want %q", c.prefix, c.root, c.appID, got, c.want)
 		}
 	}
 }
@@ -78,7 +80,7 @@ func TestEnsureAppDataDir_PreCreatesMarker(t *testing.T) {
 	put := &fakePutter{}
 	r := New(&fakeECS{}, cfg, nil, WithS3FilesDescriber(desc), WithObjectPutter(put))
 
-	if err := r.ensureAppDataDir(context.Background(), "demo"); err != nil {
+	if err := r.ensureAppDataDir(context.Background(), 7); err != nil {
 		t.Fatalf("ensureAppDataDir: %v", err)
 	}
 	if put.calls != 1 {
@@ -87,12 +89,12 @@ func TestEnsureAppDataDir_PreCreatesMarker(t *testing.T) {
 	if put.bucket != "my-bucket" {
 		t.Errorf("bucket = %q, want my-bucket", put.bucket)
 	}
-	if put.key != "apps/demo/.shinyhub-keep" {
-		t.Errorf("key = %q, want apps/demo/.shinyhub-keep", put.key)
+	if put.key != "apps/app-7/.shinyhub-keep" {
+		t.Errorf("key = %q, want apps/app-7/.shinyhub-keep", put.key)
 	}
 
 	// Bucket resolution is cached: a second app does not re-describe.
-	if err := r.ensureAppDataDir(context.Background(), "demo2"); err != nil {
+	if err := r.ensureAppDataDir(context.Background(), 8); err != nil {
 		t.Fatal(err)
 	}
 	if desc.calls != 1 {
@@ -109,7 +111,7 @@ func TestEnsureAppDataDir_SkipsWithAccessPoint(t *testing.T) {
 	}
 	put := &fakePutter{}
 	r := New(&fakeECS{}, cfg, nil, WithObjectPutter(put), WithS3FilesDescriber(&fakeS3FilesDescriber{}))
-	if err := r.ensureAppDataDir(context.Background(), "demo"); err != nil {
+	if err := r.ensureAppDataDir(context.Background(), 7); err != nil {
 		t.Fatal(err)
 	}
 	if put.calls != 0 {
@@ -119,7 +121,7 @@ func TestEnsureAppDataDir_SkipsWithAccessPoint(t *testing.T) {
 
 func TestEnsureAppDataDir_NotConfiguredNoOp(t *testing.T) {
 	r := New(&fakeECS{}, testCfg(), nil)
-	if err := r.ensureAppDataDir(context.Background(), "demo"); err != nil {
+	if err := r.ensureAppDataDir(context.Background(), 7); err != nil {
 		t.Fatalf("unconfigured: want nil, got %v", err)
 	}
 }

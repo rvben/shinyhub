@@ -634,7 +634,7 @@ func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (ta
 		base = b
 		baseKey = aws.ToString(b.TaskDefinitionArn)
 	}
-	syncKey := hash + "|" + baseKey + "|" + r.s3filesSyncKey(p.Slug)
+	syncKey := hash + "|" + baseKey + "|" + r.s3filesSyncKey(p.AppID)
 	if cached, ok := r.cachedSyncKey(p.AppID); ok && cached == syncKey {
 		return family, true, nil
 	}
@@ -672,10 +672,10 @@ func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (ta
 	// pre-create that subdirectory on the file system, since a non-existent
 	// per-app rootDirectory fails to mount. Pre-create before registering the def
 	// that mounts it.
-	if err := addS3FilesMount(in, r.cfg.ContainerName, r.cfg.S3Files, p.Slug); err != nil {
+	if err := addS3FilesMount(in, r.cfg.ContainerName, r.cfg.S3Files, p.AppID); err != nil {
 		return "", false, err
 	}
-	if err := r.ensureAppDataDir(ctx, p.Slug); err != nil {
+	if err := r.ensureAppDataDir(ctx, p.AppID); err != nil {
 		return "", false, err
 	}
 	out, err := r.client.RegisterTaskDefinition(ctx, in)
