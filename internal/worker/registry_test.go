@@ -14,6 +14,19 @@ func newTestStore(t *testing.T) *db.Store {
 	return dbtest.New(t)
 }
 
+// newTestRegistry builds a fresh store-backed registry for tests that need
+// both, returning the store alongside so a test can also assert against it
+// directly.
+func newTestRegistry(t *testing.T) (*Registry, *db.Store) {
+	t.Helper()
+	store := newTestStore(t)
+	reg, err := NewRegistry(store)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	return reg, store
+}
+
 // joinUp registers a worker and brings it up the normal way: a heartbeat.
 // Register alone leaves a worker "joining" (not routable); it becomes routable
 // only on its first heartbeat, mirroring how an agent reports in only after its
@@ -510,6 +523,23 @@ func TestRegistryHeartbeat_LegacyZeroIncarnationNeverFences(t *testing.T) {
 	fenced, _, err := reg.Heartbeat(node.NodeID, "fp1", 0)
 	if err != nil || fenced {
 		t.Fatalf("legacy (incarnation 0) heartbeat must never be fenced: fenced=%v err=%v", fenced, err)
+	}
+}
+
+// TestRegistryReap_BumpsAndDownsIndex asserts Reap marks a worker down AND
+// bumps its stored incarnation, and refreshes the in-memory index to match, so
+// the down-monitor's reap is what fences a worker that reconnects still
+// running its (now reassigned) replicas.
+func TestRegistryReap_BumpsAndDownsIndex(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+	node, _ := reg.Register(RegisterParams{Tier: "burst", AdvertiseAddr: "203.0.113.2:9000"})
+	_, _, _ = reg.Heartbeat(node.NodeID, "fp1", node.Incarnation) // -> up
+	if err := reg.Reap(node.NodeID); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	w, ok := reg.Worker(node.NodeID)
+	if !ok || w.Status != "down" || w.Incarnation != 2 {
+		t.Fatalf("after reap: status=%s incarnation=%d ok=%v, want down/2", w.Status, w.Incarnation, ok)
 	}
 }
 

@@ -98,10 +98,6 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 		Status:      "joining",
 		Fingerprint: p.Fingerprint,
 		Version:     p.Version,
-		// UpsertWorker hardcodes incarnation=1 for a brand-new row; mirror that
-		// here so the in-memory index and the returned worker agree with the store
-		// immediately, without waiting for a Refresh.
-		Incarnation: 1,
 	}
 	// Serialize the whole registration so concurrent same-tier joins cannot
 	// interleave their store writes. regMu, not the routing RWMutex, guards the
@@ -112,6 +108,16 @@ func (r *Registry) Register(p RegisterParams) (db.Worker, error) {
 	if err := r.store.UpsertWorker(w); err != nil {
 		return db.Worker{}, err
 	}
+	// Re-read the stored row rather than hardcoding the incarnation UpsertWorker
+	// assigns a brand-new node id (1): this mirrors Reap/Revoke, which likewise
+	// return the store's authoritative row rather than trusting an in-memory
+	// guess, and keeps Register correct if UpsertWorker's new-row behavior ever
+	// changes.
+	fresh, err := r.store.GetWorker(nodeID)
+	if err != nil {
+		return db.Worker{}, err
+	}
+	w = *fresh
 	// One up worker per (tier, advertise address): retire any other up worker at
 	// this exact endpoint. A registration at an occupied endpoint means the
 	// occupant is being replaced - the only way to reach this is an agent that
@@ -160,6 +166,27 @@ func (r *Registry) MarkDown(nodeID string) error {
 		w.Status = "down"
 		r.byID[nodeID] = w
 	}
+	r.mu.Unlock()
+	return nil
+}
+
+// Reap marks a worker down AND bumps its incarnation, then refreshes the index
+// from the store so the bumped value is visible to Heartbeat's fence check. The
+// down-monitor calls this (not MarkDown) because a reaped worker also has its
+// replicas stripped and reassigned elsewhere; the incarnation bump is what
+// fences the worker if it later reconnects still running them.
+func (r *Registry) Reap(nodeID string) error {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	if err := r.store.ReapWorker(nodeID); err != nil {
+		return err
+	}
+	w, err := r.store.GetWorker(nodeID)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.byID[nodeID] = *w
 	r.mu.Unlock()
 	return nil
 }

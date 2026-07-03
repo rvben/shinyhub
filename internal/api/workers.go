@@ -125,9 +125,10 @@ func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workerapi.RegisterResponse{
-		NodeID:   node.NodeID,
-		CertPEM:  string(certPEM),
-		CABundle: string(a.ca.CertPEM()),
+		NodeID:      node.NodeID,
+		CertPEM:     string(certPEM),
+		CABundle:    string(a.ca.CertPEM()),
+		Incarnation: node.Incarnation,
 	})
 }
 
