@@ -2795,7 +2795,9 @@ document.addEventListener('DOMContentLoaded', () => {
       resp = await api(`/api/apps/${settingsSlug}/group-access`);
     } catch { list.innerHTML = ''; return; }
     if (!resp.ok) { list.innerHTML = ''; return; }
-    const rules = await resp.json();
+    const gaBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const rules = Array.isArray(gaBody) ? gaBody : (gaBody && Array.isArray(gaBody.items) ? gaBody.items : []);
     list.innerHTML = '';
     for (const rule of rules) {
       const li = document.createElement('li');
@@ -4538,7 +4540,9 @@ document.addEventListener('DOMContentLoaded', () => {
       container.innerHTML = '<p class="error">Failed to load schedules.</p>';
       return;
     }
-    const schedules = await resp.json();
+    const schedBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const schedules = Array.isArray(schedBody) ? schedBody : (schedBody && Array.isArray(schedBody.items) ? schedBody.items : []);
     if (schedules.length === 0) {
       container.innerHTML = '<p class="env-empty">No schedules configured for this app.</p>';
       return;
@@ -4616,7 +4620,9 @@ document.addEventListener('DOMContentLoaded', () => {
       container.innerHTML = '<p class="error">Failed to load shared data mounts.</p>';
       return;
     }
-    const mounts = await resp.json();
+    const body = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const mounts = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
     if (mounts.length === 0) {
       container.innerHTML = '<p class="env-empty">No shared data mounts configured.</p>';
       return;

@@ -64,16 +64,19 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var got []struct {
-		Slug            string `json:"slug"`
-		Schedule        string `json:"schedule"`
-		Stale           bool   `json:"stale"`
-		LastRunStatus   string `json:"last_run_status"`
-		LastSuccessAgeS *int64 `json:"last_success_age_s"`
+	var env struct {
+		Items []struct {
+			Slug            string `json:"slug"`
+			Schedule        string `json:"schedule"`
+			Stale           bool   `json:"stale"`
+			LastRunStatus   string `json:"last_run_status"`
+			LastSuccessAgeS *int64 `json:"last_success_age_s"`
+		} `json:"items"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	got := env.Items
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %+v", len(got), got)
 	}

@@ -2255,7 +2255,8 @@ func (s *Server) handleGetAppGroupAccess(w http.ResponseWriter, r *http.Request)
 	for i, rule := range rules {
 		resp[i] = appGroupRuleResponse{Group: rule.Group, Role: rule.Role, Source: rule.Source}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	limit, offset := parsePagination(r)
+	writeList(w, resp, limit, offset, nil)
 }
 
 func (s *Server) handleGrantAppGroupAccess(w http.ResponseWriter, r *http.Request) {

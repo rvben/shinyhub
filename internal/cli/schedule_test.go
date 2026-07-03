@@ -151,10 +151,11 @@ func TestSchedule_Add_RequiresNameAndCron(t *testing.T) {
 // TestSchedule_Ls_FormatsRows verifies that ls prints both schedule names.
 func TestSchedule_Ls_FormatsRows(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
-	setResp(200, `[
+	// The server returns the standard {items,total,...} list envelope.
+	setResp(200, `{"items":[
 		{"id":1,"name":"daily","cron_expr":"0 0 * * *","command":["Rscript","run.R"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip"},
 		{"id":2,"name":"hourly","cron_expr":"0 * * * *","command":["python","go.py"],"enabled":false,"timeout_seconds":600,"overlap_policy":"queue","missed_policy":"run_once"}
-	]`)
+	],"total":2,"limit":0,"offset":0}`)
 
 	cmd := newScheduleCmd()
 	var buf bytes.Buffer

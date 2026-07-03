@@ -92,7 +92,8 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, toScheduleDTO(sc, next, s.cfg.Scheduler.Location))
 	}
-	writeJSON(w, http.StatusOK, out)
+	limit, offset := parsePagination(r)
+	writeList(w, out, limit, offset, nil)
 }
 
 // POST /api/apps/{slug}/schedules
@@ -677,7 +678,8 @@ func (s *Server) handleListSharedData(w http.ResponseWriter, r *http.Request) {
 	for _, m := range rows {
 		out = append(out, sharedDataDTO{SourceSlug: m.SourceSlug, SourceID: m.SourceAppID})
 	}
-	writeJSON(w, http.StatusOK, out)
+	limit, offset := parsePagination(r)
+	writeList(w, out, limit, offset, nil)
 }
 
 // POST /api/apps/{slug}/shared-data

@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-const scheduleStatusBody = `[
+// The server returns the standard {items,total,limit,offset} list envelope.
+const scheduleStatusBody = `{"items":[
   {"slug":"jp-dash","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"succeeded","last_success_at":"2026-06-30T06:00:00Z","last_success_age_s":7200,"stale":false},
   {"slug":"ccro-kpi","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"failed","last_success_at":null,"last_success_age_s":null,"stale":true}
-]`
+],"total":2,"limit":0,"offset":0}`
 
 func TestScheduleStatus_Table(t *testing.T) {
 	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {

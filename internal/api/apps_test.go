@@ -3099,10 +3099,14 @@ func TestGroupAccess_GrantListRevoke(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: expected 200, got %d", rec.Code)
 	}
-	var rules []map[string]any
-	json.Unmarshal(rec.Body.Bytes(), &rules)
-	if len(rules) != 1 || rules[0]["group"] != "finance" || rules[0]["role"] != "manager" {
-		t.Fatalf("list rules = %v", rules)
+	env := decodeEnvelope(t, rec)
+	rulesAny, _ := env["items"].([]any)
+	if len(rulesAny) != 1 {
+		t.Fatalf("list rules = %v", env)
+	}
+	rule0 := rulesAny[0].(map[string]any)
+	if rule0["group"] != "finance" || rule0["role"] != "manager" {
+		t.Fatalf("list rules = %v", rulesAny)
 	}
 	req = authedRequest(t, "DELETE", "/api/apps/ga/group-access/finance", nil, token)
 	rec = httptest.NewRecorder()

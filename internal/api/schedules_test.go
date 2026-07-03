@@ -85,15 +85,13 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var list []map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&list); err != nil {
-		t.Fatalf("decode list: %v", err)
-	}
+	env := decodeEnvelope(t, rec)
+	list, _ := env["items"].([]any)
 	if len(list) != 1 {
-		t.Fatalf("expected 1 schedule, got %d", len(list))
+		t.Fatalf("expected 1 schedule, got %d (env=%v)", len(list), env)
 	}
-	if list[0]["name"] != "daily-job" {
-		t.Errorf("expected name=daily-job in list, got %v", list[0]["name"])
+	if list[0].(map[string]any)["name"] != "daily-job" {
+		t.Errorf("expected name=daily-job in list, got %v", list[0])
 	}
 }
 
