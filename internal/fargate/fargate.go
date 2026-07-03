@@ -204,8 +204,19 @@ type Runtime struct {
 	// instead of plaintext task overrides, keeping them out of ecs:DescribeTasks.
 	// Nil disables the feature: secret env stays plaintext (the Phase 1 behavior).
 	secrets SecretsStore
-	cfg     Config
-	log     *slog.Logger
+	// s3filesDesc + s3put back the S3 Files managed backend's per-app directory
+	// pre-creation (a non-existent per-app rootDirectory fails to mount). Non-nil
+	// only when cfg.S3Files is configured; wired by buildFargateRuntime.
+	s3filesDesc S3FilesDescriber
+	s3put       ObjectPutter
+	// bucketName caches the S3 bucket linked to the S3 Files file system, resolved
+	// once via GetFileSystem. bucketPrefix is the file system's bucket prefix.
+	bucketMu     sync.Mutex
+	bucketName   string
+	bucketPrefix string
+	bucketDone   bool
+	cfg          Config
+	log          *slog.Logger
 	// metrics records AWS operation outcomes. Never nil after New(); defaults to
 	// noopFargateMetrics{} so callers need no nil guard.
 	metrics FargateMetrics
@@ -279,6 +290,20 @@ func WithStartTimeout(d time.Duration) Option {
 // otherwise.
 func WithEC2Client(c EC2Client) Option {
 	return func(r *Runtime) { r.ec2 = c }
+}
+
+// WithS3FilesDescriber supplies the S3 Files client used to resolve the linked
+// bucket for per-app directory pre-creation. Required when cfg.S3Files is
+// configured without an access point.
+func WithS3FilesDescriber(d S3FilesDescriber) Option {
+	return func(r *Runtime) { r.s3filesDesc = d }
+}
+
+// WithObjectPutter supplies the S3 client used to pre-create per-app directory
+// markers in the linked bucket. Required when cfg.S3Files is configured without
+// an access point.
+func WithObjectPutter(p ObjectPutter) Option {
+	return func(r *Runtime) { r.s3put = p }
 }
 
 // WithSecretsStore enables out-of-band secret injection: an app's secret env
@@ -643,8 +668,14 @@ func (r *Runtime) resolveTaskDef(ctx context.Context, p process.StartParams) (ta
 	if err != nil {
 		return "", false, err
 	}
-	// Inject the managed durable-data mount (per-app S3 Files subdirectory).
+	// Inject the managed durable-data mount (per-app S3 Files subdirectory) and
+	// pre-create that subdirectory on the file system, since a non-existent
+	// per-app rootDirectory fails to mount. Pre-create before registering the def
+	// that mounts it.
 	if err := addS3FilesMount(in, r.cfg.ContainerName, r.cfg.S3Files, p.Slug); err != nil {
+		return "", false, err
+	}
+	if err := r.ensureAppDataDir(ctx, p.Slug); err != nil {
 		return "", false, err
 	}
 	out, err := r.client.RegisterTaskDefinition(ctx, in)

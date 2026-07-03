@@ -26,6 +26,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3files"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
@@ -618,6 +620,14 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		// overrides, so they never appear in ecs:DescribeTasks.
 		opts = append(opts, fargate.WithSecretsStore(
 			fargate.NewSecretsManagerStore(secretsmanager.NewFromConfig(awsCfg), fc.SecretsKMSKeyID)))
+	}
+	if fc.S3Files.Configured() && fc.S3Files.AccessPointArn == "" {
+		// Managed durable-data backend without an access point: the runtime
+		// pre-creates each app's directory in the linked bucket (a non-existent
+		// per-app rootDirectory fails to mount). Needs GetFileSystem + PutObject.
+		opts = append(opts,
+			fargate.WithS3FilesDescriber(s3files.NewFromConfig(awsCfg)),
+			fargate.WithObjectPutter(s3.NewFromConfig(awsCfg)))
 	}
 	return fargate.New(ecs.NewFromConfig(awsCfg), fargate.Config{
 		Cluster:          fc.Cluster,
