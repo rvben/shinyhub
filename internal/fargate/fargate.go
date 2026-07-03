@@ -160,6 +160,15 @@ type Config struct {
 	// by buildFargateRuntime. Must not be nil when ControlPlaneURL is set.
 	BundleTokenKey []byte
 
+	// DurableData reports whether this Fargate tier has a durable app-data
+	// backend (S3 Files configured, or runtime.fargate.durable_data asserted for
+	// a manually attached EFS/volume). When false, task storage is ephemeral
+	// scratch: app-data is lost on restart/hibernation and not shared across
+	// replicas. buildFargateRuntime computes it as
+	// durable_data || s3files.Configured(). Consumed by the durable-data guard
+	// via TierHasDurableData.
+	DurableData bool
+
 	// LaunchType is the ECS launch type for tasks on this tier. Use
 	// ecstypes.LaunchTypeFargate (default) for Fargate tasks or
 	// ecstypes.LaunchTypeEc2 for EC2 tasks. The zero value defaults to
@@ -331,6 +340,12 @@ func (r *Runtime) AppBindHost() string { return "0.0.0.0" }
 // HostProvidesAppData reports false: the task provisions its own app-data; the
 // control-plane host must not create directories or strip-then-dispatch paths.
 func (r *Runtime) HostProvidesAppData() bool { return false }
+
+// TierHasDurableData reports whether app-data on this Fargate tier survives task
+// restart/hibernation and is shared across replicas. Bare Fargate task storage
+// is ephemeral scratch, so this is false unless a durable backend is configured
+// (Config.DurableData, set by buildFargateRuntime from s3files/durable_data).
+func (r *Runtime) TierHasDurableData() bool { return r.cfg.DurableData }
 
 // encodeHandle joins the runtime's worker identity and the task ARN into the
 // "<workerID>/<task-arn>" form that recovery also produces, so a handle minted

@@ -635,6 +635,10 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		BundleTokenKey:   bundleTokenKey,
 		LaunchType:       lt,
 		SecretNamePrefix: fc.SecretsNamePrefix,
+		// A tier is durable if the operator asserts it (durable_data) or an S3
+		// Files backend is configured. Until the S3 Files config lands, the
+		// assertion is the only source.
+		DurableData: fc.DurableData,
 	}, slog.Default(), opts...), nil
 }
 

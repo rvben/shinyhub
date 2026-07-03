@@ -558,6 +558,15 @@ type FargateRuntimeConfig struct {
 	// pull) regularly exceeds 10 minutes.
 	BundleTokenTTL time.Duration
 
+	// DurableData asserts that this Fargate tier has durable, replica-shared
+	// app-data storage (S3 Files, or a volume the operator attached to the base
+	// task definition, e.g. EFS). It suppresses the durable-data guard, which
+	// otherwise blocks deploying a data-using app onto a Fargate tier whose task
+	// storage is ephemeral scratch. Default false. When S3 Files config is added,
+	// buildFargateRuntime treats the tier as durable if DurableData is true OR an
+	// S3 Files backend is configured.
+	DurableData bool
+
 	// SecretsNamePrefix, when non-empty, enables routing apps' secret env vars
 	// through AWS Secrets Manager (referenced by ARN from a per-app task-def
 	// secrets block) instead of plaintext task overrides, so they never appear
@@ -852,6 +861,7 @@ type rawFargateRuntimeConfig struct {
 	DefaultCPUPercent int                     `yaml:"default_cpu_percent"`
 	ControlPlaneURL   string                  `yaml:"control_plane_url"`
 	BundleTokenTTL    string                  `yaml:"bundle_token_ttl"` // parsed as time.Duration
+	DurableData       bool                    `yaml:"durable_data"`
 	Secrets           rawFargateSecretsConfig `yaml:"secrets"`
 }
 
@@ -1731,6 +1741,7 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		DefaultMemoryMB:   r.Fargate.DefaultMemoryMB,
 		DefaultCPUPercent: r.Fargate.DefaultCPUPercent,
 		ControlPlaneURL:   r.Fargate.ControlPlaneURL,
+		DurableData:       r.Fargate.DurableData,
 		SecretsNamePrefix: r.Fargate.Secrets.NamePrefix,
 		SecretsKMSKeyID:   r.Fargate.Secrets.KMSKeyID,
 	}
