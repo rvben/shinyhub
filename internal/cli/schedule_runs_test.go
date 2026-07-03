@@ -22,10 +22,11 @@ func scheduleRunsHandler(runsJSON string) http.HandlerFunc {
 	}
 }
 
-const runsBody = `[
+// The server returns the standard {items,total,limit,offset} list envelope.
+const runsBody = `{"items":[
   {"id":4,"schedule_id":1,"status":"succeeded","trigger":"manual","started_at":"2026-06-13T10:22:13.117414Z","finished_at":"2026-06-13T10:22:13.281299Z","exit_code":0},
   {"id":3,"schedule_id":1,"status":"failed","trigger":"register","started_at":"2026-06-13T10:21:40.500000Z","finished_at":"2026-06-13T10:21:41.700000Z","exit_code":1}
-]`
+],"total":2,"limit":0,"offset":0}`
 
 func TestScheduleRuns_Table(t *testing.T) {
 	_, reqs := setupCLITestHandler(t, scheduleRunsHandler(runsBody))

@@ -858,7 +858,11 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    state.apps = (await response.json()) || [];
+    {
+      // Standard {items,...} list envelope; tolerate a bare array for resilience.
+      const gridBody = (await response.json()) || [];
+      state.apps = Array.isArray(gridBody) ? gridBody : (Array.isArray(gridBody.items) ? gridBody.items : []);
+    }
     clearGridLoading();
     renderApps();
     syncSidebar();
@@ -914,7 +918,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.user !== sessionUser) return;
     if (response.status === 401) { await handleUnauthorized(); return; }
     if (!response.ok) return;
-    const apps = (await response.json()) || [];
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const idxBody = (await response.json()) || [];
+    const apps = Array.isArray(idxBody) ? idxBody : (Array.isArray(idxBody.items) ? idxBody.items : []);
     if (state.user !== sessionUser) return;
     state.apps = apps;
     syncSidebar();
@@ -4772,7 +4778,9 @@ document.addEventListener('DOMContentLoaded', () => {
       flashToast('Failed to load run history: ' + await resp.text().catch(() => 'error'));
       return;
     }
-    const runs = await resp.json();
+    const runsBody = await resp.json();
+    // Standard {items,...} list envelope; tolerate a bare array for resilience.
+    const runs = Array.isArray(runsBody) ? runsBody : (runsBody && Array.isArray(runsBody.items) ? runsBody.items : []);
 
     // Reuse existing log pane infrastructure.
     if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
@@ -4780,7 +4788,7 @@ document.addEventListener('DOMContentLoaded', () => {
     logPaneBody.innerHTML = '';
     setHidden(logPane, false);
 
-    if (!runs || runs.length === 0) {
+    if (runs.length === 0) {
       logPaneBody.textContent = 'No runs yet.';
       return;
     }

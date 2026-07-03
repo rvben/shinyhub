@@ -51,7 +51,9 @@ export function mountLaunchpad(ctx, opts = {}) {
       if (disposed) return;
       if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
       if (!resp.ok) { if (initial) body.replaceChildren(errorState()); return; }
-      apps = (await resp.json()) || [];
+      // Standard {items,...} list envelope; tolerate a bare array for resilience.
+      const lpBody = (await resp.json()) || [];
+      apps = Array.isArray(lpBody) ? lpBody : (Array.isArray(lpBody.items) ? lpBody.items : []);
     } catch {
       if (initial) body.replaceChildren(errorState());
       return;

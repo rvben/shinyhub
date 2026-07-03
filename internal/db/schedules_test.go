@@ -149,6 +149,40 @@ func TestScheduleRuns_InsertUpdateList(t *testing.T) {
 	}
 }
 
+// TestCountScheduleRuns verifies the run counter used to report an accurate
+// total alongside a server-paginated page of run history.
+func TestCountScheduleRuns(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "counter")
+	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "x", CronExpr: "* * * * *",
+		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 10,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+
+	if n, err := store.CountScheduleRuns(schedID); err != nil || n != 0 {
+		t.Fatalf("empty count = %d, err %v; want 0", n, err)
+	}
+
+	started := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 3; i++ {
+		if _, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: schedID, Status: "running", Trigger: "schedule",
+			StartedAt: started, LogPath: "/var/log/x/run.log",
+		}); err != nil {
+			t.Fatalf("insert run %d: %v", i, err)
+		}
+	}
+
+	if n, err := store.CountScheduleRuns(schedID); err != nil || n != 3 {
+		t.Fatalf("count = %d, err %v; want 3", n, err)
+	}
+	// A schedule with no runs (unknown id) counts zero, not an error.
+	if n, err := store.CountScheduleRuns(schedID + 999); err != nil || n != 0 {
+		t.Fatalf("unknown-schedule count = %d, err %v; want 0", n, err)
+	}
+}
+
 // TestScheduleRuns_ExitCodeNullableLifecycle asserts exit_code is NULL (nil)
 // for a run that has not reached a terminal state, and is populated only once
 // the run finishes. A still-running run with exit_code defaulted to 0 reads as

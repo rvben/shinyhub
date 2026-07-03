@@ -37,7 +37,9 @@ export function mountOverview(ctx) {
       if (disposed) return;
       if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
       if (!resp.ok) { if (initial) body.replaceChildren(errorState()); return; }
-      apps = (await resp.json()) || [];
+      // Standard {items,...} list envelope; tolerate a bare array for resilience.
+      const ovBody = (await resp.json()) || [];
+      apps = Array.isArray(ovBody) ? ovBody : (Array.isArray(ovBody.items) ? ovBody.items : []);
     } catch {
       if (initial) body.replaceChildren(errorState());
       return;

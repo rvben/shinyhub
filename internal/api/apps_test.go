@@ -79,8 +79,10 @@ func TestListApps(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var apps []any
-	json.NewDecoder(rec.Body).Decode(&apps)
+	env := decodeEnvelope(t, rec)
+	if _, ok := env["items"].([]any); !ok {
+		t.Fatalf("apps list must be the {items,...} envelope; body=%q", rec.Body.String())
+	}
 	// empty list is fine
 }
 
@@ -96,12 +98,14 @@ func TestListApps_PreviewAsViewer(t *testing.T) {
 	token, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
 
 	slugs := func(rec *httptest.ResponseRecorder) map[string]bool {
-		var apps []struct {
-			Slug string `json:"slug"`
+		var env struct {
+			Items []struct {
+				Slug string `json:"slug"`
+			} `json:"items"`
 		}
-		json.NewDecoder(rec.Body).Decode(&apps)
+		json.NewDecoder(rec.Body).Decode(&env)
 		out := map[string]bool{}
-		for _, a := range apps {
+		for _, a := range env.Items {
 			out[a.Slug] = true
 		}
 		return out
@@ -326,16 +330,18 @@ func TestListApps_FilteredByAccess(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var apps []db.App
-	if err := json.NewDecoder(rec.Body).Decode(&apps); err != nil {
+	var env struct {
+		Items []db.App `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
 		t.Fatalf("decode apps: %v", err)
 	}
-	if len(apps) != 2 {
-		t.Fatalf("expected 2 visible apps, got %d", len(apps))
+	if len(env.Items) != 2 {
+		t.Fatalf("expected 2 visible apps, got %d", len(env.Items))
 	}
-	for _, app := range apps {
+	for _, app := range env.Items {
 		if app.Slug == "private-app" {
-			t.Fatalf("viewer should not see private-app: %+v", apps)
+			t.Fatalf("viewer should not see private-app: %+v", env.Items)
 		}
 	}
 }

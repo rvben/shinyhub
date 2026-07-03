@@ -31,7 +31,9 @@ export async function mountAppsGrid(ctx) {
   }
   if (resp.status === 401) { ctx.onUnauthorized(); return viewObject(); }
   if (!resp.ok) { showError(loadFailed); return viewObject(); }
-  const apps = (await resp.json()) || [];
+  const gridBody = (await resp.json()) || [];
+  // Standard {items,...} list envelope; tolerate a bare array for resilience.
+  const apps = Array.isArray(gridBody) ? gridBody : (Array.isArray(gridBody.items) ? gridBody.items : []);
   showError('');
   ctx.state.apps = apps;
   // Use applyGridFilters when available so persisted search/sort apply on

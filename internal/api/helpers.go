@@ -69,7 +69,15 @@ func writeList[T any](w http.ResponseWriter, items []T, limit, offset int, extra
 	if limit > 0 && start+limit < end {
 		end = start + limit
 	}
-	page := items[start:end]
+	writeListPage(w, items[start:end], total, limit, offset, extra)
+}
+
+// writeListPage writes the standard list envelope for a page the caller has
+// ALREADY selected (e.g. a store method that paginated at the DB layer), with an
+// explicit total for the full result set. Used where fetching the whole set
+// in-memory would be unbounded (e.g. schedule run history). An empty page always
+// marshals as [] (never null); extra never clobbers the standard fields.
+func writeListPage[T any](w http.ResponseWriter, page []T, total, limit, offset int, extra map[string]any) {
 	if len(page) == 0 {
 		page = []T{}
 	}

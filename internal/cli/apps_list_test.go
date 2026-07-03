@@ -12,13 +12,16 @@ import (
 
 func newAppsListServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	all := []map[string]any{
+		{"slug": "a", "status": "running", "deploy_count": 3},
+		{"slug": "b", "status": "stopped", "deploy_count": 1},
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/apps" {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"slug":"a","status":"running","deploy_count":3},{"slug":"b","status":"stopped","deploy_count":1}]`))
+		writeMigrationEnvelope(w, r, all, nil)
 	}))
 }
 

@@ -1,10 +1,8 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,28 +26,14 @@ func newScheduleRunsCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		// Fetch up to the server's max so the client-side --limit/--offset can
-		// page over real history rather than only the server's default page.
-		url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs?limit=200", cfg.Host, slug, id)
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
+		// Run history is paginated server-side (it can be large); the CLI forwards
+		// --limit/--offset and renders the returned page with an accurate total.
+		path := fmt.Sprintf("/api/apps/%s/schedules/%d/runs", slug, id)
+		runs, total, err := getPaginatedList(cfg, "list schedule runs", path, f)
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "list schedule runs", resp, out)
-		}
-		var runs []map[string]any
-		if err := json.Unmarshal(out, &runs); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-		return renderList(cmd, f, runs, nil, func(w io.Writer, items []map[string]any) {
+		return renderServerList(cmd, f, runs, total, nil, func(w io.Writer, items []map[string]any) {
 			if len(items) == 0 {
 				fmt.Fprintln(w, "No runs yet.")
 				return

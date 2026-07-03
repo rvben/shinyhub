@@ -67,25 +67,11 @@ func runAppsList(cmd *cobra.Command, f *listFlags) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	apps, total, err := getPaginatedList(cfg, "list apps", "/api/apps", f)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "list apps", resp, out)
-	}
-	var apps []map[string]any
-	if err := json.Unmarshal(out, &apps); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return renderList(cmd, f, apps, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, f, apps, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintln(w, "No apps.")
 			return

@@ -42,6 +42,9 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 
 	limit, offset := parsePagination(r)
 
+	// Fetch the full (bounded) app set; writeList paginates in-memory so the
+	// envelope carries an accurate total. The dashboard polls this list, so the
+	// count stays small.
 	var (
 		apps []*db.App
 		err  error
@@ -52,20 +55,17 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		// baseline (public + shared) so the preview shows what viewers actually see
 		// rather than the operator's full list. Read-only; the param is ignored for
 		// non-privileged callers, who are already scoped by ListAppsVisibleToUser.
-		apps, err = s.store.ListViewerBaselineApps(limit, offset)
+		apps, err = s.store.ListViewerBaselineApps(0, 0)
 	case isPrivilegedAppOperator(u):
-		apps, err = s.store.ListApps(limit, offset)
+		apps, err = s.store.ListApps(0, 0)
 	default:
-		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
+		apps, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if apps == nil {
-		apps = []*db.App{}
-	}
-	writeJSON(w, http.StatusOK, apps)
+	writeList(w, apps, limit, offset, nil)
 }
 
 type createAppRequest struct {

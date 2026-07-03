@@ -689,10 +689,19 @@ func newScheduleLogsCmd() *cobra.Command {
 			}
 			defer runsResp.Body.Close()
 
-			var runs []struct {
+			// The server returns the standard {items,...} list envelope; tolerate a
+			// bare array for resilience across versions.
+			type runIDItem struct {
 				ID int64 `json:"id"`
 			}
-			if err := json.NewDecoder(runsResp.Body).Decode(&runs); err != nil {
+			runsBody, _ := io.ReadAll(runsResp.Body)
+			var runsEnv struct {
+				Items []runIDItem `json:"items"`
+			}
+			var runs []runIDItem
+			if err := json.Unmarshal(runsBody, &runsEnv); err == nil && runsEnv.Items != nil {
+				runs = runsEnv.Items
+			} else if err := json.Unmarshal(runsBody, &runs); err != nil {
 				return fmt.Errorf("decode runs: %w", err)
 			}
 			if len(runs) == 0 {

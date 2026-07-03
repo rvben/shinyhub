@@ -422,7 +422,14 @@ func (s *Server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, runs)
+	// Run history can be large, so the page is fetched at the DB layer; report
+	// the full count separately for an accurate envelope total.
+	total, err := s.store.CountScheduleRuns(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeListPage(w, runs, total, limit, offset, nil)
 }
 
 // POST /api/apps/{slug}/schedules/{id}/runs/{run_id}/cancel
