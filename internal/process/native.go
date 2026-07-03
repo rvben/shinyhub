@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -253,6 +254,26 @@ func sandboxLaunchEnv(appDir, tmpDir, encSpec string) []string {
 	return env
 }
 
+// withDelegateHint augments a cgroup-base preparation error with an actionable
+// systemd remediation when the underlying failure is a permission / read-only
+// class errno - the signature of a systemd unit that omits Delegate=. Without
+// delegation systemd leaves the service's cgroup subtree root-owned, so a
+// non-root service user cannot create or write it (EACCES/EPERM), the _supervisor
+// mkdir fails, and warm-wake plus per-app limits silently degrade. The bare
+// "permission denied" errno names nothing the operator can act on; this turns it
+// into a one-line fix. Non-permission errors (e.g. the memory controller
+// genuinely absent, or a non-linux stub) are returned unchanged, so the more
+// specific "need systemd Delegate=memory" message from ensureDelegatedBase is
+// never overwritten.
+func withDelegateHint(err error) error {
+	if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%w; add \"Delegate=cpu memory\" (or Delegate=yes) to the [Service] "+
+			"section of the systemd unit and reload so the service user can manage its cgroup "+
+			"subtree (see deploy/systemd/shinyhub.service)", err)
+	}
+	return err
+}
+
 // ensureCgroupBase prepares the delegated cgroup base exactly once, before the
 // first child that needs it is forked, so the child is born in base/_supervisor
 // (where shinyhub now lives) rather than base, which must stay empty of
@@ -264,7 +285,7 @@ func (r *NativeRuntime) ensureCgroupBase() {
 	r.cgroupOnce.Do(func() {
 		base, cpuAvailable, err := ensureDelegatedBase()
 		if err != nil {
-			slog.Warn("native: cgroup base unavailable; warm-wake and resource limits disabled", "err", err)
+			slog.Warn("native: cgroup base unavailable; warm-wake and resource limits disabled", "err", withDelegateHint(err))
 			return
 		}
 		r.mu.Lock()
