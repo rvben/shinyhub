@@ -562,10 +562,16 @@ type FargateRuntimeConfig struct {
 	// app-data storage (S3 Files, or a volume the operator attached to the base
 	// task definition, e.g. EFS). It suppresses the durable-data guard, which
 	// otherwise blocks deploying a data-using app onto a Fargate tier whose task
-	// storage is ephemeral scratch. Default false. When S3 Files config is added,
-	// buildFargateRuntime treats the tier as durable if DurableData is true OR an
-	// S3 Files backend is configured.
+	// storage is ephemeral scratch. Default false. buildFargateRuntime treats the
+	// tier as durable if DurableData is true OR an S3 Files backend is configured.
 	DurableData bool
+
+	// S3Files, when configured, is the managed durable-data backend: an Amazon S3
+	// Files file system mounted into every app's task at MountPath, with each
+	// app's data isolated to a per-app subdirectory of RootDirectory. When set,
+	// the tier is durable and the control plane injects the volume + mount point
+	// into each app's per-app task-definition revision.
+	S3Files FargateS3FilesConfig
 
 	// SecretsNamePrefix, when non-empty, enables routing apps' secret env vars
 	// through AWS Secrets Manager (referenced by ARN from a per-app task-def
@@ -579,6 +585,41 @@ type FargateRuntimeConfig struct {
 	// meaningful when SecretsNamePrefix is set.
 	SecretsKMSKeyID string
 }
+
+// FargateS3FilesConfig configures the managed Amazon S3 Files durable-data
+// backend for a Fargate tier. When FileSystemArn is set, the control plane
+// mounts the file system into every app's task and gives each app an isolated
+// per-app subdirectory of RootDirectory.
+type FargateS3FilesConfig struct {
+	// FileSystemArn is the ARN of the S3 Files file system to mount
+	// (arn:aws:s3files:<region>:<account>:file-system/fs-...). Setting it enables
+	// the backend and makes the tier durable.
+	FileSystemArn string
+
+	// RootDirectory is the file-system directory under which each app gets its
+	// own subdirectory (RootDirectory/<slug>), isolating apps from each other.
+	// Default "/". Ignored when AccessPointArn is set (the access point fixes the
+	// root and the operator owns isolation).
+	RootDirectory string
+
+	// AccessPointArn optionally pins the mount to an S3 Files access point, which
+	// enforces its own root directory and identity. When set, per-app RootDirectory
+	// isolation does not apply; the operator is responsible for isolation.
+	AccessPointArn string
+
+	// TransitEncryptionPort is the port for encrypted data between the ECS host
+	// and the file system. 0 lets ECS choose. Transit encryption is always on.
+	TransitEncryptionPort int
+
+	// MountPath is the absolute container path the volume is mounted at. It must
+	// equal the app's working directory + "/data" so the {data_dir} placeholder
+	// ("data", relative to the app cwd) resolves onto the mount. Default
+	// "/app/bundle/data" (the reference runner's bundle working directory).
+	MountPath string
+}
+
+// Configured reports whether the S3 Files backend is enabled for this tier.
+func (c FargateS3FilesConfig) Configured() bool { return c.FileSystemArn != "" }
 
 // AutoscaleConfig holds the global settings for the replica autoscale
 // controller. Autoscaling is opt-in per app; with no app opted in these values
@@ -862,7 +903,16 @@ type rawFargateRuntimeConfig struct {
 	ControlPlaneURL   string                  `yaml:"control_plane_url"`
 	BundleTokenTTL    string                  `yaml:"bundle_token_ttl"` // parsed as time.Duration
 	DurableData       bool                    `yaml:"durable_data"`
+	S3Files           rawFargateS3FilesConfig `yaml:"s3files"`
 	Secrets           rawFargateSecretsConfig `yaml:"secrets"`
+}
+
+type rawFargateS3FilesConfig struct {
+	FileSystemArn         string `yaml:"file_system_arn"`
+	RootDirectory         string `yaml:"root_directory"`
+	AccessPointArn        string `yaml:"access_point_arn"`
+	TransitEncryptionPort int    `yaml:"transit_encryption_port"`
+	MountPath             string `yaml:"mount_path"`
 }
 
 type rawFargateSecretsConfig struct {
@@ -1636,6 +1686,22 @@ func validateFargate(f FargateRuntimeConfig, tiers []TierConfig) error {
 			}
 		}
 	}
+
+	if f.S3Files.Configured() {
+		if !strings.Contains(f.S3Files.FileSystemArn, ":s3files:") ||
+			!strings.Contains(f.S3Files.FileSystemArn, ":file-system/") {
+			return fmt.Errorf("runtime.fargate.s3files.file_system_arn %q is not an S3 Files file-system ARN (arn:aws:s3files:<region>:<account>:file-system/fs-...)", f.S3Files.FileSystemArn)
+		}
+		if f.S3Files.AccessPointArn != "" && !strings.Contains(f.S3Files.AccessPointArn, ":access-point/") {
+			return fmt.Errorf("runtime.fargate.s3files.access_point_arn %q is not an S3 Files access-point ARN", f.S3Files.AccessPointArn)
+		}
+		if !strings.HasPrefix(f.S3Files.MountPath, "/") {
+			return fmt.Errorf("runtime.fargate.s3files.mount_path %q must be an absolute path (the app's working directory + \"/data\", e.g. /app/bundle/data)", f.S3Files.MountPath)
+		}
+		if f.S3Files.TransitEncryptionPort < 0 || f.S3Files.TransitEncryptionPort > 65535 {
+			return fmt.Errorf("runtime.fargate.s3files.transit_encryption_port %d is out of range (0 lets ECS choose; 1-65535 otherwise)", f.S3Files.TransitEncryptionPort)
+		}
+	}
 	return nil
 }
 
@@ -1742,8 +1808,24 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		DefaultCPUPercent: r.Fargate.DefaultCPUPercent,
 		ControlPlaneURL:   r.Fargate.ControlPlaneURL,
 		DurableData:       r.Fargate.DurableData,
+		S3Files: FargateS3FilesConfig{
+			FileSystemArn:         r.Fargate.S3Files.FileSystemArn,
+			RootDirectory:         r.Fargate.S3Files.RootDirectory,
+			AccessPointArn:        r.Fargate.S3Files.AccessPointArn,
+			TransitEncryptionPort: r.Fargate.S3Files.TransitEncryptionPort,
+			MountPath:             r.Fargate.S3Files.MountPath,
+		},
 		SecretsNamePrefix: r.Fargate.Secrets.NamePrefix,
 		SecretsKMSKeyID:   r.Fargate.Secrets.KMSKeyID,
+	}
+	// Apply S3 Files defaults only when the backend is configured.
+	if rc.Fargate.S3Files.Configured() {
+		if rc.Fargate.S3Files.RootDirectory == "" {
+			rc.Fargate.S3Files.RootDirectory = "/"
+		}
+		if rc.Fargate.S3Files.MountPath == "" {
+			rc.Fargate.S3Files.MountPath = "/app/bundle/data"
+		}
 	}
 	if r.Fargate.BundleTokenTTL != "" {
 		d, err := time.ParseDuration(r.Fargate.BundleTokenTTL)
