@@ -202,7 +202,7 @@ func multiWorkerColocationFixture(t *testing.T) (*Server, *db.App, *db.App, stri
 			t.Fatalf("register worker %q: %v", addr, err)
 		}
 		// A worker is routable only after its first heartbeat (Register -> joining).
-		if err := reg.Heartbeat(w.NodeID, addr); err != nil {
+		if _, _, err := reg.Heartbeat(w.NodeID, addr, 0); err != nil {
 			t.Fatalf("heartbeat worker %q: %v", addr, err)
 		}
 	}
@@ -347,7 +347,7 @@ func TestResolveColocation_RejectsMultipleWorkerTiers(t *testing.T) {
 			t.Fatalf("register worker %q: %v", rp.addr, err)
 		}
 		// A worker is routable only after its first heartbeat (Register -> joining).
-		if err := reg.Heartbeat(w.NodeID, rp.addr); err != nil {
+		if _, _, err := reg.Heartbeat(w.NodeID, rp.addr, 0); err != nil {
 			t.Fatalf("heartbeat worker %q: %v", rp.addr, err)
 		}
 	}
@@ -437,7 +437,7 @@ func TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource(t *testing.
 			t.Fatalf("register worker %q: %v", addr, err)
 		}
 		// A worker is routable only after its first heartbeat (Register -> joining).
-		if err := reg.Heartbeat(w.NodeID, addr); err != nil {
+		if _, _, err := reg.Heartbeat(w.NodeID, addr, 0); err != nil {
 			t.Fatalf("heartbeat worker %q: %v", addr, err)
 		}
 	}
@@ -531,7 +531,7 @@ func TestMaybeRestartForChange_RejectsInfeasibleColocationBeforeTeardown(t *test
 			t.Fatalf("register worker %q: %v", addr, err)
 		}
 		// A worker is routable only after its first heartbeat (Register -> joining).
-		if err := reg.Heartbeat(w.NodeID, addr); err != nil {
+		if _, _, err := reg.Heartbeat(w.NodeID, addr, 0); err != nil {
 			t.Fatalf("heartbeat worker %q: %v", addr, err)
 		}
 	}

@@ -63,7 +63,7 @@ func TestAppsAPI_GetDerivesWorkerUnavailableReason(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 	// A worker is healthy/routable only after its first heartbeat (Register -> joining).
-	if err := reg.Heartbeat(w1.NodeID, "fp"); err != nil {
+	if _, _, err := reg.Heartbeat(w1.NodeID, "fp", 0); err != nil {
 		t.Fatalf("heartbeat worker: %v", err)
 	}
 	if r := get(); r.Reason != "" {

@@ -76,7 +76,7 @@ func TestRegistryHeartbeatRefusesRevokedWorker(t *testing.T) {
 		t.Fatalf("revoke: %v", err)
 	}
 
-	if err := reg.Heartbeat(node.NodeID, "bb"); err == nil {
+	if _, _, err := reg.Heartbeat(node.NodeID, "bb", 0); err == nil {
 		t.Fatal("heartbeat from a revoked worker was accepted")
 	}
 	if _, ok := reg.WorkerForTier("burst"); ok {
@@ -111,7 +111,7 @@ func TestRegistryRevokeRaceWithHeartbeat(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 20; i++ {
-				_ = reg.Heartbeat(node.NodeID, "bb")
+				_, _, _ = reg.Heartbeat(node.NodeID, "bb", 0)
 			}
 		}()
 		go func() {
