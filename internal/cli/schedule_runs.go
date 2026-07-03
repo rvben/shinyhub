@@ -28,6 +28,12 @@ func newScheduleRunsCmd() *cobra.Command {
 		}
 		// Run history is paginated server-side (it can be large); the CLI forwards
 		// --limit/--offset and renders the returned page with an accurate total.
+		// Default to the server's max page (200) so an unflagged `runs` shows the
+		// same history it did before server-side pagination rather than dropping to
+		// the server's default page of 50.
+		if f.limit == 0 {
+			f.limit = 200
+		}
 		path := fmt.Sprintf("/api/apps/%s/schedules/%d/runs", slug, id)
 		runs, total, err := getPaginatedList(cfg, "list schedule runs", path, f)
 		if err != nil {

@@ -50,6 +50,12 @@ func TestScheduleRuns_Table(t *testing.T) {
 	if !strings.Contains(out, "164ms") {
 		t.Errorf("expected computed duration ~164ms:\n%s", out)
 	}
+	// The command must request the server's max page (limit=200) by default so it
+	// does not silently drop to the server's default page of 50; the server caps
+	// run history at 200 per request regardless.
+	if !strings.Contains((*reqs)[1].Query, "limit=200") {
+		t.Errorf("default runs fetch must send limit=200, got query %q", (*reqs)[1].Query)
+	}
 }
 
 func TestScheduleRuns_JSONEnvelope(t *testing.T) {
