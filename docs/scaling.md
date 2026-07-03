@@ -275,6 +275,33 @@ enforced (the app runs uncapped) and a warning is logged; the Configuration
 tab shows whether enforcement is active. CPU enforcement additionally needs
 `Delegate=cpu`; memory works with `Delegate=memory` alone.
 
+### Native mode under systemd requires `Delegate=`
+
+When ShinyHub runs natively (`runtime.mode: native`) under a systemd unit with a
+non-root `User=`, the unit **must** set `Delegate=cpu memory` (or `Delegate=yes`).
+This is what makes systemd hand the service its own writable cgroup v2 subtree.
+Two native features build on that subtree:
+
+- **Per-app resource limits** (`memory_limit_mb` / `cpu_quota_percent`), above.
+- **Warm-wake** hibernation (freeze + memory reclaim instead of a cold stop).
+
+Without `Delegate=`, the service's cgroup directory stays root-owned, so the
+non-root service user cannot create the child cgroups ShinyHub needs. On the
+first app start you will see:
+
+```
+WARN native: cgroup base unavailable; warm-wake and resource limits disabled
+     err: mkdir /sys/fs/cgroup/system.slice/shinyhub.service/_supervisor: permission denied; add "Delegate=cpu memory" ...
+```
+
+ShinyHub then **degrades gracefully**: apps still start and serve traffic
+normally (single-process, uncapped, hibernating via a cold stop instead of a
+warm freeze). Only warm-wake and per-app limits are off. The shipped unit
+[`deploy/systemd/shinyhub.service`](../deploy/systemd/shinyhub.service) already
+includes the `Delegate=` line; if you hand-write or template your own unit, copy
+it across. After editing the unit run `systemctl daemon-reload` and restart the
+service.
+
 ### Hibernation
 
 Hibernated apps restart on demand. The replica count and cap apply
