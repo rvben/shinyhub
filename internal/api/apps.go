@@ -258,6 +258,17 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// connectivity surfaces the app's realtime (WebSocket) health so the detail
+	// page can warn when an app is serving pages but its WebSocket never connects
+	// (typically a reverse proxy blocking the upgrade). Only meaningful while the
+	// app is running; omitted otherwise so a stopped/hibernated app shows nothing.
+	if s.proxy != nil && app.Status == "running" {
+		everConnected, servingWithoutWS := s.proxy.ConnectivityHealth(slug)
+		envelope["connectivity"] = map[string]any{
+			"websocket_ok":       everConnected,
+			"serving_without_ws": servingWithoutWS,
+		}
+	}
 	asEvent, asFound, asErr := s.store.LatestAutoscaleEvent(slug)
 	if asErr != nil {
 		slog.Warn("autoscale status query", "err", asErr)
