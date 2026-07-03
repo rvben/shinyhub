@@ -14,6 +14,15 @@ import (
 // (which drives the "showing X of Y" hint). action names the operation for
 // error messages (e.g. "list deployments").
 func getPaginatedList(cfg *cliConfig, action, path string, f *listFlags) ([]map[string]any, int, error) {
+	// Reject invalid pagination before issuing the request, mirroring the
+	// client-side sliceAndProject checks so switching to server-side pagination
+	// does not silently drop input validation.
+	if f.offset < 0 {
+		return nil, 0, validationErr("--offset must be >= 0", "")
+	}
+	if f.limit < 0 {
+		return nil, 0, validationErr("--limit must be >= 0", "")
+	}
 	url := cfg.Host + path + paginationQuery(path, f)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
