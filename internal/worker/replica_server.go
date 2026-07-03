@@ -492,6 +492,32 @@ func (s *replicaServer) RebuildFromContainers() error {
 	return nil
 }
 
+// StopAll signals every tracked replica to terminate and drops it from the
+// tracking maps, so the worker stops serving /v1/data/{token} for any of them.
+// The agent calls this when the control plane fences it (it was reaped while
+// partitioned and its replicas were reassigned), converging to single-owner.
+//
+// The maps are cleared under the lock first, before any runtime call, so a
+// concurrent data-plane request sees the replica as gone even if the signal
+// itself is slow or fails. Signalling runs outside the lock: a Signal error
+// (e.g. the runtime is already gone) is logged and does not abort the loop.
+func (s *replicaServer) StopAll() {
+	s.mu.Lock()
+	recs := make([]*replicaRecord, 0, len(s.byContainer))
+	for _, rec := range s.byContainer {
+		recs = append(recs, rec)
+	}
+	s.byContainer = make(map[string]*replicaRecord)
+	s.byToken = make(map[string]*replicaRecord)
+	s.mu.Unlock()
+
+	for _, rec := range recs {
+		if err := s.runtime.Signal(rec.handle, syscall.SIGKILL); err != nil {
+			slog.Warn("stop-all: signal replica failed", "container", rec.containerID, "err", err)
+		}
+	}
+}
+
 // Routes registers the replica-control and data-plane endpoints on r. The agent
 // mounts this on its mTLS listener.
 func (s *replicaServer) Routes(r chi.Router) {
