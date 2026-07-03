@@ -840,7 +840,8 @@ func TestAppsDelete_PromptGoesToStderr(t *testing.T) {
 // verbatim inside the tableFn closure in runAppsDeployments.
 func TestAppsDeployments(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
-	setResp(200, `[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}]`)
+	// The server returns the standard {items,total,limit,offset} list envelope.
+	setResp(200, `{"items":[{"id":3,"version":"1735689600000","status":"active","created_at":"2026-01-01T00:00:00Z"},{"id":1,"version":"1735600000000","status":"active","created_at":"2025-12-31T00:00:00Z"}],"total":2,"limit":0,"offset":0}`)
 
 	out, err := execCLI(t, "apps", "deployments", "demo")
 	if err != nil {

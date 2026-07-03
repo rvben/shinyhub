@@ -2687,7 +2687,8 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, deployments)
+	limit, offset := parsePagination(r)
+	writeList(w, deployments, limit, offset, nil)
 }
 
 // writeQuotaExceeded returns a 413 with structured detail so callers can

@@ -1610,25 +1610,11 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *listFlags) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/deployments", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	deployments, total, err := getPaginatedList(cfg, "list deployments", "/api/apps/"+slug+"/deployments", f)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "list deployments", resp, out)
-	}
-	var deployments []map[string]any
-	if err := json.Unmarshal(out, &deployments); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return renderList(cmd, f, deployments, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, f, deployments, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintln(w, "No deployments.")
 			return

@@ -42,6 +42,17 @@ func newManagerTestServer(t *testing.T) (*api.Server, *db.Store, *process.Manage
 	return srv, store, mgr
 }
 
+// decodeEnvelope reads a recorder body into the standard list envelope
+// {items,total,limit,offset}. Shared by the external (api_test) list tests.
+func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var env map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode envelope: %v (body=%q)", err, rec.Body.String())
+	}
+	return env
+}
+
 func authedRequest(t *testing.T, method, path string, body []byte, token string) *http.Request {
 	t.Helper()
 	var req *http.Request
@@ -726,13 +737,17 @@ func TestListDeployments(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var deployments []map[string]any
-	json.NewDecoder(rec.Body).Decode(&deployments)
+	env := decodeEnvelope(t, rec)
+	deployments, _ := env["items"].([]any)
 	if len(deployments) != 1 {
-		t.Fatalf("expected 1 deployment, got %d", len(deployments))
+		t.Fatalf("expected 1 deployment, got %d (env=%v)", len(deployments), env)
 	}
-	if deployments[0]["version"] != "v1" {
-		t.Errorf("version = %v, want v1", deployments[0]["version"])
+	if env["total"] != float64(1) {
+		t.Errorf("total = %v, want 1", env["total"])
+	}
+	first := deployments[0].(map[string]any)
+	if first["version"] != "v1" {
+		t.Errorf("version = %v, want v1", first["version"])
 	}
 }
 
@@ -767,10 +782,14 @@ func TestDeploymentReleaseNumbers(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deployments: %d %s", rec.Code, rec.Body.String())
 	}
-	var deps []map[string]any
-	json.NewDecoder(rec.Body).Decode(&deps)
-	if len(deps) != 3 {
-		t.Fatalf("got %d deployments, want 3", len(deps))
+	depsEnv := decodeEnvelope(t, rec)
+	depsAny, _ := depsEnv["items"].([]any)
+	if len(depsAny) != 3 {
+		t.Fatalf("got %d deployments, want 3", len(depsAny))
+	}
+	deps := make([]map[string]any, len(depsAny))
+	for i, d := range depsAny {
+		deps[i] = d.(map[string]any)
 	}
 	if deps[0]["release_number"] != float64(2) {
 		t.Errorf("newest (v2) release_number = %v, want 2", deps[0]["release_number"])
@@ -869,9 +888,55 @@ func TestListDeployments_EmptySlice(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// Must be [] not null.
-	if rec.Body.String() != "[]\n" {
-		t.Errorf("expected empty JSON array, got %q", rec.Body.String())
+	// Empty list still uses the standard envelope with items:[] (never null).
+	env := decodeEnvelope(t, rec)
+	items, ok := env["items"].([]any)
+	if !ok {
+		t.Fatalf("items must be [] not null; body=%q", rec.Body.String())
+	}
+	if len(items) != 0 {
+		t.Errorf("expected empty items, got %d", len(items))
+	}
+	if env["total"] != float64(0) {
+		t.Errorf("total = %v, want 0", env["total"])
+	}
+}
+
+// TestListDeployments_ServerPagination verifies the deployments endpoint honours
+// ?limit=&offset= server-side and reports the full total alongside the page.
+func TestListDeployments_ServerPagination(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := auth.HashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
+	app, _ := store.GetAppBySlug("myapp")
+
+	for i := 0; i < 5; i++ {
+		if _, err := store.DB().Exec(
+			`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?)`,
+			app.ID, fmt.Sprintf("v%d", i), fmt.Sprintf("/tmp/v%d", i), "succeeded"); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/deployments?limit=2&offset=1", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	env := decodeEnvelope(t, rec)
+	items, _ := env["items"].([]any)
+	if len(items) != 2 {
+		t.Errorf("page size = %d, want 2", len(items))
+	}
+	if env["total"] != float64(5) {
+		t.Errorf("total = %v, want 5 (full set, not page)", env["total"])
+	}
+	if env["limit"] != float64(2) || env["offset"] != float64(1) {
+		t.Errorf("limit/offset = %v/%v, want 2/1", env["limit"], env["offset"])
 	}
 }
 

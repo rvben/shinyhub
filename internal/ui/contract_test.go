@@ -503,9 +503,18 @@ func TestRollbackHandlerBoundOnce(t *testing.T) {
 	}
 }
 
+// TestDeploymentsLoadReadsListEnvelope pins that the deployments tab reads the
+// standard {items,...} list envelope (handleListDeployments emits it via
+// writeList). Reading the raw response as an array would silently render an
+// empty history once the server wraps the list.
+func TestDeploymentsLoadReadsListEnvelope(t *testing.T) {
+	assertContains(t, "views/app-detail.js", "body.items",
+		"app-detail.js deployments load() must read the {items,...} envelope (body.items), not the raw response body")
+}
+
 // TestDeploymentsLoadDoesNotMask404AsEmpty guards the deployments tab error
 // surface. The server (internal/api/apps.go handleListDeployments) returns
-// `200 []` for an existing app with no deployments, and only emits 404 when
+// `200 {items:[]}` for an existing app with no deployments, and only emits 404 when
 // the app is missing or the user has no view access (via requireViewApp).
 // Treating any 404 as "No deployments yet" therefore hides real authorization
 // or routing errors as a benign empty state. The buggy block was
