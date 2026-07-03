@@ -279,9 +279,12 @@ func readoptFromDisk(cfg Config, agentDir string, now time.Time) (*Agent, bool, 
 
 	// Re-adopting a persisted cert has no RegisterResponse to source an
 	// incarnation from (the process restarted; nothing was just registered), so
-	// this seeds 0, the legacy-grace value the control plane never fences.
-	// Persisting the assigned incarnation across a worker-process restart so a
-	// re-adopt can seed its real value is a documented out-of-scope follow-up.
+	// this always seeds 0 here - on any worker-process restart that re-adopts a
+	// persisted cert, not only a cross-version upgrade. A restarted-and-re-adopted
+	// worker is treated as grace: 0 is never fenced, even if the control plane
+	// reaped and reassigned its replicas while it was down. Reconciling a
+	// worker-process restart (and its container re-adopting those replicas) with
+	// the fencing incarnation is a documented out-of-scope follow-up.
 	ag, err := buildAgent(cfg, nodeID, keyPEM, csrPEM, certPEM, caBundle, 0)
 	if err != nil {
 		return nil, false, err
