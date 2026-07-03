@@ -306,6 +306,15 @@ type Proxy struct {
 	// distinguish "process started" from "actually accepting WS connections"
 	// - the latter is what end users care about for Shiny/Streamlit apps.
 	wsReady map[string]struct{}
+	// firstServedAt records, per slug, the first time real user traffic was
+	// proxied to a live replica since the last lifecycle reset. Paired with
+	// wsReady it lets ConnectivityHealth detect an app that serves pages but whose
+	// realtime WebSocket never connects (typically a reverse proxy blocking the
+	// upgrade). Reset on deregister/hibernate and once a WebSocket connects.
+	firstServedAt map[string]time.Time
+	// wsWarned guards the one-shot "serving without WebSocket" ERROR log so a
+	// misconfigured proxy logs once per app lifecycle, not once per request.
+	wsWarned map[string]struct{}
 
 	// rejects is the in-memory rolling rejection rollup surfaced by apps show.
 	rejects *rejectCounter
@@ -379,12 +388,14 @@ func New() *Proxy {
 	// opt-in, wired by main.go for production, so tests and embedders are not
 	// implicitly slowed by it (same pattern as SetWakeTrigger).
 	return &Proxy{
-		pools:    make(map[string]*backendPool),
-		lastSeen: make(map[string]time.Time),
-		wsReady:  make(map[string]struct{}),
-		rejects:  newRejectCounter(),
-		conns:    newConnTracker(),
-		clients:  make(map[string]map[string]*clientSlot),
+		pools:         make(map[string]*backendPool),
+		lastSeen:      make(map[string]time.Time),
+		wsReady:       make(map[string]struct{}),
+		firstServedAt: make(map[string]time.Time),
+		wsWarned:      make(map[string]struct{}),
+		rejects:       newRejectCounter(),
+		conns:         newConnTracker(),
+		clients:       make(map[string]map[string]*clientSlot),
 	}
 }
 
@@ -780,11 +791,29 @@ func (p *Proxy) SetSlugExists(fn func(string) (bool, error)) {
 	p.mu.Unlock()
 }
 
-// RecordActivity marks slug as seen at the current time.
+// RecordActivity marks slug as seen at the current time. It also records the
+// first time real traffic was served (firstServedAt) and, once an app has been
+// serving longer than wsWarnGrace without any WebSocket connecting, logs a
+// one-shot ERROR: the realtime channel is not getting through, which usually
+// means a reverse proxy is not forwarding the WebSocket upgrade.
 func (p *Proxy) RecordActivity(slug string) {
 	p.seenMu.Lock()
-	p.lastSeen[slug] = time.Now()
+	now := time.Now()
+	p.lastSeen[slug] = now
+	var warn bool
+	if _, ready := p.wsReady[slug]; !ready {
+		if first, ok := p.firstServedAt[slug]; !ok {
+			p.firstServedAt[slug] = now
+		} else if _, warned := p.wsWarned[slug]; !warned && now.Sub(first) > wsWarnGrace {
+			p.wsWarned[slug] = struct{}{}
+			warn = true
+		}
+	}
 	p.seenMu.Unlock()
+	if warn {
+		slog.Error("proxy: app is serving HTTP but no WebSocket has connected; interactions will fail - the reverse proxy may be blocking WebSocket upgrades (see docs/reverse-proxy/caddy.md)",
+			"slug", slug, "grace", wsWarnGrace)
+	}
 }
 
 // LastSeen returns the last time a request was successfully proxied for slug.
@@ -803,6 +832,11 @@ func (p *Proxy) LastSeen(slug string) time.Time {
 func (p *Proxy) MarkWSReady(slug string) {
 	p.seenMu.Lock()
 	p.wsReady[slug] = struct{}{}
+	// A completed handshake ends the "serving without WebSocket" window for this
+	// lifecycle: drop the tracking so the warning cannot re-trip until the pool is
+	// reset (deregister/hibernate).
+	delete(p.firstServedAt, slug)
+	delete(p.wsWarned, slug)
 	p.seenMu.Unlock()
 }
 
@@ -813,6 +847,37 @@ func (p *Proxy) IsWSReady(slug string) bool {
 	defer p.seenMu.RUnlock()
 	_, ok := p.wsReady[slug]
 	return ok
+}
+
+// wsWarnGrace is how long an app may serve real HTTP traffic without any
+// completed WebSocket handshake before the proxy treats the realtime channel as
+// broken. A Shiny/Streamlit client opens its WebSocket within a second or two of
+// loading, so a sustained gap means the upgrade is not getting through - most
+// commonly a reverse proxy that does not forward WebSocket upgrades.
+const wsWarnGrace = 20 * time.Second
+
+// ConnectivityHealth reports the realtime-connection health for slug since its
+// pool was last (re)registered:
+//
+//   - everConnected is true once at least one WebSocket handshake has completed.
+//   - servingWithoutWS is true when the app has served real traffic for longer
+//     than wsWarnGrace but no WebSocket has ever connected - the signature of a
+//     reverse proxy blocking the WebSocket upgrade, which leaves the page
+//     rendering while every interaction fails.
+//
+// The two are mutually exclusive; a never-served or still-within-grace app
+// reports (false, false). The app-detail envelope combines this with the app's
+// running state to surface an operator warning.
+func (p *Proxy) ConnectivityHealth(slug string) (everConnected, servingWithoutWS bool) {
+	p.seenMu.RLock()
+	defer p.seenMu.RUnlock()
+	if _, ok := p.wsReady[slug]; ok {
+		return true, false
+	}
+	if first, ok := p.firstServedAt[slug]; ok && time.Since(first) > wsWarnGrace {
+		return false, true
+	}
+	return false, false
 }
 
 // MarkSynced marks the proxy as having completed at least one pool
@@ -852,10 +917,13 @@ func (p *Proxy) SetOnMissSync(fn func(slug string)) {
 	p.onMissSync.Store(&f)
 }
 
-// clearWSReadyLocked drops any cached readiness for slug. Caller must hold
-// p.seenMu for writing.
+// clearWSReadyLocked drops any cached readiness for slug and resets the
+// serving-without-WebSocket tracking, so a re-woken or re-registered pool gets a
+// fresh detection window. Caller must hold p.seenMu for writing.
 func (p *Proxy) clearWSReadyLocked(slug string) {
 	delete(p.wsReady, slug)
+	delete(p.firstServedAt, slug)
+	delete(p.wsWarned, slug)
 }
 
 // clearWSReady drops any cached readiness for slug.

@@ -46,6 +46,22 @@ func TestAppDetailAccessResolverWired(t *testing.T) {
 		"app-detail.js must build the tab strip visibility/href/roving-tabindex model via tabViewModels")
 }
 
+// TestConnectivityBannerWired pins the API/frontend contract for the WebSocket
+// health warning. handleGetApp emits envelope.connectivity.serving_without_ws
+// (see internal/api/apps.go) when a running app is serving pages but no
+// WebSocket has connected; the pure, unit-tested views/connectivity-banner.js
+// (jstests/connectivity-banner.test.js) renders the amber warning from it, and
+// app-detail.js must import and call it. This keeps the envelope key, the
+// consumer, and the wiring from drifting apart into a silently-undefined field.
+func TestConnectivityBannerWired(t *testing.T) {
+	assertContains(t, "views/connectivity-banner.js", "connectivity",
+		"connectivity-banner.js must read envelope.connectivity (emitted by handleGetApp in internal/api/apps.go)")
+	assertContains(t, "views/connectivity-banner.js", "serving_without_ws",
+		"connectivity-banner.js must key on connectivity.serving_without_ws to decide whether to warn")
+	assertContains(t, "views/app-detail.js", "connectivityBanner",
+		"app-detail.js must call connectivityBanner so a WebSocket-blocked app surfaces a warning on the Overview")
+}
+
 // TestThemeWiring guards the light/dark theme feature. The pure resolver is
 // unit-tested (jstests/theme.test.js); the wiring lives in the app.js IIFE and
 // index.html, so pin the load-bearing pieces by string search:

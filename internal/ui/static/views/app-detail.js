@@ -16,6 +16,7 @@ import { statusPillClass } from '/static/views/stat-format.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
 import { crashBanner } from '/static/views/crash-banner.js';
+import { connectivityBanner } from '/static/views/connectivity-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
 import { createTablistNav } from '/static/views/tablist-keys.js';
 import { TAB_ROUTES, resolveDetailAccess, tabViewModels } from '/static/views/app-detail-nav.js';
@@ -521,6 +522,13 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     onRestart: () => ctx.restart(app.slug),
   });
   if (crashEl) panel.insertBefore(crashEl, panel.firstChild);
+
+  // A running app that is serving pages but whose WebSocket never connects shows
+  // an amber connectivity warning above the overview cards, so an operator sees
+  // "your reverse proxy is likely blocking WebSockets" instead of users silently
+  // hitting "Shiny disconnected". Reads envelope.connectivity.serving_without_ws.
+  const connEl = connectivityBanner(document, envelope || {});
+  if (connEl) panel.insertBefore(connEl, panel.firstChild);
 
   // Seed the Replicas list from /api/apps/:slug's replicas_status so the
   // panel shows index + status immediately. Sessions / CPU / RAM stay as

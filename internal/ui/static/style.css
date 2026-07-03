@@ -989,6 +989,29 @@ main {
 }
 .crash-banner-restart { margin-top: 4px; }
 
+/* Connectivity banner: an amber warning when an app serves pages but its
+   WebSocket never connects (usually a reverse proxy blocking the upgrade). Same
+   rhythm as the crash banner but amber with a heavier left accent, so it reads
+   as "attention", not "dead". */
+.conn-banner {
+  background: var(--yellow-bg);
+  border: 1px solid var(--yellow);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.conn-banner-title { color: var(--yellow); font-weight: 600; margin-bottom: 8px; }
+.conn-banner-body {
+  color: var(--text);
+  font-size: 0.9em;
+  line-height: 1.5;
+  margin: 0 0 12px;
+  max-width: 60ch;
+}
+.conn-banner-link { color: var(--yellow); font-weight: 500; text-decoration: none; }
+.conn-banner-link:hover { text-decoration: underline; }
+
 /* Deployment status */
 .badge-active   { background: var(--accent-glow); color: var(--cyan-bright); }
 .badge-success  { background: var(--green-bg);    color: var(--green); }
