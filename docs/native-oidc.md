@@ -148,7 +148,8 @@ Cookie attributes, secure by default:
 - **`Secure`** - set whenever the request is HTTPS. Behind a TLS-terminating
   proxy this is decided from `X-Forwarded-Proto`, honored only from a configured
   `trusted_proxies` peer (see below).
-- **Lifetime** - the JWT expires after 1 hour and slides on activity, capped by a
+- **Lifetime** - the JWT expires after 1 hour. It is renewed (slid forward) when
+  the dashboard polls `/api/auth/me` with a still-valid session, capped by a
   12-hour absolute session age, after which the user must re-authenticate.
 
 **Logout** (`POST /api/auth/logout`) ends the ShinyHub session: it revokes the
