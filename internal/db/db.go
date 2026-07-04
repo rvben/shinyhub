@@ -241,6 +241,11 @@ const legacyBaselineVersion = 12
 // currently-embedded versions are recorded as already applied without being
 // re-executed. A genuinely fresh database has no core tables and runs every
 // migration from scratch.
+// migrateAdvisoryLockKey is the fixed Postgres advisory-lock key that serializes
+// Migrate() across control-plane instances during an HA rolling upgrade. It must
+// be identical on every instance; the value itself is arbitrary.
+const migrateAdvisoryLockKey int64 = 4017538291
+
 func (s *Store) Migrate() error {
 	defer s.timed("Migrate")()
 	migrations, err := loadMigrations(s.migrationsSubdir())
@@ -249,6 +254,31 @@ func (s *Store) Migrate() error {
 	}
 	if len(migrations) == 0 {
 		return fmt.Errorf("no embedded migrations found")
+	}
+
+	// On Postgres, serialize Migrate() across control-plane instances with a
+	// session advisory lock held for the whole migration (acquired before the
+	// applied-set is read, so a waiter sees the winner's completed migrations and
+	// skips them). Without it, two new-version instances booting in the same HA
+	// rolling-upgrade window race and one crashes on a duplicate-key violation.
+	// SQLite is single-node and serializes writes itself, so it needs no lock.
+	if s.IsPostgres() {
+		ctx := context.Background()
+		// A session advisory lock must be held on a single dedicated connection;
+		// the pool's per-call Exec could land on different connections. rawDB
+		// exposes the underlying pool; the native $1 placeholder is used directly
+		// (this branch only runs on Postgres, so no dialect rebind is needed).
+		conn, cerr := s.rawDB().Conn(ctx)
+		if cerr != nil {
+			return fmt.Errorf("migrate: acquire advisory-lock conn: %w", cerr)
+		}
+		defer conn.Close()
+		if _, lerr := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", migrateAdvisoryLockKey); lerr != nil {
+			return fmt.Errorf("migrate: advisory lock: %w", lerr)
+		}
+		defer func() {
+			_, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrateAdvisoryLockKey)
+		}()
 	}
 
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
