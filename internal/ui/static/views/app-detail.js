@@ -87,7 +87,11 @@ export function mountAppDetail(ctx) {
     const resp = await ctx.api(`/api/apps/${slug}`);
     if (resp.status === 404) { ctx.navigate('/'); return {}; }
     if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
-    if (!resp.ok) { return {}; }
+    // A silent `return {}` here used to leave the main panel totally blank with
+    // no error or retry (a 500/502 read as a successful, empty mount). Throw so
+    // the router's error boundary (showRouteError in app.js) catches it and
+    // reveals #route-error-view with a Reload button instead.
+    if (!resp.ok) { throw new Error(`Failed to load app (HTTP ${resp.status}).`); }
     // GET /api/apps/:slug returns a wrapped envelope; normalizeAppEnvelope folds
     // the envelope-level fields (can_manage, runtime_mode, resource_enforcement,
     // release_number/released_at/released_version) onto app and returns
@@ -341,7 +345,7 @@ async function renderDeployments(panel, app, ctx) {
       });
     } catch {
       btn.disabled = false;
-      alert('Rollback failed: network error.');
+      ctx.flashToast('Rollback failed: network error.', 'error');
       return;
     }
     if (r.status === 401) {
@@ -357,7 +361,7 @@ async function renderDeployments(panel, app, ctx) {
     btn.disabled = false;
     let msg = 'Rollback failed.';
     try { const j = await r.json(); if (j && j.error) msg = `Rollback failed: ${j.error}`; } catch { /* non-JSON */ }
-    alert(msg);
+    ctx.flashToast(msg, 'error');
   };
 
   async function load() {

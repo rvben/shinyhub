@@ -383,6 +383,17 @@ document.addEventListener('DOMContentLoaded', () => {
     return fetch(path, init);
   }
 
+  // errorMessage extracts the human-readable message from a failed API
+  // response. Every handler writes {"error": "..."} (see internal/api/helpers.go
+  // writeError), so parse that instead of showing the raw JSON body in a toast.
+  async function errorMessage(resp, fallback = 'Request failed') {
+    try {
+      const j = await resp.json();
+      if (j && j.error) return j.error;
+    } catch { /* non-JSON body */ }
+    return fallback;
+  }
+
   function renderEmptyStateCopy() {
     if (state.canCreateApps) {
       emptyStateEyebrow.textContent = 'Ready when you are';
@@ -506,7 +517,7 @@ document.addEventListener('DOMContentLoaded', () => {
           kebabBtn.setAttribute('aria-label', `More actions for ${app.name}`);
           const kebabList = kebab.querySelector('.kebab-list');
           wireKebab(kebabBtn, kebabList, card);
-          kebabList.querySelector('[data-kebab="restart"]').addEventListener('click', () => restart(app.slug));
+          kebabList.querySelector('[data-kebab="restart"]').addEventListener('click', (e) => restart(app.slug, e.currentTarget));
           actions.appendChild(kebab);
         }
       }
@@ -740,8 +751,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function handleUnauthorized() {
+    // A 401 wipes all client state unconditionally. If the operator had unsaved
+    // settings edits in flight, silently discarding them with no explanation
+    // looks like data loss; check for dirty edits before the logout clears
+    // state, and surface a clear message so they know to redo the edit after
+    // logging in.
+    const hadUnsavedChanges = anySettingsDirty();
     showLoggedOut();
-    setError(loginError, '');
+    setError(loginError, hadUnsavedChanges
+      ? 'Your session expired and you were logged out. Unsaved changes were lost - please log in again.'
+      : '');
   }
 
   async function loadFleetHealth() {
@@ -1252,7 +1271,7 @@ document.addEventListener('DOMContentLoaded', () => {
         delBtn.disabled = true;
         if (caps.deleteHint) delBtn.title = caps.deleteHint;
       } else {
-        delBtn.addEventListener('click', () => deleteUser(u.id, u.username));
+        delBtn.addEventListener('click', () => deleteUser(u.id, u.username, delBtn));
       }
       actions.appendChild(delBtn);
 
@@ -1289,14 +1308,17 @@ document.addEventListener('DOMContentLoaded', () => {
     loadUsers();
   }
 
-  async function deleteUser(id, username) {
+  async function deleteUser(id, username, btn) {
     if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    if (btn) btn.disabled = true;
     let resp;
     try {
       resp = await api(`/api/users/${id}`, {method: 'DELETE'});
     } catch {
       setError(usersError, 'Network error');
       return;
+    } finally {
+      if (btn) btn.disabled = false;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(usersError, `Failed to delete ${username}`); return; }
@@ -1386,6 +1408,8 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(newUserError, 'Username and 8+ char password are required');
       return;
     }
+    const submitBtn = newUserForm.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
     let resp;
     try {
       resp = await api('/api/users', {
@@ -1395,6 +1419,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       setError(newUserError, 'Network error');
       return;
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
@@ -1488,14 +1514,17 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTokens(); // refresh the list behind the modal
   }
 
-  async function revokeToken(id, name) {
+  async function revokeToken(id, name, btn) {
     if (!confirm(`Revoke token "${name}"? Any CLI or app using it will stop working immediately.`)) return;
+    if (btn) btn.disabled = true;
     let resp;
     try {
       resp = await api(`/api/tokens/${id}`, { method: 'DELETE' });
     } catch {
       setError(tokensError, 'Network error');
       return;
+    } finally {
+      if (btn) btn.disabled = false;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(tokensError, `Failed to revoke ${name}`); return; }
@@ -1503,8 +1532,9 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTokens();
   }
 
-  async function restart(slug) {
+  async function restart(slug, btn) {
     setError(appError, '');
+    if (btn) btn.disabled = true;
 
     let response;
     try {
@@ -1512,6 +1542,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       setError(appError, 'Network error');
       return;
+    } finally {
+      if (btn) btn.disabled = false;
     }
 
     if (response.status === 401) {
@@ -2899,7 +2931,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   if (tokensList) tokensList.addEventListener('click', e => {
     const btn = e.target.closest('button[data-token-id]');
-    if (btn) revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'));
+    if (btn) revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn);
   });
   if (profileTokensLink) profileTokensLink.addEventListener('click', () => {
     // The data-nav link navigates to /tokens; close the profile modal behind it.
@@ -3013,6 +3045,10 @@ document.addEventListener('DOMContentLoaded', () => {
         closeResetPasswordModal();
       } else if (scheduleModal && !scheduleModal.hidden) {
         closeScheduleForm();
+      } else if (newTokenModal && !newTokenModal.hidden) {
+        // Without this branch, Escape left the modal open after the secret
+        // token value was already revealed in the DOM once (tokenRevealValue).
+        closeNewTokenModal();
       } else if (!document.getElementById('log-pane').hidden) {
         closeLogs();
       }
@@ -3808,42 +3844,52 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     setError(loginError, '');
 
-    let response;
+    const submitBtn = loginForm.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
     try {
-      response = await api('/api/auth/session', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          username: usernameInput.value,
-          password: passwordInput.value,
-        }),
-      });
-    } catch {
-      setError(loginError, 'Network error');
-      return;
-    }
+      let response;
+      try {
+        response = await api('/api/auth/session', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            username: usernameInput.value,
+            password: passwordInput.value,
+          }),
+        });
+      } catch {
+        setError(loginError, 'Network error');
+        return;
+      }
 
-    if (response.status === 401) {
-      setError(loginError, 'Invalid credentials');
-      return;
-    }
-    if (!response.ok) {
-      setError(loginError, 'Login failed');
-      return;
-    }
+      if (response.status === 401) {
+        setError(loginError, 'Invalid credentials');
+        return;
+      }
+      if (response.status === 429) {
+        setError(loginError, 'Too many attempts - try again in a moment.');
+        return;
+      }
+      if (!response.ok) {
+        setError(loginError, 'Login failed');
+        return;
+      }
 
-    const payload = await response.json();
-    showLoggedIn(payload);
-    passwordInput.value = '';
-    // Mirror the bootstrap path: await router.start() so state.apps is
-    // populated before handleDeployHash consumes the persisted slug.
-    // Without the await + handleDeployHash call here, a logged-out user
-    // who landed on /#deploy=<slug> would persist the slug, log in, and
-    // then never get the deploy modal (the bootstrap path doesn't run on
-    // an interactive login).
-    await router.start();
-    consumeNextParam();
-    await handleDeployHash();
+      const payload = await response.json();
+      showLoggedIn(payload);
+      passwordInput.value = '';
+      // Mirror the bootstrap path: await router.start() so state.apps is
+      // populated before handleDeployHash consumes the persisted slug.
+      // Without the await + handleDeployHash call here, a logged-out user
+      // who landed on /#deploy=<slug> would persist the slug, log in, and
+      // then never get the deploy modal (the bootstrap path doesn't run on
+      // an interactive login).
+      await router.start();
+      consumeNextParam();
+      await handleDeployHash();
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
   });
 
   refreshButton.addEventListener('click', async () => {
@@ -4012,6 +4058,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
     },
+    // A failed background metrics poll used to fail silently — no onError was
+    // wired, so the CPU/RAM line just stopped updating with no visible signal.
+    // A 401 specifically means the session died while the dashboard was open
+    // in the background; log the user out instead of polling a dead session
+    // forever. metrics-controller.js reports a non-2xx as `Error('status N')`.
+    onError: (slug, err) => {
+      if (err && /status 401/.test(err.message)) {
+        handleUnauthorized();
+      }
+    },
   });
 
   function renderReplicasPanel(m) {
@@ -4167,6 +4223,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // restart triggers POST /api/apps/:slug/restart (the same action as the
     // header kebab), exposed so the crash banner's Restart button can reuse it.
     restart: (slug) => restart(slug),
+    // flashToast lets app-detail.js report failures (e.g. a failed rollback)
+    // through the same accessible, auto-dismissing toast used everywhere else
+    // in the dashboard instead of a blocking window.alert().
+    flashToast,
   };
 
   const appDetailMount = mountAppDetail({
@@ -4597,8 +4657,8 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.addEventListener('click', () => {
         const action = btn.dataset.action;
         const id = parseInt(btn.dataset.id, 10);
-        if (action === 'run') runScheduleNow(slug, id);
-        else if (action === 'delete') deleteSchedule(slug, id, btn.dataset.name);
+        if (action === 'run') runScheduleNow(slug, id, btn);
+        else if (action === 'delete') deleteSchedule(slug, id, btn.dataset.name, btn);
         else if (action === 'history') openScheduleHistory(slug, id);
         else if (action === 'edit') {
           const s = JSON.parse(btn.dataset.schedule);
@@ -4641,11 +4701,26 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.addEventListener('click', async () => {
         const sourceSlug = btn.dataset.slug;
         if (!confirm(`Unmount data from "${sourceSlug}"?`)) return;
-        const r = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data/${encodeURIComponent(sourceSlug)}`, {
-          method: 'DELETE',
-        });
-        if (!r.ok) { flashToast('Unmount failed: ' + await r.text()); return; }
-        await loadSharedData(slug);
+        btn.disabled = true;
+        try {
+          let r;
+          try {
+            r = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data/${encodeURIComponent(sourceSlug)}`, {
+              method: 'DELETE',
+            });
+          } catch {
+            flashToast('Unmount failed: network error', 'error');
+            return;
+          }
+          if (r.status === 401) { await handleUnauthorized(); return; }
+          if (!r.ok) {
+            flashToast('Unmount failed: ' + (await errorMessage(r)), 'error');
+            return;
+          }
+          await loadSharedData(slug);
+        } finally {
+          btn.disabled = false;
+        }
       });
     });
   }
@@ -4697,27 +4772,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const timezone = newForm.querySelector('#sched-timezone').value.trim();
       const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled, timezone});
-      let r;
-      if (existing) {
-        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${existing.id}`, {
-          method: 'PATCH',
-          headers: {'Content-Type': 'application/json'},
-          body,
-        });
-      } else {
-        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body,
-        });
+      const submitBtn = newForm.querySelector('button[type="submit"]');
+      if (submitBtn) submitBtn.disabled = true;
+      try {
+        let r;
+        try {
+          if (existing) {
+            r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${existing.id}`, {
+              method: 'PATCH',
+              headers: {'Content-Type': 'application/json'},
+              body,
+            });
+          } else {
+            r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules`, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body,
+            });
+          }
+        } catch {
+          setError(newErrEl, 'Network error');
+          return;
+        }
+        if (r.status === 401) { await handleUnauthorized(); return; }
+        if (!r.ok) {
+          setError(newErrEl, await errorMessage(r));
+          return;
+        }
+        closeScheduleForm();
+        await loadSchedules(slug);
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
       }
-      if (!r.ok) {
-        const msg = await r.text().catch(() => 'Request failed');
-        setError(newErrEl, msg);
-        return;
-      }
-      closeScheduleForm();
-      await loadSchedules(slug);
     });
 
     modal.hidden = false;
@@ -4733,24 +4819,48 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function runScheduleNow(slug, id) {
-    const r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}/run`, {method: 'POST'});
-    if (!r.ok) {
-      flashToast('Run failed: ' + await r.text().catch(() => 'error'));
-      return;
+  async function runScheduleNow(slug, id, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      let r;
+      try {
+        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}/run`, {method: 'POST'});
+      } catch {
+        flashToast('Run failed: network error', 'error');
+        return;
+      }
+      if (r.status === 401) { await handleUnauthorized(); return; }
+      if (!r.ok) {
+        flashToast('Run failed: ' + (await errorMessage(r)), 'error');
+        return;
+      }
+      flashToast('Schedule started.', 'success');
+      await loadSchedules(slug);
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    flashToast('Schedule started.');
-    await loadSchedules(slug);
   }
 
-  async function deleteSchedule(slug, id, name) {
+  async function deleteSchedule(slug, id, name, btn) {
     if (!confirm(`Delete schedule "${name}"?`)) return;
-    const r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}`, {method: 'DELETE'});
-    if (!r.ok) {
-      flashToast('Delete failed: ' + await r.text().catch(() => 'error'));
-      return;
+    if (btn) btn.disabled = true;
+    try {
+      let r;
+      try {
+        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}`, {method: 'DELETE'});
+      } catch {
+        flashToast('Delete failed: network error', 'error');
+        return;
+      }
+      if (r.status === 401) { await handleUnauthorized(); return; }
+      if (!r.ok) {
+        flashToast('Delete failed: ' + (await errorMessage(r)), 'error');
+        return;
+      }
+      await loadSchedules(slug);
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    await loadSchedules(slug);
   }
 
   // Open the log pane showing the run history for a schedule.
@@ -4759,11 +4869,12 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${schedID}/runs`);
     } catch {
-      flashToast('Failed to load run history.');
+      flashToast('Failed to load run history: network error', 'error');
       return;
     }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
-      flashToast('Failed to load run history: ' + await resp.text().catch(() => 'error'));
+      flashToast('Failed to load run history: ' + (await errorMessage(resp)), 'error');
       return;
     }
     const runsBody = await resp.json();
@@ -4832,17 +4943,33 @@ document.addEventListener('DOMContentLoaded', () => {
     if (settingsSlug) openScheduleForm(settingsSlug, null);
   });
 
-  document.getElementById('shared-data-add-btn')?.addEventListener('click', async () => {
+  document.getElementById('shared-data-add-btn')?.addEventListener('click', async (event) => {
     if (!settingsSlug) return;
     const sourceSlug = (prompt('Source app slug to mount read-only:') || '').trim();
     if (!sourceSlug) return;
-    const r = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/shared-data`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({source_slug: sourceSlug}),
-    });
-    if (!r.ok) { flashToast('Mount failed: ' + await r.text().catch(() => 'error')); return; }
-    await loadSharedData(settingsSlug);
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    try {
+      let r;
+      try {
+        r = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/shared-data`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({source_slug: sourceSlug}),
+        });
+      } catch {
+        flashToast('Mount failed: network error', 'error');
+        return;
+      }
+      if (r.status === 401) { await handleUnauthorized(); return; }
+      if (!r.ok) {
+        flashToast('Mount failed: ' + (await errorMessage(r)), 'error');
+        return;
+      }
+      await loadSharedData(settingsSlug);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // Wire the schedule form close button and overlay-click dismiss.

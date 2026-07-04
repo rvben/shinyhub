@@ -3068,6 +3068,19 @@ fieldset.settings-block { min-width: 0; }
 .schedules-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); }
 .schedules-table .table-actions { white-space: nowrap; }
 
+/* Unlike the other wide admin tables (audit/users/workers), the schedules
+   table has no fixed id — it is rebuilt by loadSchedules() into the
+   .schedules-table container — so it was missing from the shared 640px
+   overflow rule. Placed after the base rules (not in the earlier shared
+   640px block) so it actually wins; see the .scaling-row precedent above. */
+@media (max-width: 640px) {
+  .schedules-table {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .schedules-table table { white-space: nowrap; }
+}
+
 .shared-data-table .shared-data-list { list-style: none; padding: 0; margin: 0; }
 .shared-data-list li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
 

@@ -2417,3 +2417,295 @@ func TestAppDescriptionUIContract(t *testing.T) {
 	assertContains(t, "app.js", "name, description, project_slug",
 		"saveGeneralInfo PATCHes description alongside name + project_slug")
 }
+
+// TestAppDetailSurfacesLoadFailure guards UX-1: a non-OK, non-404, non-401
+// response from GET /api/apps/:slug (e.g. a 500) must not be swallowed into a
+// silent `return {}` that mounts a totally blank panel. mountAppDetail must
+// throw so the router's error boundary (showRouteError in app.js) catches it
+// and reveals #route-error-view with a Reload button instead.
+func TestAppDetailSurfacesLoadFailure(t *testing.T) {
+	assertNotContains(t, "views/app-detail.js", "if (!resp.ok) { return {}; }",
+		"a failed GET /api/apps/:slug must not silently mount an empty panel with no error or retry")
+	assertContains(t, "views/app-detail.js", "if (!resp.ok) { throw new Error(",
+		"mountAppDetail must throw on a non-OK response so the router error boundary shows #route-error-view")
+}
+
+// TestSessionExpiryWarnsOnUnsavedChanges guards UX-2: handleUnauthorized used
+// to wipe all client state unconditionally on a 401, discarding any unsaved
+// settings edits with no warning. It must check anySettingsDirty() BEFORE
+// showLoggedOut() clears state, and surface a message explaining the loss.
+func TestSessionExpiryWarnsOnUnsavedChanges(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "async function handleUnauthorized()")
+	if start < 0 {
+		t.Fatal("app.js: handleUnauthorized not found")
+	}
+	end := strings.Index(src[start:], "\n  }")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of handleUnauthorized")
+	}
+	body := src[start : start+end]
+	if !strings.Contains(body, "anySettingsDirty()") {
+		t.Fatal("handleUnauthorized must call anySettingsDirty() to detect unsaved settings edits before wiping state")
+	}
+	dirtyCheck := strings.Index(body, "anySettingsDirty()")
+	wipe := strings.Index(body, "showLoggedOut()")
+	if wipe < 0 || dirtyCheck > wipe {
+		t.Fatal("handleUnauthorized must check anySettingsDirty() BEFORE showLoggedOut() wipes client state")
+	}
+	if !strings.Contains(body, "Unsaved changes were lost") {
+		t.Fatal("handleUnauthorized must warn the user that unsaved changes were lost on session expiry")
+	}
+}
+
+// TestMetricsControllerOnErrorWired guards UX-3: the background metrics poll
+// (createMetricsController) was constructed with only {intervalMs, onMetrics},
+// so a failed poll (e.g. the session dying while the dashboard sat idle in a
+// background tab) failed completely silently. onError must be wired, and a
+// 401 specifically must log the user out via handleUnauthorized so a dead
+// session doesn't keep polling forever with no visible signal. The
+// onError/onMetrics contract itself is unit-tested in
+// jstests/metrics-controller.test.js.
+func TestMetricsControllerOnErrorWired(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "const metrics = createMetricsController({")
+	if start < 0 {
+		t.Fatal("app.js: createMetricsController call site not found")
+	}
+	end := strings.Index(src[start:], "\n  });")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of the createMetricsController call")
+	}
+	call := src[start : start+end]
+	if !strings.Contains(call, "onError:") {
+		t.Fatal("createMetricsController must be given an onError callback so a failed background poll is no longer silent")
+	}
+	if !strings.Contains(call, "handleUnauthorized()") {
+		t.Fatal("the metrics onError callback must call handleUnauthorized() on a 401 so a dead session logs the user out instead of polling forever")
+	}
+}
+
+// TestScheduleAndSharedDataHandlersHardened guards UX-4/UX-9: the schedule
+// (run/delete/submit/history) and shared-data (mount/unmount) handlers used to
+// call api() with no try/catch for network errors, no 401 check, and dumped
+// the raw response body (a JSON {"error":"..."} envelope; see
+// internal/api/helpers.go writeError) straight into a toast/inline error. They
+// must match the established pattern used elsewhere in app.js: catch network
+// failures, redirect a 401 through handleUnauthorized, and parse the .error
+// field via the shared errorMessage helper instead of showing raw JSON.
+func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
+	assertContains(t, "app.js", "async function errorMessage(resp, fallback = 'Request failed')",
+		"app.js must define a shared errorMessage helper that parses the {error} JSON envelope every API handler writes")
+
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+
+	checkHandler := func(startNeedle, label string) {
+		t.Helper()
+		start := strings.Index(src, startNeedle)
+		if start < 0 {
+			t.Fatalf("app.js: could not find %s (looked for %q)", label, startNeedle)
+		}
+		// Scan forward to the next top-level handler/function boundary so the
+		// extracted body doesn't bleed into unrelated code; a generous window
+		// comfortably covers each of these handlers.
+		windowEnd := start + 2200
+		if windowEnd > len(src) {
+			windowEnd = len(src)
+		}
+		body := src[start:windowEnd]
+		if !strings.Contains(body, "} catch {") {
+			t.Fatalf("%s must catch a network failure from api(), not let it propagate uncaught", label)
+		}
+		if !strings.Contains(body, "r.status === 401") && !strings.Contains(body, "resp.status === 401") {
+			t.Fatalf("%s must check for a 401 and call handleUnauthorized()", label)
+		}
+		if !strings.Contains(body, "handleUnauthorized()") {
+			t.Fatalf("%s must call handleUnauthorized() on a 401", label)
+		}
+		if !strings.Contains(body, "errorMessage(") {
+			t.Fatalf("%s must parse the error via the shared errorMessage helper instead of showing the raw response body", label)
+		}
+	}
+
+	checkHandler("async function runScheduleNow(slug, id, btn)", "runScheduleNow")
+	checkHandler("async function deleteSchedule(slug, id, name, btn)", "deleteSchedule")
+	checkHandler("async function openScheduleHistory(slug, schedID)", "openScheduleHistory")
+	checkHandler("container.querySelectorAll('[data-action=\"revoke\"]')", "the shared-data unmount handler")
+	checkHandler("document.getElementById('shared-data-add-btn')", "the shared-data mount handler")
+
+	// The schedule add/edit submit handler is inside openScheduleForm; anchor on
+	// its addEventListener('submit', ...) call specifically.
+	submitStart := strings.Index(src, "newForm.addEventListener('submit', async e => {")
+	if submitStart < 0 {
+		t.Fatal("app.js: could not find the schedule form submit handler")
+	}
+	submitEnd := submitStart + 2200
+	if submitEnd > len(src) {
+		submitEnd = len(src)
+	}
+	submitBody := src[submitStart:submitEnd]
+	if !strings.Contains(submitBody, "} catch {") {
+		t.Fatal("the schedule form submit handler must catch a network failure from api()")
+	}
+	if !strings.Contains(submitBody, "r.status === 401") || !strings.Contains(submitBody, "handleUnauthorized()") {
+		t.Fatal("the schedule form submit handler must check for a 401 and call handleUnauthorized()")
+	}
+	if !strings.Contains(submitBody, "errorMessage(") {
+		t.Fatal("the schedule form submit handler must parse the error via errorMessage instead of showing the raw response body")
+	}
+}
+
+// TestLoginHandlesRateLimitAndDoubleSubmit guards UX-6/UX-8: a 429 from the
+// rate-limited login endpoint used to fall through to the generic "Login
+// failed" message, giving no hint that retrying immediately won't help; and
+// the submit button had no disabled-during-request guard, so a slow request
+// (or an impatient double-click) could fire the login POST twice.
+func TestLoginHandlesRateLimitAndDoubleSubmit(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "loginForm.addEventListener('submit'")
+	if start < 0 {
+		t.Fatal("app.js: login form submit handler not found")
+	}
+	end := strings.Index(src[start:], "\n  });")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of the login submit handler")
+	}
+	body := src[start : start+end]
+	if !strings.Contains(body, "response.status === 429") {
+		t.Fatal("the login submit handler must special-case a 429 (rate limited) response")
+	}
+	if !strings.Contains(body, "Too many attempts") {
+		t.Fatal("a 429 login response must show a message distinct from the generic 'Login failed', so the user knows to wait rather than retry the same credentials")
+	}
+	if !strings.Contains(body, "submitBtn.disabled = true") || !strings.Contains(body, "submitBtn.disabled = false") {
+		t.Fatal("the login submit button must be disabled for the duration of the request to prevent a double-submit")
+	}
+}
+
+// TestSchedulesTableResponsiveOverflow guards UX-5: unlike the other wide
+// admin tables (audit/users/workers), the schedules table is rebuilt at
+// runtime by loadSchedules() with no fixed id, so it was missing from the
+// shared 640px overflow-x rule and could overflow the viewport on mobile.
+func TestSchedulesTableResponsiveOverflow(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	i := strings.Index(css, ".schedules-table {")
+	if i < 0 {
+		t.Fatal("style.css: no .schedules-table rule found (a 640px overflow-x rule is expected)")
+	}
+	end := strings.Index(css[i:], "}")
+	if end < 0 || !strings.Contains(css[i:i+end], "overflow-x: auto") {
+		t.Fatal("style.css: .schedules-table must set overflow-x:auto (in a 640px media block) so a wide schedules table scrolls within itself instead of overflowing the viewport")
+	}
+}
+
+// TestEscapeClosesNewTokenModal guards UX-7: the global Escape key handler
+// closed every other modal (deploy/new-app/new-user/profile/reset-password/
+// schedule) and the log pane, but omitted the new-API-token modal. That modal
+// reveals a bearer secret once (tokenRevealValue); leaving it out of the
+// Escape chain meant a reflexive Escape press did nothing, unlike every other
+// modal in the app.
+func TestEscapeClosesNewTokenModal(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "document.addEventListener('keydown', e => {")
+	if start < 0 {
+		t.Fatal("app.js: global keydown handler not found")
+	}
+	end := strings.Index(src[start:], "\n  });")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of the global keydown handler")
+	}
+	body := src[start : start+end]
+	if !strings.Contains(body, "newTokenModal && !newTokenModal.hidden") {
+		t.Fatal("the global Escape handler must branch on the new-token modal being open")
+	}
+	if !strings.Contains(body, "closeNewTokenModal()") {
+		t.Fatal("the global Escape handler must call closeNewTokenModal() so the revealed secret doesn't linger visible")
+	}
+}
+
+// TestDoubleSubmitGuardsOnDestructiveActions guards the rest of UX-8: several
+// destructive/mutating actions (delete user, revoke token, create user, card
+// restart) had no disabled-during-request guard, so a slow request or an
+// impatient double-click could fire the request twice. They must all follow
+// the same disable-before/re-enable-after pattern already used by the login
+// and schedule handlers.
+func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+
+	checkGuard := func(startNeedle, label, disableExpr, enableExpr string) {
+		t.Helper()
+		start := strings.Index(src, startNeedle)
+		if start < 0 {
+			t.Fatalf("app.js: could not find %s (looked for %q)", label, startNeedle)
+		}
+		windowEnd := start + 1200
+		if windowEnd > len(src) {
+			windowEnd = len(src)
+		}
+		body := src[start:windowEnd]
+		if !strings.Contains(body, disableExpr) || !strings.Contains(body, enableExpr) {
+			t.Fatalf("%s must disable its trigger button for the duration of the request (expected %q and %q)", label, disableExpr, enableExpr)
+		}
+	}
+
+	checkGuard("async function deleteUser(id, username, btn)", "deleteUser", "btn.disabled = true", "btn.disabled = false")
+	checkGuard("async function revokeToken(id, name, btn)", "revokeToken", "btn.disabled = true", "btn.disabled = false")
+	checkGuard("async function submitNewUser(event)", "submitNewUser", "submitBtn.disabled = true", "submitBtn.disabled = false")
+	checkGuard("async function restart(slug, btn)", "the card Restart handler", "btn.disabled = true", "btn.disabled = false")
+
+	// Each guarded function must actually receive the triggering button at its
+	// call site, not just declare an unused parameter.
+	if !strings.Contains(src, "deleteUser(u.id, u.username, delBtn)") {
+		t.Fatal("the Delete user button click handler must pass its own button through to deleteUser for the disable guard")
+	}
+	if !strings.Contains(src, "revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn)") {
+		t.Fatal("the Revoke token button click handler must pass its own button through to revokeToken for the disable guard")
+	}
+	if !strings.Contains(src, "restart(app.slug, e.currentTarget)") {
+		t.Fatal("the card Restart button click handler must pass its own button through to restart for the disable guard")
+	}
+}
+
+// TestRollbackFailureUsesToastNotAlert guards UX-9: a failed rollback (network
+// error or a non-OK response) used window.alert(), a blocking, unstyled
+// browser dialog inconsistent with every other error surface in the
+// dashboard. It must report through the same accessible flashToast used
+// elsewhere, which app.js exposes on ctx for exactly this purpose.
+func TestRollbackFailureUsesToastNotAlert(t *testing.T) {
+	assertContains(t, "app.js", "flashToast,",
+		"app.js must expose flashToast on the ctx object passed to mountAppDetail so app-detail.js can report failures without window.alert()")
+	assertNotContains(t, "views/app-detail.js", "alert(",
+		"app-detail.js must not use window.alert() for rollback failures; use ctx.flashToast so failures match the rest of the dashboard's error UI")
+	assertContains(t, "views/app-detail.js", "ctx.flashToast('Rollback failed: network error.', 'error')",
+		"a network failure during rollback must be reported via ctx.flashToast, not a blocking alert()")
+	assertContains(t, "views/app-detail.js", "ctx.flashToast(msg, 'error')",
+		"a non-OK rollback response must be reported via ctx.flashToast, not a blocking alert()")
+}
