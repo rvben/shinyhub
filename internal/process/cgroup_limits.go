@@ -47,6 +47,22 @@ func cgroupMemoryMaxValue(memMB int) string {
 	return strconv.FormatInt(int64(memMB)*1024*1024, 10)
 }
 
+// defaultNativePidsMax caps the number of processes/threads a native app cgroup
+// may hold, preventing a fork bomb in one app from exhausting the host PID table
+// and taking down ShinyHub and every co-located tenant. Generous enough for a
+// heavily-threaded data app; a fork bomb spawns orders of magnitude more. The
+// Docker runtime applies an equivalent PidsLimit.
+const defaultNativePidsMax = 1024
+
+// cgroupPidsMaxValue returns the value to write to a cgroup v2 pids.max file:
+// a decimal count, or "max" (unlimited) when limit is zero or negative.
+func cgroupPidsMaxValue(limit int) string {
+	if limit <= 0 {
+		return "max"
+	}
+	return strconv.Itoa(limit)
+}
+
 // cgroupCPUMaxValue returns the value to write to a cgroup v2 cpu.max file for a
 // quota percent, as "<quota> <period>" microseconds where 100 percent is one
 // full core (quota == period). Zero or negative yields "max <period>" (no
