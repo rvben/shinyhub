@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -289,9 +290,25 @@ func (w *Watcher) Start(ctx context.Context) {
 			w.drainWakes()
 			return
 		case <-ticker.C:
-			w.runOnce()
+			// Guard the tick: a panic anywhere in reconcile/crash/hibernation must
+			// not crash the whole process (it would take down every app's proxy
+			// and self-healing). The next tick retries.
+			runGuarded("watchdog", w.runOnce)
 		}
 	}
+}
+
+// runGuarded runs fn, recovering and logging any panic so a bug in one
+// background loop iteration cannot crash the whole process and take down every
+// app's routing and self-healing. The caller's loop continues on the next tick.
+func runGuarded(name string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("lifecycle: recovered panic in background loop",
+				"loop", name, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	fn()
 }
 
 // drainWakes stops admitting new wakes and waits (bounded) for in-flight
