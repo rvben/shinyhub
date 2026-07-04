@@ -30,11 +30,17 @@ type statusRecorder struct {
 	// proxy's ErrorHandler (connection refused, timeout, mid-stream drop) so
 	// the trace span can surface it. Nil on success.
 	proxyErr error
-	// onUpgrade, when non-nil, fires exactly once at the moment a 101
-	// Switching Protocols header is written. The reverse-proxy WS upgrade
-	// path writes 101 before calling Hijack, so this hook observes the
-	// successful handshake without waiting for the hijacked goroutine to
-	// finish - which it never does until the client disconnects.
+	// onUpgrade, when non-nil, fires exactly once at the moment a genuine
+	// WebSocket/protocol-switch upgrade is observed. On this Go toolchain
+	// httputil.ReverseProxy's upgrade path (handleUpgradeResponse) hijacks the
+	// connection FIRST and writes the 101 status line directly to the
+	// hijacked bufio.Writer afterwards - it never calls rw.WriteHeader(101).
+	// So the real signal is Hijack succeeding, not WriteHeader(101); see the
+	// Hijack method below. The WriteHeader(101) branch is kept as a defensive
+	// fallback for callers/toolchains that do write the status explicitly
+	// before hijacking, and to keep this hook observable without waiting for
+	// the hijacked goroutine to finish - which it never does until the
+	// client disconnects.
 	onUpgrade func()
 	// trackHijack, when non-nil, wraps the hijacked connection so the proxy can
 	// track its lifetime for graceful drain on shutdown. It returns the conn to
@@ -80,17 +86,39 @@ func (r *statusRecorder) Flush() {
 }
 
 // Hijack forwards to the underlying writer's Hijacker. Required for WebSocket
-// upgrades routed through the reverse proxy. We do not touch r.status here:
-// ReverseProxy's upgrade path calls WriteHeader(101) before Hijack, so the
-// 101 has already been recorded.
+// upgrades routed through the reverse proxy.
+//
+// This is the authoritative upgrade signal, not WriteHeader(101):
+// httputil.ReverseProxy's upgrade path (handleUpgradeResponse) hijacks the
+// connection before writing anything, then writes the 101 status line
+// directly to the hijacked bufio.Writer - rw.WriteHeader is never called.
+// A successful Hijack reached through this proxy's request path only ever
+// happens via that upgrade handling, which itself only runs when the
+// backend answered 101 (see the res.StatusCode == http.StatusSwitchingProtocols
+// gate in reverseproxy.go), so treating Hijack success as the upgrade signal
+// cannot false-positive on a non-upgrade response.
+//
+// We only do this when nothing was written yet (!wroteHeader): if a caller
+// explicitly wrote a status before hijacking (e.g. for a non-WS protocol
+// takeover), that status is preserved and this hijack is not mistaken for a
+// WS handshake.
 func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	h, ok := r.ResponseWriter.(http.Hijacker)
 	if !ok {
 		return nil, nil, fmt.Errorf("proxy: underlying ResponseWriter does not support hijacking")
 	}
 	conn, rw, err := h.Hijack()
-	if err == nil && r.trackHijack != nil {
-		conn = r.trackHijack(conn)
+	if err == nil {
+		if !r.wroteHeader {
+			r.status = http.StatusSwitchingProtocols
+			r.wroteHeader = true
+			if r.onUpgrade != nil {
+				r.onUpgrade()
+			}
+		}
+		if r.trackHijack != nil {
+			conn = r.trackHijack(conn)
+		}
 	}
 	return conn, rw, err
 }
