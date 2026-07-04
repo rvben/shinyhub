@@ -627,7 +627,18 @@ func (m *Manager) StopReplica(slug string, index int) error {
 		slog.Warn("manager: replica did not exit within grace; sending SIGKILL",
 			"slug", slug, "idx", index, "grace", grace)
 		rt.Signal(handle, syscall.SIGKILL) //nolint:errcheck
-		<-done
+		select {
+		case <-done:
+		case <-time.After(grace):
+			// SIGKILL did not take effect within a second grace window: the
+			// process is likely in uninterruptible sleep (e.g. a hung NFS /
+			// shared-mount app-data backend). Proceed instead of blocking the
+			// caller forever - a blocked Stop here freezes the watchdog and
+			// stalls crash-restart/hibernation for the whole fleet. The exit
+			// monitor reconciles the entry if the process ever does exit.
+			slog.Error("manager: replica did not exit after SIGKILL within grace; proceeding (process may be in uninterruptible sleep)",
+				"slug", slug, "idx", index, "grace", grace)
+		}
 	}
 
 	m.mu.Lock()
