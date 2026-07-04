@@ -108,8 +108,13 @@ func TestAgentServer_HotReloadsClientCATrust(t *testing.T) {
 	addr := serveTLS(t, srv.TLSConfig(),
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 
-	// The control plane presents a client cert signed by the new CA.
-	cpCert := newWorkerClientCert(t, clientCANew, "node-cp")
+	// The control plane presents its client cert signed by the new CA. It must be
+	// the control-plane identity (not a worker cert): the agent listener pins
+	// inbound peers to the control plane (see IsControlPlaneClientCert).
+	cpCert, err := clientCANew.ControlClientCertificate()
+	if err != nil {
+		t.Fatalf("control client cert: %v", err)
+	}
 	dial := func() error {
 		c := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 			Certificates: []tls.Certificate{cpCert},

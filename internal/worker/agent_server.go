@@ -60,6 +60,20 @@ func (s *AgentServer) TLSConfig() *tls.Config {
 				ClientCAs:      s.cfg.CASource.Pool(),
 				MinVersion:     tls.VersionTLS12,
 				NextProtos:     []string{"http/1.1"},
+				// Chain verification (RequireAndVerifyClientCert + ClientCAs) proves
+				// the peer holds a cert signed by the shared worker CA, but every
+				// worker's own dual-use cert satisfies that. Pin the peer identity to
+				// the control plane so one compromised worker cannot dial another
+				// worker's agent listener and launch arbitrary processes there.
+				VerifyConnection: func(cs tls.ConnectionState) error {
+					if len(cs.PeerCertificates) == 0 {
+						return errors.New("worker agent: missing client certificate")
+					}
+					if !IsControlPlaneClientCert(cs.PeerCertificates[0]) {
+						return errors.New("worker agent: client is not the control plane")
+					}
+					return nil
+				},
 			}, nil
 		},
 	}
