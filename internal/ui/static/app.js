@@ -517,7 +517,7 @@ document.addEventListener('DOMContentLoaded', () => {
           kebabBtn.setAttribute('aria-label', `More actions for ${app.name}`);
           const kebabList = kebab.querySelector('.kebab-list');
           wireKebab(kebabBtn, kebabList, card);
-          kebabList.querySelector('[data-kebab="restart"]').addEventListener('click', () => restart(app.slug));
+          kebabList.querySelector('[data-kebab="restart"]').addEventListener('click', (e) => restart(app.slug, e.currentTarget));
           actions.appendChild(kebab);
         }
       }
@@ -1271,7 +1271,7 @@ document.addEventListener('DOMContentLoaded', () => {
         delBtn.disabled = true;
         if (caps.deleteHint) delBtn.title = caps.deleteHint;
       } else {
-        delBtn.addEventListener('click', () => deleteUser(u.id, u.username));
+        delBtn.addEventListener('click', () => deleteUser(u.id, u.username, delBtn));
       }
       actions.appendChild(delBtn);
 
@@ -1308,14 +1308,17 @@ document.addEventListener('DOMContentLoaded', () => {
     loadUsers();
   }
 
-  async function deleteUser(id, username) {
+  async function deleteUser(id, username, btn) {
     if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    if (btn) btn.disabled = true;
     let resp;
     try {
       resp = await api(`/api/users/${id}`, {method: 'DELETE'});
     } catch {
       setError(usersError, 'Network error');
       return;
+    } finally {
+      if (btn) btn.disabled = false;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(usersError, `Failed to delete ${username}`); return; }
@@ -1405,6 +1408,8 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(newUserError, 'Username and 8+ char password are required');
       return;
     }
+    const submitBtn = newUserForm.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
     let resp;
     try {
       resp = await api('/api/users', {
@@ -1414,6 +1419,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       setError(newUserError, 'Network error');
       return;
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
@@ -1507,14 +1514,17 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTokens(); // refresh the list behind the modal
   }
 
-  async function revokeToken(id, name) {
+  async function revokeToken(id, name, btn) {
     if (!confirm(`Revoke token "${name}"? Any CLI or app using it will stop working immediately.`)) return;
+    if (btn) btn.disabled = true;
     let resp;
     try {
       resp = await api(`/api/tokens/${id}`, { method: 'DELETE' });
     } catch {
       setError(tokensError, 'Network error');
       return;
+    } finally {
+      if (btn) btn.disabled = false;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(tokensError, `Failed to revoke ${name}`); return; }
@@ -1522,8 +1532,9 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTokens();
   }
 
-  async function restart(slug) {
+  async function restart(slug, btn) {
     setError(appError, '');
+    if (btn) btn.disabled = true;
 
     let response;
     try {
@@ -1531,6 +1542,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       setError(appError, 'Network error');
       return;
+    } finally {
+      if (btn) btn.disabled = false;
     }
 
     if (response.status === 401) {
@@ -2918,7 +2931,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   if (tokensList) tokensList.addEventListener('click', e => {
     const btn = e.target.closest('button[data-token-id]');
-    if (btn) revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'));
+    if (btn) revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn);
   });
   if (profileTokensLink) profileTokensLink.addEventListener('click', () => {
     // The data-nav link navigates to /tokens; close the profile modal behind it.

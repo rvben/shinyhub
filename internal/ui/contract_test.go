@@ -2646,3 +2646,50 @@ func TestEscapeClosesNewTokenModal(t *testing.T) {
 		t.Fatal("the global Escape handler must call closeNewTokenModal() so the revealed secret doesn't linger visible")
 	}
 }
+
+// TestDoubleSubmitGuardsOnDestructiveActions guards the rest of UX-8: several
+// destructive/mutating actions (delete user, revoke token, create user, card
+// restart) had no disabled-during-request guard, so a slow request or an
+// impatient double-click could fire the request twice. They must all follow
+// the same disable-before/re-enable-after pattern already used by the login
+// and schedule handlers.
+func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+
+	checkGuard := func(startNeedle, label, disableExpr, enableExpr string) {
+		t.Helper()
+		start := strings.Index(src, startNeedle)
+		if start < 0 {
+			t.Fatalf("app.js: could not find %s (looked for %q)", label, startNeedle)
+		}
+		windowEnd := start + 1200
+		if windowEnd > len(src) {
+			windowEnd = len(src)
+		}
+		body := src[start:windowEnd]
+		if !strings.Contains(body, disableExpr) || !strings.Contains(body, enableExpr) {
+			t.Fatalf("%s must disable its trigger button for the duration of the request (expected %q and %q)", label, disableExpr, enableExpr)
+		}
+	}
+
+	checkGuard("async function deleteUser(id, username, btn)", "deleteUser", "btn.disabled = true", "btn.disabled = false")
+	checkGuard("async function revokeToken(id, name, btn)", "revokeToken", "btn.disabled = true", "btn.disabled = false")
+	checkGuard("async function submitNewUser(event)", "submitNewUser", "submitBtn.disabled = true", "submitBtn.disabled = false")
+	checkGuard("async function restart(slug, btn)", "the card Restart handler", "btn.disabled = true", "btn.disabled = false")
+
+	// Each guarded function must actually receive the triggering button at its
+	// call site, not just declare an unused parameter.
+	if !strings.Contains(src, "deleteUser(u.id, u.username, delBtn)") {
+		t.Fatal("the Delete user button click handler must pass its own button through to deleteUser for the disable guard")
+	}
+	if !strings.Contains(src, "revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn)") {
+		t.Fatal("the Revoke token button click handler must pass its own button through to revokeToken for the disable guard")
+	}
+	if !strings.Contains(src, "restart(app.slug, e.currentTarget)") {
+		t.Fatal("the card Restart button click handler must pass its own button through to restart for the disable guard")
+	}
+}
