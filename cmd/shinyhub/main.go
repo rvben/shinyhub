@@ -1800,13 +1800,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Streaming and long-running routes (the reverse proxy, SSE log tails, large
 	// uploads, lifecycle swaps) clear these per-connection deadlines via
 	// deadlineExemptions so they are not severed mid-flight.
+	// RecoverPanic wraps the outer mux so a panic in a non-/api/ handler (notably
+	// the /app/* reverse proxy, which had no recovery) is logged via slog and
+	// returned as a 500 instead of escaping to the stdlib server's per-connection
+	// default (which bypasses structured logging). /api/* already has chi.Recoverer.
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, cspScriptSrc, cspStyleSrc, deadlineExemptions(rootHandler)),
+		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, cspScriptSrc, cspStyleSrc, api.RecoverPanic(slog.Default(), deadlineExemptions(rootHandler))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// Route stdlib server errors (TLS handshake failures, malformed requests)
+		// through slog instead of the default unstructured log package.
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 	}
 
 	ln, err := upg.Listen("tcp", addr)
