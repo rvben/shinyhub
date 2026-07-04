@@ -173,6 +173,16 @@ type fakeStore struct {
 	// listReplicasCalls counts how many times ListReplicas has been called.
 	listReplicasCalls int
 
+	// listReconcilableAppsCalls counts how many times ListReconcilableApps has
+	// been called; used to assert the watchdog tick batches this to one call
+	// instead of one per reconcile phase.
+	listReconcilableAppsCalls int
+
+	// listReplicasForAppsCalls counts how many times the batch ListReplicasForApps
+	// has been called; used to assert the watchdog tick uses a small, bounded
+	// number of batched calls instead of one ListReplicas call per app per phase.
+	listReplicasForAppsCalls int
+
 	// fleetActive and fleetIdleSinceSec are returned by AppFleetLoad.
 	// fleetActive is the sum of other-instance active counts (0 = fleet idle).
 	// fleetIdleSinceSec is the seconds since the most recent fleet activity on
@@ -338,11 +348,42 @@ func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 func (f *fakeStore) ListReconcilableApps() ([]*db.App, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listReconcilableAppsCalls++
 	var out []*db.App
 	for _, app := range f.apps {
 		if app.Status == "running" || app.Status == "degraded" {
 			out = append(out, app)
 		}
+	}
+	return out, nil
+}
+
+// ListReplicasForApps is the batch form of ListReplicas. Unlike ListReplicas
+// (which returns the live, mutation-aliased slice held by the fake), this
+// returns independent copies of each replica, faithfully modeling a real SQL
+// scan where every call produces fresh struct values. A caller that caches an
+// early result must not observe a later UpsertReplica mutation without
+// re-fetching - exactly the staleness class the real store's ListReplicasForApps
+// exposes callers to.
+func (f *fakeStore) ListReplicasForApps(appIDs []int64) (map[int64][]*db.Replica, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listReplicasForAppsCalls++
+	if len(appIDs) == 0 {
+		return nil, nil
+	}
+	out := make(map[int64][]*db.Replica, len(appIDs))
+	for _, id := range appIDs {
+		reps := f.replicas[id]
+		if len(reps) == 0 {
+			continue
+		}
+		cp := make([]*db.Replica, len(reps))
+		for i, r := range reps {
+			rc := *r
+			cp[i] = &rc
+		}
+		out[id] = cp
 	}
 	return out, nil
 }
@@ -576,6 +617,91 @@ func TestWatchdog_IgnoresCrashedSlotAboveReplicaCount(t *testing.T) {
 
 	if n := atomic.LoadInt32(&calls); n != 0 {
 		t.Errorf("expected no restart for stale crashed slot above replica count, got %d calls", n)
+	}
+}
+
+// TestRunOnce_BatchesReconcileQueries proves the watchdog tick issues a
+// bounded, batched number of reconcile queries per tick instead of the old
+// pattern: two ListReconcilableApps calls (one from reconcileReplicas, one
+// from reconcileStatuses) plus one ListReplicas call per app per phase. With 3
+// reconcilable apps the old pattern cost 2 ListReconcilableApps + 6 ListReplicas
+// calls; the batched path costs exactly 1 ListReconcilableApps call and at most
+// 2 batched ListReplicasForApps calls (one per reconcile phase), with the
+// per-app ListReplicas path unused.
+func TestRunOnce_BatchesReconcileQueries(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "a", Index: 0, Status: process.StatusRunning},
+		{Slug: "b", Index: 0, Status: process.StatusRunning},
+		{Slug: "c", Index: 0, Status: process.StatusRunning},
+	}}
+	st := newFakeStore(
+		map[string]*db.App{
+			"a": {ID: 1, Slug: "a", Status: "running", Replicas: 1},
+			"b": {ID: 2, Slug: "b", Status: "running", Replicas: 1},
+			"c": {ID: 3, Slug: "c", Status: "running", Replicas: 1},
+		},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	st.replicas = map[int64][]*db.Replica{
+		1: {{AppID: 1, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"}},
+		2: {{AppID: 2, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"}},
+		3: {{AppID: 3, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"}},
+	}
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
+		func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.listReconcilableAppsCalls != 1 {
+		t.Errorf("ListReconcilableApps called %d times per tick, want exactly 1 (was 2: reconcileReplicas + reconcileStatuses each called it separately)", st.listReconcilableAppsCalls)
+	}
+	if st.listReplicasCalls != 0 {
+		t.Errorf("expected the per-app ListReplicas call to no longer be used by the reconcile path, got %d calls", st.listReplicasCalls)
+	}
+	if st.listReplicasForAppsCalls == 0 {
+		t.Fatal("expected the batched ListReplicasForApps to be used")
+	}
+	if st.listReplicasForAppsCalls > 2 {
+		t.Errorf("ListReplicasForApps called %d times for 3 apps in one tick, want <= 2 (batched once per reconcile phase, not once per app)", st.listReplicasForAppsCalls)
+	}
+}
+
+// TestRunOnce_ReconcileStatusesSeesSameTickReplicaRestart proves that batching
+// the reconcile queries does not go stale: reconcileStatuses must observe a
+// replica that reconcileReplicas itself restarted earlier in the same tick, not
+// a pre-restart snapshot. Only reconcileReplicas can drive replica index 1 here
+// (the process manager has no entry for it at all, so the crash never routes
+// through the top-loop's handleCrashed path) - this is what would catch a naive
+// single up-front replica fetch shared across both reconcile phases. The fake's
+// ListReplicasForApps deliberately returns independent copies (like a real SQL
+// scan) rather than the live-mutating aliases ListReplicas returns, so a stale
+// reuse is actually observable here rather than masked by pointer aliasing.
+func TestRunOnce_ReconcileStatusesSeesSameTickReplicaRestart(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "myapp", Index: 0, Status: process.StatusRunning},
+	}}
+	st := newFakeStore(
+		map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "degraded", Replicas: 2}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	pid0, port0 := 10, 20010
+	st.replicas = map[int64][]*db.Replica{
+		1: {
+			{AppID: 1, Index: 0, PID: &pid0, Port: &port0, Status: db.ReplicaStatusRunning, DesiredState: "running"},
+			{AppID: 1, Index: 1, Status: "crashed", DesiredState: "running"}, // no mgr entry: only reconcileReplicas can restart this
+		},
+	}
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
+		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{Index: idx, PID: 11, Port: 20011}, nil
+		})
+
+	w.runOnce()
+
+	if got := st.appStatus["myapp"]; got != "running" {
+		t.Fatalf("status = %q, want running: reconcileStatuses must observe reconcileReplicas's same-tick restart of index 1, not a stale pre-restart snapshot", got)
 	}
 }
 

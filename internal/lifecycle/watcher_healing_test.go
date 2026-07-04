@@ -222,7 +222,7 @@ func TestReconcileAppStatus_DegradedWhenAnySlotDown(t *testing.T) {
 	}
 	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
 
-	w.reconcileAppStatus(st.apps["app"])
+	w.reconcileAppStatus(st.apps["app"], st.replicas[1])
 
 	if st.appStatus["app"] != "degraded" {
 		t.Errorf("status = %q, want degraded", st.appStatus["app"])
@@ -236,7 +236,7 @@ func TestReconcileAppStatus_RunningWhenAllRunning(t *testing.T) {
 	}
 	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
 
-	w.reconcileAppStatus(st.apps["app"])
+	w.reconcileAppStatus(st.apps["app"], st.replicas[1])
 
 	if st.appStatus["app"] != "running" {
 		t.Errorf("status = %q, want running", st.appStatus["app"])
@@ -249,7 +249,7 @@ func TestReconcileAppStatus_IgnoresHibernatedAndDeploying(t *testing.T) {
 		st.replicas = map[int64][]*db.Replica{1: {{AppID: 1, Index: 0, Status: "running"}}}
 		w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
 
-		w.reconcileAppStatus(st.apps["app"])
+		w.reconcileAppStatus(st.apps["app"], st.replicas[1])
 
 		if st.appStatus["app"] != status {
 			t.Errorf("status %q was changed to %q; should be left untouched", status, st.appStatus["app"])
@@ -296,11 +296,11 @@ func TestReconcileAppStatus_WarmRowsKeepRunning(t *testing.T) {
 	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
 
 	// Run twice to prove no oscillation.
-	w.reconcileAppStatus(st.apps["app"])
+	w.reconcileAppStatus(st.apps["app"], st.replicas[1])
 	if st.appStatus["app"] != "running" {
 		t.Errorf("tick 1: status = %q, want running (warm victims are healthy stopped capacity)", st.appStatus["app"])
 	}
-	w.reconcileAppStatus(st.apps["app"])
+	w.reconcileAppStatus(st.apps["app"], st.replicas[1])
 	if st.appStatus["app"] != "running" {
 		t.Errorf("tick 2: status = %q, want running (oscillation detected)", st.appStatus["app"])
 	}
@@ -322,7 +322,7 @@ func TestReconcileAppStatus_CrashStillDegrades(t *testing.T) {
 	}
 	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
 
-	w.reconcileAppStatus(st.apps["app"])
+	w.reconcileAppStatus(st.apps["app"], st.replicas[1])
 
 	if st.appStatus["app"] != "degraded" {
 		t.Errorf("status = %q, want degraded (one genuinely missing replica)", st.appStatus["app"])
@@ -352,7 +352,7 @@ func TestReconcileReplicas_NeverRestartsWarm(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 100, Port: 9000}, nil
 		})
 
-	w.reconcileReplicas(map[replicaKey]bool{})
+	w.reconcileReplicas([]*db.App{st.apps["app"]}, st.replicas, map[replicaKey]bool{})
 
 	if n := atomic.LoadInt32(&deployCount); n != 0 {
 		t.Errorf("expected no restart for warm rows, got %d deploy calls", n)

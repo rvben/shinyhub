@@ -130,6 +130,11 @@ type appStore interface {
 	ListReconcilableApps() ([]*db.App, error)
 	ListWakingApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
+	// ListReplicasForApps is the batch form of ListReplicas: it returns every
+	// replica for the given app IDs in one query, grouped by app ID. The
+	// watchdog tick uses this (instead of one ListReplicas call per app) so a
+	// fleet of N apps costs O(1) replica reads per reconcile phase, not O(N).
+	ListReplicasForApps(appIDs []int64) (map[int64][]*db.Replica, error)
 	// ReapStaleReplicaSessions removes replica_sessions rows whose updated_at
 	// is older than staleWindowSec seconds ago on the database clock. Called on
 	// every watcher tick (owner-gated) so rows from crashed or restarted
@@ -150,10 +155,6 @@ type appStore interface {
 	// rows exist. Used by the clustered warm-expand path to compare fleet
 	// activity against the shrink moment entirely on the database clock.
 	AppFleetLastActivity(appID int64, staleWindowSec int64, excludeInstanceID string) (int64, error)
-	// ListWarmShrunkApps returns running/degraded apps that have at least one
-	// replica parked with desired_state='warm'. The watcher expand check
-	// iterates this set each tick.
-	ListWarmShrunkApps() ([]*db.App, error)
 	// ListSuspendedReplicas returns all suspended replicas oldest-first, joined to
 	// the app slug. The warm-wake GC evicts the oldest over the configured cap.
 	ListSuspendedReplicas() ([]db.SuspendedReplica, error)
@@ -754,9 +755,42 @@ func (w *Watcher) runOnce() {
 			}
 		}
 	}
-	w.reconcileReplicas(handled)
-	w.reconcileStatuses()
-	w.handleWarmExpand()
+	// Fetch the reconcilable apps (running+degraded) once for the whole tick:
+	// reconcileReplicas, reconcileStatuses, and handleWarmExpand all iterate the
+	// same set, and none of them changes an app's Status field directly (only
+	// replica rows), so one shared ListReconcilableApps call safely serves all
+	// three instead of the three separate calls each used to make.
+	apps, err := w.store.ListReconcilableApps()
+	if err != nil {
+		apps = nil
+	}
+	appIDs := make([]int64, len(apps))
+	for i, app := range apps {
+		appIDs[i] = app.ID
+	}
+
+	// Replica rows are batched (ListReplicasForApps) instead of one ListReplicas
+	// call per app, but still fetched TWICE: once before reconcileReplicas, and
+	// again before reconcileStatuses/handleWarmExpand. reconcileReplicas can
+	// restart a slot (restartSlot -> UpsertReplica) in this same tick, and
+	// reconcileStatuses/handleWarmExpand must see that fresh row rather than the
+	// pre-restart snapshot - otherwise a just-recovered app would be misreported
+	// as still down for one tick. A single shared fetch would be fewer queries
+	// but stale.
+	repMap, err := w.store.ListReplicasForApps(appIDs)
+	if err != nil {
+		slog.Warn("watcher: list replicas for apps failed", "err", err)
+	} else {
+		w.reconcileReplicas(apps, repMap, handled)
+	}
+
+	repMap, err = w.store.ListReplicasForApps(appIDs)
+	if err != nil {
+		slog.Warn("watcher: list replicas for apps failed", "err", err)
+	} else {
+		w.reconcileStatuses(apps, repMap)
+		w.handleWarmExpand(apps, repMap)
+	}
 	w.enforceSuspendedCap()
 	// Reap stale replica_sessions rows only in clustered mode. Single-node
 	// deployments never write replica_sessions rows, so this DELETE is both
@@ -790,17 +824,11 @@ func (w *Watcher) runOnce() {
 // by a partial-success deploy) and lost slots (whose worker died). Both run over
 // running+degraded apps so a degraded app can recover. handled holds the slots
 // already driven this tick via the manager loop so they are not driven twice.
-func (w *Watcher) reconcileReplicas(handled map[replicaKey]bool) {
-	apps, err := w.store.ListReconcilableApps()
-	if err != nil {
-		return
-	}
+// apps and repMap are the tick's shared snapshot fetched once in runOnce (see
+// its comment for why the replica map is refetched per phase).
+func (w *Watcher) reconcileReplicas(apps []*db.App, repMap map[int64][]*db.Replica, handled map[replicaKey]bool) {
 	for _, app := range apps {
-		reps, err := w.store.ListReplicas(app.ID)
-		if err != nil {
-			continue
-		}
-		for _, r := range reps {
+		for _, r := range repMap[app.ID] {
 			if r.Index >= app.Replicas || handled[replicaKey{app.Slug, r.Index}] {
 				continue
 			}
@@ -952,26 +980,20 @@ func (w *Watcher) scheduleBackoffLocked(k replicaKey, attempt int) {
 // reconcileStatuses is the sole running<->degraded authority. It runs over
 // running+degraded apps and reconciles each app's status against its real
 // replica health, consistent with "UpdateAppStatus is soft state — the watchdog
-// reconciles".
-func (w *Watcher) reconcileStatuses() {
-	apps, err := w.store.ListReconcilableApps()
-	if err != nil {
-		return
-	}
+// reconciles". apps and repMap are the tick's shared snapshot fetched once in
+// runOnce (see its comment for why the replica map is refetched per phase).
+func (w *Watcher) reconcileStatuses(apps []*db.App, repMap map[int64][]*db.Replica) {
 	for _, app := range apps {
-		w.reconcileAppStatus(app)
+		w.reconcileAppStatus(app, repMap[app.ID])
 	}
 }
 
 // reconcileAppStatus marks an app running iff every desired slot is running,
 // else degraded. It only moves an app between running and degraded; it never
-// touches hibernated/deploying/stopped apps.
-func (w *Watcher) reconcileAppStatus(app *db.App) {
+// touches hibernated/deploying/stopped apps. reps is app's current replica
+// snapshot.
+func (w *Watcher) reconcileAppStatus(app *db.App, reps []*db.Replica) {
 	if app.Status != "running" && app.Status != "degraded" {
-		return
-	}
-	reps, err := w.store.ListReplicas(app.ID)
-	if err != nil {
 		return
 	}
 	running, warm := 0, 0
@@ -1279,23 +1301,18 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration, runnin
 //     Unix epoch. Either the owner's own local LastSeen (also on the local wall
 //     clock - the owner proxies traffic too) OR the fleet predicate suffice: the
 //     OR covers both paths.
-func (w *Watcher) handleWarmExpand() {
+//
+// apps and repMap are the tick's shared running+degraded snapshot fetched once
+// in runOnce; the warm-shrunk subset (apps with at least one warm-parked
+// replica) is derived from repMap here instead of a dedicated
+// ListWarmShrunkApps query, since it is the same predicate over the same rows.
+func (w *Watcher) handleWarmExpand(apps []*db.App, repMap map[int64][]*db.Replica) {
 	if w.warmExpand == nil {
 		return
 	}
 
-	apps, err := w.store.ListWarmShrunkApps()
-	if err != nil {
-		slog.Warn("watcher: list warm-shrunk apps failed", "err", err)
-		return
-	}
-
 	for _, app := range apps {
-		reps, err := w.store.ListReplicas(app.ID)
-		if err != nil {
-			slog.Warn("watcher: list replicas for warm-expand check failed", "slug", app.Slug, "err", err)
-			continue
-		}
+		reps := repMap[app.ID]
 
 		// Compute the shrink moment as the newest updated_at among warm-parked rows.
 		var shrinkMoment time.Time

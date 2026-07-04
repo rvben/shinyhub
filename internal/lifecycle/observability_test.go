@@ -144,7 +144,7 @@ func TestReconcile_LogsStatusUpdateFailure(t *testing.T) {
 
 	buf, restore := captureWarnings(t)
 	defer restore()
-	w.reconcileAppStatus(st.apps["app"])
+	w.reconcileAppStatus(st.apps["app"], st.replicas[1])
 
 	if !strings.Contains(buf.String(), "db locked") {
 		t.Fatalf("expected a warning carrying the reconcile status error, got:\n%s", buf.String())
