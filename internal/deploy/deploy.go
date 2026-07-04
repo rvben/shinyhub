@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/sandbox"
 )
 
 var portCounter atomic.Int64
@@ -29,12 +32,218 @@ func init() {
 	portCounter.Store(20000)
 }
 
+// deploySandboxShimArg is the magic os.Args[1] value that re-execs this
+// binary through the build/hook sandbox shim (see sandboxedCommand below). A
+// sandboxed build/hook step is launched as a fresh child process with argv
+// `<self> deploySandboxShimArg -- <real command...>`; the init() below
+// detects it and hands off to sandbox.RunShim.
+//
+// This is a package init() rather than a cobra subcommand (the way
+// sandbox.ShimCommand is wired for app processes in cmd/shinyhub/main.go)
+// because the sandboxed build/hook path must work identically from the
+// production binary AND from a `go test` binary, which has no cobra command
+// tree at all. Go runs every imported package's init() before
+// main()/testing.Main() executes, so checking os.Args here works uniformly
+// for both. A magic argv string (rather than an env-var-only trigger) is
+// used so ambient environment state can never accidentally divert a normal
+// `shinyhub serve` invocation into the shim path — the trigger only fires
+// for a process this package itself spawned with that literal argv.
+const deploySandboxShimArg = "__deploy_sandbox_shim__"
+
+func init() {
+	if len(os.Args) > 1 && os.Args[1] == deploySandboxShimArg {
+		// RunShim only returns on error: on success it replaces the process
+		// image via syscall.Exec and this line is never reached.
+		err := sandbox.RunShim(os.Args[2:])
+		fmt.Fprintln(os.Stderr, "deploy sandbox shim:", err)
+		os.Exit(1)
+	}
+}
+
+// sandboxBuildLevel is the isolation tier applied to the dependency-build and
+// post-deploy-hook exec phases when the platform supports Landlock. Fixed at
+// "standard" (the only implemented tier) regardless of the app's own runtime
+// isolation setting: a build/hook step only needs to write its own project
+// tree plus the shared scratch areas, the same confinement
+// internal/process/native.go applies to the running app process.
+const sandboxBuildLevel = sandbox.LevelStandard
+
+// sandboxedCommand wraps argv so that, when Landlock is available, it runs
+// confined to dir (read+write) plus the shared /tmp and /dev scratch areas
+// (write), with the rest of the filesystem read-only — the same "standard"
+// tier and re-exec-and-Landlock shim mechanism NativeRuntime.sandboxWrap
+// (internal/process/native.go) uses to confine the app process, applied here
+// to the dependency-build (`uv sync` / `renv::restore`) and post-deploy-hook
+// phases (previously the only host-exec paths that ran completely
+// unconfined even with isolation enabled — see the "standard" isolation
+// level's doc comment in internal/sandbox for the general blast-radius
+// rationale).
+//
+// Network access for package downloads is unaffected: Landlock here is
+// filesystem-only (see internal/sandbox.Apply), so uv/renv can still reach
+// PyPI/CRAN. PATH lookups still work: the "standard" tier's read-only "/"
+// grants read+execute everywhere, only write is confined.
+//
+// Returns argv unchanged (nil extraEnv, nil error) when sandbox.Supported()
+// is false, so the build/hook still runs — unsandboxed — on every non-Linux
+// platform (this repo's darwin dev machines, and any future non-Linux CI
+// leg) rather than failing outright.
+func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv []string, err error) {
+	if !sandbox.Supported() {
+		return argv, nil, nil
+	}
+	if len(argv) == 0 {
+		return nil, nil, fmt.Errorf("sandboxed command must not be empty")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve self for sandbox: %w", err)
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve build dir %q: %w", dir, err)
+	}
+	bin, err := resolveBuildExecutable(argv[0], absDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve command %q: %w", argv[0], err)
+	}
+	spec := sandbox.ComputeSpec(sandboxBuildLevel, absDir, "")
+	enc, err := spec.Encode()
+	if err != nil {
+		return nil, nil, err
+	}
+	wrapped = append([]string{self, deploySandboxShimArg, "--", bin}, argv[1:]...)
+	extraEnv = []string{
+		// uv/renv default to a per-user cache outside dir; under the standard
+		// tier's read-only root that write would be denied and dependency
+		// resolution would fail even with network access, so both tools'
+		// caches are redirected into the writable build dir. Mirrors
+		// sandboxLaunchEnv in internal/process/native.go.
+		"UV_CACHE_DIR=" + filepath.Join(absDir, ".uv-cache"),
+		"XDG_CACHE_HOME=" + filepath.Join(absDir, ".cache"),
+		"RENV_PATHS_ROOT=" + filepath.Join(absDir, ".renv-cache"),
+		sandbox.EnvVar + "=" + enc,
+	}
+	return wrapped, extraEnv, nil
+}
+
+// resolveBuildExecutable mirrors internal/process's own executable
+// resolution rule (NativeRuntime.sandboxWrap / resolveExecutable in
+// internal/process/native.go): a name containing a path separator resolves
+// against workDir (or is used as-is when already absolute); a bare name
+// (e.g. "uv", "Rscript") is looked up on the server's PATH. Resolving here,
+// before the shim re-execs, keeps command lookup identical to the
+// unsandboxed path and fails fast — before ever forking — when the
+// executable is missing.
+func resolveBuildExecutable(name, workDir string) (string, error) {
+	if strings.ContainsRune(name, filepath.Separator) {
+		path := name
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workDir, path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			return "", fmt.Errorf("%s is not an executable file", path)
+		}
+		return path, nil
+	}
+	return exec.LookPath(name)
+}
+
+// runSandboxedBuildStep runs argv in dir under the same confinement
+// sandboxedCommand documents, and returns its combined stdout+stderr. It is
+// the shared plumbing behind sandboxedPythonSync and sandboxedRSync.
+func runSandboxedBuildStep(ctx context.Context, dir string, argv []string) ([]byte, error) {
+	wrapped, extraEnv, err := sandboxedCommand(dir, argv)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, wrapped[0], wrapped[1:]...)
+	cmd.Dir = dir
+	// The build backend / configure script is deployer-controlled code, so the
+	// env is scrubbed of server secrets via SanitizedEnv, matching
+	// process.uvSyncCmd / process.renvRestoreCmd.
+	cmd.Env = append(process.SanitizedEnv(), extraEnv...)
+	return cmd.CombinedOutput()
+}
+
+// sandboxedPythonSync is pythonSyncFn's production default. It duplicates
+// process.Sync's no-pyproject.toml guard and error-wrapping exactly, but
+// routes the actual `uv sync` exec through runSandboxedBuildStep instead of
+// calling process.Sync directly, so uv's project build backend — arbitrary
+// deployer-controlled Python code executed at package-build time — runs
+// confined the same way the app process itself does (SEC-A1), instead of
+// unconfined on the host with access to every app's bundle/data and the
+// control-plane DB.
+//
+// This duplicates process.Sync rather than adding a seam there because
+// process.uvSyncCmd builds its own unwrapped *exec.Cmd with no injectable
+// hook, and internal/process is outside this fix's edit scope.
+//
+// Residual gap: ensureProjectFn (process.EnsureProject — the uv-init/uv-add
+// project-conversion step that runs before this for a requirements.txt-only
+// app) is NOT routed through this sandbox. Confining it too would mean
+// re-deriving its ~40 lines of pydantic-detection logic here since
+// process.EnsureProject has no injectable exec seam either; `uv init`/`uv
+// add` resolve and record dependency versions but do not execute arbitrary
+// third-party build backends the way `uv sync` does, so the residual
+// exposure is materially smaller than the gap this fix closes, but it is not
+// zero. Closing it fully belongs in a follow-up that adds a seam inside
+// internal/process itself.
+func sandboxedPythonSync(ctx context.Context, dir string) error {
+	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
+		return nil
+	}
+	out, err := runSandboxedBuildStep(ctx, dir, []string{"uv", "sync"})
+	if err != nil {
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			return fmt.Errorf("build exceeded the build timeout: %w", ctx.Err())
+		case context.Canceled:
+			return fmt.Errorf("build canceled: %w", ctx.Err())
+		}
+		return fmt.Errorf("%w\n%s", err, out)
+	}
+	return nil
+}
+
+// sandboxedRSync is rSyncFn's production default: process.SyncR's no-lockfile
+// guard and error-wrapping, routing the actual `Rscript -e renv::restore(...)`
+// exec through the same build sandbox as sandboxedPythonSync. renv evaluates
+// the project's renv profile plus each package's configure/.onLoad scripts —
+// also deployer-controlled code — so the same SEC-A1 rationale applies. See
+// sandboxedPythonSync for why this duplicates process.SyncR instead of
+// adding a seam there.
+func sandboxedRSync(ctx context.Context, dir string) error {
+	lockfile := filepath.Join(dir, "renv.lock")
+	if _, err := os.Stat(lockfile); errors.Is(err, fs.ErrNotExist) {
+		return nil // no renv.lock — nothing to restore
+	}
+	argv := []string{"Rscript", "-e",
+		`options(renv.config.sandbox.enabled=FALSE); renv::restore(prompt=FALSE)`}
+	out, err := runSandboxedBuildStep(ctx, dir, argv)
+	if err != nil {
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			return fmt.Errorf("build exceeded the build timeout: %w", ctx.Err())
+		case context.Canceled:
+			return fmt.Errorf("build canceled: %w", ctx.Err())
+		}
+		return fmt.Errorf("%w\n%s", err, out)
+	}
+	return nil
+}
+
 // pythonSyncFn / rSyncFn are package-level indirections so tests can observe
 // (or replace) host-side dependency installation. Production code always
-// goes through process.Sync / process.SyncR.
+// goes through sandboxedPythonSync / sandboxedRSync (SEC-A1: confined the
+// same way the app process is, instead of running straight on the host).
 var (
-	pythonSyncFn    = process.Sync
-	rSyncFn         = process.SyncR
+	pythonSyncFn    = sandboxedPythonSync
+	rSyncFn         = sandboxedRSync
 	ensureProjectFn = process.EnsureProject
 )
 
@@ -108,11 +317,19 @@ const defaultBuildTimeout = 900 * time.Second
 // (not const) so tests can shrink it without timing flakiness.
 var buildProgressInterval = 15 * time.Second
 
-// portIsBindable returns true if a TCP listener can be opened on
+// portIsBindable is a package-level indirection (not a plain func) so tests
+// can make AllocatePort's wraparound logic deterministic without depending
+// on real OS port state: a real bind probe can spuriously fail when the test
+// machine happens to have a candidate port held by an unrelated process,
+// which previously made the wraparound test flaky. Production always uses
+// realPortIsBindable.
+var portIsBindable = realPortIsBindable
+
+// realPortIsBindable returns true if a TCP listener can be opened on
 // 127.0.0.1:port right now. The probe listener is closed immediately; the
 // caller is responsible for reserving the port via the actual app process
 // before another concurrent allocation re-probes the same value.
-func portIsBindable(port int) bool {
+func realPortIsBindable(port int) bool {
 	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return false
