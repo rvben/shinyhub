@@ -70,6 +70,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.9.5](https://github.com/rvben/shinyhub/compare/v0.9.4...v0.9.5) - 2026-07-04
+
+### Added
+
+- **auth**: SSO-only mode - disable local password login ([fd7453f](https://github.com/rvben/shinyhub/commit/fd7453f14ec78f5fbb7c4b37f9d52e1222230d54))
+- **identity**: forward the user's display name to apps ([10b5623](https://github.com/rvben/shinyhub/commit/10b56234111cef3e096792d09bffe6f98b1efec4))
+- **proxy,ui**: warn when an app serves HTTP but no WebSocket connects ([399cef3](https://github.com/rvben/shinyhub/commit/399cef34095998514b4192bc5751bf9cc1eb8f02))
+- **worker**: agent self-fences (StopAll) on a fenced heartbeat ([c022cfe](https://github.com/rvben/shinyhub/commit/c022cfe37d9654358f898a3a23d6b27008727c63))
+- **fargate**: pre-create per-app S3 Files directory before first mount ([14470cc](https://github.com/rvben/shinyhub/commit/14470cc77af62f239b965cc6ad70c400e36c6ef5))
+- **worker**: add replicaServer.StopAll to kill and forget all tracked replicas ([40e7659](https://github.com/rvben/shinyhub/commit/40e7659f6cf17110b34687347322a32c0cbafe1e))
+- **worker**: heartbeat client sends the worker incarnation ([e42d21b](https://github.com/rvben/shinyhub/commit/e42d21b5df018915269e33851b664a6bccff04ec))
+- **worker**: reap bumps incarnation via the down-monitor + register returns it ([0c7b6fc](https://github.com/rvben/shinyhub/commit/0c7b6fc05fe4d542f5d8b51e1964f9cfca4f3f79))
+- **worker**: fence a rejoining worker with a stale incarnation ([28b366f](https://github.com/rvben/shinyhub/commit/28b366f4081bb68d9908ee215cd015ffd46e06e2))
+- **fargate**: mount per-app S3 Files volume into task definitions ([b4e63d9](https://github.com/rvben/shinyhub/commit/b4e63d904eef6117cf5bc19664f80cc95f9099a9))
+- **config**: add runtime.fargate.s3files managed durable-data backend ([fb0e502](https://github.com/rvben/shinyhub/commit/fb0e5021f9be111eb16a97db3dd6d7f64c64705c))
+- **worker-api**: carry incarnation + fenced on register/heartbeat ([6d95f8b](https://github.com/rvben/shinyhub/commit/6d95f8b18b522c2e9eacf98bdebd70342a049029))
+- **db**: ReapWorker bumps worker incarnation; revoke bumps too ([101cfe8](https://github.com/rvben/shinyhub/commit/101cfe83286ca8c9ab71cd768dcba40e780f48b7))
+- **db**: add worker incarnation column + scans ([20c4168](https://github.com/rvben/shinyhub/commit/20c4168cbd9384dd22499c8e619b3cfc7d1861e1))
+- **cli**: add apps set --ephemeral-data-ok ([600ff8e](https://github.com/rvben/shinyhub/commit/600ff8eeb4fc9d16bde345a8e0dd788f294c1b47))
+- **api**: block deploy and data push of data-using apps on ephemeral tiers ([09336a7](https://github.com/rvben/shinyhub/commit/09336a726ef03bae9e1791fb8551dcf3bed5f524))
+- **db**: add ephemeral_data_ack app column ([bc7356b](https://github.com/rvben/shinyhub/commit/bc7356b389f56d940745c949a1f85e66e5facff2))
+- **runtime**: report per-tier app-data durability ([384014a](https://github.com/rvben/shinyhub/commit/384014a943ffc9ddd61079d0e2c231a97a194b24))
+- **deploy**: detect persistent-data use and decide ephemeral-tier blocking ([587fa0a](https://github.com/rvben/shinyhub/commit/587fa0a61642573486bc99b4a9a64bfb6394a16c))
+- **api,cli,ui**: paginate schedule runs + apps list, completing T2-10 ([5d10af8](https://github.com/rvben/shinyhub/commit/5d10af833c6a0ff908e74b7390f79cc9cc061312))
+- **api,cli,ui**: paginate members, env, data, users lists (T2-10) ([c624276](https://github.com/rvben/shinyhub/commit/c6242768e1bba9156c0e2820a8dee50c27e268e5))
+- **api,cli,ui**: paginate schedule status/ls, share ls, group-list (T2-10) ([a381196](https://github.com/rvben/shinyhub/commit/a381196f3a8125c342caedbd8eda8a8cde2ae6b3))
+- **cli**: getPaginatedListWithExtra surfaces envelope extra keys ([dd48745](https://github.com/rvben/shinyhub/commit/dd48745fca607ca0d59ae2375899eba576c9bd48))
+- **api,cli,ui**: paginate tokens list via standard envelope (T2-10) ([21ec939](https://github.com/rvben/shinyhub/commit/21ec939c9e06de7c66b0920378dd99fa93985d80))
+- **api,cli,ui**: paginate deployments list via standard envelope (T2-10) ([a0dbe28](https://github.com/rvben/shinyhub/commit/a0dbe28e6be782cab0517b0c0fc4fe1a51222df6))
+- **api,cli**: add writeList + renderServerList pagination helpers ([9d2a265](https://github.com/rvben/shinyhub/commit/9d2a26599859d62914b51c3f69fe522d46a11fb5))
+
+### Fixed
+
+- **ui**: show OAuth/SSO login buttons only when the provider is configured ([8c700a2](https://github.com/rvben/shinyhub/commit/8c700a2112ef69781cc37318281d3081e5162997))
+- **identity**: resolve email + display name on the /app proxy path ([5e1d30f](https://github.com/rvben/shinyhub/commit/5e1d30f56974d5551f3516989f8fef402327601f))
+- **proxy**: fire WS-ready on Hijack, not WriteHeader(101) ([10b358f](https://github.com/rvben/shinyhub/commit/10b358fb9eee3fd1b8c5860c6e0cf75ea54a3890))
+- **db**: renumber ephemeral_data_ack migration to 044 ([b301868](https://github.com/rvben/shinyhub/commit/b30186854214d90bc60bec6affe8f768d5bc5913))
+- **fargate**: warn when s3files access point disables per-app isolation; fix migration comment ([c3d092a](https://github.com/rvben/shinyhub/commit/c3d092a2e7a6db594a98d3c1b72709387228e162))
+- **api**: guard tier/placement changes, rollback, and restart against ephemeral data loss ([f7ed9e4](https://github.com/rvben/shinyhub/commit/f7ed9e4bea5fa2d010ec2ebb54a627d1b8abbd88))
+- **fargate**: key per-app S3 Files directory on app id, not slug ([981ca52](https://github.com/rvben/shinyhub/commit/981ca5266d53fb8565ea5c782424f78bfa79adcf))
+- **process**: name Delegate= in native cgroup-degradation warning ([1075881](https://github.com/rvben/shinyhub/commit/1075881c54ea739d6915c46b139a24fabd099582))
+- **cli**: keep schedule runs default page at 200 ([c3bfb3e](https://github.com/rvben/shinyhub/commit/c3bfb3e512d04a9c8577be48852aff70fec6cad6))
+- **cli**: reject negative --limit/--offset on server-paginated lists ([142ac51](https://github.com/rvben/shinyhub/commit/142ac51eaa0c59410a5432c71c8045463568986e))
+
 ## [0.9.4](https://github.com/rvben/shinyhub/compare/v0.9.3...v0.9.4) - 2026-07-03
 
 ### Added
