@@ -802,6 +802,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if adminPass == "" {
 			return fmt.Errorf("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
 		}
+		if !cfg.Auth.LocalLoginEnabled() {
+			slog.Warn("SHINYHUB_ADMIN_USER is set but local login is disabled (auth.local_login: false); this admin cannot sign in with a password - grant admin via SSO (e.g. group_role_mappings) instead",
+				"username", adminUser)
+		}
 		_, err := store.GetUserByUsername(adminUser)
 		if errors.Is(err, db.ErrNotFound) {
 			hash, err := auth.HashPassword(adminPass)
@@ -1299,6 +1303,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			"groups_header", cfg.Auth.ForwardAuth.GroupsHeader,
 			"group_role_mappings", len(cfg.Auth.GroupRoleMappings),
 			"default_role", cfg.Auth.ForwardAuth.DefaultRole,
+		)
+	}
+	if !cfg.Auth.LocalLoginEnabled() {
+		// SSO-only. The startup lockout guard already ensured at least one SSO
+		// path is CONFIGURED, but not that it WORKS - surface exactly what was
+		// counted so a misconfigured edge (e.g. forward-auth without the edge in
+		// trusted_proxies) is diagnosable rather than a silent total lockout.
+		slog.Warn("local password login is disabled (auth.local_login: false); users must sign in via SSO",
+			"sso_paths", cfg.ActiveSSOLoginPaths(),
+			"note", "verify SSO end-to-end; forward-auth needs trusted_proxies to include your edge proxy and the proxy to send the user header",
 		)
 	}
 

@@ -37,6 +37,13 @@ auth:
   # Bump to "developer" when your IdP only ever sees trusted employees.
   oauth_default_role: viewer            # SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE
 
+  # Built-in username/password login. Default true. Set false for an SSO-only
+  # deployment: the login screen hides the password form AND the password
+  # endpoints reject with 403. Startup fails if this is false and no SSO path
+  # (GitHub/Google/OIDC/forward-auth) is configured, and it also disables the
+  # break-glass admin password login. See docs/native-oidc.md#sso-only.
+  # local_login: true                   # SHINYHUB_AUTH_LOCAL_LOGIN
+
   # Optional: map IdP groups to global roles. Groups come from the OIDC `groups`
   # claim (see oauth.oidc.groups_claim) or the forward-auth groups header.
   # Highest-rank match wins. Unlike oauth_default_role, a group MAY confer admin.

@@ -20,12 +20,17 @@ func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name,omitempty"`
 	}
 	type response struct {
+		// Local reports whether the built-in username/password form is usable.
+		// False for an SSO-only deployment (auth.local_login: false); the login
+		// screen hides the password form when false.
+		Local  bool     `json:"local"`
 		GitHub bool     `json:"github"`
 		Google bool     `json:"google"`
 		OIDC   oidcInfo `json:"oidc"`
 	}
 
 	resp := response{
+		Local:  s.cfg.Auth.LocalLoginEnabled(),
 		GitHub: s.github != nil,
 		Google: s.googleOAuth != nil,
 		OIDC: oidcInfo{

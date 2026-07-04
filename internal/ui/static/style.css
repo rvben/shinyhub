@@ -599,6 +599,9 @@ main {
 }
 
 .login-box form { display: grid; gap: 0.6rem; }
+/* The form display:grid outranks the UA [hidden] rule, so restore hidden
+   semantics for the SSO-only case where the password form is disabled. */
+.login-box form[hidden] { display: none; }
 
 .login-box .login-label {
   font-size: 0.72rem;
