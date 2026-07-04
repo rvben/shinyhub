@@ -57,3 +57,37 @@ func TestUserLookup_ResolvesPersistedEmail(t *testing.T) {
 		t.Errorf("local account ContextUser.Email = %q, want empty", lcu.Email)
 	}
 }
+
+// TestUserLookup_ResolvesDisplayName proves the native session/JWT identity path
+// carries a user's display name into ContextUser.DisplayName, which the reverse
+// proxy forwards as X-Shinyhub-Name and stamps into the identity token's `name`
+// claim. userLookup runs on every JWT-authenticated request, so this is the seam
+// that makes the display name reach apps for native (password/OAuth/OIDC) sessions
+// - forward-auth already sets it request-scoped from an upstream header.
+func TestUserLookup_ResolvesDisplayName(t *testing.T) {
+	store := dbtest.New(t)
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+	}
+	srv := New(cfg, store, nil, nil)
+
+	if err := store.CreateUser(db.CreateUserParams{Username: "sso", PasswordHash: "", Role: "developer"}); err != nil {
+		t.Fatalf("create sso: %v", err)
+	}
+	u, err := store.GetUserByUsername("sso")
+	if err != nil {
+		t.Fatalf("get sso: %v", err)
+	}
+	if err := store.SetDisplayNameFromIdP(u.ID, "Ana Smith"); err != nil {
+		t.Fatalf("persist display name: %v", err)
+	}
+
+	cu, err := srv.userLookup(u.ID)
+	if err != nil {
+		t.Fatalf("userLookup: %v", err)
+	}
+	if cu.DisplayName != "Ana Smith" {
+		t.Errorf("ContextUser.DisplayName = %q, want %q (persisted display name not resolved on the session path)", cu.DisplayName, "Ana Smith")
+	}
+}

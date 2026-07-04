@@ -1714,14 +1714,12 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// Without this an admin's still-valid JWT keeps the admin-bypass path
 	// open through the access middleware until the token expires — the same
 	// staleness bug the API middleware already guards against via its own
-	// userLookup wiring (see internal/api/router.go).
-	appUserLookup := func(id int64) (*auth.ContextUser, error) {
-		u, err := store.GetUserByID(id)
-		if err != nil {
-			return nil, err
-		}
-		return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
-	}
+	// userLookup wiring (see internal/api/router.go). Routes through the
+	// canonical store.LookupContextUser so the resolved user carries Email and
+	// DisplayName - the proxy forwards these to apps as X-Shinyhub-Email /
+	// X-Shinyhub-Name, and a hand-rolled ContextUser here would silently blank
+	// them for every native /app session.
+	appUserLookup := store.LookupContextUser
 	emptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(prx)
 	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(emptyState)
 	mux.Handle("/app/", appHandler)

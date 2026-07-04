@@ -630,7 +630,7 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 	if db.IsSystemUser(u.Username) {
 		return nil, fmt.Errorf("api key owned by system user is not honored")
 	}
-	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role, Email: u.Email}, nil
+	return u.ContextUser(), nil
 }
 
 // userLookup satisfies auth.UserLookup by re-resolving the user against the
@@ -638,11 +638,7 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 // downgrades and account deletions take effect immediately, instead of
 // remaining in force until the JWT expires.
 func (s *Server) userLookup(userID int64) (*auth.ContextUser, error) {
-	u, err := s.store.GetUserByID(userID)
-	if err != nil {
-		return nil, err
-	}
-	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role, Email: u.Email}, nil
+	return s.store.LookupContextUser(userID)
 }
 
 // revocationChecker returns an auth.RevocationChecker bound to the server's

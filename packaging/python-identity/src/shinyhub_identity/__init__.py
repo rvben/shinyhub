@@ -42,9 +42,10 @@ class Identity:
     groups: tuple[str, ...]
     groups_truncated: bool
     claims: Mapping[str, Any]
-    # Appended with a default so the positional constructor stays
-    # backward-compatible. "" when the upstream IdP asserted no email.
+    # Appended with defaults so the positional constructor stays
+    # backward-compatible. "" when the upstream IdP asserted no email / name.
     email: str = ""
+    name: str = ""
 
 
 def _resolve_key(key: Union[bytes, bytearray, str, None]) -> Optional[bytes]:
@@ -73,6 +74,7 @@ def _identity_from_claims(claims: Mapping[str, Any]) -> Identity:
         username=claims.get("preferred_username", ""),
         role=claims.get("role", ""),
         email=claims.get("email", ""),
+        name=claims.get("name", ""),
         groups=tuple(groups),
         groups_truncated=bool(claims.get("groups_truncated", False)),
         claims=claims,

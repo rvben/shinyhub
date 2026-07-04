@@ -182,6 +182,8 @@ value.
 | [Tracing](docs/tracing.md) | OpenTelemetry propagation, app spans, and control-plane spans. |
 | [Metrics and logs](docs/metrics.md) | The `/metrics` endpoint, exposed series, and the structured access log. |
 | [Branding](docs/branding.md) | White-label title, logo, theme, landing page, and footer links. |
+| [Native OIDC login (SSO)](docs/native-oidc.md) | Terminate OpenID Connect SSO in ShinyHub itself - config, claim mapping, group-to-role, sessions/logout, behind-a-proxy, and HA - no external auth proxy. |
+| [Identity forwarding to apps](docs/identity.md) | The trusted `X-Shinyhub-*` headers and signed token apps read to know the connected user, with one-call Python/R helpers. |
 | [Reverse-proxy auth - Caddy](docs/reverse-proxy/caddy.md) | Authenticate users via Caddy `forward_auth` and forward the identity to ShinyHub. |
 | [Reverse-proxy auth - nginx](docs/reverse-proxy/nginx.md) | Authenticate users via nginx `auth_request` and forward the identity to ShinyHub. |
 | [CLI/CI behind an auth proxy](docs/reverse-proxy/deploying-behind-a-proxy.md) | Deploy and manage apps from the CLI or CI when ShinyHub is behind an auth proxy that blocks non-browser clients. |

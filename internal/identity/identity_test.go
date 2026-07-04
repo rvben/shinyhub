@@ -148,6 +148,42 @@ func TestMintToken_OmitsEmptyEmail(t *testing.T) {
 	}
 }
 
+func TestMintToken_CarriesName(t *testing.T) {
+	key := DeriveKey("secret", 7)
+	tok, err := MintToken(key, TokenParams{
+		UserID: 12, Username: "ruben", Role: "admin",
+		Name: "Ruben Jongejan", Slug: "demo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := &TokenClaims{}
+	if _, err := jwt.ParseWithClaims(tok, claims, func(*jwt.Token) (any, error) {
+		return key, nil
+	}, jwt.WithAudience("demo"), jwt.WithIssuer(Issuer)); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if claims.Name != "Ruben Jongejan" {
+		t.Fatalf("name claim = %q, want %q", claims.Name, "Ruben Jongejan")
+	}
+}
+
+func TestMintToken_OmitsEmptyName(t *testing.T) {
+	key := DeriveKey("secret", 7)
+	tok, _ := MintToken(key, TokenParams{UserID: 1, Username: "u", Role: "viewer", Slug: "demo"})
+	// An empty name must be absent from the serialized claims (omitempty). Match
+	// the quoted key so the "name" substring inside "preferred_username" does not
+	// false-positive.
+	parts := strings.Split(tok, ".")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), `"name"`) {
+		t.Fatalf("empty name must be omitted from claims, got: %s", payload)
+	}
+}
+
 func TestMintToken_AppAKeyRejectsAppBToken(t *testing.T) {
 	keyA, keyB := DeriveKey("secret", 1), DeriveKey("secret", 2)
 	tok, err := MintToken(keyB, TokenParams{UserID: 1, Username: "u", Role: "viewer", Slug: "b"})

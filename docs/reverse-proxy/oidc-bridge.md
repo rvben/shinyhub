@@ -19,7 +19,7 @@ Use the table below to pick the right path:
 | You already run Caddy or nginx with an LDAP/SAML auth service | Forward-auth (caddy.md or nginx.md) |
 | You have LDAP but no existing auth proxy | OIDC bridge (this guide) |
 | You have a SAML IdP | OIDC bridge - most SAML IdPs also expose an OIDC endpoint; or deploy Authelia/Authentik as a bridge |
-| You have an OIDC IdP (Okta, Azure AD, Google Workspace, Keycloak) | ShinyHub's built-in OIDC support directly (no bridge needed) |
+| You have an OIDC IdP (Okta, Azure AD, Google Workspace, Keycloak) | [Native OIDC login](../native-oidc.md) directly (no bridge needed) |
 | You use mTLS client certificates at the perimeter | Forward-auth (caddy.md) with a proxy that validates client certs |
 
 ## OIDC bridge with Authelia and docker compose
@@ -134,11 +134,15 @@ keep stale roles.
 
 ## Notes
 
-**Group-based role assignment.** When using the OIDC bridge path, ShinyHub
-assigns `oauth_default_role` to all new OIDC users. There is no automatic
-promotion based on LDAP group membership in this mode. For group-based
-promotion (including auto-admin from a group name), use the forward-auth path
-instead.
+**Group-based role assignment.** ShinyHub reconciles the platform role from the
+IdP groups claim via `auth.group_role_mappings` on every OIDC login, same as the
+forward-auth path - so group-based promotion (including auto-admin from a group
+name) works through the bridge. The requirement is that the bridge IdP include a
+groups claim in the ID token: register the `groups` scope on the client (as the
+Authelia sketch above does) and set `groups_claim` / `groups_scope` if the claim
+name differs. A user in no mapped group receives `oauth_default_role`. See
+[Native OIDC login](../native-oidc.md) for the full claim-to-role mapping,
+session/logout semantics, and behind-a-proxy and multi-replica notes.
 
 **Authelia vs Authentik vs Keycloak.** All three work as an OIDC bridge in
 front of LDAP or SAML. Choose based on what you already run:

@@ -41,6 +41,15 @@ func TestProvider_PayloadCarriesIdentity(t *testing.T) {
 	}
 }
 
+func TestProvider_PayloadCarriesName(t *testing.T) {
+	src := &fakeGroups{groups: []string{"eng"}}
+	p := NewProvider("secret", src)
+	pl := p.PayloadFor(&auth.ContextUser{ID: 5, Username: "ana", Role: "developer", DisplayName: "Ana Smith"}, "demo", 42)
+	if pl.Name != "Ana Smith" {
+		t.Fatalf("payload name = %q, want %q", pl.Name, "Ana Smith")
+	}
+}
+
 func TestProvider_GroupsCachedWithinTTL(t *testing.T) {
 	src := &fakeGroups{groups: []string{"eng"}}
 	p := NewProvider("secret", src)
