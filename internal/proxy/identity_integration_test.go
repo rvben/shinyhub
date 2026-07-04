@@ -10,6 +10,7 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/identity"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -173,25 +174,45 @@ func TestIdentityChain_SessionUserReachesBackendVerifiable(t *testing.T) {
 	}
 }
 
-// TestIdentityChain_DisplayNameReachesBackend proves a user's display name
-// reaches the app both as the X-Shinyhub-Name header and the identity token's
-// `name` claim, when the session-resolved ContextUser carries a DisplayName.
-func TestIdentityChain_DisplayNameReachesBackend(t *testing.T) {
+// TestIdentityChain_DisplayNameAndEmailReachBackend proves a user's display name
+// and email reach the app - as X-Shinyhub-Name / X-Shinyhub-Email headers and
+// the identity token's name/email claims - for a native session.
+//
+// It resolves the request user through the REAL production mapper
+// (store.LookupContextUser, the exact function cmd/shinyhub wires as the /app/*
+// userLookup), NOT a hand-rolled ContextUser. A hand-rolled lookup here would
+// mask the class of bug where a session-resolution path forgets to copy Email /
+// DisplayName off the DB row and silently blanks these headers.
+func TestIdentityChain_DisplayNameAndEmailReachBackend(t *testing.T) {
 	const (
 		slug   = "demo"
 		secret = "chain-test-secret"
-		userID = int64(7)
 	)
 
-	app := &db.App{ID: 42, Slug: slug, Access: "private"}
-	lookup := func(id int64) (*auth.ContextUser, error) {
-		return &auth.ContextUser{ID: userID, Username: "ana", Role: "developer", DisplayName: "Ana Smith"}, nil
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "ana", PasswordHash: "", Role: "developer"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	u, err := store.GetUserByUsername("ana")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if err := store.SetDisplayNameFromIdP(u.ID, "Ana Smith"); err != nil {
+		t.Fatalf("set display name: %v", err)
+	}
+	if err := store.SetEmailFromIdP(u.ID, "ana@corp.example"); err != nil {
+		t.Fatalf("set email: %v", err)
 	}
 
-	srv, getHeaders := startChainBackend(t)
-	chain, _ := buildChain(t, app, secret, lookup, srv.URL)
+	app := &db.App{ID: 42, Slug: slug, Access: "private"}
 
-	tok, err := auth.IssueJWT(userID, "ana", "developer", secret)
+	srv, getHeaders := startChainBackend(t)
+	// The production /app/* userLookup IS store.LookupContextUser (see
+	// cmd/shinyhub/main.go). Exercising the same function keeps this test
+	// faithful to production wiring.
+	chain, _ := buildChain(t, app, secret, store.LookupContextUser, srv.URL)
+
+	tok, err := auth.IssueJWT(u.ID, "ana", "developer", secret)
 	if err != nil {
 		t.Fatalf("IssueJWT: %v", err)
 	}
@@ -210,6 +231,9 @@ func TestIdentityChain_DisplayNameReachesBackend(t *testing.T) {
 	if got := h.Get(identity.HeaderName); got != "Ana Smith" {
 		t.Errorf("X-Shinyhub-Name = %q, want %q", got, "Ana Smith")
 	}
+	if got := h.Get(identity.HeaderEmail); got != "ana@corp.example" {
+		t.Errorf("X-Shinyhub-Email = %q, want %q", got, "ana@corp.example")
+	}
 
 	tokenStr := h.Get(identity.HeaderToken)
 	if tokenStr == "" {
@@ -224,6 +248,9 @@ func TestIdentityChain_DisplayNameReachesBackend(t *testing.T) {
 	}
 	if claims.Name != "Ana Smith" {
 		t.Errorf("token name claim = %q, want %q", claims.Name, "Ana Smith")
+	}
+	if claims.Email != "ana@corp.example" {
+		t.Errorf("token email claim = %q, want %q", claims.Email, "ana@corp.example")
 	}
 }
 

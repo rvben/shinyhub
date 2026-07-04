@@ -53,6 +53,22 @@ type User struct {
 	CreatedAt time.Time
 }
 
+// ContextUser maps a persisted user row to the auth.ContextUser carried through
+// request context. It copies EVERY identity field the proxy forwards to apps
+// (id, username, role, email, display name). All session-resolution paths route
+// through this (see LookupContextUser) so no field is silently dropped on one
+// path - a class of bug that blanks X-Shinyhub-Email / X-Shinyhub-Name for
+// native sessions.
+func (u *User) ContextUser() *auth.ContextUser {
+	return &auth.ContextUser{
+		ID:          u.ID,
+		Username:    u.Username,
+		Role:        u.Role,
+		Email:       u.Email,
+		DisplayName: u.DisplayName,
+	}
+}
+
 // HasLocalPassword reports whether the hash is a usable bcrypt password (i.e.
 // the account can log in with a username/password and may change it from the
 // profile page). OAuth/OIDC accounts carry an empty hash and forward-auth /
@@ -107,6 +123,20 @@ func (s *Store) GetUserByID(id int64) (*User, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+// LookupContextUser re-resolves a user by ID against the live DB and returns the
+// full auth.ContextUser (every identity field, via User.ContextUser). It is THE
+// session-resolution mapper: the /app/* proxy chain and the /api/* router both
+// resolve the request user through this, so role demotions take effect
+// immediately AND no identity field is dropped on one path. Satisfies
+// auth.UserLookup.
+func (s *Store) LookupContextUser(id int64) (*auth.ContextUser, error) {
+	u, err := s.GetUserByID(id)
+	if err != nil {
+		return nil, err
+	}
+	return u.ContextUser(), nil
 }
 
 // ListUsers returns all users ordered by username.
