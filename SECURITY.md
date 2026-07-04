@@ -386,6 +386,25 @@ action, OAuth-start) are per-process in-memory abuse controls, not distributed
 quotas; front multi-node deployments with a shared edge rate limiter if you
 need a global ceiling on those too.
 
+## Audit-trail integrity and alerting
+
+Every mutating action is recorded in `audit_events`. The write is best-effort by
+design: `LogAuditEvent` never fails the caller, so a database or disk problem
+cannot block a legitimate operation. That means a persistent write failure
+(disk full, DB busy) can silently drop audit rows while the mutations themselves
+succeed. This is surfaced two ways, and a production deployment should alert on
+at least one:
+
+- **Always on:** each dropped audit write emits an `audit_log_write_failed`
+  error log line (action + error), independent of any metrics configuration.
+  Alert on this log event.
+- **When metrics are enabled:** the `shinyhub_audit_write_errors_total` counter
+  increments per failure; alert on any nonzero rate.
+
+Deleting a user sets `audit_events.user_id` to NULL (`ON DELETE SET NULL`) rather
+than removing the rows, so the accountability trail survives account deletion
+(anonymized, not lost) - a deliberate privacy-preserving control.
+
 ## Hosting apps on the same origin as the dashboard
 
 By default ShinyHub serves proxied apps same-origin with the dashboard, under
