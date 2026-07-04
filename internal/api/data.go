@@ -53,7 +53,9 @@ func (s *Server) appUsedBytes(slug string) (int64, error) {
 //
 // Access is gated by requireExplicitAppAccess: public/shared visibility alone
 // is not sufficient; only the owner, admins/operators, or explicit app_members
-// rows pass.
+// rows pass. Explicit viewer-members may list data-file names/sizes (not
+// contents) - a deliberate distinction from env vars, which hold secrets and are
+// manager-only. See TestDataList_ExplicitViewerAllowed.
 func (s *Server) handleDataList(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
