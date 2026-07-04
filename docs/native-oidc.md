@@ -159,8 +159,17 @@ With this set:
 
 **Lockout guard.** Startup **fails fast** if `local_login` is false and no SSO
 login path (GitHub, Google, OIDC, or forward-auth) is configured, so you cannot
-accidentally lock every user out. Configure a provider before turning local login
-off.
+accidentally lock every user out. GitHub/Google count only when both a
+`client_id` and a `client_secret` are set; OIDC's discovery is verified at
+startup. The boot log then prints the SSO paths that were counted.
+
+The guard checks that a provider is **configured**, not that it is **working** -
+test SSO end to end before turning local login off. This matters most for
+forward-auth: it authenticates a request only when the direct peer is in
+`server.trusted_proxies` **and** the proxy sends the user header, neither of which
+ShinyHub can verify at startup. An SSO-only server whose `trusted_proxies` does
+not include the real edge proxy will 403 every login. (OAuth callbacks must also
+be reachable at the registered redirect URI.)
 
 **Break-glass caveat.** Disabling local login also disables the built-in admin's
 password login (including any `SHINYHUB_LOCAL_ADMIN_*` break-glass account) and

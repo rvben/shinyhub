@@ -426,16 +426,39 @@ func (a *AuthConfig) LocalLoginEnabled() bool {
 	return a.LocalLogin == nil || *a.LocalLogin
 }
 
-// HasSSOLoginPath reports whether at least one non-password browser login path
-// is configured: GitHub OAuth, Google OAuth, native OIDC, or forward-auth. The
-// conditions mirror exactly how those providers are activated at startup
-// (see internal/api/router.go and cmd/shinyhub/main.go), so the SSO-only
-// lockout guard cannot disagree with what actually authenticates users.
+// ActiveSSOLoginPaths returns the names of the SSO login paths that are
+// configured well enough to attempt a login. GitHub/Google require BOTH a
+// client_id and a client_secret (a missing secret fails at the token exchange,
+// so a client_id alone is not a login path); OIDC requires an issuer_url (its
+// discovery is verified at startup); forward-auth counts when enabled. The order
+// is stable so it can be logged. See HasSSOLoginPath for the important caveat
+// that "configured" is not "verified working".
+func (c *Config) ActiveSSOLoginPaths() []string {
+	var paths []string
+	if c.OAuth.GitHub.ClientID != "" && c.OAuth.GitHub.ClientSecret != "" {
+		paths = append(paths, "github")
+	}
+	if c.OAuth.Google.ClientID != "" && c.OAuth.Google.ClientSecret != "" {
+		paths = append(paths, "google")
+	}
+	if c.OAuth.OIDC.IssuerURL != "" {
+		paths = append(paths, "oidc")
+	}
+	if c.Auth.ForwardAuth.Enabled {
+		paths = append(paths, "forward-auth")
+	}
+	return paths
+}
+
+// HasSSOLoginPath reports whether at least one non-password browser login path is
+// configured (see ActiveSSOLoginPaths). This is the SSO-only lockout guard's
+// check. IMPORTANT: "configured" is not "verified working" - forward-auth still
+// depends on trusted_proxies including the edge proxy AND the proxy sending the
+// user header, and OAuth requires a reachable callback URL. Only OIDC is verified
+// at startup (discovery). Operators must test SSO end to end before disabling
+// local login; the boot log names the paths that were counted.
 func (c *Config) HasSSOLoginPath() bool {
-	return c.OAuth.GitHub.ClientID != "" ||
-		c.OAuth.Google.ClientID != "" ||
-		c.OAuth.OIDC.IssuerURL != "" ||
-		c.Auth.ForwardAuth.Enabled
+	return len(c.ActiveSSOLoginPaths()) > 0
 }
 
 // ForwardAuthConfig configures trust of an upstream reverse proxy that has
