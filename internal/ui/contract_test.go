@@ -2461,3 +2461,34 @@ func TestSessionExpiryWarnsOnUnsavedChanges(t *testing.T) {
 		t.Fatal("handleUnauthorized must warn the user that unsaved changes were lost on session expiry")
 	}
 }
+
+// TestMetricsControllerOnErrorWired guards UX-3: the background metrics poll
+// (createMetricsController) was constructed with only {intervalMs, onMetrics},
+// so a failed poll (e.g. the session dying while the dashboard sat idle in a
+// background tab) failed completely silently. onError must be wired, and a
+// 401 specifically must log the user out via handleUnauthorized so a dead
+// session doesn't keep polling forever with no visible signal. The
+// onError/onMetrics contract itself is unit-tested in
+// jstests/metrics-controller.test.js.
+func TestMetricsControllerOnErrorWired(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "const metrics = createMetricsController({")
+	if start < 0 {
+		t.Fatal("app.js: createMetricsController call site not found")
+	}
+	end := strings.Index(src[start:], "\n  });")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of the createMetricsController call")
+	}
+	call := src[start : start+end]
+	if !strings.Contains(call, "onError:") {
+		t.Fatal("createMetricsController must be given an onError callback so a failed background poll is no longer silent")
+	}
+	if !strings.Contains(call, "handleUnauthorized()") {
+		t.Fatal("the metrics onError callback must call handleUnauthorized() on a 401 so a dead session logs the user out instead of polling forever")
+	}
+}

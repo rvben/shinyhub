@@ -4020,6 +4020,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
     },
+    // A failed background metrics poll used to fail silently — no onError was
+    // wired, so the CPU/RAM line just stopped updating with no visible signal.
+    // A 401 specifically means the session died while the dashboard was open
+    // in the background; log the user out instead of polling a dead session
+    // forever. metrics-controller.js reports a non-2xx as `Error('status N')`.
+    onError: (slug, err) => {
+      if (err && /status 401/.test(err.message)) {
+        handleUnauthorized();
+      }
+    },
   });
 
   function renderReplicasPanel(m) {
