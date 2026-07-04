@@ -1220,21 +1220,81 @@ func (m *Manager) LogReader(slug string, index int) (*LogReader, bool) {
 	return NewLogReader(path), true
 }
 
-// SanitizedEnv returns the current process environment with all SHINYHUB_*
-// variables removed. It is the single source of truth for the env base of
-// every app-controlled code path: app processes, dependency installation
-// (uv/renv), and post-deploy hooks. Server secrets (SHINYHUB_AUTH_SECRET,
-// the deploy token, OAuth/OIDC client secrets) must never reach code that a
-// deployer can influence, so all such call sites build their env from here.
+// appEnvAllowExact / appEnvAllowPrefixes are the allow-list of server-process
+// environment variables that may pass through to app-controlled code. Everything
+// else (AWS/GCP/Azure credentials, tokens, or any other secret the operator
+// happens to have in ShinyHub's own environment) is dropped. Operators whose
+// apps need an additional inherited variable name it in SHINYHUB_APP_ENV_ALLOW
+// (comma-separated) rather than exposing the whole environment; the intended
+// mechanism for app-specific values remains per-app env vars and the manifest.
+var appEnvAllowExact = map[string]struct{}{
+	"PATH": {}, "HOME": {}, "USER": {}, "LOGNAME": {}, "SHELL": {}, "PWD": {},
+	"LANG": {}, "LANGUAGE": {}, "TERM": {}, "TZ": {},
+	"TMPDIR": {}, "TMP": {}, "TEMP": {},
+	"SSL_CERT_FILE": {}, "SSL_CERT_DIR": {}, "CURL_CA_BUNDLE": {},
+	"REQUESTS_CA_BUNDLE": {}, "NODE_EXTRA_CA_CERTS": {},
+	"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "NO_PROXY": {}, "ALL_PROXY": {},
+	"http_proxy": {}, "https_proxy": {}, "no_proxy": {}, "all_proxy": {},
+	"XDG_CACHE_HOME": {}, "XDG_DATA_HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_RUNTIME_DIR": {},
+	"UV_CACHE_DIR": {}, "PIP_CACHE_DIR": {},
+	"R_LIBS": {}, "R_LIBS_USER": {}, "R_LIBS_SITE": {}, "RENV_PATHS_CACHE": {},
+}
+
+var appEnvAllowPrefixes = []string{"LC_"}
+
+// SanitizedEnv returns an allow-listed subset of the current process environment.
+// It is the single source of truth for the env base of every app-controlled code
+// path: app processes, dependency installation (uv/renv), and post-deploy hooks.
+// Server secrets (SHINYHUB_AUTH_SECRET, the deploy token, OAuth/OIDC client
+// secrets, and cloud credentials such as AWS_SECRET_ACCESS_KEY) must never reach
+// code that a deployer can influence, so only known-safe variables pass through.
 func SanitizedEnv() []string {
+	extra := parseAppEnvAllow(os.Getenv("SHINYHUB_APP_ENV_ALLOW"))
 	raw := os.Environ()
 	filtered := make([]string, 0, len(raw))
 	for _, e := range raw {
-		if !strings.HasPrefix(e, "SHINYHUB_") {
+		name, _, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if appEnvVarAllowed(name, extra) {
 			filtered = append(filtered, e)
 		}
 	}
 	return filtered
+}
+
+// appEnvVarAllowed reports whether an environment variable name is safe to pass
+// through to app-controlled code: on the exact allow-list, matching an allowed
+// prefix, or explicitly permitted by the operator via SHINYHUB_APP_ENV_ALLOW.
+func appEnvVarAllowed(name string, extra map[string]struct{}) bool {
+	if _, ok := appEnvAllowExact[name]; ok {
+		return true
+	}
+	if _, ok := extra[name]; ok {
+		return true
+	}
+	for _, p := range appEnvAllowPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseAppEnvAllow parses the comma-separated SHINYHUB_APP_ENV_ALLOW operator
+// extension into a set of exact variable names.
+func parseAppEnvAllow(v string) map[string]struct{} {
+	if v == "" {
+		return nil
+	}
+	out := make(map[string]struct{})
+	for _, name := range strings.Split(v, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			out[name] = struct{}{}
+		}
+	}
+	return out
 }
 
 // filteredEnv is the package-internal alias for SanitizedEnv.
