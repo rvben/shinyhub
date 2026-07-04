@@ -2617,3 +2617,32 @@ func TestSchedulesTableResponsiveOverflow(t *testing.T) {
 		t.Fatal("style.css: .schedules-table must set overflow-x:auto (in a 640px media block) so a wide schedules table scrolls within itself instead of overflowing the viewport")
 	}
 }
+
+// TestEscapeClosesNewTokenModal guards UX-7: the global Escape key handler
+// closed every other modal (deploy/new-app/new-user/profile/reset-password/
+// schedule) and the log pane, but omitted the new-API-token modal. That modal
+// reveals a bearer secret once (tokenRevealValue); leaving it out of the
+// Escape chain meant a reflexive Escape press did nothing, unlike every other
+// modal in the app.
+func TestEscapeClosesNewTokenModal(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "document.addEventListener('keydown', e => {")
+	if start < 0 {
+		t.Fatal("app.js: global keydown handler not found")
+	}
+	end := strings.Index(src[start:], "\n  });")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of the global keydown handler")
+	}
+	body := src[start : start+end]
+	if !strings.Contains(body, "newTokenModal && !newTokenModal.hidden") {
+		t.Fatal("the global Escape handler must branch on the new-token modal being open")
+	}
+	if !strings.Contains(body, "closeNewTokenModal()") {
+		t.Fatal("the global Escape handler must call closeNewTokenModal() so the revealed secret doesn't linger visible")
+	}
+}

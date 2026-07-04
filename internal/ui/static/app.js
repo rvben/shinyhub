@@ -3032,6 +3032,10 @@ document.addEventListener('DOMContentLoaded', () => {
         closeResetPasswordModal();
       } else if (scheduleModal && !scheduleModal.hidden) {
         closeScheduleForm();
+      } else if (newTokenModal && !newTokenModal.hidden) {
+        // Without this branch, Escape left the modal open after the secret
+        // token value was already revealed in the DOM once (tokenRevealValue).
+        closeNewTokenModal();
       } else if (!document.getElementById('log-pane').hidden) {
         closeLogs();
       }
