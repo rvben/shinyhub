@@ -692,7 +692,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/auth/me", s.handleMe)
 		r.Patch("/api/auth/me", s.handlePatchMe) // self-service profile: display name + own password
 		r.Get("/api/apps", s.handleListApps)
-		r.Post("/api/apps", s.handleCreateApp)
+		// Per-user rate limit on app creation so a developer cannot cheaply grow
+		// the apps table (and degrade every user's list-view latency). Uses the
+		// shared per-user action limiter (30/min) - generous for fleet apply.
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps", s.handleCreateApp)
 		// Static "/metrics" is registered before the "{slug}" wildcard so chi
 		// routes the batch endpoint here rather than to handleGetApp(slug=metrics).
 		r.Get("/api/apps/metrics", s.handleBatchMetrics)

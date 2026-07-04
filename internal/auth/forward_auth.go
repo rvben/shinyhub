@@ -75,12 +75,33 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				next.ServeHTTP(w, r)
 				return
 			}
+			// Capture the forward-auth header values for our own auth decision, then
+			// STRIP every configured forward-auth header from the request before any
+			// downstream handler (API or the /app proxy) can see it. These headers
+			// are ShinyHub's ingress-auth channel from the trusted proxy; a backend
+			// app receives identity only via the X-Shinyhub-* channel. Stripping
+			// unconditionally (even from an untrusted direct-port peer) prevents a
+			// caller from injecting a forged Remote-User/-Groups/-Email/-Name into a
+			// tenant app.
+			userHdr := strings.TrimSpace(r.Header.Get(cfg.UserHeader))
+			nameHdr := strings.TrimSpace(r.Header.Get(cfg.NameHeader))
+			emailHdr := strings.TrimSpace(r.Header.Get(cfg.EmailHeader))
+			var groupsVals []string
+			groupsPresent := false
+			if cfg.GroupsHeader != "" {
+				groupsVals, groupsPresent = r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]
+			}
+			delForwardAuthHeader(r, cfg.UserHeader)
+			delForwardAuthHeader(r, cfg.GroupsHeader)
+			delForwardAuthHeader(r, cfg.NameHeader)
+			delForwardAuthHeader(r, cfg.EmailHeader)
+
 			if !peerInTrustedProxies(r.RemoteAddr, trustedProxies) {
 				// If the request carries the user header that would authenticate a
 				// user, the operator most likely forgot to add this peer to
 				// server.trusted_proxies. Log a WARN once per distinct peer IP so
 				// the misconfiguration surfaces without flooding the log.
-				if strings.TrimSpace(r.Header.Get(cfg.UserHeader)) != "" {
+				if userHdr != "" {
 					host, _, err := net.SplitHostPort(r.RemoteAddr)
 					if err != nil {
 						host = r.RemoteAddr
@@ -95,7 +116,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				next.ServeHTTP(w, r)
 				return
 			}
-			username := strings.TrimSpace(r.Header.Get(cfg.UserHeader))
+			username := userHdr
 			if username == "" {
 				next.ServeHTTP(w, r)
 				return
@@ -111,7 +132,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			}
 
 			if cfg.GroupsHeader != "" {
-				vals, present := r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]
+				vals, present := groupsVals, groupsPresent
 				if !present && cfg.RequireGroupsHeader {
 					// Strict mode: the operator requires the proxy to assert group
 					// membership on every request. A missing header is a proxy
@@ -145,7 +166,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			// write path for the common unchanged case, since this middleware runs
 			// on every request.
 			if cfg.NameHeader != "" {
-				if name := strings.TrimSpace(r.Header.Get(cfg.NameHeader)); name != "" && name != user.DisplayName {
+				if name := nameHdr; name != "" && name != user.DisplayName {
 					if err := store.SetDisplayNameFromIdP(user.ID, name); err != nil {
 						slog.Warn("forward_auth: failed to update display name", "user", user.Username, "err", err)
 					} else {
@@ -158,12 +179,27 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			// request-scoped (the users table has no email column) and forwarded
 			// to apps via X-Shinyhub-Email and the identity token's email claim.
 			if cfg.EmailHeader != "" {
-				user.Email = strings.TrimSpace(r.Header.Get(cfg.EmailHeader))
+				user.Email = emailHdr
 			}
 
 			ctx := WithUser(r.Context(), user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}
+}
+
+// delForwardAuthHeader removes a forward-auth header from the request by both
+// its canonical and raw case-insensitive key, so a value written directly to the
+// header map (non-canonical key) is also removed. A no-op for an empty name.
+func delForwardAuthHeader(r *http.Request, name string) {
+	if name == "" {
+		return
+	}
+	canonical := textproto.CanonicalMIMEHeaderKey(name)
+	for k := range r.Header {
+		if strings.EqualFold(k, canonical) || strings.EqualFold(k, name) {
+			delete(r.Header, k)
+		}
 	}
 }
 
