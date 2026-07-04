@@ -8,6 +8,16 @@ import (
 // SetPortCounterForTest resets the port allocator to v. Test use only.
 var SetPortCounterForTest = func(v int64) { portCounter.Store(v) }
 
+// SetPortIsBindableForTest swaps the package's port-bindability probe so
+// AllocatePort's wraparound logic can be tested deterministically without
+// depending on real OS port state. Returns a restore func — pair with defer.
+// Test use only.
+func SetPortIsBindableForTest(fn func(int) bool) (restore func()) {
+	orig := portIsBindable
+	portIsBindable = fn
+	return func() { portIsBindable = orig }
+}
+
 // SetSyncHooksForTest swaps the package's host-side dep installation hooks.
 // Returns a restore func that re-installs the originals — pair with defer.
 // Test use only.

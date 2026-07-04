@@ -144,15 +144,22 @@ func TestAllocatePort(t *testing.T) {
 }
 
 func TestAllocatePort_WrapAround(t *testing.T) {
+	// Fake bindability so the wraparound logic is exercised deterministically:
+	// a real bind probe can spuriously fail if the test machine happens to
+	// have the candidate port (e.g. 60000) held by an unrelated process,
+	// which made this test flaky when it probed real OS ports.
+	restore := deploy.SetPortIsBindableForTest(func(int) bool { return true })
+	defer restore()
+
 	// Drive the counter to 60000, then verify the next call wraps back into range.
 	deploy.SetPortCounterForTest(59999)
 	p1 := deploy.AllocatePort() // 60000 — last valid
-	p2 := deploy.AllocatePort() // should wrap to 20001 (or 20000 sentinel + 1)
+	p2 := deploy.AllocatePort() // wraps to 20001
 	if p1 != 60000 {
 		t.Errorf("expected 60000, got %d", p1)
 	}
-	if p2 < 20000 || p2 > 60000 {
-		t.Errorf("wrapped port out of range: %d", p2)
+	if p2 != 20001 {
+		t.Errorf("expected wraparound to 20001, got %d", p2)
 	}
 }
 

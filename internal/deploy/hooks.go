@@ -476,13 +476,28 @@ func RunPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, ext
 // stderr are merged into logOut so the deploy log keeps a single linear
 // transcript matching what an operator would see if they ran the hook
 // manually with `2>&1`.
+//
+// SEC-A1: a manifest [[hooks]] command is deployer-controlled code that
+// previously ran directly on the host via exec.CommandContext, even when
+// process isolation was enabled for the app itself. It now runs through
+// sandboxedCommand (deploy.go), the same "standard"-tier Landlock
+// confinement (write limited to bundleDir + /tmp + /dev, read-only
+// elsewhere) internal/process/native.go applies to the app process. On a
+// platform without Landlock support, sandboxedCommand returns argv
+// unchanged and this behaves exactly as before.
 func runHookExec(ctx context.Context, bundleDir string, argv []string, extraEnv []string, logOut io.Writer) error {
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	wrapped, sandboxEnv, err := sandboxedCommand(bundleDir, argv)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, wrapped[0], wrapped[1:]...)
 	cmd.Dir = bundleDir
 	// Hooks are deployer-controlled code. Base the env on the scrubbed server
 	// env (no SHINYHUB_* secrets), then layer the app's own env vars on top
-	// so the hook sees what the app will see at start, minus server secrets.
-	cmd.Env = append(process.SanitizedEnv(), extraEnv...)
+	// so the hook sees what the app will see at start, minus server secrets,
+	// then the sandbox's own extra vars (cache-dir redirects + the encoded
+	// spec) last so they always take effect under the sandbox.
+	cmd.Env = append(append(process.SanitizedEnv(), extraEnv...), sandboxEnv...)
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	return cmd.Run()
