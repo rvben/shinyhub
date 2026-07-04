@@ -2429,3 +2429,35 @@ func TestAppDetailSurfacesLoadFailure(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "if (!resp.ok) { throw new Error(",
 		"mountAppDetail must throw on a non-OK response so the router error boundary shows #route-error-view")
 }
+
+// TestSessionExpiryWarnsOnUnsavedChanges guards UX-2: handleUnauthorized used
+// to wipe all client state unconditionally on a 401, discarding any unsaved
+// settings edits with no warning. It must check anySettingsDirty() BEFORE
+// showLoggedOut() clears state, and surface a message explaining the loss.
+func TestSessionExpiryWarnsOnUnsavedChanges(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "async function handleUnauthorized()")
+	if start < 0 {
+		t.Fatal("app.js: handleUnauthorized not found")
+	}
+	end := strings.Index(src[start:], "\n  }")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of handleUnauthorized")
+	}
+	body := src[start : start+end]
+	if !strings.Contains(body, "anySettingsDirty()") {
+		t.Fatal("handleUnauthorized must call anySettingsDirty() to detect unsaved settings edits before wiping state")
+	}
+	dirtyCheck := strings.Index(body, "anySettingsDirty()")
+	wipe := strings.Index(body, "showLoggedOut()")
+	if wipe < 0 || dirtyCheck > wipe {
+		t.Fatal("handleUnauthorized must check anySettingsDirty() BEFORE showLoggedOut() wipes client state")
+	}
+	if !strings.Contains(body, "Unsaved changes were lost") {
+		t.Fatal("handleUnauthorized must warn the user that unsaved changes were lost on session expiry")
+	}
+}

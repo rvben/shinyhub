@@ -740,8 +740,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function handleUnauthorized() {
+    // A 401 wipes all client state unconditionally. If the operator had unsaved
+    // settings edits in flight, silently discarding them with no explanation
+    // looks like data loss; check for dirty edits before the logout clears
+    // state, and surface a clear message so they know to redo the edit after
+    // logging in.
+    const hadUnsavedChanges = anySettingsDirty();
     showLoggedOut();
-    setError(loginError, '');
+    setError(loginError, hadUnsavedChanges
+      ? 'Your session expired and you were logged out. Unsaved changes were lost - please log in again.'
+      : '');
   }
 
   async function loadFleetHealth() {
