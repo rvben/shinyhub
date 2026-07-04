@@ -9,21 +9,27 @@
 // RPO/RTO: `backup` is point-in-time and safe to run on a live server, so the
 // recovery point objective is "as fresh as your last scheduled backup" (run it
 // from cron as often as your tolerated data loss window). `restore` is offline
-// (stop the server first) and rebuilds state in place after moving the current
-// state aside, so the recovery time objective is dominated by archive size,
-// typically minutes. Always rehearse the restore drill (see SECURITY.md /
-// docs) against a scratch directory before you need it for real.
+// (stop the server first — Restore refuses when it detects a live one via a
+// PID file or an open listener; RestoreForce overrides that) and rebuilds
+// state in place after moving the current state aside, so the recovery time
+// objective is dominated by archive size, typically minutes. Always rehearse
+// the restore drill (see SECURITY.md / docs) against a scratch directory
+// before you need it for real.
 package backup
 
 import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
@@ -205,6 +211,14 @@ func Create(cfg *config.Config, version, outPath string) error {
 		_ = os.Remove(tmpOut)
 		return fmt.Errorf("close %s: %w", tmpOut, err)
 	}
+	// Re-open and fully decode what was just written before reporting success:
+	// a short write on a flaky filesystem must surface as an error here, not
+	// as a silently truncated archive an operator only discovers during a
+	// restore.
+	if err := Verify(tmpOut); err != nil {
+		_ = os.Remove(tmpOut)
+		return fmt.Errorf("backup archive failed verification: %w", err)
+	}
 	if err := os.Rename(tmpOut, outPath); err != nil {
 		_ = os.Remove(tmpOut)
 		return fmt.Errorf("finalize %s: %w", outPath, err)
@@ -243,7 +257,78 @@ func ReadManifest(archivePath string) (Manifest, error) {
 	}
 }
 
-// Restore rebuilds durable state from archivePath. The server must be stopped.
+// Verify re-opens archivePath and fully decodes it end to end: the gzip
+// trailer plus every tar entry's body, confirming the manifest and the DB
+// snapshot entry its own manifest.Backend declares are both present and
+// readable. Create calls this on every archive it writes, before renaming it
+// into place, so a short write on a flaky filesystem is caught as an error
+// instead of a silently truncated "backup written". It is also safe to call
+// standalone against an existing archive, e.g. before trusting it for a
+// restore drill.
+func Verify(archivePath string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", archivePath, err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("read gzip header: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+
+	seen := map[string]bool{}
+	var manifest Manifest
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read archive structure: %w", err)
+		}
+		if hdr.Name == manifestEntry {
+			if err := json.NewDecoder(tr).Decode(&manifest); err != nil {
+				return fmt.Errorf("read manifest: %w", err)
+			}
+		} else if _, err := io.Copy(io.Discard, tr); err != nil {
+			return fmt.Errorf("read entry %q: %w", hdr.Name, err)
+		}
+		seen[hdr.Name] = true
+	}
+	// tar.Reader stops at the end-of-archive marker; draining what remains
+	// forces gzip to validate its trailing CRC32/size, which a truncated or
+	// bit-flipped write can corrupt even when every tar entry above read back
+	// clean.
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return fmt.Errorf("read gzip trailer: %w", err)
+	}
+
+	if !seen[manifestEntry] {
+		return fmt.Errorf("archive is missing %s", manifestEntry)
+	}
+	backend := manifest.Backend
+	if backend == "" {
+		backend = backendSQLite
+	}
+	wantDBEntry := dbEntry
+	if backend == backendPostgres {
+		wantDBEntry = dbDumpEntry
+	}
+	if !seen[wantDBEntry] {
+		return fmt.Errorf("archive is missing %s snapshot entry %s", backend, wantDBEntry)
+	}
+	return nil
+}
+
+// Restore rebuilds durable state from archivePath. The server must be
+// stopped: Restore refuses when it detects one still running for cfg (a
+// server.pid_file naming a live process, or something already listening on
+// cfg.Server's configured address) and returns an error without touching any
+// state. Call RestoreForce to override that guard once you have independently
+// confirmed the server is stopped.
+//
 // It refuses archives produced by a newer schema (this binary cannot run them),
 // preserves the current state (never deletes — that is your rollback path),
 // then rebuilds in place. For SQLite the current DB file and app/app-data trees
@@ -254,6 +339,27 @@ func ReadManifest(archivePath string) (Manifest, error) {
 // moved aside. The archive backend must match the configured database. The
 // returned slice lists every path that was preserved.
 func Restore(cfg *config.Config, archivePath string) (movedAside []string, err error) {
+	return restore(cfg, archivePath, false)
+}
+
+// RestoreForce is Restore but, when force is true, skips the running-server
+// guard described on Restore. Only pass force=true once you have
+// independently confirmed the server is stopped: restoring into a live server
+// renames the SQLite file (and its WAL) — and the apps/app-data trees — out
+// from under an open connection, which can corrupt or wedge it.
+func RestoreForce(cfg *config.Config, archivePath string, force bool) (movedAside []string, err error) {
+	return restore(cfg, archivePath, force)
+}
+
+func restore(cfg *config.Config, archivePath string, force bool) (movedAside []string, err error) {
+	if !force {
+		if reason := runningServerSignal(cfg); reason != "" {
+			return nil, fmt.Errorf(
+				"refusing to restore: %s; stop the server first, or use RestoreForce to override",
+				reason)
+		}
+	}
+
 	postgres := db.IsPostgresDSN(cfg.Database.DSN)
 
 	var dbPath string
@@ -354,6 +460,71 @@ func Restore(cfg *config.Config, archivePath string) (movedAside []string, err e
 		}
 	}
 	return movedAside, nil
+}
+
+// runningServerSignal reports why a ShinyHub server for cfg appears to be
+// live, or "" if neither available signal fires. Two independent signals are
+// checked because neither alone is reliable: server.pid_file is opt-in
+// (config.ServerConfig.PIDFile) and can go stale after an unclean crash; the
+// listener probe fires for whatever is bound to the configured address, not
+// provably ShinyHub itself, but ShinyHub always binds that address while
+// running and nothing else should be answering on a dedicated host's app
+// port. Either signal alone is sufficient to report "running".
+func runningServerSignal(cfg *config.Config) string {
+	if cfg.Server.PIDFile != "" {
+		if pid, ok := readAlivePID(cfg.Server.PIDFile); ok {
+			return fmt.Sprintf("pid file %s names running process %d", cfg.Server.PIDFile, pid)
+		}
+	}
+	if addr, ok := serverProbeAddr(cfg); ok {
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return fmt.Sprintf("a process is already listening on %s", addr)
+		}
+	}
+	return ""
+}
+
+// readAlivePID reads a PID from path and reports it only if the process it
+// names is still alive (signal 0). A missing/unreadable/unparsable file, or a
+// stale PID that no longer exists, both report ok=false.
+func readAlivePID(path string) (pid int, ok bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	if !pidAlive(pid) {
+		return 0, false
+	}
+	return pid, true
+}
+
+// pidAlive reports whether pid names a live process by sending it signal 0,
+// which checks existence without actually signaling it. A process that exists
+// but that we lack permission to signal (EPERM) still counts as alive.
+func pidAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// serverProbeAddr returns the address to dial to detect a live listener for
+// cfg's server, or ok=false when no port is configured (Port <= 0). A
+// bind-all host ("0.0.0.0", "::", or unset) is probed via loopback, since
+// dialing a bind-all address as a client is not portable.
+func serverProbeAddr(cfg *config.Config) (addr string, ok bool) {
+	if cfg.Server.Port <= 0 {
+		return "", false
+	}
+	host := cfg.Server.Host
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(cfg.Server.Port)), true
 }
 
 // preserve renames p to "p.pre-restore-<ts>" and returns the new path, or ""
