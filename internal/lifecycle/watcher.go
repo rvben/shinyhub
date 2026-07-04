@@ -388,7 +388,16 @@ func (w *Watcher) SetResume(fn func(slug, bundleDir string, index int) (*deploy.
 // warmed RAM was actually freed. On freed=true the replica rows are marked
 // suspended (resumable on wake). Otherwise it falls back to Stop + stopped,
 // which always frees RAM (the never-worse-than-cold-stop invariant).
-func (w *Watcher) hibernatePool(app *db.App) {
+// hibernatePool freezes or stops app's pool and persists the resulting replica
+// state. It reports whether the pool actually reached a terminal
+// suspended/stopped state: when the manager's Stop call itself fails (the
+// process refused to die, or the runtime call errored), the replicas are left
+// as-is rather than persisted as "stopped" - the DB must not assert a state
+// that isn't real, since that would strand a live manager entry that later
+// trips ErrReplicaAlreadyRunning on wake. Callers should keep the app in a
+// non-terminal status and let the next tick retry rather than treating this
+// as a completed hibernation.
+func (w *Watcher) hibernatePool(app *db.App) bool {
 	freed, err := w.mgr.Suspend(app.Slug)
 	if freed && err == nil {
 		for i := 0; i < app.Replicas; i++ {
@@ -398,13 +407,14 @@ func (w *Watcher) hibernatePool(app *db.App) {
 				slog.Warn("watcher: persist suspended replica failed", "slug", app.Slug, "index", i, "err", uerr)
 			}
 		}
-		return
+		return true
 	}
 	if err != nil && !errors.Is(err, process.ErrRuntimeNotSnapshotter) {
 		slog.Warn("watcher: suspend failed; falling back to stop", "slug", app.Slug, "err", err)
 	}
 	if serr := w.mgr.Stop(app.Slug); serr != nil {
-		slog.Warn("watcher: stop on hibernate failed", "slug", app.Slug, "err", serr)
+		slog.Warn("watcher: stop on hibernate failed; leaving replica state as-is for a later retry", "slug", app.Slug, "err", serr)
+		return false
 	}
 	for i := 0; i < app.Replicas; i++ {
 		if uerr := w.store.UpsertReplica(db.UpsertReplicaParams{
@@ -413,6 +423,7 @@ func (w *Watcher) hibernatePool(app *db.App) {
 			slog.Warn("watcher: persist hibernated replica failed", "slug", app.Slug, "index", i, "err", uerr)
 		}
 	}
+	return true
 }
 
 // RestoreWarm re-boots and re-freezes apps that were hibernated before a server
@@ -1116,7 +1127,15 @@ func (w *Watcher) handleIdle(slug string, runningCount int) {
 	_, endSpan := w.traceOp(context.Background(), "lifecycle.hibernate", slug)
 	defer func() { endSpan(nil) }()
 
-	w.hibernatePool(app)
+	if !w.hibernatePool(app) {
+		// The pool did not actually reach a stopped state (mgr.Stop errored), so
+		// the app is still effectively running. Do not persist "hibernated" - that
+		// would assert a state that isn't real and could later trip
+		// ErrReplicaAlreadyRunning on wake. Leave status as-is; the next tick
+		// re-evaluates idleness and retries the stop.
+		slog.Warn("watcher: hibernate stop failed; leaving app status unchanged for retry", "slug", slug)
+		return
+	}
 	if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"}); err != nil {
 		slog.Warn("watcher: persist hibernated status failed", "slug", slug, "err", err)
 	}

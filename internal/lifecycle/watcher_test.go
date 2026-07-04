@@ -758,6 +758,64 @@ func TestHibernation_StopsIdleApp(t *testing.T) {
 	}
 }
 
+// TestHibernation_StopFailureDoesNotPersistHibernatedStatus proves that when
+// mgr.Stop fails during single-node hibernation, the watcher does NOT persist
+// "hibernated" (app status) or "stopped" (replica rows). Asserting a terminal
+// hibernated state that isn't real would strand a live manager entry and could
+// later trip ErrReplicaAlreadyRunning on wake; leaving the real status
+// untouched lets the next tick retry the stop.
+func TestHibernation_StopFailureDoesNotPersistHibernatedStatus(t *testing.T) {
+	mgr := &fakeManager{
+		entries: []*process.ProcessInfo{
+			{Slug: "app", Index: 0, Status: process.StatusRunning},
+		},
+		stopErr: fmt.Errorf("kill refused"),
+	}
+	prx := newFakeProxy()
+	prx.seen["app"] = time.Now().Add(-2 * time.Hour) // idle for 2h
+
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:        1,
+			Slug:      "app",
+			Status:    "running",
+			Replicas:  1,
+			UpdatedAt: time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	// The replica is genuinely still running (mgr.Stop below is refused, so the
+	// real OS process never dies): seed the same pre-existing "running" row a
+	// live app would have, so reconcileStatuses - which runs later in the same
+	// tick - reconciles against the true state rather than an empty snapshot.
+	st.replicas = map[int64][]*db.Replica{
+		1: {{AppID: 1, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"}},
+	}
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.runOnce()
+
+	if len(mgr.stopped) == 0 || mgr.stopped[0] != "app" {
+		t.Fatalf("expected manager.Stop('app') to have been attempted, got %v", mgr.stopped)
+	}
+	for _, s := range st.statusUpdates {
+		if s.Status == "hibernated" {
+			t.Errorf("expected no hibernated status update after a failed Stop, got %v", st.statusUpdates)
+		}
+	}
+	if got := st.appStatus["app"]; got != "running" {
+		t.Errorf("app status = %q, want running (unchanged, so the next tick retries the stop)", got)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, ur := range st.upsertedReplicas {
+		if ur.Status == "stopped" {
+			t.Errorf("expected no replica persisted as stopped after a failed Stop, got %+v", ur)
+		}
+	}
+}
+
 // TestHibernation_AbortsWhenActivityRacesIn covers the read-then-stop race
 // where a request lands between LastSeen() and the hibernate action. The
 // proxy's CAS-style BeginHibernate must reject the hibernate, leaving the
