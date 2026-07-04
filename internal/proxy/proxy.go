@@ -1648,9 +1648,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The recorder delegates Flush/Hijack/ReadFrom so streaming responses,
 	// WebSocket upgrades, and the sendfile fast path keep working.
 	rec := newStatusRecorder(w)
-	// Mark this slug ready the instant the reverse proxy writes 101.
-	// httputil.ReverseProxy emits WriteHeader(101) before calling Hijack,
-	// so the hook fires synchronously before the hijacked goroutine
+	// Mark this slug ready the instant the reverse proxy completes a WS
+	// upgrade. On this Go toolchain httputil.ReverseProxy hijacks the
+	// connection and writes the 101 status line to the hijacked writer
+	// WITHOUT calling WriteHeader(101), so onUpgrade fires from the recorder's
+	// Hijack (see recorder.go), synchronously before the hijacked goroutine
 	// (which lives for the duration of the WS) ever starts.
 	rec.onUpgrade = func() { p.MarkWSReady(slug) }
 	// Track the hijacked connection (if this request upgrades to WebSocket) so a
