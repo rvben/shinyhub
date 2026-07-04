@@ -47,6 +47,20 @@ func (g *GitHub) AuthURL(state string) string {
 	return g.cfg.AuthCodeURL(state, oauth2.AccessTypeOnline)
 }
 
+// SetTestEndpoints overrides the token-exchange and REST API base URLs. It
+// exists only so tests can point a GitHub provider at a fake server; the
+// authorization endpoint (never hit outside a real browser redirect) and the
+// production defaults (github.Endpoint, https://api.github.com) are untouched
+// for callers that never call this.
+func (g *GitHub) SetTestEndpoints(tokenURL, apiBase string) {
+	if tokenURL != "" {
+		g.cfg.Endpoint.TokenURL = tokenURL
+	}
+	if apiBase != "" {
+		g.apiBase = apiBase
+	}
+}
+
 // Exchange trades the authorization code for an access token.
 func (g *GitHub) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
 	tok, err := g.cfg.Exchange(ctx, code)

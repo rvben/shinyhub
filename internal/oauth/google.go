@@ -17,9 +17,15 @@ type GoogleUser struct {
 	Name  string `json:"name"`  // Display name (may be empty)
 }
 
+// googleUserinfoURL is the production Google userinfo endpoint.
+const googleUserinfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
+
 // Google is an OAuth2 provider for Google.
 type Google struct {
 	cfg *oauth2.Config
+	// userinfoURL is the userinfo endpoint, overridable in tests. Defaults to
+	// googleUserinfoURL.
+	userinfoURL string
 }
 
 // NewGoogle creates a Google OAuth2 provider. callbackURL must match the
@@ -33,6 +39,7 @@ func NewGoogle(clientID, clientSecret, callbackURL string) *Google {
 			Scopes:       []string{"openid", "email", "profile"},
 			Endpoint:     google.Endpoint,
 		},
+		userinfoURL: googleUserinfoURL,
 	}
 }
 
@@ -40,6 +47,20 @@ func NewGoogle(clientID, clientSecret, callbackURL string) *Google {
 // must be stored (in the DB) and verified in the callback.
 func (g *Google) AuthURL(state string) string {
 	return g.cfg.AuthCodeURL(state, oauth2.AccessTypeOnline)
+}
+
+// SetTestEndpoints overrides the token-exchange and userinfo URLs. It exists
+// only so tests can point a Google provider at a fake server; the
+// authorization endpoint (never hit outside a real browser redirect) and the
+// production defaults (google.Endpoint, googleUserinfoURL) are untouched for
+// callers that never call this.
+func (g *Google) SetTestEndpoints(tokenURL, userinfoURL string) {
+	if tokenURL != "" {
+		g.cfg.Endpoint.TokenURL = tokenURL
+	}
+	if userinfoURL != "" {
+		g.userinfoURL = userinfoURL
+	}
 }
 
 // Exchange trades the authorization code for an access token.
@@ -54,7 +75,7 @@ func (g *Google) Exchange(ctx context.Context, code string) (*oauth2.Token, erro
 // FetchUser retrieves the authenticated Google user's profile.
 func (g *Google) FetchUser(ctx context.Context, tok *oauth2.Token) (*GoogleUser, error) {
 	client := g.cfg.Client(ctx, tok)
-	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	resp, err := client.Get(g.userinfoURL)
 	if err != nil {
 		return nil, fmt.Errorf("google user fetch: %w", err)
 	}
