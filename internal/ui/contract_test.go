@@ -2417,3 +2417,15 @@ func TestAppDescriptionUIContract(t *testing.T) {
 	assertContains(t, "app.js", "name, description, project_slug",
 		"saveGeneralInfo PATCHes description alongside name + project_slug")
 }
+
+// TestAppDetailSurfacesLoadFailure guards UX-1: a non-OK, non-404, non-401
+// response from GET /api/apps/:slug (e.g. a 500) must not be swallowed into a
+// silent `return {}` that mounts a totally blank panel. mountAppDetail must
+// throw so the router's error boundary (showRouteError in app.js) catches it
+// and reveals #route-error-view with a Reload button instead.
+func TestAppDetailSurfacesLoadFailure(t *testing.T) {
+	assertNotContains(t, "views/app-detail.js", "if (!resp.ok) { return {}; }",
+		"a failed GET /api/apps/:slug must not silently mount an empty panel with no error or retry")
+	assertContains(t, "views/app-detail.js", "if (!resp.ok) { throw new Error(",
+		"mountAppDetail must throw on a non-OK response so the router error boundary shows #route-error-view")
+}
