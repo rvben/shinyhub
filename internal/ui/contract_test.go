@@ -2567,6 +2567,37 @@ func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
 	}
 }
 
+// TestLoginHandlesRateLimitAndDoubleSubmit guards UX-6/UX-8: a 429 from the
+// rate-limited login endpoint used to fall through to the generic "Login
+// failed" message, giving no hint that retrying immediately won't help; and
+// the submit button had no disabled-during-request guard, so a slow request
+// (or an impatient double-click) could fire the login POST twice.
+func TestLoginHandlesRateLimitAndDoubleSubmit(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "loginForm.addEventListener('submit'")
+	if start < 0 {
+		t.Fatal("app.js: login form submit handler not found")
+	}
+	end := strings.Index(src[start:], "\n  });")
+	if end < 0 {
+		t.Fatal("app.js: could not find end of the login submit handler")
+	}
+	body := src[start : start+end]
+	if !strings.Contains(body, "response.status === 429") {
+		t.Fatal("the login submit handler must special-case a 429 (rate limited) response")
+	}
+	if !strings.Contains(body, "Too many attempts") {
+		t.Fatal("a 429 login response must show a message distinct from the generic 'Login failed', so the user knows to wait rather than retry the same credentials")
+	}
+	if !strings.Contains(body, "submitBtn.disabled = true") || !strings.Contains(body, "submitBtn.disabled = false") {
+		t.Fatal("the login submit button must be disabled for the duration of the request to prevent a double-submit")
+	}
+}
+
 // TestSchedulesTableResponsiveOverflow guards UX-5: unlike the other wide
 // admin tables (audit/users/workers), the schedules table is rebuilt at
 // runtime by loadSchedules() with no fixed id, so it was missing from the

@@ -3827,42 +3827,52 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     setError(loginError, '');
 
-    let response;
+    const submitBtn = loginForm.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
     try {
-      response = await api('/api/auth/session', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          username: usernameInput.value,
-          password: passwordInput.value,
-        }),
-      });
-    } catch {
-      setError(loginError, 'Network error');
-      return;
-    }
+      let response;
+      try {
+        response = await api('/api/auth/session', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            username: usernameInput.value,
+            password: passwordInput.value,
+          }),
+        });
+      } catch {
+        setError(loginError, 'Network error');
+        return;
+      }
 
-    if (response.status === 401) {
-      setError(loginError, 'Invalid credentials');
-      return;
-    }
-    if (!response.ok) {
-      setError(loginError, 'Login failed');
-      return;
-    }
+      if (response.status === 401) {
+        setError(loginError, 'Invalid credentials');
+        return;
+      }
+      if (response.status === 429) {
+        setError(loginError, 'Too many attempts - try again in a moment.');
+        return;
+      }
+      if (!response.ok) {
+        setError(loginError, 'Login failed');
+        return;
+      }
 
-    const payload = await response.json();
-    showLoggedIn(payload);
-    passwordInput.value = '';
-    // Mirror the bootstrap path: await router.start() so state.apps is
-    // populated before handleDeployHash consumes the persisted slug.
-    // Without the await + handleDeployHash call here, a logged-out user
-    // who landed on /#deploy=<slug> would persist the slug, log in, and
-    // then never get the deploy modal (the bootstrap path doesn't run on
-    // an interactive login).
-    await router.start();
-    consumeNextParam();
-    await handleDeployHash();
+      const payload = await response.json();
+      showLoggedIn(payload);
+      passwordInput.value = '';
+      // Mirror the bootstrap path: await router.start() so state.apps is
+      // populated before handleDeployHash consumes the persisted slug.
+      // Without the await + handleDeployHash call here, a logged-out user
+      // who landed on /#deploy=<slug> would persist the slug, log in, and
+      // then never get the deploy modal (the bootstrap path doesn't run on
+      // an interactive login).
+      await router.start();
+      consumeNextParam();
+      await handleDeployHash();
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
   });
 
   refreshButton.addEventListener('click', async () => {
