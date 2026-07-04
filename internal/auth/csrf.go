@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 // CSRFCookieName is the cookie that holds the CSRF token. Not HttpOnly so
@@ -52,6 +54,20 @@ func CSRFMiddleware(trustedNets []*net.IPNet) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Defense in depth against a proxied app riding the session: apps are
+			// served same-origin under /app/<slug>/, so a compromised app's JS can
+			// read the (JS-readable) csrf_token cookie and issue a same-origin
+			// mutating request. Reject any mutation whose Referer is under /app/.
+			// The dashboard's own fetches carry a dashboard-route Referer (never
+			// /app/); token-authed API clients bypass CSRF above; a missing Referer
+			// is allowed so privacy tooling / no-referrer policies don't break the
+			// dashboard. For hard isolation of untrusted apps, deploy them on a
+			// separate origin (server.app_origin).
+			if refererUnderAppPath(r.Header.Get("Referer")) {
+				http.Error(w, "csrf: mutation originated from a proxied app", http.StatusForbidden)
+				return
+			}
+
 			cookie, err := r.Cookie(CSRFCookieName)
 			if err != nil || cookie.Value == "" {
 				http.Error(w, "csrf: missing token", http.StatusForbidden)
@@ -65,6 +81,21 @@ func CSRFMiddleware(trustedNets []*net.IPNet) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// refererUnderAppPath reports whether the Referer URL's path is under /app/,
+// i.e. the request was initiated from a proxied app page. An empty or
+// unparseable Referer returns false (fail-open for missing headers; the
+// double-submit token check still applies).
+func refererUnderAppPath(referer string) bool {
+	if referer == "" {
+		return false
+	}
+	u, err := url.Parse(referer)
+	if err != nil {
+		return false
+	}
+	return u.Path == "/app" || strings.HasPrefix(u.Path, "/app/")
 }
 
 // ensureCSRFCookie sets a csrf_token cookie on the response when the request
