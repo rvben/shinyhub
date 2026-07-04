@@ -130,9 +130,12 @@
           <button type="submit">Login</button>
         </form>
         <p id="login-error" class="error" hidden></p>
-        <div class="login-separator">or</div>
-        <a class="github-login" href="/api/auth/github/login">Sign in with GitHub</a>
-        <a class="google-login" href="/api/auth/google/login">Sign in with Google</a>
+        <!-- Hidden by default; login-providers.js reveals each only when the
+             server reports it configured (/api/auth/providers), so a native-only
+             install never shows a dead SSO button. -->
+        <div class="login-separator" hidden>or</div>
+        <a class="github-login" href="/api/auth/github/login" hidden>Sign in with GitHub</a>
+        <a class="google-login" href="/api/auth/google/login" hidden>Sign in with Google</a>
       </div>
     </section>
 

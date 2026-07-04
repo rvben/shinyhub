@@ -695,6 +695,13 @@ main {
   transition: all var(--ease);
 }
 
+/* The button display:flex (author origin) outranks the UA [hidden]{display:none}
+   rule, so the attribute alone would not hide an unconfigured provider. Restore
+   the hidden semantics explicitly (same pattern as .nav-item[hidden]). */
+.github-login[hidden],
+.google-login[hidden],
+.oidc-login[hidden] { display: none; }
+
 .github-login:hover,
 .google-login:hover,
 .oidc-login:hover {
