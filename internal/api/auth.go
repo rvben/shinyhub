@@ -205,7 +205,22 @@ func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
 	return user, nil
 }
 
+// rejectIfLocalLoginDisabled writes a 403 and returns true when the built-in
+// username/password login is turned off (auth.local_login: false). The SSO-only
+// switch is enforced at the endpoint, not only by hiding the form, so a client
+// cannot bypass the IdP by POSTing credentials directly.
+func (s *Server) rejectIfLocalLoginDisabled(w http.ResponseWriter) bool {
+	if !s.cfg.Auth.LocalLoginEnabled() {
+		writeError(w, http.StatusForbidden, "local password login is disabled; sign in with SSO")
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.rejectIfLocalLoginDisabled(w) {
+		return
+	}
 	if !s.loginLimiter.allow(s.ClientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
@@ -252,6 +267,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
+	if s.rejectIfLocalLoginDisabled(w) {
+		return
+	}
 	if !s.loginLimiter.allow(s.ClientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return

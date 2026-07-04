@@ -11,6 +11,7 @@ import { providerVisibility, applyLoginProviders } from '../static/views/login-p
 
 function loginDoc() {
   return new JSDOM(`<!DOCTYPE html><div class="login-box">
+    <form id="login-form"><input id="login-username"><input id="login-password"><button type="submit">Login</button></form>
     <div class="login-separator" hidden>or</div>
     <a class="github-login" href="/api/auth/github/login" hidden>Sign in with GitHub</a>
     <a class="google-login" href="/api/auth/google/login" hidden>Sign in with Google</a>
@@ -94,4 +95,46 @@ test('re-applying with oidc disabled hides the previously-created button and the
   applyLoginProviders(doc, { github: false, google: false, oidc: { enabled: false } });
   assert.equal(doc.querySelector('.oidc-login').hidden, true);
   assert.equal(doc.querySelector('.login-separator').hidden, true);
+});
+
+// --- local (password) login gating ---
+
+test('local login defaults to shown (fail open) when the field is absent', () => {
+  assert.equal(providerVisibility({}).local, true);
+  assert.equal(providerVisibility(undefined).local, true);
+  assert.equal(providerVisibility({ local: true }).local, true);
+});
+
+test('local:false hides the password form', () => {
+  const doc = loginDoc();
+  applyLoginProviders(doc, { local: false, oidc: { enabled: true, display_name: 'Company SSO' } });
+  assert.equal(doc.querySelector('#login-form').hidden, true);
+  // SSO-only: the OIDC button shows, but the "or" separator does not (no form to divide from).
+  assert.equal(doc.querySelector('.oidc-login').hidden, false);
+  assert.equal(doc.querySelector('.login-separator').hidden, true);
+});
+
+test('local login shown keeps the form visible', () => {
+  const doc = loginDoc();
+  applyLoginProviders(doc, { local: true, github: true });
+  assert.equal(doc.querySelector('#login-form').hidden, false);
+  // form + SSO button => the separator divides them
+  assert.equal(doc.querySelector('.login-separator').hidden, false);
+});
+
+test('separator shows only when BOTH the form and an SSO button are present', () => {
+  // form only (no SSO): no separator
+  assert.equal(providerVisibility({ local: true }).separator, false);
+  // SSO only (form hidden): no separator
+  assert.equal(providerVisibility({ local: false, github: true }).separator, false);
+  // both: separator
+  assert.equal(providerVisibility({ local: true, github: true }).separator, true);
+});
+
+test('re-applying with local re-enabled restores the form', () => {
+  const doc = loginDoc();
+  applyLoginProviders(doc, { local: false, oidc: { enabled: true } });
+  assert.equal(doc.querySelector('#login-form').hidden, true);
+  applyLoginProviders(doc, { local: true, oidc: { enabled: true } });
+  assert.equal(doc.querySelector('#login-form').hidden, false);
 });

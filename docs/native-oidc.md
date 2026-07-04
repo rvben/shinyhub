@@ -39,6 +39,7 @@ oauth:
 
 auth:
   oauth_default_role: viewer                      # role for a first-time SSO user
+  local_login: true                               # false => SSO-only (hide + reject password login)
   group_role_mappings:                            # IdP group -> ShinyHub PLATFORM role
     platform-admins: admin
     data-team:       operator
@@ -62,6 +63,7 @@ Every option has an environment-variable equivalent (env wins over YAML):
 | `SHINYHUB_OIDC_REQUIRE_VALID_GROUPS` | `true` to fail login on a malformed groups claim (default `false`) |
 | `SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE` | Role for a first-time SSO user (default `viewer`) |
 | `SHINYHUB_AUTH_GROUP_ROLE_MAPPINGS` | `group:role,group2:role2` |
+| `SHINYHUB_AUTH_LOCAL_LOGIN` | `false` for SSO-only: hide and reject username/password login (default `true`) |
 
 ShinyHub always requests the `openid`, `email`, and `profile` scopes (plus
 `groups_scope` when set), so the `email` and `name` claims are available without
@@ -136,6 +138,36 @@ etc.). They are deliberately separate from what an **app** does with the raw
 groups: apps receive the unmodified IdP group names via
 [identity forwarding](identity.md) and run their own in-app RBAC.
 
+
+## SSO-only (disable password login)
+
+To require SSO and remove the built-in username/password path entirely, set:
+
+```yaml
+auth:
+  local_login: false        # or SHINYHUB_AUTH_LOCAL_LOGIN=false
+```
+
+With this set:
+
+- The login screen **hides the password form** and leads with the SSO button(s).
+- The password endpoints (`/api/auth/login`, `/api/auth/session`) **reject with
+  403**. This is enforced server-side, not just in the UI, so a client cannot
+  bypass the IdP by POSTing credentials directly. (The UI hiding is driven off
+  the `local` flag in `/api/auth/providers` and fails open - the server is the
+  authoritative gate.)
+
+**Lockout guard.** Startup **fails fast** if `local_login` is false and no SSO
+login path (GitHub, Google, OIDC, or forward-auth) is configured, so you cannot
+accidentally lock every user out. Configure a provider before turning local login
+off.
+
+**Break-glass caveat.** Disabling local login also disables the built-in admin's
+password login (including any `SHINYHUB_LOCAL_ADMIN_*` break-glass account) and
+the `SHINYHUB_ADMIN_USER`/`_PASSWORD` bootstrap login. Make sure at least one
+admin can reach the platform through SSO (e.g. an IdP group mapped to `admin` via
+`group_role_mappings`) before enabling SSO-only. To recover, set
+`SHINYHUB_AUTH_LOCAL_LOGIN=true` and restart.
 
 ## Sessions, cookies, and logout
 

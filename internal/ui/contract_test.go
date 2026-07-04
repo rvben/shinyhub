@@ -84,6 +84,17 @@ func TestLoginProvidersGated(t *testing.T) {
 		"loadProviders must delegate button gating to applyLoginProviders so the wiring stays covered")
 	assertContains(t, "style.css", ".github-login[hidden]",
 		"style.css must override the button display:flex with a [hidden] rule, or the hidden attribute won't hide it (see .nav-item[hidden])")
+
+	// SSO-only: the password form is hidden when /api/auth/providers reports
+	// local:false (handleGetProviders emits it from cfg.Auth.LocalLoginEnabled).
+	// The server also rejects password logins with 403 when disabled, so this is
+	// a UI convenience, not the security boundary.
+	assertContains(t, "views/login-providers.js", "p.local !== false",
+		"the password form must be gated on the providers 'local' flag (fail open: only an explicit false hides it)")
+	assertContains(t, "views/login-providers.js", "#login-form",
+		"login-providers.js must hide #login-form when local login is disabled")
+	assertContains(t, "style.css", ".login-box form[hidden]",
+		"style.css must override the form display:grid with a [hidden] rule so the SSO-only hidden form is actually hidden")
 }
 
 // TestThemeWiring guards the light/dark theme feature. The pure resolver is

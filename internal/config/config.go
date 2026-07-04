@@ -401,6 +401,16 @@ type AuthConfig struct {
 	// operator kill switch: per-app manifest opt-ins cannot override it.
 	// Per-app `[app] identity_headers = false` opts a single app out.
 	IdentityHeaders *bool `yaml:"identity_headers"`
+
+	// LocalLogin enables the built-in username/password login: the sign-in form
+	// and the /api/auth/login and /api/auth/session endpoints. nil/absent =
+	// enabled (the default). Set false for an SSO-only deployment: the login
+	// screen hides the password form AND the password endpoints reject with 403,
+	// so a user cannot bypass the IdP by POSTing credentials. Startup fails when
+	// this is false and no SSO login path is configured (see HasSSOLoginPath), to
+	// avoid locking out every user. Note: this also disables the break-glass
+	// admin's password login, so keep at least one SSO admin path.
+	LocalLogin *bool `yaml:"local_login"`
 }
 
 // IdentityHeadersEnabled reports whether identity headers (X-Shinyhub-* and
@@ -408,6 +418,24 @@ type AuthConfig struct {
 // processes. Returns true when the field is absent (the default).
 func (a *AuthConfig) IdentityHeadersEnabled() bool {
 	return a.IdentityHeaders == nil || *a.IdentityHeaders
+}
+
+// LocalLoginEnabled reports whether the built-in username/password login is
+// permitted. Returns true when the field is absent (the default).
+func (a *AuthConfig) LocalLoginEnabled() bool {
+	return a.LocalLogin == nil || *a.LocalLogin
+}
+
+// HasSSOLoginPath reports whether at least one non-password browser login path
+// is configured: GitHub OAuth, Google OAuth, native OIDC, or forward-auth. The
+// conditions mirror exactly how those providers are activated at startup
+// (see internal/api/router.go and cmd/shinyhub/main.go), so the SSO-only
+// lockout guard cannot disagree with what actually authenticates users.
+func (c *Config) HasSSOLoginPath() bool {
+	return c.OAuth.GitHub.ClientID != "" ||
+		c.OAuth.Google.ClientID != "" ||
+		c.OAuth.OIDC.IssuerURL != "" ||
+		c.Auth.ForwardAuth.Enabled
 }
 
 // ForwardAuthConfig configures trust of an upstream reverse proxy that has
@@ -974,6 +1002,13 @@ func Load(path string) (*Config, error) {
 	}
 	if len(cfg.Auth.Secret) < 32 {
 		return nil, fmt.Errorf("auth.secret must be at least 32 characters (got %d); generate one with: openssl rand -hex 32", len(cfg.Auth.Secret))
+	}
+	// Lockout guard: SSO-only (auth.local_login: false) with no SSO login path
+	// configured would leave no way for anyone to sign in. Fail fast rather than
+	// boot an unreachable server. (LoadForMaintenance skips this - backup/restore
+	// performs no login.)
+	if !cfg.Auth.LocalLoginEnabled() && !cfg.HasSSOLoginPath() {
+		return nil, fmt.Errorf("auth.local_login is false but no SSO login path is configured (GitHub, Google, OIDC, or forward-auth); this would lock out all users. Configure an SSO provider or set auth.local_login: true")
 	}
 	return cfg, nil
 }
@@ -1927,6 +1962,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_IDENTITY_HEADERS: %w", err)
 		}
 		cfg.Auth.IdentityHeaders = &b
+	}
+	if v := os.Getenv("SHINYHUB_AUTH_LOCAL_LOGIN"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_AUTH_LOCAL_LOGIN: %w", err)
+		}
+		cfg.Auth.LocalLogin = &b
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
