@@ -172,7 +172,7 @@ func (s *Store) GetForwardAuthUser(username string) (*auth.ContextUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role, DisplayName: u.DisplayName}, nil
+	return u.ContextUser(), nil
 }
 
 // CreateForwardAuthUser inserts a user with no local password login path
@@ -190,7 +190,7 @@ func (s *Store) CreateForwardAuthUser(username, role string) (*auth.ContextUser,
 	if err != nil {
 		return nil, err
 	}
-	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role}, nil
+	return u.ContextUser(), nil
 }
 
 // UpdateUserPassword sets a new password hash for the user identified by ID.
