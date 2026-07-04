@@ -102,12 +102,17 @@ func newMockIdP(t *testing.T, clientID string, idClaims map[string]any) *httptes
 func TestOIDC_EndToEnd_LoginCallbackProvisionsAndReconciles(t *testing.T) {
 	const clientID = "shinyhub"
 
-	idp := newMockIdP(t, clientID, map[string]any{
+	// idClaims is mutated below (after the login redirect) to echo back the
+	// nonce our own login handler generated, mirroring what a real IdP does:
+	// it embeds whatever nonce it received on the authorization request into
+	// the ID token it later returns from the token endpoint.
+	idClaims := map[string]any{
 		"sub":    "idp-subject-123",
 		"email":  "alice@corp.example",
 		"name":   "Alice Liddell",
 		"groups": []string{"eng-admins"},
-	})
+	}
+	idp := newMockIdP(t, clientID, idClaims)
 
 	store := dbtest.New(t)
 	cfg := &config.Config{
@@ -144,6 +149,14 @@ func TestOIDC_EndToEnd_LoginCallbackProvisionsAndReconciles(t *testing.T) {
 	if state == "" {
 		t.Fatalf("login redirect %q carries no state", loc.String())
 	}
+	nonce := loc.Query().Get("nonce")
+	if nonce == "" {
+		t.Fatalf("login redirect %q carries no nonce", loc.String())
+	}
+	// The mock IdP has no real authorize endpoint to observe the nonce we just
+	// sent, so echo it into the claims it will sign - exactly what a real IdP
+	// does with the nonce it received on the authorization request.
+	idClaims["nonce"] = nonce
 	var stateCookie *http.Cookie
 	for _, c := range loginRec.Result().Cookies() {
 		if c.Value != "" {
@@ -206,11 +219,12 @@ func TestOIDC_EndToEnd_LoginCallbackProvisionsAndReconciles(t *testing.T) {
 func TestOIDC_EndToEnd_AbsentGroupsClaimDoesNotDemote(t *testing.T) {
 	const clientID = "shinyhub"
 	// No "groups" key at all in the ID token.
-	idp := newMockIdP(t, clientID, map[string]any{
+	idClaims := map[string]any{
 		"sub":   "idp-subject-777",
 		"email": "bob@corp.example",
 		"name":  "Bob Builder",
-	})
+	}
+	idp := newMockIdP(t, clientID, idClaims)
 
 	store := dbtest.New(t)
 	cfg := &config.Config{
@@ -240,6 +254,9 @@ func TestOIDC_EndToEnd_AbsentGroupsClaimDoesNotDemote(t *testing.T) {
 	srv.Router().ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil))
 	loc, _ := loginRec.Result().Location()
 	state := loc.Query().Get("state")
+	// Echo the nonce back into the claims the mock IdP will sign, as a real
+	// IdP would (see the sibling provisioning test for the full rationale).
+	idClaims["nonce"] = loc.Query().Get("nonce")
 	var stateCookie *http.Cookie
 	for _, c := range loginRec.Result().Cookies() {
 		if c.Value != "" {

@@ -64,9 +64,13 @@ func NewOIDCProvider(ctx context.Context, issuerURL, clientID, clientSecret, cal
 	}, nil
 }
 
-// AuthURL returns the authorization URL to redirect the browser to.
-func (p *OIDCProvider) AuthURL(state string) string {
-	return p.oauth2Cfg.AuthCodeURL(state, oauth2.AccessTypeOnline)
+// AuthURL returns the authorization URL to redirect the browser to. nonce is
+// a per-request value the caller must also pass to VerifyIDToken on callback;
+// it defends against ID-token replay/injection by binding the token the IdP
+// returns to this specific authorization request (RFC 6749 doesn't require a
+// nonce, but the OIDC core spec does for exactly this reason).
+func (p *OIDCProvider) AuthURL(state, nonce string) string {
+	return p.oauth2Cfg.AuthCodeURL(state, oauth2.AccessTypeOnline, oauth2.SetAuthURLParam("nonce", nonce))
 }
 
 // Exchange trades an authorization code for tokens.
@@ -78,8 +82,12 @@ func (p *OIDCProvider) Exchange(ctx context.Context, code string) (*oauth2.Token
 	return tok, nil
 }
 
-// VerifyIDToken extracts and verifies the ID token, returning the user's claims.
-func (p *OIDCProvider) VerifyIDToken(ctx context.Context, tok *oauth2.Token) (*OIDCUser, error) {
+// VerifyIDToken extracts and verifies the ID token, returning the user's
+// claims. expectedNonce must equal the nonce previously passed to AuthURL for
+// this authorization request; a missing or mismatched nonce claim is rejected
+// (defense-in-depth against ID-token replay/injection - see AuthURL). Pass ""
+// only when no nonce was requested, which production callers never do.
+func (p *OIDCProvider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, expectedNonce string) (*OIDCUser, error) {
 	rawIDToken, ok := tok.Extra("id_token").(string)
 	if !ok {
 		return nil, fmt.Errorf("oidc: no id_token in token response")
@@ -92,12 +100,16 @@ func (p *OIDCProvider) VerifyIDToken(ctx context.Context, tok *oauth2.Token) (*O
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("oidc extract claims: %w", err)
 	}
-	var sub, email, name string
+	var sub, email, name, nonce string
 	_ = json.Unmarshal(claims["sub"], &sub)
 	_ = json.Unmarshal(claims["email"], &email)
 	_ = json.Unmarshal(claims["name"], &name)
+	_ = json.Unmarshal(claims["nonce"], &nonce)
 	if sub == "" {
 		return nil, fmt.Errorf("oidc: id_token missing sub claim")
+	}
+	if expectedNonce != "" && nonce != expectedNonce {
+		return nil, fmt.Errorf("oidc: id_token nonce mismatch")
 	}
 	rawGroups := claims[p.groupsClaim]
 	groups, decoded := decodeGroupsClaim(rawGroups)
