@@ -2,8 +2,8 @@
 
 A Shiny for Python app that demonstrates ShinyHub identity forwarding. It
 verifies the signed `X-Shinyhub-Identity-Token` JWT on every request and
-displays the caller's username, platform role, and group memberships. An
-admins-only panel appears when the verified role is `admin`.
+displays the caller's username, display name, platform role, and group
+memberships. An admins-only panel appears when the verified role is `admin`.
 
 ## Deploy
 
@@ -16,8 +16,9 @@ After deploy, the app is live at `https://your-shinyhub.example.com/app/identity
 
 ## What to observe
 
-- **Signed in:** The app shows your username, role, and groups read from the
-  verified JWT. If your role is `admin`, the admins-only panel is visible.
+- **Signed in:** The app shows your username, display name, role, and groups
+  read from the verified JWT. If your role is `admin`, the admins-only panel is
+  visible.
 - **Anonymous (private window or logged-out):** The app shows the anonymous
   visitor message. For a public app, logged-out visitors reach this branch;
   for a private or shared app, ShinyHub redirects unauthenticated requests to
