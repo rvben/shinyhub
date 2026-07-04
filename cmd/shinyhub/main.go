@@ -135,7 +135,8 @@ var restoreCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
-		moved, err := backup.Restore(cfg, args[0])
+		force, _ := cmd.Flags().GetBool("force")
+		moved, err := backup.RestoreForce(cfg, args[0], force)
 		for _, p := range moved {
 			fmt.Fprintf(cmd.ErrOrStderr(), "previous state preserved at %s\n", p)
 		}
@@ -313,6 +314,7 @@ func init() {
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
 	_ = backupCmd.MarkFlagRequired("out")
 	migrateBackendCmd.Flags().StringVar(&migrateTargetDSN, "to", "", "Target Postgres DSN (overrides SHINYHUB_TARGET_DSN)")
+	restoreCmd.Flags().Bool("force", false, "Restore even if a running server is detected (only after confirming the server is stopped)")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
 	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
