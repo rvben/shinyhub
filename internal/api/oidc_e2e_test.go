@@ -102,12 +102,17 @@ func newMockIdP(t *testing.T, clientID string, idClaims map[string]any) *httptes
 func TestOIDC_EndToEnd_LoginCallbackProvisionsAndReconciles(t *testing.T) {
 	const clientID = "shinyhub"
 
-	idp := newMockIdP(t, clientID, map[string]any{
+	// idClaims is mutated below (after the login redirect) to echo back the
+	// nonce our own login handler generated, mirroring what a real IdP does:
+	// it embeds whatever nonce it received on the authorization request into
+	// the ID token it later returns from the token endpoint.
+	idClaims := map[string]any{
 		"sub":    "idp-subject-123",
 		"email":  "alice@corp.example",
 		"name":   "Alice Liddell",
 		"groups": []string{"eng-admins"},
-	})
+	}
+	idp := newMockIdP(t, clientID, idClaims)
 
 	store := dbtest.New(t)
 	cfg := &config.Config{
@@ -144,6 +149,14 @@ func TestOIDC_EndToEnd_LoginCallbackProvisionsAndReconciles(t *testing.T) {
 	if state == "" {
 		t.Fatalf("login redirect %q carries no state", loc.String())
 	}
+	nonce := loc.Query().Get("nonce")
+	if nonce == "" {
+		t.Fatalf("login redirect %q carries no nonce", loc.String())
+	}
+	// The mock IdP has no real authorize endpoint to observe the nonce we just
+	// sent, so echo it into the claims it will sign - exactly what a real IdP
+	// does with the nonce it received on the authorization request.
+	idClaims["nonce"] = nonce
 	var stateCookie *http.Cookie
 	for _, c := range loginRec.Result().Cookies() {
 		if c.Value != "" {
@@ -206,11 +219,12 @@ func TestOIDC_EndToEnd_LoginCallbackProvisionsAndReconciles(t *testing.T) {
 func TestOIDC_EndToEnd_AbsentGroupsClaimDoesNotDemote(t *testing.T) {
 	const clientID = "shinyhub"
 	// No "groups" key at all in the ID token.
-	idp := newMockIdP(t, clientID, map[string]any{
+	idClaims := map[string]any{
 		"sub":   "idp-subject-777",
 		"email": "bob@corp.example",
 		"name":  "Bob Builder",
-	})
+	}
+	idp := newMockIdP(t, clientID, idClaims)
 
 	store := dbtest.New(t)
 	cfg := &config.Config{
@@ -240,6 +254,9 @@ func TestOIDC_EndToEnd_AbsentGroupsClaimDoesNotDemote(t *testing.T) {
 	srv.Router().ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil))
 	loc, _ := loginRec.Result().Location()
 	state := loc.Query().Get("state")
+	// Echo the nonce back into the claims the mock IdP will sign, as a real
+	// IdP would (see the sibling provisioning test for the full rationale).
+	idClaims["nonce"] = loc.Query().Get("nonce")
 	var stateCookie *http.Cookie
 	for _, c := range loginRec.Result().Cookies() {
 		if c.Value != "" {
@@ -261,5 +278,82 @@ func TestOIDC_EndToEnd_AbsentGroupsClaimDoesNotDemote(t *testing.T) {
 	}
 	if user.Role != "operator" {
 		t.Errorf("role = %q, want operator preserved (absent groups claim must not demote)", user.Role)
+	}
+}
+
+// TestOIDC_EndToEnd_MalformedGroupsClaimRefusedWhenRequireValid drives the real
+// callback route (not a unit test of decodeGroupsClaim in isolation) against an
+// IdP that sends a "groups" claim of the wrong JSON type (a number, not an
+// array/string). With oauth.oidc.require_valid_groups=true this must fail
+// closed: 502, and - critically - no session cookie, since a claim we can't
+// parse must never be silently treated as "no groups" and let the login
+// through with a default role. This exercises the refusal in
+// handleOIDCCallback (oidc_handler.go's GroupsClaimMalformed + RequireValidGroups
+// gate), which previously had no test coverage at all.
+func TestOIDC_EndToEnd_MalformedGroupsClaimRefusedWhenRequireValid(t *testing.T) {
+	const clientID = "shinyhub"
+	idClaims := map[string]any{
+		"sub":    "idp-subject-42",
+		"email":  "carol@corp.example",
+		"name":   "Carol Danvers",
+		"groups": 42, // malformed: neither a JSON array of strings nor a single string
+	}
+	idp := newMockIdP(t, clientID, idClaims)
+
+	store := dbtest.New(t)
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Secret:           "test-secret-000000000000000000000000",
+			OAuthDefaultRole: "viewer",
+		},
+		OAuth: config.OAuthConfig{
+			OIDC: config.OIDCConfig{RequireValidGroups: true},
+		},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	provider, err := oauth.NewOIDCProvider(
+		context.Background(), idp.URL, clientID, "client-secret",
+		"http://app.example.test/api/auth/oidc/callback", "Company SSO", "groups", "",
+	)
+	if err != nil {
+		t.Fatalf("NewOIDCProvider: %v", err)
+	}
+	srv.SetOIDCProvider(provider)
+
+	loginRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil))
+	loc, err := loginRec.Result().Location()
+	if err != nil {
+		t.Fatalf("login redirect location: %v", err)
+	}
+	state := loc.Query().Get("state")
+	idClaims["nonce"] = loc.Query().Get("nonce")
+	var stateCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Value != "" {
+			stateCookie = c
+		}
+	}
+	if stateCookie == nil {
+		t.Fatal("login set no state binding cookie")
+	}
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=mock-auth-code", nil)
+	cbReq.AddCookie(stateCookie)
+	cbRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(cbRec, cbReq)
+
+	if cbRec.Code != http.StatusBadGateway {
+		t.Fatalf("callback: expected 502 for malformed groups claim with require_valid_groups=true, got %d (%s)",
+			cbRec.Code, cbRec.Body.String())
+	}
+	for _, c := range cbRec.Result().Cookies() {
+		if c.Name == auth.SessionCookieName && c.Value != "" {
+			t.Errorf("callback set a session cookie despite refusing the malformed groups claim")
+		}
+	}
+	if _, err := store.GetUserByUsername("carol"); err == nil {
+		t.Errorf("user should not be provisioned when the malformed groups claim is refused")
 	}
 }

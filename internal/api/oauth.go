@@ -10,7 +10,22 @@ import (
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/oauth"
 )
+
+// SetGitHubProvider replaces the GitHub OAuth provider after the server is
+// constructed. Must be called before the server begins handling requests.
+// Production wiring happens in New via cfg.OAuth.GitHub; this setter exists so
+// tests can point a GitHub provider at a fake server (see SetTestEndpoints on
+// oauth.GitHub).
+func (s *Server) SetGitHubProvider(g *oauth.GitHub) { s.github = g }
+
+// SetGoogleProvider replaces the Google OAuth provider after the server is
+// constructed. Must be called before the server begins handling requests.
+// Production wiring happens in New via cfg.OAuth.Google; this setter exists so
+// tests can point a Google provider at a fake server (see SetTestEndpoints on
+// oauth.Google).
+func (s *Server) SetGoogleProvider(g *oauth.Google) { s.googleOAuth = g }
 
 // handleGitHubLogin redirects the browser to GitHub's OAuth2 authorization page.
 func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {

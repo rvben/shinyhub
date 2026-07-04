@@ -1,7 +1,9 @@
 package api
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -11,6 +13,22 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/oauth"
 )
+
+// deriveOIDCNonce returns a per-authorization-request OIDC nonce, deterministically
+// derived from the state nonce and the server's auth secret via HMAC-SHA256.
+// Recomputing it at callback time (rather than storing it) needs no schema
+// change: state is already single-use (consumed from oauth_states) and bound
+// to the browser via the state cookie, so a value derived from it is exactly
+// as unpredictable and exactly as scoped to this one login attempt as a
+// separately-stored nonce would be. Defense-in-depth against ID-token
+// replay/injection: an ID token minted for one authorization request carries a
+// nonce claim that cannot be reproduced for a different state without knowing
+// the server secret, so it cannot be substituted into another callback.
+func deriveOIDCNonce(secret, state string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte("oidc-nonce:" + state))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 // handleGetProviders returns a JSON object indicating which login providers
 // are currently enabled on this server instance.
@@ -60,6 +78,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := hex.EncodeToString(stateBytes)
+	nonce := deriveOIDCNonce(s.cfg.Auth.Secret, state)
 
 	if err := s.store.CreateOAuthState(state); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -67,7 +86,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auth.SetOAuthStateCookie(w, r, state, s.cfg.TrustedProxyNets)
-	http.Redirect(w, r, s.oidcProvider.AuthURL(state), http.StatusFound)
+	http.Redirect(w, r, s.oidcProvider.AuthURL(state, nonce), http.StatusFound)
 }
 
 // handleOIDCCallback handles the OIDC authorization callback, verifies the
@@ -103,7 +122,8 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oidcUser, err := s.oidcProvider.VerifyIDToken(r.Context(), tok)
+	expectedNonce := deriveOIDCNonce(s.cfg.Auth.Secret, state)
+	oidcUser, err := s.oidcProvider.VerifyIDToken(r.Context(), tok, expectedNonce)
 	if err != nil {
 		reqLog(r).Error("oidc_verify_id_token_failed", "err", err)
 		writeError(w, http.StatusBadGateway, "failed to verify OIDC ID token")
