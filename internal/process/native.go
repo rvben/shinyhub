@@ -333,6 +333,12 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 			"slug", p.Slug, "idx", p.Index, "err", err)
 		return
 	}
+	// Fork-bomb guard: cap processes/threads so one app cannot exhaust the host
+	// PID table. Applied whenever the cgroup exists, independent of memory/CPU.
+	if err := setCgroupPidsMax(dir, defaultNativePidsMax); err != nil {
+		slog.Warn("native: pids.max not applied; replica runs without a fork-bomb cap",
+			"slug", p.Slug, "idx", p.Index, "err", err)
+	}
 	if p.MemoryLimitMB > 0 {
 		if err := setCgroupMemoryMax(dir, p.MemoryLimitMB); err != nil {
 			slog.Warn("native: memory limit not applied; replica runs uncapped",
@@ -653,6 +659,10 @@ func (r *NativeRuntime) placeJobInCgroup(p StartParams, pid int) func() {
 		slog.Warn("native: per-job cgroup setup failed; job runs uncapped",
 			"slug", p.Slug, "run_id", p.JobRunID, "err", err)
 		return noop
+	}
+	if err := setCgroupPidsMax(dir, defaultNativePidsMax); err != nil {
+		slog.Warn("native: job pids.max not applied; job runs without a fork-bomb cap",
+			"slug", p.Slug, "run_id", p.JobRunID, "err", err)
 	}
 	if p.MemoryLimitMB > 0 {
 		if err := setCgroupMemoryMax(dir, p.MemoryLimitMB); err != nil {

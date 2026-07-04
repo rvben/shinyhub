@@ -37,6 +37,23 @@ oom_group_kill 1
 	}
 }
 
+// TestCgroupPidsMaxValue verifies the pids.max value mapping: a positive limit
+// becomes its decimal, and zero/negative means unlimited ("max").
+func TestCgroupPidsMaxValue(t *testing.T) {
+	if got := cgroupPidsMaxValue(0); got != "max" {
+		t.Errorf("cgroupPidsMaxValue(0) = %q, want max", got)
+	}
+	if got := cgroupPidsMaxValue(-3); got != "max" {
+		t.Errorf("cgroupPidsMaxValue(-3) = %q, want max", got)
+	}
+	if got := cgroupPidsMaxValue(1024); got != "1024" {
+		t.Errorf("cgroupPidsMaxValue(1024) = %q, want 1024", got)
+	}
+	if defaultNativePidsMax <= 0 {
+		t.Errorf("defaultNativePidsMax must be a positive fork-bomb ceiling, got %d", defaultNativePidsMax)
+	}
+}
+
 // TestJobCgroupNameNeverCollidesWithReplica verifies a one-shot job's cgroup name
 // is disjoint from every replica's app-<slug>-<index>, so a capped job can never
 // be placed into (and write its PID into) a live replica's cgroup.

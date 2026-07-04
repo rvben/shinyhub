@@ -81,10 +81,12 @@ func TestHost(t *testing.T) {
 		}
 	})
 
-	t.Run("trusted peer with multiple XFH values takes the first", func(t *testing.T) {
+	t.Run("trusted peer with multiple XFH values takes the last (trusted-proxy) value", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
 		req.RemoteAddr = "127.0.0.1:5000"
-		req.Header.Set("X-Forwarded-Host", "hub.example.com, evil.example.com")
+		// Proxies append, so a client-prepended forged host sits to the LEFT of the
+		// value the trusted proxy appended; the rightmost value is authoritative.
+		req.Header.Set("X-Forwarded-Host", "evil.example.com, hub.example.com")
 		if got := proxytrust.Host(req, nets); got != "hub.example.com" {
 			t.Errorf("multi-XFH: got %q, want hub.example.com", got)
 		}
@@ -125,12 +127,38 @@ func TestScheme(t *testing.T) {
 func TestClientIP(t *testing.T) {
 	nets := mustCIDRs(t, "127.0.0.0/8")
 
-	t.Run("trusted peer first XFF entry wins", func(t *testing.T) {
+	t.Run("trusted peer: rightmost untrusted XFF entry is the client", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
 		req.RemoteAddr = "127.0.0.1:5000"
-		req.Header.Set("X-Forwarded-For", "198.51.100.1, 10.0.0.1")
+		// Both entries are outside the trusted net; proxies append, so the rightmost
+		// is the value the trusted proxy actually observed. A forged leftmost entry
+		// must be ignored.
+		req.Header.Set("X-Forwarded-For", "9.9.9.9, 198.51.100.1")
 		if got := proxytrust.ClientIP(req, nets); got != "198.51.100.1" {
 			t.Errorf("trusted XFF: got %q, want 198.51.100.1", got)
+		}
+	})
+
+	t.Run("trusted peer: forged leftmost XFF ignored (prepend attack)", func(t *testing.T) {
+		// Single trusted proxy on loopback (the prod Caddy-in-front deploy): Caddy
+		// appends the real client after any client-supplied value.
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "127.0.0.1:5000"
+		req.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.7")
+		if got := proxytrust.ClientIP(req, mustCIDRs(t, "127.0.0.0/8")); got != "198.51.100.7" {
+			t.Errorf("prepend attack: got %q, want 198.51.100.7", got)
+		}
+	})
+
+	t.Run("trusted peer: walks past trusted proxy hops to the client", func(t *testing.T) {
+		chain := mustCIDRs(t, "127.0.0.0/8", "10.0.0.0/8")
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "127.0.0.1:5000"
+		// XFF = client, inner-trusted-proxy. Walking from the right skips the
+		// trusted 10.0.0.5 hop and returns the client.
+		req.Header.Set("X-Forwarded-For", "198.51.100.7, 10.0.0.5")
+		if got := proxytrust.ClientIP(req, chain); got != "198.51.100.7" {
+			t.Errorf("chain: got %q, want 198.51.100.7", got)
 		}
 	})
 

@@ -52,7 +52,7 @@ func Host(r *http.Request, nets []*net.IPNet) string {
 	}
 	if PeerIsTrusted(r, nets) {
 		if v := r.Header.Get("X-Forwarded-Host"); v != "" {
-			return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
+			return lastForwardedValue(v)
 		}
 	}
 	return r.Host
@@ -72,7 +72,7 @@ func Scheme(r *http.Request, nets []*net.IPNet) string {
 	}
 	if PeerIsTrusted(r, nets) {
 		if v := r.Header.Get("X-Forwarded-Proto"); v != "" {
-			return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
+			return lastForwardedValue(v)
 		}
 	}
 	return "http"
@@ -96,8 +96,45 @@ func ClientIP(r *http.Request, nets []*net.IPNet) string {
 	if xff == "" {
 		return peerHost
 	}
-	if idx := strings.Index(xff, ","); idx >= 0 {
-		return strings.TrimSpace(xff[:idx])
+	// Reverse proxies APPEND to X-Forwarded-For, so entries added by trusted
+	// proxies are on the RIGHT and any client-supplied (spoofable) value is on the
+	// LEFT. Walk right-to-left, skipping addresses that are themselves trusted
+	// proxies; the first untrusted address is the real client as observed by the
+	// innermost trusted proxy. Taking the leftmost entry (the previous behaviour)
+	// let a client forge its own IP by prepending X-Forwarded-For.
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(parts[i])
+		if ip == "" {
+			continue
+		}
+		parsed := net.ParseIP(ip)
+		if parsed == nil {
+			continue
+		}
+		if ipInNets(parsed, nets) {
+			continue // a trusted proxy hop; keep walking left
+		}
+		return ip
 	}
-	return strings.TrimSpace(xff)
+	// Every entry was a trusted proxy (or empty/unparseable): fall back to the peer.
+	return peerHost
+}
+
+// lastForwardedValue returns the rightmost comma-separated entry of a forwarded
+// header. Proxies append, so the rightmost value is the one set by the closest
+// (most trusted) hop; a client-supplied value would sit to its left.
+func lastForwardedValue(v string) string {
+	parts := strings.Split(v, ",")
+	return strings.TrimSpace(parts[len(parts)-1])
+}
+
+// ipInNets reports whether ip is inside any of the supplied CIDRs.
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

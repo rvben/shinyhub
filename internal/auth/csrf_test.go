@@ -64,6 +64,53 @@ func TestCSRF_POSTMatchingTokenAllowed(t *testing.T) {
 	}
 }
 
+func TestCSRF_POSTFromProxiedAppRefererRejected(t *testing.T) {
+	// A malicious/compromised proxied app served same-origin at /app/<slug>/ could
+	// read the JS-readable csrf_token cookie and ride the session. Reject any
+	// mutating request whose Referer is under /app/ even when the token matches.
+	h := auth.CSRFMiddleware(nil)(okHandler())
+	req := httptest.NewRequest("POST", "/api/apps", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
+	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "matching-token"})
+	req.Header.Set("X-CSRF-Token", "matching-token")
+	req.Header.Set("Referer", "https://hub.example.com/app/evil/page")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("want 403 for /app/-refered mutation, got %d", rr.Code)
+	}
+}
+
+func TestCSRF_POSTFromDashboardRefererAllowed(t *testing.T) {
+	// The dashboard's own fetches carry a dashboard-route Referer, never /app/.
+	h := auth.CSRFMiddleware(nil)(okHandler())
+	req := httptest.NewRequest("POST", "/api/apps", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
+	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "matching-token"})
+	req.Header.Set("X-CSRF-Token", "matching-token")
+	req.Header.Set("Referer", "https://hub.example.com/apps/demo/overview")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 for dashboard-refered mutation, got %d", rr.Code)
+	}
+}
+
+func TestCSRF_POSTNoRefererAllowed(t *testing.T) {
+	// A missing Referer (privacy tooling, no-referrer policy) must not break the
+	// dashboard; the token check still applies.
+	h := auth.CSRFMiddleware(nil)(okHandler())
+	req := httptest.NewRequest("POST", "/api/apps", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
+	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "matching-token"})
+	req.Header.Set("X-CSRF-Token", "matching-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 for no-referer mutation, got %d", rr.Code)
+	}
+}
+
 func TestCSRF_POSTMismatchedTokenRejected(t *testing.T) {
 	h := auth.CSRFMiddleware(nil)(okHandler())
 	req := httptest.NewRequest("POST", "/api/apps", nil)

@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/secrets"
@@ -27,6 +28,30 @@ import (
 // nodeIDSANSuffix namespaces the DNS SAN that carries a worker's node id, so the
 // id is recoverable from the presented client certificate alone.
 const nodeIDSANSuffix = ".node.shinyhub.internal"
+
+// ControlPlaneCommonName is the Subject CommonName the control plane's client
+// and server certificates carry (see ControlClientCertificate / ServerCertificate).
+// A worker agent listener pins inbound peers to this identity so one worker's own
+// CA-signed certificate cannot be presented as a client to command another worker.
+const ControlPlaneCommonName = "shinyhub-control-plane"
+
+// IsControlPlaneClientCert reports whether cert is the control plane's client
+// certificate rather than a worker's own cert. A worker leaf always carries a
+// namespaced node DNS SAN (<nodeid>.node.shinyhub.internal); the control-plane
+// client cert carries none. Requiring the control-plane CN AND the absence of a
+// node SAN rejects a worker even if its assigned node id ever collided with the
+// control-plane CN.
+func IsControlPlaneClientCert(cert *x509.Certificate) bool {
+	if cert == nil || cert.Subject.CommonName != ControlPlaneCommonName {
+		return false
+	}
+	for _, name := range cert.DNSNames {
+		if strings.HasSuffix(name, nodeIDSANSuffix) {
+			return false
+		}
+	}
+	return true
+}
 
 // CA is the control plane's internal certificate authority. It signs short-lived
 // worker client certificates that bind a node id, and pins itself as the trust
@@ -220,7 +245,7 @@ func (c *CA) ControlClientCertificate() (tls.Certificate, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "shinyhub-control-plane"},
+		Subject:      pkix.Name{CommonName: ControlPlaneCommonName},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -260,7 +285,7 @@ func (c *CA) ServerCertificate(hosts ...string) (tls.Certificate, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "shinyhub-control-plane"},
+		Subject:      pkix.Name{CommonName: ControlPlaneCommonName},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().AddDate(1, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

@@ -214,6 +214,14 @@ func setCgroupCPUMax(dir string, cpuPct int) error {
 	return writeCgroupFile(filepath.Join(dir, "cpu.max"), cgroupCPUMaxValue(cpuPct))
 }
 
+// setCgroupPidsMax writes a pids.max limit to an app cgroup directory, capping
+// the number of processes/threads it may hold as a fork-bomb guard. The pids
+// controller is enabled by default in cgroup v2, so a write failure is surfaced
+// for the caller to warn on rather than silently dropping the guard.
+func setCgroupPidsMax(dir string, limit int) error {
+	return writeCgroupFile(filepath.Join(dir, "pids.max"), cgroupPidsMaxValue(limit))
+}
+
 // appCgroupCurrentMemory reads memory.current (bytes charged) for an app cgroup
 // directory created by setupAppCgroup.
 func appCgroupCurrentMemory(dir string) (uint64, error) {

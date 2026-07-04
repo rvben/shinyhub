@@ -2,6 +2,8 @@ package leader
 
 import (
 	"context"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 )
 
@@ -40,6 +42,16 @@ func (o *OwnerScope) Acquire(epoch int64) {
 	o.mu.Unlock()
 	go func() {
 		defer close(done)
+		// Recover so a panic in owner-only work does not crash the whole process
+		// (an unrecovered goroutine panic is fatal). The span ends; the elector
+		// still holds the lease, so this instance stays owner and the next
+		// acquisition re-runs work rather than the fleet losing its control plane.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("leader: owner work panicked",
+					"epoch", epoch, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		o.work(ctx, epoch)
 	}()
 }

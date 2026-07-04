@@ -78,21 +78,24 @@ func TestFilteredEnvStripsShinyHubVars(t *testing.T) {
 
 func TestFilteredEnvPreservesNonShinyHubVars(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "should-be-stripped")
-	t.Setenv("MY_APP_SECRET", "should-be-kept")
+	// An arbitrary non-listed var (which may itself be a secret, as its name
+	// suggests) must NOT pass through: the app env base is an allow-list, not a
+	// SHINYHUB_-only deny-list.
+	t.Setenv("MY_APP_SECRET", "should-be-dropped")
+	t.Setenv("PATH", "/usr/bin:/bin")
 
 	env := filteredEnv()
 
-	keptFound := false
+	if !envHas(env, "PATH") {
+		t.Error("expected PATH (an allow-listed essential) to be preserved in filtered env")
+	}
+	if envHas(env, "MY_APP_SECRET") {
+		t.Error("arbitrary non-listed var leaked into the app env base")
+	}
 	for _, e := range env {
-		if e == "MY_APP_SECRET=should-be-kept" {
-			keptFound = true
-		}
 		if strings.HasPrefix(e, "SHINYHUB_") {
 			t.Errorf("SHINYHUB_ var present in filtered env: %s", e)
 		}
-	}
-	if !keptFound {
-		t.Error("expected MY_APP_SECRET to be preserved in filtered env")
 	}
 }
 
@@ -286,13 +289,15 @@ func TestStart_DeploySuppliedEnvWinsOverSecretEnv(t *testing.T) {
 // output is appended after the inherited env, so resolver values win on
 // last-wins key collision (e.g. for shells that process env in order).
 func TestStart_AppliesResolverEnvAfterInherited(t *testing.T) {
-	t.Setenv("INHERITED_VAR", "from-parent")
+	// TZ is on the app-env allow-list, so it survives SanitizedEnv and lets this
+	// test exercise last-wins ordering against a genuinely inherited variable.
+	t.Setenv("TZ", "from-parent")
 	t.Setenv("SHINYHUB_AUTH_SECRET", "must-not-leak")
 
 	rt := &captureRuntime{}
 	m := NewManager(t.TempDir(), rt)
 	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
-		return []string{"APP_VAR=from-app", "INHERITED_VAR=overridden"}, nil, nil
+		return []string{"APP_VAR=from-app", "TZ=overridden"}, nil, nil
 	})
 
 	_, err := m.Start(StartParams{
@@ -324,18 +329,18 @@ func TestStart_AppliesResolverEnvAfterInherited(t *testing.T) {
 	// INHERITED_VAR=overridden must appear after INHERITED_VAR=from-parent.
 	firstIdx, lastIdx := -1, -1
 	for i, e := range env {
-		if e == "INHERITED_VAR=from-parent" {
+		if e == "TZ=from-parent" {
 			firstIdx = i
 		}
-		if e == "INHERITED_VAR=overridden" {
+		if e == "TZ=overridden" {
 			lastIdx = i
 		}
 	}
 	if lastIdx == -1 {
-		t.Error("INHERITED_VAR=overridden not found in captured env")
+		t.Error("TZ=overridden not found in captured env")
 	}
 	if firstIdx == -1 {
-		t.Error("INHERITED_VAR=from-parent not found in captured env")
+		t.Error("TZ=from-parent not found in captured env")
 	}
 	if firstIdx != -1 && lastIdx != -1 && lastIdx <= firstIdx {
 		t.Errorf("resolver value (idx %d) must appear after inherited value (idx %d) to win on last-wins semantics", lastIdx, firstIdx)

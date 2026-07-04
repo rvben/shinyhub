@@ -386,6 +386,52 @@ action, OAuth-start) are per-process in-memory abuse controls, not distributed
 quotas; front multi-node deployments with a shared edge rate limiter if you
 need a global ceiling on those too.
 
+## Audit-trail integrity and alerting
+
+Every mutating action is recorded in `audit_events`. The write is best-effort by
+design: `LogAuditEvent` never fails the caller, so a database or disk problem
+cannot block a legitimate operation. That means a persistent write failure
+(disk full, DB busy) can silently drop audit rows while the mutations themselves
+succeed. This is surfaced two ways, and a production deployment should alert on
+at least one:
+
+- **Always on:** each dropped audit write emits an `audit_log_write_failed`
+  error log line (action + error), independent of any metrics configuration.
+  Alert on this log event.
+- **When metrics are enabled:** the `shinyhub_audit_write_errors_total` counter
+  increments per failure; alert on any nonzero rate.
+
+Deleting a user sets `audit_events.user_id` to NULL (`ON DELETE SET NULL`) rather
+than removing the rows, so the accountability trail survives account deletion
+(anonymized, not lost) - a deliberate privacy-preserving control.
+
+## Hosting apps on the same origin as the dashboard
+
+By default ShinyHub serves proxied apps same-origin with the dashboard, under
+`/app/<slug>/`. This is convenient but means an app's own JavaScript shares the
+browser origin with the control-plane API at `/api/`. Because the session cookie
+is sent on same-origin requests and the double-submit CSRF token is (by design)
+readable by first-party JavaScript, a **malicious or compromised app's JavaScript
+can ride a logged-in operator's session** and call `/api/` with that operator's
+privileges. The native runtime's trusted-code model assumes you vet app code, so
+this is only a concern when you host apps whose authors are less trusted than the
+operators (for example, developer self-service on a shared instance).
+
+Two defenses apply:
+
+- **Built in (defense in depth):** mutating `/api/` requests whose `Referer` is
+  under `/app/` are rejected, which blocks the straightforward attack from an app
+  page. This does not stop an app that deliberately strips its referrer, so it is
+  a mitigation, not a complete boundary.
+- **Recommended for untrusted multi-tenant hosting (complete fix):** serve apps
+  from a **separate origin** (a distinct hostname or wildcard subdomain, e.g.
+  `*.apps.example.com`) from the dashboard/API origin. The same-origin policy then
+  isolates app JavaScript from the control-plane session entirely: the host-only
+  session and CSRF cookies are never sent to the app origin, and `/api/` is not
+  reachable from it. Route the two origins to ShinyHub with your reverse proxy and
+  keep session/CSRF cookies host-scoped (the default; do not set a shared cookie
+  `Domain`).
+
 ## Backup, restore, and recovery drill
 
 `shinyhub backup --out <archive>` writes a snapshot of the database plus the

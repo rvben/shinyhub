@@ -1503,6 +1503,17 @@ func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
 				return false
 			}
 		}
+		// Elastic (grouped/per_session) pools keep their live backends in the
+		// workers map, not the replicas slice, so the scan above never sees them.
+		// A long-lived Shiny WebSocket holds activeConns > 0 on its worker while
+		// lastSeen goes stale; without this scan the watchdog would hibernate the
+		// pool and tear down the live session mid-use (ARCH-1). workers is nil for
+		// multiplex pools, so this is a no-op there.
+		for _, wkr := range pool.workers {
+			if wkr != nil && wkr.activeConns.Load() > 0 {
+				return false
+			}
+		}
 		delete(p.pools, slug)
 	}
 	delete(p.lastSeen, slug)

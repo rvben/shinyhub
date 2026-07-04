@@ -444,29 +444,15 @@ resource "aws_iam_role" "app_task" {
   })
 }
 
-# App tasks need GetSecretValue to read their per-app secret env vars from
-# the Secrets Manager ARNs injected into the task definition secrets block.
-# This policy is a no-op when fargate_secrets_name_prefix is empty.
-resource "aws_iam_role_policy" "app_task_secrets" {
-  count = var.fargate_secrets_name_prefix != "" ? 1 : 0
-  name  = "app-secrets"
-  role  = aws_iam_role.app_task.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid    = "ReadAppSecrets"
-      Effect = "Allow"
-      Action = ["secretsmanager:GetSecretValue"]
-      # The execution role reads secrets at launch; the task role is the
-      # identity used AFTER launch. Include it here for completeness --
-      # ECS injects secrets at container start via the execution role, not
-      # the task role, but operators sometimes attach extra GetSecretValue
-      # grants to the task role for runtime SDK calls inside the app.
-      Resource = "arn:aws:secretsmanager:*:*:secret:${var.fargate_secrets_name_prefix}/app-*"
-    }]
-  })
-}
+# NOTE: the app task role deliberately has NO Secrets Manager access. ECS injects
+# per-app secret env vars at container start via the EXECUTION role (see
+# aws_iam_role_policy.execution_secrets), not the task role. The task role is the
+# identity available to (untrusted) app code AFTER launch; granting it
+# GetSecretValue on the shared "${prefix}/app-*" wildcard would let any app task
+# read every other tenant's secrets - cross-tenant exfiltration. This matches the
+# least-privilege model documented in SECURITY.md. An operator whose app makes
+# runtime Secrets Manager SDK calls should add a grant scoped to that app's own
+# secret ARN only, on a per-app role - never the shared wildcard here.
 
 # ---------------------------------------------------------------------------
 # Control-plane ECS task definition

@@ -1,0 +1,61 @@
+package process
+
+import (
+	"strings"
+	"testing"
+)
+
+func envHas(env []string, key string) bool {
+	for _, e := range env {
+		if strings.HasPrefix(e, key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSanitizedEnv_AllowListDropsSecretsKeepsEssentials proves the env base for
+// app-controlled code is an allow-list: OS/runtime essentials pass through while
+// arbitrary server-process secrets (cloud credentials, tokens, SHINYHUB_*) are
+// dropped (SEC-H2).
+func TestSanitizedEnv_AllowListDropsSecretsKeepsEssentials(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/app")
+	t.Setenv("LC_ALL", "en_US.UTF-8")
+	t.Setenv("HTTPS_PROXY", "http://proxy:8080")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "leak-me")
+	t.Setenv("GITHUB_TOKEN", "leak-me-too")
+	t.Setenv("SHINYHUB_AUTH_SECRET", "server-secret")
+
+	env := SanitizedEnv()
+
+	for _, keep := range []string{"PATH", "HOME", "LC_ALL", "HTTPS_PROXY"} {
+		if !envHas(env, keep) {
+			t.Errorf("allow-list dropped essential %s", keep)
+		}
+	}
+	for _, drop := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "SHINYHUB_AUTH_SECRET"} {
+		if envHas(env, drop) {
+			t.Errorf("allow-list leaked secret %s into app env", drop)
+		}
+	}
+}
+
+// TestSanitizedEnv_EscapeHatch proves an operator can pass an extra variable
+// through via SHINYHUB_APP_ENV_ALLOW without exposing the whole environment.
+func TestSanitizedEnv_EscapeHatch(t *testing.T) {
+	t.Setenv("MY_CUSTOM_APP_VAR", "value")
+	t.Setenv("ANOTHER_SECRET", "nope")
+	t.Setenv("SHINYHUB_APP_ENV_ALLOW", "MY_CUSTOM_APP_VAR, SPACED_NAME")
+
+	env := SanitizedEnv()
+	if !envHas(env, "MY_CUSTOM_APP_VAR") {
+		t.Error("escape hatch did not allow MY_CUSTOM_APP_VAR")
+	}
+	if envHas(env, "ANOTHER_SECRET") {
+		t.Error("escape hatch leaked a non-listed var")
+	}
+	if envHas(env, "SHINYHUB_APP_ENV_ALLOW") {
+		t.Error("the allow-list control var itself must not pass through")
+	}
+}
