@@ -2566,3 +2566,23 @@ func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
 		t.Fatal("the schedule form submit handler must parse the error via errorMessage instead of showing the raw response body")
 	}
 }
+
+// TestSchedulesTableResponsiveOverflow guards UX-5: unlike the other wide
+// admin tables (audit/users/workers), the schedules table is rebuilt at
+// runtime by loadSchedules() with no fixed id, so it was missing from the
+// shared 640px overflow-x rule and could overflow the viewport on mobile.
+func TestSchedulesTableResponsiveOverflow(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	i := strings.Index(css, ".schedules-table {")
+	if i < 0 {
+		t.Fatal("style.css: no .schedules-table rule found (a 640px overflow-x rule is expected)")
+	}
+	end := strings.Index(css[i:], "}")
+	if end < 0 || !strings.Contains(css[i:i+end], "overflow-x: auto") {
+		t.Fatal("style.css: .schedules-table must set overflow-x:auto (in a 640px media block) so a wide schedules table scrolls within itself instead of overflowing the viewport")
+	}
+}
