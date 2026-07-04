@@ -383,6 +383,17 @@ document.addEventListener('DOMContentLoaded', () => {
     return fetch(path, init);
   }
 
+  // errorMessage extracts the human-readable message from a failed API
+  // response. Every handler writes {"error": "..."} (see internal/api/helpers.go
+  // writeError), so parse that instead of showing the raw JSON body in a toast.
+  async function errorMessage(resp, fallback = 'Request failed') {
+    try {
+      const j = await resp.json();
+      if (j && j.error) return j.error;
+    } catch { /* non-JSON body */ }
+    return fallback;
+  }
+
   function renderEmptyStateCopy() {
     if (state.canCreateApps) {
       emptyStateEyebrow.textContent = 'Ready when you are';
@@ -4615,8 +4626,8 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.addEventListener('click', () => {
         const action = btn.dataset.action;
         const id = parseInt(btn.dataset.id, 10);
-        if (action === 'run') runScheduleNow(slug, id);
-        else if (action === 'delete') deleteSchedule(slug, id, btn.dataset.name);
+        if (action === 'run') runScheduleNow(slug, id, btn);
+        else if (action === 'delete') deleteSchedule(slug, id, btn.dataset.name, btn);
         else if (action === 'history') openScheduleHistory(slug, id);
         else if (action === 'edit') {
           const s = JSON.parse(btn.dataset.schedule);
@@ -4659,11 +4670,26 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.addEventListener('click', async () => {
         const sourceSlug = btn.dataset.slug;
         if (!confirm(`Unmount data from "${sourceSlug}"?`)) return;
-        const r = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data/${encodeURIComponent(sourceSlug)}`, {
-          method: 'DELETE',
-        });
-        if (!r.ok) { flashToast('Unmount failed: ' + await r.text()); return; }
-        await loadSharedData(slug);
+        btn.disabled = true;
+        try {
+          let r;
+          try {
+            r = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data/${encodeURIComponent(sourceSlug)}`, {
+              method: 'DELETE',
+            });
+          } catch {
+            flashToast('Unmount failed: network error', 'error');
+            return;
+          }
+          if (r.status === 401) { await handleUnauthorized(); return; }
+          if (!r.ok) {
+            flashToast('Unmount failed: ' + (await errorMessage(r)), 'error');
+            return;
+          }
+          await loadSharedData(slug);
+        } finally {
+          btn.disabled = false;
+        }
       });
     });
   }
@@ -4715,27 +4741,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const timezone = newForm.querySelector('#sched-timezone').value.trim();
       const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled, timezone});
-      let r;
-      if (existing) {
-        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${existing.id}`, {
-          method: 'PATCH',
-          headers: {'Content-Type': 'application/json'},
-          body,
-        });
-      } else {
-        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body,
-        });
+      const submitBtn = newForm.querySelector('button[type="submit"]');
+      if (submitBtn) submitBtn.disabled = true;
+      try {
+        let r;
+        try {
+          if (existing) {
+            r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${existing.id}`, {
+              method: 'PATCH',
+              headers: {'Content-Type': 'application/json'},
+              body,
+            });
+          } else {
+            r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules`, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body,
+            });
+          }
+        } catch {
+          setError(newErrEl, 'Network error');
+          return;
+        }
+        if (r.status === 401) { await handleUnauthorized(); return; }
+        if (!r.ok) {
+          setError(newErrEl, await errorMessage(r));
+          return;
+        }
+        closeScheduleForm();
+        await loadSchedules(slug);
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
       }
-      if (!r.ok) {
-        const msg = await r.text().catch(() => 'Request failed');
-        setError(newErrEl, msg);
-        return;
-      }
-      closeScheduleForm();
-      await loadSchedules(slug);
     });
 
     modal.hidden = false;
@@ -4751,24 +4788,48 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function runScheduleNow(slug, id) {
-    const r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}/run`, {method: 'POST'});
-    if (!r.ok) {
-      flashToast('Run failed: ' + await r.text().catch(() => 'error'));
-      return;
+  async function runScheduleNow(slug, id, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      let r;
+      try {
+        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}/run`, {method: 'POST'});
+      } catch {
+        flashToast('Run failed: network error', 'error');
+        return;
+      }
+      if (r.status === 401) { await handleUnauthorized(); return; }
+      if (!r.ok) {
+        flashToast('Run failed: ' + (await errorMessage(r)), 'error');
+        return;
+      }
+      flashToast('Schedule started.', 'success');
+      await loadSchedules(slug);
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    flashToast('Schedule started.');
-    await loadSchedules(slug);
   }
 
-  async function deleteSchedule(slug, id, name) {
+  async function deleteSchedule(slug, id, name, btn) {
     if (!confirm(`Delete schedule "${name}"?`)) return;
-    const r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}`, {method: 'DELETE'});
-    if (!r.ok) {
-      flashToast('Delete failed: ' + await r.text().catch(() => 'error'));
-      return;
+    if (btn) btn.disabled = true;
+    try {
+      let r;
+      try {
+        r = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}`, {method: 'DELETE'});
+      } catch {
+        flashToast('Delete failed: network error', 'error');
+        return;
+      }
+      if (r.status === 401) { await handleUnauthorized(); return; }
+      if (!r.ok) {
+        flashToast('Delete failed: ' + (await errorMessage(r)), 'error');
+        return;
+      }
+      await loadSchedules(slug);
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    await loadSchedules(slug);
   }
 
   // Open the log pane showing the run history for a schedule.
@@ -4777,11 +4838,12 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${schedID}/runs`);
     } catch {
-      flashToast('Failed to load run history.');
+      flashToast('Failed to load run history: network error', 'error');
       return;
     }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
-      flashToast('Failed to load run history: ' + await resp.text().catch(() => 'error'));
+      flashToast('Failed to load run history: ' + (await errorMessage(resp)), 'error');
       return;
     }
     const runsBody = await resp.json();
@@ -4850,17 +4912,33 @@ document.addEventListener('DOMContentLoaded', () => {
     if (settingsSlug) openScheduleForm(settingsSlug, null);
   });
 
-  document.getElementById('shared-data-add-btn')?.addEventListener('click', async () => {
+  document.getElementById('shared-data-add-btn')?.addEventListener('click', async (event) => {
     if (!settingsSlug) return;
     const sourceSlug = (prompt('Source app slug to mount read-only:') || '').trim();
     if (!sourceSlug) return;
-    const r = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/shared-data`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({source_slug: sourceSlug}),
-    });
-    if (!r.ok) { flashToast('Mount failed: ' + await r.text().catch(() => 'error')); return; }
-    await loadSharedData(settingsSlug);
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    try {
+      let r;
+      try {
+        r = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/shared-data`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({source_slug: sourceSlug}),
+        });
+      } catch {
+        flashToast('Mount failed: network error', 'error');
+        return;
+      }
+      if (r.status === 401) { await handleUnauthorized(); return; }
+      if (!r.ok) {
+        flashToast('Mount failed: ' + (await errorMessage(r)), 'error');
+        return;
+      }
+      await loadSharedData(settingsSlug);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // Wire the schedule form close button and overlay-click dismiss.
