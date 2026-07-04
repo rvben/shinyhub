@@ -18,6 +18,7 @@ import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
 import { cardMetricsLabel, instanceCountLabel } from '/static/views/card-metrics.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
+import { applyLoginProviders } from '/static/views/login-providers.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
@@ -3934,23 +3935,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const resp = await api('/api/auth/providers');
       if (!resp.ok) return;
       const data = await resp.json();
-      if (data && data.oidc && data.oidc.enabled) {
-        const btn = document.createElement('a');
-        btn.className = 'oidc-login';
-        btn.href = '/api/auth/oidc/login';
-        btn.textContent = data.oidc.display_name || 'Sign in with SSO';
-        const googleLink = document.querySelector('.google-login');
-        if (googleLink) {
-          googleLink.insertAdjacentElement('afterend', btn);
-        } else {
-          const ghLink = document.querySelector('.github-login');
-          if (ghLink) {
-            ghLink.insertAdjacentElement('afterend', btn);
-          } else {
-            document.querySelector('.login-box').appendChild(btn);
-          }
-        }
-      }
+      // Reveal only the SSO buttons the server reports configured; the GitHub and
+      // Google buttons start hidden in index.html, so a failed fetch or a
+      // native-only server never shows a dead button (see login-providers.js).
+      applyLoginProviders(document, data);
     } catch (e) { /* non-critical */ }
   }
 

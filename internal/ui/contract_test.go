@@ -62,6 +62,30 @@ func TestConnectivityBannerWired(t *testing.T) {
 		"app-detail.js must call connectivityBanner so a WebSocket-blocked app surfaces a warning on the Overview")
 }
 
+// TestLoginProvidersGated pins that SSO login buttons only appear for providers
+// the server reports configured via GET /api/auth/providers ({github, google,
+// oidc:{enabled,display_name}}; see internal/api/oidc_handler.go handleGetProviders).
+// The GitHub and Google buttons are static markup in index.html and were shown
+// unconditionally, so a native-only install advertised buttons whose endpoints
+// return 501. They are now hidden by default and revealed by the pure,
+// unit-tested views/login-providers.js (jstests/login-providers.test.js), which
+// app.js must call. The CSS [hidden] override is load-bearing: the button
+// display:flex outranks the UA [hidden] rule.
+func TestLoginProvidersGated(t *testing.T) {
+	assertContains(t, "index.html", `class="github-login" href="/api/auth/github/login" hidden`,
+		"the GitHub button must be hidden by default so an unconfigured install never shows a dead 501 button")
+	assertContains(t, "index.html", `class="google-login" href="/api/auth/google/login" hidden`,
+		"the Google button must be hidden by default so an unconfigured install never shows a dead 501 button")
+	assertContains(t, "views/login-providers.js", "p.github === true",
+		"providerVisibility must gate the GitHub button on a strict boolean github flag from /api/auth/providers")
+	assertContains(t, "views/login-providers.js", "oidc.enabled === true",
+		"providerVisibility must gate the OIDC button on oidc.enabled from /api/auth/providers")
+	assertContains(t, "app.js", "applyLoginProviders(document",
+		"loadProviders must delegate button gating to applyLoginProviders so the wiring stays covered")
+	assertContains(t, "style.css", ".github-login[hidden]",
+		"style.css must override the button display:flex with a [hidden] rule, or the hidden attribute won't hide it (see .nav-item[hidden])")
+}
+
 // TestThemeWiring guards the light/dark theme feature. The pure resolver is
 // unit-tested (jstests/theme.test.js); the wiring lives in the app.js IIFE and
 // index.html, so pin the load-bearing pieces by string search:
