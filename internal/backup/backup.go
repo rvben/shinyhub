@@ -205,6 +205,14 @@ func Create(cfg *config.Config, version, outPath string) error {
 		_ = os.Remove(tmpOut)
 		return fmt.Errorf("close %s: %w", tmpOut, err)
 	}
+	// Re-open and fully decode what was just written before reporting success:
+	// a short write on a flaky filesystem must surface as an error here, not
+	// as a silently truncated archive an operator only discovers during a
+	// restore.
+	if err := Verify(tmpOut); err != nil {
+		_ = os.Remove(tmpOut)
+		return fmt.Errorf("backup archive failed verification: %w", err)
+	}
 	if err := os.Rename(tmpOut, outPath); err != nil {
 		_ = os.Remove(tmpOut)
 		return fmt.Errorf("finalize %s: %w", outPath, err)
@@ -241,6 +249,71 @@ func ReadManifest(archivePath string) (Manifest, error) {
 			return m, nil
 		}
 	}
+}
+
+// Verify re-opens archivePath and fully decodes it end to end: the gzip
+// trailer plus every tar entry's body, confirming the manifest and the DB
+// snapshot entry its own manifest.Backend declares are both present and
+// readable. Create calls this on every archive it writes, before renaming it
+// into place, so a short write on a flaky filesystem is caught as an error
+// instead of a silently truncated "backup written". It is also safe to call
+// standalone against an existing archive, e.g. before trusting it for a
+// restore drill.
+func Verify(archivePath string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", archivePath, err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("read gzip header: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+
+	seen := map[string]bool{}
+	var manifest Manifest
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read archive structure: %w", err)
+		}
+		if hdr.Name == manifestEntry {
+			if err := json.NewDecoder(tr).Decode(&manifest); err != nil {
+				return fmt.Errorf("read manifest: %w", err)
+			}
+		} else if _, err := io.Copy(io.Discard, tr); err != nil {
+			return fmt.Errorf("read entry %q: %w", hdr.Name, err)
+		}
+		seen[hdr.Name] = true
+	}
+	// tar.Reader stops at the end-of-archive marker; draining what remains
+	// forces gzip to validate its trailing CRC32/size, which a truncated or
+	// bit-flipped write can corrupt even when every tar entry above read back
+	// clean.
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return fmt.Errorf("read gzip trailer: %w", err)
+	}
+
+	if !seen[manifestEntry] {
+		return fmt.Errorf("archive is missing %s", manifestEntry)
+	}
+	backend := manifest.Backend
+	if backend == "" {
+		backend = backendSQLite
+	}
+	wantDBEntry := dbEntry
+	if backend == backendPostgres {
+		wantDBEntry = dbDumpEntry
+	}
+	if !seen[wantDBEntry] {
+		return fmt.Errorf("archive is missing %s snapshot entry %s", backend, wantDBEntry)
+	}
+	return nil
 }
 
 // Restore rebuilds durable state from archivePath. The server must be stopped.
