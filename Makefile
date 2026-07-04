@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-race vuln test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
+.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -25,6 +25,25 @@ test-race:
 # the same locally and in CI.
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+# scan-image builds the container image and scans it for known HIGH/CRITICAL
+# CVEs with Trivy (base image layers + the embedded Go binary's dependencies).
+# govulncheck (make vuln) covers Go source; this covers what actually ships in
+# the image. Uses a local trivy if present, else the aquasec/trivy container, so
+# it runs the same locally and in CI. Skips (exit 0) when docker is unavailable
+# so a workstation without docker stays green; --ignore-unfixed avoids failing on
+# base-image CVEs with no upstream fix yet.
+scan-image:
+	@if ! command -v docker >/dev/null 2>&1; then \
+		echo "docker not found; skipping image scan"; exit 0; \
+	fi
+	docker build -t shinyhub-scan:latest .
+	@if command -v trivy >/dev/null 2>&1; then \
+		trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shinyhub-scan:latest; \
+	else \
+		docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+			image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shinyhub-scan:latest; \
+	fi
 
 # test-js runs the JSDOM tests for UI assets. Requires Node 20+. Installs
 # devDependencies (jsdom, axe-core) the first time it runs; afterwards it's a no-op.
