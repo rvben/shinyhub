@@ -280,3 +280,80 @@ func TestOIDC_EndToEnd_AbsentGroupsClaimDoesNotDemote(t *testing.T) {
 		t.Errorf("role = %q, want operator preserved (absent groups claim must not demote)", user.Role)
 	}
 }
+
+// TestOIDC_EndToEnd_MalformedGroupsClaimRefusedWhenRequireValid drives the real
+// callback route (not a unit test of decodeGroupsClaim in isolation) against an
+// IdP that sends a "groups" claim of the wrong JSON type (a number, not an
+// array/string). With oauth.oidc.require_valid_groups=true this must fail
+// closed: 502, and - critically - no session cookie, since a claim we can't
+// parse must never be silently treated as "no groups" and let the login
+// through with a default role. This exercises the refusal in
+// handleOIDCCallback (oidc_handler.go's GroupsClaimMalformed + RequireValidGroups
+// gate), which previously had no test coverage at all.
+func TestOIDC_EndToEnd_MalformedGroupsClaimRefusedWhenRequireValid(t *testing.T) {
+	const clientID = "shinyhub"
+	idClaims := map[string]any{
+		"sub":    "idp-subject-42",
+		"email":  "carol@corp.example",
+		"name":   "Carol Danvers",
+		"groups": 42, // malformed: neither a JSON array of strings nor a single string
+	}
+	idp := newMockIdP(t, clientID, idClaims)
+
+	store := dbtest.New(t)
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Secret:           "test-secret-000000000000000000000000",
+			OAuthDefaultRole: "viewer",
+		},
+		OAuth: config.OAuthConfig{
+			OIDC: config.OIDCConfig{RequireValidGroups: true},
+		},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+	}
+	srv := api.New(cfg, store, nil, nil)
+	provider, err := oauth.NewOIDCProvider(
+		context.Background(), idp.URL, clientID, "client-secret",
+		"http://app.example.test/api/auth/oidc/callback", "Company SSO", "groups", "",
+	)
+	if err != nil {
+		t.Fatalf("NewOIDCProvider: %v", err)
+	}
+	srv.SetOIDCProvider(provider)
+
+	loginRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(loginRec, httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil))
+	loc, err := loginRec.Result().Location()
+	if err != nil {
+		t.Fatalf("login redirect location: %v", err)
+	}
+	state := loc.Query().Get("state")
+	idClaims["nonce"] = loc.Query().Get("nonce")
+	var stateCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Value != "" {
+			stateCookie = c
+		}
+	}
+	if stateCookie == nil {
+		t.Fatal("login set no state binding cookie")
+	}
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/callback?state="+url.QueryEscape(state)+"&code=mock-auth-code", nil)
+	cbReq.AddCookie(stateCookie)
+	cbRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(cbRec, cbReq)
+
+	if cbRec.Code != http.StatusBadGateway {
+		t.Fatalf("callback: expected 502 for malformed groups claim with require_valid_groups=true, got %d (%s)",
+			cbRec.Code, cbRec.Body.String())
+	}
+	for _, c := range cbRec.Result().Cookies() {
+		if c.Name == auth.SessionCookieName && c.Value != "" {
+			t.Errorf("callback set a session cookie despite refusing the malformed groups claim")
+		}
+	}
+	if _, err := store.GetUserByUsername("carol"); err == nil {
+		t.Errorf("user should not be provisioned when the malformed groups claim is refused")
+	}
+}
