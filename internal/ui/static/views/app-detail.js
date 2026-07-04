@@ -345,7 +345,7 @@ async function renderDeployments(panel, app, ctx) {
       });
     } catch {
       btn.disabled = false;
-      alert('Rollback failed: network error.');
+      ctx.flashToast('Rollback failed: network error.', 'error');
       return;
     }
     if (r.status === 401) {
@@ -361,7 +361,7 @@ async function renderDeployments(panel, app, ctx) {
     btn.disabled = false;
     let msg = 'Rollback failed.';
     try { const j = await r.json(); if (j && j.error) msg = `Rollback failed: ${j.error}`; } catch { /* non-JSON */ }
-    alert(msg);
+    ctx.flashToast(msg, 'error');
   };
 
   async function load() {

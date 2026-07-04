@@ -2693,3 +2693,19 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 		t.Fatal("the card Restart button click handler must pass its own button through to restart for the disable guard")
 	}
 }
+
+// TestRollbackFailureUsesToastNotAlert guards UX-9: a failed rollback (network
+// error or a non-OK response) used window.alert(), a blocking, unstyled
+// browser dialog inconsistent with every other error surface in the
+// dashboard. It must report through the same accessible flashToast used
+// elsewhere, which app.js exposes on ctx for exactly this purpose.
+func TestRollbackFailureUsesToastNotAlert(t *testing.T) {
+	assertContains(t, "app.js", "flashToast,",
+		"app.js must expose flashToast on the ctx object passed to mountAppDetail so app-detail.js can report failures without window.alert()")
+	assertNotContains(t, "views/app-detail.js", "alert(",
+		"app-detail.js must not use window.alert() for rollback failures; use ctx.flashToast so failures match the rest of the dashboard's error UI")
+	assertContains(t, "views/app-detail.js", "ctx.flashToast('Rollback failed: network error.', 'error')",
+		"a network failure during rollback must be reported via ctx.flashToast, not a blocking alert()")
+	assertContains(t, "views/app-detail.js", "ctx.flashToast(msg, 'error')",
+		"a non-OK rollback response must be reported via ctx.flashToast, not a blocking alert()")
+}

@@ -4223,6 +4223,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // restart triggers POST /api/apps/:slug/restart (the same action as the
     // header kebab), exposed so the crash banner's Restart button can reuse it.
     restart: (slug) => restart(slug),
+    // flashToast lets app-detail.js report failures (e.g. a failed rollback)
+    // through the same accessible, auto-dismissing toast used everywhere else
+    // in the dashboard instead of a blocking window.alert().
+    flashToast,
   };
 
   const appDetailMount = mountAppDetail({
