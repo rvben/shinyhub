@@ -39,6 +39,7 @@ def server(input, output, session):
         groups = ", ".join(user.get("groups") or []) or "(none)"
         return ui.tags.dl(
             ui.tags.dt("User"), ui.tags.dd(user["preferred_username"]),
+            ui.tags.dt("Name"), ui.tags.dd(user.get("name") or "(none)"),
             ui.tags.dt("Role"), ui.tags.dd(user["role"]),
             ui.tags.dt("Groups (verified)"), ui.tags.dd(groups),
         )

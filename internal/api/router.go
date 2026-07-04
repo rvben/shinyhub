@@ -642,7 +642,7 @@ func (s *Server) userLookup(userID int64) (*auth.ContextUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role, Email: u.Email}, nil
+	return &auth.ContextUser{ID: u.ID, Username: u.Username, Role: u.Role, Email: u.Email, DisplayName: u.DisplayName}, nil
 }
 
 // revocationChecker returns an auth.RevocationChecker bound to the server's

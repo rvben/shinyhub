@@ -21,6 +21,7 @@ const (
 	HeaderUserID          = "X-Shinyhub-User-Id"
 	HeaderRole            = "X-Shinyhub-Role"
 	HeaderEmail           = "X-Shinyhub-Email"
+	HeaderName            = "X-Shinyhub-Name"
 	HeaderGroups          = "X-Shinyhub-Groups"
 	HeaderGroupsTruncated = "X-Shinyhub-Groups-Truncated"
 	HeaderToken           = "X-Shinyhub-Identity-Token"
@@ -82,6 +83,7 @@ func SanitizeGroups(groups []string) (string, []string, bool) {
 type TokenClaims struct {
 	Role              string   `json:"role"`
 	Email             string   `json:"email,omitempty"`
+	Name              string   `json:"name,omitempty"`
 	Groups            []string `json:"groups"`
 	GroupsTruncated   bool     `json:"groups_truncated,omitempty"`
 	PreferredUsername string   `json:"preferred_username"`
@@ -94,6 +96,7 @@ type TokenParams struct {
 	Username        string
 	Role            string
 	Email           string   // empty when the upstream IdP provided none
+	Name            string   // display name; empty when the IdP provided none
 	Groups          []string // pre-sanitized claim slice from SanitizeGroups
 	GroupsTruncated bool
 	Slug            string // becomes aud
@@ -105,6 +108,7 @@ func MintToken(key []byte, p TokenParams) (string, error) {
 	claims := TokenClaims{
 		Role:              p.Role,
 		Email:             p.Email,
+		Name:              p.Name,
 		Groups:            p.Groups,
 		GroupsTruncated:   p.GroupsTruncated,
 		PreferredUsername: p.Username,

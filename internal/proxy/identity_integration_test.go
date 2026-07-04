@@ -173,6 +173,60 @@ func TestIdentityChain_SessionUserReachesBackendVerifiable(t *testing.T) {
 	}
 }
 
+// TestIdentityChain_DisplayNameReachesBackend proves a user's display name
+// reaches the app both as the X-Shinyhub-Name header and the identity token's
+// `name` claim, when the session-resolved ContextUser carries a DisplayName.
+func TestIdentityChain_DisplayNameReachesBackend(t *testing.T) {
+	const (
+		slug   = "demo"
+		secret = "chain-test-secret"
+		userID = int64(7)
+	)
+
+	app := &db.App{ID: 42, Slug: slug, Access: "private"}
+	lookup := func(id int64) (*auth.ContextUser, error) {
+		return &auth.ContextUser{ID: userID, Username: "ana", Role: "developer", DisplayName: "Ana Smith"}, nil
+	}
+
+	srv, getHeaders := startChainBackend(t)
+	chain, _ := buildChain(t, app, secret, lookup, srv.URL)
+
+	tok, err := auth.IssueJWT(userID, "ana", "developer", secret)
+	if err != nil {
+		t.Fatalf("IssueJWT: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: tok})
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	h := getHeaders()
+	if h == nil {
+		t.Fatal("backend received no headers")
+	}
+	if got := h.Get(identity.HeaderName); got != "Ana Smith" {
+		t.Errorf("X-Shinyhub-Name = %q, want %q", got, "Ana Smith")
+	}
+
+	tokenStr := h.Get(identity.HeaderToken)
+	if tokenStr == "" {
+		t.Fatal("X-Shinyhub-Identity-Token must be present")
+	}
+	key := identity.DeriveKey(secret, app.ID)
+	var claims identity.TokenClaims
+	if _, err := jwt.ParseWithClaims(tokenStr, &claims, func(t *jwt.Token) (any, error) {
+		return key, nil
+	}, jwt.WithAudience(slug), jwt.WithIssuer(identity.Issuer), jwt.WithLeeway(30)); err != nil {
+		t.Fatalf("token parse failed: %v", err)
+	}
+	if claims.Name != "Ana Smith" {
+		t.Errorf("token name claim = %q, want %q", claims.Name, "Ana Smith")
+	}
+}
+
 // TestIdentityChain_PublicAppAuthenticatedAndAnonymous verifies two sub-cases
 // for a public app:
 // (a) a session cookie results in identity headers reaching the backend;
