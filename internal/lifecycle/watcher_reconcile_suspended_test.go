@@ -18,7 +18,7 @@ func TestReconcile_SuspendedWarmVictim_StaysRunning(t *testing.T) {
 	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
 	app, _ := st.GetAppBySlug("app")
 
-	w.reconcileAppStatus(app)
+	w.reconcileAppStatus(app, st.replicas[1])
 
 	if got := st.appStatus["app"]; got != "running" {
 		t.Fatalf("app status = %q, want running (warm victim is intentional)", got)
@@ -36,7 +36,7 @@ func TestReconcile_SuspendedNonWarm_MarksDegraded(t *testing.T) {
 	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
 	app, _ := st.GetAppBySlug("app")
 
-	w.reconcileAppStatus(app)
+	w.reconcileAppStatus(app, st.replicas[1])
 
 	if got := st.appStatus["app"]; got != "degraded" {
 		t.Fatalf("app status = %q, want degraded (suspended non-warm must be visible)", got)

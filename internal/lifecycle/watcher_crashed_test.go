@@ -167,7 +167,7 @@ func TestReconcileAppStatus_GivesUpToCrashed(t *testing.T) {
 	// The watchdog has spent the restart budget for the only slot.
 	w.attempts[replicaKey{"broke", 0}] = 5
 
-	w.reconcileAppStatus(app)
+	w.reconcileAppStatus(app, st.replicas[1])
 
 	if got := appStatusOf(st, "broke"); got != "crashed" {
 		t.Fatalf("status = %q, want crashed (budget exhausted, 0 healthy)", got)
@@ -191,7 +191,7 @@ func TestReconcileAppStatus_StillRetrying_StaysDegraded(t *testing.T) {
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st, noopDeploy)
 	w.attempts[replicaKey{"flaky", 0}] = 2 // budget remains
 
-	w.reconcileAppStatus(app)
+	w.reconcileAppStatus(app, st.replicas[1])
 
 	if got := appStatusOf(st, "flaky"); got != "degraded" {
 		t.Fatalf("status = %q, want degraded (still retrying, not yet crashed)", got)
@@ -211,7 +211,7 @@ func TestReconcileAppStatus_RestartedAppNotRecrashed(t *testing.T) {
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st, noopDeploy)
 	w.attempts[replicaKey{"fixed", 0}] = 5 // budget still maxed from the prior crash loop
 
-	w.reconcileAppStatus(app)
+	w.reconcileAppStatus(app, st.replicas[1])
 
 	if got := appStatusOf(st, "fixed"); got != "running" {
 		t.Fatalf("status = %q, want running (a booted replica must not be re-crashed)", got)
@@ -239,7 +239,7 @@ func TestReconcileAppStatus_PartialHealthy_StaysDegraded(t *testing.T) {
 	w.attempts[replicaKey{"half", 0}] = 5
 	w.attempts[replicaKey{"half", 1}] = 5
 
-	w.reconcileAppStatus(app)
+	w.reconcileAppStatus(app, st.replicas[1])
 
 	if got := appStatusOf(st, "half"); got != "degraded" {
 		t.Fatalf("status = %q, want degraded (one replica still serving)", got)
