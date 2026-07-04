@@ -190,9 +190,17 @@ func serveWorkerMTLS(ctx context.Context, logger *slog.Logger, cfg *config.Confi
 		return
 	}
 	srv := &http.Server{
-		Addr:      workerListenAddr(cfg),
-		Handler:   r,
-		TLSConfig: tlsConf,
+		Addr: workerListenAddr(cfg),
+		// bodyLimitHandler caps request bodies (register decodes its body before
+		// the join-token check, so this bound applies pre-authentication); the
+		// timeouts bound slow-header/slow-body clients so a peer that only
+		// completes the TLS handshake cannot pin connections. WriteTimeout is left
+		// unset so large bundle-fetch responses stream without being severed.
+		Handler:           bodyLimitHandler(r),
+		TLSConfig:         tlsConf,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	go func() {
 		<-ctx.Done()
