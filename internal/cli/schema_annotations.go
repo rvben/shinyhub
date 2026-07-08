@@ -191,6 +191,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	}, ArgEnums: map[string][]string{
 		"--isolation": {"multiplex", "grouped", "per_session"},
 	}},
+	"apps transfer": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "transferred"},
+		{Name: "slug", Type: "string"},
+		{Name: "owner", Type: "string"},
+	}},
 
 	// ── apps access (container) ───────────────────────────────────────────────
 	"apps access": {Mutating: ro},

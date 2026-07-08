@@ -332,7 +332,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, db.ErrUserOwnsApps) {
-			writeError(w, http.StatusConflict, "user still owns apps; reassign or delete them first")
+			writeError(w, http.StatusConflict, "user still owns apps; transfer them first (shinyhub apps transfer <slug> <new-owner>) or delete them")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")

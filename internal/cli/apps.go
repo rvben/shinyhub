@@ -33,6 +33,7 @@ func newAppsCmd() *cobra.Command {
 		newAppsStartCmd(),
 		newAppsSetCmd(),
 		newAppsAccessCmd(),
+		newAppsTransferCmd(),
 		newAppsDeleteCmd(),
 		newAppsStopCmd(),
 		newAppsDeploymentsCmd(),
@@ -1355,6 +1356,52 @@ func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *listFlags) err
 			fmt.Fprintf(w, "%-20s %s\n", group, role)
 		}
 	})
+}
+
+// ── apps transfer ───────────────────────────────────────────────────────────
+
+func newAppsTransferCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "transfer <slug> <username>",
+		Short: "Transfer app ownership to another user",
+		Long: "Transfer app ownership to another user.\n\n" +
+			"Only the current owner or a platform admin/operator can transfer.\n" +
+			"The new owner gains full manage rights on the app; the previous\n" +
+			"owner keeps only whatever membership they hold. Use this before\n" +
+			"deleting a user who still owns apps.",
+		Args: cobra.ExactArgs(2),
+		RunE: runAppsTransfer,
+	}
+}
+
+func runAppsTransfer(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug, username := args[0], args[1]
+	body, err := json.Marshal(map[string]string{"username": username})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/owner", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "transfer ownership", resp, out)
+	}
+	return renderAction(cmd, "transferred",
+		map[string]any{"slug": slug, "owner": username},
+		fmt.Sprintf("%s: ownership transferred to %s", slug, username))
 }
 
 // ── tokens create ───────────────────────────────────────────────────────────

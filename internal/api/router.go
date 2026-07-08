@@ -714,6 +714,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/apps/{slug}/traces", s.handleTraces)
 		r.Get("/api/apps/{slug}/members", s.handleGetMembers)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)
+		r.Post("/api/apps/{slug}/owner", s.handleTransferAppOwnership)
 		r.Post("/api/apps/{slug}/members", s.handleGrantAppAccess)
 		r.Delete("/api/apps/{slug}/members", s.handleRevokeAppAccess)
 		r.Delete("/api/apps/{slug}/members/{user_id}", s.handleRevokeAppAccess)

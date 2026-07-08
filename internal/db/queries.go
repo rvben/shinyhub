@@ -1728,6 +1728,25 @@ func (s *Store) SetAppAccess(slug, access string) error {
 	return nil
 }
 
+// SetAppOwner reassigns the app to a new owning user. Target validation
+// (existence, non-system) is the API layer's job; the FK on owner_id is the
+// last line of defense. Returns ErrNotFound when the slug does not exist.
+func (s *Store) SetAppOwner(slug string, ownerID int64) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET owner_id = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, ownerID, slug)
+	if err != nil {
+		return fmt.Errorf("set app owner: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app owner rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetAppDescription updates the app's optional one-line description (shown on
 // the Launchpad). An empty string clears it.
 func (s *Store) SetAppDescription(slug, description string) error {
