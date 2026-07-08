@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
@@ -275,12 +276,96 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 	return results, nil
 }
 
+// firstFireStore and firstFireRunner are the narrow store and jobs-manager
+// views the first-fire decision needs, so it is testable with fakes.
+// *db.Store and *jobs.Manager satisfy them.
+type firstFireStore interface {
+	LastSuccessfulRun(scheduleID int64) (*db.ScheduleRun, error)
+	LatestRegisterRunID(scheduleID int64) (int64, error)
+}
+
+type firstFireRunner interface {
+	Run(scheduleID int64, trigger string, userID *int64) (int64, error)
+}
+
+// errFirstFireAlreadySucceeded reports that the never-succeeded gate found a
+// prior successful run: the first-fire is skipped, which is not an error.
+var errFirstFireAlreadySucceeded = errors.New("schedule already has a successful run")
+
+// firstFireOnce runs one gate-then-dispatch attempt. It fires only when the
+// schedule has never had a successful run. A gate error that is NOT
+// ErrNotFound is returned wrapped rather than fired through: dispatching on
+// uncertain gate state could double-fire.
+func firstFireOnce(store firstFireStore, runner firstFireRunner, scheduleID int64) (int64, error) {
+	if _, lerr := store.LastSuccessfulRun(scheduleID); lerr == nil {
+		return 0, errFirstFireAlreadySucceeded
+	} else if !errors.Is(lerr, db.ErrNotFound) {
+		return 0, fmt.Errorf("gate check: %w", lerr)
+	}
+	return runner.Run(scheduleID, "register", nil)
+}
+
+// firstFire dispatches the run_on_register first run, retrying once after
+// delay when the gate query or the dispatch fails. A single transient store
+// error must not silently lose the first-fire: a failure swallowed before the
+// run row is inserted leaves no 'interrupted' row for the scheduler's startup
+// reconcile to pick up, so without a retry the run would never happen until
+// the schedule's next registration or cron tick.
+//
+// The retry is double-fire safe. A gate failure precedes any dispatch, so its
+// retry needs no further checks. A dispatch error is ambiguous - the run row
+// may have been admitted before the driver returned the error - so the latest
+// register-run id is snapshotted before dispatching and the retry runs only
+// when that marker is provably unmoved after the failure (a moved or
+// unverifiable marker is left to the restart reconcile). The marker is a max
+// run id, not a count: retention pruning deletes only older rows, so a prune
+// racing the retry window cannot mask an admission the way it could offset a
+// count. The retry attempt re-runs the never-succeeded gate, so a run that
+// succeeded in between is skipped. One retry keeps the create/deploy request
+// path bounded; a persistent failure stays best-effort (logged, nil id) as
+// designed.
+func firstFire(store firstFireStore, runner firstFireRunner, scheduleID int64, delay time.Duration) (int64, error) {
+	if _, lerr := store.LastSuccessfulRun(scheduleID); lerr == nil {
+		return 0, errFirstFireAlreadySucceeded
+	} else if !errors.Is(lerr, db.ErrNotFound) {
+		slog.Warn("run_on_register: first-fire gate check failed; retrying once",
+			"schedule_id", scheduleID, "err", lerr)
+		time.Sleep(delay)
+		return firstFireOnce(store, runner, scheduleID)
+	}
+	before, berr := store.LatestRegisterRunID(scheduleID)
+	runID, derr := runner.Run(scheduleID, "register", nil)
+	if derr == nil {
+		return runID, nil
+	}
+	slog.Warn("run_on_register: first-fire dispatch failed; verifying before retry",
+		"schedule_id", scheduleID, "err", derr)
+	time.Sleep(delay)
+	if berr != nil {
+		return 0, fmt.Errorf("%w (admission baseline unavailable: %v)", derr, berr)
+	}
+	after, aerr := store.LatestRegisterRunID(scheduleID)
+	if aerr != nil {
+		return 0, fmt.Errorf("%w (admission check failed: %v)", derr, aerr)
+	}
+	if after != before {
+		return 0, fmt.Errorf("%w (a register run was admitted by the failed dispatch; not retrying)", derr)
+	}
+	return firstFireOnce(store, runner, scheduleID)
+}
+
+// firstFireRetryDelay spaces the retry inside firstFire: long enough for the
+// transient store errors seen under load (connection resets, pool exhaustion)
+// to clear, short enough not to stall the create/deploy request noticeably.
+const firstFireRetryDelay = 250 * time.Millisecond
+
 // maybeFirstFire fires the schedule once for run_on_register and returns the
 // dispatched run id, or nil. It NEVER fails the caller: a disabled schedule, an
 // unavailable job manager, a closed gate (the schedule has already succeeded),
-// or a dispatch error all yield nil, with problems logged. The gate is "has
-// this schedule ever succeeded?" so a failed first-fire self-heals on the next
-// registration.
+// or a persistent gate/dispatch error all yield nil, with problems logged.
+// Transient errors are absorbed by firstFire's single retry; the gate is "has
+// this schedule ever succeeded?" so even a persistently failed first-fire
+// self-heals on the next registration.
 //
 // Inline dispatch is safe because ownerGuard gates both the deploy POST and the
 // schedule-create endpoint, so only the owner instance reaches here - the same
@@ -289,20 +374,13 @@ func (s *Server) maybeFirstFire(scheduleID int64, runOnRegister, disabled bool, 
 	if !runOnRegister || disabled || s.jobs == nil {
 		return nil
 	}
-	// Fire only when the schedule has never had a successful run. A non-nil
-	// error that is NOT ErrNotFound means the gate check itself failed; skip
-	// firing and log rather than risk a double-fire on uncertain state.
-	if _, lerr := s.store.LastSuccessfulRun(scheduleID); !errors.Is(lerr, db.ErrNotFound) {
-		if lerr != nil {
-			slog.Warn("run_on_register: gate check failed; skipping first-fire",
-				"slug", slug, "schedule", name, "err", lerr)
-		}
+	runID, err := firstFire(s.store, s.jobs, scheduleID, firstFireRetryDelay)
+	if errors.Is(err, errFirstFireAlreadySucceeded) {
 		return nil
 	}
-	runID, rerr := s.jobs.Run(scheduleID, "register", nil)
-	if rerr != nil {
-		slog.Warn("run_on_register: first-fire dispatch failed",
-			"slug", slug, "schedule", name, "err", rerr)
+	if err != nil {
+		slog.Warn("run_on_register: first-fire failed; skipping",
+			"slug", slug, "schedule", name, "err", err)
 		return nil
 	}
 	return &runID

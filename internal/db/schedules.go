@@ -507,6 +507,24 @@ func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	return &r, nil
 }
 
+// LatestRegisterRunID returns the highest run id among the schedule's runs
+// with the 'register' trigger, regardless of status; 0 when there is none.
+// The first-fire retry snapshots it before dispatching and re-checks after a
+// failed dispatch, so it can verify the failure did not admit a run before
+// re-dispatching. A max id is used rather than a count because it moves ONLY
+// on admission: retention pruning deletes older rows, which would offset a
+// count but cannot move the max.
+func (s *Store) LatestRegisterRunID(scheduleID int64) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(`
+		SELECT COALESCE(MAX(id), 0) FROM schedule_runs
+		WHERE schedule_id = ? AND trigger = 'register'`, scheduleID).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("latest register run for schedule %d: %w", scheduleID, err)
+	}
+	return id, nil
+}
+
 // SchedulesNeedingFirstFireRetry returns the ids of enabled schedules whose
 // run_on_register first-fire was interrupted by a service restart and has never
 // succeeded, so the startup reconcile can re-fire it.
