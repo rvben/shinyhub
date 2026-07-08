@@ -609,11 +609,14 @@ document.addEventListener('DOMContentLoaded', () => {
   function showLoggedIn(payload) {
     state.user = payload.user;
     state.canCreateApps = !!payload.can_create_apps;
+    state.canReadAudit = !!payload.can_read_audit;
     renderIdentity(payload.user);
     setHidden(logoutButton, false);
     setHidden(loginView, true);
     document.body.dataset.auth = 'in';
-    tabAudit.hidden = payload.user.role !== 'admin';
+    // Audit access is a server-computed capability (admin, or operator when
+    // auth.operator_audit_access is on), not a client-side role check.
+    tabAudit.hidden = !state.canReadAudit;
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
     // The home (/) is role-adaptive: fleet operators (admin/operator) get the
@@ -1485,9 +1488,12 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     const name = newTokenName.value.trim();
     if (!name) { setError(newTokenError, 'A token name is required'); return; }
+    const payload = { name };
+    const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
+    if (Number.isFinite(expiryDays) && expiryDays > 0) payload.expires_in_days = expiryDays;
     let resp;
     try {
-      resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) });
+      resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });
     } catch {
       setError(newTokenError, 'Network error');
       return;

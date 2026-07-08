@@ -65,6 +65,17 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// A scoped identity (deploy token with an app allowlist) sees only its
+	// allowlisted apps, matching the per-slug gates.
+	if len(u.AppScope) > 0 {
+		scoped := apps[:0]
+		for _, a := range apps {
+			if u.AppInScope(a.Slug) {
+				scoped = append(scoped, a)
+			}
+		}
+		apps = scoped
+	}
 	writeList(w, apps, limit, offset, nil)
 }
 
@@ -117,6 +128,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if !canCreateApps(u) {
 		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if !u.AppInScope(req.Slug) {
+		writeError(w, http.StatusForbidden, "this credential is restricted to specific apps; "+req.Slug+" is not one of them")
 		return
 	}
 
@@ -2111,6 +2126,72 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 			UserID: &u.ID, Action: "set_access", ResourceType: "app",
 			ResourceID: slug, Detail: string(accessDetail), IPAddress: s.ClientIP(r),
 		})
+	}
+	writeJSON(w, http.StatusOK, app)
+}
+
+// handleTransferAppOwnership reassigns apps.owner_id. The gate is stricter
+// than requireManageApp: only the current owner or a platform admin/operator
+// may transfer (a manager-role member manages the app but does not own it,
+// matching the owner-vs-collaborator split in comparable platforms). This is
+// the offboarding path: transfer a leaver's apps, then delete the account.
+func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	app, u, ok := s.requireViewApp(w, r, slug)
+	if !ok {
+		return
+	}
+	if !isPrivilegedAppOperator(u) && app.OwnerID != u.ID {
+		writeError(w, http.StatusForbidden, "only the app's owner or a platform admin/operator can transfer ownership")
+		return
+	}
+	var req struct {
+		UserID   int64  `json:"user_id"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	var target *db.User
+	var err error
+	switch {
+	case req.UserID != 0:
+		target, err = s.store.GetUserByID(req.UserID)
+	case req.Username != "":
+		target, err = s.store.GetUserByUsername(req.Username)
+	default:
+		writeError(w, http.StatusBadRequest, "user_id or username is required")
+		return
+	}
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if db.IsSystemUser(target.Username) {
+		writeError(w, http.StatusForbidden, "cannot transfer ownership to a system user")
+		return
+	}
+	if target.ID != app.OwnerID {
+		if err := s.store.SetAppOwner(slug, target.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID: &u.ID, Action: "transfer_ownership", ResourceType: "app",
+			ResourceID: slug,
+			Detail:     fmt.Sprintf("from_user_id=%d to_user_id=%d to_username=%s", app.OwnerID, target.ID, target.Username),
+			IPAddress:  s.ClientIP(r),
+		})
+	}
+	app, err = s.store.GetAppBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
 	writeJSON(w, http.StatusOK, app)
 }

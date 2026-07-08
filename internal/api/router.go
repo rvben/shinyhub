@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"sort"
@@ -623,12 +624,20 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
 		}
 		return u, nil
 	}
-	u, err := s.store.GetUserByAPIKeyHash(keyHash)
+	u, keyID, lastUsed, err := s.store.AuthenticateAPIKey(keyHash)
 	if err != nil {
 		return nil, err
 	}
 	if db.IsSystemUser(u.Username) {
 		return nil, fmt.Errorf("api key owned by system user is not honored")
+	}
+	// Refresh the usage stamp at most about once a minute per key: coarse
+	// enough to keep the write off the auth hot path, fresh enough for a
+	// credential inventory. Best-effort - a failed touch never fails auth.
+	if lastUsed == nil || time.Since(*lastUsed) >= time.Minute {
+		if err := s.store.TouchAPIKey(keyID, time.Now().UTC()); err != nil {
+			slog.Warn("api key touch failed", "key_id", keyID, "err", err)
+		}
 	}
 	return u.ContextUser(), nil
 }
@@ -714,6 +723,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/apps/{slug}/traces", s.handleTraces)
 		r.Get("/api/apps/{slug}/members", s.handleGetMembers)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)
+		r.Post("/api/apps/{slug}/owner", s.handleTransferAppOwnership)
 		r.Post("/api/apps/{slug}/members", s.handleGrantAppAccess)
 		r.Delete("/api/apps/{slug}/members", s.handleRevokeAppAccess)
 		r.Delete("/api/apps/{slug}/members/{user_id}", s.handleRevokeAppAccess)
@@ -756,6 +766,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/users/{username}", s.handleGetUser)                               // any auth: lookup by username
 		r.Patch("/api/users/{id}", s.handlePatchUser)                                 // admin: update role
 		r.Patch("/api/users/{id}/password", s.handlePatchUserPassword)                // admin: reset password
+		r.Post("/api/users/{id}/revoke-sessions", s.handleRevokeUserSessions)         // admin: force-logout all sessions
 		r.Delete("/api/users/{id}", s.handleDeleteUser)                               // admin: delete user
 
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log

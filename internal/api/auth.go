@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -186,6 +187,10 @@ func newSessionUser(u *db.User) *sessionUserResponse {
 type sessionResponse struct {
 	User          *sessionUserResponse `json:"user"`
 	CanCreateApps bool                 `json:"can_create_apps"`
+	// CanReadAudit advertises audit-log access (admin, or operator behind
+	// auth.operator_audit_access) so the UI shows the Audit tab and the
+	// Overview activity feed to exactly the users who can load them.
+	CanReadAudit bool `json:"can_read_audit"`
 }
 
 func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
@@ -247,7 +252,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	token, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -296,7 +301,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	token, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -310,10 +315,11 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.ClientIP(r),
 	})
 	auth.SetSessionCookie(w, r, token, s.cfg.TrustedProxyNets)
-	ctxUser := &auth.ContextUser{ID: user.ID, Username: user.Username, Role: user.Role}
+	ctxUser := user.ContextUser()
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          newSessionUser(user),
 		CanCreateApps: canCreateApps(ctxUser),
+		CanReadAudit:  s.canReadAudit(ctxUser),
 	})
 }
 
@@ -366,7 +372,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				if authTime.IsZero() {
 					authTime = time.Now()
 				}
-				freshToken, err := auth.IssueJWTAt(u.ID, u.Username, u.Role, s.cfg.Auth.Secret, authTime)
+				freshToken, err := auth.SlideSessionToken(u, s.cfg.Auth.Secret, authTime)
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "internal server error")
 					return
@@ -385,6 +391,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          su,
 		CanCreateApps: canCreateApps(u),
+		CanReadAudit:  s.canReadAudit(u),
 	})
 }
 
@@ -474,6 +481,30 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
+		// Changing the password signs out every session that was authenticated
+		// with the old credential (a hijacked session must not survive the
+		// rotation). The caller's own browser session is re-issued below at the
+		// new epoch so they stay signed in; a Bearer-JWT caller re-logs in.
+		if err := s.store.BumpTokenEpoch(u.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if r.Header.Get("Authorization") == "" {
+			if _, cerr := r.Cookie(auth.SessionCookieName); cerr == nil {
+				var authTime time.Time
+				if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
+					authTime = ti.AuthTime
+				}
+				if authTime.IsZero() {
+					authTime = time.Now()
+				}
+				if liveUser, lerr := s.store.LookupContextUser(u.ID); lerr == nil {
+					if freshToken, terr := auth.SlideSessionToken(liveUser, s.cfg.Auth.Secret, authTime); terr == nil {
+						auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
+					}
+				}
+			}
+		}
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "change_own_password",
@@ -501,18 +532,29 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          newSessionUser(fresh),
 		CanCreateApps: canCreateApps(u),
+		CanReadAudit:  s.canReadAudit(u),
 	})
 }
 
 type createTokenRequest struct {
 	Name string `json:"name"`
+	// ExpiresInDays sets an expiry that far in the future; 0/absent keeps the
+	// token non-expiring (the historical behavior).
+	ExpiresInDays int `json:"expires_in_days"`
 }
+
+// maxTokenExpiryDays caps requested expiries at ten years: far enough out to
+// be "effectively forever" for a real workflow, small enough to reject typos
+// like 99999999 that would silently mean never.
+const maxTokenExpiryDays = 3650
 
 type createTokenResponse struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
 	Token     string    `json:"token"`
 	CreatedAt time.Time `json:"created_at"`
+	// ExpiresAt is null for a never-expiring token.
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
@@ -547,6 +589,17 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ExpiresInDays < 0 || req.ExpiresInDays > maxTokenExpiryDays {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("expires_in_days must be between 0 (never) and %d", maxTokenExpiryDays))
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresInDays > 0 {
+		t := time.Now().UTC().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
+		expiresAt = &t
+	}
+
 	rawKey, keyHash, err := generateAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -554,20 +607,26 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	keyID, createdAt, err := s.store.CreateAPIKey(db.CreateAPIKeyParams{
-		UserID:  u.ID,
-		KeyHash: keyHash,
-		Name:    req.Name,
+		UserID:    u.ID,
+		KeyHash:   keyHash,
+		Name:      req.Name,
+		ExpiresAt: expiresAt,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
+	auditDetail := ""
+	if req.ExpiresInDays > 0 {
+		auditDetail = fmt.Sprintf("expires_in_days=%d", req.ExpiresInDays)
+	}
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "create_token",
 		ResourceType: "token",
 		ResourceID:   req.Name,
+		Detail:       auditDetail,
 		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{
@@ -575,6 +634,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		Name:      req.Name,
 		Token:     rawKey,
 		CreatedAt: createdAt,
+		ExpiresAt: expiresAt,
 	})
 }
 
@@ -584,13 +644,30 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	limit, offset := parsePagination(r)
+
+	// ?all=1: the admin-only credential inventory across every user, with the
+	// owning username per token so revocation does not require trawling the
+	// audit log for IDs.
+	if r.URL.Query().Get("all") != "" {
+		if u.Role != "admin" {
+			writeError(w, http.StatusForbidden, "admin only")
+			return
+		}
+		keys, err := s.store.ListAllAPIKeys()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		writeList(w, keys, limit, offset, nil)
+		return
+	}
 
 	keys, err := s.store.ListAPIKeys(u.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	limit, offset := parsePagination(r)
 	writeList(w, keys, limit, offset, nil)
 }
 

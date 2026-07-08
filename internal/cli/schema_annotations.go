@@ -191,6 +191,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	}, ArgEnums: map[string][]string{
 		"--isolation": {"multiplex", "grouped", "per_session"},
 	}},
+	"apps transfer": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "transferred"},
+		{Name: "slug", Type: "string"},
+		{Name: "owner", Type: "string"},
+	}},
 
 	// ── apps access (container) ───────────────────────────────────────────────
 	"apps access": {Mutating: ro},
@@ -268,11 +273,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "name", Type: "string"},
 		{Name: "token", Type: "string", Desc: "The token value (shown once)"},
 		{Name: "created_at", Type: "string"},
+		{Name: "expires_at", Type: "string", Desc: "null when the token never expires"},
 	}},
 	"tokens list": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "id", Type: "integer"},
 		{Name: "name", Type: "string"},
 		{Name: "created_at", Type: "string"},
+		{Name: "expires_at", Type: "string", Desc: "null when the token never expires"},
+		{Name: "last_used_at", Type: "string", Desc: "null until the token first authenticates"},
 	}, EnvelopeFields: []fieldSpec{
 		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},
@@ -491,6 +499,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"users reset-password": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "password_reset"},
 		{Name: "id", Type: "integer"},
+		{Name: "username", Type: "string"},
+	}},
+	"users revoke-sessions": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "revoked"},
 		{Name: "username", Type: "string"},
 	}},
 	"users delete": {Mutating: mut, OutputFields: []fieldSpec{

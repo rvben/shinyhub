@@ -962,6 +962,15 @@
                    autocomplete="off" spellcheck="false" placeholder="e.g. ci-deploy or laptop">
             <p class="profile-hint">A label to recognise it later. Must be unique among your tokens.</p>
 
+            <label for="new-token-expiry">Expires</label>
+            <select id="new-token-expiry">
+              <option value="30">30 days</option>
+              <option value="90" selected>90 days</option>
+              <option value="365">365 days</option>
+              <option value="0">Never</option>
+            </select>
+            <p class="profile-hint">An expired token stops authenticating; create a new one to replace it.</p>
+
             <p id="new-token-error" class="error" hidden></p>
 
             <div class="modal-actions">

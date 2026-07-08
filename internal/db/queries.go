@@ -51,6 +51,10 @@ type User struct {
 	// for local username/password accounts and until the first SSO login sets it.
 	Email     string
 	CreatedAt time.Time
+	// TokenEpoch is the session-revocation counter. JWTs embed the epoch they
+	// were issued at; a bump (admin revoke-sessions, password change)
+	// invalidates every outstanding session token at the next request.
+	TokenEpoch int64
 }
 
 // ContextUser maps a persisted user row to the auth.ContextUser carried through
@@ -66,6 +70,7 @@ func (u *User) ContextUser() *auth.ContextUser {
 		Role:        u.Role,
 		Email:       u.Email,
 		DisplayName: u.DisplayName,
+		TokenEpoch:  u.TokenEpoch,
 	}
 }
 
@@ -97,11 +102,11 @@ func (s *Store) CreateUser(p CreateUserParams) error {
 
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users WHERE username = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users WHERE username = ?`,
 		username,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -112,11 +117,11 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users WHERE id = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users WHERE id = ?`,
 		id,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -142,7 +147,7 @@ func (s *Store) LookupContextUser(id int64) (*auth.ContextUser, error) {
 // ListUsers returns all users ordered by username.
 func (s *Store) ListUsers() ([]*User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users ORDER BY username`)
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +155,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 	var users []*User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 			return nil, err
 		}
 		users = append(users, &u)
@@ -159,6 +164,24 @@ func (s *Store) ListUsers() ([]*User, error) {
 		users = []*User{}
 	}
 	return users, rows.Err()
+}
+
+// BumpTokenEpoch increments the user's session-revocation counter, killing
+// every outstanding session JWT at its next request. Returns ErrNotFound for
+// an unknown user.
+func (s *Store) BumpTokenEpoch(userID int64) error {
+	res, err := s.db.Exec(`UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?`, userID)
+	if err != nil {
+		return fmt.Errorf("bump token epoch: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("bump token epoch rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetForwardAuthUser returns the auth.ContextUser for a username, or
@@ -396,6 +419,9 @@ type CreateAPIKeyParams struct {
 	UserID  int64
 	KeyHash string
 	Name    string
+	// ExpiresAt, when non-nil, makes the key unusable past that instant.
+	// nil = never expires.
+	ExpiresAt *time.Time
 }
 
 // CreateAPIKey inserts a new API key and returns the inserted row's ID and
@@ -404,8 +430,8 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 	var id int64
 	var createdAt time.Time
 	err := s.db.QueryRow(
-		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?) RETURNING id, created_at`,
-		p.UserID, p.KeyHash, p.Name,
+		`INSERT INTO api_keys (user_id, key_hash, name, expires_at) VALUES (?, ?, ?, ?) RETURNING id, created_at`,
+		p.UserID, p.KeyHash, p.Name, p.ExpiresAt,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("create api key: %w", err)
@@ -413,19 +439,45 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 	return id, createdAt, nil
 }
 
-func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
+// AuthenticateAPIKey resolves an API key hash to its owning user, skipping
+// expired keys (an expired key misses exactly like an unknown one, so the
+// caller's 401 does not leak which). It also returns the key's ID and current
+// last_used_at so the caller can decide whether to refresh the usage stamp
+// without a second lookup.
+func (s *Store) AuthenticateAPIKey(hash string) (*User, int64, *time.Time, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch,
+		       k.id, k.last_used_at
 		FROM users u JOIN api_keys k ON k.user_id = u.id
-		WHERE k.key_hash = ?`, hash)
+		WHERE k.key_hash = ? AND (k.expires_at IS NULL OR k.expires_at > ?)`,
+		hash, time.Now().UTC())
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	var keyID int64
+	var lastUsed sql.NullTime
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+		&keyID, &lastUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, 0, nil, ErrNotFound
 		}
-		return nil, err
+		return nil, 0, nil, err
 	}
-	return &u, nil
+	var lu *time.Time
+	if lastUsed.Valid {
+		t := lastUsed.Time
+		lu = &t
+	}
+	return &u, keyID, lu, nil
+}
+
+// TouchAPIKey stamps the key's last_used_at. Callers throttle (the auth path
+// touches at most about once a minute per key) so this write stays off the
+// hot path.
+func (s *Store) TouchAPIKey(id int64, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`, at, id)
+	if err != nil {
+		return fmt.Errorf("touch api key: %w", err)
+	}
+	return nil
 }
 
 // APIKeyInfo is a safe view of an api_keys row — no key_hash exposed.
@@ -433,12 +485,41 @@ type APIKeyInfo struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+	// ExpiresAt is nil for a never-expiring key.
+	ExpiresAt *time.Time `json:"expires_at"`
+	// LastUsedAt is nil for a key that has never authenticated a request.
+	LastUsedAt *time.Time `json:"last_used_at"`
+}
+
+// APIKeyAdminInfo is APIKeyInfo plus the owning user, for the admin-only
+// cross-user token inventory.
+type APIKeyAdminInfo struct {
+	APIKeyInfo
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
+func scanAPIKeyInfo(rows *sql.Rows, k *APIKeyInfo, extra ...any) error {
+	var expires, lastUsed sql.NullTime
+	dest := append([]any{&k.ID, &k.Name, &k.CreatedAt, &expires, &lastUsed}, extra...)
+	if err := rows.Scan(dest...); err != nil {
+		return err
+	}
+	if expires.Valid {
+		t := expires.Time
+		k.ExpiresAt = &t
+	}
+	if lastUsed.Valid {
+		t := lastUsed.Time
+		k.LastUsedAt = &t
+	}
+	return nil
 }
 
 // ListAPIKeys returns all tokens owned by userID, newest first.
 func (s *Store) ListAPIKeys(userID int64) ([]APIKeyInfo, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
+		`SELECT id, name, created_at, expires_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
 		userID)
 	if err != nil {
 		return nil, err
@@ -447,7 +528,30 @@ func (s *Store) ListAPIKeys(userID int64) ([]APIKeyInfo, error) {
 	keys := []APIKeyInfo{}
 	for rows.Next() {
 		var k APIKeyInfo
-		if err := rows.Scan(&k.ID, &k.Name, &k.CreatedAt); err != nil {
+		if err := scanAPIKeyInfo(rows, &k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// ListAllAPIKeys returns every token on the server with its owning user,
+// newest first. Admin-only surface: the credential inventory that makes
+// revocation possible without trawling the audit log for IDs.
+func (s *Store) ListAllAPIKeys() ([]APIKeyAdminInfo, error) {
+	rows, err := s.db.Query(`
+		SELECT k.id, k.name, k.created_at, k.expires_at, k.last_used_at, k.user_id, u.username
+		FROM api_keys k JOIN users u ON u.id = k.user_id
+		ORDER BY k.created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := []APIKeyAdminInfo{}
+	for rows.Next() {
+		var k APIKeyAdminInfo
+		if err := scanAPIKeyInfo(rows, &k.APIKeyInfo, &k.UserID, &k.Username); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)
@@ -1728,6 +1832,25 @@ func (s *Store) SetAppAccess(slug, access string) error {
 	return nil
 }
 
+// SetAppOwner reassigns the app to a new owning user. Target validation
+// (existence, non-system) is the API layer's job; the FK on owner_id is the
+// last line of defense. Returns ErrNotFound when the slug does not exist.
+func (s *Store) SetAppOwner(slug string, ownerID int64) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET owner_id = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`, ownerID, slug)
+	if err != nil {
+		return fmt.Errorf("set app owner: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app owner rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetAppDescription updates the app's optional one-line description (shown on
 // the Launchpad). An empty string clears it.
 func (s *Store) SetAppDescription(slug, description string) error {
@@ -1852,12 +1975,12 @@ func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
 
 func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`, provider, providerID)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -1904,7 +2027,7 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	scanUser := func(row *sql.Row) (*User, error) {
 		var u User
-		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrNotFound
 			}
@@ -1913,12 +2036,12 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return &u, nil
 	}
 	const linkedQuery = `
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`
 	const userByIDQuery = `
-		SELECT id, username, password_hash, role, display_name, email, created_at
+		SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch
 		FROM users WHERE id = ?`
 
 	if u, gerr := scanUser(tx.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {

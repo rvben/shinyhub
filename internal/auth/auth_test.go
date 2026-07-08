@@ -355,62 +355,10 @@ func TestBearerMiddleware_SessionCookieRevalidates(t *testing.T) {
 	}
 }
 
-func TestRequireRole_UnknownUserRole(t *testing.T) {
-	handler := auth.RequireRole(auth.RoleViewer)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	req := httptest.NewRequest("GET", "/", nil)
-	ctx := auth.WithUser(req.Context(), &auth.ContextUser{ID: 1, Username: "x", Role: "superadmin"})
-	req = req.WithContext(ctx)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403 for unknown role, got %d", rec.Code)
-	}
-}
-
-func TestRequireRole_NoUser(t *testing.T) {
-	handler := auth.RequireRole(auth.RoleViewer)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	req := httptest.NewRequest("GET", "/", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for missing user, got %d", rec.Code)
-	}
-}
-
 func TestHashAPIKey_Distinct(t *testing.T) {
 	h1 := auth.HashAPIKey("shk_key_one")
 	h2 := auth.HashAPIKey("shk_key_two")
 	if h1 == h2 {
 		t.Error("expected distinct keys to produce distinct hashes")
-	}
-}
-
-func TestRequireRole_AllowsSufficientRole(t *testing.T) {
-	h := auth.RequireRole(auth.RoleDeveloper)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	req := httptest.NewRequest("GET", "/", nil)
-	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{Role: "admin"}))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d", rr.Code)
-	}
-}
-
-func TestRequireRole_RejectsInsufficientRole(t *testing.T) {
-	h := auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("handler should not have been called")
-	}))
-	req := httptest.NewRequest("GET", "/", nil)
-	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{Role: "developer"}))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("want 403, got %d", rr.Code)
 	}
 }

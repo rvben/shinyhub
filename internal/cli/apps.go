@@ -33,6 +33,7 @@ func newAppsCmd() *cobra.Command {
 		newAppsStartCmd(),
 		newAppsSetCmd(),
 		newAppsAccessCmd(),
+		newAppsTransferCmd(),
 		newAppsDeleteCmd(),
 		newAppsStopCmd(),
 		newAppsDeploymentsCmd(),
@@ -1357,11 +1358,58 @@ func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *listFlags) err
 	})
 }
 
+// ── apps transfer ───────────────────────────────────────────────────────────
+
+func newAppsTransferCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "transfer <slug> <username>",
+		Short: "Transfer app ownership to another user",
+		Long: "Transfer app ownership to another user.\n\n" +
+			"Only the current owner or a platform admin/operator can transfer.\n" +
+			"The new owner gains full manage rights on the app; the previous\n" +
+			"owner keeps only whatever membership they hold. Use this before\n" +
+			"deleting a user who still owns apps.",
+		Args: cobra.ExactArgs(2),
+		RunE: runAppsTransfer,
+	}
+}
+
+func runAppsTransfer(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug, username := args[0], args[1]
+	body, err := json.Marshal(map[string]string{"username": username})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/owner", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "transfer ownership", resp, out)
+	}
+	return renderAction(cmd, "transferred",
+		map[string]any{"slug": slug, "owner": username},
+		fmt.Sprintf("%s: ownership transferred to %s", slug, username))
+}
+
 // ── tokens create ───────────────────────────────────────────────────────────
 
 type tokensCreateFlags struct {
-	name   string
-	format string
+	name          string
+	format        string
+	expiresInDays int
 }
 
 func newTokensCreateCmd() *cobra.Command {
@@ -1376,15 +1424,17 @@ func newTokensCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.name, "name", "", "Name for the token (required)")
 	_ = cmd.MarkFlagRequired("name")
 	cmd.Flags().StringVar(&f.format, "format", "text", "Output format: text or json")
+	cmd.Flags().IntVar(&f.expiresInDays, "expires-in-days", 0, "Days until the token expires (0 = never)")
 	return cmd
 }
 
 // tokenCreateResult holds the fields returned by the server on token creation.
 type tokenCreateResult struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Token     string `json:"token"`
-	CreatedAt string `json:"created_at"`
+	ID        int64   `json:"id"`
+	Name      string  `json:"name"`
+	Token     string  `json:"token"`
+	CreatedAt string  `json:"created_at"`
+	ExpiresAt *string `json:"expires_at"`
 }
 
 func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) error {
@@ -1403,11 +1453,19 @@ func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) er
 		return err
 	}
 
+	if f.expiresInDays < 0 {
+		return validationErr("--expires-in-days must be 0 (never) or positive", "")
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]string{"name": f.name})
+	payload := map[string]any{"name": f.name}
+	if f.expiresInDays > 0 {
+		payload["expires_in_days"] = f.expiresInDays
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -1645,42 +1703,78 @@ func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
 	return env.Items, nil
 }
 
+type tokensListFlags struct {
+	listFlags
+	all bool
+}
+
 func newTokensListCmd() *cobra.Command {
-	f := &listFlags{}
+	f := &tokensListFlags{}
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List your API tokens",
+		Long: "List your API tokens.\n\n" +
+			"With --all (admin only), list every token on the server with its\n" +
+			"owning user - the credential inventory for revoking stale or\n" +
+			"orphaned tokens (revoke by id with `shinyhub tokens revoke`).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTokensList(cmd, f)
 		},
 	}
-	addListFlags(cmd, f)
+	addListFlags(cmd, &f.listFlags)
+	cmd.Flags().BoolVar(&f.all, "all", false, "List every user's tokens (admin only)")
 	return cmd
 }
 
-func runTokensList(cmd *cobra.Command, f *listFlags) error {
+// tokenTimeCell renders a nullable ISO timestamp map value as a fixed-width
+// cell: "-" for null/absent, else the timestamp truncated to seconds.
+func tokenTimeCell(v any) string {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return "-"
+	}
+	if len(s) > 19 {
+		s = s[:19]
+	}
+	return s
+}
+
+func runTokensList(cmd *cobra.Command, f *tokensListFlags) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	tokens, total, err := getPaginatedList(cfg, "list tokens", "/api/tokens", f)
+	path := "/api/tokens"
+	if f.all {
+		path += "?all=1"
+	}
+	tokens, total, err := getPaginatedList(cfg, "list tokens", path, &f.listFlags)
 	if err != nil {
 		return err
 	}
-	return renderServerList(cmd, f, tokens, total, nil, func(w io.Writer, items []map[string]any) {
+	return renderServerList(cmd, &f.listFlags, tokens, total, nil, func(w io.Writer, items []map[string]any) {
 		if len(items) == 0 {
 			fmt.Fprintln(w, "No tokens.")
 			return
 		}
-		fmt.Fprintf(w, "%-6s %-24s %s\n", "ID", "NAME", "CREATED")
+		if f.all {
+			fmt.Fprintf(w, "%-6s %-16s %-24s %-20s %-20s %s\n", "ID", "USER", "NAME", "CREATED", "EXPIRES", "LAST USED")
+		} else {
+			fmt.Fprintf(w, "%-6s %-24s %-20s %-20s %s\n", "ID", "NAME", "CREATED", "EXPIRES", "LAST USED")
+		}
 		for _, t := range items {
 			id := fmt.Sprintf("%v", t["id"])
 			name := fmt.Sprintf("%v", t["name"])
-			created := fmt.Sprintf("%v", t["created_at"])
-			if len(created) > 19 {
-				created = created[:19]
+			created := tokenTimeCell(t["created_at"])
+			expires := tokenTimeCell(t["expires_at"])
+			lastUsed := tokenTimeCell(t["last_used_at"])
+			var row string
+			if f.all {
+				user := fmt.Sprintf("%v", t["username"])
+				row = fmt.Sprintf("%-6s %-16s %-24s %-20s %-20s %s", id, user, name, created, expires, lastUsed)
+			} else {
+				row = fmt.Sprintf("%-6s %-24s %-20s %-20s %s", id, name, created, expires, lastUsed)
 			}
-			row := fmt.Sprintf("%-6s %-24s %s", id, name, created)
 			fmt.Fprintln(w, strings.TrimRight(row, " "))
 		}
 	})

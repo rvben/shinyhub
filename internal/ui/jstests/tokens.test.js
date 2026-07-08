@@ -77,3 +77,53 @@ test('renderTokenList escapes token names via textContent (no HTML injection)', 
   assert.equal(container.querySelectorAll('img').length, 0, 'name is not parsed as HTML');
   assert.match(container.textContent, /<img src=x/);
 });
+
+test('tokenListModels labels expiry: future, expired, never', () => {
+  const models = tokenListModels(
+    [
+      { id: 1, name: 'never', created_at: '2026-07-01T12:00:00Z', expires_at: null, last_used_at: null },
+      { id: 2, name: 'soon', created_at: '2026-07-01T12:00:00Z', expires_at: '2026-07-04T12:00:00Z', last_used_at: null },
+      { id: 3, name: 'dead', created_at: '2026-06-01T12:00:00Z', expires_at: '2026-07-01T12:00:00Z', last_used_at: null },
+    ],
+    NOW,
+  );
+  const byName = Object.fromEntries(models.map((m) => [m.name, m]));
+  assert.equal(byName.never.expiresLabel, '', 'no expiry -> no label');
+  assert.equal(byName.never.expired, false);
+  assert.equal(byName.soon.expiresLabel, 'expires in 2d', 'future expiry labelled');
+  assert.equal(byName.soon.expired, false);
+  assert.equal(byName.dead.expiresLabel, 'expired', 'past expiry labelled');
+  assert.equal(byName.dead.expired, true);
+});
+
+test('tokenListModels labels last use', () => {
+  const models = tokenListModels(
+    [
+      { id: 1, name: 'used', created_at: '2026-07-01T12:00:00Z', expires_at: null, last_used_at: '2026-07-02T10:00:00Z' },
+      { id: 2, name: 'idle', created_at: '2026-07-01T12:00:00Z', expires_at: null, last_used_at: null },
+    ],
+    NOW,
+  );
+  const byName = Object.fromEntries(models.map((m) => [m.name, m]));
+  assert.equal(byName.used.lastUsedLabel, 'last used 2h ago');
+  assert.equal(byName.idle.lastUsedLabel, 'never used');
+});
+
+test('renderTokenList shows expiry and last-use, marking expired rows', () => {
+  const doc = fixture();
+  const container = doc.getElementById('list');
+  renderTokenList(
+    container,
+    tokenListModels(
+      [
+        { id: 9, name: 'dead', created_at: '2026-06-01T12:00:00Z', expires_at: '2026-07-01T12:00:00Z', last_used_at: '2026-06-30T12:00:00Z' },
+      ],
+      NOW,
+    ),
+    doc,
+  );
+  const row = container.querySelector('[data-token-row]');
+  assert.ok(row.classList.contains('token-expired'), 'expired row carries a marker class');
+  assert.match(row.textContent, /expired/, 'expiry label rendered');
+  assert.match(row.textContent, /last used 2d ago/, 'last-use label rendered');
+});

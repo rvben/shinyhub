@@ -31,6 +31,11 @@ type Claims struct {
 	// AuthTime is the original login time. Unlike IssuedAt/ExpiresAt it is NOT
 	// reset by a sliding renewal, so it bounds the absolute session lifetime.
 	AuthTime *jwt.NumericDate `json:"auth_time,omitempty"`
+	// SessionEpoch is the user's token_epoch at issuance. Validation rejects
+	// the token when the live epoch differs (admin revoke-sessions or a
+	// password change bumped it). Legacy tokens carry 0, matching the column
+	// default, so an upgrade logs nobody out.
+	SessionEpoch int64 `json:"sess_epoch,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -75,26 +80,48 @@ func newJTI() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// IssueJWT issues a fresh session token for a new login, stamping auth_time to
-// now so the absolute session lifetime is measured from this login.
-func IssueJWT(userID int64, username, role, secret string) (string, error) {
-	return IssueJWTAt(userID, username, role, secret, time.Now())
+// IssueSessionToken issues a fresh session token for a new login, embedding
+// the user's current token epoch so a later revoke-sessions/password-change
+// bump invalidates it. Production login paths MUST use this (or
+// SlideSessionToken) rather than IssueJWT: a token issued without the user's
+// live epoch is rejected on the first request after any bump.
+func IssueSessionToken(u *ContextUser, secret string) (string, error) {
+	return issueJWT(u.ID, u.Username, u.Role, u.TokenEpoch, secret, time.Now())
 }
 
-// IssueJWTAt issues a token whose auth_time is authTime. A fresh login passes
-// now (via IssueJWT); a sliding renewal passes the session's original auth_time
-// so renewing does not extend the absolute lifetime. IssuedAt/ExpiresAt/
-// NotBefore always slide to now.
+// SlideSessionToken re-issues a session token during a sliding renewal,
+// preserving the original auth_time (so renewals cannot extend the absolute
+// session lifetime) while embedding the user's current token epoch.
+func SlideSessionToken(u *ContextUser, secret string, authTime time.Time) (string, error) {
+	return issueJWT(u.ID, u.Username, u.Role, u.TokenEpoch, secret, authTime)
+}
+
+// IssueJWT issues a session token at epoch 0, stamping auth_time to now. Test
+// helper: valid for users whose epoch was never bumped. Production sessions go
+// through IssueSessionToken/SlideSessionToken, which carry the live epoch.
+func IssueJWT(userID int64, username, role, secret string) (string, error) {
+	return issueJWT(userID, username, role, 0, secret, time.Now())
+}
+
+// IssueJWTAt issues an epoch-0 token whose auth_time is authTime. Test helper;
+// see IssueJWT.
 func IssueJWTAt(userID int64, username, role, secret string, authTime time.Time) (string, error) {
+	return issueJWT(userID, username, role, 0, secret, authTime)
+}
+
+// issueJWT mints the session token. IssuedAt/ExpiresAt/NotBefore always slide
+// to now; auth_time and the session epoch are the caller's responsibility.
+func issueJWT(userID int64, username, role string, epoch int64, secret string, authTime time.Time) (string, error) {
 	jti, err := newJTI()
 	if err != nil {
 		return "", err
 	}
 	now := time.Now()
 	claims := Claims{
-		UserID:   userID,
-		Role:     role,
-		AuthTime: jwt.NewNumericDate(authTime),
+		UserID:       userID,
+		Role:         role,
+		AuthTime:     jwt.NewNumericDate(authTime),
+		SessionEpoch: epoch,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
 			Subject:   username,

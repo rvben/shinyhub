@@ -146,6 +146,12 @@ func TestTokensUIWiring(t *testing.T) {
 		"app.js must confirm before revoking a token (destructive)")
 	assertContains(t, "app.js", `router.register('/tokens'`,
 		"app.js must register the /tokens SPA route")
+	assertContains(t, "index.html", `id="new-token-expiry"`,
+		"the new-token form must offer an expiry choice")
+	assertContains(t, "app.js", "getElementById('new-token-expiry')",
+		"submitNewToken must read the expiry select")
+	assertContains(t, "app.js", "payload.expires_in_days = expiryDays",
+		"submitNewToken must send expires_in_days to POST /api/tokens when an expiry is chosen")
 }
 
 // TestTablistKeyboardNavWired guards the WAI-ARIA tablist keyboard pattern on
@@ -366,6 +372,21 @@ func TestAccessVisibilityUsesExplicitSave(t *testing.T) {
 		"the Visibility Save button must be wired to saveVisibility")
 	assertContains(t, "app.js", "registerSettingsSection('visibility'",
 		"the Visibility section must register with the dirty-state tracker")
+}
+
+// TestAuditTabUsesCapability pins the audit-surface gating on the
+// server-computed can_read_audit capability (admin, or operator behind
+// auth.operator_audit_access) instead of a client-side role comparison, so
+// enabling the flag lights the tab up without a UI change.
+func TestAuditTabUsesCapability(t *testing.T) {
+	assertContains(t, "app.js", "state.canReadAudit = !!payload.can_read_audit",
+		"showLoggedIn must capture the server-computed audit capability")
+	assertContains(t, "app.js", "tabAudit.hidden = !state.canReadAudit",
+		"the Audit nav tab must be gated on the capability, not role==='admin'")
+	assertContains(t, "views/overview.js", "ctx.state.canReadAudit",
+		"the Overview activity feed must be gated on the capability")
+	assertNotContains(t, "views/overview.js", "role === 'admin'",
+		"overview.js must not re-derive audit access from the role")
 }
 
 // TestAccessVisibilityLabelsTeachSemantics pins the corrected visibility copy.

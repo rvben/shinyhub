@@ -1,0 +1,2 @@
+-- See sqlite/046.
+ALTER TABLE users ADD COLUMN token_epoch BIGINT NOT NULL DEFAULT 0;

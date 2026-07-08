@@ -33,6 +33,28 @@ type ContextUser struct {
 	// claim. Empty for local username/password accounts and when no upstream
 	// email is available.
 	Email string
+	// AppScope, when non-empty, restricts this identity to the listed app
+	// slugs across every app surface, regardless of role. Set on the deploy
+	// token identity from auth.deploy_token_apps; nil for every normal user.
+	AppScope []string
+	// TokenEpoch is the user's live session-revocation counter (users.token_epoch).
+	// JWT validation rejects tokens whose embedded epoch differs.
+	TokenEpoch int64
+}
+
+// AppInScope reports whether this identity may touch the app named by slug.
+// An identity with no AppScope is unrestricted; a scoped identity is limited
+// to its allowlist even when its role would otherwise grant broader access.
+func (u *ContextUser) AppInScope(slug string) bool {
+	if u == nil || len(u.AppScope) == 0 {
+		return true
+	}
+	for _, s := range u.AppScope {
+		if s == slug {
+			return true
+		}
+	}
+	return false
 }
 
 // TokenInfo describes the JWT the current request was authenticated with.
@@ -83,13 +105,23 @@ func tokenFromClaims(c *Claims) *TokenInfo {
 // resolveJWTUser turns validated claims into a ContextUser. When userLookup
 // is supplied, the live DB record wins over what the token was issued with;
 // this is what makes role demotions and user deletions take effect without
-// waiting for the JWT to expire. With no lookup we fall back to the claim
-// values (used by tests that want to skip DB plumbing).
+// waiting for the JWT to expire. It also enforces session revocation: a token
+// whose embedded epoch no longer matches the user's live token_epoch (bumped
+// by admin revoke-sessions or a password change) is rejected. With no lookup
+// we fall back to the claim values (used by tests that want to skip DB
+// plumbing).
 func resolveJWTUser(claims *Claims, userLookup UserLookup) (*ContextUser, error) {
 	if userLookup == nil {
 		return userFromClaims(claims), nil
 	}
-	return userLookup(claims.UserID)
+	u, err := userLookup(claims.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if u != nil && u.TokenEpoch != claims.SessionEpoch {
+		return nil, ErrTokenRevoked
+	}
+	return u, nil
 }
 
 func authenticateHeader(header, secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
@@ -253,31 +285,12 @@ var roleOrder = map[string]int{
 // IsValidGlobalRole reports whether s names one of the four global roles that
 // can be assigned to a user account (viewer, developer, operator, admin).
 // Keep the single source of truth in this package so handlers and migrations
-// cannot drift from the hierarchy used by RequireRole.
+// cannot drift from the ranking used by group-to-role mapping. Authorization
+// itself is enforced per-handler (requireAdmin and the app gates in
+// internal/api/authorization.go), not by router middleware.
 func IsValidGlobalRole(s string) bool {
 	_, ok := roleOrder[s]
 	return ok
-}
-
-// RequireRole enforces a minimum role level. Roles are ordered:
-// viewer < developer < operator < admin.
-func RequireRole(role Role) func(http.Handler) http.Handler {
-	required := roleOrder[string(role)]
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			u := UserFromContext(r.Context())
-			if u == nil {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			actual := roleOrder[u.Role]
-			if actual == 0 || actual < required {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
 }
 
 // WithUser returns a copy of ctx with the given ContextUser attached.

@@ -289,10 +289,51 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// An admin reset is the compromised-account playbook: kill the (possibly
+	// hijacked) live sessions along with the credential.
+	if err := s.store.BumpTokenEpoch(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
 
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "reset_user_password",
+		ResourceType: "user",
+		ResourceID:   strconv.FormatInt(id, 10),
+		IPAddress:    s.ClientIP(r),
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRevokeUserSessions bumps the user's token epoch, invalidating every
+// outstanding session JWT at its next request (API keys are separate
+// credentials and unaffected; revoke those individually). The break-glass
+// counterpart to waiting out the 1h token TTL / 12h absolute session cap.
+func (s *Server) handleRevokeUserSessions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	if s.refuseSystemUser(w, id) {
+		return
+	}
+	if err := s.store.BumpTokenEpoch(id); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID:       callerID(r),
+		Action:       "revoke_sessions",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
 		IPAddress:    s.ClientIP(r),
@@ -332,7 +373,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, db.ErrUserOwnsApps) {
-			writeError(w, http.StatusConflict, "user still owns apps; reassign or delete them first")
+			writeError(w, http.StatusConflict, "user still owns apps; transfer them first (shinyhub apps transfer <slug> <new-owner>) or delete them")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
