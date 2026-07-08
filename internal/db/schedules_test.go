@@ -229,6 +229,64 @@ func TestScheduleRuns_ExitCodeNullableLifecycle(t *testing.T) {
 	}
 }
 
+// TestLatestRegisterRunID covers the first-fire retry's admission marker:
+// only runs with the 'register' trigger move it, regardless of their status,
+// and it moves monotonically on each admission so a failed-but-admitted
+// dispatch is detected even if retention pruning deletes older rows.
+func TestLatestRegisterRunID(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "fetch")
+	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "warm", CronExpr: "0 5 * * *",
+		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("create schedule: %v", err)
+	}
+
+	if got, err := store.LatestRegisterRunID(schedID); err != nil || got != 0 {
+		t.Fatalf("no runs: LatestRegisterRunID = %d, %v; want 0, nil", got, err)
+	}
+	if got, err := store.LatestRegisterRunID(schedID + 999); err != nil || got != 0 {
+		t.Fatalf("unknown schedule: LatestRegisterRunID = %d, %v; want 0, nil", got, err)
+	}
+
+	// A cron-triggered run does not move the first-fire admission marker.
+	if _, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "interrupted", Trigger: "schedule",
+		StartedAt: time.Now().UTC(), LogPath: "x",
+	}); err != nil {
+		t.Fatalf("insert cron run: %v", err)
+	}
+	if got, err := store.LatestRegisterRunID(schedID); err != nil || got != 0 {
+		t.Fatalf("cron run only: LatestRegisterRunID = %d, %v; want 0, nil", got, err)
+	}
+
+	// Each register run moves the marker forward, whatever its status.
+	var prev int64
+	for _, status := range []string{"running", "failed"} {
+		rid, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: schedID, Status: status, Trigger: "register",
+			StartedAt: time.Now().UTC(), LogPath: "x",
+		})
+		if err != nil {
+			t.Fatalf("insert register run: %v", err)
+		}
+		got, err := store.LatestRegisterRunID(schedID)
+		if err != nil {
+			t.Fatalf("LatestRegisterRunID: %v", err)
+		}
+		if got != rid {
+			t.Fatalf("LatestRegisterRunID = %d, want the just-inserted run id %d", got, rid)
+		}
+		if got <= prev {
+			t.Fatalf("marker did not move forward: %d after %d", got, prev)
+		}
+		prev = got
+	}
+}
+
 // TestSchedulesNeedingFirstFireRetry covers the startup-reconcile gate: a
 // run_on_register first-fire (trigger='register') that was interrupted by a
 // service restart and has never succeeded must be re-fired, while a schedule
