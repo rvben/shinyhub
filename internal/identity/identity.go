@@ -20,6 +20,7 @@ const (
 	HeaderUser            = "X-Shinyhub-User"
 	HeaderUserID          = "X-Shinyhub-User-Id"
 	HeaderRole            = "X-Shinyhub-Role"
+	HeaderAppRole         = "X-Shinyhub-App-Role"
 	HeaderEmail           = "X-Shinyhub-Email"
 	HeaderName            = "X-Shinyhub-Name"
 	HeaderGroups          = "X-Shinyhub-Groups"
@@ -81,7 +82,11 @@ func SanitizeGroups(groups []string) (string, []string, bool) {
 // TokenClaims is the identity token payload. Apps verify iss, aud (their own
 // slug, injected as SHINYHUB_APP_SLUG), signature, and exp with ~30 s leeway.
 type TokenClaims struct {
-	Role              string   `json:"role"`
+	Role string `json:"role"`
+	// AppRole is the caller's capability on THIS app: "owner", "manager"
+	// (global admin/operator or a manager-role member/group), or "viewer".
+	// Empty when the membership lookup was unavailable.
+	AppRole           string   `json:"app_role,omitempty"`
 	Email             string   `json:"email,omitempty"`
 	Name              string   `json:"name,omitempty"`
 	Groups            []string `json:"groups"`
@@ -95,6 +100,7 @@ type TokenParams struct {
 	UserID          int64
 	Username        string
 	Role            string
+	AppRole         string   // per-app capability; empty = unavailable
 	Email           string   // empty when the upstream IdP provided none
 	Name            string   // display name; empty when the IdP provided none
 	Groups          []string // pre-sanitized claim slice from SanitizeGroups
@@ -107,6 +113,7 @@ func MintToken(key []byte, p TokenParams) (string, error) {
 	now := time.Now()
 	claims := TokenClaims{
 		Role:              p.Role,
+		AppRole:           p.AppRole,
 		Email:             p.Email,
 		Name:              p.Name,
 		Groups:            p.Groups,

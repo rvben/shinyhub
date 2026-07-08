@@ -33,11 +33,16 @@ func (s chainStore) UserCanAccessApp(_ string, _ int64) (bool, error) {
 	return true, nil
 }
 
-// oneUserGroups is a minimal GroupsSource that returns a fixed group list.
+// oneUserGroups is a minimal identity.Source that returns a fixed group list
+// and no app membership.
 type oneUserGroups struct{ group string }
 
 func (g oneUserGroups) GetUserGroups(_ int64) ([]string, error) {
 	return []string{g.group}, nil
+}
+
+func (g oneUserGroups) AppMembershipForUser(string, int64) (bool, string, error) {
+	return false, "", nil
 }
 
 // startChainBackend returns an httptest.Server that records received headers.

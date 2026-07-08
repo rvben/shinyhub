@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -87,6 +89,39 @@ func (s *Store) GroupRoleForUserOnApp(slug string, userID int64) (string, bool, 
 		return "", false, err
 	}
 	return best, best != "", nil
+}
+
+// AppMembershipForUser reports whether userID owns the app and their effective
+// member role on it: the highest of the manual app_members role and any
+// group-derived role ("" when neither grants one). Satisfies
+// identity.Source for the per-app role forwarded to app processes.
+// Returns ErrNotFound for an unknown slug.
+func (s *Store) AppMembershipForUser(slug string, userID int64) (bool, string, error) {
+	var ownerID int64
+	err := s.db.QueryRow(`SELECT owner_id FROM apps WHERE slug = ?`, slug).Scan(&ownerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "", ErrNotFound
+	}
+	if err != nil {
+		return false, "", err
+	}
+	if ownerID == userID {
+		return true, "", nil
+	}
+	role := ""
+	if r, err := s.GetMemberRole(slug, userID); err == nil {
+		role = r
+	} else if !errors.Is(err, ErrNotFound) {
+		return false, "", err
+	}
+	groupRole, ok, err := s.GroupRoleForUserOnApp(slug, userID)
+	if err != nil {
+		return false, "", err
+	}
+	if ok {
+		role = HigherMemberRole(role, groupRole)
+	}
+	return false, role, nil
 }
 
 // HigherMemberRole returns the higher-rank of two member roles ("manager" >

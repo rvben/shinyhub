@@ -23,6 +23,12 @@ func (f *fakeGroups) GetUserGroups(userID int64) ([]string, error) {
 	return f.groups, f.err
 }
 
+// AppMembershipForUser satisfies Source; the plain groups fake models a user
+// with no ownership and no membership.
+func (f *fakeGroups) AppMembershipForUser(string, int64) (bool, string, error) {
+	return false, "", nil
+}
+
 func TestProvider_PayloadCarriesIdentity(t *testing.T) {
 	src := &fakeGroups{groups: []string{"eng", "ops"}}
 	p := NewProvider("secret", src)

@@ -86,6 +86,7 @@ key and cannot be reached with the old one.
 | `X-Shinyhub-User` | Username string | Absent for anonymous visitors |
 | `X-Shinyhub-User-Id` | Decimal user ID | Integer encoded as a string |
 | `X-Shinyhub-Role` | One of `viewer`, `developer`, `operator`, `admin` | The user's global platform role |
+| `X-Shinyhub-App-Role` | One of `owner`, `manager`, `viewer` | The user's capability on THIS app: `owner` owns it; `manager` covers platform admins/operators and manager-role members (by membership or group rule); everyone else who passed the access gate is `viewer`. Absent when the membership lookup was unavailable. Changes propagate within ~30 s (cached) |
 | `X-Shinyhub-Email` | Email address | Present when the IdP asserts one: from the forward-auth `email_header`, or persisted from an OAuth/OIDC login for native sessions. Absent for local-password accounts and anonymous visitors |
 | `X-Shinyhub-Name` | Display name | The user's friendly name when the IdP asserts one: from the forward-auth `name_header`, or persisted from an OAuth/OIDC login for native sessions. Absent for local-password accounts and anonymous visitors |
 | `X-Shinyhub-Groups` | Comma-joined sorted group names | Capped at 100 names; group names that contain a comma are omitted from this header (they appear in the JWT claim instead) |
@@ -123,6 +124,7 @@ The identity token is a standard JWT signed with HS256. Its claims are:
 | `sub` | string | Decimal user ID |
 | `preferred_username` | string | Username |
 | `role` | string | One of `viewer`, `developer`, `operator`, `admin` |
+| `app_role` | string | One of `owner`, `manager`, `viewer` (see the `X-Shinyhub-App-Role` header); omitted when the membership lookup was unavailable |
 | `email` | string | The user's email when the IdP asserts one (forward-auth `email_header`, or persisted from an OAuth/OIDC login); omitted for local-password accounts |
 | `name` | string | The user's display name when the IdP asserts one (forward-auth `name_header`, or persisted from an OAuth/OIDC login); omitted for local-password accounts |
 | `groups` | array of strings | Sorted group names, capped at 100 (all names, including comma-bearing ones) |

@@ -34,6 +34,11 @@ type staticGroups struct{ g []string }
 
 func (s staticGroups) GetUserGroups(int64) ([]string, error) { return s.g, nil }
 
+// The test user is a plain member with the manager role on every app.
+func (s staticGroups) AppMembershipForUser(string, int64) (bool, string, error) {
+	return false, "manager", nil
+}
+
 func newIdentityProxy(t *testing.T, backendURL string, enabled bool) *Proxy {
 	t.Helper()
 	p := New()
@@ -77,6 +82,9 @@ func TestIdentityHeaders_InjectedForAuthenticatedUser(t *testing.T) {
 	}
 	if h.Get(identity.HeaderToken) == "" {
 		t.Fatal("identity token must be injected")
+	}
+	if h.Get(identity.HeaderAppRole) != "manager" {
+		t.Fatalf("app-role header = %q, want manager (per-app capability forwarded)", h.Get(identity.HeaderAppRole))
 	}
 }
 
