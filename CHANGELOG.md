@@ -72,6 +72,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.0](https://github.com/rvben/shinyhub/compare/v0.9.6...v0.10.0) - 2026-07-08
+
+### Added
+
+- **identity**: forward the per-app role to apps (X-Shinyhub-App-Role) ([0a412ed](https://github.com/rvben/shinyhub/commit/0a412ed506db3f48cafe7b24274d7c1a179085e3))
+- **api**: opt-in audit-log access for operators ([e8ff30d](https://github.com/rvben/shinyhub/commit/e8ff30d755e16fee21c18dddf272626e0c90111a))
+- **auth**: session revocation via per-user token epoch ([971d680](https://github.com/rvben/shinyhub/commit/971d680643e981465b1dc7e0d59f7bfe57e586a4))
+- **auth**: API token expiry, last-used tracking, and admin inventory ([085921b](https://github.com/rvben/shinyhub/commit/085921bd51d8188e0c913c12189853ef9c7e961b))
+- **api**: app ownership transfer ([09ed240](https://github.com/rvben/shinyhub/commit/09ed240e6d8f50ce22862107cc98de9988d229aa))
+- **auth**: scope the deploy token to an app allowlist and warn on admin role ([4dc2423](https://github.com/rvben/shinyhub/commit/4dc242350eff780aa07e7a4a6fd0d79d9a91d8a6))
+
+### Fixed
+
+- **api**: advertise can_read_audit on the SPA session-login response ([4f78e5a](https://github.com/rvben/shinyhub/commit/4f78e5aaa3a0331556b6f813ebf934cf0e1a88e3))
+- **deploy**: make project-mode launches sync dependencies on off-host tiers ([0a8b274](https://github.com/rvben/shinyhub/commit/0a8b27420b85db49b9911dc0b44cb3581c055697))
+- **access**: correct grant and visibility messaging that pushed apps toward over-exposure ([78d1af8](https://github.com/rvben/shinyhub/commit/78d1af8b41c3aac0a07f42bb39a3369deb163462))
+
 ## [0.9.6](https://github.com/rvben/shinyhub/compare/v0.9.5...v0.9.6) - 2026-07-08
 
 ### Added
