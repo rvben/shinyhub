@@ -315,10 +315,11 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.ClientIP(r),
 	})
 	auth.SetSessionCookie(w, r, token, s.cfg.TrustedProxyNets)
-	ctxUser := &auth.ContextUser{ID: user.ID, Username: user.Username, Role: user.Role}
+	ctxUser := user.ContextUser()
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          newSessionUser(user),
 		CanCreateApps: canCreateApps(ctxUser),
+		CanReadAudit:  s.canReadAudit(ctxUser),
 	})
 }
 

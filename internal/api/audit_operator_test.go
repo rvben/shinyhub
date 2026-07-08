@@ -36,6 +36,29 @@ func meCanReadAudit(t *testing.T, srv *api.Server, tok string) bool {
 	return resp.CanReadAudit
 }
 
+// TestSessionLogin_CarriesAuditCapability pins that the SPA login response
+// (POST /api/auth/session) advertises can_read_audit like /api/auth/me does:
+// showLoggedIn consumes both payloads, and a missing field there hides the
+// Audit tab for audit-capable users until a full reload.
+func TestSessionLogin_CarriesAuditCapability(t *testing.T) {
+	srv, store := newAuditFlagServer(t, false)
+	mkUser(t, store, "boss", "admin")
+
+	rec := do(t, srv, "POST", "/api/auth/session", "", []byte(`{"username":"boss","password":"pass"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session login = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		CanReadAudit bool `json:"can_read_audit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.CanReadAudit {
+		t.Error("session-login payload must carry can_read_audit=true for an admin")
+	}
+}
+
 // TestAuditAccess_OperatorFlag pins the audit-read gate: admin always, operator
 // only behind auth.operator_audit_access (default off), everyone else never.
 // The /me payload advertises the capability so the UI shows the tab to exactly
