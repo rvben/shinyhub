@@ -71,6 +71,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.9.6](https://github.com/rvben/shinyhub/compare/v0.9.5...v0.9.6) - 2026-07-08
+
+### Added
+
+- **oauth**: add nonce defense-in-depth to OIDC login/callback ([6f87cc6](https://github.com/rvben/shinyhub/commit/6f87cc622a84abcdce4bde87392c7205f54a6f7a))
+- **cli**: --force flag on restore to bypass the running-server guard ([1c154b2](https://github.com/rvben/shinyhub/commit/1c154b2b12aed63cde90b3b6e46919e43c8e3ee0))
+
+### Fixed
+
+- **deploy**: sandbox the dependency-build and post-deploy-hook exec phases ([10bf4ca](https://github.com/rvben/shinyhub/commit/10bf4cad9e0a503f672e86e1db954130264118d9))
+- **lifecycle**: avoid persisting false hibernated state on stop failure ([5f2ab31](https://github.com/rvben/shinyhub/commit/5f2ab317b85286f8a18a96868ea9b77fe8e5e267))
+- **ui**: replace rollback alert() with an accessible toast ([3969f08](https://github.com/rvben/shinyhub/commit/3969f0855082ab0734646d511c0e0d507c737f97))
+- **ui**: guard against double-submit on delete/revoke/create/restart ([ed35370](https://github.com/rvben/shinyhub/commit/ed353708975ed1229850e0736738b27d3f93f10c))
+- **ui**: close the new-token modal on Escape ([cd9f687](https://github.com/rvben/shinyhub/commit/cd9f6877f21d2d13770c15a83569c0a309f2a585))
+- **ui**: distinguish rate-limited login and guard against double-submit ([dee359a](https://github.com/rvben/shinyhub/commit/dee359ac8fef20fc41b119174a3bed33312ee4e1))
+- **ui**: give the schedules table responsive overflow on mobile ([1442463](https://github.com/rvben/shinyhub/commit/1442463bbef2dc49d29460c2508a84353af8ce1e))
+- **ui**: harden schedule and shared-data handlers against network/auth failures ([cc0b5ec](https://github.com/rvben/shinyhub/commit/cc0b5ec0ab674d9d338d512d2d75a0b9789df519))
+- **ui**: wire onError into the background metrics poll ([eaa3a9f](https://github.com/rvben/shinyhub/commit/eaa3a9f355221534200776bd98c8cfdfd87b4499))
+- **backup**: refuse to restore into a live server unless forced ([2271116](https://github.com/rvben/shinyhub/commit/22711161307f02378132f0ba920d2e6c6fe6a194))
+- **backup**: verify archive integrity before reporting a backup written ([c084f12](https://github.com/rvben/shinyhub/commit/c084f12fb6ebacced1496646ab9acab10edf0328))
+- **ui**: warn before session-expiry logout discards unsaved settings edits ([ebf658a](https://github.com/rvben/shinyhub/commit/ebf658a32601a018f49af4247fe227c8a2d2c031))
+- **ui**: surface app-detail load failures instead of blanking the panel ([5bb874d](https://github.com/rvben/shinyhub/commit/5bb874d060cbbeff9ec8d9d4b53170cdd4eaa5b4))
+- **terraform**: remove cross-tenant Secrets Manager grant on the app task role ([e72954b](https://github.com/rvben/shinyhub/commit/e72954b6dac12d9d6be46dd28f25a59f50bee8b8))
+- **db**: serialize Postgres Migrate() with a session advisory lock ([78678fa](https://github.com/rvben/shinyhub/commit/78678fa48838fda8a630af793279fc641cef9f84))
+- **process**: bound StopReplica's post-SIGKILL wait ([8554552](https://github.com/rvben/shinyhub/commit/855455275e435f9cc29e1149a60421b1b6a38d9e))
+- **proxytrust**: read the rightmost forwarded value, not the leftmost ([6762aeb](https://github.com/rvben/shinyhub/commit/6762aebaa6155545474da2119c413cd3cd45b318))
+- **proxy**: don't hibernate elastic pools with live worker connections ([3087c0f](https://github.com/rvben/shinyhub/commit/3087c0fd93c2ddd0c415d705253f9594dc4831ab))
+- **worker**: pin worker-agent mTLS peer to control-plane identity ([72c804f](https://github.com/rvben/shinyhub/commit/72c804f859b5e7f0d74ff029c248236ba0c8fb4f))
+
+### Performance
+
+- **lifecycle**: batch watchdog reconcile queries instead of per-app fetches ([ab03d25](https://github.com/rvben/shinyhub/commit/ab03d25662a6f90c345e900d263a694d12eaff96))
+
 ## [0.9.5](https://github.com/rvben/shinyhub/compare/v0.9.4...v0.9.5) - 2026-07-04
 
 ### Added
