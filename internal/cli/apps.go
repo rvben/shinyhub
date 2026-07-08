@@ -1045,8 +1045,14 @@ func newAppsAccessSetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <slug> <level>",
 		Short: "Set access level for an app (level: public, private, or shared)",
-		Args:  cobra.ExactArgs(2),
-		RunE:  runAppsAccessSet,
+		Long: "Set who can open an app.\n\n" +
+			"  private  only the owner and the members/groups granted access\n" +
+			"  shared   every signed-in user\n" +
+			"  public   anyone who can reach the server, no sign-in required\n\n" +
+			"Platform admins and operators can always open any app. Use\n" +
+			"`shinyhub apps access grant` to add members to a private app.",
+		Args: cobra.ExactArgs(2),
+		RunE: runAppsAccessSet,
 	}
 }
 
@@ -1089,10 +1095,12 @@ func newAppsAccessGrantCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "grant <slug> <username>",
 		Short: "Grant a user access to an app",
-		Long: "Grant a user access to an app.\n\n" +
-			"Member grants only take effect when the app's visibility is `shared`.\n" +
-			"On a `private` app a grant is recorded but the user still cannot reach it;\n" +
-			"set visibility first with `shinyhub apps access set <slug> shared`.",
+		Long: "Grant a user membership of an app.\n\n" +
+			"On a `private` app, membership is what admits the user: a viewer grant\n" +
+			"lets them open the app, and `--role manager` additionally lets them\n" +
+			"deploy, configure, and manage members. On a `shared` or `public` app,\n" +
+			"where every signed-in user (or anyone, for public) can already view,\n" +
+			"a grant still controls the manager role.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsAccessGrant(cmd, args, f)
@@ -1141,13 +1149,10 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 	} else {
 		prose = fmt.Sprintf("%s: granted access to %s", slug, username)
 	}
-	// A grant has no effect while the app is private: tell the user so they don't
-	// believe sharing is complete when the grantee still cannot reach the app.
-	if resp.Header.Get("X-Shinyhub-App-Access") == "private" {
-		fields["app_access"] = "private"
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"Note: %s is private, so %s still cannot reach it. Make it shared: shinyhub apps access set %s shared\n",
-			slug, username, slug)
+	// The server warns when the app's visibility already admits everyone
+	// (shared/public); relay it like group-grant does.
+	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
 	return renderAction(cmd, "granted", fields, prose)
 }

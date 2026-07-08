@@ -688,12 +688,12 @@
         <section id="detail-access-panel"        class="settings-tab-panel" role="tabpanel" hidden>
           <fieldset class="settings-block access-level">
             <legend class="settings-block-title">Visibility</legend>
-            <p class="settings-block-desc">Who can open this app. Private is owner-only; Shared adds members and groups below; Public is open to anyone who can reach the server.</p>
+            <p class="settings-block-desc">Who can open this app. Private: only the owner plus the members and groups granted below. Shared: every signed-in user. Public: anyone who can reach the server, no sign-in. Admins and operators can always open it.</p>
             <div class="settings-block-body">
               <div class="access-radios">
-                <label><input type="radio" name="access-level" value="private"> Private</label>
-                <label><input type="radio" name="access-level" value="shared"> Shared</label>
-                <label><input type="radio" name="access-level" value="public"> Public</label>
+                <label><input type="radio" name="access-level" value="private"> Private (members only)</label>
+                <label><input type="radio" name="access-level" value="shared"> Shared (all signed-in users)</label>
+                <label><input type="radio" name="access-level" value="public"> Public (no sign-in)</label>
               </div>
               <div class="env-form-actions">
                 <button id="visibility-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
@@ -706,7 +706,7 @@
 
           <section class="settings-block">
             <h3 class="settings-block-title">Members</h3>
-            <p class="settings-block-desc">People granted direct access to this app, beyond its visibility setting.</p>
+            <p class="settings-block-desc">People granted direct access. On a private app this is what admits them; the manager role also lets them deploy, configure, and manage members.</p>
             <div class="settings-block-body">
               <ul id="members-list"></ul>
               <div class="grant-row">

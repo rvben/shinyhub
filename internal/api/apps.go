@@ -2197,10 +2197,28 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
-	// Advertise the app's visibility so the CLI can warn that a grant on a
-	// private app has no effect until it is shared (the 204 carries no body).
-	w.Header().Set("X-Shinyhub-App-Access", app.Access)
+	// On a private app the grant is what admits the user, so it needs no
+	// caveat. On a shared or public app viewing is already open to everyone,
+	// so advertise (on the same header group grants use; the 204 carries no
+	// body) what the grant still controls.
+	if audience := openVisibilityAudience(app.Access); audience != "" {
+		w.Header().Set("X-ShinyHub-Warning", fmt.Sprintf(
+			"app is %s; %s can already view it (membership matters for the manager role and if the app is made private)",
+			app.Access, audience))
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// openVisibilityAudience names who can already view an app whose visibility
+// admits everyone, or returns "" for private (where grants are the gate).
+func openVisibilityAudience(access string) string {
+	switch access {
+	case "shared":
+		return "all signed-in users"
+	case "public":
+		return "anyone"
+	}
+	return ""
 }
 
 func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
