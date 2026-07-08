@@ -15,7 +15,7 @@ import (
 // the same user returns 429 Too Many Requests.
 func TestDeployRateLimit(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass-" + strings.Repeat("x", 16))
+	hash, _ := testHashPassword("pass-" + strings.Repeat("x", 16))
 	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestDeployRateLimit(t *testing.T) {
 // most likely to hit under load.
 func TestRateLimit429IsJSONEnvelope(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass-" + strings.Repeat("x", 16))
+	hash, _ := testHashPassword("pass-" + strings.Repeat("x", 16))
 	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestRateLimit429IsJSONEnvelope(t *testing.T) {
 // actionLimiter is shared by restart/rollback/manual schedule run at 30/min).
 func TestActionRateLimit(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass-" + strings.Repeat("x", 16))
+	hash, _ := testHashPassword("pass-" + strings.Repeat("x", 16))
 	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestBearerAuthFailureRateLimit(t *testing.T) {
 // matter how many requests it makes — only 401s count against the limit.
 func TestBearerAuthFailure_ValidTokenNeverThrottled(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass-" + strings.Repeat("x", 16))
+	hash, _ := testHashPassword("pass-" + strings.Repeat("x", 16))
 	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestBearerAuthFailure_ValidTokenNeverThrottled(t *testing.T) {
 // request that authenticates successfully is never throttled.
 func TestBearerAuthFailure_ValidTokenPassesAfterBucketFills(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass-" + strings.Repeat("x", 16))
+	hash, _ := testHashPassword("pass-" + strings.Repeat("x", 16))
 	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}

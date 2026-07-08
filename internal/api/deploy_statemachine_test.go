@@ -20,7 +20,7 @@ func TestDeployApp_FailedDeployRestoresPreviousPool(t *testing.T) {
 	appsDir := t.TempDir()
 	srv, store := newQuotaTestServer(t, appsDir, 0) // quota disabled
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})

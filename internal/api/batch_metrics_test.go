@@ -16,7 +16,7 @@ import (
 // dashboard populates every card with a single request.
 func TestBatchMetrics_RequestedVisibleAppsKeyedBySlug(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateUser(db.CreateUserParams{Username: "other", PasswordHash: hash, Role: "developer"})
@@ -62,7 +62,7 @@ func TestBatchMetrics_RequestedVisibleAppsKeyedBySlug(t *testing.T) {
 // With no ?slugs=, the batch endpoint reports every app visible to the caller.
 func TestBatchMetrics_NoSlugsReturnsAllVisible(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "a", Name: "A", OwnerID: owner.ID})
@@ -98,7 +98,7 @@ func TestBatchMetrics_SurfacesLostReplicaAndAutoscale(t *testing.T) {
 	}
 	srv.SetWorkerRegistry(reg)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})

@@ -100,7 +100,7 @@ func TestRedeployInFlight_Lifecycle(t *testing.T) {
 // "redeploy still in flight" even while app.status stays "running".
 func TestHandleGetApp_AdvertisesRedeployInFlight(t *testing.T) {
 	store := dbtest.New(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestPatchApp_ResourceLimitChangeTriggersRedeploy(t *testing.T) {
 func newRedeployTestStore(t *testing.T, slug, status string) (*db.Store, *db.App) {
 	t.Helper()
 	store := dbtest.New(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}

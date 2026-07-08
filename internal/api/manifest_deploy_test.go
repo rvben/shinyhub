@@ -106,7 +106,7 @@ func buildManifestE2EServer(t *testing.T, runtime config.RuntimeConfig) (srv *Se
 	appsDir = t.TempDir()
 	store = dbtest.New(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{
 		Username: "admin", PasswordHash: hash, Role: "admin",
 	}); err != nil {

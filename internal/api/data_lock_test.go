@@ -34,7 +34,7 @@ func newDataLockTestServer(t *testing.T, quotaMB int) (*Server, string) {
 	prx := proxy.New()
 	srv := New(cfg, store, mgr, prx)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}

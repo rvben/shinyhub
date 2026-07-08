@@ -16,7 +16,7 @@ import (
 // developer JWT. The user is always owner id=1.
 func setupIdempotencyApp(t *testing.T, store *db.Store, slug string) string {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: "Test App", OwnerID: 1}); err != nil {
@@ -126,7 +126,7 @@ func TestRestartApp_WithIfNotRunning_StaleRunningStatus_FallsThroughToStart(t *t
 // server stays truthful.
 func TestDeleteApp_Missing_Returns404(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 
@@ -147,7 +147,7 @@ func TestRevokeAppAccess_NonMember_Returns204(t *testing.T) {
 	token := setupIdempotencyApp(t, store, "my-app")
 
 	// Create a second user who has no access to the app.
-	hash2, _ := auth.HashPassword("pass")
+	hash2, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: hash2, Role: "developer"})
 	// user id 2 = stranger
 
@@ -169,7 +169,7 @@ func TestGrantAppAccess_DuplicateSameRole_Returns204(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 	token := setupIdempotencyApp(t, store, "my-app")
 
-	hash2, _ := auth.HashPassword("pass")
+	hash2, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash2, Role: "developer"})
 
 	body, _ := json.Marshal(map[string]any{"username": "alice", "role": "viewer"})
@@ -197,7 +197,7 @@ func TestGrantAppAccess_SameUserDifferentRole_UpdatesRole(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 	token := setupIdempotencyApp(t, store, "my-app")
 
-	hash2, _ := auth.HashPassword("pass")
+	hash2, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash2, Role: "developer"})
 
 	body1, _ := json.Marshal(map[string]any{"username": "alice", "role": "viewer"})

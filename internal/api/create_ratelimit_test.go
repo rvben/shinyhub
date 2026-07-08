@@ -16,7 +16,7 @@ import (
 // limiter is 30/min; the 31st create from one user must be rejected with 429.
 func TestCreateApp_RateLimited(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "bob", "developer", "test-secret")
 

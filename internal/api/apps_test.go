@@ -68,7 +68,7 @@ func authedRequest(t *testing.T, method, path string, body []byte, token string)
 
 func TestListApps(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 
 	token, _ := auth.IssueJWT(1, "bob", "admin", "test-secret")
@@ -88,7 +88,7 @@ func TestListApps(t *testing.T) {
 
 func TestListApps_PreviewAsViewer(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	// One app of each visibility, all owned by the admin.
@@ -144,7 +144,7 @@ func TestUnauthenticatedRejected(t *testing.T) {
 
 func TestCreateApp(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "bob", "developer", "test-secret")
 
@@ -160,7 +160,7 @@ func TestCreateApp(t *testing.T) {
 
 func TestPatchApp_SetHibernateTimeout(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -187,7 +187,7 @@ func TestPatchApp_SetHibernateTimeout(t *testing.T) {
 
 func TestPatchApp_NotFound(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -204,7 +204,7 @@ func TestPatchApp_NotFound(t *testing.T) {
 
 func TestPatchApp_ResetToGlobalDefault(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -228,7 +228,7 @@ func TestPatchApp_ResetToGlobalDefault(t *testing.T) {
 // from null (use global default). The UI's "Never hibernate" radio sends 0.
 func TestPatchApp_NeverHibernate(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -255,7 +255,7 @@ func TestPatchApp_NeverHibernate(t *testing.T) {
 
 func TestPatchApp_HibernateTimeoutRejectsNegative(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -277,7 +277,7 @@ func TestPatchApp_HibernateTimeoutRejectsNegative(t *testing.T) {
 
 func TestPatchApp_HibernateTimeoutRejectsNonInteger(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -295,7 +295,7 @@ func TestPatchApp_HibernateTimeoutRejectsNonInteger(t *testing.T) {
 
 func TestListApps_FilteredByAccess(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "viewer"})
 
@@ -348,7 +348,7 @@ func TestListApps_FilteredByAccess(t *testing.T) {
 
 func TestCreateApp_ViewerForbidden(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "viewonly", PasswordHash: hash, Role: "viewer"})
 
 	token, _ := auth.IssueJWT(1, "viewonly", "viewer", "test-secret")
@@ -364,7 +364,7 @@ func TestCreateApp_ViewerForbidden(t *testing.T) {
 
 func TestGetApp_NotFoundWhenNoAccess(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "viewer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -390,7 +390,7 @@ func TestGetApp_NotFoundWhenNoAccess(t *testing.T) {
 // that eliminates the redundant auth.UserFromContext call in requireManageApp.
 func TestGetApp_GrantedMemberCanView(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "member", PasswordHash: hash, Role: "viewer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -419,7 +419,7 @@ func TestGetApp_GrantedMemberCanView(t *testing.T) {
 
 func TestPatchApp_ForbiddenForNonOwner(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "member", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -448,7 +448,7 @@ func TestPatchApp_ForbiddenForNonOwner(t *testing.T) {
 
 func TestGetMembers_Empty(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -469,7 +469,7 @@ func TestGetMembers_Empty(t *testing.T) {
 
 func TestGetMembers_WithMembers(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "viewer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -504,7 +504,7 @@ func TestGetMembers_WithMembers(t *testing.T) {
 
 func TestGetMembers_Forbidden(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "other", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -536,7 +536,7 @@ func TestGetMembers_NotFound(t *testing.T) {
 
 func TestGetUser_Found(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	alice, _ := store.GetUserByUsername("alice")
 
@@ -557,7 +557,7 @@ func TestGetUser_Found(t *testing.T) {
 
 func TestGetUser_NotFound(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	alice, _ := store.GetUserByUsername("alice")
 
@@ -584,7 +584,7 @@ func TestGetUser_Unauthenticated(t *testing.T) {
 
 func TestManagerMember_CanManage(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -608,7 +608,7 @@ func TestManagerMember_CanManage(t *testing.T) {
 
 func TestViewerMember_CannotManage(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -630,7 +630,7 @@ func TestViewerMember_CannotManage(t *testing.T) {
 
 func TestDeleteApp(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "to-delete", Name: "To Delete", OwnerID: u.ID})
@@ -654,7 +654,7 @@ func TestDeleteApp(t *testing.T) {
 
 func TestStopApp(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "running-app", Name: "Running App", OwnerID: u.ID})
@@ -693,7 +693,7 @@ func TestRollbackPost(t *testing.T) {
 
 func TestRevokeAppAccess_PathParam(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "viewer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -720,7 +720,7 @@ func TestRevokeAppAccess_PathParam(t *testing.T) {
 
 func TestListDeployments(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -762,7 +762,7 @@ func TestListDeployments(t *testing.T) {
 // and the app detail envelope carries the current release_number + released_at.
 func TestDeploymentReleaseNumbers(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -826,7 +826,7 @@ func TestDeploymentReleaseNumbers(t *testing.T) {
 
 func TestRollbackApp_ToSpecificDeployment(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +859,7 @@ func TestRollbackApp_ToSpecificDeployment(t *testing.T) {
 
 func TestRollbackApp_ToInvalidDeployment(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +881,7 @@ func TestRollbackApp_ToInvalidDeployment(t *testing.T) {
 
 func TestListDeployments_EmptySlice(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -912,7 +912,7 @@ func TestListDeployments_EmptySlice(t *testing.T) {
 // ?limit=&offset= server-side and reports the full total alongside the page.
 func TestListDeployments_ServerPagination(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -948,7 +948,7 @@ func TestListDeployments_ServerPagination(t *testing.T) {
 
 func TestPatchApp_UpdateName(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "Old Name", OwnerID: owner.ID})
@@ -975,7 +975,7 @@ func TestPatchApp_UpdateName(t *testing.T) {
 
 func TestPatchApp_UpdateDescription(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -1022,7 +1022,7 @@ func TestPatchApp_UpdateDescription(t *testing.T) {
 
 func TestPatchApp_UpdateProjectSlug(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -1058,7 +1058,7 @@ func TestPatchApp_UpdateProjectSlug(t *testing.T) {
 
 func TestRollbackApp_DeploymentFromOtherApp(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 
@@ -1089,7 +1089,7 @@ func TestRollbackApp_DeploymentFromOtherApp(t *testing.T) {
 
 func TestRollbackApp_NoPreviousDeployment(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -1117,7 +1117,7 @@ func TestRollbackApp_NoPreviousDeployment(t *testing.T) {
 // deployment and point at `--to <id>`.
 func TestRollbackApp_DefaultAfterFailedDeploy(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -1150,7 +1150,7 @@ func TestRollbackApp_DefaultAfterFailedDeploy(t *testing.T) {
 // fail and the live app would already be down with no path back to running.
 func TestRollbackApp_MissingBundleRefusesBeforeStop(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -1188,7 +1188,7 @@ func TestRollbackApp_MissingBundleRefusesBeforeStop(t *testing.T) {
 // safety reason as above.
 func TestRollbackApp_BundlePathIsFileRefuses(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID})
@@ -1249,7 +1249,7 @@ func createApp(t *testing.T, srv *api.Server, token, slug string) {
 
 func TestPatchAppResourceLimits(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token := loginAsAdmin(t, srv)
 	createApp(t, srv, token, "my-app")
@@ -1287,7 +1287,7 @@ func TestPatchAppResourceLimits(t *testing.T) {
 // host, while a value past the 6400 (64-core) ceiling is rejected.
 func TestPatchAppResourceLimits_CPUAboveOneCore(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token := loginAsAdmin(t, srv)
 	createApp(t, srv, token, "my-app")
@@ -1318,7 +1318,7 @@ func TestPatchAppResourceLimits_CPUAboveOneCore(t *testing.T) {
 // while still accepting the 1 TiB ceiling. The historical >=0 floor is preserved.
 func TestPatchAppResourceLimits_MemoryUpperBound(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token := loginAsAdmin(t, srv)
 	createApp(t, srv, token, "my-app")
@@ -1349,7 +1349,7 @@ func TestPatchAppResourceLimits_MemoryUpperBound(t *testing.T) {
 // triggers no redeploy), while a real change does log one naming the field.
 func TestPatchAppResourceLimits_NoOpDoesNotAudit(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token := loginAsAdmin(t, srv)
 	createApp(t, srv, token, "my-app")
@@ -1398,7 +1398,7 @@ func TestPatchAppResourceLimits_NoOpDoesNotAudit(t *testing.T) {
 // per-app cgroup v2 memory.max / cpu.max).
 func TestPatchAppResourceLimits_NativeMode(t *testing.T) {
 	srv, store := newManagerTestServerWithRuntimeMode(t, "native")
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token := loginAsAdmin(t, srv)
 	createApp(t, srv, token, "my-app")
@@ -1423,7 +1423,7 @@ func TestPatchAppResourceLimits_NativeMode(t *testing.T) {
 
 func TestPatchAppResourceLimitsClear(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token := loginAsAdmin(t, srv)
 	createApp(t, srv, token, "my-app")
@@ -1458,7 +1458,7 @@ func TestPatchAppResourceLimitsClear(t *testing.T) {
 
 func TestCreateApp_DuplicateSlug(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "bob", "developer", "test-secret")
 
@@ -1486,7 +1486,7 @@ func TestCreateApp_DuplicateSlug(t *testing.T) {
 // Live manager state is merged into the DB rows when the manager is populated.
 func TestAppsAPI_GetIncludesReplicasStatus(t *testing.T) {
 	srv, store, mgr := newManagerTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -1621,7 +1621,7 @@ func newTestServerWithDefaultMaxSessions(t *testing.T, def int) (*api.Server, *d
 // bare "0".
 func TestAppsAPI_GetApp_ExposesEffectiveMaxSessions(t *testing.T) {
 	srv, store := newTestServerWithDefaultMaxSessions(t, 10)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	// App's own cap stays 0 (inherit the runtime default).
@@ -1652,7 +1652,7 @@ func TestAppsAPI_GetApp_ExposesEffectiveMaxSessions(t *testing.T) {
 // updates the DB and does not trigger a redeploy when the app is stopped.
 func TestAppsAPI_PatchReplicasUpdatesCount(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -1681,7 +1681,7 @@ func TestAppsAPI_PatchReplicasUpdatesCount(t *testing.T) {
 // count exceeding MaxReplicas returns 400.
 func TestAppsAPI_PatchReplicasAboveMaxRejected(t *testing.T) {
 	srv, store := newManagerTestServerWithMaxReplicas(t, 8)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -1700,7 +1700,7 @@ func TestAppsAPI_PatchReplicasAboveMaxRejected(t *testing.T) {
 // TestAppsAPI_PatchReplicasBelowMinRejected verifies that PATCH with replicas=0 returns 400.
 func TestAppsAPI_PatchReplicasBelowMinRejected(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -1722,7 +1722,7 @@ func TestAppsAPI_PatchReplicasBelowMinRejected(t *testing.T) {
 func patchTierApp(t *testing.T) (*api.Server, *db.Store, *db.App, string) {
 	t.Helper()
 	srv, store := newTestServerWithTiers(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -1841,7 +1841,7 @@ func TestPatchApp_ReplicasRejectedWhenPlacementStored(t *testing.T) {
 // gets the replica count from cfg.Runtime.DefaultReplicas when it is greater than 1.
 func TestAppsAPI_CreateAppRespectsDefaultReplicas(t *testing.T) {
 	srv, store := newTestServerWithDefaultReplicas(t, 4)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 
@@ -1866,7 +1866,7 @@ func TestAppsAPI_CreateAppRespectsDefaultReplicas(t *testing.T) {
 
 func TestCreateApp_RejectsLingeringDataDir(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 
@@ -1890,7 +1890,7 @@ func TestCreateApp_RejectsLingeringDataDir(t *testing.T) {
 
 func TestCreateApp_RejectsLingeringAppsDir(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 
@@ -1932,7 +1932,7 @@ func TestDeployApp_RejectsRAppOnFargateTier(t *testing.T) {
 		return nil, fmt.Errorf("stub: deploy hook must not be reached for a rejected R-on-Fargate deploy")
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 	createApp(t, srv, token, "demo")
@@ -1976,7 +1976,7 @@ func TestDeployApp_RejectsRAppOnFargateTier(t *testing.T) {
 func TestDeployApp_RejectsDataEntry(t *testing.T) {
 	appsDir := t.TempDir()
 	srv, store := newQuotaTestServer(t, appsDir, 0)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 	createApp(t, srv, token, "demo")
@@ -2034,7 +2034,7 @@ func TestDeployApp_RejectsDataEntry(t *testing.T) {
 func TestDeployApp_OrphanCleanupOnExtractFailure(t *testing.T) {
 	appsDir := t.TempDir()
 	srv, store := newQuotaTestServer(t, appsDir, 0)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 	createApp(t, srv, token, "demo")
@@ -2107,7 +2107,7 @@ func newTestServerWithDefaultVisibility(t *testing.T, visibility string) (*api.S
 // newly created apps get access=private.
 func TestCreateApp_DefaultVisibilityPrivate(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
@@ -2133,7 +2133,7 @@ func TestCreateApp_DefaultVisibilityPrivate(t *testing.T) {
 // is applied to newly created apps when no per-request access is specified.
 func TestCreateApp_ConfigDefaultVisibilityPublic(t *testing.T) {
 	srv, store := newTestServerWithDefaultVisibility(t, "public")
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
@@ -2159,7 +2159,7 @@ func TestCreateApp_ConfigDefaultVisibilityPublic(t *testing.T) {
 // access value in the request body overrides the config default.
 func TestCreateApp_ExplicitAccessOverridesConfigDefault(t *testing.T) {
 	srv, store := newTestServerWithDefaultVisibility(t, "public")
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
@@ -2185,7 +2185,7 @@ func TestCreateApp_ExplicitAccessOverridesConfigDefault(t *testing.T) {
 // the request body is rejected with 400.
 func TestCreateApp_InvalidAccessRejected(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
@@ -2204,7 +2204,7 @@ func TestCreateApp_InvalidAccessRejected(t *testing.T) {
 // is applied to newly created apps.
 func TestCreateApp_ConfigDefaultVisibilityShared(t *testing.T) {
 	srv, store := newTestServerWithDefaultVisibility(t, "shared")
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "developer", "test-secret")
@@ -2230,7 +2230,7 @@ func TestCreateApp_ConfigDefaultVisibilityShared(t *testing.T) {
 // apps dir (code) and the app-data dir (persistent data) from disk.
 func TestDeleteApp_RemovesBothDirs(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 	createApp(t, srv, token, "demo")
@@ -2267,7 +2267,7 @@ func TestDeleteApp_RemovesBothDirs(t *testing.T) {
 // than dropping the row and orphaning bytes with no owning quota.
 func TestDeleteApp_CleanupFailureRetainsTombstone(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 	createApp(t, srv, token, "demo")
@@ -2313,7 +2313,7 @@ func (f *fakeSecretsCleaner) CleanupApp(_ context.Context, appID int64) error {
 // cleanup runs (with the app's id) when an app is deleted.
 func TestDeleteApp_InvokesSecretsCleaner(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 	createApp(t, srv, token, "demo")
@@ -2342,7 +2342,7 @@ func TestDeleteApp_InvokesSecretsCleaner(t *testing.T) {
 // secrets/task-defs do not orphan.
 func TestDeleteApp_SecretCleanerFailureRetainsTombstone(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	token, _ := auth.IssueJWT(1, "admin", "admin", "test-secret")
 	createApp(t, srv, token, "demo")
@@ -2406,7 +2406,7 @@ func TestDeployToken_AppOwnershipAndAdminBypass(t *testing.T) {
 	}
 
 	// --- admin user: does not own the app but must be able to manage it ---
-	hash, _ := auth.HashPassword("adminpass")
+	hash, _ := testHashPassword("adminpass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "sysadmin", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatalf("create admin: %v", err)
 	}
@@ -2623,7 +2623,7 @@ func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
 	prx := proxy.New()
 	srv := api.New(cfg, store, nil, prx)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
@@ -2684,7 +2684,7 @@ func newInlineServerWithProxy(t *testing.T) (*api.Server, *db.Store, *proxy.Prox
 func TestDeleteApp_ForgetsRejects(t *testing.T) {
 	srv, store, prx := newInlineServerWithProxy(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
@@ -2724,7 +2724,7 @@ func TestHandleGetApp_RejectsByReason_MultipleReasons(t *testing.T) {
 	// recorded for the same slug, each with the correct count.
 	srv, store, prx := newInlineServerWithProxy(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
@@ -2813,7 +2813,7 @@ func TestHandleGetApp_RejectsByReason_MultipleReasons(t *testing.T) {
 
 func TestSetMemberRole_ByManager(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -2837,7 +2837,7 @@ func TestSetMemberRole_ByManager(t *testing.T) {
 
 func TestSetMemberRole_NonMember404(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "carol", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -2856,7 +2856,7 @@ func TestSetMemberRole_NonMember404(t *testing.T) {
 
 func TestSetMemberRole_InvalidRole400(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "dan", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -2876,7 +2876,7 @@ func TestSetMemberRole_InvalidRole400(t *testing.T) {
 
 func TestSetMemberRole_ViewerMemberForbidden(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
@@ -2899,7 +2899,7 @@ func TestSetMemberRole_ViewerMemberForbidden(t *testing.T) {
 
 func TestGrantAppAccess_WithManagerRole(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "erin", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -2922,7 +2922,7 @@ func TestGrantAppAccess_WithManagerRole(t *testing.T) {
 
 func TestGrantAppAccess_DefaultRole(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "frank", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -2945,7 +2945,7 @@ func TestGrantAppAccess_DefaultRole(t *testing.T) {
 
 func TestSetMemberRole_EmptyRole400(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "grace", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -2965,7 +2965,7 @@ func TestSetMemberRole_EmptyRole400(t *testing.T) {
 
 func TestSetMemberRole_RejectsSelfChange(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -2990,7 +2990,7 @@ func TestSetMemberRole_RejectsSelfChange(t *testing.T) {
 
 func TestGrantAppAccess_OmittedRolePreservesExisting(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "ivy", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -3014,7 +3014,7 @@ func TestGrantAppAccess_OmittedRolePreservesExisting(t *testing.T) {
 
 func TestGrantAppAccess_RejectsSelfRoleChange(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -3038,7 +3038,7 @@ func TestGrantAppAccess_RejectsSelfRoleChange(t *testing.T) {
 
 func TestRevokeAppAccess_RejectsSelfRevoke(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "mgr", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -3062,7 +3062,7 @@ func TestRevokeAppAccess_RejectsSelfRevoke(t *testing.T) {
 
 func TestGrantAppAccess_ByUserID(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "jack", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -3086,7 +3086,7 @@ func TestGrantAppAccess_ByUserID(t *testing.T) {
 
 func TestGroupAccess_GrantListRevoke(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "ga", Name: "GA", OwnerID: owner.ID})
@@ -3124,7 +3124,7 @@ func TestGroupAccess_GrantListRevoke(t *testing.T) {
 
 func TestGroupAccess_InvalidRole400(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "ga2", Name: "GA2", OwnerID: owner.ID})
@@ -3140,7 +3140,7 @@ func TestGroupAccess_InvalidRole400(t *testing.T) {
 
 func TestGroupAccess_RequiresManage(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -3158,7 +3158,7 @@ func TestGroupAccess_RequiresManage(t *testing.T) {
 
 func TestGroupAccess_AdditiveWarningOnPublic(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: owner.ID})
@@ -3178,7 +3178,7 @@ func TestGroupAccess_AdditiveWarningOnPublic(t *testing.T) {
 
 func TestGetApp_CanManage_ViaGroupManager(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "gm", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "gv", PasswordHash: hash, Role: "developer"})
@@ -3214,7 +3214,7 @@ func TestGetApp_CanManage_ViaGroupManager(t *testing.T) {
 
 func TestGroupAccess_RevokeManifestRuleRejected(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "gm1", Name: "GM1", OwnerID: owner.ID})
@@ -3238,7 +3238,7 @@ func TestGroupAccess_RevokeManifestRuleRejected(t *testing.T) {
 // back from the DB, and confirms the audit event detail carries the field.
 func TestPatchApp_SetMinWarmReplicas(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -3281,7 +3281,7 @@ func TestPatchApp_SetMinWarmReplicas(t *testing.T) {
 // TestPatchApp_MinWarmReplicasRejectsNegative rejects a negative value with 400.
 func TestPatchApp_MinWarmReplicasRejectsNegative(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -3303,7 +3303,7 @@ func TestPatchApp_MinWarmReplicasRejectsNegative(t *testing.T) {
 // TestPatchApp_MinWarmReplicasRejectsAboveMax rejects a value above 1000 with 400.
 func TestPatchApp_MinWarmReplicasRejectsAboveMax(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")

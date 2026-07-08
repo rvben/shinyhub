@@ -50,7 +50,7 @@ func TestDeploy_RecordsSuccessMetric(t *testing.T) {
 		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 1, Port: 20001}}}, nil
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "ok", Name: "OK", OwnerID: u.ID})
@@ -77,7 +77,7 @@ func TestDeploy_RecordsFailureMetric(t *testing.T) {
 		return nil, errors.New("pool failed to start")
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "bad", Name: "Bad", OwnerID: u.ID})

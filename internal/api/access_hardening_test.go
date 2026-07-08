@@ -12,7 +12,7 @@ import (
 // mkUser creates a user with the given role and returns an authed JWT for them.
 func mkUser(t *testing.T, store *db.Store, username, role string) (int64, string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: username, PasswordHash: hash, Role: role}); err != nil {
 		t.Fatalf("create user %s: %v", username, err)
 	}

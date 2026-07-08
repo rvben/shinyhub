@@ -39,7 +39,7 @@ func serveIcon(srv *api.Server, req *http.Request) *httptest.ResponseRecorder {
 
 func TestAppIcon_UploadServeDelete(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: owner.ID, Access: "public"})
@@ -101,7 +101,7 @@ func TestAppIcon_UploadServeDelete(t *testing.T) {
 
 func TestAppIcon_AuthzAndValidation(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "viewer"})

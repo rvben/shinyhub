@@ -46,7 +46,7 @@ func newDataTestServer(t *testing.T, appsDir, appDataDir string, quotaMB int) (*
 // user and a JWT token that can be used in requests.
 func seedOwnerAndApp(t *testing.T, store *db.Store, username, slug string) (*db.User, string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: username, PasswordHash: hash, Role: "developer"}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestDataPut_StrangerRejected(t *testing.T) {
 	seedOwnerAndApp(t, store, "owner", "demo")
 
 	// Create a separate user "stranger" with no access.
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: hash, Role: "developer"})
 	stranger, _ := store.GetUserByUsername("stranger")
 	strangerToken, _ := auth.IssueJWT(stranger.ID, stranger.Username, stranger.Role, "test-secret")
@@ -396,7 +396,7 @@ func dataListReq(t *testing.T, slug, token string) *http.Request {
 // a valid JWT for that user.
 func seedVisitor(t *testing.T, store *db.Store, username string) (*db.User, string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: username, PasswordHash: hash, Role: "developer"}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}

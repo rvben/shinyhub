@@ -21,7 +21,7 @@ func TestDeploy_FailureKindReadinessTimeout(t *testing.T) {
 		return nil, errors.New("all replicas failed health check: replica 0: health: app at http://127.0.0.1:1/ did not become healthy within 120s")
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "ff", Name: "FF", OwnerID: u.ID})

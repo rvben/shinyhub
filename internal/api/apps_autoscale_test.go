@@ -32,7 +32,7 @@ func newAutoscaleTestServer(t *testing.T, maxReplicas int, defaultTarget float64
 
 func seedAutoscaleApp(t *testing.T, store *db.Store) (slug, token string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	tok, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")

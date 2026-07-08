@@ -72,7 +72,7 @@ func newFleetHealthServer(t *testing.T) (*api.Server, *db.Store) {
 func TestFleetHealth_AggregatesAcrossBackends(t *testing.T) {
 	srv, store := newFleetHealthServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
@@ -144,7 +144,7 @@ func TestFleetHealth_AggregatesAcrossBackends(t *testing.T) {
 func TestFleetHealth_JoiningWorkerNotCountedDown(t *testing.T) {
 	srv, store := newFleetHealthServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
@@ -184,7 +184,7 @@ func TestFleetHealth_JoiningWorkerNotCountedDown(t *testing.T) {
 // The endpoint is admin-only.
 func TestFleetHealth_AdminOnly(t *testing.T) {
 	srv, store := newFleetHealthServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
 	dev, _ := store.GetUserByUsername("dev")
 	devTok, _ := auth.IssueJWT(dev.ID, "dev", "developer", "test-secret")
@@ -199,7 +199,7 @@ func TestFleetHealth_AdminOnly(t *testing.T) {
 
 func TestFleetHealth_CountsStaleSchedules(t *testing.T) {
 	srv, store := newFleetHealthServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")

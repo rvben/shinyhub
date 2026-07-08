@@ -22,7 +22,7 @@ func TestAppsAPI_GetDerivesWorkerUnavailableReason(t *testing.T) {
 	}
 	srv.SetWorkerRegistry(reg)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -84,7 +84,7 @@ func TestMetricsPoll_SurfacesLostReason(t *testing.T) {
 	}
 	srv.SetWorkerRegistry(reg)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})

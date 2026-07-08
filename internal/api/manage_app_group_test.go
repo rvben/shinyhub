@@ -12,7 +12,7 @@ import (
 
 func TestManageApp_ViaGroupManager(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "gm", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
@@ -33,7 +33,7 @@ func TestManageApp_ViaGroupManager(t *testing.T) {
 
 func TestManageApp_ViaGroupViewerForbidden(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "gv", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")

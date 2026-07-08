@@ -90,7 +90,7 @@ func TestAppsJSONAnonymousPublicOnly(t *testing.T) {
 	srv, store := newBrandingTestServer(t, config.BrandingConfig{})
 
 	// Seed one user to be the owner.
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 
@@ -159,7 +159,7 @@ func TestAppsJSONAuthedVisibility(t *testing.T) {
 	srv, store := newBrandingTestServer(t, config.BrandingConfig{})
 
 	// Create users.
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "viewer"})
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})

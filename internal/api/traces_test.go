@@ -33,7 +33,7 @@ func newTracesTestServer(t *testing.T) (*api.Server, *db.Store, *tracing.Buffer,
 
 func seedTracesApp(t *testing.T, store *db.Store, slug, ownerName string) (token string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: ownerName, PasswordHash: hash, Role: "developer"}); err != nil {
 		t.Fatalf("create user: %v", err)
 	}

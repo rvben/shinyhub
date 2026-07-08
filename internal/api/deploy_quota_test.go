@@ -141,7 +141,7 @@ func TestDeployApp_RejectsWhenOverQuota(t *testing.T) {
 	appsDir := t.TempDir()
 	srv, store := newQuotaTestServer(t, appsDir, 1) // 1 MiB quota
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "big", Name: "Big", OwnerID: u.ID})
@@ -192,7 +192,7 @@ func TestDeployApp_QuotaDisabled_DoesNotReject(t *testing.T) {
 		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 1, Port: 1}}}, nil
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "big", Name: "Big", OwnerID: u.ID})
@@ -220,7 +220,7 @@ func TestDeployApp_RejectsOversizedBundle(t *testing.T) {
 	appsDir := t.TempDir()
 	srv, store := newMaxBundleTestServer(t, appsDir, 1) // 1 MiB cap
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
@@ -256,7 +256,7 @@ func TestDeployApp_MaxBundleDisabled_DoesNotRejectBySize(t *testing.T) {
 		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 1, Port: 1}}}, nil
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})

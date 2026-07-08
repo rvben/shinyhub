@@ -33,7 +33,7 @@ func newLogsTestServer(t *testing.T) (*api.Server, *db.Store, string) {
 
 func TestHandleLogs_NoLogFile(t *testing.T) {
 	srv, store, _ := newLogsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -54,7 +54,7 @@ func TestHandleLogs_NoLogFile(t *testing.T) {
 // lines should appear.
 func TestHandleLogs_TailLimitsInitialBurst(t *testing.T) {
 	srv, store, appsDir := newLogsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -95,7 +95,7 @@ func TestHandleLogs_TailLimitsInitialBurst(t *testing.T) {
 // fetch shape that scripts can pipe to tail/grep without parsing SSE frames.
 func TestHandleLogs_NoFollowReturnsPlainText(t *testing.T) {
 	srv, store, appsDir := newLogsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -134,7 +134,7 @@ func TestHandleLogs_NoFollowReturnsPlainText(t *testing.T) {
 // tail values rather than silently emitting nothing or the default 200.
 func TestHandleLogs_TailZeroRejected(t *testing.T) {
 	srv, store, appsDir := newLogsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -161,7 +161,7 @@ func TestHandleLogs_TailZeroRejected(t *testing.T) {
 
 func TestHandleLogs_SSEInitialBurst(t *testing.T) {
 	srv, store, appsDir := newLogsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})

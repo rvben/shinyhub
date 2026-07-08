@@ -15,7 +15,7 @@ import (
 
 func TestListUsers_AdminOnly(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
 	devToken, _ := auth.IssueJWT(1, "dev", "developer", "test-secret")
 
@@ -29,7 +29,7 @@ func TestListUsers_AdminOnly(t *testing.T) {
 
 func TestListUsers_Admin(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
@@ -49,7 +49,7 @@ func TestListUsers_Admin(t *testing.T) {
 
 func TestCreateUser_Admin(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
@@ -74,7 +74,7 @@ func TestCreateUser_Admin(t *testing.T) {
 
 func TestCreateUser_Viewer(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
@@ -108,7 +108,7 @@ func TestCreateUser_Viewer(t *testing.T) {
 
 func TestCreateUser_RejectsInvalidRole(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
@@ -128,7 +128,7 @@ func TestCreateUser_RejectsInvalidRole(t *testing.T) {
 
 func TestPatchUser_DowngradeToViewer(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
 	admin, _ := store.GetUserByUsername("admin")
@@ -152,7 +152,7 @@ func TestPatchUser_DowngradeToViewer(t *testing.T) {
 
 func TestPatchUser_UpdateRole(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
 	admin, _ := store.GetUserByUsername("admin")
@@ -176,7 +176,7 @@ func TestPatchUser_UpdateRole(t *testing.T) {
 
 func TestPatchUserPassword_Admin(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
 	admin, _ := store.GetUserByUsername("admin")
@@ -203,7 +203,7 @@ func TestPatchUserPassword_Admin(t *testing.T) {
 
 func TestPatchUserPassword_TooShort(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
 	admin, _ := store.GetUserByUsername("admin")
@@ -222,7 +222,7 @@ func TestPatchUserPassword_TooShort(t *testing.T) {
 
 func TestPatchUserPassword_NonAdminForbidden(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "target", PasswordHash: hash, Role: "developer"})
 	dev, _ := store.GetUserByUsername("dev")
@@ -241,7 +241,7 @@ func TestPatchUserPassword_NonAdminForbidden(t *testing.T) {
 
 func TestDeleteUser_Admin(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "todelete", PasswordHash: hash, Role: "developer"})
 	admin, _ := store.GetUserByUsername("admin")
@@ -259,7 +259,7 @@ func TestDeleteUser_Admin(t *testing.T) {
 
 func TestGetUserByUsername_PathParam(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "developer"})
 	alice, _ := store.GetUserByUsername("alice")
@@ -337,7 +337,7 @@ func TestPatchUserPassword_RejectsSystemUser(t *testing.T) {
 // valid role sets the manual override and returns the updated role.
 func TestPatchUser_SetsManualOverride(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "viewer"})
 	admin, _ := store.GetUserByUsername("admin")
@@ -362,7 +362,7 @@ func TestPatchUser_SetsManualOverride(t *testing.T) {
 // group/default governance) and returns 200.
 func TestPatchUser_ClearsManualOverrideWithEmptyRole(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "viewer"})
 	admin, _ := store.GetUserByUsername("admin")
@@ -395,7 +395,7 @@ func TestPatchUser_ClearsManualOverrideWithEmptyRole(t *testing.T) {
 // two admins always exist); the store-level rejection is tested in db/.
 func TestPatchUser_MultiAdminDemotionAllowed(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	store.CreateUser(db.CreateUserParams{Username: "second", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")

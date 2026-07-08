@@ -73,7 +73,7 @@ func newTestServerWithTrustedProxies(t *testing.T, cidrs []string) (*api.Server,
 // should mint their token via this helper.
 func seedUserAndJWT(t *testing.T, store *db.Store, username, role string) (token string, userID int64) {
 	t.Helper()
-	hash, err := auth.HashPassword("seed-password")
+	hash, err := testHashPassword("seed-password")
 	if err != nil {
 		t.Fatalf("hash password: %v", err)
 	}
@@ -100,7 +100,7 @@ func setCSRF(req *http.Request) {
 
 func TestLogin(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass123")
+	hash, _ := testHashPassword("pass123")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"})
 
 	body, _ := json.Marshal(map[string]string{"username": "alice", "password": "pass123"})
@@ -139,7 +139,7 @@ func TestLogin(t *testing.T) {
 
 func TestLoginWrongPassword(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass123")
+	hash, _ := testHashPassword("pass123")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"})
 
 	body, _ := json.Marshal(map[string]string{"username": "alice", "password": "wrong"})
@@ -155,7 +155,7 @@ func TestLoginWrongPassword(t *testing.T) {
 
 func TestSessionLoginSetsHttpOnlyCookie(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass123")
+	hash, _ := testHashPassword("pass123")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"})
 
 	body, _ := json.Marshal(map[string]string{"username": "alice", "password": "pass123"})
@@ -311,7 +311,7 @@ func TestLogoutUnauthenticatedReturns401(t *testing.T) {
 
 func TestLogoutRevokesJWT(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass123")
+	hash, _ := testHashPassword("pass123")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"})
 
 	token, _ := auth.IssueJWT(1, "alice", "admin", "test-secret")
@@ -367,7 +367,7 @@ func TestMeIssuesFreshJWT(t *testing.T) {
 
 	// Seed the user before minting the stale JWT — BearerMiddleware
 	// re-resolves the user against the live DB on every request.
-	hash, _ := auth.HashPassword("seed")
+	hash, _ := testHashPassword("seed")
 	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestMeIssuesFreshJWT(t *testing.T) {
 
 func TestListTokens_Empty(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("alice")
 	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
@@ -446,7 +446,7 @@ func TestListTokens_Empty(t *testing.T) {
 
 func TestListTokens_AfterCreate(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("alice")
 	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
@@ -483,7 +483,7 @@ func TestListTokens_AfterCreate(t *testing.T) {
 
 func TestCreateToken_ResponseIncludesAllFields(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("alice")
 	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
@@ -522,7 +522,7 @@ func TestCreateToken_ResponseIncludesAllFields(t *testing.T) {
 
 func TestDeleteToken(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("alice")
 	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
@@ -565,7 +565,7 @@ func TestDeleteToken(t *testing.T) {
 
 func TestCreateToken_DuplicateName(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("alice")
 	token, _ := auth.IssueJWT(u.ID, "alice", "developer", "test-secret")
@@ -647,7 +647,7 @@ func TestMeIncludesCanCreateApps_Viewer(t *testing.T) {
 
 func TestSessionLoginIncludesCanCreateApps_Developer(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass123")
+	hash, _ := testHashPassword("pass123")
 	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
 
 	body, _ := json.Marshal(map[string]string{"username": "dev", "password": "pass123"})
@@ -1002,7 +1002,7 @@ func TestKeyLookup_RejectsDBKeysOwnedBySystemUser(t *testing.T) {
 
 func TestMe_DoesNotRefreshCookieForTokenAuth(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, err := auth.HashPassword("pass")
+	hash, err := testHashPassword("pass")
 	if err != nil {
 		t.Fatal(err)
 	}

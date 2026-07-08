@@ -21,7 +21,7 @@ func TestListAppEnv_MasksSecrets(t *testing.T) {
 	key := secrets.DeriveKey("test-secret")
 	srv.SetSecretsKey(key)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	ownerToken, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
@@ -105,7 +105,7 @@ func TestListAppEnv_MasksSecrets(t *testing.T) {
 func TestListAppEnv_NonManagerDenied(t *testing.T) {
 	srv, store := newTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "appowner", PasswordHash: hash, Role: "developer"})
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("appowner")
@@ -129,7 +129,7 @@ func TestListAppEnv_NonManagerDenied(t *testing.T) {
 func TestListAppEnv_UnauthenticatedDenied(t *testing.T) {
 	srv, store := newTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner2", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner2")
 	store.CreateApp(db.CreateAppParams{Slug: "private-app", Name: "Private App", OwnerID: owner.ID})
@@ -153,7 +153,7 @@ func setupEnvApp(t *testing.T) (*testEnvFixture, error) {
 	key := secrets.DeriveKey("test-secret")
 	srv.SetSecretsKey(key)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
 		return nil, err
 	}
@@ -446,7 +446,7 @@ func TestUpsertAppEnv_ViewerDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	f.store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
 	viewer, _ := f.store.GetUserByUsername("viewer")
 	viewerToken, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")
@@ -643,7 +643,7 @@ func TestDeleteAppEnv_RequiresManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	f.store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "developer"})
 	viewer, _ := f.store.GetUserByUsername("viewer")
 	viewerToken, _ := auth.IssueJWT(viewer.ID, "viewer", "developer", "test-secret")

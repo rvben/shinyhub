@@ -34,7 +34,7 @@ func reqWithUser(u *auth.ContextUser) *http.Request {
 
 func TestRequireExplicitAppAccess_OwnerPasses(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -51,7 +51,7 @@ func TestRequireExplicitAppAccess_OwnerPasses(t *testing.T) {
 
 func TestRequireExplicitAppAccess_StrangerOnPublicAppRejected(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -76,7 +76,7 @@ func TestRequireExplicitAppAccess_StrangerOnPublicAppRejected(t *testing.T) {
 
 func TestRequireExplicitAppAccess_StrangerOnSharedAppRejected(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -99,7 +99,7 @@ func TestRequireExplicitAppAccess_StrangerOnSharedAppRejected(t *testing.T) {
 
 func TestRequireExplicitAppAccess_ExplicitMemberPasses(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -122,7 +122,7 @@ func TestRequireExplicitAppAccess_ExplicitMemberPasses(t *testing.T) {
 
 func TestRequireExplicitAppAccess_AdminPasses(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -142,7 +142,7 @@ func TestRequireExplicitAppAccess_AdminPasses(t *testing.T) {
 
 func TestRequireExplicitAppAccess_UnauthenticatedRejected(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
@@ -179,7 +179,7 @@ func TestJITOAuthRole_HonorsConfig(t *testing.T) {
 
 func TestRequireExplicitAppAccess_MissingSlugIs404(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "ops", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("ops")
 
@@ -199,7 +199,7 @@ func TestRequireExplicitAppAccess_MissingSlugIs404(t *testing.T) {
 // direct app_members row.
 func TestRequireExplicitAppAccess_GroupMemberPasses(t *testing.T) {
 	srv, store := newAuthTestServer(t)
-	hash, _ := auth.HashPassword("pw")
+	hash, _ := testHashPassword("pw")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})

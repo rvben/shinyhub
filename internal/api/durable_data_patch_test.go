@@ -15,7 +15,7 @@ import (
 // API (and therefore the `apps set --ephemeral-data-ok` CLI flag).
 func TestPatchApp_SetEphemeralDataAck(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")
@@ -38,7 +38,7 @@ func TestPatchApp_SetEphemeralDataAck(t *testing.T) {
 // A non-bool ephemeral_data_ack is rejected with 400.
 func TestPatchApp_EphemeralDataAckRejectsNonBool(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("bob")
 	token, _ := auth.IssueJWT(u.ID, "bob", "admin", "test-secret")

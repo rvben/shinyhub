@@ -13,7 +13,7 @@ import (
 
 func TestFleetScheduleStatus_AdminOnly(t *testing.T) {
 	srv, store := newFleetHealthServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
 	dev, _ := store.GetUserByUsername("dev")
 	devTok, _ := auth.IssueJWT(dev.ID, "dev", "developer", "test-secret")
@@ -28,7 +28,7 @@ func TestFleetScheduleStatus_AdminOnly(t *testing.T) {
 
 func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	srv, store := newFleetHealthServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	admin, _ := store.GetUserByUsername("admin")
 	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")

@@ -34,7 +34,7 @@ func TestDeployStampsDeploymentMetadataOnReplicas(t *testing.T) {
 		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 1, Port: 20001}}}, nil
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "meta", Name: "Meta", OwnerID: u.ID})
@@ -111,7 +111,7 @@ func TestRollbackUsesPendingIDAndTargetDigest(t *testing.T) {
 		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 2, Port: 20002}}}, nil
 	})
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "rbtgt", Name: "RBTgt", OwnerID: u.ID})

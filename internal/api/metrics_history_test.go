@@ -27,7 +27,7 @@ type historyResp struct {
 
 func seedHistoryApp(t *testing.T, store *db.Store) (token string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})

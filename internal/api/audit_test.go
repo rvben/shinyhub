@@ -109,7 +109,7 @@ func TestAuditListAnonymousEventHasNoUsername(t *testing.T) {
 // must reflect the filtered count, not the table total).
 func TestListAuditEvents_ActionFilter(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestListAuditEvents_AdminOnly(t *testing.T) {
 
 func TestListAuditEvents_Admin(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}

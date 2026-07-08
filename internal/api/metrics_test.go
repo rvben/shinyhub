@@ -28,7 +28,7 @@ func (f fakeMetricsSampler) Sample(_ process.RunHandle) (process.Stats, error) {
 
 func TestGetMetrics_Running(t *testing.T) {
 	srv, store := newTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -79,7 +79,7 @@ func newMetricsTestServer(t *testing.T) (*api.Server, *db.Store, *process.Manage
 
 func TestGetMetrics_NotRunning(t *testing.T) {
 	srv, store, mgr := newMetricsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -104,7 +104,7 @@ func TestGetMetrics_NotRunning(t *testing.T) {
 
 func TestGetMetrics_SamplerError(t *testing.T) {
 	srv, store, mgr := newMetricsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -150,7 +150,7 @@ func newMetricsTestServerWithProxy(t *testing.T) (*api.Server, *db.Store, *proce
 // keeps legacy top-level fields mirroring the first running replica.
 func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 	srv, store, mgr, prx := newMetricsTestServerWithProxy(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -250,7 +250,7 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 // status remains "running" as long as any replica is up.
 func TestGetMetrics_StoppedReplicaSlot(t *testing.T) {
 	srv, store, mgr, prx := newMetricsTestServerWithProxy(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -312,7 +312,7 @@ func TestGetMetrics_StoppedReplicaSlot(t *testing.T) {
 
 func TestGetMetrics_RunningWithStats(t *testing.T) {
 	srv, store, mgr := newMetricsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
@@ -349,7 +349,7 @@ func TestGetMetrics_RunningWithStats(t *testing.T) {
 // between HandleReplica and Sample).
 func TestGetMetrics_SamplerError_MetricsAvailableFalse(t *testing.T) {
 	srv, store, mgr := newMetricsTestServer(t)
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})

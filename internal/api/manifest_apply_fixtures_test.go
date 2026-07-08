@@ -37,7 +37,7 @@ func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) 
 	store := dbtest.New(t)
 
 	// Create the owner user.
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{
 		Username: "owner", PasswordHash: hash, Role: "developer",
 	}); err != nil {

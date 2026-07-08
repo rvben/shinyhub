@@ -46,7 +46,7 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
 	// Create owner user.
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 
@@ -104,7 +104,7 @@ func TestSchedules_Create_SurfacesDSTAdvisory(t *testing.T) {
 	}
 	srv, store, _ := newManagerTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "my-app", Name: "My App", OwnerID: 1}); err != nil {
@@ -167,7 +167,7 @@ func TestSchedules_Create_SurfacesDSTAdvisory(t *testing.T) {
 func TestSchedules_Create_ValidationRejected(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 
@@ -204,7 +204,7 @@ func TestSchedules_Create_ViewerCannotCreate(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
 	// Owner creates the app.
-	ownerHash, _ := auth.HashPassword("pass")
+	ownerHash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: ownerHash, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{
 		Slug:    "my-app",
@@ -215,7 +215,7 @@ func TestSchedules_Create_ViewerCannotCreate(t *testing.T) {
 	}
 
 	// A second user granted explicit member access (view-only, not manager role).
-	viewerHash, _ := auth.HashPassword("pass")
+	viewerHash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: viewerHash, Role: "viewer"})
 	// Grant access so requireViewApp passes, but with default role (not "manager").
 	if err := store.GrantAppAccess("my-app", 2); err != nil {
@@ -239,7 +239,7 @@ func TestSchedules_Patch_RejectsCrossAppSchedule(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
 	// User 1 owns app-a.
-	hashA, _ := auth.HashPassword("pass")
+	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
@@ -247,7 +247,7 @@ func TestSchedules_Patch_RejectsCrossAppSchedule(t *testing.T) {
 	tokenA, _ := auth.IssueJWT(1, "owner-a", "developer", "test-secret")
 
 	// User 2 owns app-b.
-	hashB, _ := auth.HashPassword("pass")
+	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
@@ -281,7 +281,7 @@ func TestSchedules_Patch_RejectsCrossAppSchedule(t *testing.T) {
 func TestSchedules_RunDetail_ReturnsRow(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	user, _ := store.GetUserByUsername("alice")
 	_ = store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: user.ID})
@@ -338,7 +338,7 @@ func TestSchedules_Cancel_RejectsCrossAppRun(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
 	// User 1 owns app-a.
-	hashA, _ := auth.HashPassword("pass")
+	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
@@ -346,7 +346,7 @@ func TestSchedules_Cancel_RejectsCrossAppRun(t *testing.T) {
 	tokenA, _ := auth.IssueJWT(1, "owner-a", "developer", "test-secret")
 
 	// User 2 owns app-b.
-	hashB, _ := auth.HashPassword("pass")
+	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
@@ -393,13 +393,13 @@ func TestSchedules_Cancel_RejectsCrossAppRun(t *testing.T) {
 func TestSchedules_RunDetail_RejectsCrossAppRun(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hashA, _ := auth.HashPassword("pass")
+	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
 	}
 
-	hashB, _ := auth.HashPassword("pass")
+	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
@@ -437,13 +437,13 @@ func TestSchedules_RunDetail_RejectsCrossAppRun(t *testing.T) {
 func TestSchedules_RunLogs_RejectsCrossAppRun(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hashA, _ := auth.HashPassword("pass")
+	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
 	}
 
-	hashB, _ := auth.HashPassword("pass")
+	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
@@ -483,7 +483,7 @@ func TestSchedules_RunLogs_RejectsCrossAppRun(t *testing.T) {
 func TestSchedules_RunLogs_PlainTextWhenNotFollowing(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
@@ -543,7 +543,7 @@ func TestSchedules_RunLogs_PlainTextWhenNotFollowing(t *testing.T) {
 func TestSchedules_RunLogs_FollowStopsWhenRunFinishes(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
@@ -610,7 +610,7 @@ func TestSchedules_RunLogs_FollowStopsWhenRunFinishes(t *testing.T) {
 func TestSchedules_RunLogs_RejectsPublicViewer(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hashOwner, _ := auth.HashPassword("pass")
+	hashOwner, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hashOwner, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
@@ -619,7 +619,7 @@ func TestSchedules_RunLogs_RejectsPublicViewer(t *testing.T) {
 		t.Fatalf("set public access: %v", err)
 	}
 
-	hashOther, _ := auth.HashPassword("pass")
+	hashOther, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "stranger", PasswordHash: hashOther, Role: "developer"})
 	tokenStranger, _ := auth.IssueJWT(2, "stranger", "developer", "test-secret")
 
@@ -668,7 +668,7 @@ func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) 
 	srv, store, _ := newManagerTestServer(t)
 
 	// Source app: public visibility, owned by someone else.
-	hashOwner, _ := auth.HashPassword("pass")
+	hashOwner, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "src-owner", PasswordHash: hashOwner, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
 		t.Fatalf("create src: %v", err)
@@ -678,7 +678,7 @@ func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) 
 	}
 
 	// Caller: a developer who owns their own app but has no explicit access to src.
-	hashCaller, _ := auth.HashPassword("pass")
+	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	tokenCaller, _ := auth.IssueJWT(2, "caller", "developer", "test-secret")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
@@ -703,7 +703,7 @@ func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) 
 func TestSchedules_Create_DuplicateName_DifferentConfig_Returns409(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 
@@ -759,7 +759,7 @@ func TestSchedules_Create_DuplicateName_DifferentConfig_Returns409(t *testing.T)
 // Used by the PATCH timezone tri-state tests below.
 func scheduleWithTimezone(t *testing.T, store *db.Store, storedTZ string) (schedID int64, token string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "tz-owner", PasswordHash: hash, Role: "developer"})
 	_ = store.CreateApp(db.CreateAppParams{Slug: "tz-app", Name: "TZ App", OwnerID: 1})
 	app, _ := store.GetAppBySlug("tz-app")
@@ -908,13 +908,13 @@ func TestSchedules_Patch_Timezone_ValidZone_Sets(t *testing.T) {
 func TestSchedules_GrantSharedData_AllowedForExplicitMember(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 
-	hashOwner, _ := auth.HashPassword("pass")
+	hashOwner, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "src-owner", PasswordHash: hashOwner, Role: "developer"})
 	if err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
 		t.Fatalf("create src: %v", err)
 	}
 
-	hashCaller, _ := auth.HashPassword("pass")
+	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	tokenCaller, _ := auth.IssueJWT(2, "caller", "developer", "test-secret")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
@@ -941,7 +941,7 @@ func TestSchedules_GrantSharedData_AllowedForExplicitMember(t *testing.T) {
 func grantSharedDataFixture(t *testing.T) (srv *api.Server, store *db.Store, token string) {
 	t.Helper()
 	srv, store, _ = newManagerTestServer(t)
-	hashCaller, _ := auth.HashPassword("pass")
+	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	token, _ = auth.IssueJWT(1, "caller", "developer", "test-secret")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
@@ -959,7 +959,7 @@ func grantSharedDataFixture(t *testing.T) (srv *api.Server, store *db.Store, tok
 // RO contract is not OS-enforced unless they switch to the Docker runtime.
 func TestSchedules_GrantSharedData_NativeRuntimeWarnsReadOnlyConvention(t *testing.T) {
 	srv, store := newManagerTestServerWithRuntimeMode(t, "native")
-	hashCaller, _ := auth.HashPassword("pass")
+	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
@@ -994,7 +994,7 @@ func TestSchedules_GrantSharedData_NativeRuntimeWarnsReadOnlyConvention(t *testi
 // grant response must NOT carry the convention warning.
 func TestSchedules_GrantSharedData_DockerRuntimeOmitsWarning(t *testing.T) {
 	srv, store := newManagerTestServerWithRuntimeMode(t, "docker")
-	hashCaller, _ := auth.HashPassword("pass")
+	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
 	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
@@ -1111,7 +1111,7 @@ func buildScheduleE2EServer(t *testing.T) (srv *api.Server, store *db.Store, tok
 	appsDir := t.TempDir()
 	store = dbtest.New(t)
 
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{
 		Username: "admin", PasswordHash: hash, Role: "admin",
 	}); err != nil {

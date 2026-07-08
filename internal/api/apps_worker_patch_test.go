@@ -41,7 +41,7 @@ func newWorkerBudgetServer(t *testing.T, hostBudgetMB int) (*api.Server, *db.Sto
 // a valid JWT for that user.
 func seedWorkerApp(t *testing.T, store *db.Store) (slug, token string) {
 	t.Helper()
-	hash, _ := auth.HashPassword("pass")
+	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "wuser", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("wuser")
 	tok, _ := auth.IssueJWT(u.ID, "wuser", "admin", "test-secret")
