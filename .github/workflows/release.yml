@@ -200,3 +200,46 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+
+  # Publish the app-facing SDK, shinyhub-identity: the pure-Python helper a Shiny/
+  # Streamlit/Dash app imports to read its forwarded identity (docs/identity.md).
+  # It is deliberately a SEPARATE package from `shinyhub` - the main wheel bundles
+  # a ~90MB Go binary that an app must never drag into its runtime, and the helper
+  # is versioned independently in packaging/python-identity/pyproject.toml.
+  # skip-existing makes this idempotent: it publishes only when that version bumps;
+  # a re-run on an already-published version is a no-op, so it can ride every tag.
+  identity-helper:
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/shinyhub-identity/
+    permissions:
+      id-token: write   # PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build shinyhub-identity
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build packaging/python-identity/
+
+      - name: Verify the built wheel installs and passes its tests
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/id-venv
+          /tmp/id-venv/bin/pip install --upgrade pip pytest
+          /tmp/id-venv/bin/pip install packaging/python-identity/dist/*.whl
+          /tmp/id-venv/bin/python -c "from shinyhub_identity import current_user; print('import ok')"
+          /tmp/id-venv/bin/pytest packaging/python-identity/tests/ -q
+
+      - name: Publish to PyPI (skip if version already exists)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packaging/python-identity/dist
+          skip-existing: true
