@@ -253,9 +253,9 @@ host accordingly.
 **Host-capacity guard.** When `server.host_budget_mb` is set, the API and
 deploy pipeline reject any combination where
 `max_workers * (memory_limit_mb + 150 MiB)` exceeds the budget. The check
-runs when worker settings are saved (via the API or a manifest deploy), not
-on server startup and not on each incoming request. Set the budget to catch
-misconfigured limits early. The guard is inert unless the app also has an
+runs when worker settings are saved (via the API or a manifest deploy) and
+when an app's `memory_limit_mb` changes, not on server startup and not on
+each incoming request. Set the budget to catch misconfigured limits early. The guard is inert unless the app also has an
 effective memory limit (per-app or tier default); saving elastic worker
 settings with NO active memory guard succeeds but returns an
 `X-ShinyHub-Warning` header, which `shinyhub apps set` prints to stderr.
