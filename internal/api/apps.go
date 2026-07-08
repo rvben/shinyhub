@@ -645,7 +645,12 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// validator), so a raise that busts the host budget cannot slip in alone.
 	if setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime || setMemoryLimitMB {
 		ws := config.WorkerSettings{
-			Isolation:          config.WorkerIsolationMode(orString(newWorkerIsolation, setWorkerIsolation, app.WorkerIsolation)),
+			// Resolve through the fleet default exactly like the runtime does
+			// (SetPoolMode below): an app with empty stored isolation inherits
+			// an elastic fleet default and must be budget-checked as elastic.
+			Isolation: config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(
+				orString(newWorkerIsolation, setWorkerIsolation, app.WorkerIsolation),
+				s.cfg.Runtime.DefaultWorkerIsolation)),
 			GroupedSize:        orInt(newWorkerGroupedSize, setWorkerGroupedSize, app.WorkerGroupedSize),
 			MaxWorkers:         orInt(newWorkerMaxWorkers, setWorkerMaxWorkers, app.WorkerMaxWorkers),
 			MaxSessionLifetime: orInt(newWorkerMaxSessionLifetime, setWorkerMaxSessionLifetime, app.WorkerMaxSessionLifetimeSecs),
