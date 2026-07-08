@@ -202,3 +202,201 @@ func TestPatchApp_WorkerPartialPatchFallbackRejectsZeroGroupedSize(t *testing.T)
 		t.Errorf("expected error to mention grouped_size, got: %s", rec.Body.String())
 	}
 }
+
+// newWorkerFloorServer builds a server whose runtime memory floor
+// (min_available_memory_mb) is set, i.e. the runtime guard is active.
+func newWorkerFloorServer(t *testing.T, minAvailableMB int) (*api.Server, *db.Store) {
+	t.Helper()
+	store := dbtest.New(t)
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+		Server:  config.ServerConfig{MinAvailableMemoryMB: minAvailableMB},
+	}
+	return api.New(cfg, store, nil, nil), store
+}
+
+// TestPatchApp_ElasticIsolationWarnsWithoutMemoryGuard verifies that switching
+// an app to elastic isolation on a server with no memory guard configured
+// (no host budget, no runtime floor) succeeds but attaches the
+// X-ShinyHub-Warning header so operators learn the host is unprotected.
+func TestPatchApp_ElasticIsolationWarnsWithoutMemoryGuard(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2}`)
+	rec := patchWorkerApp(t, srv, token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	warn := rec.Header().Get("X-ShinyHub-Warning")
+	if warn == "" {
+		t.Fatal("expected X-ShinyHub-Warning when no memory guard is configured")
+	}
+	if !strings.Contains(warn, "memory guard") {
+		t.Errorf("warning should name the missing memory guard, got %q", warn)
+	}
+}
+
+// TestPatchApp_ElasticIsolationSilentWithRuntimeFloor verifies that the
+// warning is suppressed when the runtime available-memory floor is configured.
+func TestPatchApp_ElasticIsolationSilentWithRuntimeFloor(t *testing.T) {
+	srv, store := newWorkerFloorServer(t, 1024)
+	_, token := seedWorkerApp(t, store)
+
+	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2}`)
+	rec := patchWorkerApp(t, srv, token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("expected no warning with the runtime floor set, got %q", warn)
+	}
+}
+
+// TestPatchApp_MultiplexNeverWarnsAboutMemoryGuard pins that the warning is
+// scoped to elastic isolation: reverting to multiplex is always silent.
+func TestPatchApp_MultiplexNeverWarnsAboutMemoryGuard(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	body := []byte(`{"worker_isolation":"multiplex"}`)
+	rec := patchWorkerApp(t, srv, token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("expected no warning for multiplex, got %q", warn)
+	}
+}
+
+// TestPatchApp_WarningTracksMemoryLimitInSamePatch pins that the memory-guard
+// warning is decided against the POST-patch memory limit when one request
+// changes both: clearing the limit disarms the static budget guard (warn),
+// while setting a limit on a budget-configured server arms it (silent).
+func TestPatchApp_WarningTracksMemoryLimitInSamePatch(t *testing.T) {
+	srv, store := newWorkerBudgetServer(t, 8192)
+	_, token := seedWorkerApp(t, store)
+
+	// Arm the static guard in the same request that turns on elastic
+	// isolation: budget + limit are both active, so no warning.
+	rec := patchWorkerApp(t, srv, token,
+		[]byte(`{"memory_limit_mb":512,"worker_isolation":"per_session","worker_max_workers":2}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("limit set in the same patch arms the guard; expected no warning, got %q", warn)
+	}
+
+	// Clearing the limit in the same request disarms the guard: the warning
+	// must reflect the post-patch state, not the stored 512.
+	rec = patchWorkerApp(t, srv, token,
+		[]byte(`{"memory_limit_mb":null,"worker_max_workers":3}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn == "" {
+		t.Error("clearing the memory limit disarms the static guard; expected a warning")
+	}
+}
+
+// TestPatchApp_MemoryLimitChangeRevalidatesElasticApp pins that changing ONLY
+// the memory limit on an app already in elastic isolation re-runs the worker
+// budget math: a raise that busts the host budget is rejected, and clearing
+// the limit (disarming the static guard) warns.
+func TestPatchApp_MemoryLimitChangeRevalidatesElasticApp(t *testing.T) {
+	srv, store := newWorkerBudgetServer(t, 2000)
+	_, token := seedWorkerApp(t, store)
+
+	// 2 workers x (512 + 150) = 1324 <= 2000: accepted, guard armed.
+	rec := patchWorkerApp(t, srv, token,
+		[]byte(`{"memory_limit_mb":512,"worker_isolation":"per_session","worker_max_workers":2}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 2 workers x (1500 + 150) = 3300 > 2000: the raise alone must be rejected.
+	rec = patchWorkerApp(t, srv, token, []byte(`{"memory_limit_mb":1500}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("limit raise busting the budget: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Clearing the limit alone disarms the static guard: accepted with warning.
+	rec = patchWorkerApp(t, srv, token, []byte(`{"memory_limit_mb":null}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn == "" {
+		t.Error("clearing the limit on an elastic app disarms the guard; expected a warning")
+	}
+}
+
+// TestPatchApp_MemoryLimitChangeOnMultiplexStaysSilent pins that the
+// revalidation is invisible for multiplex apps: memory limit changes neither
+// fail worker validation nor warn.
+func TestPatchApp_MemoryLimitChangeOnMultiplexStaysSilent(t *testing.T) {
+	srv, store := newWorkerBudgetServer(t, 100)
+	_, token := seedWorkerApp(t, store)
+
+	// Even a limit far above the budget is fine on multiplex (the worker
+	// budget math only applies to elastic isolation).
+	rec := patchWorkerApp(t, srv, token, []byte(`{"memory_limit_mb":4096}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("expected no warning for multiplex, got %q", warn)
+	}
+}
+
+// newWorkerFleetDefaultServer builds a server whose FLEET default isolation is
+// elastic, with a host budget: apps with empty stored isolation inherit the
+// elastic mode at runtime, so the budget math must treat them as elastic too.
+func newWorkerFleetDefaultServer(t *testing.T, isolation string, hostBudgetMB int) (*api.Server, *db.Store) {
+	t.Helper()
+	store := dbtest.New(t)
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+		Server:  config.ServerConfig{HostBudgetMB: hostBudgetMB},
+		Runtime: config.RuntimeConfig{DefaultWorkerIsolation: isolation},
+	}
+	return api.New(cfg, store, nil, nil), store
+}
+
+// TestPatchApp_InheritedElasticIsolationGuardsMemoryLimit pins that the
+// memory-guard math resolves isolation through the fleet default: an app
+// whose stored worker_isolation is empty but inherits per_session runs the
+// budget check and unguarded warning like an explicitly elastic app.
+func TestPatchApp_InheritedElasticIsolationGuardsMemoryLimit(t *testing.T) {
+	srv, store := newWorkerFleetDefaultServer(t, "per_session", 2000)
+	_, token := seedWorkerApp(t, store)
+
+	// Clear the isolation to "" (inherit the fleet default) with a valid dial:
+	// resolved as per_session, 2 x (512 + 150) = 1324 <= 2000.
+	rec := patchWorkerApp(t, srv, token,
+		[]byte(`{"worker_isolation":"","worker_max_workers":2,"memory_limit_mb":512}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if app, _ := store.GetAppBySlug("wapp"); app.WorkerIsolation != "" {
+		t.Fatalf("expected stored isolation to be empty (inherit), got %q", app.WorkerIsolation)
+	}
+
+	// A memory-only raise busting the budget must be rejected even though the
+	// stored isolation is empty: 2 x (1500 + 150) = 3300 > 2000.
+	rec = patchWorkerApp(t, srv, token, []byte(`{"memory_limit_mb":1500}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("inherited elastic app, budget-busting raise: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Clearing the limit disarms the static guard: accepted with warning.
+	rec = patchWorkerApp(t, srv, token, []byte(`{"memory_limit_mb":null}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn == "" {
+		t.Error("inherited elastic app with guard disarmed: expected a warning")
+	}
+}

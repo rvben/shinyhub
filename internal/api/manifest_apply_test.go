@@ -492,3 +492,43 @@ func TestValidateManifestForServer_WorkerGroupedValidPasses(t *testing.T) {
 		t.Errorf("expected valid grouped worker block to pass, got: %v", verr)
 	}
 }
+
+// TestValidateManifestForServer_WorkerBudgetMergesStoredState pins that the
+// worker budget math validates the POST-deploy state: stored worker columns
+// overlaid with the declared manifest fields, isolation resolved through the
+// fleet default, and a declared memory limit replacing the stored one.
+func TestValidateManifestForServer_WorkerBudgetMergesStoredState(t *testing.T) {
+	srv, store, _ := newServerWithOwnedAppCfg(t, "alpha", manifestServerCfg{
+		DefaultWorkerIsolation: "per_session",
+		HostBudgetMB:           2000,
+	})
+	app, _ := store.GetAppBySlug("alpha")
+	// Clear the stored isolation to "" so the app inherits the fleet default
+	// (created apps start at the explicit 'multiplex' column default).
+	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		AppID: app.ID, SetWorkerIsolation: true, WorkerIsolation: "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = store.GetAppBySlug("alpha")
+
+	// Stored isolation is empty (inherits per_session); the manifest declares
+	// max_workers and a memory limit whose worst case busts the budget:
+	// 4 x (600 + 150) = 3000 > 2000.
+	ve := srv.validateManifestForServer(app, deploy.AppSettings{
+		MemoryLimitMB: ptrIntAPI(600),
+		Worker:        &deploy.WorkerManifest{MaxWorkers: ptrIntAPI(4)},
+	})
+	if ve == nil {
+		t.Fatal("expected validation error for a budget-busting inherited-elastic manifest")
+	}
+
+	// The same manifest fits when the budget can hold it: 2 x (600+150) = 1500.
+	ve = srv.validateManifestForServer(app, deploy.AppSettings{
+		MemoryLimitMB: ptrIntAPI(600),
+		Worker:        &deploy.WorkerManifest{MaxWorkers: ptrIntAPI(2)},
+	})
+	if ve != nil {
+		t.Errorf("expected the fitting manifest to pass, got %v", ve)
+	}
+}

@@ -55,24 +55,50 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 	if msg := s.fargateLimitViolation(m.MemoryLimitMB, m.CPUQuotaPercent); msg != "" {
 		return newValidationError("%s", msg)
 	}
-	if m.Worker != nil {
-		ws := config.WorkerSettings{}
-		if m.Worker.Isolation != nil {
-			ws.Isolation = config.WorkerIsolationMode(*m.Worker.Isolation)
+	if m.Worker != nil || m.MemoryLimitMB != nil {
+		// Validate the POST-deploy state: stored worker columns overlaid with
+		// the declared fields (nil = unchanged, matching apply semantics), the
+		// isolation resolved through the fleet default exactly like the
+		// runtime does, and a declared memory limit replacing the stored one.
+		// A declared limit alone re-runs the math too: on an elastic app it
+		// moves the per-worker budget term.
+		ws := config.WorkerSettings{
+			Isolation:          config.WorkerIsolationMode(app.WorkerIsolation),
+			GroupedSize:        app.WorkerGroupedSize,
+			MaxWorkers:         app.WorkerMaxWorkers,
+			MaxSessionLifetime: app.WorkerMaxSessionLifetimeSecs,
 		}
-		if m.Worker.GroupedSize != nil {
-			ws.GroupedSize = *m.Worker.GroupedSize
+		if m.Worker != nil {
+			if m.Worker.Isolation != nil {
+				ws.Isolation = config.WorkerIsolationMode(*m.Worker.Isolation)
+			}
+			if m.Worker.GroupedSize != nil {
+				ws.GroupedSize = *m.Worker.GroupedSize
+			}
+			if m.Worker.MaxWorkers != nil {
+				ws.MaxWorkers = *m.Worker.MaxWorkers
+			}
+			if m.Worker.MaxSessionLifetimeSecs != nil {
+				ws.MaxSessionLifetime = *m.Worker.MaxSessionLifetimeSecs
+			}
 		}
-		if m.Worker.MaxWorkers != nil {
-			ws.MaxWorkers = *m.Worker.MaxWorkers
-		}
-		if m.Worker.MaxSessionLifetimeSecs != nil {
-			ws.MaxSessionLifetime = *m.Worker.MaxSessionLifetimeSecs
+		ws.Isolation = config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(
+			string(ws.Isolation), s.cfg.Runtime.DefaultWorkerIsolation))
+		declaredLimit := app.MemoryLimitMB
+		if m.MemoryLimitMB != nil {
+			declaredLimit = m.MemoryLimitMB
 		}
 		memMB, _ := s.cfg.Runtime.DefaultResourcesForApp(app)
-		effMemMB := deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, memMB)
+		effMemMB := deploy.ResolveMemoryLimitMB(declaredLimit, memMB)
 		if err := config.ValidateWorkerSettings(ws, s.clustered, effMemMB, s.cfg.HostBudgetMB()); err != nil {
 			return newValidationError("%s", err.Error())
+		}
+		// The deploy response has no warning channel, so an unguarded elastic
+		// configuration is surfaced in the server log instead (the PATCH path
+		// additionally sends X-ShinyHub-Warning).
+		if warn := config.WorkerBudgetWarning(ws, effMemMB, s.cfg.HostBudgetMB(), s.cfg.MinAvailableMemoryMB()); warn != "" {
+			slog.Warn("manifest worker settings accepted without a memory guard",
+				"app", app.Slug, "detail", warn)
 		}
 	}
 	return nil

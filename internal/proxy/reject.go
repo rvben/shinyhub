@@ -25,6 +25,12 @@ const (
 	// ReasonAppNotReady: a known (or not-confidently-unknown) app has no replica
 	// that has completed a WebSocket handshake yet (503, readiness probe).
 	ReasonAppNotReady RejectReason = "app-not-ready"
+	// ReasonMemoryPressure: the host is below the configured available-memory
+	// floor (server.min_available_memory_mb), so no new elastic worker may be
+	// allocated (503). Existing sessions keep routing. Deliberately distinct
+	// from pool-saturated so capacity automation does not scale up in response.
+	// Remedy: free host memory, lower per-app ceilings, or add hardware.
+	ReasonMemoryPressure RejectReason = "memory-pressure"
 )
 
 // rejectSentinel is the metrics key substituted for any slug that is not a

@@ -640,19 +640,39 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Validate the fully-resolved worker settings when any worker field was set.
 	// orString/orInt merge the incoming value (when set) with the app's current
 	// value so the validator sees the complete dial even when only one field is
-	// being changed.
-	if setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime {
+	// being changed. A memory-limit change re-runs the same math: on an elastic
+	// app it moves the per-worker budget term (multiplex no-ops inside the
+	// validator), so a raise that busts the host budget cannot slip in alone.
+	if setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime || setMemoryLimitMB {
 		ws := config.WorkerSettings{
-			Isolation:          config.WorkerIsolationMode(orString(newWorkerIsolation, setWorkerIsolation, app.WorkerIsolation)),
+			// Resolve through the fleet default exactly like the runtime does
+			// (SetPoolMode below): an app with empty stored isolation inherits
+			// an elastic fleet default and must be budget-checked as elastic.
+			Isolation: config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(
+				orString(newWorkerIsolation, setWorkerIsolation, app.WorkerIsolation),
+				s.cfg.Runtime.DefaultWorkerIsolation)),
 			GroupedSize:        orInt(newWorkerGroupedSize, setWorkerGroupedSize, app.WorkerGroupedSize),
 			MaxWorkers:         orInt(newWorkerMaxWorkers, setWorkerMaxWorkers, app.WorkerMaxWorkers),
 			MaxSessionLifetime: orInt(newWorkerMaxSessionLifetime, setWorkerMaxSessionLifetime, app.WorkerMaxSessionLifetimeSecs),
 		}
 		memMB, _ := s.cfg.Runtime.DefaultResourcesForApp(app)
-		effMemMB := deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, memMB)
+		// Validate and warn against the POST-patch memory limit: a combined
+		// request can change the limit and the worker dial together, and the
+		// budget math must see the state the patch is about to persist.
+		patchedLimit := app.MemoryLimitMB
+		if setMemoryLimitMB {
+			patchedLimit = memoryLimitMB
+		}
+		effMemMB := deploy.ResolveMemoryLimitMB(patchedLimit, memMB)
 		if err := config.ValidateWorkerSettings(ws, s.clustered, effMemMB, s.cfg.HostBudgetMB()); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// Valid but unguarded elastic isolation is accepted with a warning so
+		// the operator learns the host has no memory backstop (the CLI relays
+		// this header to stderr).
+		if warn := config.WorkerBudgetWarning(ws, effMemMB, s.cfg.HostBudgetMB(), s.cfg.MinAvailableMemoryMB()); warn != "" {
+			w.Header().Set("X-ShinyHub-Warning", warn)
 		}
 	}
 

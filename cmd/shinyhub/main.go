@@ -60,6 +60,7 @@ import (
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/worker"
+	gopsmem "github.com/shirou/gopsutil/v4/mem"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/hkdf"
 )
@@ -1430,6 +1431,21 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		go elasticSpawner.Spawn(slug, slotID)
 	})
 	prx.SetTerminateFunc(elasticSpawner.Terminate)
+
+	// Host-memory admission floor for elastic pools: while MemAvailable is
+	// below the configured floor, new worker allocation is shed (503) instead
+	// of letting the kernel OOM killer pick a live worker. Probe errors fail
+	// open inside the proxy.
+	if minMB := cfg.MinAvailableMemoryMB(); minMB > 0 {
+		prx.SetMemoryGuard(minMB, func() (int, bool) {
+			vm, err := gopsmem.VirtualMemory()
+			if err != nil {
+				return 0, false
+			}
+			return int(vm.Available / (1024 * 1024)), true
+		})
+		slog.Info("elastic admission memory floor active", "min_available_memory_mb", minMB)
+	}
 
 	// Let the proxy render a clear status page (instead of the endless loading
 	// spinner) when a request hits an app that is crashed or stopped, surfacing

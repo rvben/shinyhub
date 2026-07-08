@@ -28,7 +28,9 @@ func newServerWithOwnedAppAndMaxReplicas(t *testing.T, slug string, max int) (*S
 }
 
 type manifestServerCfg struct {
-	MaxReplicas int
+	MaxReplicas            int
+	DefaultWorkerIsolation string
+	HostBudgetMB           int
 }
 
 func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) (*Server, *db.Store, int64) {
@@ -59,7 +61,11 @@ func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) 
 	serverCfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: appsDir},
-		Runtime: config.RuntimeConfig{MaxReplicas: cfg.MaxReplicas},
+		Server:  config.ServerConfig{HostBudgetMB: cfg.HostBudgetMB},
+		Runtime: config.RuntimeConfig{
+			MaxReplicas:            cfg.MaxReplicas,
+			DefaultWorkerIsolation: cfg.DefaultWorkerIsolation,
+		},
 	}
 
 	srv := New(serverCfg, store, nil, nil)

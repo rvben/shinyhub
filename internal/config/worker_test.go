@@ -42,3 +42,40 @@ func TestValidateWorkerSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerBudgetWarning(t *testing.T) {
+	grouped := WorkerSettings{Isolation: IsolationGrouped, GroupedSize: 4, MaxWorkers: 10}
+	perSession := WorkerSettings{Isolation: IsolationPerSession, MaxWorkers: 40}
+
+	cases := []struct {
+		name           string
+		w              WorkerSettings
+		effMemMB       int
+		hostBudgetMB   int
+		minAvailableMB int
+		wantWarning    bool
+	}{
+		{"multiplex never warns", WorkerSettings{Isolation: IsolationMultiplex}, 0, 0, 0, false},
+		{"empty isolation never warns", WorkerSettings{}, 0, 0, 0, false},
+		{"grouped with no guard warns", grouped, 0, 0, 0, true},
+		{"per_session with no guard warns", perSession, 0, 0, 0, true},
+		{"static guard armed silences", grouped, 512, 8192, 0, false},
+		{"runtime floor silences", grouped, 0, 0, 1024, false},
+		{"budget without memory limit is inert and warns", grouped, 0, 8192, 0, true},
+		{"memory limit without budget is inert and warns", grouped, 512, 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := WorkerBudgetWarning(tc.w, tc.effMemMB, tc.hostBudgetMB, tc.minAvailableMB)
+			if tc.wantWarning && got == "" {
+				t.Fatal("expected a warning, got none")
+			}
+			if !tc.wantWarning && got != "" {
+				t.Fatalf("expected no warning, got %q", got)
+			}
+			if tc.wantWarning && !strings.Contains(got, "memory guard") {
+				t.Errorf("warning should name the missing memory guard, got %q", got)
+			}
+		})
+	}
+}

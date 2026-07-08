@@ -925,6 +925,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "update app", resp, out)
 	}
+	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
+	}
 
 	var lines []string
 	if hibernateChanged {
