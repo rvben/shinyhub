@@ -146,6 +146,12 @@ func TestTokensUIWiring(t *testing.T) {
 		"app.js must confirm before revoking a token (destructive)")
 	assertContains(t, "app.js", `router.register('/tokens'`,
 		"app.js must register the /tokens SPA route")
+	assertContains(t, "index.html", `id="new-token-expiry"`,
+		"the new-token form must offer an expiry choice")
+	assertContains(t, "app.js", "getElementById('new-token-expiry')",
+		"submitNewToken must read the expiry select")
+	assertContains(t, "app.js", "payload.expires_in_days = expiryDays",
+		"submitNewToken must send expires_in_days to POST /api/tokens when an expiry is chosen")
 }
 
 // TestTablistKeyboardNavWired guards the WAI-ARIA tablist keyboard pattern on

@@ -396,6 +396,9 @@ type CreateAPIKeyParams struct {
 	UserID  int64
 	KeyHash string
 	Name    string
+	// ExpiresAt, when non-nil, makes the key unusable past that instant.
+	// nil = never expires.
+	ExpiresAt *time.Time
 }
 
 // CreateAPIKey inserts a new API key and returns the inserted row's ID and
@@ -404,8 +407,8 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 	var id int64
 	var createdAt time.Time
 	err := s.db.QueryRow(
-		`INSERT INTO api_keys (user_id, key_hash, name) VALUES (?, ?, ?) RETURNING id, created_at`,
-		p.UserID, p.KeyHash, p.Name,
+		`INSERT INTO api_keys (user_id, key_hash, name, expires_at) VALUES (?, ?, ?, ?) RETURNING id, created_at`,
+		p.UserID, p.KeyHash, p.Name, p.ExpiresAt,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("create api key: %w", err)
@@ -413,19 +416,45 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 	return id, createdAt, nil
 }
 
-func (s *Store) GetUserByAPIKeyHash(hash string) (*User, error) {
+// AuthenticateAPIKey resolves an API key hash to its owning user, skipping
+// expired keys (an expired key misses exactly like an unknown one, so the
+// caller's 401 does not leak which). It also returns the key's ID and current
+// last_used_at so the caller can decide whether to refresh the usage stamp
+// without a second lookup.
+func (s *Store) AuthenticateAPIKey(hash string) (*User, int64, *time.Time, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at,
+		       k.id, k.last_used_at
 		FROM users u JOIN api_keys k ON k.user_id = u.id
-		WHERE k.key_hash = ?`, hash)
+		WHERE k.key_hash = ? AND (k.expires_at IS NULL OR k.expires_at > ?)`,
+		hash, time.Now().UTC())
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	var keyID int64
+	var lastUsed sql.NullTime
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt,
+		&keyID, &lastUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return nil, 0, nil, ErrNotFound
 		}
-		return nil, err
+		return nil, 0, nil, err
 	}
-	return &u, nil
+	var lu *time.Time
+	if lastUsed.Valid {
+		t := lastUsed.Time
+		lu = &t
+	}
+	return &u, keyID, lu, nil
+}
+
+// TouchAPIKey stamps the key's last_used_at. Callers throttle (the auth path
+// touches at most about once a minute per key) so this write stays off the
+// hot path.
+func (s *Store) TouchAPIKey(id int64, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`, at, id)
+	if err != nil {
+		return fmt.Errorf("touch api key: %w", err)
+	}
+	return nil
 }
 
 // APIKeyInfo is a safe view of an api_keys row — no key_hash exposed.
@@ -433,12 +462,41 @@ type APIKeyInfo struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+	// ExpiresAt is nil for a never-expiring key.
+	ExpiresAt *time.Time `json:"expires_at"`
+	// LastUsedAt is nil for a key that has never authenticated a request.
+	LastUsedAt *time.Time `json:"last_used_at"`
+}
+
+// APIKeyAdminInfo is APIKeyInfo plus the owning user, for the admin-only
+// cross-user token inventory.
+type APIKeyAdminInfo struct {
+	APIKeyInfo
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
+func scanAPIKeyInfo(rows *sql.Rows, k *APIKeyInfo, extra ...any) error {
+	var expires, lastUsed sql.NullTime
+	dest := append([]any{&k.ID, &k.Name, &k.CreatedAt, &expires, &lastUsed}, extra...)
+	if err := rows.Scan(dest...); err != nil {
+		return err
+	}
+	if expires.Valid {
+		t := expires.Time
+		k.ExpiresAt = &t
+	}
+	if lastUsed.Valid {
+		t := lastUsed.Time
+		k.LastUsedAt = &t
+	}
+	return nil
 }
 
 // ListAPIKeys returns all tokens owned by userID, newest first.
 func (s *Store) ListAPIKeys(userID int64) ([]APIKeyInfo, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
+		`SELECT id, name, created_at, expires_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
 		userID)
 	if err != nil {
 		return nil, err
@@ -447,7 +505,30 @@ func (s *Store) ListAPIKeys(userID int64) ([]APIKeyInfo, error) {
 	keys := []APIKeyInfo{}
 	for rows.Next() {
 		var k APIKeyInfo
-		if err := rows.Scan(&k.ID, &k.Name, &k.CreatedAt); err != nil {
+		if err := scanAPIKeyInfo(rows, &k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// ListAllAPIKeys returns every token on the server with its owning user,
+// newest first. Admin-only surface: the credential inventory that makes
+// revocation possible without trawling the audit log for IDs.
+func (s *Store) ListAllAPIKeys() ([]APIKeyAdminInfo, error) {
+	rows, err := s.db.Query(`
+		SELECT k.id, k.name, k.created_at, k.expires_at, k.last_used_at, k.user_id, u.username
+		FROM api_keys k JOIN users u ON u.id = k.user_id
+		ORDER BY k.created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := []APIKeyAdminInfo{}
+	for rows.Next() {
+		var k APIKeyAdminInfo
+		if err := scanAPIKeyInfo(rows, &k.APIKeyInfo, &k.UserID, &k.Username); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)

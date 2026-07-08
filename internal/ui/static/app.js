@@ -1485,9 +1485,12 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     const name = newTokenName.value.trim();
     if (!name) { setError(newTokenError, 'A token name is required'); return; }
+    const payload = { name };
+    const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
+    if (Number.isFinite(expiryDays) && expiryDays > 0) payload.expires_in_days = expiryDays;
     let resp;
     try {
-      resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) });
+      resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });
     } catch {
       setError(newTokenError, 'Network error');
       return;

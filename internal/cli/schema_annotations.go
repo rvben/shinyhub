@@ -273,11 +273,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "name", Type: "string"},
 		{Name: "token", Type: "string", Desc: "The token value (shown once)"},
 		{Name: "created_at", Type: "string"},
+		{Name: "expires_at", Type: "string", Desc: "null when the token never expires"},
 	}},
 	"tokens list": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "id", Type: "integer"},
 		{Name: "name", Type: "string"},
 		{Name: "created_at", Type: "string"},
+		{Name: "expires_at", Type: "string", Desc: "null when the token never expires"},
+		{Name: "last_used_at", Type: "string", Desc: "null until the token first authenticates"},
 	}, EnvelopeFields: []fieldSpec{
 		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},

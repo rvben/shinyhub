@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -506,13 +507,23 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 
 type createTokenRequest struct {
 	Name string `json:"name"`
+	// ExpiresInDays sets an expiry that far in the future; 0/absent keeps the
+	// token non-expiring (the historical behavior).
+	ExpiresInDays int `json:"expires_in_days"`
 }
+
+// maxTokenExpiryDays caps requested expiries at ten years: far enough out to
+// be "effectively forever" for a real workflow, small enough to reject typos
+// like 99999999 that would silently mean never.
+const maxTokenExpiryDays = 3650
 
 type createTokenResponse struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
 	Token     string    `json:"token"`
 	CreatedAt time.Time `json:"created_at"`
+	// ExpiresAt is null for a never-expiring token.
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
@@ -547,6 +558,17 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ExpiresInDays < 0 || req.ExpiresInDays > maxTokenExpiryDays {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("expires_in_days must be between 0 (never) and %d", maxTokenExpiryDays))
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresInDays > 0 {
+		t := time.Now().UTC().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
+		expiresAt = &t
+	}
+
 	rawKey, keyHash, err := generateAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -554,20 +576,26 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	keyID, createdAt, err := s.store.CreateAPIKey(db.CreateAPIKeyParams{
-		UserID:  u.ID,
-		KeyHash: keyHash,
-		Name:    req.Name,
+		UserID:    u.ID,
+		KeyHash:   keyHash,
+		Name:      req.Name,
+		ExpiresAt: expiresAt,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
+	auditDetail := ""
+	if req.ExpiresInDays > 0 {
+		auditDetail = fmt.Sprintf("expires_in_days=%d", req.ExpiresInDays)
+	}
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "create_token",
 		ResourceType: "token",
 		ResourceID:   req.Name,
+		Detail:       auditDetail,
 		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{
@@ -575,6 +603,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		Name:      req.Name,
 		Token:     rawKey,
 		CreatedAt: createdAt,
+		ExpiresAt: expiresAt,
 	})
 }
 
@@ -584,13 +613,30 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	limit, offset := parsePagination(r)
+
+	// ?all=1: the admin-only credential inventory across every user, with the
+	// owning username per token so revocation does not require trawling the
+	// audit log for IDs.
+	if r.URL.Query().Get("all") != "" {
+		if u.Role != "admin" {
+			writeError(w, http.StatusForbidden, "admin only")
+			return
+		}
+		keys, err := s.store.ListAllAPIKeys()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		writeList(w, keys, limit, offset, nil)
+		return
+	}
 
 	keys, err := s.store.ListAPIKeys(u.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	limit, offset := parsePagination(r)
 	writeList(w, keys, limit, offset, nil)
 }
 
