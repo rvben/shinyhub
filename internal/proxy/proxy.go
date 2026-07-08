@@ -375,6 +375,22 @@ type Proxy struct {
 	// decisionAllocate reserves a new slot and the request is served the loading
 	// page. Tasks 12/13 provide the real implementation; wire via SetSpawnFunc.
 	spawn func(slug string, slotID int)
+
+	// memGuard is the optional host-memory admission floor for elastic pools:
+	// while the host reports less available memory than the floor, NO new
+	// worker is allocated (fresh sessions are shed with 503) but existing
+	// bindings keep routing. Atomic so the check runs lock-free on the
+	// allocate path; nil disables. Wire via SetMemoryGuard.
+	memGuard atomic.Pointer[memoryGuard]
+}
+
+// memoryGuard pairs the configured floor with the probe that reads the host's
+// currently available memory. probe returns ok=false when no reading is
+// available, in which case admission fails open: a broken probe must never
+// take the platform down.
+type memoryGuard struct {
+	minAvailableMB int
+	probe          func() (availableMB int, ok bool)
 }
 
 // onMissSyncFuncT is the signature for the injected on-miss synchronous sync.
@@ -419,6 +435,20 @@ func (p *Proxy) SetSpawnFunc(fn func(slug string, slotID int)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.spawn = fn
+}
+
+// SetMemoryGuard arms (or, with a non-positive floor or nil probe, disarms)
+// the host-memory admission floor for elastic pools. While probe reports less
+// than minAvailableMB of available host memory, requests that would allocate a
+// NEW worker are shed with 503; sessions already bound to a worker are
+// unaffected. Shedding one incoming session is deliberate: the alternative is
+// the kernel OOM-killing a live worker together with every session on it.
+func (p *Proxy) SetMemoryGuard(minAvailableMB int, probe func() (int, bool)) {
+	if minAvailableMB <= 0 || probe == nil {
+		p.memGuard.Store(nil)
+		return
+	}
+	p.memGuard.Store(&memoryGuard{minAvailableMB: minAvailableMB, probe: probe})
 }
 
 const (
@@ -1927,6 +1957,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		case decisionAllocate:
 			p.mu.RUnlock()
+			// Host-memory admission floor: shed the request BEFORE reserving a
+			// slot or spawning. Only this branch is gated; pinned clients take
+			// decisionRoute and keep being served under memory pressure. The
+			// reject reason is distinct from pool-saturated so capacity
+			// automation (autoscale, warm expansion) does not read memory
+			// pressure as a scale-up signal.
+			if g := p.memGuard.Load(); g != nil {
+				if availMB, ok := g.probe(); ok && availMB < g.minAvailableMB {
+					p.recordReject(rec, slug, ReasonMemoryPressure, true)
+					rec.Header().Set("Retry-After", "5")
+					http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
+					return
+				}
+			}
 			slot := p.reserveWorker(slug, cid)
 			if slot < 0 {
 				// maxWorkers reached between the RUnlock and reserveWorker's Lock;

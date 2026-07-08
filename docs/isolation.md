@@ -211,10 +211,11 @@ runtime:
 
 server:
   host_budget_mb: 0                     # 0 = no host-level guard; > 0 = MiB limit
+  min_available_memory_mb: 0            # 0 = no runtime floor; > 0 = MiB floor
 ```
 
 Env vars: `SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION`,
-`SHINYHUB_SERVER_HOST_BUDGET_MB`.
+`SHINYHUB_SERVER_HOST_BUDGET_MB`, `SHINYHUB_SERVER_MIN_AVAILABLE_MEMORY_MB`.
 
 `default_worker_isolation` is the fallback applied when an app's
 `worker_isolation` is empty. The default is `multiplex`, preserving backward
@@ -254,7 +255,23 @@ deploy pipeline reject any combination where
 `max_workers * (memory_limit_mb + 150 MiB)` exceeds the budget. The check
 runs when worker settings are saved (via the API or a manifest deploy), not
 on server startup and not on each incoming request. Set the budget to catch
-misconfigured limits early.
+misconfigured limits early. The guard is inert unless the app also has an
+effective memory limit (per-app or tier default); saving elastic worker
+settings with NO active memory guard succeeds but returns an
+`X-ShinyHub-Warning` header, which `shinyhub apps set` prints to stderr.
+
+**Runtime memory floor.** `server.min_available_memory_mb` is the runtime
+companion to the static budget: while the host's available memory
+(`MemAvailable`) is below the floor, requests that would allocate a NEW
+worker are shed with `503` (`Retry-After: 5`,
+`X-Shinyhub-Reject: memory-pressure`) instead of spawning. Sessions already
+bound to a worker keep routing, and the floor releases as soon as memory
+recovers - no restart needed. Shedding one incoming session is deliberate:
+without the floor the backstop is the kernel OOM killer, which kills a live
+worker together with every session on it. The `memory-pressure` reject reason
+is distinct from `pool-saturated` so autoscaling does not read memory
+pressure as a scale-up signal. If the memory reading is unavailable, the
+floor fails open (admission proceeds).
 
 **`max_workers` is a hard ceiling; overflow yields 503.** When all
 `max_workers` slots are occupied, a new client receives `503 Service

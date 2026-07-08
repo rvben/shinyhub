@@ -202,3 +202,70 @@ func TestPatchApp_WorkerPartialPatchFallbackRejectsZeroGroupedSize(t *testing.T)
 		t.Errorf("expected error to mention grouped_size, got: %s", rec.Body.String())
 	}
 }
+
+// newWorkerFloorServer builds a server whose runtime memory floor
+// (min_available_memory_mb) is set, i.e. the runtime guard is active.
+func newWorkerFloorServer(t *testing.T, minAvailableMB int) (*api.Server, *db.Store) {
+	t.Helper()
+	store := dbtest.New(t)
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+		Server:  config.ServerConfig{MinAvailableMemoryMB: minAvailableMB},
+	}
+	return api.New(cfg, store, nil, nil), store
+}
+
+// TestPatchApp_ElasticIsolationWarnsWithoutMemoryGuard verifies that switching
+// an app to elastic isolation on a server with no memory guard configured
+// (no host budget, no runtime floor) succeeds but attaches the
+// X-ShinyHub-Warning header so operators learn the host is unprotected.
+func TestPatchApp_ElasticIsolationWarnsWithoutMemoryGuard(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2}`)
+	rec := patchWorkerApp(t, srv, token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	warn := rec.Header().Get("X-ShinyHub-Warning")
+	if warn == "" {
+		t.Fatal("expected X-ShinyHub-Warning when no memory guard is configured")
+	}
+	if !strings.Contains(warn, "memory guard") {
+		t.Errorf("warning should name the missing memory guard, got %q", warn)
+	}
+}
+
+// TestPatchApp_ElasticIsolationSilentWithRuntimeFloor verifies that the
+// warning is suppressed when the runtime available-memory floor is configured.
+func TestPatchApp_ElasticIsolationSilentWithRuntimeFloor(t *testing.T) {
+	srv, store := newWorkerFloorServer(t, 1024)
+	_, token := seedWorkerApp(t, store)
+
+	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2}`)
+	rec := patchWorkerApp(t, srv, token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("expected no warning with the runtime floor set, got %q", warn)
+	}
+}
+
+// TestPatchApp_MultiplexNeverWarnsAboutMemoryGuard pins that the warning is
+// scoped to elastic isolation: reverting to multiplex is always silent.
+func TestPatchApp_MultiplexNeverWarnsAboutMemoryGuard(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	body := []byte(`{"worker_isolation":"multiplex"}`)
+	rec := patchWorkerApp(t, srv, token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("expected no warning for multiplex, got %q", warn)
+	}
+}

@@ -74,6 +74,13 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 		if err := config.ValidateWorkerSettings(ws, s.clustered, effMemMB, s.cfg.HostBudgetMB()); err != nil {
 			return newValidationError("%s", err.Error())
 		}
+		// The deploy response has no warning channel, so an unguarded elastic
+		// configuration is surfaced in the server log instead (the PATCH path
+		// additionally sends X-ShinyHub-Warning).
+		if warn := config.WorkerBudgetWarning(ws, effMemMB, s.cfg.HostBudgetMB(), s.cfg.MinAvailableMemoryMB()); warn != "" {
+			slog.Warn("manifest worker settings accepted without a memory guard",
+				"app", app.Slug, "detail", warn)
+		}
 	}
 	return nil
 }

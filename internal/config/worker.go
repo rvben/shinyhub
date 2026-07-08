@@ -49,3 +49,24 @@ func ValidateWorkerSettings(w WorkerSettings, clustered bool, effectiveMemMB, ho
 	}
 	return nil
 }
+
+// WorkerBudgetWarning returns a human-readable warning when elastic isolation
+// (grouped/per_session) is configured with NO memory guard active: the static
+// worst-case check is inert (it needs both host_budget_mb and a per-worker
+// memory limit) and the runtime available-memory floor is off. In that state
+// the kernel OOM killer is the only backstop, and it takes out a live worker
+// with every session on it. Empty when guarded or when isolation is multiplex.
+func WorkerBudgetWarning(w WorkerSettings, effectiveMemMB, hostBudgetMB, minAvailableMB int) string {
+	switch w.Isolation {
+	case IsolationGrouped, IsolationPerSession:
+	default:
+		return ""
+	}
+	staticActive := effectiveMemMB > 0 && hostBudgetMB > 0
+	if staticActive || minAvailableMB > 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s isolation has no memory guard: up to max_workers=%d workers may spawn with no host memory check, leaving the kernel OOM killer as the only backstop. Set server.host_budget_mb plus a per-app memory limit, or server.min_available_memory_mb.",
+		w.Isolation, w.MaxWorkers)
+}

@@ -360,6 +360,14 @@ type ServerConfig struct {
 	// worker processes. Used by the host-capacity guard to reject deploys that
 	// would exceed available memory. 0 disables the guard.
 	HostBudgetMB int `yaml:"host_budget_mb"`
+
+	// MinAvailableMemoryMB is the runtime companion to HostBudgetMB's static
+	// worst-case check: while the host's available memory (MemAvailable) is
+	// below this floor, NO new elastic worker (grouped/per_session isolation)
+	// is allocated; fresh sessions get 503 while established sessions keep
+	// routing. Shedding one new session beats the kernel OOM-killing a live
+	// worker with every session on it. 0 disables the floor.
+	MinAvailableMemoryMB int `yaml:"min_available_memory_mb"`
 }
 
 // GroupRoleMapping maps an IdP group name to a global role. Shared by the OIDC
@@ -2133,6 +2141,13 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Server.HostBudgetMB = n
 	}
+	if v := os.Getenv("SHINYHUB_SERVER_MIN_AVAILABLE_MEMORY_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_MIN_AVAILABLE_MEMORY_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Server.MinAvailableMemoryMB = n
+	}
 	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
 		cfg.Server.TrustedProxies = splitCSV(v)
 	}
@@ -2525,3 +2540,7 @@ func applyEnv(cfg *Config) error {
 // HostBudgetMB returns the total RAM budget (in MiB) for app worker processes.
 // 0 means the host-capacity guard is disabled.
 func (c *Config) HostBudgetMB() int { return c.Server.HostBudgetMB }
+
+// MinAvailableMemoryMB returns the runtime host-memory floor (in MiB) below
+// which no new elastic worker is allocated. 0 means the floor is disabled.
+func (c *Config) MinAvailableMemoryMB() int { return c.Server.MinAvailableMemoryMB }

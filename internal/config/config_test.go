@@ -2807,3 +2807,42 @@ server:
 		t.Errorf("expected HostBudgetMB=8192, got %d", cfg.HostBudgetMB())
 	}
 }
+
+func TestMinAvailableMemoryMB_DefaultsToZero(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MinAvailableMemoryMB() != 0 {
+		t.Errorf("expected MinAvailableMemoryMB=0 when unset, got %d", cfg.MinAvailableMemoryMB())
+	}
+}
+
+func TestMinAvailableMemoryMB_FromEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_SERVER_MIN_AVAILABLE_MEMORY_MB", "1024")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MinAvailableMemoryMB() != 1024 {
+		t.Errorf("expected MinAvailableMemoryMB=1024, got %d", cfg.MinAvailableMemoryMB())
+	}
+}
+
+func TestMinAvailableMemoryMB_FromYAML(t *testing.T) {
+	f := writeYAML(t, `
+auth:
+  secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+server:
+  min_available_memory_mb: 768
+`)
+	cfg, err := config.Load(f)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MinAvailableMemoryMB() != 768 {
+		t.Errorf("expected MinAvailableMemoryMB=768, got %d", cfg.MinAvailableMemoryMB())
+	}
+}

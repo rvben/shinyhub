@@ -654,6 +654,12 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// Valid but unguarded elastic isolation is accepted with a warning so
+		// the operator learns the host has no memory backstop (the CLI relays
+		// this header to stderr).
+		if warn := config.WorkerBudgetWarning(ws, effMemMB, s.cfg.HostBudgetMB(), s.cfg.MinAvailableMemoryMB()); warn != "" {
+			w.Header().Set("X-ShinyHub-Warning", warn)
+		}
 	}
 
 	if rawVal, present := raw["placement"]; present {
