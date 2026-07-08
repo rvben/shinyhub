@@ -37,6 +37,9 @@ type ContextUser struct {
 	// slugs across every app surface, regardless of role. Set on the deploy
 	// token identity from auth.deploy_token_apps; nil for every normal user.
 	AppScope []string
+	// TokenEpoch is the user's live session-revocation counter (users.token_epoch).
+	// JWT validation rejects tokens whose embedded epoch differs.
+	TokenEpoch int64
 }
 
 // AppInScope reports whether this identity may touch the app named by slug.
@@ -102,13 +105,23 @@ func tokenFromClaims(c *Claims) *TokenInfo {
 // resolveJWTUser turns validated claims into a ContextUser. When userLookup
 // is supplied, the live DB record wins over what the token was issued with;
 // this is what makes role demotions and user deletions take effect without
-// waiting for the JWT to expire. With no lookup we fall back to the claim
-// values (used by tests that want to skip DB plumbing).
+// waiting for the JWT to expire. It also enforces session revocation: a token
+// whose embedded epoch no longer matches the user's live token_epoch (bumped
+// by admin revoke-sessions or a password change) is rejected. With no lookup
+// we fall back to the claim values (used by tests that want to skip DB
+// plumbing).
 func resolveJWTUser(claims *Claims, userLookup UserLookup) (*ContextUser, error) {
 	if userLookup == nil {
 		return userFromClaims(claims), nil
 	}
-	return userLookup(claims.UserID)
+	u, err := userLookup(claims.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if u != nil && u.TokenEpoch != claims.SessionEpoch {
+		return nil, ErrTokenRevoked
+	}
+	return u, nil
 }
 
 func authenticateHeader(header, secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {

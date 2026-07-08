@@ -194,7 +194,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		user = fresh
 	}
 
-	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	jwtToken, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

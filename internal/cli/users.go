@@ -48,9 +48,52 @@ func newUsersCmd() *cobra.Command {
 		newUsersCreateCmd(),
 		newUsersSetRoleCmd(),
 		newUsersResetPasswordCmd(),
+		newUsersRevokeSessionsCmd(),
 		newUsersDeleteCmd(),
 	)
 	return cmd
+}
+
+func newUsersRevokeSessionsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "revoke-sessions <username>",
+		Short: "Sign a user out of every active session",
+		Long: "Sign a user out of every active session.\n\n" +
+			"Invalidates all of the user's outstanding session tokens immediately\n" +
+			"(they must log in again). Use when a session may be compromised or a\n" +
+			"leaver's browser is still signed in. API tokens are separate\n" +
+			"credentials: list them with `shinyhub tokens list --all` and revoke\n" +
+			"individually.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			username := args[0]
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			id, err := lookupUserID(cfg, username)
+			if err != nil {
+				return err
+			}
+			req, err := http.NewRequest("POST", cfg.Host+"/api/users/"+strconv.FormatInt(id, 10)+"/revoke-sessions", nil)
+			if err != nil {
+				return fmt.Errorf("build request: %w", err)
+			}
+			req.Header.Set("Authorization", authHeader(cfg.Token))
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			out, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode >= 400 {
+				return httpError(cfg.Token, "revoke sessions", resp, out)
+			}
+			return renderAction(cmd, "revoked",
+				map[string]any{"username": username},
+				fmt.Sprintf("%s: all sessions revoked", username))
+		},
+	}
 }
 
 // lookupUserID resolves a username to its numeric id via GET /api/users/{username}

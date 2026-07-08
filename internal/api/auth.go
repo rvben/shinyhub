@@ -248,7 +248,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	token, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -297,7 +297,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	token, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -367,7 +367,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				if authTime.IsZero() {
 					authTime = time.Now()
 				}
-				freshToken, err := auth.IssueJWTAt(u.ID, u.Username, u.Role, s.cfg.Auth.Secret, authTime)
+				freshToken, err := auth.SlideSessionToken(u, s.cfg.Auth.Secret, authTime)
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "internal server error")
 					return
@@ -474,6 +474,30 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.UpdateUserPassword(u.ID, hash); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
+		}
+		// Changing the password signs out every session that was authenticated
+		// with the old credential (a hijacked session must not survive the
+		// rotation). The caller's own browser session is re-issued below at the
+		// new epoch so they stay signed in; a Bearer-JWT caller re-logs in.
+		if err := s.store.BumpTokenEpoch(u.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if r.Header.Get("Authorization") == "" {
+			if _, cerr := r.Cookie(auth.SessionCookieName); cerr == nil {
+				var authTime time.Time
+				if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
+					authTime = ti.AuthTime
+				}
+				if authTime.IsZero() {
+					authTime = time.Now()
+				}
+				if liveUser, lerr := s.store.LookupContextUser(u.ID); lerr == nil {
+					if freshToken, terr := auth.SlideSessionToken(liveUser, s.cfg.Auth.Secret, authTime); terr == nil {
+						auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
+					}
+				}
+			}
 		}
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,

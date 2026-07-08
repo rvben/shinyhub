@@ -766,6 +766,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/users/{username}", s.handleGetUser)                               // any auth: lookup by username
 		r.Patch("/api/users/{id}", s.handlePatchUser)                                 // admin: update role
 		r.Patch("/api/users/{id}/password", s.handlePatchUserPassword)                // admin: reset password
+		r.Post("/api/users/{id}/revoke-sessions", s.handleRevokeUserSessions)         // admin: force-logout all sessions
 		r.Delete("/api/users/{id}", s.handleDeleteUser)                               // admin: delete user
 
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log

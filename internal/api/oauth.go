@@ -127,7 +127,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Warn("oauth_email_failed", "provider", "github", "err", err)
 	}
 
-	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	jwtToken, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -244,7 +244,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Warn("oauth_email_failed", "provider", "google", "err", err)
 	}
 
-	jwtToken, err := auth.IssueJWT(user.ID, user.Username, user.Role, s.cfg.Auth.Secret)
+	jwtToken, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

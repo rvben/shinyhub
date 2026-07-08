@@ -51,6 +51,10 @@ type User struct {
 	// for local username/password accounts and until the first SSO login sets it.
 	Email     string
 	CreatedAt time.Time
+	// TokenEpoch is the session-revocation counter. JWTs embed the epoch they
+	// were issued at; a bump (admin revoke-sessions, password change)
+	// invalidates every outstanding session token at the next request.
+	TokenEpoch int64
 }
 
 // ContextUser maps a persisted user row to the auth.ContextUser carried through
@@ -66,6 +70,7 @@ func (u *User) ContextUser() *auth.ContextUser {
 		Role:        u.Role,
 		Email:       u.Email,
 		DisplayName: u.DisplayName,
+		TokenEpoch:  u.TokenEpoch,
 	}
 }
 
@@ -97,11 +102,11 @@ func (s *Store) CreateUser(p CreateUserParams) error {
 
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users WHERE username = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users WHERE username = ?`,
 		username,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -112,11 +117,11 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users WHERE id = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users WHERE id = ?`,
 		id,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -142,7 +147,7 @@ func (s *Store) LookupContextUser(id int64) (*auth.ContextUser, error) {
 // ListUsers returns all users ordered by username.
 func (s *Store) ListUsers() ([]*User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, password_hash, role, display_name, email, created_at FROM users ORDER BY username`)
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +155,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 	var users []*User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 			return nil, err
 		}
 		users = append(users, &u)
@@ -159,6 +164,24 @@ func (s *Store) ListUsers() ([]*User, error) {
 		users = []*User{}
 	}
 	return users, rows.Err()
+}
+
+// BumpTokenEpoch increments the user's session-revocation counter, killing
+// every outstanding session JWT at its next request. Returns ErrNotFound for
+// an unknown user.
+func (s *Store) BumpTokenEpoch(userID int64) error {
+	res, err := s.db.Exec(`UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?`, userID)
+	if err != nil {
+		return fmt.Errorf("bump token epoch: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("bump token epoch rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetForwardAuthUser returns the auth.ContextUser for a username, or
@@ -423,7 +446,7 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 // without a second lookup.
 func (s *Store) AuthenticateAPIKey(hash string) (*User, int64, *time.Time, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at,
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch,
 		       k.id, k.last_used_at
 		FROM users u JOIN api_keys k ON k.user_id = u.id
 		WHERE k.key_hash = ? AND (k.expires_at IS NULL OR k.expires_at > ?)`,
@@ -431,7 +454,7 @@ func (s *Store) AuthenticateAPIKey(hash string) (*User, int64, *time.Time, error
 	var u User
 	var keyID int64
 	var lastUsed sql.NullTime
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt,
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
 		&keyID, &lastUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, nil, ErrNotFound
@@ -1952,12 +1975,12 @@ func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
 
 func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`, provider, providerID)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -2004,7 +2027,7 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	scanUser := func(row *sql.Row) (*User, error) {
 		var u User
-		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt); err != nil {
+		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrNotFound
 			}
@@ -2013,12 +2036,12 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return &u, nil
 	}
 	const linkedQuery = `
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`
 	const userByIDQuery = `
-		SELECT id, username, password_hash, role, display_name, email, created_at
+		SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch
 		FROM users WHERE id = ?`
 
 	if u, gerr := scanUser(tx.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {

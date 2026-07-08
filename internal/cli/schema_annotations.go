@@ -501,6 +501,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "id", Type: "integer"},
 		{Name: "username", Type: "string"},
 	}},
+	"users revoke-sessions": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "revoked"},
+		{Name: "username", Type: "string"},
+	}},
 	"users delete": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "deleted"},
 		{Name: "id", Type: "integer"},
