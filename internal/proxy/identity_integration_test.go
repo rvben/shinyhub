@@ -9,6 +9,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/identity"
@@ -83,6 +84,54 @@ func buildChain(
 	prx.SetIdentityProvider(prov.PayloadFor)
 	if err := prx.RegisterReplica(app.Slug, 0, backendURL, nil, 1); err != nil {
 		t.Fatalf("RegisterReplica: %v", err)
+	}
+
+	st := chainStore{app: app}
+	mw := access.Middleware(st, secret, nil, lookup)
+	chain := mw(prx)
+	return chain, headers
+}
+
+// buildElasticChain wires access.Middleware -> proxy.Proxy -> backend using
+// the ELASTIC worker registration path (RegisterElasticWorker), the Director
+// builder used by grouped/per_session/remote_docker/fargate tiers, instead of
+// buildChain's multiplex RegisterReplica path.
+//
+// The pool setup mirrors the production call order in
+// internal/deploy/deploy.go's Run (SetPoolSize, SetPoolCap-equivalent via
+// SetPoolAppID/SetPoolIdentityHeaders, then SetPoolMode with an elastic mode)
+// followed by the async registration internal/lifecycle/elastic.go's
+// ElasticSpawner.Spawn performs once a worker is healthy
+// (s.Proxy.RegisterElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID)).
+// groupedSize=1, maxWorkers=1 keeps decide() routing a single client straight
+// to the one registered worker without a prior reserveWorker/bindClient
+// round-trip, since reserveWorker is unexported and unavailable to this
+// external test package - RegisterElasticWorker on its own already creates
+// the worker entry when no booting placeholder exists (see its doc comment).
+func buildElasticChain(
+	t *testing.T,
+	app *db.App,
+	secret string,
+	lookup auth.UserLookup,
+	backendURL string,
+) (http.Handler, func() http.Header) {
+	t.Helper()
+
+	srv, headers := startChainBackend(t)
+	if backendURL == "" {
+		backendURL = srv.URL
+	}
+	_ = srv // already registered in t.Cleanup via startChainBackend; this is now a no-op reference
+
+	prx := proxy.New()
+	prx.SetPoolSize(app.Slug, 1)
+	prx.SetPoolAppID(app.Slug, app.ID)
+	prx.SetPoolIdentityHeaders(app.Slug, true)
+	prx.SetPoolMode(app.Slug, config.IsolationGrouped, 1, 1)
+	prov := identity.NewProvider(secret, oneUserGroups{"eng"})
+	prx.SetIdentityProvider(prov.PayloadFor)
+	if err := prx.RegisterElasticWorker(app.Slug, 0, backendURL, nil, 1); err != nil {
+		t.Fatalf("RegisterElasticWorker: %v", err)
 	}
 
 	st := chainStore{app: app}
@@ -397,5 +446,160 @@ func TestIdentityChain_ForwardAuthStyleContextUser(t *testing.T) {
 	}
 	if claims.Subject != "9" {
 		t.Errorf("token Subject = %q, want %q", claims.Subject, "9")
+	}
+}
+
+// TestIdentityChain_ElasticWorkerHeadersVerifiable proves that a backend
+// registered through RegisterElasticWorker - the Director builder used by the
+// grouped / per_session / remote_docker / fargate tiers, as opposed to
+// RegisterReplica used by multiplex/dense pools - receives the same identity
+// headers and a verifiable per-app HS256 token as the multiplex path.
+//
+// It resolves the request user through the REAL production mapper
+// (store.LookupContextUser), matching TestIdentityChain_DisplayNameAndEmailReachBackend,
+// so this test is faithful to production session resolution as well as to
+// production pool registration.
+func TestIdentityChain_ElasticWorkerHeadersVerifiable(t *testing.T) {
+	const (
+		slug   = "demo"
+		secret = "chain-test-secret"
+	)
+
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "ana", PasswordHash: "", Role: "developer"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	u, err := store.GetUserByUsername("ana")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if err := store.SetDisplayNameFromIdP(u.ID, "Ana Smith"); err != nil {
+		t.Fatalf("set display name: %v", err)
+	}
+	if err := store.SetEmailFromIdP(u.ID, "ana@corp.example"); err != nil {
+		t.Fatalf("set email: %v", err)
+	}
+
+	app := &db.App{ID: 42, Slug: slug, Access: "private"}
+
+	srv, getHeaders := startChainBackend(t)
+	chain, _ := buildElasticChain(t, app, secret, store.LookupContextUser, srv.URL)
+
+	tok, err := auth.IssueJWT(u.ID, "ana", "developer", secret)
+	if err != nil {
+		t.Fatalf("IssueJWT: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: tok})
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	h := getHeaders()
+	if h == nil {
+		t.Fatal("backend received no headers (request never reached the elastic worker)")
+	}
+
+	if got := h.Get(identity.HeaderUser); got != "ana" {
+		t.Errorf("X-Shinyhub-User = %q, want %q", got, "ana")
+	}
+	if got := h.Get(identity.HeaderEmail); got != "ana@corp.example" {
+		t.Errorf("X-Shinyhub-Email = %q, want %q", got, "ana@corp.example")
+	}
+	if got := h.Get(identity.HeaderName); got != "Ana Smith" {
+		t.Errorf("X-Shinyhub-Name = %q, want %q", got, "Ana Smith")
+	}
+	if got := h.Get(identity.HeaderGroups); got != "eng" {
+		t.Errorf("X-Shinyhub-Groups = %q, want %q", got, "eng")
+	}
+
+	tokenStr := h.Get(identity.HeaderToken)
+	if tokenStr == "" {
+		t.Fatal("X-Shinyhub-Identity-Token must be present")
+	}
+
+	key := identity.DeriveKey(secret, app.ID)
+	var claims identity.TokenClaims
+	parsed, parseErr := jwt.ParseWithClaims(
+		tokenStr,
+		&claims,
+		func(t *jwt.Token) (any, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return key, nil
+		},
+		jwt.WithAudience(slug),
+		jwt.WithIssuer(identity.Issuer),
+		jwt.WithLeeway(30),
+	)
+	if parseErr != nil {
+		t.Fatalf("token parse failed: %v", parseErr)
+	}
+	if !parsed.Valid {
+		t.Fatal("identity token is not valid")
+	}
+	if claims.Subject == "" {
+		t.Error("token Subject must not be empty")
+	}
+	if claims.Role != "developer" {
+		t.Errorf("token Role = %q, want %q", claims.Role, "developer")
+	}
+	if claims.Email != "ana@corp.example" {
+		t.Errorf("token email claim = %q, want %q", claims.Email, "ana@corp.example")
+	}
+	if claims.Name != "Ana Smith" {
+		t.Errorf("token name claim = %q, want %q", claims.Name, "Ana Smith")
+	}
+	if len(claims.Groups) != 1 || claims.Groups[0] != "eng" {
+		t.Errorf("token groups claim = %v, want [eng]", claims.Groups)
+	}
+}
+
+// TestIdentityChain_ElasticWorkerStripsForgedHeaders proves that the elastic
+// Director strips inbound forged X-Shinyhub-* headers exactly like the
+// multiplex Director (TestIdentityChain_PublicAppAuthenticatedAndAnonymous's
+// "no cookie with forged header" sub-case), for a public app with no
+// authenticated user.
+func TestIdentityChain_ElasticWorkerStripsForgedHeaders(t *testing.T) {
+	const (
+		slug   = "demo"
+		secret = "chain-test-secret"
+	)
+
+	app := &db.App{ID: 42, Slug: slug, Access: "public"}
+
+	srv, getHeaders := startChainBackend(t)
+	chain, _ := buildElasticChain(t, app, secret, nil, srv.URL)
+
+	req := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+	req.Header.Set("X-Shinyhub-User", "forged")
+	req.Header.Set("X-Shinyhub-Identity-Token", "forged-token")
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for public app, got %d", rec.Code)
+	}
+	h := getHeaders()
+	if h == nil {
+		t.Fatal("backend received no headers")
+	}
+	for k := range h {
+		prefix := k
+		if len(prefix) > len(identity.HeaderPrefix) {
+			prefix = prefix[:len(identity.HeaderPrefix)]
+		}
+		if http.CanonicalHeaderKey(prefix) == http.CanonicalHeaderKey(identity.HeaderPrefix) {
+			t.Errorf("forged/injected X-Shinyhub-* header %q reached the backend", k)
+		}
+	}
+	if got := h.Get(identity.HeaderUser); got != "" {
+		t.Errorf("X-Shinyhub-User reached backend = %q; must be stripped", got)
+	}
+	if got := h.Get(identity.HeaderToken); got != "" {
+		t.Errorf("X-Shinyhub-Identity-Token reached backend = %q; must be stripped", got)
 	}
 }
