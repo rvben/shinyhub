@@ -18,6 +18,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/sandbox"
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
 // OAuthConfig holds OAuth2 provider credentials.
@@ -392,6 +393,13 @@ type AuthConfig struct {
 	// env-token is active. Sourced from SHINYHUB_DEPLOY_TOKEN_ROLE; default
 	// "developer". Must be one of viewer, developer, operator, admin.
 	DeployTokenRole string `yaml:"-"`
+
+	// DeployTokenApps, when non-empty, restricts the deploy token to the listed
+	// app slugs across every app surface (view, manage, deploy, create, list),
+	// regardless of DeployTokenRole. Sourced from SHINYHUB_DEPLOY_TOKEN_APPS
+	// (comma-separated) or auth.deploy_token_apps. Slugs may name apps that do
+	// not exist yet (the token is allowed to create them).
+	DeployTokenApps []string `yaml:"deploy_token_apps"`
 
 	ForwardAuth ForwardAuthConfig `yaml:"forward_auth"`
 
@@ -1257,6 +1265,23 @@ func loadRaw(path string) (*Config, error) {
 				cfg.Auth.DeployTokenRole)
 		}
 	}
+	// Normalize and validate the deploy-token app allowlist. It only means
+	// something when a deploy token is configured; a lone allowlist is almost
+	// certainly a broken deployment, so fail loudly instead of silently doing
+	// nothing.
+	if normalized := normalizeSlugList(cfg.Auth.DeployTokenApps); len(normalized) > 0 {
+		cfg.Auth.DeployTokenApps = normalized
+		if cfg.Auth.DeployToken == "" {
+			return nil, fmt.Errorf("auth.deploy_token_apps is set but no deploy token is configured (SHINYHUB_DEPLOY_TOKEN)")
+		}
+		for _, s := range normalized {
+			if !slugpkg.Valid(s) {
+				return nil, fmt.Errorf("auth.deploy_token_apps: %q is not a valid app slug (%s)", s, slugpkg.HumanRule)
+			}
+		}
+	} else {
+		cfg.Auth.DeployTokenApps = nil
+	}
 	if cfg.Auth.OAuthDefaultRole == "" {
 		cfg.Auth.OAuthDefaultRole = "viewer"
 	}
@@ -1575,6 +1600,18 @@ func parseGroupRoleMappings(v string) ([]GroupRoleMapping, error) {
 }
 
 // splitCSV splits a comma-separated env value into trimmed, non-empty entries.
+// normalizeSlugList trims whitespace and drops empty entries so YAML-sourced
+// lists get the same normalization splitCSV applies to env-sourced ones.
+func normalizeSlugList(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 func splitCSV(v string) []string {
 	parts := strings.Split(v, ",")
 	out := make([]string, 0, len(parts))
@@ -1939,6 +1976,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_DEPLOY_TOKEN_ROLE"); v != "" {
 		cfg.Auth.DeployTokenRole = v
+	}
+	if v := os.Getenv("SHINYHUB_DEPLOY_TOKEN_APPS"); v != "" {
+		cfg.Auth.DeployTokenApps = splitCSV(v)
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

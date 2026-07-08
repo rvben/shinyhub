@@ -33,6 +33,25 @@ type ContextUser struct {
 	// claim. Empty for local username/password accounts and when no upstream
 	// email is available.
 	Email string
+	// AppScope, when non-empty, restricts this identity to the listed app
+	// slugs across every app surface, regardless of role. Set on the deploy
+	// token identity from auth.deploy_token_apps; nil for every normal user.
+	AppScope []string
+}
+
+// AppInScope reports whether this identity may touch the app named by slug.
+// An identity with no AppScope is unrestricted; a scoped identity is limited
+// to its allowlist even when its role would otherwise grant broader access.
+func (u *ContextUser) AppInScope(slug string) bool {
+	if u == nil || len(u.AppScope) == 0 {
+		return true
+	}
+	for _, s := range u.AppScope {
+		if s == slug {
+			return true
+		}
+	}
+	return false
 }
 
 // TokenInfo describes the JWT the current request was authenticated with.

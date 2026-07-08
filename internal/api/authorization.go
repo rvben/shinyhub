@@ -23,6 +23,12 @@ func (s *Server) canViewApp(u *auth.ContextUser, app *db.App) (bool, error) {
 	if u == nil || app == nil {
 		return false, nil
 	}
+	// A scoped identity (deploy token with an app allowlist) is checked before
+	// role and visibility: scope beats both, so an out-of-scope app stays
+	// invisible even to an admin-role token and even when the app is public.
+	if !u.AppInScope(app.Slug) {
+		return false, nil
+	}
 	if isPrivilegedAppOperator(u) || app.Access == "public" || app.Access == "shared" || app.OwnerID == u.ID {
 		return true, nil
 	}
@@ -31,6 +37,9 @@ func (s *Server) canViewApp(u *auth.ContextUser, app *db.App) (bool, error) {
 
 func canManageApp(u *auth.ContextUser, app *db.App) bool {
 	if u == nil || app == nil {
+		return false
+	}
+	if !u.AppInScope(app.Slug) {
 		return false
 	}
 	return isPrivilegedAppOperator(u) || app.OwnerID == u.ID
@@ -116,6 +125,9 @@ func (s *Server) effectiveAppMemberRole(u *auth.ContextUser, app *db.App) (strin
 // "Not a member" is the expected miss path; only DB errors propagate.
 func (s *Server) hasExplicitAccess(u *auth.ContextUser, app *db.App) (bool, error) {
 	if u == nil || app == nil {
+		return false, nil
+	}
+	if !u.AppInScope(app.Slug) {
 		return false, nil
 	}
 	if isPrivilegedAppOperator(u) || app.OwnerID == u.ID {

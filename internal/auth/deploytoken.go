@@ -61,3 +61,16 @@ func ValidateDeployTokenFormat(raw string) error {
 	}
 	return nil
 }
+
+// DeployTokenRoleWarning returns a boot-time warning when the pre-shared
+// deploy token is configured with a role far broader than deploys need, or
+// "" when the configuration warrants no warning. A leaked admin-role deploy
+// token is full platform compromise (user management, every app, token
+// revocation), so the operator should hear about it once at startup.
+func DeployTokenRoleWarning(role string) string {
+	if role != string(RoleAdmin) {
+		return ""
+	}
+	return "SHINYHUB_DEPLOY_TOKEN_ROLE=admin gives the deploy token full platform control (user management, every app); " +
+		"prefer developer, and scope it with SHINYHUB_DEPLOY_TOKEN_APPS"
+}

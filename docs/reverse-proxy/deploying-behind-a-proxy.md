@@ -28,7 +28,9 @@ The two pieces are:
 
 1. **Server side:** set `SHINYHUB_DEPLOY_TOKEN` (at least 32 characters) on the
    server process. Optionally set `SHINYHUB_DEPLOY_TOKEN_ROLE` to control what
-   the synthetic deploy user can do (default: `developer`).
+   the synthetic deploy user can do (default: `developer`), and
+   `SHINYHUB_DEPLOY_TOKEN_APPS` (comma-separated slugs) to restrict the token
+   to specific apps.
 
 2. **Client side:** set `SHINYHUB_HOST` to the direct URL of the ShinyHub port
    (not the proxied hostname) and `SHINYHUB_TOKEN` to the same value you set for
@@ -41,10 +43,19 @@ In the environment of the `shinyhub serve` process:
 ```bash
 SHINYHUB_DEPLOY_TOKEN="$(openssl rand -hex 32)"   # generate once; store in your secrets manager
 SHINYHUB_DEPLOY_TOKEN_ROLE=developer               # optional; default is developer
+SHINYHUB_DEPLOY_TOKEN_APPS=sales,hr-dashboard      # optional; restrict the token to these apps
 ```
 
 The token is never persisted to disk. To rotate it, change the env var and
 restart the server.
+
+**Scope the token to what CI actually deploys.** With
+`SHINYHUB_DEPLOY_TOKEN_APPS` set, the token can only see, deploy, and manage
+the listed slugs (it may create them if they do not exist yet); every other
+app returns 404, regardless of the token's role. This caps the blast radius of
+a leaked CI secret. Avoid `SHINYHUB_DEPLOY_TOKEN_ROLE=admin`: it grants the
+token user management on top of every app, and the server logs a warning at
+startup when it sees that configuration.
 
 ## Worked example
 

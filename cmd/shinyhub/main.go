@@ -841,10 +841,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			ID:       sysUser.ID,
 			Username: sysUser.Username,
 			Role:     sysUser.Role,
+			AppScope: cfg.Auth.DeployTokenApps,
 		})
 		slog.Info("deploy token registered",
 			"username", sysUser.Username,
-			"role", sysUser.Role)
+			"role", sysUser.Role,
+			"apps", cfg.Auth.DeployTokenApps)
+		if warning := auth.DeployTokenRoleWarning(sysUser.Role); warning != "" {
+			slog.Warn(warning)
+		}
 	}
 
 	// Refuse local-only runtimes in a clustered (Postgres) deployment before

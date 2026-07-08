@@ -65,6 +65,17 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// A scoped identity (deploy token with an app allowlist) sees only its
+	// allowlisted apps, matching the per-slug gates.
+	if len(u.AppScope) > 0 {
+		scoped := apps[:0]
+		for _, a := range apps {
+			if u.AppInScope(a.Slug) {
+				scoped = append(scoped, a)
+			}
+		}
+		apps = scoped
+	}
 	writeList(w, apps, limit, offset, nil)
 }
 
@@ -117,6 +128,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if !canCreateApps(u) {
 		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if !u.AppInScope(req.Slug) {
+		writeError(w, http.StatusForbidden, "this credential is restricted to specific apps; "+req.Slug+" is not one of them")
 		return
 	}
 
