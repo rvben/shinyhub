@@ -111,7 +111,7 @@ server). See docs/reverse-proxy/deploying-behind-a-proxy.md for the full setup.`
 	cmd.Flags().StringVar(&f.git, "git", "", "Git repository URL to clone and deploy")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
-	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private, shared, or public (default: server config)")
+	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private (members only), shared (every signed-in user), or public (anyone, no sign-in). Default: server config")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before deploying")
 	return cmd
 }
@@ -295,7 +295,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 	switch access, _ := appResp["access"].(string); access {
 	case "private":
-		fmt.Fprintf(noteW, "Access: private (only you can open it) - share with: shinyhub apps access set %s public\n", slug)
+		fmt.Fprintf(noteW, "Access: private (only people you grant can open it) - add someone: shinyhub apps access grant %s <username>\n", slug)
 	case "shared", "public":
 		fmt.Fprintf(noteW, "Access: %s\n", access)
 	}

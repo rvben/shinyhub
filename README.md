@@ -31,7 +31,7 @@ no external services to operate.
 - **Reverse proxy.** One URL per app under `/app/<slug>/`, sticky-session aware.
 - **Hibernation.** Idle apps are stopped automatically and restarted on the next request.
 - **Authentication.** Username/password, GitHub OAuth, Google OAuth, or generic OIDC (Okta, Azure AD, Keycloak, Auth0).
-- **Access control.** Public, private, or shared apps, with per-app member roles.
+- **Access control.** Private (members only), shared (every signed-in user), or public apps, with per-app member and IdP-group roles.
 - **Env vars and secrets.** Per-app key-value store; secrets encrypted at rest with AES-256-GCM. See [docs/environment.md](docs/environment.md).
 - **Persistent data dir.** Each app gets a `data/` directory that survives deploys, with `shinyhub data push|ls|rm` and a UI tab. See [docs/data.md](docs/data.md).
 - **Scheduled jobs and shared data.** Per-app cron schedules and read-only cross-app data mounts for fetcher to consumer pipelines. See [docs/schedules.md](docs/schedules.md).

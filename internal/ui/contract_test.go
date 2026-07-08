@@ -368,6 +368,24 @@ func TestAccessVisibilityUsesExplicitSave(t *testing.T) {
 		"the Visibility section must register with the dirty-state tracker")
 }
 
+// TestAccessVisibilityLabelsTeachSemantics pins the corrected visibility copy.
+// "shared" admits every signed-in user (the membership check is bypassed) and
+// "private" is where member/group grants apply; the old copy said "Private is
+// owner-only; Shared adds members and groups below", which inverted the model
+// and pushed operators toward over-exposing apps.
+func TestAccessVisibilityLabelsTeachSemantics(t *testing.T) {
+	assertContains(t, "index.html", "Private (members only)",
+		"the private radio label must say membership is what admits people")
+	assertContains(t, "index.html", "Shared (all signed-in users)",
+		"the shared radio label must say every signed-in user can open the app")
+	assertContains(t, "index.html", "Public (no sign-in)",
+		"the public radio label must say no sign-in is required")
+	assertNotContains(t, "index.html", "Private is owner-only",
+		"the visibility description must not claim private excludes members/groups")
+	assertNotContains(t, "index.html", "Shared adds members and groups",
+		"the visibility description must not conflate shared with membership")
+}
+
 // TestSPASlugifyTruncatesBeforeTrim guards parity with the CLI's
 // sanitizeSlug: the order MUST be slice(0,63) → trim trailing dashes, not
 // trim → slice. With trim-then-slice an input long enough to land on `-`

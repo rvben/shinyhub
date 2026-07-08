@@ -7,11 +7,14 @@ import (
 	"testing"
 )
 
-func grantWith(t *testing.T, appAccess string) (out, errb string) {
+// grantWith runs `apps access grant` against a stub server that responds 204,
+// optionally attaching the X-ShinyHub-Warning header the real server sends when
+// the app's visibility already admits everyone (shared/public).
+func grantWith(t *testing.T, warning string) (out, errb string) {
 	t.Helper()
 	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		if appAccess != "" {
-			w.Header().Set("X-Shinyhub-App-Access", appAccess)
+		if warning != "" {
+			w.Header().Set("X-ShinyHub-Warning", warning)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -26,19 +29,62 @@ func grantWith(t *testing.T, appAccess string) (out, errb string) {
 	return o.String(), e.String()
 }
 
-func TestAccessGrant_WarnsWhenPrivate(t *testing.T) {
-	_, errb := grantWith(t, "private")
-	if !strings.Contains(strings.ToLower(errb), "private") {
-		t.Errorf("expected a private-app warning on stderr, got %q", errb)
-	}
-	if !strings.Contains(errb, "shared") {
-		t.Errorf("warning should point at making the app shared, got %q", errb)
+// A grant on a private app is exactly what admits the member, so the CLI must
+// not second-guess it with a warning (the server sends none).
+func TestAccessGrant_SilentWhenPrivate(t *testing.T) {
+	_, errb := grantWith(t, "")
+	if errb != "" {
+		t.Errorf("expected no warning for a private-app grant, got %q", errb)
 	}
 }
 
-func TestAccessGrant_NoWarnWhenShared(t *testing.T) {
-	_, errb := grantWith(t, "shared")
-	if strings.Contains(strings.ToLower(errb), "private") {
-		t.Errorf("did not expect a private warning for a shared app, got %q", errb)
+// When the server warns that the app is already open to everyone (shared or
+// public visibility), the CLI relays that warning, matching group-grant.
+func TestAccessGrant_RelaysServerWarning(t *testing.T) {
+	_, errb := grantWith(t, "app is shared; all signed-in users can already view it")
+	if !strings.Contains(errb, "warning: app is shared") {
+		t.Errorf("expected the server warning on stderr, got %q", errb)
+	}
+}
+
+// The help text must not repeat the retired false claim that member grants
+// require shared visibility. Grants admit users to private apps; shared means
+// every signed-in user can view regardless of membership.
+func TestAccessGrantHelp_TeachesCorrectModel(t *testing.T) {
+	long := newAppsAccessGrantCmd().Long
+	for _, stale := range []string{"only take effect", "still cannot reach"} {
+		if strings.Contains(long, stale) {
+			t.Errorf("grant help still contains the false claim %q:\n%s", stale, long)
+		}
+	}
+	for _, want := range []string{"private", "signed-in"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("grant help should mention %q, got:\n%s", want, long)
+		}
+	}
+}
+
+// `apps access set` is where visibility is chosen, so its help must define what
+// each level actually admits.
+func TestAccessSetHelp_DefinesLevels(t *testing.T) {
+	long := newAppsAccessSetCmd().Long
+	for _, want := range []string{"private", "every signed-in user", "public"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("access set help should mention %q, got:\n%s", want, long)
+		}
+	}
+}
+
+// The deploy --visibility flag is the other place visibility is chosen; its
+// one-line usage must carry the same level definitions.
+func TestDeployVisibilityFlagHelp_DefinesLevels(t *testing.T) {
+	flag := newDeployCmd().Flags().Lookup("visibility")
+	if flag == nil {
+		t.Fatal("deploy has no --visibility flag")
+	}
+	for _, want := range []string{"members only", "every signed-in user", "anyone"} {
+		if !strings.Contains(flag.Usage, want) {
+			t.Errorf("--visibility usage should mention %q, got: %s", want, flag.Usage)
+		}
 	}
 }

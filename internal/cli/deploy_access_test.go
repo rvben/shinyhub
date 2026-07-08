@@ -38,7 +38,12 @@ func TestDeploy_PrintsAccessLineForPrivateApp(t *testing.T) {
 	if !strings.Contains(stdout, "Access: private") {
 		t.Errorf("expected an access line for a private app, got %q", stdout)
 	}
-	if !strings.Contains(stdout, "apps access set demo public") {
-		t.Errorf("expected a share hint pointing at access set, got %q", stdout)
+	// The hint for sharing a private app is a scoped member grant, never a
+	// visibility widening (public would open the app to everyone, unauthenticated).
+	if !strings.Contains(stdout, "apps access grant demo") {
+		t.Errorf("expected a grant hint for sharing a private app, got %q", stdout)
+	}
+	if strings.Contains(stdout, "apps access set demo public") {
+		t.Errorf("the private-app hint must not push toward public visibility, got %q", stdout)
 	}
 }
