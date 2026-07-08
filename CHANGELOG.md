@@ -73,6 +73,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.1](https://github.com/rvben/shinyhub/compare/v0.10.0...v0.10.1) - 2026-07-08
+
+### Added
+
+- **proxy**: shed new elastic workers under host memory pressure ([3ed9e65](https://github.com/rvben/shinyhub/commit/3ed9e65547d39629387b69f6e257d6f9bf8e7ccf))
+
+### Fixed
+
+- **api**: resolve inherited isolation and merged state in the worker guard math ([e87c318](https://github.com/rvben/shinyhub/commit/e87c318aad9e2a5c39f70586dfb93f894df2948d))
+- **api**: compute the worker memory-guard math against the post-patch limit ([3c51a4d](https://github.com/rvben/shinyhub/commit/3c51a4d8d2910353420c831c805afe1782eca2e8))
+- **schedules**: retry a transient first-fire failure once, guarded against double-fire ([7e0433b](https://github.com/rvben/shinyhub/commit/7e0433bad5d0f9bb62972fd6df5857c42f34f542))
+
 ## [0.10.0](https://github.com/rvben/shinyhub/compare/v0.9.6...v0.10.0) - 2026-07-08
 
 ### Added
