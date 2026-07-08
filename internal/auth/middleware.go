@@ -253,31 +253,12 @@ var roleOrder = map[string]int{
 // IsValidGlobalRole reports whether s names one of the four global roles that
 // can be assigned to a user account (viewer, developer, operator, admin).
 // Keep the single source of truth in this package so handlers and migrations
-// cannot drift from the hierarchy used by RequireRole.
+// cannot drift from the ranking used by group-to-role mapping. Authorization
+// itself is enforced per-handler (requireAdmin and the app gates in
+// internal/api/authorization.go), not by router middleware.
 func IsValidGlobalRole(s string) bool {
 	_, ok := roleOrder[s]
 	return ok
-}
-
-// RequireRole enforces a minimum role level. Roles are ordered:
-// viewer < developer < operator < admin.
-func RequireRole(role Role) func(http.Handler) http.Handler {
-	required := roleOrder[string(role)]
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			u := UserFromContext(r.Context())
-			if u == nil {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			actual := roleOrder[u.Role]
-			if actual == 0 || actual < required {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
 }
 
 // WithUser returns a copy of ctx with the given ContextUser attached.
