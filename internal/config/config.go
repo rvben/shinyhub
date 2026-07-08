@@ -401,6 +401,12 @@ type AuthConfig struct {
 	// not exist yet (the token is allowed to create them).
 	DeployTokenApps []string `yaml:"deploy_token_apps"`
 
+	// OperatorAuditAccess lets operator-role users read the audit log
+	// (GET /api/audit and the dashboard pages behind it). Default false: audit
+	// stays admin-only unless the operator opts in. Env:
+	// SHINYHUB_OPERATOR_AUDIT_ACCESS.
+	OperatorAuditAccess bool `yaml:"operator_audit_access"`
+
 	ForwardAuth ForwardAuthConfig `yaml:"forward_auth"`
 
 	// IdentityHeaders globally enables forwarding the authenticated user's
@@ -1979,6 +1985,13 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_DEPLOY_TOKEN_APPS"); v != "" {
 		cfg.Auth.DeployTokenApps = splitCSV(v)
+	}
+	if v := os.Getenv("SHINYHUB_OPERATOR_AUDIT_ACCESS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OPERATOR_AUDIT_ACCESS: %w", err)
+		}
+		cfg.Auth.OperatorAuditAccess = b
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

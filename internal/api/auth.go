@@ -187,6 +187,10 @@ func newSessionUser(u *db.User) *sessionUserResponse {
 type sessionResponse struct {
 	User          *sessionUserResponse `json:"user"`
 	CanCreateApps bool                 `json:"can_create_apps"`
+	// CanReadAudit advertises audit-log access (admin, or operator behind
+	// auth.operator_audit_access) so the UI shows the Audit tab and the
+	// Overview activity feed to exactly the users who can load them.
+	CanReadAudit bool `json:"can_read_audit"`
 }
 
 func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
@@ -386,6 +390,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          su,
 		CanCreateApps: canCreateApps(u),
+		CanReadAudit:  s.canReadAudit(u),
 	})
 }
 
@@ -526,6 +531,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          newSessionUser(fresh),
 		CanCreateApps: canCreateApps(u),
+		CanReadAudit:  s.canReadAudit(u),
 	})
 }
 

@@ -609,11 +609,14 @@ document.addEventListener('DOMContentLoaded', () => {
   function showLoggedIn(payload) {
     state.user = payload.user;
     state.canCreateApps = !!payload.can_create_apps;
+    state.canReadAudit = !!payload.can_read_audit;
     renderIdentity(payload.user);
     setHidden(logoutButton, false);
     setHidden(loginView, true);
     document.body.dataset.auth = 'in';
-    tabAudit.hidden = payload.user.role !== 'admin';
+    // Audit access is a server-computed capability (admin, or operator when
+    // auth.operator_audit_access is on), not a client-side role check.
+    tabAudit.hidden = !state.canReadAudit;
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
     // The home (/) is role-adaptive: fleet operators (admin/operator) get the

@@ -53,3 +53,16 @@ func TestLoad_DeployTokenAppsInvalidSlug(t *testing.T) {
 		t.Errorf("error %q should mention deploy_token_apps", err)
 	}
 }
+
+func TestLoad_OperatorAuditAccessFromEnv(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", strings.Repeat("a", 32))
+	t.Setenv("SHINYHUB_OPERATOR_AUDIT_ACCESS", "true")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Auth.OperatorAuditAccess {
+		t.Error("OperatorAuditAccess should be true from env")
+	}
+}

@@ -19,7 +19,9 @@ export function mountOverview(ctx) {
 
   let disposed = false;
   let timer = null;
-  const isAdmin = !!(ctx.state && ctx.state.user && ctx.state.user.role === 'admin');
+  // Server-computed capability: admins always, operators behind the
+  // auth.operator_audit_access flag. Gates the recent-activity feed.
+  const canReadAudit = !!(ctx.state && ctx.state.canReadAudit);
 
   // stop ends the liveness poll (on unmount or after a 401), so a logged-out or
   // navigated-away Overview never keeps fetching in the background.
@@ -50,7 +52,7 @@ export function mountOverview(ctx) {
 
     const metrics = await fetchMetrics(apps.map((a) => a.slug));
     if (disposed) return;
-    const events = isAdmin ? await fetchActivity() : null;
+    const events = canReadAudit ? await fetchActivity() : null;
     if (disposed) return;
 
     const model = buildOverviewModel(apps, metrics);
@@ -187,9 +189,9 @@ export function mountOverview(ctx) {
   // ── Footer: resource pressure + (admin) recent activity. ──
   function renderFooter(model, events) {
     const footer = el('div', 'ov-footer');
-    if (!isAdmin) footer.classList.add('ov-footer--single');
+    if (!canReadAudit) footer.classList.add('ov-footer--single');
     footer.appendChild(renderResources(model.resources));
-    if (isAdmin) footer.appendChild(renderActivity(events));
+    if (canReadAudit) footer.appendChild(renderActivity(events));
     return footer;
   }
 

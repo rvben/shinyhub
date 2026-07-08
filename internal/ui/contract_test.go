@@ -374,6 +374,21 @@ func TestAccessVisibilityUsesExplicitSave(t *testing.T) {
 		"the Visibility section must register with the dirty-state tracker")
 }
 
+// TestAuditTabUsesCapability pins the audit-surface gating on the
+// server-computed can_read_audit capability (admin, or operator behind
+// auth.operator_audit_access) instead of a client-side role comparison, so
+// enabling the flag lights the tab up without a UI change.
+func TestAuditTabUsesCapability(t *testing.T) {
+	assertContains(t, "app.js", "state.canReadAudit = !!payload.can_read_audit",
+		"showLoggedIn must capture the server-computed audit capability")
+	assertContains(t, "app.js", "tabAudit.hidden = !state.canReadAudit",
+		"the Audit nav tab must be gated on the capability, not role==='admin'")
+	assertContains(t, "views/overview.js", "ctx.state.canReadAudit",
+		"the Overview activity feed must be gated on the capability")
+	assertNotContains(t, "views/overview.js", "role === 'admin'",
+		"overview.js must not re-derive audit access from the role")
+}
+
 // TestAccessVisibilityLabelsTeachSemantics pins the corrected visibility copy.
 // "shared" admits every signed-in user (the membership check is bypassed) and
 // "private" is where member/group grants apply; the old copy said "Private is
