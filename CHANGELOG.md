@@ -74,6 +74,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.2](https://github.com/rvben/shinyhub/compare/v0.10.1...v0.10.2) - 2026-07-09
+
+### Fixed
+
+- **deploy**: let sandboxed builds provision uv-managed Python interpreters ([c5b3c29](https://github.com/rvben/shinyhub/commit/c5b3c29b50b2a64d6f3f00b7916324988208a707))
+
 ## [0.10.1](https://github.com/rvben/shinyhub/compare/v0.10.0...v0.10.1) - 2026-07-08
 
 ### Added
