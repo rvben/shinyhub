@@ -60,6 +60,8 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 	var m struct {
 		Status           string `json:"status"`
 		SessionsCap      int    `json:"sessions_cap"`
+		WorkerIsolation  string `json:"worker_isolation"`
+		MaxWorkers       int    `json:"max_workers"`
 		MetricsAvailable bool   `json:"metrics_available"`
 		Replicas         []struct {
 			Index            int     `json:"index"`
@@ -82,7 +84,14 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 	if !m.MetricsAvailable {
 		note = "unavailable"
 	}
-	fmt.Fprintf(w, "App: %s · sessions cap %d · metrics %s\n", m.Status, m.SessionsCap, note)
+	if m.WorkerIsolation != "" {
+		// Elastic pool: sessions_cap is the per-worker cap, so the honest
+		// summary is the ceiling arithmetic, not the multiplex per-replica cap.
+		fmt.Fprintf(w, "App: %s · %s · ceiling %d (max %d workers × %d/worker) · metrics %s\n",
+			m.Status, m.WorkerIsolation, m.MaxWorkers*m.SessionsCap, m.MaxWorkers, m.SessionsCap, note)
+	} else {
+		fmt.Fprintf(w, "App: %s · sessions cap %d · metrics %s\n", m.Status, m.SessionsCap, note)
+	}
 	if len(m.Replicas) == 0 {
 		fmt.Fprintln(w, "No running replicas.")
 		return nil
