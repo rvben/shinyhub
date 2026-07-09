@@ -19,14 +19,15 @@ type workerState struct {
 type decisionKind int
 
 const (
-	decisionRoute    decisionKind = iota // route to an existing worker
+	decisionRoute    decisionKind = iota // route to an existing ready worker
+	decisionBind                         // bind to a booting worker; the client waits on the loading page
 	decisionAllocate                     // spin up a new worker slot
 	decisionReject                       // at capacity, deny the request
 )
 
 type decision struct {
 	kind   decisionKind
-	slotID int // valid when kind == decisionRoute
+	slotID int // valid when kind == decisionRoute or decisionBind
 }
 
 func perWorkerCap(mode config.WorkerIsolationMode, groupedSize int) int {
@@ -47,22 +48,41 @@ func decide(workers []workerState, mode config.WorkerIsolationMode, groupedSize,
 		}
 	}
 	cap := perWorkerCap(mode, groupedSize)
-	// Pack: most-loaded worker still under cap.
-	best, bestClients, active := -1, -1, 0
+	// Pack: most-loaded worker still under cap. Ready workers are preferred
+	// (the client is served immediately); a booting worker under cap is the
+	// next-best placement - the client cannot be routed there (its rp is nil)
+	// but it can be BOUND there and wait on the loading page. Binding to
+	// booting workers is what keeps a burst of cold clients packed to
+	// grouped_size per worker: without it every concurrent arrival would
+	// reserve its own slot and the pool would shed at max_workers clients
+	// instead of the configured max_workers x grouped_size ceiling.
+	bestReady, bestReadyClients := -1, -1
+	bestBooting, bestBootingClients := -1, -1
+	active := 0
 	for _, wkr := range workers {
 		if wkr.status == workerDraining {
 			continue
 		}
 		active++ // booting slots count toward maxWorkers
-		if wkr.status == workerBooting {
-			continue // never route a new client to a not-yet-ready worker (its rp is nil)
+		if wkr.assignedClients >= cap {
+			continue
 		}
-		if wkr.assignedClients < cap && wkr.assignedClients > bestClients {
-			best, bestClients = wkr.slotID, wkr.assignedClients
+		switch wkr.status {
+		case workerRunning:
+			if wkr.assignedClients > bestReadyClients {
+				bestReady, bestReadyClients = wkr.slotID, wkr.assignedClients
+			}
+		case workerBooting:
+			if wkr.assignedClients > bestBootingClients {
+				bestBooting, bestBootingClients = wkr.slotID, wkr.assignedClients
+			}
 		}
 	}
-	if best >= 0 {
-		return decision{kind: decisionRoute, slotID: best}
+	if bestReady >= 0 {
+		return decision{kind: decisionRoute, slotID: bestReady}
+	}
+	if bestBooting >= 0 {
+		return decision{kind: decisionBind, slotID: bestBooting}
 	}
 	if active < maxWorkers {
 		return decision{kind: decisionAllocate}

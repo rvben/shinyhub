@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,19 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/spf13/cobra"
 )
+
+// protocolError marks a response the CLI could not decode: the server spoke,
+// but not in a shape this binary understands. The usual cause is version skew
+// (an old CLI against a newer server whose response shape changed), so
+// reporting separates it from transport and credential failures - a login
+// hint or retry cannot fix it.
+type protocolError struct {
+	op  string
+	err error
+}
+
+func (e *protocolError) Error() string { return e.op + ": " + e.err.Error() }
+func (e *protocolError) Unwrap() error { return e.err }
 
 type fleetPlanFlags struct {
 	file             string
@@ -97,9 +111,32 @@ func fetchApps(cfg *cliConfig) ([]db.App, error) {
 	}
 	var apps []db.App
 	if err := json.Unmarshal(body, &apps); err != nil {
-		return nil, fmt.Errorf("decode apps: %w", err)
+		return nil, &protocolError{op: "decode apps", err: err}
 	}
 	return apps, nil
+}
+
+// reportAppsFetchError prints the operator-facing diagnosis for a failed
+// GET /api/apps and returns the classified error. A protocol mismatch
+// (undecodable body) is diagnosed against the server's advertised version:
+// when it differs from this CLI's, the near-certain cause is version skew and
+// the guidance says to upgrade, instead of the misleading login hint that
+// fits only transport and credential failures.
+func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
+	var pe *protocolError
+	if errors.As(err, &pe) {
+		hint := "the response shape is not one this CLI understands; the CLI and server versions may have drifted apart"
+		if info, perr := probeServer(cfg); perr == nil && info.Version != "" && info.Version != version {
+			hint = fmt.Sprintf("this CLI is version %s but the server runs %s - upgrade the CLI to match", version, info.Version)
+		}
+		fmt.Fprintf(errOut, "  ✗ cannot read the apps list from %s: %v\n     %s\n", cfg.Host, err, hint)
+		// Carry the guidance into the structured envelope's hint field too:
+		// scripted/JSON consumers never see the prose above.
+		return &ExitCodeError{Code: 1, Kind: KindInternal,
+			Err: &hintedMsgError{msg: err.Error(), hint: hint}, Reported: true}
+	}
+	fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
+	return &ExitCodeError{Code: 3, Err: err, Reported: true}
 }
 
 type serverCaps struct {

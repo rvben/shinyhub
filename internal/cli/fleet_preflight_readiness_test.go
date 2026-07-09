@@ -86,6 +86,94 @@ func TestFleetPreflight_OlderServerWithout404ServerInfoIsExit3(t *testing.T) {
 	}
 }
 
+// A 200 /api/apps whose body decodes as neither the {items} list envelope
+// nor a bare array is a protocol mismatch (typically an older CLI against a
+// newer server), NOT an auth failure: kind internal / exit 1, no login hint,
+// and - when server-info reveals a version different from this CLI's -
+// explicit guidance naming both versions.
+func TestFleetPreflight_DecodeMismatchIsProtocolNotAuth(t *testing.T) {
+	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/server-info" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"version":"99.0.0","capabilities":{"content_digest":true}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"apps":{"total":1}}`)) // neither envelope nor bare array
+	})
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\n")
+
+	var errBuf bytes.Buffer
+	_, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "apply", 0)
+	if err == nil {
+		t.Fatal("want an error on an undecodable apps response")
+	}
+	kind, code := classify(err)
+	if kind != KindInternal || code != 1 {
+		t.Errorf("classify = (%s, %d), want (%s, 1): a decode mismatch is not an auth failure", kind, code, KindInternal)
+	}
+	out := errBuf.String()
+	if strings.Contains(strings.ToLower(out), "shinyhub login") {
+		t.Errorf("must NOT print the login hint for a protocol mismatch, got:\n%s", out)
+	}
+	if !strings.Contains(out, "99.0.0") || !strings.Contains(out, version) {
+		t.Errorf("expected guidance naming server version 99.0.0 and client version %s, got:\n%s", version, out)
+	}
+	if !strings.Contains(strings.ToLower(out), "upgrade") {
+		t.Errorf("expected upgrade guidance, got:\n%s", out)
+	}
+
+	// The guidance must also reach the structured error envelope (the surface
+	// scripted/JSON consumers read), not just the pre-envelope prose.
+	var envBuf bytes.Buffer
+	if code := reportTo(&envBuf, false, formatTable, err); code != 1 {
+		t.Errorf("reportTo exit = %d, want 1", code)
+	}
+	envelope := envBuf.String()
+	if !strings.Contains(envelope, `"kind":"internal"`) {
+		t.Errorf("envelope kind must be internal, got:\n%s", envelope)
+	}
+	if !strings.Contains(envelope, "99.0.0") || !strings.Contains(strings.ToLower(envelope), "upgrade") {
+		t.Errorf("envelope must carry the version-skew guidance, got:\n%s", envelope)
+	}
+}
+
+// When server-info reports the SAME version as this CLI, the decode failure
+// is a genuine protocol bug, not skew: still internal / no login hint, but
+// without misleading upgrade advice.
+func TestFleetPreflight_DecodeMismatchSameVersionNoUpgradeHint(t *testing.T) {
+	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/server-info" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"version":"` + version + `","capabilities":{"content_digest":true}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"apps":{"total":1}}`))
+	})
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\n")
+
+	var errBuf bytes.Buffer
+	_, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "apply", 0)
+	if err == nil {
+		t.Fatal("want an error on an undecodable apps response")
+	}
+	if kind, code := classify(err); kind != KindInternal || code != 1 {
+		t.Errorf("classify = (%s, %d), want (%s, 1)", kind, code, KindInternal)
+	}
+	out := strings.ToLower(errBuf.String())
+	if strings.Contains(out, "upgrade") {
+		t.Errorf("same-version mismatch must not advise an upgrade, got:\n%s", errBuf.String())
+	}
+	if strings.Contains(out, "shinyhub login") {
+		t.Errorf("must NOT print the login hint for a protocol mismatch, got:\n%s", errBuf.String())
+	}
+}
+
 // The --wait-for-server flag is registered on the server-bound commands that
 // face the EC2-churn deploy path.
 func TestWaitForServerFlagRegistered(t *testing.T) {
