@@ -171,6 +171,30 @@ jobs:
       - name: Skill smoke (deploy example app)
         run: make skill-smoke
 
+  # Build-provisioning gate: a real `uv sync` through the production
+  # Landlock-sandboxed build path, on the corp shape that broke native deploys
+  # twice (managed-Python provisioning + private-index env passthrough; the
+  # class was invisible on dev boxes with a matching system Python and
+  # PyPI-only deps). Needs network: uv downloads a managed CPython once.
+  test-provisioning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build-provisioning gate (sandboxed uv sync)
+        run: make test-provisioning
+
   # Client-side identity-helper tests (Python + R JWT verification against a
   # token minted by the real production MintToken). Security-relevant surface
   # that previously only ran when a developer invoked it locally. uv is

@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
+.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -118,6 +118,29 @@ test-ha:
 # it launches a billed Fargate task and then stops it.
 test-fargate-it:
 	go test -tags=integration -run TestIntegration -count=1 -v ./internal/fargate/...
+
+# test-provisioning runs the build-provisioning gate: a real `uv sync` through
+# the production Landlock-sandboxed build path, covering the corp shape that
+# broke native deploys twice (managed-Python provisioning into the per-app
+# UV_PYTHON_INSTALL_DIR, and private-index env vars surviving the build env
+# allowlist - the #40/#41 regression class, invisible on dev boxes with a
+# matching system Python and PyPI-only deps). Needs Linux (Landlock), uv on
+# PATH, and network (uv downloads a managed CPython once). On non-Linux hosts
+# it runs inside a Linux container when Docker is available and skips cleanly
+# otherwise. CI and the release workflow run it for real.
+test-provisioning:
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		command -v uv >/dev/null 2>&1 || { echo "test-provisioning: uv not on PATH"; exit 1; }; \
+		SHINYHUB_LIVE_UV=1 go test ./internal/deploy/ -run 'E2E_Live' -count=1 -v -timeout 15m; \
+	elif command -v docker >/dev/null 2>&1; then \
+		docker run --rm --security-opt seccomp=unconfined -e SHINYHUB_LIVE_UV=1 \
+		  -v "$$PWD":/src -w /src golang:1.26 \
+		  bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 && \
+		           PATH=$$HOME/.local/bin:$$PATH GOFLAGS=-buildvcs=false GOWORK=off \
+		           go test ./internal/deploy/ -run E2E_Live -count=1 -v -timeout 15m'; \
+	else \
+		echo "test-provisioning: skipping (needs Linux with Landlock, or Docker)"; \
+	fi
 
 lint:
 	go vet ./...
