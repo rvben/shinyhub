@@ -257,7 +257,7 @@ runtime:
 
 server:
   host_budget_mb: 0                     # 0 = no host-level guard; > 0 = MiB limit
-  min_available_memory_mb: 0            # 0 = no runtime floor; > 0 = MiB floor
+  min_available_memory_mb: 256          # unset = 256 (default floor); 0 = disable; > 0 = MiB floor
 ```
 
 Env vars: `SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION`,
@@ -324,18 +324,25 @@ effective memory limit (per-app or tier default); saving elastic worker
 settings with NO active memory guard succeeds but returns an
 `X-ShinyHub-Warning` header, which `shinyhub apps set` prints to stderr.
 
-**Runtime memory floor.** `server.min_available_memory_mb` is the runtime
-companion to the static budget: while the host's available memory
-(`MemAvailable`) is below the floor, requests that would allocate a NEW
-worker are shed with `503` (`Retry-After: 5`,
+**Runtime memory floor (on by default).** `server.min_available_memory_mb`
+is the runtime companion to the static budget: while the host's available
+memory (`MemAvailable`) is below the floor, requests that would allocate a
+NEW worker are shed with `503` (`Retry-After: 5`,
 `X-Shinyhub-Reject: memory-pressure`) instead of spawning. Sessions already
 bound to a worker keep routing, and the floor releases as soon as memory
-recovers - no restart needed. Shedding one incoming session is deliberate:
-without the floor the backstop is the kernel OOM killer, which kills a live
-worker together with every session on it. The `memory-pressure` reject reason
-is distinct from `pool-saturated` so autoscaling does not read memory
-pressure as a scale-up signal. If the memory reading is unavailable, the
-floor fails open (admission proceeds).
+recovers - no restart needed. When the key is not set at all, a default
+floor of 256 MiB applies: an elastic OOM takes out a whole worker plus every
+session bound to it, so the unset state fails safe, while 256 MiB is low
+enough that a host with genuine headroom never sheds. Set an explicit `0`
+(or a negative value) to disable the floor entirely - doing so without
+arming the static budget guard triggers the unguarded-isolation warning.
+Shedding one incoming session is deliberate: without the floor the backstop
+is the kernel OOM killer, which kills a live worker together with every
+session on it. The `memory-pressure` reject reason is distinct from
+`pool-saturated` so autoscaling does not read memory pressure as a scale-up
+signal. If the memory reading is unavailable, the floor fails open
+(admission proceeds). The floor is consulted only on elastic worker
+allocation; multiplex deployments never probe it.
 
 **`max_workers x grouped_size` is a hard ceiling; overflow yields 503.** A
 new client is shed with `503 Service Unavailable` and a `Retry-After: 5`

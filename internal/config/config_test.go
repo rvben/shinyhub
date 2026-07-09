@@ -2808,14 +2808,62 @@ server:
 	}
 }
 
-func TestMinAvailableMemoryMB_DefaultsToZero(t *testing.T) {
+func TestMinAvailableMemoryMB_DefaultsOn(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	// The runtime memory floor is on by default: an elastic (grouped/
+	// per_session) OOM kills a whole worker plus every session on it, so the
+	// unset state must fail safe. 256 MiB is below any plausible healthy
+	// MemAvailable but above what a new worker spawn needs headroom for.
+	if cfg.MinAvailableMemoryMB() != 256 {
+		t.Errorf("expected MinAvailableMemoryMB=256 when unset, got %d", cfg.MinAvailableMemoryMB())
+	}
+}
+
+func TestMinAvailableMemoryMB_ExplicitZeroDisables(t *testing.T) {
+	f := writeYAML(t, `
+auth:
+  secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+server:
+  min_available_memory_mb: 0
+`)
+	cfg, err := config.Load(f)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if cfg.MinAvailableMemoryMB() != 0 {
-		t.Errorf("expected MinAvailableMemoryMB=0 when unset, got %d", cfg.MinAvailableMemoryMB())
+		t.Errorf("explicit 0 must disable the floor, got %d", cfg.MinAvailableMemoryMB())
+	}
+}
+
+func TestMinAvailableMemoryMB_ExplicitZeroFromEnvDisables(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_SERVER_MIN_AVAILABLE_MEMORY_MB", "0")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MinAvailableMemoryMB() != 0 {
+		t.Errorf("explicit env 0 must disable the floor, got %d", cfg.MinAvailableMemoryMB())
+	}
+}
+
+func TestMinAvailableMemoryMB_NegativeTreatedAsDisabled(t *testing.T) {
+	f := writeYAML(t, `
+auth:
+  secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+server:
+  min_available_memory_mb: -5
+`)
+	cfg, err := config.Load(f)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MinAvailableMemoryMB() != 0 {
+		t.Errorf("negative floor must be treated as disabled, got %d", cfg.MinAvailableMemoryMB())
 	}
 }
 

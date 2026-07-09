@@ -25,14 +25,17 @@ func newWorkerPatchServer(t *testing.T) (*api.Server, *db.Store) {
 }
 
 // newWorkerBudgetServer builds a server with a non-zero host budget so the
-// max_workers capacity check is exercised.
+// max_workers capacity check is exercised. The runtime floor is explicitly
+// disabled so the static budget guard alone decides the unguarded warning
+// (with the floor at its default the warning would never fire).
 func newWorkerBudgetServer(t *testing.T, hostBudgetMB int) (*api.Server, *db.Store) {
 	t.Helper()
 	store := dbtest.New(t)
+	floorOff := 0
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
-		Server:  config.ServerConfig{HostBudgetMB: hostBudgetMB},
+		Server:  config.ServerConfig{HostBudgetMB: hostBudgetMB, MinAvailableMemoryMB: &floorOff},
 	}
 	return api.New(cfg, store, nil, nil), store
 }
@@ -204,24 +207,27 @@ func TestPatchApp_WorkerPartialPatchFallbackRejectsZeroGroupedSize(t *testing.T)
 }
 
 // newWorkerFloorServer builds a server whose runtime memory floor
-// (min_available_memory_mb) is set, i.e. the runtime guard is active.
+// (min_available_memory_mb) is EXPLICITLY set: a positive value arms the
+// runtime guard at that floor, 0 disables it (distinct from an unset config,
+// which applies the safe default).
 func newWorkerFloorServer(t *testing.T, minAvailableMB int) (*api.Server, *db.Store) {
 	t.Helper()
 	store := dbtest.New(t)
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
-		Server:  config.ServerConfig{MinAvailableMemoryMB: minAvailableMB},
+		Server:  config.ServerConfig{MinAvailableMemoryMB: &minAvailableMB},
 	}
 	return api.New(cfg, store, nil, nil), store
 }
 
-// TestPatchApp_ElasticIsolationWarnsWithoutMemoryGuard verifies that switching
-// an app to elastic isolation on a server with no memory guard configured
-// (no host budget, no runtime floor) succeeds but attaches the
-// X-ShinyHub-Warning header so operators learn the host is unprotected.
-func TestPatchApp_ElasticIsolationWarnsWithoutMemoryGuard(t *testing.T) {
-	srv, store := newWorkerPatchServer(t)
+// TestPatchApp_ElasticIsolationWarnsWithFloorExplicitlyDisabled verifies that
+// switching an app to elastic isolation on a server whose runtime floor was
+// EXPLICITLY disabled (min_available_memory_mb: 0) and that has no static
+// budget guard succeeds but attaches the X-ShinyHub-Warning header, so the
+// operator who opted out learns the host is unprotected.
+func TestPatchApp_ElasticIsolationWarnsWithFloorExplicitlyDisabled(t *testing.T) {
+	srv, store := newWorkerFloorServer(t, 0)
 	_, token := seedWorkerApp(t, store)
 
 	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2}`)
@@ -231,10 +237,28 @@ func TestPatchApp_ElasticIsolationWarnsWithoutMemoryGuard(t *testing.T) {
 	}
 	warn := rec.Header().Get("X-ShinyHub-Warning")
 	if warn == "" {
-		t.Fatal("expected X-ShinyHub-Warning when no memory guard is configured")
+		t.Fatal("expected X-ShinyHub-Warning when the floor is explicitly disabled and no static guard exists")
 	}
 	if !strings.Contains(warn, "memory guard") {
 		t.Errorf("warning should name the missing memory guard, got %q", warn)
+	}
+}
+
+// TestPatchApp_ElasticIsolationSilentWithDefaultFloor pins the default-on
+// behavior: an UNSET min_available_memory_mb applies the built-in floor, so
+// elastic isolation on an otherwise-unconfigured server is guarded and must
+// not warn.
+func TestPatchApp_ElasticIsolationSilentWithDefaultFloor(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2}`)
+	rec := patchWorkerApp(t, srv, token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("expected no warning with the default floor active, got %q", warn)
 	}
 }
 
@@ -353,13 +377,16 @@ func TestPatchApp_MemoryLimitChangeOnMultiplexStaysSilent(t *testing.T) {
 // newWorkerFleetDefaultServer builds a server whose FLEET default isolation is
 // elastic, with a host budget: apps with empty stored isolation inherit the
 // elastic mode at runtime, so the budget math must treat them as elastic too.
+// The runtime floor is explicitly disabled so the static guard alone decides
+// the unguarded warning.
 func newWorkerFleetDefaultServer(t *testing.T, isolation string, hostBudgetMB int) (*api.Server, *db.Store) {
 	t.Helper()
 	store := dbtest.New(t)
+	floorOff := 0
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret"},
 		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
-		Server:  config.ServerConfig{HostBudgetMB: hostBudgetMB},
+		Server:  config.ServerConfig{HostBudgetMB: hostBudgetMB, MinAvailableMemoryMB: &floorOff},
 		Runtime: config.RuntimeConfig{DefaultWorkerIsolation: isolation},
 	}
 	return api.New(cfg, store, nil, nil), store

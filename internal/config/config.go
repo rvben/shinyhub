@@ -366,9 +366,24 @@ type ServerConfig struct {
 	// below this floor, NO new elastic worker (grouped/per_session isolation)
 	// is allocated; fresh sessions get 503 while established sessions keep
 	// routing. Shedding one new session beats the kernel OOM-killing a live
-	// worker with every session on it. 0 disables the floor.
-	MinAvailableMemoryMB int `yaml:"min_available_memory_mb"`
+	// worker with every session on it.
+	//
+	// A pointer so an explicit 0 (disable the floor) is distinguishable from
+	// the key being absent: unset applies the safe default (see the
+	// MinAvailableMemoryMB accessor) because an elastic OOM takes out a whole
+	// worker plus every session bound to it. Negative values disable too.
+	MinAvailableMemoryMB *int `yaml:"min_available_memory_mb"`
 }
+
+// defaultMinAvailableMemoryMB is the runtime memory floor applied when
+// server.min_available_memory_mb is not set. 256 MiB sits below any plausible
+// healthy MemAvailable reading (so it never sheds on a host that genuinely
+// has room) while still refusing to spawn a new ~150-350 MiB worker into a
+// nearly-exhausted host, where the alternative is the kernel OOM killer
+// taking out a live worker with every session on it. The floor is consulted
+// only on elastic (grouped/per_session) worker allocation; multiplex
+// deployments never probe it.
+const defaultMinAvailableMemoryMB = 256
 
 // GroupRoleMapping maps an IdP group name to a global role. Shared by the OIDC
 // and forward-auth feeders; mirrored as auth.GroupRoleMapping at the boundary
@@ -2146,7 +2161,9 @@ func applyEnv(cfg *Config) error {
 		if err != nil {
 			return fmt.Errorf("SHINYHUB_SERVER_MIN_AVAILABLE_MEMORY_MB: %q is not an integer: %w", v, err)
 		}
-		cfg.Server.MinAvailableMemoryMB = n
+		// An explicit "0" disables the floor (pointer to 0, distinct from
+		// unset, which applies the default).
+		cfg.Server.MinAvailableMemoryMB = &n
 	}
 	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
 		cfg.Server.TrustedProxies = splitCSV(v)
@@ -2542,5 +2559,16 @@ func applyEnv(cfg *Config) error {
 func (c *Config) HostBudgetMB() int { return c.Server.HostBudgetMB }
 
 // MinAvailableMemoryMB returns the runtime host-memory floor (in MiB) below
-// which no new elastic worker is allocated. 0 means the floor is disabled.
-func (c *Config) MinAvailableMemoryMB() int { return c.Server.MinAvailableMemoryMB }
+// which no new elastic worker is allocated. Unset applies the safe default
+// (an elastic OOM kills a worker plus every session on it); an explicit 0 or
+// a negative value disables the floor. 0 from this accessor means disabled.
+func (c *Config) MinAvailableMemoryMB() int {
+	switch {
+	case c.Server.MinAvailableMemoryMB == nil:
+		return defaultMinAvailableMemoryMB
+	case *c.Server.MinAvailableMemoryMB < 0:
+		return 0
+	default:
+		return *c.Server.MinAvailableMemoryMB
+	}
+}
