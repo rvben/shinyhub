@@ -59,9 +59,11 @@ func probeWheel(t *testing.T) []byte {
 }
 
 // startProbeIndex serves a PEP 503 "simple" index whose only project is
-// provision-probe, backed by the in-memory wheel. Returns the index URL to
-// hand uv (…/simple).
-func startProbeIndex(t *testing.T) string {
+// provision-probe, backed by the in-memory wheel. It returns two index URLs:
+// probe (…/simple, where the package lives) and empty (…/empty, a valid
+// index location that has no packages - every project page 404s, which uv
+// reads as "not in this index").
+func startProbeIndex(t *testing.T) (probe, empty string) {
 	t.Helper()
 	wheel := probeWheel(t)
 	const wheelName = "provision_probe-0.0.1-py3-none-any.whl"
@@ -74,20 +76,22 @@ func startProbeIndex(t *testing.T) string {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(wheel)
 	})
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(mux) // unregistered paths (…/empty/*) 404
 	t.Cleanup(srv.Close)
-	return srv.URL + "/simple"
+	return srv.URL + "/simple", srv.URL + "/empty"
 }
 
 // TestSandboxedPythonSync_PrivateIndexE2E_Live drives the exact production
 // build path (sandboxedPythonSync) against a real uv on a bundle whose only
-// dependency exists solely on a private package index, with the index
-// configured the way operators configure it: UV_INDEX_URL in the SERVICE
-// environment. The build env is scrubbed through process.SanitizedEnv, whose
-// package-index allowlist is exactly what regressed in v0.10.x (#41:
-// UV_EXTRA_INDEX_URL dropped, private-registry deploys failed). If the
-// allowlist stops passing index env vars, uv falls back to the default index,
-// cannot resolve the probe package, and this test fails.
+// dependency exists solely behind UV_EXTRA_INDEX_URL - the exact variable
+// and topology of the v0.10.x regression (#41: the build env allowlist
+// dropped UV_EXTRA_INDEX_URL, so private-registry deploys failed). Both
+// index vars are set in the SERVICE environment, the way operators configure
+// them, and must survive process.SanitizedEnv's allowlist into the sandboxed
+// build: UV_INDEX_URL points at a hermetic empty index (so the happy path
+// never leaves localhost) and UV_EXTRA_INDEX_URL at the index that has the
+// probe package. If the allowlist stops passing UV_EXTRA_INDEX_URL, uv
+// cannot resolve the probe package and this test fails.
 //
 // requires-python forces a uv-managed interpreter as well (the #40 class:
 // the managed-Python download must land in the per-app UV_PYTHON_INSTALL_DIR
@@ -107,11 +111,12 @@ func TestSandboxedPythonSync_PrivateIndexE2E_Live(t *testing.T) {
 		t.Skip("uv not on PATH")
 	}
 
-	indexURL := startProbeIndex(t)
+	probeURL, emptyURL := startProbeIndex(t)
 	// The mechanism under test: index env vars set in the service environment
 	// must survive process.SanitizedEnv's allowlist into the sandboxed build.
 	// Deliberately NOT routed through the SHINYHUB_APP_ENV_ALLOW escape hatch.
-	t.Setenv("UV_INDEX_URL", indexURL)
+	t.Setenv("UV_INDEX_URL", emptyURL)
+	t.Setenv("UV_EXTRA_INDEX_URL", probeURL)
 	// Force the corp-host scenario regardless of what Python the test image
 	// ships (as in the ManagedPythonE2E test): the escape hatch is fine here,
 	// UV_PYTHON_PREFERENCE is not the mechanism under test.
