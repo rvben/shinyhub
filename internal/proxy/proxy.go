@@ -1844,13 +1844,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.setClientCookie(rec, r, slug, cid)
 		}
 
+		// parked bounds WS-upgrade parking to one wait per request: after a
+		// successful wait the loop re-decides once, and if the worker flapped
+		// away again the upgrade gets the loading page instead of re-parking.
+		parked := false
+	routeElastic:
+		// Every iteration starts holding p.mu.RLock (from the routing path
+		// above on the first pass; re-acquired before the goto on later ones).
+		//
 		// Resolve the routing pin from the server-side client binding, which is
 		// the authoritative source. The binding is recorded by bindClient when a
 		// new slot is allocated and remains valid after RegisterElasticWorker
 		// stamps the real deploymentID. A cookie-based depID comparison would
 		// fail here because the pin cookie is written with deploymentID=0 at
 		// allocate time and the worker registers with a non-zero ID later.
-		// Reading p.clients under the pool lock already held (p.mu.RLock).
 		pinnedSlot := -1
 		if cs := p.clients[slug][cid]; cs != nil {
 			if w := pool.workers[cs.slotID]; w != nil && w.status != workerDraining {
@@ -1871,7 +1878,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// a worker cannot be removed or change status (both need the write lock).
 			wkr := pool.workers[d.slotID]
 			if wkr == nil || wkr.status == workerBooting || wkr.status == workerDraining {
+				booting := wkr != nil && wkr.status == workerBooting
 				p.mu.RUnlock()
+				// A WebSocket upgrade cannot follow the loading page's reload
+				// loop: a non-101 hard-fails scripted clients that connect
+				// straight after their first response. Park the upgrade until
+				// the pinned worker registers (bounded by wsBootParkTTL,
+				// canceled when the client hangs up), then route it.
+				if booting && !parked && isWSUpgrade(r) && p.waitWorkerReady(r.Context(), slug, d.slotID) {
+					parked = true
+					p.mu.RLock()
+					pool = p.pools[slug]
+					if pool != nil && poolIsElastic(pool) {
+						goto routeElastic
+					}
+					p.mu.RUnlock()
+				}
 				p.serveMissPage(rec, slug, nil)
 				return
 			}
