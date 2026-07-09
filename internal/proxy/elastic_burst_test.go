@@ -318,6 +318,52 @@ func TestPlaceClient_RebindFromDrainingWorkerMigratesCount(t *testing.T) {
 	}
 }
 
+// TestPlaceClient_RebindMigrationTerminatesEmptiedWorker verifies that when
+// re-placing a client stops the old binding's pending grace timer and drops
+// the old worker's assignedClients to zero, the migration itself dispatches
+// terminate: the stopped timer was the only other reclaim path, and without
+// the dispatch the emptied worker would run forever.
+func TestPlaceClient_RebindMigrationTerminatesEmptiedWorker(t *testing.T) {
+	const slug = "migrateapp"
+
+	termCh := make(chan int, 2)
+	p := New()
+	p.SetPoolMode(slug, config.IsolationGrouped, 2, 2)
+	p.SetSpawnFunc(func(string, int) {})
+	p.SetTerminateFunc(func(_ string, slotID int) { termCh <- slotID })
+
+	rec1 := coldGet(p, slug)
+	assertSplashPinned(t, rec1, slug, 0, "initial bind")
+	cookies := extractCookies(rec1)
+	cid := findCookie(cookies, clientCookiePrefix+slug).Value
+
+	// Open and close a connection so the grace timer is pending (default TTL,
+	// far beyond this test: reclaim must come from the migration, not the timer).
+	p.clientConnOpened(slug, cid)
+	p.clientConnClosed(slug, cid)
+
+	p.mu.Lock()
+	p.pools[slug].workers[0].status = workerDraining
+	p.mu.Unlock()
+
+	// The client returns; the draining worker takes no routing, so it is
+	// re-placed on slot 1 and slot 0's count drops to zero.
+	req := httptest.NewRequest("GET", "/app/"+slug+"/", nil)
+	req.Header.Set("Cookie", cookieHeader(cookies))
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req)
+	assertSplashPinned(t, rec2, slug, 1, "rebind after drain")
+
+	select {
+	case slot := <-termCh:
+		if slot != 0 {
+			t.Errorf("terminate fired for slot %d, want 0", slot)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminate was not dispatched for the emptied worker after migration")
+	}
+}
+
 // TestMemoryGuard_GroupedBindToBootingAllowedUnderPressure verifies the guard
 // gates only NEW worker allocation: binding a fresh client onto an existing
 // booting worker adds no process and must not be shed, while a client that

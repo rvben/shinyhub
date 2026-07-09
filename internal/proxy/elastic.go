@@ -261,7 +261,9 @@ func (p *Proxy) bindClient(slug, clientID string, slotID int) {
 // is migrated, not double-counted: the previous worker's count is decremented
 // (it may be draining; a removed worker is simply gone) and any pending
 // release timer is stopped so a stale grace expiry cannot fire against the
-// new binding. Caller MUST hold p.mu WRITE.
+// new binding. When the migration empties the previous worker, terminate is
+// dispatched here - the stopped timer was the only other path that would
+// have reclaimed it. Caller MUST hold p.mu WRITE.
 func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
 	pool := p.pools[slug]
 	if old := p.lookupClientSlot(slug, clientID); old != nil {
@@ -275,6 +277,11 @@ func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
 		if pool != nil {
 			if w, ok := pool.workers[old.slotID]; ok {
 				w.assignedClients--
+				if w.assignedClients == 0 && p.terminate != nil {
+					// Dispatch via goroutine: the callback must never run
+					// inline under the write lock (re-entry / deadlock).
+					go p.terminate(slug, old.slotID)
+				}
 			}
 		}
 	}
