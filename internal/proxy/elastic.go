@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -551,4 +552,67 @@ func (p *Proxy) lookupClientSlot(slug, clientID string) *clientSlot {
 		return nil
 	}
 	return p.clients[slug][clientID]
+}
+
+// ElasticWorkerStatus is one worker's live routing state in an elastic pool,
+// as maintained by the admission path. Sessions counts bound clients
+// (assignedClients), which is what the grouped_size cap admits against;
+// ActiveConns counts connections open right now.
+type ElasticWorkerStatus struct {
+	SlotID       int    `json:"slot_id"`
+	Status       string `json:"status"` // "booting", "running", or "draining"
+	Sessions     int    `json:"sessions"`
+	ActiveConns  int64  `json:"active_conns"`
+	DeploymentID int64  `json:"deployment_id,omitempty"`
+}
+
+// ElasticPoolSnapshot is a point-in-time capacity view of an elastic pool:
+// the admission ceiling is MaxWorkers x SessionsPerWorker.
+type ElasticPoolSnapshot struct {
+	Mode              string // "grouped" or "per_session"
+	SessionsPerWorker int    // per-worker admission cap (grouped_size; always 1 for per_session)
+	MaxWorkers        int
+	Workers           []ElasticWorkerStatus // sorted by SlotID
+}
+
+func (s workerStatus) label() string {
+	switch s {
+	case workerBooting:
+		return "booting"
+	case workerDraining:
+		return "draining"
+	default:
+		return "running"
+	}
+}
+
+// ElasticWorkersSnapshot returns the live capacity view of slug's elastic
+// pool for status surfaces (API, CLI, UI). ok is false for multiplex or
+// unknown pools, so callers can distinguish "no capacity view exists" from
+// an elastic pool that currently has zero workers. Callers must NOT hold p.mu.
+func (p *Proxy) ElasticWorkersSnapshot(slug string) (ElasticPoolSnapshot, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	pool, ok := p.pools[slug]
+	if !ok || !poolIsElastic(pool) {
+		return ElasticPoolSnapshot{}, false
+	}
+	snap := ElasticPoolSnapshot{
+		Mode:              string(pool.mode),
+		SessionsPerWorker: perWorkerCap(pool.mode, pool.groupedSize),
+		MaxWorkers:        pool.maxWorkers,
+		Workers:           make([]ElasticWorkerStatus, 0, len(pool.workers)),
+	}
+	for _, w := range pool.workers {
+		snap.Workers = append(snap.Workers, ElasticWorkerStatus{
+			SlotID:       w.slotID,
+			Status:       w.status.label(),
+			Sessions:     w.assignedClients,
+			ActiveConns:  w.activeConns.Load(),
+			DeploymentID: w.deploymentID,
+		})
+	}
+	sort.Slice(snap.Workers, func(i, j int) bool { return snap.Workers[i].SlotID < snap.Workers[j].SlotID })
+	return snap, true
 }

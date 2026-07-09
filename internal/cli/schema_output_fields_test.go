@@ -54,6 +54,7 @@ func TestSchema_AppOutputFieldsBackedByStruct(t *testing.T) {
 		"worker_grouped_size":                true,
 		"worker_max_workers":                 true,
 		"worker_max_session_lifetime_secs":   true,
+		"worker_pool":                        true,
 	}
 
 	for _, cmd := range []string{"apps list", "apps show"} {

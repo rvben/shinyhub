@@ -23,6 +23,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/proxy"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/rvben/shinyhub/internal/storage"
 )
@@ -282,6 +283,17 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		envelope["connectivity"] = map[string]any{
 			"websocket_ok":       everConnected,
 			"serving_without_ws": servingWithoutWS,
+		}
+	}
+	// worker_pool is the live per-worker capacity view for elastic
+	// (grouped/per_session) apps: which workers exist, their routing status,
+	// and how many sessions each holds - the figures an operator tunes
+	// grouped_size and max_workers against. Present only while the proxy holds
+	// an elastic pool for this app; multiplex apps have no per-worker view, and
+	// an elastic pool with zero workers reports an empty (not absent) array.
+	if s.proxy != nil {
+		if snap, ok := s.proxy.ElasticWorkersSnapshot(slug); ok {
+			envelope["worker_pool"] = s.buildWorkerPool(slug, snap)
 		}
 	}
 	asEvent, asFound, asErr := s.store.LatestAutoscaleEvent(slug)
@@ -2621,6 +2633,54 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, userLookupResponse{ID: user.ID, Username: user.Username})
 }
 
+// workerPoolStatus is the live capacity view of an elastic app's worker pool,
+// embedded in the app envelope as "worker_pool" and consumed by `apps show`
+// and the dashboard. Ceiling is the admission ceiling:
+// max_workers x sessions_per_worker.
+type workerPoolStatus struct {
+	Mode              string             `json:"mode"`
+	SessionsPerWorker int                `json:"sessions_per_worker"`
+	MaxWorkers        int                `json:"max_workers"`
+	Ceiling           int                `json:"ceiling"`
+	Workers           []workerPoolWorker `json:"workers"`
+}
+
+type workerPoolWorker struct {
+	SlotID int `json:"slot_id"`
+	// Status is the proxy's routing view: "booting", "running", or "draining".
+	Status   string `json:"status"`
+	Sessions int    `json:"sessions"`
+	PID      int    `json:"pid,omitempty"`
+	Port     int    `json:"port,omitempty"`
+}
+
+// buildWorkerPool merges the proxy's live worker snapshot with the process
+// manager's pid/port (keyed by slot: elastic spawns use the slot as the
+// replica index). A worker whose process has not started yet omits pid/port
+// rather than fabricating zeros.
+func (s *Server) buildWorkerPool(slug string, snap proxy.ElasticPoolSnapshot) workerPoolStatus {
+	var live []*process.ProcessInfo
+	if s.manager != nil {
+		live = s.manager.AllForSlug(slug)
+	}
+	out := workerPoolStatus{
+		Mode:              snap.Mode,
+		SessionsPerWorker: snap.SessionsPerWorker,
+		MaxWorkers:        snap.MaxWorkers,
+		Ceiling:           snap.MaxWorkers * snap.SessionsPerWorker,
+		Workers:           make([]workerPoolWorker, 0, len(snap.Workers)),
+	}
+	for _, w := range snap.Workers {
+		entry := workerPoolWorker{SlotID: w.SlotID, Status: w.Status, Sessions: w.Sessions}
+		if w.SlotID >= 0 && w.SlotID < len(live) && live[w.SlotID] != nil {
+			entry.PID = live[w.SlotID].PID
+			entry.Port = live[w.SlotID].Port
+		}
+		out.Workers = append(out.Workers, entry)
+	}
+	return out
+}
+
 type replicaMetrics struct {
 	Index      int     `json:"index"`
 	Status     string  `json:"status"`
@@ -2655,8 +2715,14 @@ type metricsResponse struct {
 	// no replicas are tracked yet).
 	Status string `json:"status"`
 	// SessionsCap is the per-replica session cap currently in effect for
-	// this pool. 0 means uncapped.
-	SessionsCap      int              `json:"sessions_cap"`
+	// this pool. 0 means uncapped. For elastic (grouped/per_session) pools it
+	// is the per-worker cap, so the admission ceiling is
+	// MaxWorkers x SessionsCap.
+	SessionsCap int `json:"sessions_cap"`
+	// WorkerIsolation and MaxWorkers describe the elastic pool when the app
+	// runs grouped/per_session isolation; omitted for multiplex.
+	WorkerIsolation  string           `json:"worker_isolation,omitempty"`
+	MaxWorkers       int              `json:"max_workers,omitempty"`
 	Replicas         []replicaMetrics `json:"replicas"`
 	MetricsAvailable bool             `json:"metrics_available"`
 	AutoscaleStatus  *autoscaleStatus `json:"autoscale_status"`
@@ -2784,6 +2850,43 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	}
 	if anyRunning {
 		resp.Status = string(process.StatusRunning)
+	}
+
+	// Elastic (grouped/per_session) pools: rebuild the rows from the proxy's
+	// live capacity view. The multiplex session counters above never populate
+	// for these pools (sessions stays -1), so per-worker bound-session counts
+	// come from the pool snapshot; slots the proxy has reserved but whose
+	// process has not started yet appear as "booting" rows, and manager
+	// leftovers for terminated slots are dropped (elastic slot IDs are never
+	// reused, so they would otherwise accumulate forever under worker churn).
+	// sessions_cap becomes the per-worker cap: ceiling = max_workers x cap.
+	if s.proxy != nil {
+		if snap, ok := s.proxy.ElasticWorkersSnapshot(slug); ok {
+			resp.SessionsCap = snap.SessionsPerWorker
+			resp.WorkerIsolation = snap.Mode
+			resp.MaxWorkers = snap.MaxWorkers
+			managerRow := make(map[int]replicaMetrics, len(resp.Replicas))
+			for _, rm := range resp.Replicas {
+				managerRow[rm.Index] = rm
+			}
+			rows := make([]replicaMetrics, 0, len(snap.Workers))
+			for _, w := range snap.Workers {
+				rm, tracked := managerRow[w.SlotID]
+				if !tracked {
+					rm = replicaMetrics{Index: w.SlotID}
+				}
+				rm.Sessions = int64(w.Sessions)
+				// The manager tracks process health; the proxy tracks routing.
+				// Transitional routing states the manager cannot see (booting
+				// before the process exists, draining) win the display;
+				// otherwise the manager's health view stands.
+				if w.Status != "running" || !tracked {
+					rm.Status = w.Status
+				}
+				rows = append(rows, rm)
+			}
+			resp.Replicas = rows // snapshot order: sorted by slot
+		}
 	}
 
 	// Overlay DB lost-status onto the live, manager-sourced replica list. "lost"

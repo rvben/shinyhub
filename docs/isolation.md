@@ -299,6 +299,15 @@ burst of simultaneous cold arrivals therefore provisions
 `max_workers x grouped_size` ceiling is genuinely reached, instead of
 reserving one worker per arrival and shedding at `max_workers` clients.
 
+**Per-worker capacity view.** `shinyhub apps show <slug>` renders the live
+worker table for elastic apps - slot, routing status (booting/running/
+draining), bound sessions against `grouped_size`, pid, port - plus the
+admission-ceiling arithmetic, and `shinyhub apps metrics <slug>` adds
+per-worker CPU and RSS. The same data rides the app envelope (`worker_pool`)
+and the metrics poll consumed by the dashboard. Tune `grouped_size` and
+`max_workers` against this real session distribution instead of counting
+worker processes by hand.
+
 **Per-worker cgroup limits.** Each elastic worker receives the FULL per-app
 `memory_limit_mb` and `cpu_quota_percent`, NOT a fraction. With `max_workers = 30`
 and `memory_limit_mb = 512`, the worst-case host RAM for that one app is

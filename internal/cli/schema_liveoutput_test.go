@@ -221,7 +221,12 @@ func bootContractServer(t *testing.T) (host, token string) {
 		Storage: config.StorageConfig{AppsDir: appsDir, AppDataDir: dataDir},
 	}
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
-	srv := api.New(cfg, store, mgr, proxy.New())
+	prx := proxy.New()
+	srv := api.New(cfg, store, mgr, prx)
+	// The fixture app runs grouped isolation so the worker_pool envelope field
+	// the schema declares is present in live output (an elastic pool with zero
+	// workers reports an empty, not absent, view).
+	prx.SetPoolMode("demo", config.IsolationGrouped, 6, 5)
 
 	rawToken := "contract_admin_token_0123456789abcdef0123456789abcd"
 	sysUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "admin")

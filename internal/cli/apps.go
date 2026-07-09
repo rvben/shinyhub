@@ -182,6 +182,19 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			WindowSeconds int               `json:"window_seconds"`
 			Counts        map[string]uint64 `json:"counts"`
 		} `json:"rejects_by_reason"`
+		WorkerPool *struct {
+			Mode              string `json:"mode"`
+			SessionsPerWorker int    `json:"sessions_per_worker"`
+			MaxWorkers        int    `json:"max_workers"`
+			Ceiling           int    `json:"ceiling"`
+			Workers           []struct {
+				SlotID   int    `json:"slot_id"`
+				Status   string `json:"status"`
+				Sessions int    `json:"sessions"`
+				PID      int    `json:"pid"`
+				Port     int    `json:"port"`
+			} `json:"workers"`
+		} `json:"worker_pool"`
 	}
 	if err := json.Unmarshal(out, &resp2); err != nil {
 		return fmt.Errorf("decode response: %w", err)
@@ -197,37 +210,51 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 		fmt.Fprintf(w, "Project:     %s\n", a.ProjectSlug)
 	}
 	fmt.Fprintf(w, "Deploys:     %d\n", a.DeployCount)
-	fmt.Fprintf(w, "Replicas:    %d\n", a.Replicas)
-	// effective cap resolves the per-app value against the runtime default (0 =
-	// inherit). Annotate a 0 with the resolved default and print the admission
-	// ceiling (replicas × effective cap) so the bare "0" is not cryptic. An
-	// older server may omit effective_max_sessions_per_replica entirely; treat
-	// the absent field distinctly from a reported 0 so we never invent an
-	// "unlimited" ceiling for an app that has an explicit cap.
-	effKnown := resp2.EffectiveMaxSessionsPerReplica != nil
-	if a.MaxSessionsPerReplica == 0 {
-		if effKnown {
-			fmt.Fprintf(w, "Max sess/r:  0 (runtime default: %d)\n", *resp2.EffectiveMaxSessionsPerReplica)
-		} else {
-			fmt.Fprintf(w, "Max sess/r:  0 (runtime default)\n")
+	if wp := resp2.WorkerPool; wp != nil {
+		// Elastic (grouped/per_session) app: the replicas/max-sess-per-replica
+		// arithmetic below does not apply (those knobs are inert for elastic
+		// pools), so render the pool's own capacity model instead.
+		sessWord := "sessions"
+		if wp.SessionsPerWorker == 1 {
+			sessWord = "session"
 		}
+		fmt.Fprintf(w, "Isolation:   %s (%d %s/worker, max %d workers)\n",
+			wp.Mode, wp.SessionsPerWorker, sessWord, wp.MaxWorkers)
+		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent sessions\n",
+			wp.MaxWorkers, wp.SessionsPerWorker, wp.Ceiling)
 	} else {
-		fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
-	}
-	// Prefer the server-resolved effective cap; when it is absent fall back to
-	// the explicit app cap. If neither is known (absent effective + inherited
-	// cap), the ceiling is unresolvable client-side, so omit it rather than
-	// claim unlimited.
-	switch {
-	case effKnown:
-		if eff := *resp2.EffectiveMaxSessionsPerReplica; eff == 0 {
-			fmt.Fprintf(w, "Admission ceiling: unlimited (no session cap)\n")
+		fmt.Fprintf(w, "Replicas:    %d\n", a.Replicas)
+		// effective cap resolves the per-app value against the runtime default (0 =
+		// inherit). Annotate a 0 with the resolved default and print the admission
+		// ceiling (replicas × effective cap) so the bare "0" is not cryptic. An
+		// older server may omit effective_max_sessions_per_replica entirely; treat
+		// the absent field distinctly from a reported 0 so we never invent an
+		// "unlimited" ceiling for an app that has an explicit cap.
+		effKnown := resp2.EffectiveMaxSessionsPerReplica != nil
+		if a.MaxSessionsPerReplica == 0 {
+			if effKnown {
+				fmt.Fprintf(w, "Max sess/r:  0 (runtime default: %d)\n", *resp2.EffectiveMaxSessionsPerReplica)
+			} else {
+				fmt.Fprintf(w, "Max sess/r:  0 (runtime default)\n")
+			}
 		} else {
+			fmt.Fprintf(w, "Max sess/r:  %d\n", a.MaxSessionsPerReplica)
+		}
+		// Prefer the server-resolved effective cap; when it is absent fall back to
+		// the explicit app cap. If neither is known (absent effective + inherited
+		// cap), the ceiling is unresolvable client-side, so omit it rather than
+		// claim unlimited.
+		switch {
+		case effKnown:
+			if eff := *resp2.EffectiveMaxSessionsPerReplica; eff == 0 {
+				fmt.Fprintf(w, "Admission ceiling: unlimited (no session cap)\n")
+			} else {
+				fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
+			}
+		case a.MaxSessionsPerReplica > 0:
+			eff := a.MaxSessionsPerReplica
 			fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
 		}
-	case a.MaxSessionsPerReplica > 0:
-		eff := a.MaxSessionsPerReplica
-		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
 	}
 	// Autoscale summary: when enabled, resolve the effective target (the app's
 	// own value, or the runtime default the server reports when the app's is 0)
@@ -269,7 +296,11 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	if len(a.CreatedAt) >= 10 {
 		fmt.Fprintf(w, "Created:     %s\n", a.CreatedAt[:10])
 	}
-	if len(resp2.ReplicasStatus) > 0 {
+	// For elastic apps the Workers table below is the live truth; a lingering
+	// replicas_status row (from a deploy before the isolation switch) would
+	// render a stale duplicate next to it, so the multiplex section is
+	// suppressed whenever a worker pool exists.
+	if len(resp2.ReplicasStatus) > 0 && resp2.WorkerPool == nil {
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "Replicas:")
 		fmt.Fprintf(w, "  %-6s %-10s %-8s %s\n", "INDEX", "STATUS", "PID", "PORT")
@@ -286,6 +317,30 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 				reason = "  (" + r.Reason + ")"
 			}
 			fmt.Fprintf(w, "  %-6d %-10s %-8s %s%s\n", r.Index, r.Status, pid, port, reason)
+		}
+	}
+	if wp := resp2.WorkerPool; wp != nil {
+		fmt.Fprintln(w, "")
+		if len(wp.Workers) == 0 {
+			fmt.Fprintln(w, "Workers:     none yet (spawned on demand)")
+		} else {
+			bound := 0
+			for _, wk := range wp.Workers {
+				bound += wk.Sessions
+			}
+			fmt.Fprintf(w, "Workers:     %d live · %d/%d sessions\n", len(wp.Workers), bound, wp.Ceiling)
+			fmt.Fprintf(w, "  %-6s %-10s %-9s %-8s %s\n", "SLOT", "STATUS", "SESSIONS", "PID", "PORT")
+			for _, wk := range wp.Workers {
+				pid, port := "-", "-"
+				if wk.PID != 0 {
+					pid = fmt.Sprintf("%d", wk.PID)
+				}
+				if wk.Port != 0 {
+					port = fmt.Sprintf("%d", wk.Port)
+				}
+				fmt.Fprintf(w, "  %-6d %-10s %-9s %-8s %s\n",
+					wk.SlotID, wk.Status, fmt.Sprintf("%d/%d", wk.Sessions, wp.SessionsPerWorker), pid, port)
+			}
 		}
 	}
 	return nil
