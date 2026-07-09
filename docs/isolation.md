@@ -93,9 +93,11 @@ that app processes receive (see [Environment](environment.md)): locale,
 proxies, TLS trust, tool cache dirs, and package-index configuration
 (`UV_EXTRA_INDEX_URL` and friends) pass through; everything else - including
 any credential in the service environment - is scrubbed, and
-`SHINYHUB_APP_ENV_ALLOW` extends the list. The sandbox does not restrict
-network egress (Landlock is filesystem-only), so dependency downloads reach
-PyPI/CRAN or a configured private index normally.
+`SHINYHUB_APP_ENV_ALLOW` extends the list. The app's own stored env vars
+(including decrypted secrets) are layered on top, so builds and hooks see what
+the app sees at start. The sandbox does not restrict network egress (Landlock
+is filesystem-only), so dependency downloads reach PyPI/CRAN or a configured
+private index normally.
 
 ### Managed Python interpreters
 

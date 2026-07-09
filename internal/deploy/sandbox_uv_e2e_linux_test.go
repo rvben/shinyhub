@@ -71,7 +71,7 @@ package = false
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := sandboxedPythonSync(ctx, buildDir); err != nil {
+	if err := sandboxedPythonSync(ctx, buildDir, nil); err != nil {
 		t.Fatalf("sandboxed uv sync with managed-Python provisioning failed: %v", err)
 	}
 

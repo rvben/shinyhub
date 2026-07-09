@@ -233,6 +233,46 @@ func TestStart_PopulatesSecretEnvFromResolver(t *testing.T) {
 	}
 }
 
+// TestResolveAppEnv proves the exported accessor deploy uses to give builds
+// and hooks the same per-app env the app process receives: non-secret and
+// decrypted secret values combined into one slice (builds/hooks have no
+// out-of-band secret channel), nil-safe on both the receiver and an unset
+// resolver, and failing closed on a resolver error.
+func TestResolveAppEnv(t *testing.T) {
+	m := NewManager(t.TempDir(), &captureRuntime{})
+	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
+		if slug != "demo" {
+			t.Errorf("resolver called with slug %q, want demo", slug)
+		}
+		return []string{"PLAIN=1"}, []string{"SECRET=shh"}, nil
+	})
+	env, err := m.ResolveAppEnv("demo")
+	if err != nil {
+		t.Fatalf("ResolveAppEnv: %v", err)
+	}
+	if len(env) != 2 || env[0] != "PLAIN=1" || env[1] != "SECRET=shh" {
+		t.Errorf("env = %v, want [PLAIN=1 SECRET=shh]", env)
+	}
+
+	bare := NewManager(t.TempDir(), &captureRuntime{})
+	if env, err := bare.ResolveAppEnv("demo"); env != nil || err != nil {
+		t.Errorf("no resolver: got (%v, %v), want (nil, nil)", env, err)
+	}
+
+	var nilM *Manager
+	if env, err := nilM.ResolveAppEnv("demo"); env != nil || err != nil {
+		t.Errorf("nil manager: got (%v, %v), want (nil, nil)", env, err)
+	}
+
+	failing := NewManager(t.TempDir(), &captureRuntime{})
+	failing.SetEnvResolver(func(string) ([]string, []string, error) {
+		return nil, nil, fmt.Errorf("decrypt failed")
+	})
+	if _, err := failing.ResolveAppEnv("demo"); err == nil {
+		t.Error("resolver error must propagate (fail closed)")
+	}
+}
+
 // TestStart_DeploySuppliedEnvWinsOverSecretEnv guards the precedence contract
 // for an authoritative deploy/platform-supplied key (e.g. the allocated PORT).
 // Such keys arrive in StartParams.Env and must win over per-app env. Because the

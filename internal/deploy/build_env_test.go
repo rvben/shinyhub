@@ -36,8 +36,8 @@ func (h recordingHandler) WithGroup(string) slog.Handler      { return h }
 // TestSync_BuildTimeout (Task 2).
 func TestBuildEnvironment_TimesOutAsBuildFailed(t *testing.T) {
 	restore := SetSyncHooksForTest(
-		func(ctx context.Context, _ string) error { <-ctx.Done(); return ctx.Err() },
-		func(ctx context.Context, _ string) error { <-ctx.Done(); return ctx.Err() },
+		func(ctx context.Context, _ string, _ []string) error { <-ctx.Done(); return ctx.Err() },
+		func(ctx context.Context, _ string, _ []string) error { <-ctx.Done(); return ctx.Err() },
 	)
 	defer restore()
 	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error { return nil })
@@ -59,8 +59,8 @@ func TestBuildEnvironment_TimesOutAsBuildFailed(t *testing.T) {
 // proceeds (the app falls back to requirements mode).
 func TestBuildEnvironment_EnsureProjectTimeoutIsNonFatal(t *testing.T) {
 	restore := SetSyncHooksForTest(
-		func(context.Context, string) error { return nil },
-		func(context.Context, string) error { return nil },
+		func(context.Context, string, []string) error { return nil },
+		func(context.Context, string, []string) error { return nil },
 	)
 	defer restore()
 	restoreEnsure := SetEnsureProjectForTest(func(ctx context.Context, _ string) error {
@@ -99,8 +99,8 @@ func TestBuildEnvironment_LogsProgress(t *testing.T) {
 	defer func() { buildProgressInterval = prevInterval }()
 
 	restore := SetSyncHooksForTest(
-		func(context.Context, string) error { time.Sleep(10 * time.Millisecond); return nil },
-		func(context.Context, string) error { return nil },
+		func(context.Context, string, []string) error { time.Sleep(10 * time.Millisecond); return nil },
+		func(context.Context, string, []string) error { return nil },
 	)
 	defer restore()
 	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error { return nil })

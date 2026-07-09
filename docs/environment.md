@@ -5,6 +5,14 @@ in plaintext; values marked `--secret` are encrypted at rest with AES-256-GCM
 (the key is derived from `SHINYHUB_AUTH_SECRET` via HKDF-SHA256) and can never
 be read back through the API or UI.
 
+Per-app env vars reach every code path the app controls: the app process, the
+host-side dependency build (`uv sync` / `renv::restore`), and post-deploy
+hooks. The build and hooks see the same variables the app sees at start, so a
+private package-index credential stored as a secret env var works during
+dependency resolution. (One exception: the best-effort conversion of a
+requirements.txt-only bundle into a uv project sees only the service
+environment, not per-app vars.)
+
 ## When to use env vars vs persistent data
 
 | You want to... | Use |
@@ -44,7 +52,8 @@ The service's own environment is not passed through wholesale. Every
 app-controlled code path - the app process, the dependency build (`uv sync` /
 `renv::restore`), and post-deploy hooks - receives an allow-listed subset, so
 control-plane secrets (`SHINYHUB_AUTH_SECRET`, cloud credentials, tokens)
-never reach deployer-controlled code. The allow-list covers, by category:
+never reach deployer-controlled code. Per-app env vars (above) are layered on
+top of this inherited base. The allow-list covers, by category:
 
 - **OS/runtime essentials:** `PATH`, `HOME`, `USER`, locale (`LANG`, `LC_*`),
   `TERM`, `TZ`, temp dirs.
@@ -85,12 +94,25 @@ A bundle can also declare its index self-contained in `pyproject.toml` with
 `[[tool.uv.index]]`; the build sandbox does not restrict network egress, so
 either approach reaches the index directly or via the configured proxy.
 
+Each build logs its effective index configuration (credentials redacted), and
+a "not found in the package registry" failure is annotated with the index
+configuration the build actually saw - or with a pointer to this page when
+none reached it.
+
 **Credential visibility:** a build executes deployer-controlled code (build
 backends, configure scripts), so any index credential a build uses is readable
 by that build. Index variables set in the service environment are server-wide:
 treat them as visible to everyone who can deploy to the instance. On a
-multi-tenant instance, prefer index URLs that need no credential (for example
-a network-restricted mirror) over a shared secret.
+multi-tenant instance, scope credentials to the app instead - store them as
+per-app env vars, which reach only that app's builds and hooks:
+
+```bash
+shinyhub env set demo UV_INDEX_CORP_USERNAME=svc-demo
+shinyhub env set demo UV_INDEX_CORP_PASSWORD --secret --stdin
+```
+
+`shinyhub run` mirrors this locally: variables passed via `--env`/`.env` reach
+the local dependency build the same way per-app vars reach a server build.
 
 ## Caveat: rotating `SHINYHUB_AUTH_SECRET`
 

@@ -119,7 +119,10 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		port = deploy.AllocatePort()
 	}
 
-	// Step 3: Resolve the launch plan via the shared seam.
+	// Step 3: Resolve the launch plan via the shared seam. The user's --env/.env
+	// vars reach the dep-prep builds too (AppEnv), so a local run against e.g. a
+	// private package index behaves like a server deploy with the same vars.
+	userEnv := dropReservedKeys(o.Env)
 	launchOpts := deploy.LaunchOptions{
 		Port:                  port,
 		Workers:               1,
@@ -129,6 +132,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		CommandHostDeps:       !o.NoSync,
 		AutoInstrumentDefault: false,
 		HonorManifestTracing:  false,
+		AppEnv:                userEnv,
 	}
 	plan, err := deploy.ResolveLaunch(bundleDir, launchOpts)
 	if err != nil {
@@ -151,7 +155,6 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	//   SanitizedEnv() base, then o.Env (--env/.env) with reserved keys
 	//   stripped, then plan.Env (PORT), then SHINYHUB_APP_DATA.
 	//   Platform vars always win over user-supplied env.
-	userEnv := dropReservedKeys(o.Env)
 	childEnv := append(process.SanitizedEnv(), userEnv...)
 	childEnv = append(childEnv, plan.Env...)
 	childEnv = append(childEnv, "SHINYHUB_APP_DATA="+dataDir)
