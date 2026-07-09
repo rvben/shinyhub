@@ -76,6 +76,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.4](https://github.com/rvben/shinyhub/compare/v0.10.3...v0.10.4) - 2026-07-09
+
+### Added
+
+- **deploy**: give builds and hooks the app's env vars, and diagnose index misses ([a99fb65](https://github.com/rvben/shinyhub/commit/a99fb658c8187e7fa342dcf2db4f1c4d705e1c38))
+
 ## [0.10.3](https://github.com/rvben/shinyhub/compare/v0.10.2...v0.10.3) - 2026-07-09
 
 ### Fixed
