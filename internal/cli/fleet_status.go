@@ -173,8 +173,7 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 	}
 	apps, err := fetchApps(cfg)
 	if err != nil {
-		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
-		return &ExitCodeError{Code: 3, Err: err, Reported: true}
+		return reportAppsFetchError(cfg, errOut, err)
 	}
 	// buildFleetStatus computes summary over ALL apps; slicing happens after.
 	st := buildFleetStatus(cfg.Host, apps)

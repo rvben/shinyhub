@@ -47,6 +47,10 @@ func TestClassify(t *testing.T) {
 		{"conflict error type", &conflictError{slug: "app", msg: "re-run plan"}, KindConflict, 5},
 		{"deploy http 401", &deployHTTPError{statusCode: 401, body: "unauthorized"}, KindAuth, 3},
 		{"deploy http 503 wrapped", fmt.Errorf("checking demo: %w", &deployHTTPError{statusCode: 503, body: "service unavailable"}), KindServerError, 3},
+		// An undecodable response body (version skew) is not an auth failure;
+		// it must never inherit the legacy exit-3 auth heuristic, even wrapped.
+		{"protocol decode error", &protocolError{op: "decode apps", err: errors.New("cannot unmarshal")}, KindInternal, 1},
+		{"protocol decode error wrapped in legacy exit 3", &ExitCodeError{Code: 3, Err: &protocolError{op: "decode apps", err: errors.New("cannot unmarshal")}}, KindInternal, 1},
 		{"plain error", errors.New("something odd"), KindInternal, 1},
 	}
 	for _, tc := range cases {

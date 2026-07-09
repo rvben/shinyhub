@@ -56,6 +56,13 @@ func classify(err error) (Kind, int) {
 	if errors.As(err, &dhe) {
 		return statusKind(dhe.statusCode)
 	}
+	var pe *protocolError
+	if errors.As(err, &pe) {
+		// An undecodable response body (usually CLI/server version skew) is
+		// neither an auth nor a transport failure: retrying or re-logging-in
+		// cannot fix it, so it must not ride the retryable exit-3 kinds.
+		return KindInternal, 1
+	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return KindTimeout, 3

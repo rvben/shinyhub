@@ -113,8 +113,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 				"     retry, or pass --wait-for-server=<duration> to block until it is ready.\n", nr)
 			return nil, &ExitCodeError{Code: 6, Err: nr, Reported: true}
 		}
-		fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
-		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
+		return nil, reportAppsFetchError(cfg, errOut, err)
 	}
 	caps := fetchServerCaps(cfg)
 
