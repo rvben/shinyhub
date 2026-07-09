@@ -299,6 +299,13 @@ burst of simultaneous cold arrivals therefore provisions
 `max_workers x grouped_size` ceiling is genuinely reached, instead of
 reserving one worker per arrival and shedding at `max_workers` clients.
 
+**WebSocket upgrades are parked during boot.** An upgrade whose pinned
+worker is still booting is held - up to 30 seconds, released immediately if
+the client disconnects - and forwarded once the worker registers, instead of
+being answered with the loading page (a non-101 that hard-fails WS clients;
+browsers re-enter via the splash's reload loop, scripted clients cannot).
+If the boot exceeds the window the upgrade falls back to the loading page.
+
 **Per-worker capacity view.** `shinyhub apps show <slug>` renders the live
 worker table for elastic apps - slot, routing status (booting/running/
 draining), bound sessions against `grouped_size`, pid, port - plus the

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -552,6 +553,64 @@ func (p *Proxy) lookupClientSlot(slug, clientID string) *clientSlot {
 		return nil
 	}
 	return p.clients[slug][clientID]
+}
+
+// wsBootParkTTL bounds how long a WebSocket upgrade pinned to a booting
+// worker is parked before falling back to the loading page; wsBootParkInterval
+// is the status poll cadence. Vars so tests can shorten them. The TTL is
+// deliberately below the 60s spawn health timeout: a boot that slow should
+// shed the upgrade rather than hold sockets open.
+var (
+	wsBootParkTTL      = 30 * time.Second
+	wsBootParkInterval = 100 * time.Millisecond
+)
+
+// isWSUpgrade reports whether r asks for a WebSocket upgrade. Browsers only
+// open the WS after the loading page reloads into a ready worker, but
+// scripted clients connect straight after the first response and cannot
+// retry a non-101 the way the splash's reload loop retries a page.
+func isWSUpgrade(r *http.Request) bool {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	for _, part := range strings.Split(r.Header.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "upgrade") {
+			return true
+		}
+	}
+	return false
+}
+
+// waitWorkerReady blocks until slug's slotID worker is running, returning
+// false when the worker or pool disappears, the park TTL elapses, or ctx is
+// canceled (client hung up). It polls rather than subscribing: parked
+// upgrades are rare and boot times dwarf the poll interval. The caller must
+// NOT hold p.mu.
+func (p *Proxy) waitWorkerReady(ctx context.Context, slug string, slotID int) bool {
+	deadline := time.Now().Add(wsBootParkTTL)
+	for {
+		p.mu.RLock()
+		status, exists := workerStatus(0), false
+		if pool := p.pools[slug]; pool != nil {
+			if w := pool.workers[slotID]; w != nil {
+				status, exists = w.status, true
+			}
+		}
+		p.mu.RUnlock()
+		switch {
+		case !exists || status == workerDraining:
+			return false
+		case status == workerRunning:
+			return true
+		case time.Now().After(deadline):
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(wsBootParkInterval):
+		}
+	}
 }
 
 // ElasticWorkerStatus is one worker's live routing state in an elastic pool,

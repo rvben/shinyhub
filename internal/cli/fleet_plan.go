@@ -116,6 +116,24 @@ func fetchApps(cfg *cliConfig) ([]db.App, error) {
 	return apps, nil
 }
 
+// protocolHint diagnoses a protocol (decode) failure against the server's
+// advertised version: when it differs from this CLI's, the near-certain
+// cause is version skew and the guidance names both versions.
+func protocolHint(cfg *cliConfig) string {
+	if info, err := probeServer(cfg); err == nil && info.Version != "" && info.Version != version {
+		return fmt.Sprintf("this CLI is version %s but the server runs %s - upgrade the CLI to match", version, info.Version)
+	}
+	return "the response shape is not one this CLI understands; the CLI and server versions may have drifted apart"
+}
+
+// protocolFailure wraps a decode failure for the structured error surface:
+// kind internal (never the auth/retryable kinds a raw error could fall into)
+// with the version-skew guidance in the envelope's hint field.
+func protocolFailure(cfg *cliConfig, err error) error {
+	return &ExitCodeError{Code: 1, Kind: KindInternal,
+		Err: &hintedMsgError{msg: err.Error(), hint: protocolHint(cfg)}}
+}
+
 // reportAppsFetchError prints the operator-facing diagnosis for a failed
 // GET /api/apps and returns the classified error. A protocol mismatch
 // (undecodable body) is diagnosed against the server's advertised version:
@@ -125,10 +143,7 @@ func fetchApps(cfg *cliConfig) ([]db.App, error) {
 func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
 	var pe *protocolError
 	if errors.As(err, &pe) {
-		hint := "the response shape is not one this CLI understands; the CLI and server versions may have drifted apart"
-		if info, perr := probeServer(cfg); perr == nil && info.Version != "" && info.Version != version {
-			hint = fmt.Sprintf("this CLI is version %s but the server runs %s - upgrade the CLI to match", version, info.Version)
-		}
+		hint := protocolHint(cfg)
 		fmt.Fprintf(errOut, "  ✗ cannot read the apps list from %s: %v\n     %s\n", cfg.Host, err, hint)
 		// Carry the guidance into the structured envelope's hint field too:
 		// scripted/JSON consumers never see the prose above.
