@@ -1955,48 +1955,56 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			wkr.rp.ServeHTTP(rec, r)
 			return
 
-		case decisionAllocate:
+		case decisionBind, decisionAllocate:
 			p.mu.RUnlock()
-			// Host-memory admission floor: shed the request BEFORE reserving a
-			// slot or spawning. Only this branch is gated; pinned clients take
-			// decisionRoute and keep being served under memory pressure. The
+			// Host-memory admission floor, probed outside any lock. It gates
+			// only NEW worker allocation: binding onto an already-reserved
+			// worker adds no process, so it proceeds under pressure, and
+			// pinned clients take decisionRoute and keep being served. The
 			// reject reason is distinct from pool-saturated so capacity
 			// automation (autoscale, warm expansion) does not read memory
 			// pressure as a scale-up signal.
+			memOK := true
 			if g := p.memGuard.Load(); g != nil {
 				if availMB, ok := g.probe(); ok && availMB < g.minAvailableMB {
-					p.recordReject(rec, slug, ReasonMemoryPressure, true)
-					rec.Header().Set("Retry-After", "5")
-					http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
-					return
+					memOK = false
 				}
 			}
-			slot := p.reserveWorker(slug, cid)
-			if slot < 0 {
-				// maxWorkers reached between the RUnlock and reserveWorker's Lock;
-				// shed with the same response as decisionReject.
+			// Place under the write lock, re-deciding on CURRENT state: the
+			// read-lock decide() above ran on a snapshot that a concurrent
+			// cold burst makes stale (every burst client sees the same
+			// under-capacity pool). placeClient packs clients onto booting
+			// workers up to grouped_size before reserving new slots, so a
+			// burst sheds only beyond max_workers x grouped_size.
+			pl := p.placeClient(slug, cid, memOK)
+			switch pl.kind {
+			case placedBind:
+				// Pin the client to its slot. deploymentID is 0 while the
+				// worker is booting; retries during boot honor the pin and the
+				// loading page reloads into a route once the worker registers.
+				http.SetCookie(rec, &http.Cookie{
+					Name:     cookiePrefix + slug,
+					Value:    p.stickyCookieValue(slug, pl.slotID, pl.deploymentID),
+					Path:     "/app/" + slug + "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+					Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
+				})
+				if pl.spawned && spawnFn != nil {
+					go spawnFn(slug, pl.slotID)
+				}
+				p.serveMissPage(rec, slug, nil)
+			case placedMemoryPressure:
+				p.recordReject(rec, slug, ReasonMemoryPressure, true)
+				rec.Header().Set("Retry-After", "5")
+				http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
+			case placedSaturated:
 				p.recordReject(rec, slug, ReasonPoolSaturated, true)
 				rec.Header().Set("Retry-After", "5")
 				http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
-				return
+			default: // placedGone: pool vanished or turned non-elastic in the gap
+				p.serveMissPage(rec, slug, nil)
 			}
-			p.bindClient(slug, cid, slot)
-			// Set the rep sticky cookie pinning the newly reserved slot.
-			// deploymentID is 0 until RegisterElasticWorker is called; the booting
-			// placeholder also has deploymentID=0, so retries while the worker is
-			// booting continue to honor the pin.
-			http.SetCookie(rec, &http.Cookie{
-				Name:     cookiePrefix + slug,
-				Value:    p.stickyCookieValue(slug, slot, 0),
-				Path:     "/app/" + slug + "/",
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-				Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
-			})
-			if spawnFn != nil {
-				go spawnFn(slug, slot)
-			}
-			p.serveMissPage(rec, slug, nil)
 			return
 
 		case decisionReject:

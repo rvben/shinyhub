@@ -249,22 +249,119 @@ func (p *Proxy) reserveWorker(slug, _ string) int {
 }
 
 // bindClient records that clientID is assigned to slotID and increments the
-// worker's assignedClients counter. It must be called after a successful
-// reserveWorker call (before the worker starts). Caller must NOT hold p.mu.
+// worker's assignedClients counter. Caller must NOT hold p.mu.
 func (p *Proxy) bindClient(slug, clientID string, slotID int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.bindClientLocked(slug, clientID, slotID)
+}
 
+// bindClientLocked records that clientID is assigned to slotID and increments
+// the worker's assignedClients counter. A client that already holds a binding
+// is migrated, not double-counted: the previous worker's count is decremented
+// (it may be draining; a removed worker is simply gone) and any pending
+// release timer is stopped so a stale grace expiry cannot fire against the
+// new binding. Caller MUST hold p.mu WRITE.
+func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
+	pool := p.pools[slug]
+	if old := p.lookupClientSlot(slug, clientID); old != nil {
+		if old.slotID == slotID {
+			return // already bound to this slot
+		}
+		if old.releaseTimer != nil {
+			old.releaseTimer.Stop()
+			old.releaseTimer = nil
+		}
+		if pool != nil {
+			if w, ok := pool.workers[old.slotID]; ok {
+				w.assignedClients--
+			}
+		}
+	}
 	if p.clients[slug] == nil {
 		p.clients[slug] = make(map[string]*clientSlot)
 	}
 	p.clients[slug][clientID] = &clientSlot{slotID: slotID}
-
-	// Increment the worker's assignedClients.
-	if pool, ok := p.pools[slug]; ok {
+	if pool != nil {
 		if w, ok := pool.workers[slotID]; ok {
 			w.assignedClients++
 		}
+	}
+}
+
+// placement is the outcome of placeClient.
+type placementKind int
+
+const (
+	placedBind           placementKind = iota // bound to slotID; serve the loading page
+	placedSaturated                           // every worker at cap and max_workers reached: shed
+	placedMemoryPressure                      // a new worker is needed but the memory floor is breached
+	placedGone                                // pool vanished or turned non-elastic in the lock gap
+)
+
+type placement struct {
+	kind         placementKind
+	slotID       int   // valid when kind == placedBind
+	deploymentID int64 // 0 while the bound worker is still booting
+	spawned      bool  // a new slot was reserved; the caller dispatches the spawn callback
+}
+
+// placeClient atomically places a fresh elastic client. It re-runs decide()
+// against the CURRENT pool state under the write lock - the caller's read-lock
+// snapshot goes stale under a cold burst, where every concurrent client sees
+// the same empty or under-capacity pool and would otherwise reserve its own
+// worker. Serializing placement here is what packs a burst to grouped_size
+// clients per booting worker and keeps the effective admission ceiling at
+// max_workers x grouped_size instead of collapsing to max_workers.
+//
+// The outcome is one of: bind to an existing worker (ready or booting), or
+// reserve a fresh booting slot and bind to it (spawned=true; the caller
+// dispatches the spawn callback outside the lock), or shed. memOK=false
+// vetoes only NEW slot reservation - binding adds no process, so it proceeds
+// under memory pressure. The caller must NOT hold p.mu.
+func (p *Proxy) placeClient(slug, clientID string, memOK bool) placement {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pool, ok := p.pools[slug]
+	if !ok || !poolIsElastic(pool) {
+		return placement{kind: placedGone}
+	}
+
+	// A concurrent request for the same client may have bound it in the gap
+	// between the caller's RUnlock and this Lock; honor that binding.
+	if cs := p.lookupClientSlot(slug, clientID); cs != nil {
+		if w := pool.workers[cs.slotID]; w != nil && w.status != workerDraining {
+			return placement{kind: placedBind, slotID: cs.slotID, deploymentID: w.deploymentID}
+		}
+	}
+
+	d := decide(pool.workerStates(), pool.mode, pool.groupedSize, pool.maxWorkers, -1)
+	switch d.kind {
+	case decisionRoute, decisionBind:
+		w := pool.workers[d.slotID]
+		p.bindClientLocked(slug, clientID, d.slotID)
+		if w.status == workerRunning {
+			// The worker became ready in the lock gap. The caller still serves
+			// the loading page (it reloads and routes within seconds), so arm
+			// the ghost-client grace timer now: RegisterElasticWorker's sweep
+			// already ran and will never see this binding.
+			p.armClientReleaseLocked(slug, clientID)
+		}
+		return placement{kind: placedBind, slotID: d.slotID, deploymentID: w.deploymentID}
+	case decisionAllocate:
+		if !memOK {
+			return placement{kind: placedMemoryPressure}
+		}
+		slotID := pool.allocateSlotID()
+		addElasticWorker(pool, &replicaBackend{
+			slotID: slotID,
+			status: workerBooting,
+		})
+		p.bindClientLocked(slug, clientID, slotID)
+		return placement{kind: placedBind, slotID: slotID, spawned: true}
+	default: // decisionReject
+		return placement{kind: placedSaturated}
 	}
 }
 
@@ -287,11 +384,17 @@ func (p *Proxy) clientConnOpened(slug, clientID string) {
 // liveConns is still zero (a reconnect may have bumped it), removes the client
 // slot, decrements the worker's assignedClients, and dispatches p.terminate (via
 // goroutine, outside the lock) when the worker reaches zero assigned clients.
-func (p *Proxy) graceExpiry(slug, clientID string) func() {
+//
+// armed is the clientSlot this timer was created for. A timer that fires
+// after the client has been re-placed (bindClientLocked replaces the slot and
+// stops the timer, but a callback already past Stop still runs) finds a
+// DIFFERENT clientSlot under the same clientID and must not touch it: without
+// the identity check a stale expiry would tear down the fresh binding.
+func (p *Proxy) graceExpiry(slug, clientID string, armed *clientSlot) func() {
 	return func() {
 		p.mu.Lock()
 		cs := p.lookupClientSlot(slug, clientID)
-		if cs == nil {
+		if cs == nil || cs != armed {
 			p.mu.Unlock()
 			return
 		}
@@ -340,7 +443,7 @@ func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
 	if cs == nil || cs.liveConns != 0 || cs.releaseTimer != nil {
 		return
 	}
-	cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID))
+	cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID, cs))
 }
 
 // clientConnClosed records that one connection from clientID has closed. When
@@ -370,7 +473,7 @@ func (p *Proxy) clientConnClosed(slug, clientID string) {
 	}
 	// liveConns just hit zero: arm the grace-period release timer under cs.mu.
 	if cs.releaseTimer == nil {
-		cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID))
+		cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID, cs))
 	}
 }
 

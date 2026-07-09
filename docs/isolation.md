@@ -290,6 +290,15 @@ and the user sees the "Loading..." page while it boots. Subsequent requests
 from the same client route to the warm worker. Warm spare pre-allocation is a
 Phase 2 item.
 
+**Cold bursts pack onto provisioning workers.** In `grouped` mode a new
+client is placed on the fullest worker that still has room under
+`grouped_size` - including workers that are still booting. Clients placed on
+a booting worker wait on the loading page and connect when it registers. A
+burst of simultaneous cold arrivals therefore provisions
+`ceil(clients / grouped_size)` workers and sheds nobody until the full
+`max_workers x grouped_size` ceiling is genuinely reached, instead of
+reserving one worker per arrival and shedding at `max_workers` clients.
+
 **Per-worker cgroup limits.** Each elastic worker receives the FULL per-app
 `memory_limit_mb` and `cpu_quota_percent`, NOT a fraction. With `max_workers = 30`
 and `memory_limit_mb = 512`, the worst-case host RAM for that one app is
@@ -319,9 +328,12 @@ is distinct from `pool-saturated` so autoscaling does not read memory
 pressure as a scale-up signal. If the memory reading is unavailable, the
 floor fails open (admission proceeds).
 
-**`max_workers` is a hard ceiling; overflow yields 503.** When all
-`max_workers` slots are occupied, a new client receives `503 Service
-Unavailable` with a `Retry-After: 5` header. The client is not queued.
+**`max_workers x grouped_size` is a hard ceiling; overflow yields 503.** A
+new client is shed with `503 Service Unavailable` and a `Retry-After: 5`
+header only when every worker (running or booting) is at its per-worker cap
+AND `max_workers` slots are occupied - `max_workers x grouped_size` clients
+in `grouped` mode, `max_workers` in `per_session` mode. The shed client is
+not queued.
 
 **`max_session_lifetime_secs` is an absolute backstop.** When set (> 0), a
 worker is terminated after that many seconds regardless of activity. Clients
@@ -330,11 +342,12 @@ request (another cold start). Set this to reclaim long-lived workers from
 abandoned sessions.
 
 **Not-yet-connected clients are reclaimed after a grace period.** When a new
-client triggers a cold start (loading page), the worker slot is held for that
-client. If the client never opens a real connection after the worker becomes
-ready (e.g. the tab was closed), the slot is automatically released 15 seconds
-after the worker finishes booting. This prevents abandoned cold-start flows
-from leaking worker capacity. A client that does connect within those 15 seconds
+client is placed on a cold-starting worker (loading page), capacity on that
+worker is held for it. If the client never opens a real connection after the
+worker becomes ready (e.g. the tab was closed), its claim is automatically
+released 15 seconds after the worker finishes booting; a worker whose last
+claim is released terminates. This prevents abandoned cold-start flows from
+leaking worker capacity. A client that does connect within those 15 seconds
 cancels the reclaim and proceeds normally. `max_session_lifetime_secs` is
 therefore not the only reclaim path; the 15-second grace window handles the
 "seen the loading page, then disappeared" case independently.

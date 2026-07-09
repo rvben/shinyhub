@@ -26,7 +26,12 @@ func TestDecide(t *testing.T) {
 		{"grouped all full allocate", []workerState{W(0, 8)}, config.IsolationGrouped, 8, 5, -1, decision{kind: decisionAllocate}},
 		{"grouped full at max rejects", []workerState{W(0, 8), W(1, 8)}, config.IsolationGrouped, 8, 2, -1, decision{kind: decisionReject}},
 		{"stale pin allocates", []workerState{W(0, 1)}, config.IsolationPerSession, 1, 5, 99, decision{kind: decisionAllocate}},
-		{"grouped never routes a new client to a booting slot", []workerState{{slotID: 0, assignedClients: 1, status: workerBooting}}, config.IsolationGrouped, 8, 5, -1, decision{kind: decisionAllocate}},
+		{"grouped binds a new client to a booting slot under cap", []workerState{{slotID: 0, assignedClients: 1, status: workerBooting}}, config.IsolationGrouped, 8, 5, -1, decision{decisionBind, 0}},
+		{"grouped prefers a ready worker over a booting one", []workerState{W(0, 1), {slotID: 1, assignedClients: 1, status: workerBooting}}, config.IsolationGrouped, 8, 5, -1, decision{decisionRoute, 0}},
+		{"grouped packs the fullest booting slot", []workerState{{slotID: 0, assignedClients: 1, status: workerBooting}, {slotID: 1, assignedClients: 3, status: workerBooting}}, config.IsolationGrouped, 8, 5, -1, decision{decisionBind, 1}},
+		{"grouped booting slot at cap allocates", []workerState{{slotID: 0, assignedClients: 8, status: workerBooting}}, config.IsolationGrouped, 8, 5, -1, decision{kind: decisionAllocate}},
+		{"grouped booting slots at cap at max rejects", []workerState{{slotID: 0, assignedClients: 8, status: workerBooting}, {slotID: 1, assignedClients: 8, status: workerBooting}}, config.IsolationGrouped, 8, 2, -1, decision{kind: decisionReject}},
+		{"per_session booting slot is full for new clients", []workerState{{slotID: 0, assignedClients: 1, status: workerBooting}}, config.IsolationPerSession, 1, 5, -1, decision{kind: decisionAllocate}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
