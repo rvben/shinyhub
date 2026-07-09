@@ -68,3 +68,40 @@ func TestRunSandboxedBuildStep_ConfinesWrites_Live(t *testing.T) {
 		t.Error("expected the sandboxed command to report an error (the outside touch should fail), got nil")
 	}
 }
+
+// TestRunSandboxedBuildStep_AllowsManagedPythonWrites_Live proves, through the
+// same production wiring, that a build step in the canonical server layout
+// (<appsDir>/<slug>/versions/<v>) can provision uv-managed interpreters: the
+// child sees UV_PYTHON_INSTALL_DIR pointing at the per-app uv-python dir and
+// can write into it under Landlock. Without the per-app dir in the writable
+// set, uv falls back to $HOME/.local/share/uv/python, the write is denied, and
+// every deploy on a host without a bundle-compatible system Python fails its
+// build (the v0.9.6 SEC-A1 regression).
+func TestRunSandboxedBuildStep_AllowsManagedPythonWrites_Live(t *testing.T) {
+	if !sandbox.Supported() {
+		t.Skip("no isolation backend on this platform")
+	}
+	base := t.TempDir()
+	buildDir := filepath.Join(base, "myapp", "versions", "v1")
+	if err := os.MkdirAll(buildDir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+
+	// Report NO_NEW_PRIVS (Landlock-active detection), then do what uv does
+	// when provisioning a managed interpreter: create a version subdir under
+	// its install dir and write into it.
+	script := `grep NoNewPrivs /proc/self/status; ` +
+		`mkdir -p "$UV_PYTHON_INSTALL_DIR/cpython-3.14.0" && touch "$UV_PYTHON_INSTALL_DIR/cpython-3.14.0/ok"`
+	out, runErr := runSandboxedBuildStep(context.Background(), buildDir, []string{"sh", "-c", script})
+
+	if !strings.Contains(string(out), "NoNewPrivs:\t1") {
+		t.Skipf("Landlock not active on this kernel (NO_NEW_PRIVS not set): %s", out)
+	}
+	if runErr != nil {
+		t.Fatalf("managed-Python provisioning writes must be allowed, got %v\noutput:\n%s", runErr, out)
+	}
+	probe := filepath.Join(base, "myapp", "uv-python", "cpython-3.14.0", "ok")
+	if _, err := os.Stat(probe); err != nil {
+		t.Errorf("expected the write to land in the per-app uv-python dir: %v", err)
+	}
+}

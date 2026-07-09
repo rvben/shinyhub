@@ -1247,7 +1247,7 @@ var appEnvAllowExact = map[string]struct{}{
 	"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "NO_PROXY": {}, "ALL_PROXY": {},
 	"http_proxy": {}, "https_proxy": {}, "no_proxy": {}, "all_proxy": {},
 	"XDG_CACHE_HOME": {}, "XDG_DATA_HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_RUNTIME_DIR": {},
-	"UV_CACHE_DIR": {}, "PIP_CACHE_DIR": {},
+	"UV_CACHE_DIR": {}, "UV_PYTHON_INSTALL_DIR": {}, "PIP_CACHE_DIR": {},
 	"R_LIBS": {}, "R_LIBS_USER": {}, "R_LIBS_SITE": {}, "RENV_PATHS_CACHE": {},
 }
 

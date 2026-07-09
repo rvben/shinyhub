@@ -75,6 +75,41 @@ a hidden `__sandbox` subcommand of its own binary, which imposes the Landlock
 rules on itself and then executes the real app command. The app never sees the
 sandbox policy in its environment.
 
+## Dependency builds and post-deploy hooks
+
+The dependency-build step (`uv sync` / `renv::restore`) and manifest `[[hooks]]`
+commands execute deployer-controlled code (build backends, package configure
+scripts), so on any kernel with Landlock they run under the same `standard`
+confinement as the app process - independent of the isolation dial. Their
+writable set is:
+
+- the version's bundle directory (where `.venv` and the redirected
+  `UV_CACHE_DIR` / `XDG_CACHE_HOME` / `RENV_PATHS_ROOT` caches live),
+- the app's managed-Python store (below),
+- `/tmp` and `/dev`.
+
+### Managed Python interpreters
+
+When no system Python satisfies a bundle's `requires-python`, uv downloads a
+managed interpreter at build time. uv keeps that store in a data directory
+(`UV_PYTHON_INSTALL_DIR`), not in its cache, so the build sandbox gives it a
+dedicated writable location: `<apps_dir>/<slug>/uv-python`, a sibling of the
+app's `versions/` directory. One download serves every version of the app,
+survives version-retention pruning, and is removed with the app. The store is
+deliberately per-app rather than shared: a shared writable store would let one
+app's build backend tamper with an interpreter that another app executes.
+
+Operators who prefer a single shared store (for example, to download each
+interpreter once per host) can set `UV_PYTHON_INSTALL_DIR` in the service
+environment. The build sandbox honors it: the directory becomes the writable
+managed-Python store for every build and hook, and the variable passes through
+to app launches. This trades cross-app interpreter isolation for a shared
+download; choose it only when all deployers are trusted.
+
+A build step that is still denied a write (a tool writing outside the set
+above) fails with the sandbox's writable paths named in the error, rather than
+only the tool's raw "Permission denied".
+
 ## Requirements and graceful degradation
 
 Isolation is **Linux-only** and **best-effort**:

@@ -73,21 +73,23 @@ const EnvVar = "SHINYHUB_SANDBOX_SPEC"
 // /dev/null write fails ordinary shell redirects).
 var systemWritePaths = []string{"/dev", "/tmp"}
 
-// ComputeSpec resolves the isolation policy for one native replica. appDir is
-// the deployment working directory and dataDir the persistent per-app data dir
-// (may be empty). Only non-empty paths are included.
+// ComputeSpec resolves the isolation policy for one confined process. writeDirs
+// are the directory subtrees the process may write - for a native replica the
+// deployment working directory plus the persistent per-app data dir, for a
+// build/hook step the build dir plus the per-app managed-Python dir. Empty
+// entries are dropped.
 //
 // Standard: read-only everywhere ("/") so interpreter and library loads never
-// break, writable only within the app's own directories plus the shared system
+// break, writable only within the given directories plus the shared system
 // scratch/device areas. This narrows the blast radius - an app cannot tamper
 // with other apps' bundles, the control-plane database, or system files - while
 // staying robust enough not to break ordinary programs.
-func ComputeSpec(level Level, appDir, dataDir string) Spec {
+func ComputeSpec(level Level, writeDirs ...string) Spec {
 	s := Spec{Level: level}
 	if !level.Enabled() {
 		return s
 	}
-	for _, p := range []string{appDir, dataDir} {
+	for _, p := range writeDirs {
 		if p != "" {
 			s.WritePaths = append(s.WritePaths, p)
 		}

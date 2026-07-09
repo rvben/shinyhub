@@ -481,12 +481,12 @@ func RunPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, ext
 // previously ran directly on the host via exec.CommandContext, even when
 // process isolation was enabled for the app itself. It now runs through
 // sandboxedCommand (deploy.go), the same "standard"-tier Landlock
-// confinement (write limited to bundleDir + /tmp + /dev, read-only
-// elsewhere) internal/process/native.go applies to the app process. On a
-// platform without Landlock support, sandboxedCommand returns argv
-// unchanged and this behaves exactly as before.
+// confinement (write limited to bundleDir + the app's managed-Python dir +
+// /tmp + /dev, read-only elsewhere) internal/process/native.go applies to
+// the app process. On a platform without Landlock support, sandboxedCommand
+// returns argv unchanged and this behaves exactly as before.
 func runHookExec(ctx context.Context, bundleDir string, argv []string, extraEnv []string, logOut io.Writer) error {
-	wrapped, sandboxEnv, err := sandboxedCommand(bundleDir, argv)
+	wrapped, sandboxEnv, _, err := sandboxedCommand(bundleDir, argv)
 	if err != nil {
 		return err
 	}
