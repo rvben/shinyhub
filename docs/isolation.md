@@ -88,6 +88,15 @@ writable set is:
 - the app's managed-Python store (below),
 - `/tmp` and `/dev`.
 
+Their environment is the same allow-listed subset of the service environment
+that app processes receive (see [Environment](environment.md)): locale,
+proxies, TLS trust, tool cache dirs, and package-index configuration
+(`UV_EXTRA_INDEX_URL` and friends) pass through; everything else - including
+any credential in the service environment - is scrubbed, and
+`SHINYHUB_APP_ENV_ALLOW` extends the list. The sandbox does not restrict
+network egress (Landlock is filesystem-only), so dependency downloads reach
+PyPI/CRAN or a configured private index normally.
+
 ### Managed Python interpreters
 
 When no system Python satisfies a bundle's `requires-python`, uv downloads a

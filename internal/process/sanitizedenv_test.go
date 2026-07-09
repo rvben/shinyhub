@@ -52,6 +52,46 @@ func TestSanitizedEnv_AllowsUvPythonInstallDir(t *testing.T) {
 	}
 }
 
+// Package-index configuration (private registries: corp Nexus/Artifactory
+// PyPI mirrors, private CRAN) is same-class as the proxy and TLS-trust vars
+// already allow-listed: its sole purpose is to be consumed by dependency
+// resolution in app builds, unlike control-plane secrets (AWS/GCP creds,
+// tokens) that the allow-list exists to block. Dropping these vars makes uv
+// silently fall back to PyPI-only and every private-index dep fails with
+// "not found in the package registry".
+func TestSanitizedEnv_AllowsPackageIndexVars(t *testing.T) {
+	indexVars := []string{
+		// uv current names.
+		"UV_DEFAULT_INDEX", "UV_INDEX", "UV_FIND_LINKS",
+		// uv deprecated-but-honored names.
+		"UV_INDEX_URL", "UV_EXTRA_INDEX_URL",
+		// Named-index credentials and behavior (UV_INDEX_ prefix family).
+		"UV_INDEX_CORP_USERNAME", "UV_INDEX_CORP_PASSWORD", "UV_INDEX_STRATEGY",
+		// pip equivalents (build backends that shell out to pip).
+		"PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL",
+		// renv private-repo override.
+		"RENV_CONFIG_REPOS_OVERRIDE",
+	}
+	// Only uv's recognized UV_INDEX_* names pass: an unrelated server secret
+	// that merely shares the prefix must stay blocked.
+	notIndexVars := []string{"UV_INDEXING_UNRELATED", "UV_INDEX_TOKEN", "UV_INDEX_INTERNAL_SECRET"}
+	for _, v := range append(append([]string{}, indexVars...), notIndexVars...) {
+		t.Setenv(v, "https://nexus.example.com/repository/pypi/simple")
+	}
+
+	env := SanitizedEnv()
+	for _, v := range indexVars {
+		if !envHas(env, v) {
+			t.Errorf("allow-list dropped package-index var %s", v)
+		}
+	}
+	for _, v := range notIndexVars {
+		if envHas(env, v) {
+			t.Errorf("allow-list leaked non-index var %s", v)
+		}
+	}
+}
+
 // TestSanitizedEnv_EscapeHatch proves an operator can pass an extra variable
 // through via SHINYHUB_APP_ENV_ALLOW without exposing the whole environment.
 func TestSanitizedEnv_EscapeHatch(t *testing.T) {

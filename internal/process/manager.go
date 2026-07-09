@@ -1248,10 +1248,32 @@ var appEnvAllowExact = map[string]struct{}{
 	"http_proxy": {}, "https_proxy": {}, "no_proxy": {}, "all_proxy": {},
 	"XDG_CACHE_HOME": {}, "XDG_DATA_HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_RUNTIME_DIR": {},
 	"UV_CACHE_DIR": {}, "UV_PYTHON_INSTALL_DIR": {}, "PIP_CACHE_DIR": {},
+	// Package-index configuration (private registries). Same class as the
+	// proxy and TLS-trust vars above: its sole purpose is to be consumed by
+	// dependency resolution in builds, unlike the control-plane secrets this
+	// allow-list blocks. Index credentials set here are server-wide and
+	// necessarily visible to every build that uses them (builds execute
+	// deployer-controlled code).
+	"UV_DEFAULT_INDEX": {}, "UV_INDEX": {}, "UV_INDEX_URL": {}, "UV_EXTRA_INDEX_URL": {},
+	"UV_INDEX_STRATEGY": {}, "UV_FIND_LINKS": {},
+	"PIP_INDEX_URL": {}, "PIP_EXTRA_INDEX_URL": {},
 	"R_LIBS": {}, "R_LIBS_USER": {}, "R_LIBS_SITE": {}, "RENV_PATHS_CACHE": {},
+	"RENV_CONFIG_REPOS_OVERRIDE": {},
 }
 
 var appEnvAllowPrefixes = []string{"LC_"}
+
+// isUvIndexCredential matches uv's per-named-index credential variables,
+// UV_INDEX_{NAME}_USERNAME / UV_INDEX_{NAME}_PASSWORD, without admitting the
+// whole UV_INDEX_ namespace: an unrelated server secret that merely shares
+// the prefix (e.g. UV_INDEX_TOKEN) must stay blocked.
+func isUvIndexCredential(name string) bool {
+	rest, ok := strings.CutPrefix(name, "UV_INDEX_")
+	if !ok || rest == "" {
+		return false
+	}
+	return strings.HasSuffix(rest, "_USERNAME") || strings.HasSuffix(rest, "_PASSWORD")
+}
 
 // SanitizedEnv returns an allow-listed subset of the current process environment.
 // It is the single source of truth for the env base of every app-controlled code
@@ -1290,7 +1312,7 @@ func appEnvVarAllowed(name string, extra map[string]struct{}) bool {
 			return true
 		}
 	}
-	return false
+	return isUvIndexCredential(name)
 }
 
 // parseAppEnvAllow parses the comma-separated SHINYHUB_APP_ENV_ALLOW operator

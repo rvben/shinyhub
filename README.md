@@ -171,7 +171,7 @@ value.
 
 | Guide | Topic |
 |---|---|
-| [Environment and secrets](docs/environment.md) | Per-app env vars, encrypted secrets, and when to use them instead of files. |
+| [Environment and secrets](docs/environment.md) | Per-app env vars, encrypted secrets, what apps and builds inherit from the server environment, and private package indexes. |
 | [Persistent data dir](docs/data.md) | Pushing data, the app-visible path, authorization, quota, and concurrency. |
 | [Scheduled jobs and shared data](docs/schedules.md) | Per-app cron schedules and read-only cross-app data mounts. |
 | [Horizontal scaling](docs/scaling.md) | Per-app replicas, load balancing, and session admission. |
