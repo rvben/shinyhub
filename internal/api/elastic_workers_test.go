@@ -134,12 +134,21 @@ func TestGetMetrics_ElasticSessionsAndBootingSlots(t *testing.T) {
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "grpapp", Name: "Grp", OwnerID: u.ID})
+	app, _ := store.GetAppBySlug("grpapp")
 
 	seedElasticPool(t, prx, mgr, "grpapp")
 	// A terminated worker leaves a stopped manager entry behind, but its slot
 	// is gone from the pool. Elastic slot IDs are never reused, so keeping
 	// such rows would grow the table forever under worker churn.
 	mgr.ForceEntry("grpapp", process.ProcessInfo{Slug: "grpapp", Index: 2, Status: process.StatusStopped})
+	// A stale multiplex-era DB replica marked lost must not touch the elastic
+	// rows: elastic workers are never persisted to the replicas table, so for
+	// an elastic pool every DB replica row is a leftover. (The lost overlay
+	// indexes rows positionally; on compacted elastic rows it would clobber a
+	// live worker's row.)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost}); err != nil {
+		t.Fatalf("seed lost replica: %v", err)
+	}
 	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: 1.5, RSSBytes: 1 << 20}})
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")

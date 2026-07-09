@@ -2860,8 +2860,10 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	// leftovers for terminated slots are dropped (elastic slot IDs are never
 	// reused, so they would otherwise accumulate forever under worker churn).
 	// sessions_cap becomes the per-worker cap: ceiling = max_workers x cap.
+	elastic := false
 	if s.proxy != nil {
 		if snap, ok := s.proxy.ElasticWorkersSnapshot(slug); ok {
+			elastic = true
 			resp.SessionsCap = snap.SessionsPerWorker
 			resp.WorkerIsolation = snap.Mode
 			resp.MaxWorkers = snap.MaxWorkers
@@ -2893,7 +2895,13 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	// is a DB-only concept the manager pool does not track, so without this the
 	// poll would render a lost replica as "stopped" (or omit it when the pool is
 	// empty) and drop the worker-unavailable reason the app envelope derives.
-	// Overlay onto the matching slot when present, else append.
+	// Overlay onto the matching slot when present, else append. Multiplex only:
+	// elastic workers are never persisted to the replicas table, so for an
+	// elastic pool every DB replica row is a stale leftover - and the
+	// positional indexing below does not hold on the compacted elastic rows.
+	if elastic {
+		dbReplicas = nil
+	}
 	for _, rep := range dbReplicas {
 		if rep.Status != db.ReplicaStatusLost {
 			continue
