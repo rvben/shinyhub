@@ -760,8 +760,8 @@ func TestRun_DockerSkipsHostDepInstall(t *testing.T) {
 
 	var pyCalls, rCalls atomic.Int32
 	restore := deploy.SetSyncHooksForTest(
-		func(context.Context, string) error { pyCalls.Add(1); return nil },
-		func(context.Context, string) error { rCalls.Add(1); return nil },
+		func(context.Context, string, []string) error { pyCalls.Add(1); return nil },
+		func(context.Context, string, []string) error { rCalls.Add(1); return nil },
 	)
 	defer restore()
 
@@ -806,8 +806,8 @@ func TestRun_NativeStillRunsHostDepInstall(t *testing.T) {
 
 	var pyCalls atomic.Int32
 	restore := deploy.SetSyncHooksForTest(
-		func(context.Context, string) error { pyCalls.Add(1); return nil },
-		func(context.Context, string) error { return nil },
+		func(context.Context, string, []string) error { pyCalls.Add(1); return nil },
+		func(context.Context, string, []string) error { return nil },
 	)
 	defer restore()
 
@@ -1226,7 +1226,7 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			restoreSync := deploy.SetSyncHooksForTest(func(context.Context, string) error { return nil }, func(context.Context, string) error { return nil })
+			restoreSync := deploy.SetSyncHooksForTest(func(context.Context, string, []string) error { return nil }, func(context.Context, string, []string) error { return nil })
 			defer restoreSync()
 
 			var mu sync.Mutex
@@ -1468,7 +1468,7 @@ func TestRun_InstrumentedFailureFallsBackUninstrumented(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte("# app"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restoreSync := deploy.SetSyncHooksForTest(func(context.Context, string) error { return nil }, func(context.Context, string) error { return nil })
+	restoreSync := deploy.SetSyncHooksForTest(func(context.Context, string, []string) error { return nil }, func(context.Context, string, []string) error { return nil })
 	defer restoreSync()
 
 	var mu sync.Mutex

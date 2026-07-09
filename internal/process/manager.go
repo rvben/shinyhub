@@ -204,6 +204,24 @@ func (m *Manager) SetStopGrace(d time.Duration) {
 // is not safe to call concurrently with Start.
 func (m *Manager) SetEnvResolver(r EnvResolver) { m.envResolver = r }
 
+// ResolveAppEnv returns the app's stored per-app environment - non-secret and
+// decrypted secret values combined into one KEY=VALUE slice - via the
+// configured env resolver. It exists for app-controlled code paths that run
+// outside Start (host-side dependency builds and post-deploy hooks) and have
+// no out-of-band secret channel. Nil-safe: a nil Manager or unset resolver
+// returns (nil, nil). A resolver error propagates so callers fail closed,
+// matching Start.
+func (m *Manager) ResolveAppEnv(slug string) ([]string, error) {
+	if m == nil || m.envResolver == nil {
+		return nil, nil
+	}
+	env, secretEnv, err := m.envResolver(slug)
+	if err != nil {
+		return nil, err
+	}
+	return append(append([]string{}, env...), secretEnv...), nil
+}
+
 // SetPlatformDefaultEnvResolver sets the function that supplies platform-wide
 // default env vars (currently OTEL_* tracing config). The returned values are
 // prepended to the env so user-supplied per-app env wins on duplicate keys.

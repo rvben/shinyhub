@@ -132,7 +132,7 @@ func TestResolveLaunch_EnsureProject_IsNonfatal(t *testing.T) {
 		return errors.New("simulated ensure-project failure")
 	})
 	defer restoreEnsure()
-	restoreSync := SetSyncHooksForTest(func(context.Context, string) error { return nil }, func(context.Context, string) error { return nil })
+	restoreSync := SetSyncHooksForTest(func(context.Context, string, []string) error { return nil }, func(context.Context, string, []string) error { return nil })
 	defer restoreSync()
 
 	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9100, PrepHostDeps: true})

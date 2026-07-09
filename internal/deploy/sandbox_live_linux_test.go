@@ -53,7 +53,7 @@ func TestRunSandboxedBuildStep_ConfinesWrites_Live(t *testing.T) {
 	// actually active on this kernel), write inside the build dir (must
 	// succeed), then write outside it (must be denied).
 	script := "grep NoNewPrivs /proc/self/status; touch ok.txt; touch " + outsideFile
-	out, runErr := runSandboxedBuildStep(context.Background(), appDir, []string{"sh", "-c", script})
+	out, runErr := runSandboxedBuildStep(context.Background(), appDir, []string{"sh", "-c", script}, nil)
 
 	if !strings.Contains(string(out), "NoNewPrivs:\t1") {
 		t.Skipf("Landlock not active on this kernel (NO_NEW_PRIVS not set): %s", out)
@@ -92,7 +92,7 @@ func TestRunSandboxedBuildStep_AllowsManagedPythonWrites_Live(t *testing.T) {
 	// its install dir and write into it.
 	script := `grep NoNewPrivs /proc/self/status; ` +
 		`mkdir -p "$UV_PYTHON_INSTALL_DIR/cpython-3.14.0" && touch "$UV_PYTHON_INSTALL_DIR/cpython-3.14.0/ok"`
-	out, runErr := runSandboxedBuildStep(context.Background(), buildDir, []string{"sh", "-c", script})
+	out, runErr := runSandboxedBuildStep(context.Background(), buildDir, []string{"sh", "-c", script}, nil)
 
 	if !strings.Contains(string(out), "NoNewPrivs:\t1") {
 		t.Skipf("Landlock not active on this kernel (NO_NEW_PRIVS not set): %s", out)

@@ -39,6 +39,11 @@ type LaunchOptions struct {
 	AutoInstrumentDefault bool
 	HonorManifestTracing  bool // apply manifest [tracing] auto override? server true, run false
 	Reload                bool
+	// AppEnv is the per-app env layered into dep-prep builds on top of the
+	// sanitized server base (the same variables the app process will see at
+	// start, e.g. private package-index credentials). The server deploy path
+	// resolves it from the app's env store; `shinyhub run` passes --env/.env.
+	AppEnv []string
 }
 
 // ResolveLaunch resolves how a bundle launches, mirroring resolveBootParams +
@@ -100,7 +105,9 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 						return nil
 					},
 				},
-				{Label: "uv sync", Run: pythonSyncFn},
+				{Label: "uv sync", Run: func(ctx context.Context, dir string) error {
+					return pythonSyncFn(ctx, dir, opts.AppEnv)
+				}},
 			}
 		}
 		auto := opts.AutoInstrumentDefault
@@ -110,7 +117,9 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 		plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
 	case "r":
 		if opts.PrepHostDeps {
-			plan.DepPrep = []DepPrepStep{{Label: "renv restore", Run: rSyncFn}}
+			plan.DepPrep = []DepPrepStep{{Label: "renv restore", Run: func(ctx context.Context, dir string) error {
+				return rSyncFn(ctx, dir, opts.AppEnv)
+			}}}
 		}
 		plan.Command = buildRCommandReload(bundleDir, opts.Port, bindHost, opts.Reload)
 	default:

@@ -208,7 +208,7 @@ func resolveBuildExecutable(name, workDir string) (string, error) {
 // runSandboxedBuildStep runs argv in dir under the same confinement
 // sandboxedCommand documents, and returns its combined stdout+stderr. It is
 // the shared plumbing behind sandboxedPythonSync and sandboxedRSync.
-func runSandboxedBuildStep(ctx context.Context, dir string, argv []string) ([]byte, error) {
+func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEnv []string) ([]byte, error) {
 	wrapped, extraEnv, writePaths, err := sandboxedCommand(dir, argv)
 	if err != nil {
 		return nil, err
@@ -216,13 +216,18 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string) ([]by
 	cmd := exec.CommandContext(ctx, wrapped[0], wrapped[1:]...)
 	cmd.Dir = dir
 	// The build backend / configure script is deployer-controlled code, so the
-	// env is scrubbed of server secrets via SanitizedEnv, matching
-	// process.uvSyncCmd / process.renvRestoreCmd.
-	cmd.Env = append(process.SanitizedEnv(), extraEnv...)
+	// env base is scrubbed of server secrets via SanitizedEnv, matching
+	// process.uvSyncCmd / process.renvRestoreCmd. The app's own stored env
+	// (including decrypted secrets, e.g. private package-index credentials) is
+	// layered on top - the build sees what the app will see at start - and the
+	// sandbox's redirects go last so they always win under os/exec's
+	// last-occurrence-wins dedup.
+	cmd.Env = append(append(process.SanitizedEnv(), appEnv...), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if len(writePaths) > 0 {
 		err = sandboxDenialHint(out, err, writePaths)
 	}
+	err = indexResolutionHint(out, err, cmd.Env)
 	return out, err
 }
 
@@ -249,11 +254,11 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string) ([]by
 // exposure is materially smaller than the gap this fix closes, but it is not
 // zero. Closing it fully belongs in a follow-up that adds a seam inside
 // internal/process itself.
-func sandboxedPythonSync(ctx context.Context, dir string) error {
+func sandboxedPythonSync(ctx context.Context, dir string, appEnv []string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
 		return nil
 	}
-	out, err := runSandboxedBuildStep(ctx, dir, []string{"uv", "sync"})
+	out, err := runSandboxedBuildStep(ctx, dir, []string{"uv", "sync"}, appEnv)
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
@@ -273,14 +278,14 @@ func sandboxedPythonSync(ctx context.Context, dir string) error {
 // also deployer-controlled code — so the same SEC-A1 rationale applies. See
 // sandboxedPythonSync for why this duplicates process.SyncR instead of
 // adding a seam there.
-func sandboxedRSync(ctx context.Context, dir string) error {
+func sandboxedRSync(ctx context.Context, dir string, appEnv []string) error {
 	lockfile := filepath.Join(dir, "renv.lock")
 	if _, err := os.Stat(lockfile); errors.Is(err, fs.ErrNotExist) {
 		return nil // no renv.lock — nothing to restore
 	}
 	argv := []string{"Rscript", "-e",
 		`options(renv.config.sandbox.enabled=FALSE); renv::restore(prompt=FALSE)`}
-	out, err := runSandboxedBuildStep(ctx, dir, argv)
+	out, err := runSandboxedBuildStep(ctx, dir, argv, appEnv)
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
@@ -607,8 +612,26 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	defer cancel()
 
+	// The build executes deployer-controlled code that must see the same
+	// per-app env the app process receives at start (e.g. private
+	// package-index credentials stored as app env vars). A resolver failure
+	// fails the build closed: building without the app's variables would
+	// surface as a misleading downstream error (missing index credentials
+	// read as "package not found").
+	appEnv, err := p.Manager.ResolveAppEnv(p.Slug)
+	if err != nil {
+		return fmt.Errorf("resolve app env: %w", err)
+	}
+
 	start := time.Now()
 	slog.Info("deploy: building environment", "slug", p.Slug, "type", appType, "budget_s", buildTimeout.Seconds())
+	// State the effective package-index configuration up front (redacted) so
+	// the build log answers "which indexes did this build see" - the silent
+	// absence of an expected index var is otherwise diagnosable only from a
+	// downstream "not found in the package registry".
+	if indexes := collectIndexEnv(append(process.SanitizedEnv(), appEnv...)); len(indexes) > 0 {
+		slog.Info("deploy: package index configuration", "slug", p.Slug, "indexes", strings.Join(indexes, ", "))
+	}
 	stop := startBuildProgress(p.Slug, start)
 	defer stop()
 
@@ -617,11 +640,11 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 		if cerr := ensureProjectFn(ctx, p.BundleDir); cerr != nil {
 			slog.Warn("deploy: project conversion failed; using requirements.txt", "slug", p.Slug, "err", cerr)
 		}
-		if err := pythonSyncFn(ctx, p.BundleDir); err != nil {
+		if err := pythonSyncFn(ctx, p.BundleDir, appEnv); err != nil {
 			return fmt.Errorf("uv sync: %w", err)
 		}
 	case "r":
-		if err := rSyncFn(ctx, p.BundleDir); err != nil {
+		if err := rSyncFn(ctx, p.BundleDir, appEnv); err != nil {
 			return fmt.Errorf("renv restore: %w", err)
 		}
 	}
@@ -866,6 +889,17 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 		return len(hooks), nil
 	}
 
+	// Hooks are app-controlled code that must see the same per-app env the app
+	// process receives at start (RunPostDeployHooks layers extraEnv between the
+	// sanitized server base and the sandbox vars). Merge the caller-supplied
+	// Env (localrun --env) with the app's stored env; a resolver failure fails
+	// the hook phase closed, matching buildEnvironment.
+	appEnv, err := p.Manager.ResolveAppEnv(p.Slug)
+	if err != nil {
+		return 0, fmt.Errorf("resolve app env: %w", err)
+	}
+	hookEnv := append(append([]string{}, p.Env...), appEnv...)
+
 	logPath := filepath.Join(p.BundleDir, "deploy-hooks.log")
 	logFile, ferr := os.Create(logPath)
 	if ferr != nil {
@@ -875,7 +909,7 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := RunPostDeployHooks(ctx, p.BundleDir, hooks, p.Env, logFile); err != nil {
+	if err := RunPostDeployHooks(ctx, p.BundleDir, hooks, hookEnv, logFile); err != nil {
 		slog.Warn("post-deploy hook failed", "slug", p.Slug, "log", logPath, "err", err)
 		return 0, err
 	}
