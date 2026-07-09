@@ -75,6 +75,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.3](https://github.com/rvben/shinyhub/compare/v0.10.2...v0.10.3) - 2026-07-09
+
+### Fixed
+
+- **process**: pass package-index env vars through to app builds ([e78bdfc](https://github.com/rvben/shinyhub/commit/e78bdfcf0c9286b735a423e3eeb92dfa5920de48))
+
 ## [0.10.2](https://github.com/rvben/shinyhub/compare/v0.10.1...v0.10.2) - 2026-07-09
 
 ### Fixed
