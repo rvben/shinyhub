@@ -43,6 +43,18 @@ jobs:
       - name: Vulnerability scan
         run: make vuln
 
+      # Build-provisioning gate: real sandboxed `uv sync` on the corp shape
+      # (managed-Python provisioning + private-index env passthrough). The
+      # #40/#41 class shipped in releases precisely because no release gate
+      # exercised it; this one does, before any artifact is published.
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build-provisioning gate (sandboxed uv sync)
+        run: make test-provisioning
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
