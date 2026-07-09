@@ -73,6 +73,17 @@ func TestComputeSpec_DropsEmptyDataDir(t *testing.T) {
 	}
 }
 
+// Callers can grant additional writable subtrees beyond the app/data dirs
+// (the build phase needs the per-app managed-Python dir); every non-empty dir
+// lands in WritePaths.
+func TestComputeSpec_AdditionalWriteDirs(t *testing.T) {
+	s := ComputeSpec(LevelStandard, "/srv/app", "/data/app", "/srv/uv-python")
+	wantWrite := []string{"/data/app", "/dev", "/srv/app", "/srv/uv-python", "/tmp"} // sorted
+	if !slices.Equal(s.WritePaths, wantWrite) {
+		t.Errorf("WritePaths = %v, want %v", s.WritePaths, wantWrite)
+	}
+}
+
 func TestComputeSpec_OffIsEmpty(t *testing.T) {
 	s := ComputeSpec(LevelOff, "/srv/app", "/data/app")
 	if s.Level.Enabled() || len(s.WritePaths) != 0 || len(s.ReadPaths) != 0 {

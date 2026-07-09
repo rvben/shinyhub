@@ -41,6 +41,17 @@ func TestSanitizedEnv_AllowListDropsSecretsKeepsEssentials(t *testing.T) {
 	}
 }
 
+// An operator-set UV_PYTHON_INSTALL_DIR (shared managed-Python store) is a
+// non-secret tool knob that must reach uv on every app-controlled path -
+// builds, hooks, and launches - not only where the build sandbox re-exports
+// it, so it belongs on the exact allow-list.
+func TestSanitizedEnv_AllowsUvPythonInstallDir(t *testing.T) {
+	t.Setenv("UV_PYTHON_INSTALL_DIR", "/opt/shinyhub/uv-python")
+	if !envHas(SanitizedEnv(), "UV_PYTHON_INSTALL_DIR") {
+		t.Error("allow-list dropped UV_PYTHON_INSTALL_DIR")
+	}
+}
+
 // TestSanitizedEnv_EscapeHatch proves an operator can pass an extra variable
 // through via SHINYHUB_APP_ENV_ALLOW without exposing the whole environment.
 func TestSanitizedEnv_EscapeHatch(t *testing.T) {

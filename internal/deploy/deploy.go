@@ -69,51 +69,90 @@ func init() {
 const sandboxBuildLevel = sandbox.LevelStandard
 
 // sandboxedCommand wraps argv so that, when Landlock is available, it runs
-// confined to dir (read+write) plus the shared /tmp and /dev scratch areas
-// (write), with the rest of the filesystem read-only — the same "standard"
-// tier and re-exec-and-Landlock shim mechanism NativeRuntime.sandboxWrap
-// (internal/process/native.go) uses to confine the app process, applied here
-// to the dependency-build (`uv sync` / `renv::restore`) and post-deploy-hook
-// phases (previously the only host-exec paths that ran completely
-// unconfined even with isolation enabled — see the "standard" isolation
-// level's doc comment in internal/sandbox for the general blast-radius
-// rationale).
+// confined to dir and the app's managed-Python dir (read+write) plus the
+// shared /tmp and /dev scratch areas (write), with the rest of the filesystem
+// read-only — the same "standard" tier and re-exec-and-Landlock shim mechanism
+// NativeRuntime.sandboxWrap (internal/process/native.go) uses to confine the
+// app process, applied here to the dependency-build (`uv sync` /
+// `renv::restore`) and post-deploy-hook phases (previously the only host-exec
+// paths that ran completely unconfined even with isolation enabled — see the
+// "standard" isolation level's doc comment in internal/sandbox for the general
+// blast-radius rationale).
 //
 // Network access for package downloads is unaffected: Landlock here is
 // filesystem-only (see internal/sandbox.Apply), so uv/renv can still reach
 // PyPI/CRAN. PATH lookups still work: the "standard" tier's read-only "/"
 // grants read+execute everywhere, only write is confined.
 //
+// writePaths reports the spec's writable subtrees so a caller can name them in
+// diagnostics (see sandboxDenialHint); it is nil when no sandbox applies.
+//
 // Returns argv unchanged (nil extraEnv, nil error) when sandbox.Supported()
 // is false, so the build/hook still runs — unsandboxed — on every non-Linux
 // platform (this repo's darwin dev machines, and any future non-Linux CI
 // leg) rather than failing outright.
-func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv []string, err error) {
+func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv, writePaths []string, err error) {
 	if !sandbox.Supported() {
-		return argv, nil, nil
+		return argv, nil, nil, nil
 	}
 	if len(argv) == 0 {
-		return nil, nil, fmt.Errorf("sandboxed command must not be empty")
+		return nil, nil, nil, fmt.Errorf("sandboxed command must not be empty")
 	}
 	self, err := os.Executable()
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve self for sandbox: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolve self for sandbox: %w", err)
 	}
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve build dir %q: %w", dir, err)
+		return nil, nil, nil, fmt.Errorf("resolve build dir %q: %w", dir, err)
 	}
 	bin, err := resolveBuildExecutable(argv[0], absDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve command %q: %w", argv[0], err)
+		return nil, nil, nil, fmt.Errorf("resolve command %q: %w", argv[0], err)
 	}
-	spec := sandbox.ComputeSpec(sandboxBuildLevel, absDir, "")
+	spec, confEnv := buildConfinement(absDir)
 	enc, err := spec.Encode()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	wrapped = append([]string{self, deploySandboxShimArg, "--", bin}, argv[1:]...)
-	extraEnv = []string{
+	extraEnv = append(confEnv, sandbox.EnvVar+"="+enc)
+	return wrapped, extraEnv, spec.WritePaths, nil
+}
+
+// buildConfinement resolves the sandbox policy and tool-redirect environment
+// for a build/hook step in absDir. Pure policy plus one deliberate side
+// effect: the managed-Python dir is created here, because the Landlock write
+// rule for a missing dir is silently dropped (IgnoreIfMissing) and the dir's
+// parent is not writable inside the sandbox, so uv could never create it
+// itself.
+//
+// Two writable trees beyond the shared scratch areas:
+//   - absDir, the build/bundle dir (.venv, .uv-cache, .cache, .renv-cache);
+//   - the managed-Python dir, where uv provisions a downloaded interpreter
+//     when no system Python satisfies the bundle's requires-python. That store
+//     is a DATA dir (UV_PYTHON_INSTALL_DIR / XDG_DATA_HOME), not a cache, so
+//     the cache redirects alone leave uv writing $HOME/.local/share/uv/python
+//     — denied under the read-only root, failing every build on a host
+//     without a bundle-compatible system Python. Default: per-app (see
+//     pythonInstallDir). An operator-set UV_PYTHON_INSTALL_DIR overrides it,
+//     trading cross-app interpreter isolation for a shared download; the
+//     value is re-exported so it survives the SanitizedEnv scrub.
+func buildConfinement(absDir string) (sandbox.Spec, []string) {
+	pyDir := os.Getenv("UV_PYTHON_INSTALL_DIR")
+	if pyDir == "" {
+		pyDir = pythonInstallDir(absDir)
+	} else if abs, err := filepath.Abs(pyDir); err == nil {
+		pyDir = abs
+	}
+	if err := os.MkdirAll(pyDir, 0o755); err != nil {
+		// Keep the redirect and the (missing-dir, so dropped) write rule: uv
+		// then reports the real create failure, annotated by sandboxDenialHint.
+		slog.Warn("managed-Python dir unavailable; uv cannot provision interpreters for this build",
+			"dir", pyDir, "err", err)
+	}
+	spec := sandbox.ComputeSpec(sandboxBuildLevel, absDir, pyDir)
+	env := []string{
 		// uv/renv default to a per-user cache outside dir; under the standard
 		// tier's read-only root that write would be denied and dependency
 		// resolution would fail even with network access, so both tools'
@@ -122,9 +161,22 @@ func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv []string, er
 		"UV_CACHE_DIR=" + filepath.Join(absDir, ".uv-cache"),
 		"XDG_CACHE_HOME=" + filepath.Join(absDir, ".cache"),
 		"RENV_PATHS_ROOT=" + filepath.Join(absDir, ".renv-cache"),
-		sandbox.EnvVar + "=" + enc,
+		"UV_PYTHON_INSTALL_DIR=" + pyDir,
 	}
-	return wrapped, extraEnv, nil
+	return spec, env
+}
+
+// sandboxDenialHint annotates a failed build step whose output carries a
+// permission-denied signature with the sandbox's writable roots, turning a
+// raw EACCES (e.g. uv's "failed to create directory ...: Permission denied")
+// into something an operator can act on. Errors without that signature, and
+// nil, pass through unchanged.
+func sandboxDenialHint(out []byte, err error, writePaths []string) error {
+	if err == nil || !strings.Contains(strings.ToLower(string(out)), "permission denied") {
+		return err
+	}
+	return fmt.Errorf("%w (the step ran under the ShinyHub build sandbox: writable paths are %s; writes elsewhere are denied)",
+		err, strings.Join(writePaths, ", "))
 }
 
 // resolveBuildExecutable mirrors internal/process's own executable
@@ -157,7 +209,7 @@ func resolveBuildExecutable(name, workDir string) (string, error) {
 // sandboxedCommand documents, and returns its combined stdout+stderr. It is
 // the shared plumbing behind sandboxedPythonSync and sandboxedRSync.
 func runSandboxedBuildStep(ctx context.Context, dir string, argv []string) ([]byte, error) {
-	wrapped, extraEnv, err := sandboxedCommand(dir, argv)
+	wrapped, extraEnv, writePaths, err := sandboxedCommand(dir, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +219,11 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string) ([]by
 	// env is scrubbed of server secrets via SanitizedEnv, matching
 	// process.uvSyncCmd / process.renvRestoreCmd.
 	cmd.Env = append(process.SanitizedEnv(), extraEnv...)
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	if len(writePaths) > 0 {
+		err = sandboxDenialHint(out, err, writePaths)
+	}
+	return out, err
 }
 
 // sandboxedPythonSync is pythonSyncFn's production default. It duplicates
