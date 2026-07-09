@@ -51,12 +51,12 @@ func getPaginatedListWithExtra(cfg *cliConfig, action, path string, f *listFlags
 		Total int              `json:"total"`
 	}
 	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, 0, nil, fmt.Errorf("decode response: %w", err)
+		return nil, 0, nil, protocolFailure(cfg, &protocolError{op: "decode response", err: err})
 	}
 	// Capture command-specific envelope keys (all except the standard four).
 	var all map[string]any
 	if err := json.Unmarshal(out, &all); err != nil {
-		return nil, 0, nil, fmt.Errorf("decode response: %w", err)
+		return nil, 0, nil, protocolFailure(cfg, &protocolError{op: "decode response", err: err})
 	}
 	extra := map[string]any{}
 	for k, v := range all {
