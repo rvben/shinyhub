@@ -130,7 +130,10 @@ func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
 			hint = fmt.Sprintf("this CLI is version %s but the server runs %s - upgrade the CLI to match", version, info.Version)
 		}
 		fmt.Fprintf(errOut, "  ✗ cannot read the apps list from %s: %v\n     %s\n", cfg.Host, err, hint)
-		return &ExitCodeError{Code: 1, Kind: KindInternal, Err: err, Reported: true}
+		// Carry the guidance into the structured envelope's hint field too:
+		// scripted/JSON consumers never see the prose above.
+		return &ExitCodeError{Code: 1, Kind: KindInternal,
+			Err: &hintedMsgError{msg: err.Error(), hint: hint}, Reported: true}
 	}
 	fmt.Fprintf(errOut, "  ✗ cannot reach server %s: %v\n     check the URL / run 'shinyhub login'\n", cfg.Host, err)
 	return &ExitCodeError{Code: 3, Err: err, Reported: true}

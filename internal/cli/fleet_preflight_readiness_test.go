@@ -124,6 +124,20 @@ func TestFleetPreflight_DecodeMismatchIsProtocolNotAuth(t *testing.T) {
 	if !strings.Contains(strings.ToLower(out), "upgrade") {
 		t.Errorf("expected upgrade guidance, got:\n%s", out)
 	}
+
+	// The guidance must also reach the structured error envelope (the surface
+	// scripted/JSON consumers read), not just the pre-envelope prose.
+	var envBuf bytes.Buffer
+	if code := reportTo(&envBuf, false, formatTable, err); code != 1 {
+		t.Errorf("reportTo exit = %d, want 1", code)
+	}
+	envelope := envBuf.String()
+	if !strings.Contains(envelope, `"kind":"internal"`) {
+		t.Errorf("envelope kind must be internal, got:\n%s", envelope)
+	}
+	if !strings.Contains(envelope, "99.0.0") || !strings.Contains(strings.ToLower(envelope), "upgrade") {
+		t.Errorf("envelope must carry the version-skew guidance, got:\n%s", envelope)
+	}
 }
 
 // When server-info reports the SAME version as this CLI, the decode failure
