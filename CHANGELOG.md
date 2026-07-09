@@ -78,6 +78,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.6](https://github.com/rvben/shinyhub/compare/v0.10.5...v0.10.6) - 2026-07-09
+
+### Added
+
+- **proxy**: park WebSocket upgrades while their pinned worker boots ([c0b5ae4](https://github.com/rvben/shinyhub/commit/c0b5ae44166054f8b36c793ad39a1c34cad801db))
+- **config**: enable the elastic memory floor by default (256 MiB) ([f55633e](https://github.com/rvben/shinyhub/commit/f55633e9c83635fa1c8dceb8c10a9740fec1bda0))
+- **observability**: per-worker capacity view for elastic apps ([43cf320](https://github.com/rvben/shinyhub/commit/43cf320c8ad9e9b493ac94929e5ba897a36d4bad))
+
+### Fixed
+
+- **cli**: give undecodable list responses the version-skew hint ([7ee3d25](https://github.com/rvben/shinyhub/commit/7ee3d255202c2b388e6ae2ad9fbd9e9f43a42362))
+- **api**: keep the DB lost-replica overlay away from elastic metric rows ([5eee09a](https://github.com/rvben/shinyhub/commit/5eee09a1b73f345f5a1d75f382ec2b0ece83ab13))
+
 ## [0.10.5](https://github.com/rvben/shinyhub/compare/v0.10.4...v0.10.5) - 2026-07-09
 
 ### Fixed
