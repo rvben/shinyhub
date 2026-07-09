@@ -77,6 +77,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.5](https://github.com/rvben/shinyhub/compare/v0.10.4...v0.10.5) - 2026-07-09
+
+### Fixed
+
+- **cli**: carry version-skew guidance into the error envelope hint ([1d794d7](https://github.com/rvben/shinyhub/commit/1d794d7a2e30fbdca09337abb10c6c35e15deec7))
+- **proxy**: dispatch terminate when client migration empties a worker ([8327731](https://github.com/rvben/shinyhub/commit/832773198a95f7664d8f20241c04c15f31ef8bb3))
+- **cli**: classify undecodable API responses as internal with version-skew guidance ([a600940](https://github.com/rvben/shinyhub/commit/a6009404f7559daa92e155ff4db0cc5ea2c3b49c))
+- **proxy**: pack cold-burst clients onto booting workers up to grouped_size ([e997348](https://github.com/rvben/shinyhub/commit/e997348d8425e1a91d91e8bd5962900dbe1fc919))
+
 ## [0.10.4](https://github.com/rvben/shinyhub/compare/v0.10.3...v0.10.4) - 2026-07-09
 
 ### Added
