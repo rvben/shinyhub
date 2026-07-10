@@ -104,6 +104,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "slug", Type: "string"},
 		{Name: "status", Type: "string", Desc: "running | stopped | hibernated | failed"},
 		{Name: "deploy_count", Type: "integer"},
+		{Name: "deploying", Type: "boolean", Desc: "true only while a deployment or rollback is actively executing"},
 	}, EnvelopeFields: []fieldSpec{
 		{Name: "items", Type: "array"},
 		{Name: "total", Type: "integer"},

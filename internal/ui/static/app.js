@@ -12,7 +12,7 @@ import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-healt
 import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
-import { appCardBadge, updateCardStatusBadge } from '/static/views/app-card-badge.js';
+import { appCardBadge, updateCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
 import { renderSidebarApps, highlightSidebarApp } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
@@ -4006,12 +4006,20 @@ document.addEventListener('DOMContentLoaded', () => {
     intervalMs: 10000,
     onMetrics: (slug, m) => {
       // Grid card status badge: keep it live so a card opened while an app was
-      // hibernating reflects wake/sleep transitions (m.status is the live
-      // app-level status from /metrics). Update the stored model too so a later
-      // re-render (search/sort/filter) carries the fresh status.
+      // hibernating or deploying reflects the transition (m.status is the live
+      // app-level status from /metrics; m.deploying flags an executing deploy).
+      // Update the stored model too so a later re-render (search/sort/filter)
+      // carries the fresh state.
+      const liveStatus = {
+        status: m.status,
+        deploying: m.deploying,
+        last_deployment_status: m.last_deployment_status,
+      };
       const badgeEl = appGrid.querySelector(`.app-header .badge[data-slug="${slug}"]`);
       const gridApp = state.apps && state.apps.find(a => a.slug === slug);
-      if (badgeEl && gridApp) updateCardStatusBadge(badgeEl, gridApp, m.status, formatStatus);
+      if (badgeEl && gridApp) {
+        updateCardStatusBadge(badgeEl, gridApp, liveStatus, formatStatus);
+      }
       // Grid card.
       const gridEl = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
       if (gridEl) {
@@ -4027,6 +4035,13 @@ document.addEventListener('DOMContentLoaded', () => {
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
       if (!detailView.hidden && location.pathname.startsWith(`/apps/${slug}`)) {
+        // Keep the header status pill live too, on the same model merge the
+        // card badge uses, so an open detail page flips to "Deploying" and
+        // back during a deploy instead of freezing at its load-time state.
+        const pillEl = document.getElementById('app-detail-status');
+        if (pillEl && detailApp && detailApp.slug === slug) {
+          updateStatusPill(pillEl, detailApp, liveStatus, formatStatus);
+        }
         // Header metric tiles show fleet aggregates (per-replica detail lives in
         // the Overview replicas panel below). Set bare values; the labels are
         // static markup. CPU/Memory both summed across replicas → note that.
