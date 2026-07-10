@@ -68,6 +68,27 @@ func TestAppMissStatus(t *testing.T) {
 			app:        App{Status: "stopped"},
 			wantStatus: "stopped",
 		},
+		{
+			name:       "pending overrides waking row-only (wake mid-flight)",
+			app:        App{Status: "waking", LastDeploymentStatus: DeploymentPending},
+			wantStatus: "deploying",
+		},
+		{
+			name:       "pending overrides degraded row-only (watchdog reconciles)",
+			app:        App{Status: "degraded", LastDeploymentStatus: DeploymentPending},
+			wantStatus: "deploying",
+		},
+		{
+			name:       "pending never overrides a deleting tombstone",
+			app:        App{Status: "deleting", LastDeploymentStatus: DeploymentPending},
+			wantStatus: "deleting",
+		},
+		{
+			name:           "deleting stays deleting even while the delete holds the deploy lock",
+			app:            App{Status: "deleting", LastDeploymentStatus: DeploymentPending},
+			deployInFlight: true,
+			wantStatus:     "deleting",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -727,9 +727,13 @@ func (a *App) MissStatus(deployInFlight bool) (status, reason string) {
 			// Stale pending row next to a terminal status: show the truth
 			// page. The wake CAS cannot recover a stopped/crashed app, so the
 			// deploying page would spin forever here.
-		default:
+		case "running", "hibernated", "waking", "degraded":
 			return "deploying", ""
 		}
+		// Any other status (e.g. a "deleting" tombstone retained after a
+		// failed cleanup) keeps its own semantics: an explicit allowlist so a
+		// stale pending row can never dress an unforeseen state up as an
+		// in-flight deploy.
 	}
 	return a.Status, a.LastError
 }
