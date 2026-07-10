@@ -1448,14 +1448,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	// Let the proxy render a clear status page (instead of the endless loading
-	// spinner) when a request hits an app that is crashed or stopped, surfacing
-	// the crash reason recorded in apps.last_error.
+	// spinner) when a request hits an app that is crashed or stopped, and the
+	// deploying wait page while a deployment is in flight. MissStatus reports
+	// "deploying" from the pending deployment row, which GetAppBySlug already
+	// joins in, so this costs no extra query.
 	prx.SetAppStatusLookup(func(slug string) (string, string) {
 		app, err := store.GetAppBySlug(slug)
 		if err != nil {
 			return "", ""
 		}
-		return app.Status, app.LastError
+		return app.MissStatus()
 	})
 
 	// Hold a request for a not-yet-routable app while its wake completes, so a
