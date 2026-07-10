@@ -705,16 +705,31 @@ func (a App) PlacementMap() map[string]int {
 // reconciliation covers a crash mid-deploy). It therefore takes precedence
 // over the stored status, which is stale during the deploy window ("stopped"
 // for a first deploy, "running" for a redeploy, "crashed" while a fix
-// deploys). Sole exception: a PromoteDeployment failure leaves the row
-// pending with the new pool live; the miss path is then only reachable via
-// hibernation or elastic spawn waits, where the deploying copy is harmless:
-// the proxy keeps firing the wake trigger for this status (BeginWake's
-// hibernated->waking CAS makes that a no-op during genuine deploys), so a
-// hibernated app with a stale pending row still wakes and the page
-// auto-refreshes onto the app.
-func (a *App) MissStatus() (status, reason string) {
+// deploys).
+//
+// The one row that can outlive its deploy is a PromoteDeployment failure
+// (deliberately left pending with the new pool live). To keep that stale row
+// from masking a later stop or crash behind an unbounded deploying page, the
+// terminal statuses trust the row only while deployInFlight reports that this
+// instance actually holds the app's deploy lock. The non-terminal statuses
+// stay row-only: "running" means the pool serves (the miss path is barely
+// reachable), and a "hibernated" app still wakes because the proxy keeps
+// firing the wake trigger for the deploying status. Row-only for non-terminal
+// statuses also keeps the deploying page on clustered standbys, which never
+// hold the lock; their stopped/crashed windows degrade to the previous pages.
+func (a *App) MissStatus(deployInFlight bool) (status, reason string) {
 	if a.LastDeploymentStatus == DeploymentPending {
-		return "deploying", ""
+		switch a.Status {
+		case "stopped", "crashed":
+			if deployInFlight {
+				return "deploying", ""
+			}
+			// Stale pending row next to a terminal status: show the truth
+			// page. The wake CAS cannot recover a stopped/crashed app, so the
+			// deploying page would spin forever here.
+		default:
+			return "deploying", ""
+		}
 	}
 	return a.Status, a.LastError
 }

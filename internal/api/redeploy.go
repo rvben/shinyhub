@@ -31,10 +31,35 @@ func (s *Server) deployLockFor(slug string) *sync.Mutex {
 // returned func releases it; pair with `defer release()` at the call site.
 // Use this from HTTP handlers, which should provide backpressure (the second
 // concurrent deploy waits for the first) rather than silently dropping work.
+// While held, the slug is tracked in deployInFlight so DeployInFlight can
+// report whether this instance is actively executing a lock-holding operation.
 func (s *Server) acquireDeployLock(slug string) (release func()) {
 	m := s.deployLockFor(slug)
 	m.Lock()
-	return m.Unlock
+	s.deployLocksMu.Lock()
+	if s.deployInFlight == nil {
+		s.deployInFlight = make(map[string]struct{})
+	}
+	s.deployInFlight[slug] = struct{}{}
+	s.deployLocksMu.Unlock()
+	return func() {
+		s.deployLocksMu.Lock()
+		delete(s.deployInFlight, slug)
+		s.deployLocksMu.Unlock()
+		m.Unlock()
+	}
+}
+
+// DeployInFlight reports whether this instance currently holds the per-slug
+// deploy lock for slug (a deploy, rollback, restart, stop, or delete is
+// executing). The proxy's miss-status lookup combines it with the pending
+// deployment row to tell a live deploy window apart from a stale pending row
+// left by a PromoteDeployment failure. Cheap: one small map read.
+func (s *Server) DeployInFlight(slug string) bool {
+	s.deployLocksMu.Lock()
+	defer s.deployLocksMu.Unlock()
+	_, ok := s.deployInFlight[slug]
+	return ok
 }
 
 // dataLockFor returns the per-slug mutex used to serialize the quota check

@@ -119,6 +119,9 @@ type Server struct {
 	// applied even when an HTTP-driven deploy is already running.
 	deployLocksMu sync.Mutex
 	deployLocks   map[string]*sync.Mutex
+	// deployInFlight tracks slugs whose deploy lock is currently held, so
+	// DeployInFlight can answer without a try-lock. Guarded by deployLocksMu.
+	deployInFlight map[string]struct{}
 
 	// dataLocksMu guards the dataLocks map. Each slug gets its own
 	// sync.Mutex held across the quota-check + write phase of handleDataPut

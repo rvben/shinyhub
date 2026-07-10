@@ -1451,13 +1451,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// spinner) when a request hits an app that is crashed or stopped, and the
 	// deploying wait page while a deployment is in flight. MissStatus reports
 	// "deploying" from the pending deployment row, which GetAppBySlug already
-	// joins in, so this costs no extra query.
+	// joins in, so this costs no extra query; DeployInFlight (a map read)
+	// keeps a stale pending row from masking a stopped/crashed app.
 	prx.SetAppStatusLookup(func(slug string) (string, string) {
 		app, err := store.GetAppBySlug(slug)
 		if err != nil {
 			return "", ""
 		}
-		return app.MissStatus()
+		return app.MissStatus(srv.DeployInFlight(slug))
 	})
 
 	// Hold a request for a not-yet-routable app while its wake completes, so a
