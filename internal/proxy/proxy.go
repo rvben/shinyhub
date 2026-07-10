@@ -522,14 +522,17 @@ func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(strin
 		case "crashed", "stopped":
 			return false // will not come up; let the caller serve the down page now
 		case "deploying":
-			// A deployment is in flight: the per-slug deploy lock owns the app.
-			// There is nothing to wake (for an app deployed out of hibernation,
-			// BeginWake would queue a redundant wake behind the deploy), and the
-			// clustered on-miss sync could re-register stale replica rows for
-			// the pool the deploy just tore down. Still hold: a fast redeploy
-			// that finishes within the window is served inline with no
-			// interstitial at all.
-			trigger = nil
+			// A deployment is in flight: suppress the clustered on-miss sync,
+			// which could re-register stale replica rows for the pool the
+			// deploy just tore down (the background syncer still converges).
+			// The wake trigger deliberately KEEPS firing: BeginWake is a
+			// hibernated->waking CAS, so it is a no-op during a genuine deploy
+			// (status is stopped/running/crashed then), and for a hibernated
+			// app whose newest row is a stale pending one (a PromoteDeployment
+			// failure) it is the only demand-wake path - suppressing it would
+			// pin visitors on the deploying page forever. Still hold: a fast
+			// redeploy that finishes within the window is served inline with
+			// no interstitial at all.
 			syncSuppressed = true
 		}
 	}
@@ -856,7 +859,10 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 			// pool down before the new pool boots). Serve the deploy-aware
 			// wait page: no give-up countdown (the pending deployment row
 			// resolves on every handler path and the server stops serving
-			// this page the moment it does) and no wake trigger.
+			// this page the moment it does). This branch does not re-fire the
+			// wake trigger itself: on the miss path holdForWake already fired
+			// it, and on the upstream-error path dead-replica recovery belongs
+			// to the watchdog.
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(deployingPage)) //nolint:errcheck

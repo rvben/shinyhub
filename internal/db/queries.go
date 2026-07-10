@@ -707,8 +707,11 @@ func (a App) PlacementMap() map[string]int {
 // for a first deploy, "running" for a redeploy, "crashed" while a fix
 // deploys). Sole exception: a PromoteDeployment failure leaves the row
 // pending with the new pool live; the miss path is then only reachable via
-// hibernation or elastic spawn waits, where the deploying copy is harmless
-// (the page auto-refreshes onto the app either way).
+// hibernation or elastic spawn waits, where the deploying copy is harmless:
+// the proxy keeps firing the wake trigger for this status (BeginWake's
+// hibernated->waking CAS makes that a no-op during genuine deploys), so a
+// hibernated app with a stale pending row still wakes and the page
+// auto-refreshes onto the app.
 func (a *App) MissStatus() (status, reason string) {
 	if a.LastDeploymentStatus == DeploymentPending {
 		return "deploying", ""

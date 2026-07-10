@@ -140,26 +140,48 @@ func TestServeMissPage_DeployingServesDeployAwareWaitPage(t *testing.T) {
 	}
 }
 
-// While a deployment is in flight, neither the wake trigger nor the clustered
-// on-miss sync may fire: the per-slug deploy lock owns the app. A wake could
-// queue a redundant restart behind the deploy; a sync could re-register stale
-// replica rows for the pool the deploy just tore down.
-func TestServeMissPage_DeployingFiresNeitherWakeNorSync(t *testing.T) {
+// While a deployment is in flight the clustered on-miss sync must not fire:
+// it could re-register stale replica rows for the pool the deploy just tore
+// down (the background syncer still converges afterwards).
+func TestServeMissPage_DeployingDoesNotSync(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("ship", 1)
 	p.SetAppStatusLookup(func(_ string) (string, string) { return "deploying", "" })
-	fired := make(chan string, 2)
-	p.SetWakeTrigger(func(slug string) { fired <- "wake:" + slug })
-	p.SetOnMissSync(func(slug string) { fired <- "sync:" + slug })
+	fired := make(chan string, 1)
+	p.SetOnMissSync(func(slug string) { fired <- slug })
 
 	req := httptest.NewRequest(http.MethodGet, "/app/ship/", nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
 	select {
-	case what := <-fired:
-		t.Fatalf("%s fired during an in-flight deployment", what)
+	case slug := <-fired:
+		t.Fatalf("on-miss sync fired for %q during an in-flight deployment", slug)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The wake trigger MUST keep firing while the status reports deploying.
+// BeginWake is a hibernated->waking CAS, so it is a no-op during a genuine
+// deploy; but for a hibernated app whose newest deployment row is a stale
+// pending one (a PromoteDeployment failure), the visitor-fired trigger is the
+// only demand-wake path. Suppressing it would pin visitors on the deploying
+// page forever.
+func TestServeMissPage_DeployingStillFiresWake(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("ship", 1)
+	p.SetAppStatusLookup(func(_ string) (string, string) { return "deploying", "" })
+	fired := make(chan string, 1)
+	p.SetWakeTrigger(func(slug string) { fired <- slug })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/ship/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake trigger did not fire for an app reported as deploying")
 	}
 }
 
