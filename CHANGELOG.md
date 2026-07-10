@@ -79,6 +79,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.7](https://github.com/rvben/shinyhub/compare/v0.10.6...v0.10.7) - 2026-07-10
+
+### Added
+
+- **cli**: accept internal as an alias for the shared access level ([f8580fc](https://github.com/rvben/shinyhub/commit/f8580fcfaaaa61722698d9779c8d3c03f04ab00d))
+- **identity**: diagnose rejected tokens and add local-dev identities ([e3ec122](https://github.com/rvben/shinyhub/commit/e3ec122fd6d04cff13200237aefd0bb9798ee3d0))
+
 ## [0.10.6](https://github.com/rvben/shinyhub/compare/v0.10.5...v0.10.6) - 2026-07-09
 
 ### Added
