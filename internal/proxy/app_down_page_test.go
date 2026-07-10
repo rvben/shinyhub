@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -76,5 +77,130 @@ func TestServeMissPage_HibernatedServesLoadingPage(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `id="shinyhub-box"`) {
 		t.Error("hibernated app must get the loading page, not a down page")
+	}
+}
+
+// The generic loading page keeps its bounded give-up after the shell refactor:
+// the retry cap, the error copy, and the manual retry button must survive.
+func TestLoadingPage_KeepsBoundedGiveUp(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("cold", 1) // sized but no backend, no status lookup -> loading page
+
+	req := httptest.NewRequest(http.MethodGet, "/app/cold/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, needle := range []string{
+		proxy.LoadingPageSentinel,
+		"var MAX = 20",
+		"App did not start",
+		`id="shinyhub-retry"`,
+		"window.location.reload",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("loading page missing %q", needle)
+		}
+	}
+}
+
+// A deployment is in flight: serve the deploy-aware wait page. It must
+// auto-refresh, must clear the give-up counter, and must not contain the
+// give-up state that falsely reports "App did not start" mid-build.
+func TestServeMissPage_DeployingServesDeployAwareWaitPage(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("ship", 1)
+	p.SetAppStatusLookup(func(_ string) (string, string) { return "deploying", "" })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/ship/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, proxy.DeployingPageSentinel) {
+		t.Error("deploying page missing its sentinel copy")
+	}
+	if !strings.Contains(body, "sessionStorage.removeItem") {
+		t.Error("deploying page must clear the give-up counter")
+	}
+	if !strings.Contains(body, "window.location.reload") {
+		t.Error("deploying page must auto-refresh")
+	}
+	if strings.Contains(body, "App did not start") {
+		t.Error("deploying page must not carry the give-up state; a long build would falsely report failure")
+	}
+	if strings.Contains(body, "This app is stopped") {
+		t.Error("deploying app rendered the stopped page")
+	}
+}
+
+// While a deployment is in flight the clustered on-miss sync must not fire:
+// it could re-register stale replica rows for the pool the deploy just tore
+// down (the background syncer still converges afterwards).
+func TestServeMissPage_DeployingDoesNotSync(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("ship", 1)
+	p.SetAppStatusLookup(func(_ string) (string, string) { return "deploying", "" })
+	fired := make(chan string, 1)
+	p.SetOnMissSync(func(slug string) { fired <- slug })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/ship/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	select {
+	case slug := <-fired:
+		t.Fatalf("on-miss sync fired for %q during an in-flight deployment", slug)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The wake trigger MUST keep firing while the status reports deploying.
+// BeginWake is a hibernated->waking CAS, so it is a no-op during a genuine
+// deploy; but for a hibernated app whose newest deployment row is a stale
+// pending one (a PromoteDeployment failure), the visitor-fired trigger is the
+// only demand-wake path. Suppressing it would pin visitors on the deploying
+// page forever.
+func TestServeMissPage_DeployingStillFiresWake(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("ship", 1)
+	p.SetAppStatusLookup(func(_ string) (string, string) { return "deploying", "" })
+	fired := make(chan string, 1)
+	p.SetWakeTrigger(func(slug string) { fired <- slug })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/ship/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake trigger did not fire for an app reported as deploying")
+	}
+}
+
+// Control: a hibernated app still fires the wake trigger on a miss (the
+// deploying suppression must not leak into the normal wake path).
+func TestServeMissPage_HibernatedStillFiresWake(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("warm", 1)
+	p.SetAppStatusLookup(func(_ string) (string, string) { return "hibernated", "" })
+	fired := make(chan string, 1)
+	p.SetWakeTrigger(func(slug string) { fired <- slug })
+
+	req := httptest.NewRequest(http.MethodGet, "/app/warm/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake trigger did not fire for a hibernated app")
 	}
 }
