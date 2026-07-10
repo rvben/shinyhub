@@ -697,10 +697,29 @@ func (a App) PlacementMap() map[string]int {
 	return m
 }
 
-// deploymentSummarySQL is the SELECT fragment that adds last_deployed_at and
-// current_version to any apps query. Kept as a constant so all seven App
-// queries (ListApps, ListAppsVisibleToUser, ListPublicApps, ListRunningApps,
-// ListDeletingApps, GetAppBySlug, GetAppByID) stay in sync.
+// MissStatus returns the lifecycle status the proxy should use when a request
+// arrives for this app and no live backend exists, plus the crash reason when
+// applicable. A pending deployment row means a deploy or rollback is in
+// flight right now: BeginDeployment records it before the running pool is
+// torn down, and every handler path resolves it (promote or fail; startup
+// reconciliation covers a crash mid-deploy). It therefore takes precedence
+// over the stored status, which is stale during the deploy window ("stopped"
+// for a first deploy, "running" for a redeploy, "crashed" while a fix
+// deploys). Sole exception: a PromoteDeployment failure leaves the row
+// pending with the new pool live; the miss path is then only reachable via
+// hibernation or elastic spawn waits, where the deploying copy is harmless
+// (the page auto-refreshes onto the app either way).
+func (a *App) MissStatus() (status, reason string) {
+	if a.LastDeploymentStatus == DeploymentPending {
+		return "deploying", ""
+	}
+	return a.Status, a.LastError
+}
+
+// deploymentSummarySQL is the SELECT fragment that adds the deployment-derived
+// columns (last_deployed_at, current_version, content_digest,
+// last_deployment_status) to an apps query. Kept as a constant so every App
+// query stays in sync; append it wherever appColumns is selected.
 const deploymentSummarySQL = `
 		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id) AS last_deployed_at,
 		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
