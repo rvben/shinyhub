@@ -61,6 +61,15 @@ real deployment: it only applies when no token arrived **and**
 `SHINYHUB_IDENTITY_KEY` is absent, and ShinyHub always injects that key into
 app processes.
 
+## Compatibility
+
+This helper is versioned independently of the ShinyHub server: its version
+tracks changes to *this package's API*, not the server's release train. Any
+release verifies tokens from any ShinyHub **v0.8.6 or later** (the release
+that introduced identity forwarding); the token contract is stable across
+server releases. Claims a later server added (`email`, `name`) are simply
+absent when an older server minted the token.
+
 ## Why verify, not just read the plain headers?
 
 ShinyHub forwards convenience plain headers and strips client-supplied ones, but

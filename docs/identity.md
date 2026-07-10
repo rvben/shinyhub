@@ -144,6 +144,13 @@ language. Each returns the verified identity or a defined anonymous value
 SSO. Both read the injected `SHINYHUB_IDENTITY_KEY` / `SHINYHUB_APP_SLUG`
 automatically.
 
+The helpers are versioned independently of the server: their versions track
+changes to the helper APIs, not the server release train. Any helper release
+verifies tokens from any ShinyHub v0.8.6 or later (identity forwarding
+shipped in v0.8.6); the token contract is stable across server releases, and
+claims a later server added (`email`, `name`) are simply empty when an older
+server minted the token.
+
 Failure handling is fail-closed but not silent where it matters. Every
 verification failure returns the anonymous value - no exception. A token that
 is **present but rejected** (missing or wrong key, audience/issuer mismatch,
