@@ -516,9 +516,21 @@ func (p *Proxy) SetWakeHoldTimeout(d time.Duration) {
 // crashed/stopped app is never held. ctx is the request context, so a client
 // that gives up frees the hold immediately rather than polling to the deadline.
 func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(string)) bool {
+	syncSuppressed := false
 	if fn := p.getAppStatusLookup(); fn != nil {
-		if status, _ := fn(slug); status == "crashed" || status == "stopped" {
+		switch status, _ := fn(slug); status {
+		case "crashed", "stopped":
 			return false // will not come up; let the caller serve the down page now
+		case "deploying":
+			// A deployment is in flight: the per-slug deploy lock owns the app.
+			// There is nothing to wake (for an app deployed out of hibernation,
+			// BeginWake would queue a redundant wake behind the deploy), and the
+			// clustered on-miss sync could re-register stale replica rows for
+			// the pool the deploy just tore down. Still hold: a fast redeploy
+			// that finishes within the window is served inline with no
+			// interstitial at all.
+			trigger = nil
+			syncSuppressed = true
 		}
 	}
 	hold := time.Duration(p.wakeHoldNanos.Load())
@@ -526,6 +538,9 @@ func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(strin
 		go trigger(slug)
 	}
 	syncFn := p.onMissSync.Load()
+	if syncSuppressed {
+		syncFn = nil
+	}
 	if hold <= 0 {
 		// Hold disabled: preserve the original one-shot clustered sync + a single
 		// pool check, then fall back to the loading page immediately.
@@ -818,10 +833,11 @@ func (p *Proxy) getAppStatusLookup() func(string) (string, string) {
 	return fn
 }
 
-// serveMissPage responds to a request for a slug with no live backend. A crashed
-// or stopped app gets a clear, static status page so the user sees why it is
-// unavailable; anything else fires the wake trigger and gets the auto-retrying
-// loading page (the normal cold-start path).
+// serveMissPage responds to a request for a slug with no live backend. A
+// crashed or stopped app gets a clear, static status page so the user sees why
+// it is unavailable; an app with a deployment in flight gets the deploying
+// wait page (auto-refresh, no give-up, no wake); anything else fires the wake
+// trigger and gets the auto-retrying loading page (the normal cold-start path).
 func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(string)) {
 	if fn := p.getAppStatusLookup(); fn != nil {
 		switch status, reason := fn(slug); status {
@@ -834,6 +850,16 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(renderAppDownPage("stopped", slug, ""))) //nolint:errcheck
+			return
+		case "deploying":
+			// A deployment is in flight for this slug (the deploy tears the
+			// pool down before the new pool boots). Serve the deploy-aware
+			// wait page: no give-up countdown (the pending deployment row
+			// resolves on every handler path and the server stops serving
+			// this page the moment it does) and no wake trigger.
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(deployingPage)) //nolint:errcheck
 			return
 		}
 	}
