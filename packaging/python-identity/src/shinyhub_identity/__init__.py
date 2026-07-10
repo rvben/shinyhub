@@ -15,11 +15,22 @@ plumbing of their own.
 
 Every failure mode - no token, bad signature, wrong audience/issuer, expired,
 or no ShinyHub in front at all (running locally) - returns ``None`` rather than
-raising, so an app stays testable without SSO.
+raising, so an app stays testable without SSO. A token that is PRESENT but
+rejected additionally logs a WARNING on the "shinyhub_identity" logger (once
+per distinct reason per process), because that almost always means a
+misconfigured deployment rather than an anonymous visitor.
+
+For local development without a ShinyHub proxy, set
+``SHINYHUB_IDENTITY_DEV_USER`` (and optionally ``..._DEV_GROUPS`` /
+``..._DEV_EMAIL`` / ``..._DEV_NAME`` / ``..._DEV_ROLE``) to make
+``current_user`` return a synthetic Identity marked ``claims={"dev": True}``.
+It never activates when ``SHINYHUB_IDENTITY_KEY`` is set, so it cannot mask a
+real verification failure in a deployment.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Union
@@ -30,6 +41,28 @@ __all__ = ["Identity", "current_user", "verify_token"]
 
 _ISSUER = "shinyhub"
 _TOKEN_HEADER = "x-shinyhub-identity-token"
+
+_log = logging.getLogger("shinyhub_identity")
+
+# Reasons already warned about, so a misconfigured deployment logs each
+# distinct problem once per process instead of once per request.
+_warned: set = set()
+
+
+def _warn_once(reason_key: str, detail: str) -> None:
+    """Warn that a PRESENT token was rejected. A genuine anonymous visitor
+    sends no token at all, so a rejected token almost always means a
+    misconfiguration (wrong or missing key, audience/issuer mismatch, clock
+    skew) - high-signal, and safe to surface without leaking anything."""
+    if reason_key in _warned:
+        return
+    _warned.add(reason_key)
+    _log.warning(
+        "identity token present but rejected: %s "
+        "(the request is treated as anonymous; a rejected-but-present token "
+        "usually means the deployment is misconfigured)",
+        detail,
+    )
 
 
 @dataclass(frozen=True)
@@ -48,17 +81,24 @@ class Identity:
     name: str = ""
 
 
-def _resolve_key(key: Union[bytes, bytearray, str, None]) -> Optional[bytes]:
+def _resolve_key(
+    key: Union[bytes, bytearray, str, None],
+) -> "tuple[Optional[bytes], Optional[str]]":
+    """Resolve the verification key, returning (key_bytes, problem).
+
+    Exactly one of the two is None: a resolved key carries no problem, and a
+    problem string describes why no key is available.
+    """
     if key is None:
         key = os.environ.get("SHINYHUB_IDENTITY_KEY")
     if key is None or key == "":
-        return None
+        return None, "no verification key (SHINYHUB_IDENTITY_KEY is unset or empty)"
     if isinstance(key, (bytes, bytearray)):
-        return bytes(key)
+        return bytes(key), None
     try:
-        return bytes.fromhex(key)
+        return bytes.fromhex(key), None
     except ValueError:
-        return None
+        return None, "verification key is not valid hex (check SHINYHUB_IDENTITY_KEY)"
 
 
 def _resolve_slug(slug: Optional[str]) -> Optional[str]:
@@ -96,9 +136,16 @@ def verify_token(
     """
     if not token:
         return None
-    resolved_key = _resolve_key(key)
+    resolved_key, key_problem = _resolve_key(key)
     resolved_slug = _resolve_slug(slug)
-    if resolved_key is None or resolved_slug is None:
+    if resolved_key is None:
+        _warn_once("no_key", key_problem or "no verification key")
+        return None
+    if resolved_slug is None:
+        _warn_once(
+            "no_slug",
+            "expected audience unknown (SHINYHUB_APP_SLUG is unset or empty)",
+        )
         return None
     try:
         claims = jwt.decode(
@@ -112,9 +159,57 @@ def verify_token(
             # omits it cannot bypass the short-lived-token / replay bound.
             options={"require": ["exp"]},
         )
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as exc:
+        _warn_once(type(exc).__name__, f"{type(exc).__name__}: {exc}")
         return None
     return _identity_from_claims(claims)
+
+
+def _dev_identity() -> Optional[Identity]:
+    """Synthetic identity for local development, from SHINYHUB_IDENTITY_DEV_*.
+
+    Only active when SHINYHUB_IDENTITY_KEY is absent: ShinyHub always injects
+    that key into app processes, so under a real deployment this can never
+    substitute for a missing or failed verification.
+    """
+    username = os.environ.get("SHINYHUB_IDENTITY_DEV_USER")
+    if not username or os.environ.get("SHINYHUB_IDENTITY_KEY"):
+        return None
+    groups = tuple(
+        g.strip()
+        for g in os.environ.get("SHINYHUB_IDENTITY_DEV_GROUPS", "").split(",")
+        if g.strip()
+    )
+    role = os.environ.get("SHINYHUB_IDENTITY_DEV_ROLE", "viewer")
+    email = os.environ.get("SHINYHUB_IDENTITY_DEV_EMAIL", "")
+    name = os.environ.get("SHINYHUB_IDENTITY_DEV_NAME", "")
+    claims: Mapping[str, Any] = {
+        "dev": True,
+        "sub": username,
+        "preferred_username": username,
+        "role": role,
+        "email": email,
+        "name": name,
+        "groups": list(groups),
+    }
+    if "dev_identity" not in _warned:
+        _warned.add("dev_identity")
+        _log.info(
+            "returning dev identity %r from SHINYHUB_IDENTITY_DEV_USER "
+            "(local development only; inactive whenever SHINYHUB_IDENTITY_KEY "
+            "is set)",
+            username,
+        )
+    return Identity(
+        user_id=username,
+        username=username,
+        role=role,
+        email=email,
+        name=name,
+        groups=groups,
+        groups_truncated=False,
+        claims=claims,
+    )
 
 
 def _find_token(headers: Any) -> Optional[str]:
@@ -148,5 +243,15 @@ def current_user(
     ``headers`` is any header mapping (e.g. a Shiny for Python
     ``session.http_conn.headers``, a Starlette/Flask request's headers, or a
     plain dict). ``key``/``slug`` default to the ShinyHub-injected environment.
+
+    For local development (no ShinyHub proxy, so no token and no injected
+    key), setting ``SHINYHUB_IDENTITY_DEV_USER`` (and optionally
+    ``..._DEV_GROUPS``/``..._DEV_EMAIL``/``..._DEV_NAME``/``..._DEV_ROLE``)
+    makes this return a synthetic Identity with ``claims == {"dev": True, ...}``.
     """
-    return verify_token(_find_token(headers), key=key, slug=slug, leeway=leeway)
+    token = _find_token(headers)
+    if not token and key is None:
+        dev = _dev_identity()
+        if dev is not None:
+            return dev
+    return verify_token(token, key=key, slug=slug, leeway=leeway)

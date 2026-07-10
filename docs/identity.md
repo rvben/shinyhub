@@ -144,6 +144,24 @@ language. Each returns the verified identity or a defined anonymous value
 SSO. Both read the injected `SHINYHUB_IDENTITY_KEY` / `SHINYHUB_APP_SLUG`
 automatically.
 
+Failure handling is fail-closed but not silent where it matters. Every
+verification failure returns the anonymous value - no exception. A token that
+is **present but rejected** (missing or wrong key, audience/issuer mismatch,
+expired, clock skew) additionally emits a diagnostic - a Python `WARNING` on
+the `"shinyhub_identity"` logger, an R `warning()` - once per distinct reason
+per process, because a rejected-but-present token almost always means a
+misconfigured deployment, while a genuine anonymous visitor sends no token at
+all. Deployments that gate on identity should still self-check at startup
+(assert `SHINYHUB_IDENTITY_KEY` and `SHINYHUB_APP_SLUG` are set) so
+misconfiguration fails fast instead of rendering every user anonymous.
+
+For local development (no proxy, so no token and no injected key), both
+helpers honor `SHINYHUB_IDENTITY_DEV_USER` (plus optional
+`SHINYHUB_IDENTITY_DEV_GROUPS`, `..._DEV_EMAIL`, `..._DEV_NAME`,
+`..._DEV_ROLE`, default `viewer`) and return a synthetic identity marked with
+a `dev` claim. The dev identity never activates when `SHINYHUB_IDENTITY_KEY`
+is set, so it cannot mask a real verification failure in a deployment.
+
 ### Python
 
 ```

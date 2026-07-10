@@ -32,16 +32,34 @@ server <- function(input, output, session) {
 ```
 
 `current_user(session)` returns the verified JWT claims
-(`preferred_username`, `role`, `email`, `groups`, `sub`, ...) or `NULL`
-(`email` is present only when the deployment's forward-auth SSO asserts one).
-Every failure -
+(`preferred_username`, `role`, `email`, `name`, `groups`, `groups_truncated`,
+`sub`, ...) or `NULL` (`email`/`name` are present only when the deployment's
+IdP asserts them). Every failure -
 no token, bad signature, wrong audience/issuer, expired, or no ShinyHub in front
 (running locally) - returns `NULL` rather than erroring, so your app stays
 testable without SSO.
 
+A token that is **present but rejected** additionally raises an R `warning()`
+(once per distinct reason per session), because that almost always means a
+misconfigured deployment - missing or wrong `SHINYHUB_IDENTITY_KEY`,
+audience/issuer mismatch, clock skew - rather than an anonymous visitor. A
+request without a token stays silent.
+
 Key and slug default to the `SHINYHUB_IDENTITY_KEY`/`SHINYHUB_APP_SLUG`
 environment variables ShinyHub injects; pass `key=`/`slug=` explicitly for
 tests.
+
+## Local development
+
+With no ShinyHub proxy in front there is no token, so `current_user` is always
+`NULL`. Instead of writing a per-app mock, set `SHINYHUB_IDENTITY_DEV_USER`
+(and optionally `SHINYHUB_IDENTITY_DEV_GROUPS` (comma-separated),
+`SHINYHUB_IDENTITY_DEV_EMAIL`, `SHINYHUB_IDENTITY_DEV_NAME`,
+`SHINYHUB_IDENTITY_DEV_ROLE`, default `viewer`); `current_user` then returns a
+synthetic claims list marked `dev = TRUE`. This can never activate under a
+real deployment: it only applies when no token arrived **and**
+`SHINYHUB_IDENTITY_KEY` is absent, and ShinyHub always injects that key into
+app processes.
 
 ## Why verify, not just read the plain headers?
 

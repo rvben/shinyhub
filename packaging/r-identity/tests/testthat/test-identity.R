@@ -31,22 +31,26 @@ test_that("a missing token is anonymous", {
   expect_null(verify_token("", key = key, slug = slug))
 })
 
+# The negative-path tests below assert only the fail-closed NULL return and
+# suppress the present-but-rejected warning; the warning contract itself is
+# asserted in test-diagnostics.R.
+
 test_that("a bad signature is anonymous", {
   wrong <- sodium::hex2bin(paste(rep("ff", 32), collapse = ""))
-  expect_null(verify_token(mint(k = wrong), key = key, slug = slug))
+  expect_null(suppressWarnings(verify_token(mint(k = wrong), key = key, slug = slug)))
 })
 
 test_that("a wrong audience is anonymous", {
-  expect_null(verify_token(mint(s = "other-app"), key = key, slug = slug))
+  expect_null(suppressWarnings(verify_token(mint(s = "other-app"), key = key, slug = slug)))
 })
 
 test_that("a wrong issuer is anonymous", {
-  expect_null(verify_token(mint(iss = "evil"), key = key, slug = slug))
+  expect_null(suppressWarnings(verify_token(mint(iss = "evil"), key = key, slug = slug)))
 })
 
 test_that("an expired token is anonymous", {
   stale <- mint(exp = as.numeric(Sys.time()) - 3600)
-  expect_null(verify_token(stale, key = key, slug = slug))
+  expect_null(suppressWarnings(verify_token(stale, key = key, slug = slug)))
 })
 
 test_that("a token missing exp is anonymous", {
@@ -60,7 +64,7 @@ test_that("a token missing exp is anonymous", {
     preferred_username = "alice", role = "admin", groups = list("team-a")
   )
   token <- jose::jwt_encode_hmac(no_exp, secret = key)
-  expect_null(verify_token(token, key = key, slug = slug))
+  expect_null(suppressWarnings(verify_token(token, key = key, slug = slug)))
 })
 
 test_that("current_user reads the session request header", {

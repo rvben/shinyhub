@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shinyhub-identity"
-version = "0.1.0"
+version = "0.1.1"
 description = "Read the signed ShinyHub identity a Shiny/Streamlit/Dash app receives, in one call."
 readme = "README.md"
 requires-python = ">=3.9"

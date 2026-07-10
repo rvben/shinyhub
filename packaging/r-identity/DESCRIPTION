@@ -1,6 +1,6 @@
 Package: shinyhubidentity
 Title: Read the Signed ShinyHub Identity in a Shiny App
-Version: 0.1.0
+Version: 0.1.1
 Authors@R:
     person("Ruben J.", "Jongejan", email = "ruben.jongejan@gmail.com",
            role = c("aut", "cre"))
