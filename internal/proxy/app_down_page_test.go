@@ -78,3 +78,30 @@ func TestServeMissPage_HibernatedServesLoadingPage(t *testing.T) {
 		t.Error("hibernated app must get the loading page, not a down page")
 	}
 }
+
+// The generic loading page keeps its bounded give-up after the shell refactor:
+// the retry cap, the error copy, and the manual retry button must survive.
+func TestLoadingPage_KeepsBoundedGiveUp(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolSize("cold", 1) // sized but no backend, no status lookup -> loading page
+
+	req := httptest.NewRequest(http.MethodGet, "/app/cold/", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, needle := range []string{
+		proxy.LoadingPageSentinel,
+		"var MAX = 20",
+		"App did not start",
+		`id="shinyhub-retry"`,
+		"window.location.reload",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("loading page missing %q", needle)
+		}
+	}
+}

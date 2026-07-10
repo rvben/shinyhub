@@ -68,19 +68,18 @@ func (b *errCapturingBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// loadingPage is returned when a request arrives for a slug with no registered
-// backend. Client-side JS reloads the page every 3 s up to loadingPageMaxRetries
-// times (~60 s) and then switches to an error state with a manual retry button.
-// The per-path retry count is stored in sessionStorage; a fresh navigation
-// (not a reload) resets it so users can revisit after a previous give-up.
-// A <noscript><meta http-equiv="refresh"> is included as a fallback for
-// browsers with JS disabled — it refreshes forever but at least keeps working.
-const loadingPage = `<!DOCTYPE html>
+// waitPage builds one of the auto-refreshing wait pages served when a request
+// arrives for a slug with no registered backend. The shell (styles, spinner,
+// hidden retry button, and a <noscript> meta-refresh fallback for browsers
+// with JS disabled, which refreshes forever but at least keeps working) is
+// shared; the title, message, and behaviour script differ per variant.
+func waitPage(title, msg, script string) string {
+	return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <noscript><meta http-equiv="refresh" content="3"></noscript>
-<title>Starting app…</title>
+<title>` + title + `</title>
 <style>
   html, body { background: #030510; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -106,12 +105,22 @@ const loadingPage = `<!DOCTYPE html>
 <body>
 <div class="box" id="shinyhub-box">
   <div class="spinner"></div>
-  <h1 id="shinyhub-title">Starting app…</h1>
-  <p id="shinyhub-msg">This page will refresh automatically.</p>
+  <h1 id="shinyhub-title">` + title + `</h1>
+  <p id="shinyhub-msg">` + msg + `</p>
   <button id="shinyhub-retry" style="display:none">Try again</button>
 </div>
 <script>
-(function(){
+` + script + `
+</script>
+</body>
+</html>`
+}
+
+// loadingScript reloads the page every 3 s up to MAX times (~60 s) and then
+// switches to an error state with a manual retry button. The per-path retry
+// count is stored in sessionStorage; a fresh navigation (not a reload) resets
+// it so users can revisit after a previous give-up.
+const loadingScript = `(function(){
   var MAX = 20;
   var INTERVAL_MS = 3000;
   var key = 'shinyhub-retry:' + window.location.pathname;
@@ -136,10 +145,34 @@ const loadingPage = `<!DOCTYPE html>
   }
   sessionStorage.setItem(key, String(n + 1));
   setTimeout(function(){ window.location.reload(); }, INTERVAL_MS);
-})();
-</script>
-</body>
-</html>`
+})();`
+
+// deployingScript reloads every 3 s with no give-up cap. While a deployment
+// is in flight the server keeps serving the deploying page, and the pending
+// deployment row resolves on every handler path (promote, fail, or startup
+// reconciliation), so the refresh loop is bounded by the deploy itself, not
+// by a client-side count. It also clears the loading page's give-up counter
+// so the post-deploy boot phase gets a fresh ~60 s window instead of
+// inheriting stale reloads.
+const deployingScript = `(function(){
+  var key = 'shinyhub-retry:' + window.location.pathname;
+  sessionStorage.removeItem(key);
+  setTimeout(function(){ window.location.reload(); }, 3000);
+})();`
+
+// loadingPage is served on a miss with no in-flight deployment: the app is
+// starting (cold boot, wake, or crash-restart). Client-side JS gives up after
+// ~60 s with a manual retry button.
+var loadingPage = waitPage("Starting app…",
+	"This page will refresh automatically.", loadingScript)
+
+// deployingPage is served on a miss while a deployment (deploy or rollback)
+// is in flight for the slug: the deploy tears the pool down before the new
+// pool boots. The copy is version-neutral because rollbacks take this path
+// too. See deployingScript for why it never gives up on its own.
+var deployingPage = waitPage("Deploying app…",
+	"A deployment is in progress. This can take a few minutes. This page will refresh automatically.",
+	deployingScript)
 
 // cookiePrefix is the prefix for the sticky-session cookie name.
 // The full cookie name is cookiePrefix + slug (e.g. "shinyhub_rep_myapp").
@@ -160,6 +193,11 @@ const MsgPoolSaturated = "Service temporarily at capacity, please retry."
 // without comparing the full HTML; if the copy changes and the sentinel is
 // removed, the build test fails rather than vacuously passing.
 const LoadingPageSentinel = "Starting app"
+
+// DeployingPageSentinel is the deployingPage counterpart of
+// LoadingPageSentinel: always present in the deploying wait page and in
+// neither of the other miss pages.
+const DeployingPageSentinel = "Deploying app"
 
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
