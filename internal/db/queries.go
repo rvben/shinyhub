@@ -635,6 +635,16 @@ type App struct {
 	// lets a consumer tell a failed-only deploy from a never-deployed app, which
 	// deploy_count (incremented on success only) cannot.
 	LastDeploymentStatus string `json:"last_deployment_status,omitempty"`
+	// Deploying is true while a deployment or rollback for this app is
+	// actively executing on this instance (pending deployment row + the
+	// per-slug deploy lock held). Computed by the API layer per request,
+	// never persisted; the dashboard renders it as the card's "Deploying"
+	// badge. Not omitempty: an explicit false keeps the field present in
+	// every payload (the schema documents it, and consumers never read an
+	// absent key as a value). Handlers that do not compute it simply report
+	// false. See api.Server.appDeploying for why it is stricter than the
+	// proxy's MissStatus.
+	Deploying bool `json:"deploying"`
 	// ReplicaPlacement is the per-app replica placement as a JSON object
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.

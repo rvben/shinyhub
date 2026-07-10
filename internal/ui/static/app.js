@@ -4006,12 +4006,15 @@ document.addEventListener('DOMContentLoaded', () => {
     intervalMs: 10000,
     onMetrics: (slug, m) => {
       // Grid card status badge: keep it live so a card opened while an app was
-      // hibernating reflects wake/sleep transitions (m.status is the live
-      // app-level status from /metrics). Update the stored model too so a later
-      // re-render (search/sort/filter) carries the fresh status.
+      // hibernating or deploying reflects the transition (m.status is the live
+      // app-level status from /metrics; m.deploying flags an executing deploy).
+      // Update the stored model too so a later re-render (search/sort/filter)
+      // carries the fresh state.
       const badgeEl = appGrid.querySelector(`.app-header .badge[data-slug="${slug}"]`);
       const gridApp = state.apps && state.apps.find(a => a.slug === slug);
-      if (badgeEl && gridApp) updateCardStatusBadge(badgeEl, gridApp, m.status, formatStatus);
+      if (badgeEl && gridApp) {
+        updateCardStatusBadge(badgeEl, gridApp, { status: m.status, deploying: m.deploying }, formatStatus);
+      }
       // Grid card.
       const gridEl = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
       if (gridEl) {

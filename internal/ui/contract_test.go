@@ -62,6 +62,26 @@ func TestConnectivityBannerWired(t *testing.T) {
 		"app-detail.js must call connectivityBanner so a WebSocket-blocked app surfaces a warning on the Overview")
 }
 
+// TestDeployingBadgeWired pins the API/frontend contract for the card's
+// "Deploying" badge. The server computes `deploying` (pending deployment row
+// + held deploy lock; see api.Server.appDeploying) onto the apps-list payload
+// and the batch-metrics payload (metricsResponse.Deploying). The pure,
+// unit-tested views/app-card-badge.js (jstests/app-card-badge.test.js) ranks
+// it above every other state, and app.js must forward m.deploying from the
+// 10s poll into updateCardStatusBadge so the badge flips live. The
+// badge-deploying class must exist in style.css or the state renders
+// unstyled.
+func TestDeployingBadgeWired(t *testing.T) {
+	assertContains(t, "views/app-card-badge.js", "app.deploying",
+		"app-card-badge.js must rank the server-computed deploying flag above every other state")
+	assertContains(t, "app.js", "deploying: m.deploying",
+		"app.js must forward m.deploying from the /metrics poll into updateCardStatusBadge (see metricsResponse.Deploying in internal/api/apps.go)")
+	assertContains(t, "style.css", ".badge-deploying",
+		"style.css must style the badge-deploying state the card badge emits")
+	assertContains(t, "style.css", ".status-deploying",
+		"style.css must style the status-deploying pill state the detail header emits")
+}
+
 // TestLoginProvidersGated pins that SSO login buttons only appear for providers
 // the server reports configured via GET /api/auth/providers ({github, google,
 // oidc:{enabled,display_name}}; see internal/api/oidc_handler.go handleGetProviders).

@@ -62,6 +62,21 @@ func (s *Server) DeployInFlight(slug string) bool {
 	return ok
 }
 
+// appDeploying reports whether a deployment or rollback for app is actively
+// executing right now: its newest deployment row is pending AND this instance
+// holds the app's deploy lock. It feeds the dashboard's "Deploying" badge.
+//
+// Deliberately stricter than db.App.MissStatus, which stays row-only for
+// non-terminal statuses so clustered standbys (which never hold the lock)
+// keep serving the deploying wait page on a miss. The badge renders even
+// while a pool is live and healthy, so a row-only rule would pin a false
+// "Deploying" badge on a running app whose pending row went stale after a
+// PromoteDeployment failure. Requiring the lock keeps the badge exact on the
+// instance executing the deploy; standbys simply do not light it.
+func (s *Server) appDeploying(app *db.App) bool {
+	return app.LastDeploymentStatus == db.DeploymentPending && s.DeployInFlight(app.Slug)
+}
+
 // dataLockFor returns the per-slug mutex used to serialize the quota check
 // and disk write inside handleDataPut. Without it two concurrent uploads can
 // each read the same pre-write usage, both pass the quota check, and the
