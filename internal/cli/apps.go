@@ -1100,13 +1100,23 @@ func newAppsAccessCmd() *cobra.Command {
 	return cmd
 }
 
+// normalizeAccessLevel maps the accepted alias "internal" onto the canonical
+// access level "shared" (every signed-in user). Other values pass through
+// unchanged for the server to validate, so the API surface stays canonical.
+func normalizeAccessLevel(level string) string {
+	if level == "internal" {
+		return "shared"
+	}
+	return level
+}
+
 func newAppsAccessSetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <slug> <level>",
 		Short: "Set access level for an app (level: public, private, or shared)",
 		Long: "Set who can open an app.\n\n" +
 			"  private  only the owner and the members/groups granted access\n" +
-			"  shared   every signed-in user\n" +
+			"  shared   every signed-in user (alias: internal)\n" +
 			"  public   anyone who can reach the server, no sign-in required\n\n" +
 			"Platform admins and operators can always open any app. Use\n" +
 			"`shinyhub apps access grant` to add members to a private app.",
@@ -1120,7 +1130,7 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	slug, accessLevel := args[0], args[1]
+	slug, accessLevel := args[0], normalizeAccessLevel(args[1])
 	body, err := json.Marshal(map[string]string{"access": accessLevel})
 	if err != nil {
 		return err

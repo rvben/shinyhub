@@ -111,7 +111,7 @@ server). See docs/reverse-proxy/deploying-behind-a-proxy.md for the full setup.`
 	cmd.Flags().StringVar(&f.git, "git", "", "Git repository URL to clone and deploy")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
-	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private (members only), shared (every signed-in user), or public (anyone, no sign-in). Default: server config")
+	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private (members only), shared (every signed-in user; alias: internal), or public (anyone, no sign-in). Default: server config")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before deploying")
 	return cmd
 }
@@ -185,9 +185,8 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 
-	if f.visibility != "" && !db.IsValidAppVisibility(f.visibility) {
-		return fmt.Errorf("invalid --visibility %q: must be one of %s",
-			f.visibility, strings.Join(db.ValidAppVisibilities, ", "))
+	if f.visibility, err = resolveVisibilityFlag(f.visibility); err != nil {
+		return err
 	}
 
 	format, err := resolveFormat(false, false)
@@ -561,6 +560,18 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	}
 	status := result.App.Status
 	return status == "running" && !result.RedeployInFlight, status, nil
+}
+
+// resolveVisibilityFlag normalizes the accepted "internal" alias to the
+// canonical "shared" and validates the result against the canonical set. An
+// empty value passes through (the server applies its configured default).
+func resolveVisibilityFlag(visibility string) (string, error) {
+	visibility = normalizeAccessLevel(visibility)
+	if visibility != "" && !db.IsValidAppVisibility(visibility) {
+		return "", fmt.Errorf("invalid --visibility %q: must be one of %s (internal is accepted as an alias for shared)",
+			visibility, strings.Join(db.ValidAppVisibilities, ", "))
+	}
+	return visibility, nil
 }
 
 // ensureApp checks whether the app exists and creates it if not. When visibility

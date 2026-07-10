@@ -68,7 +68,7 @@ func TestAccessGrantHelp_TeachesCorrectModel(t *testing.T) {
 // each level actually admits.
 func TestAccessSetHelp_DefinesLevels(t *testing.T) {
 	long := newAppsAccessSetCmd().Long
-	for _, want := range []string{"private", "every signed-in user", "public"} {
+	for _, want := range []string{"private", "every signed-in user", "public", "internal"} {
 		if !strings.Contains(long, want) {
 			t.Errorf("access set help should mention %q, got:\n%s", want, long)
 		}
@@ -82,7 +82,7 @@ func TestDeployVisibilityFlagHelp_DefinesLevels(t *testing.T) {
 	if flag == nil {
 		t.Fatal("deploy has no --visibility flag")
 	}
-	for _, want := range []string{"members only", "every signed-in user", "anyone"} {
+	for _, want := range []string{"members only", "every signed-in user", "anyone", "internal"} {
 		if !strings.Contains(flag.Usage, want) {
 			t.Errorf("--visibility usage should mention %q, got: %s", want, flag.Usage)
 		}

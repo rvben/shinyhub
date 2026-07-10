@@ -86,7 +86,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"deploy": {
 		Mutating: mut,
 		ArgEnums: map[string][]string{
-			"--visibility": {"private", "shared", "public"},
+			"--visibility": {"private", "shared", "public", "internal"},
 		},
 		OutputFields: []fieldSpec{
 			{Name: "status", Type: "string", Desc: "deployed"},
@@ -206,13 +206,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"apps access set": {
 		Mutating: mut,
 		ArgEnums: map[string][]string{
-			"level": {"private", "shared", "public"},
+			"level": {"private", "shared", "public", "internal"},
 		},
 		OutputFields: []fieldSpec{
 			{Name: "status", Type: "string", Desc: "updated"},
 			{Name: "slug", Type: "string"},
 			{Name: "access", Type: "string"},
 		},
+		Notes: "shared admits every signed-in user; internal is an accepted alias that the CLI normalizes to shared before sending. private admits only the owner plus granted members/groups. public requires no sign-in.",
 	},
 	"apps access grant": {
 		Mutating: mut,
