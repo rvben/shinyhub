@@ -1296,6 +1296,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Colocated-shared placement check, like every validation above, runs
+	// BEFORE the pending row is recorded and the pool is torn down: a
+	// rejected deploy leaves no deployment record and no state change.
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
 	// Capture the current live deployment so a failed deploy can restore the
 	// previous pool, then durably record the new deployment as 'pending'
 	// BEFORE the running pool is touched. ListDeployments excludes pending
@@ -1334,11 +1342,6 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	} else {
 		slog.Warn("deploy: could not re-open bundle for digest (non-fatal)",
 			"slug", slug, "version", version, "err", derr)
-	}
-
-	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
 	}
 
 	// Stop existing instance before re-deploying; ignore the error since the
@@ -1702,6 +1705,24 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// All validation runs BEFORE the pending row is recorded and the pool is
+	// torn down: a rejected rollback leaves the running app untouched and no
+	// deployment record.
+	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	// Defense in depth: if the app's tier lost its durable backend since the last
+	// deploy, refuse to re-run a data-using app onto now-ephemeral storage.
+	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, nil); gerr != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	} else if blocked {
+		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
+		return
+	}
+
 	// Capture the current live deployment for restore-on-failure, then record
 	// the rollback target as a pending deployment BEFORE tearing down the pool
 	// (same durability contract as a forward deploy).
@@ -1716,25 +1737,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-
 	// Stop current instance; ignore the error if it wasn't running.
 	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
-	}
-
-	// Defense in depth: if the app's tier lost its durable backend since the last
-	// deploy, refuse to re-run a data-using app onto now-ephemeral storage.
-	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, nil); gerr != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	} else if blocked {
-		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
-		return
 	}
 
 	rollbackDefaultMem, rollbackDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
