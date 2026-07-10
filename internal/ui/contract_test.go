@@ -76,6 +76,10 @@ func TestDeployingBadgeWired(t *testing.T) {
 		"app-card-badge.js must rank the server-computed deploying flag above every other state")
 	assertContains(t, "app.js", "deploying: m.deploying",
 		"app.js must forward m.deploying from the /metrics poll into updateCardStatusBadge (see metricsResponse.Deploying in internal/api/apps.go)")
+	assertContains(t, "app.js", "last_deployment_status: m.last_deployment_status",
+		"app.js must forward m.last_deployment_status so a watched failed first deploy renders Failed, not Awaiting deploy")
+	assertContains(t, "app.js", "updateStatusPill(pillEl",
+		"app.js must live-update the detail-header pill from the /metrics poll so an open detail page flips to Deploying and back")
 	assertContains(t, "style.css", ".badge-deploying",
 		"style.css must style the badge-deploying state the card badge emits")
 	assertContains(t, "style.css", ".status-deploying",

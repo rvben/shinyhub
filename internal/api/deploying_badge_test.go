@@ -110,7 +110,8 @@ func TestDeployingFlag_InListAndBatchMetricsPayloads(t *testing.T) {
 		}
 		var body struct {
 			Metrics map[string]struct {
-				Deploying bool `json:"deploying"`
+				Deploying            bool   `json:"deploying"`
+				LastDeploymentStatus string `json:"last_deployment_status"`
 			} `json:"metrics"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -120,7 +121,30 @@ func TestDeployingFlag_InListAndBatchMetricsPayloads(t *testing.T) {
 		if !ok {
 			t.Fatal("demo not in metrics payload")
 		}
+		// The poll must carry the row status so a watched failed first deploy
+		// renders "Failed" on the card instead of "Awaiting deploy".
+		if m.LastDeploymentStatus != db.DeploymentPending {
+			t.Errorf("metrics last_deployment_status = %q, want %q", m.LastDeploymentStatus, db.DeploymentPending)
+		}
 		return m.Deploying
+	}
+	detailDeploying := func() bool {
+		req := httptest.NewRequest("GET", "/api/apps/demo", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get app: status %d: %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			App struct {
+				Deploying bool `json:"deploying"`
+			} `json:"app"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("get app: %v", err)
+		}
+		return body.App.Deploying
 	}
 
 	// Pending row but no lock held: a stale row must not light the badge.
@@ -130,14 +154,20 @@ func TestDeployingFlag_InListAndBatchMetricsPayloads(t *testing.T) {
 	if metricsDeploying() {
 		t.Error("metrics payload reports deploying for a stale pending row")
 	}
+	if detailDeploying() {
+		t.Error("detail payload reports deploying for a stale pending row")
+	}
 
-	// Lock held (a deploy is executing): both payloads light the badge.
+	// Lock held (a deploy is executing): all payloads light the badge.
 	release := srv.acquireDeployLock("demo")
 	if !listDeploying() {
 		t.Error("list payload missing deploying=true during an executing deploy")
 	}
 	if !metricsDeploying() {
 		t.Error("metrics payload missing deploying=true during an executing deploy")
+	}
+	if !detailDeploying() {
+		t.Error("detail payload missing deploying=true during an executing deploy")
 	}
 	release()
 
@@ -147,5 +177,8 @@ func TestDeployingFlag_InListAndBatchMetricsPayloads(t *testing.T) {
 	}
 	if metricsDeploying() {
 		t.Error("metrics payload still deploying after the lock was released")
+	}
+	if detailDeploying() {
+		t.Error("detail payload still deploying after the lock was released")
 	}
 }

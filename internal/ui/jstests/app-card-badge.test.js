@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { appCardBadge, updateCardStatusBadge, appStatusView } from '../static/views/app-card-badge.js';
+import {
+  appCardBadge,
+  updateCardStatusBadge,
+  updateStatusPill,
+  appStatusView,
+} from '../static/views/app-card-badge.js';
 
 // Stub for app.js's formatStatus so the helper stays pure and testable.
 const fmt = (s) => `S:${s}`;
@@ -165,4 +170,42 @@ test('a first deploy observed via polls ends on Running, not Awaiting deploy', (
   updateCardStatusBadge(el, app, { status: 'running', deploying: false }, fmt);
   assert.equal(el.textContent, 'S:running');
   assert.equal(el.className, 'badge badge-running');
+});
+
+test('a FAILED first deploy observed via polls ends on Failed, not Awaiting deploy', () => {
+  // The poll carries last_deployment_status so a watched failure surfaces:
+  // reverting to "Awaiting deploy" would suggest the deploy never happened.
+  const app = { slug: 'fresh', deploy_count: 0, last_deployment_status: '', status: 'stopped' };
+  const el = badgeSpan(app);
+  assert.equal(el.textContent, 'Awaiting deploy');
+
+  updateCardStatusBadge(
+    el, app,
+    { status: 'stopped', deploying: true, last_deployment_status: 'pending' },
+    fmt,
+  );
+  assert.equal(el.textContent, 'Deploying');
+
+  updateCardStatusBadge(
+    el, app,
+    { status: 'stopped', deploying: false, last_deployment_status: 'failed' },
+    fmt,
+  );
+  assert.equal(el.textContent, 'Failed');
+  assert.equal(el.className, 'badge badge-failed');
+});
+
+test('updateStatusPill keeps the detail header pill on the same lifecycle', () => {
+  const doc = new JSDOM('<!DOCTYPE html><span id="pill"></span>').window.document;
+  const pill = doc.getElementById('pill');
+  const app = { slug: 'demo', deploy_count: 2, status: 'running' };
+
+  updateStatusPill(pill, app, { status: 'running', deploying: true }, fmt);
+  assert.equal(pill.textContent, 'Deploying');
+  assert.equal(pill.className, 'status-pill status-deploying');
+
+  updateStatusPill(pill, app, { status: 'running', deploying: false }, fmt);
+  assert.equal(pill.textContent, 'S:running');
+  // Running gets the is-live pulse, matching statusPillClass.
+  assert.equal(pill.className, 'status-pill status-running is-live');
 });

@@ -2734,6 +2734,12 @@ type metricsResponse struct {
 	// and back without a page reload. Not omitempty: the poll must be able
 	// to clear the badge with an explicit false.
 	Deploying bool `json:"deploying"`
+	// LastDeploymentStatus mirrors the app's newest deployment-row status
+	// ("succeeded"/"failed"/"pending", "" when never deployed) so the poll
+	// can keep the badge model honest: a first deploy that fails while
+	// watched flips the card to "Failed" instead of quietly reverting to
+	// "Awaiting deploy".
+	LastDeploymentStatus string `json:"last_deployment_status,omitempty"`
 	// SessionsCap is the per-replica session cap currently in effect for
 	// this pool. 0 means uncapped. For elastic (grouped/per_session) pools it
 	// is the per-worker cap, so the admission ceiling is
@@ -2806,7 +2812,12 @@ func (s *Server) buildAppMetrics(slug string, app *db.App) metricsResponse {
 // the DB reads out lets handleBatchMetrics fetch them for all cards in a few
 // queries instead of three per card.
 func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.Replica, autoscaleEvent db.AuditEvent, autoscaleFound bool) metricsResponse {
-	resp := metricsResponse{Status: app.Status, Deploying: s.appDeploying(app), Replicas: []replicaMetrics{}}
+	resp := metricsResponse{
+		Status:               app.Status,
+		Deploying:            s.appDeploying(app),
+		LastDeploymentStatus: app.LastDeploymentStatus,
+		Replicas:             []replicaMetrics{},
+	}
 
 	if s.manager == nil {
 		return resp

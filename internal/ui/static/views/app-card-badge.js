@@ -1,3 +1,5 @@
+import { statusPillClass } from './stat-format.js';
+
 // appStatusView is the canonical status decision an app card AND the detail-
 // header pill both consume, so the same app cannot read "Failed" on its card
 // while reading "Awaiting deploy" on its detail page. It returns a state key
@@ -35,10 +37,31 @@ export function appCardBadge(app, formatStatus) {
   return { cls: `badge badge-${state}`, text };
 }
 
+// applyLiveStatus merges a freshly polled live view ({status, deploying,
+// last_deployment_status} from /metrics) onto the app model, so a later
+// re-render (search/sort/filter) carries the fresh state.
+function applyLiveStatus(app, live) {
+  // A deploy this poller watched finish with the app running has, by
+  // definition, succeeded: reconcile the stale deploy_count so the badge
+  // lands on "Running" instead of falling back to "Awaiting deploy" until
+  // the next full grid reload.
+  if (app.deploying && !live.deploying && live.status === 'running') {
+    app.deploy_count = Math.max(1, app.deploy_count || 0);
+  }
+  if (live.status) app.status = live.status;
+  // Carrying last_deployment_status keeps a watched FAILED first deploy
+  // honest: the model flips to 'failed' and appStatusView renders "Failed"
+  // instead of quietly reverting to "Awaiting deploy".
+  if (live.last_deployment_status !== undefined) {
+    app.last_deployment_status = live.last_deployment_status;
+  }
+  app.deploying = !!live.deploying;
+}
+
 // updateCardStatusBadge refreshes a card's status badge in place from a
-// freshly polled live view (the 10s /metrics tick reports `status` plus the
-// `deploying` flag), so a card opened while an app was hibernating or
-// deploying reflects the transition without a full reload.
+// freshly polled live view (the 10s /metrics tick), so a card opened while an
+// app was hibernating or deploying reflects the transition without a full
+// reload.
 //
 // It writes the live fields onto the app model first, then re-derives the
 // badge via appCardBadge. Routing through appCardBadge (rather than setting
@@ -50,16 +73,21 @@ export function appCardBadge(app, formatStatus) {
 // the class attribute, so the data-slug used to locate it survives.
 export function updateCardStatusBadge(badgeEl, app, live, formatStatus) {
   if (!badgeEl || !app || !live) return;
-  // A deploy this poller watched finish with the app running has, by
-  // definition, succeeded: reconcile the stale deploy_count so the badge
-  // lands on "Running" instead of falling back to "Awaiting deploy" until
-  // the next full grid reload.
-  if (app.deploying && !live.deploying && live.status === 'running') {
-    app.deploy_count = Math.max(1, app.deploy_count || 0);
-  }
-  if (live.status) app.status = live.status;
-  app.deploying = !!live.deploying;
+  applyLiveStatus(app, live);
   const info = appCardBadge(app, formatStatus);
   badgeEl.className = info.cls;
   badgeEl.textContent = info.text;
+}
+
+// updateStatusPill is the detail-header counterpart of updateCardStatusBadge:
+// the same model merge and the same appStatusView decision, rendered with the
+// pill class set (status-<state> plus the is-live pulse). Keeping both
+// surfaces on one code path is what makes the card and the open detail page
+// flip to "Deploying" and back together during a deploy.
+export function updateStatusPill(pillEl, app, live, formatStatus) {
+  if (!pillEl || !app || !live) return;
+  applyLiveStatus(app, live);
+  const view = appStatusView(app, formatStatus);
+  pillEl.textContent = view.text;
+  pillEl.className = statusPillClass(view.state);
 }
