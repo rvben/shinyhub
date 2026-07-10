@@ -80,6 +80,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.8](https://github.com/rvben/shinyhub/compare/v0.10.7...v0.10.8) - 2026-07-10
+
+### Added
+
+- **ui**: live Deploying badge on app cards and the detail status pill ([6c923b2](https://github.com/rvben/shinyhub/commit/6c923b2ebdbb9d6e5670b176bc503b2eb59564ea))
+- **ui**: show a live Deploying badge on app cards while a deployment executes ([4da28b1](https://github.com/rvben/shinyhub/commit/4da28b155512cb2f6fd6ec67d3019818a9d7b512))
+- deploy-aware wait pages for the proxy miss path ([0b5978b](https://github.com/rvben/shinyhub/commit/0b5978b45f2a0ef302b132802b61f6106b7b0644))
+- **server**: report in-flight deployments to the proxy miss path ([ad37cd8](https://github.com/rvben/shinyhub/commit/ad37cd88091fb24e20a28a38019cd6fb014a82fd))
+- **proxy**: serve a deploy-aware wait page while a deployment is in flight ([618d16e](https://github.com/rvben/shinyhub/commit/618d16eab901188df7a1f8d2cba9d457178bda9c))
+- **db**: report a synthesized deploying status while a deployment is pending ([1b57b5c](https://github.com/rvben/shinyhub/commit/1b57b5ca63117a6a812879a76d96c07d8025107f))
+
+### Fixed
+
+- **ui**: live-update the detail status pill and surface watched deploy failures ([9bf3a67](https://github.com/rvben/shinyhub/commit/9bf3a676206c0c6efd4c3c87eb1e584cd7e0a7b1))
+- **db**: allowlist the statuses a pending deployment row may report as deploying ([6154b86](https://github.com/rvben/shinyhub/commit/6154b86a0acce600936e8c877758c140edc1fc4a))
+- **db**: trust a pending deployment row for stopped or crashed apps only while the deploy lock is held ([ec25e0f](https://github.com/rvben/shinyhub/commit/ec25e0f3dc0a61b0e64384ec9ffd6b45661b21e9))
+- **proxy**: keep firing the wake trigger while a deployment is reported in flight ([23c74a8](https://github.com/rvben/shinyhub/commit/23c74a8cf287d6a5aa12feb9bbe09b1f5c40bef7))
+- **api**: validate deploy and rollback before recording the pending row or tearing down the pool ([ffcfb17](https://github.com/rvben/shinyhub/commit/ffcfb173786a0f90de4f232f6fd152ab1b62794f))
+
 ## [0.10.7](https://github.com/rvben/shinyhub/compare/v0.10.6...v0.10.7) - 2026-07-10
 
 ### Added
